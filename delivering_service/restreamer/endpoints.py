@@ -10,7 +10,6 @@ import ffmpeg
 from boto3 import exceptions
 from botocore.exceptions import BotoCoreError
 from django.conf import settings
-from restreamer.models import ChunkRecord, EndPointCfg, StreamingEvent
 import queue
 
 data_queue = queue.Queue()
