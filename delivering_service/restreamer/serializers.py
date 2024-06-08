@@ -8,7 +8,8 @@ class StreamInfoSerializer(serializers.Serializer):
     streaming_key = serializers.CharField(max_length=250, write_only=True)
 
 class StreamDataSerializer(serializers.Serializer):
-    chunk_record = serializers.CharField(max_length=250)
+    chunk_data = serializers.FileField()
+    chunk_id = serializers.IntegerField()
     
     
     
