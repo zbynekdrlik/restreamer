@@ -13,8 +13,10 @@ class ReceiveDataView(APIView):
     def post(self, request, *args, **kwargs):
         try:
             data = request.body
+            log.info(f"data------->{data}")
             log.info(f"Data------------------>{data}")
             data_queue.put(data)
+            log.info(f"data_queue --- > {data_queue}")
             return Response({'status':'success'}, status=status.HTTP_200_OK)
         
         except Exception as e:
