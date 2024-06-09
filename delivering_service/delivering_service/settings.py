@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 
 from pathlib import Path
 import boto3
+import os
 from pathlib import Path
 from dotenv import load_dotenv
 from decouple import config
@@ -140,3 +141,49 @@ S3_CLIENT = boto3.client('s3',
                          aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
 
 APPEND_SLASH = False
+
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{asctime} {levelname}|{filename}:{lineno}|{message}",
+            "style": "{",
+        },
+        "format_with_thread": {
+            "format": "{asctime} {levelname}|{processName}|{filename}:{lineno}|{message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+        "console_with_thread": {
+            "class": "logging.StreamHandler",
+            "formatter": "format_with_thread",
+        },
+        "file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": os.path.join(BASE_DIR / "endpoint_service.log"),
+            "formatter": "format_with_thread",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console", "file"],
+            "level": "INFO",
+        },
+        "restreamer": {
+            "handlers": ["console", "file"],
+            "level": "DEBUG",
+        },
+        "restreamer.endpoints": {
+            "handlers": ["console_with_thread"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+    },
+}
