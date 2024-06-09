@@ -138,3 +138,5 @@ S3_CLIENT = boto3.client('s3',
                          endpoint_url=OBJECT_STORAGE_URL,
                          aws_access_key_id=AWS_ACCESS_KEY_ID,
                          aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+
+APPEND_SLASH = False
