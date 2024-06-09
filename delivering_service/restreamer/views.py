@@ -17,6 +17,12 @@ class ReceiveDataView(APIView):
             log.info(f"Data------------------>{data}")
             data_queue.put(data)
             log.info(f"data_queue --- > {data_queue}")
+            try:
+                while not data_queue.empty():
+                    queued_data = data_queue.get()
+                    log.info(f"Processing queued data: {queued_data}")
+            except Exception as e:
+                log.exception("Error processing data from queue: ", e)
             return Response({'status':'success'}, status=status.HTTP_200_OK)
         
         except Exception as e:
