@@ -40,10 +40,12 @@ class ReceiveInitDataView(APIView):
             endpoints = serializer.validated_data['endpoints']
             
             for endpoint in endpoints:
+                alias = endpoint['alias']
                 service_type = endpoint['service_type']
-                endpoint_key = endpoint['endpoint_key']
+                stream_key = endpoint['stream_key']
+                log.info(f'alias ------> {alias}')
                 log.info(f'service_type ------> {service_type}')
-                log.info(f'endpoint_key ------> {endpoint_key}')
+                log.info(f'stream_key ------> {stream_key}')
             
             return Response({"message": "Data received successfully"}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
