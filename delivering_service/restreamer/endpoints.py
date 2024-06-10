@@ -11,24 +11,28 @@ from boto3 import exceptions
 from botocore.exceptions import BotoCoreError
 from django.conf import settings
 import queue
+from queue import Empty
+
 
 data_queue = queue.Queue()
 
 log = logging.getLogger(__name__)
 
 
+
 class EndPoint(multiprocessing.Process):
-    def __init__(self, alias, service_type, stream_key):
+    def __init__(self, alias, service_type, stream_key, streaming_evnet, chunk_identifier):
         super().__init__(name=alias)
         self.alias = alias
         self.service_type = service_type
         self.stream_key = stream_key
+        self.chunk_identifier = chunk_identifier
+        self.streaming_event = streaming_evnet
         self.buff_size = multiprocessing.Value("L", 0)
         self.chunk_record_id = multiprocessing.Value("i", 0)
-        self.stored_position = 0
         self.reader_thread_terminate = Event()
+        # self.stdout_thread = None
         self.stderr_thread = None
-        self.ffmpeg_process = None
 
     def run_ffmpeg(self):
         if self.service_type == "YT_HLS":
@@ -52,6 +56,7 @@ class EndPoint(multiprocessing.Process):
                 c="copy",
                 flags="+cgop",
             )
+            """   threads=2 b='4000k, audio_codec='aac' ,c='libx264',s='1280x720''"""
         elif self.service_type == "FB":
             output_url = f"rtmps://live-api-s.facebook.com:443/rtmp/{self.stream_key}"
             cmd = ffmpeg.input(
@@ -77,7 +82,7 @@ class EndPoint(multiprocessing.Process):
                 .global_args("-vf", "yadif")
                 .global_args("-re")
             )
-
+            
         elif self.service_type == "VIMEO":
             output_url = f"rtmps://rtmp-global.cloud.vimeo.com:443/live/{self.stream_key}"
             cmd = ffmpeg.input(
@@ -85,7 +90,7 @@ class EndPoint(multiprocessing.Process):
                 readrate=1.00,
                 format="mpegts",
                 loglevel="info",
-            ).output(output_url, f="flv", c="copy")
+                ).output(output_url, f="flv", c="copy") 
         else:
             log.error(f"Unsupported service type: {self.service_type}")
             raise ValueError
@@ -94,22 +99,74 @@ class EndPoint(multiprocessing.Process):
         log.debug(" ".join(cmd.compile()))
 
         self.reader_thread_terminate.set()
+        # if self.stdout_thread:
+        #     self.stdout_thread.join()
         if self.stderr_thread:
             self.stderr_thread.join()
         self.reader_thread_terminate.clear()
 
-        self.ffmpeg_process = cmd.run_async(pipe_stdin=True, pipe_stdout=False, pipe_stderr=True)
+        process = cmd.run_async(pipe_stdin=True, pipe_stdout=False, pipe_stderr=True)
         time.sleep(5)
 
+        # self.stdout_thread = Thread(target=self.reader_thread, args=(process.stdout, 'stdout'), daemon=True)
+        # self.stdout_thread.start()
         self.stderr_thread = Thread(
-            target=self.reader_thread, args=(self.ffmpeg_process.stderr, "stderr"), daemon=True
+            target=self.reader_thread, args=(process.stderr, "stderr"), daemon=True
         )
         self.stderr_thread.start()
 
+        return process
+
+        """     def get_last_chunk_position(self):
+        try:
+            ChunkRecord.objects.get(
+                streaming_event=self.streaming_event,
+                local_id=self.end_point_cfg.position_last,
+            )
+        except ChunkRecord.DoesNotExist:
+            self.end_point_cfg.position_last = 0
+
+            # Try to locate first chunk in db
+            first_chunk = (
+                ChunkRecord.objects.filter(streaming_event=self.streaming_event)
+                .order_by("local_id")
+                .first()
+            )
+            if first_chunk:
+                self.end_point_cfg.position_last = first_chunk.local_id
+
+            self.end_point_cfg.position_last -= 1
+            self.end_point_cfg.save()
+        return self.end_point_cfg.position_last
+
+    def get_next_chunk_position(self):
+        self.stored_position = self.get_last_chunk_position() + 1
+        return self.stored_position """
+    
+    """ last_position = self.get_last_chunk_position()
+    self.current_position = last_position + 1
+    next_chunk = None
+    while True:
+        try:
+            chunk_record = ChunkRecord.objects.get(
+                streaming_event=self.streaming_event,
+                local_id=self.current_position
+            )
+            return self.current_position
+        except ChunkRecord.DoesNotExist:
+            if next_chunk is None:
+                next_chunk = ChunkRecord.objects.select_related('streaming_event').filter(local_id__gt=self.current_position).order_by('local_id').first()
+                if next_chunk is None:
+                    return None
+                self.current_position = next_chunk.local_id
+            else:
+                    self.current_position += 1 """ 
+
+   
     def reader_thread(self, pipe, pipe_name):
         try:
             with open(
-                    f'{self.alias.replace(" ", "_")}_{pipe_name}.log', "ab"
+                f'{self.alias.replace(" ","_")}_{pipe_name}.log', "ab"
             ) as logfile:
                 line = bytearray()
                 while True:
@@ -127,74 +184,116 @@ class EndPoint(multiprocessing.Process):
                         log.warning("Terminating reader_thread function!")
                         break
         except KeyboardInterrupt:
+            # pipe.close()
             pass
         except Exception as e:
             log.exception(e)
 
     def run(self):
+        # Creating separate connection to db
+        # log.debug('closing connection - wait 10s')
+        # time.sleep(10)
+
+        # log.debug('closing connection - move forward')
+
+        ffmpeg_process = None
+
         try:
             log.info(f"Starting end point: {self.alias}")
-            self.run_ffmpeg()
+            ffmpeg_process = self.run_ffmpeg()
             while True:
                 time.sleep(0.1)
-                ret = self.ffmpeg_process.poll()
-                if ret is not None:
-                    log.warning(f"Ffmpeg process has exited with code: {ret}!!!")
-                    time.sleep(3)
-                    self.run_ffmpeg()
 
+                # Verify if ffmpeg instance is still running
+                ret = ffmpeg_process.poll()
+                if ret is not None:
+                    log.warning(f"Ffmpeg process has exited with code:{ret}!!!")
+                    time.sleep(3)
+                    ffmpeg_process = self.run_ffmpeg()
+                    continue
+
+                try:
+                    chunk_record = data_queue.get_nowait()
+                
+                except Empty:
+                    log.info("No data in queue, waiting for new data...")
+                    time.sleep(1)
+                    
+                s3 = settings.S3_CLIENT
+                bucket = settings.AWS_STORAGE_BUCKET_NAME
+
+
+                # Deliver data to ffmpeg over stdin pipe
+                if not ffmpeg_process.poll():
+                    try:
+                        object_key = f"{chunk_record}_{self.chunk_identifier}.bin"
+                        response = s3.get_object(Bucket=bucket, Key=object_key)
+                        if response:
+                            chunk_data = response['Body'].read()
+                            ffmpeg_process.stdin.write(chunk_data)
+                            ffmpeg_process.stdin.flush()
+                            self.buff_size.value += len(chunk_data)
+                        else:
+                            log.warning("Chunk file not exists, skipping!")
+                        
+
+                    except boto3.exceptions.S3UploadFailedError as e:
+                        log.error(f"Error uploading chunk to S3: {e}")
+                    except BotoCoreError as e:
+                        # Handle general Botocore errors
+                        log.error(f"Error: {e}")
+                    except BrokenPipeError:
+                        log.warning("Write to ffmpeg stdin unsuccessful")
+                        
+                        
         except KeyboardInterrupt:
             log.info("Ctrl-C detected, terminating!")
             log.info("Cleaning up EndPoint process...")
-            if self.ffmpeg_process and not self.ffmpeg_process.poll():
-                self.ffmpeg_process.terminate()
-                self.ffmpeg_process.stdin.close()
-                self.ffmpeg_process.terminate()
-                self.ffmpeg_process.wait()
+            if ffmpeg_process and not ffmpeg_process.poll():
+                ffmpeg_process.terminate()
+                ffmpeg_process.stdin.close()
+                ffmpeg_process.terminate()
+                ffmpeg_process.wait()
             log.info("Terminated")
 
         except Exception as e:
             log.exception(e)
 
-endpoints = {}
 
-@csrf_exempt
-def start_endpoint(request):
-    if request.method == 'POST':
-        data = json.loads(request.body)
-        alias = data['alias']
-        service_type = data['service_type']
-        stream_key = data['stream_key']
-        
-        if alias in endpoints:
-            return JsonResponse({"error": "Endpoint already exists"}, status=400)
-        
-        endpoint = EndPoint(alias, service_type, stream_key)
-        endpoint.start()
-        endpoints[alias] = endpoint
-        
-        return JsonResponse({"status": "started"}, status=200)
-    
-    return HttpResponseBadRequest("Invalid request method")
+""" class ManagerEndPoint:
+    def __init__(self):
+        self.endpoint_list = []
 
-@csrf_exempt
-def send_chunk(request):
-    if request.method == 'POST':
-        alias = request.GET.get('alias')
-        if alias not in endpoints:
-            return JsonResponse({"error": "Endpoint not found"}, status=404)
-        
-        chunk_data = request.body
-        endpoint = endpoints[alias]
-        
-        if endpoint.ffmpeg_process:
-            try:
-                endpoint.ffmpeg_process.stdin.write(chunk_data)
-                endpoint.ffmpeg_process.stdin.flush()
-                return JsonResponse({"status": "chunk sent"}, status=200)
-            except BrokenPipeError:
-                return JsonResponse({"error": "Broken pipe"}, status=500)
-        
-        return JsonResponse({"error": "FFmpeg process not running"}, status=500)
-    
-    return HttpResponseBadRequest("Invalid request method")
+    def add_endpoint(self, endpoint_alias, service_type, stream_key, streaming_event):
+        for n in self.endpoint_list:
+            if n.alias == endpoint_alias:
+                return
+
+        from django.db import connection
+
+        connection.close()
+        end_point = EndPoint(endpoint_alias, service_type, stream_key, streaming_event)
+        end_point.start()
+        from django.db import connection
+
+        connection.close()
+
+        self.endpoint_list.append(end_point)
+
+    def manage_endpoints(self):
+        streaming_events = StreamingEvent.objects.filter(
+            delivering_activated=True, short_description="Main Stream"
+        )
+        for streaming_event in streaming_events:
+            end_point_cfgs = streaming_event.end_points.filter(enabled=True)
+            for end_point_cfg in end_point_cfgs:
+                self.add_endpoint(
+                    end_point_cfg.alias,
+                    end_point_cfg.service_type,
+                    end_point_cfg.stream_key,
+                    streaming_event,
+                )
+
+
+restr_manager = ManagerEndPoint() """
+

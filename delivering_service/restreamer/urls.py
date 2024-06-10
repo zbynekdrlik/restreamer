@@ -1,9 +1,9 @@
 from django.urls import path
-from .views import ReceiveDataView
-from restreamer.endpoints import send_chunk, start_endpoint
+from .views import ReceiveStreamDataView, ReceiveInitDataView
+
 
 urlpatterns = [
-    path('api/receive_data/', ReceiveDataView.as_view(), name='receive_data'),
-    path('api/send_chunk/', send_chunk , name='send_chunk'),
-    path('api/start_endpoint/', start_endpoint , name='start_endpoint'),
+    path('api/receive_data/', ReceiveStreamDataView.as_view(), name='receive_data'),
+    path('api/raceive_init_data/', ReceiveInitDataView.as_view() , name='raceive_init_data'),
+
 ]
