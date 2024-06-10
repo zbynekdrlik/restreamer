@@ -37,7 +37,7 @@ class ReceiveInitDataView(APIView):
     def post(self, request, *args, **kwargs):
         serializer = StreamInfoSerializer(data=request.data)
         if serializer.is_valid():
-            service_type = serializer.validate_data['service_type']
+            service_type = serializer.validated_data['service_type']
             endpoint_key = serializer.validated_data['endpoint_key']
             
             log.info(f'service type ------>{service_type}')
