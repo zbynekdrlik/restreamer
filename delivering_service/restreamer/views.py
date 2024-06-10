@@ -16,6 +16,7 @@ class ReceiveStreamDataView(APIView):
             chunk_id = request.GET.get('chunk_id')
             chunk_identifer = request.GET.get('stream_id')
             log.info(f"chunk_id------>{chunk_id}")
+            log.info(f"request------>{request.GET}")
             log.info(f"chunk_identifer------>{chunk_identifer}")
             data_queue.put(chunk_id)
             log.info(f"data_queue --- > {data_queue}")
