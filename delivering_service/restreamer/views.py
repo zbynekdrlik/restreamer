@@ -1,7 +1,7 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from restreamer.serializers import StreamInfoSerializer
+from restreamer.serializers import StreamInfoSerializer, EndpointsListSerializer
 from restreamer.endpoints import EndPoint
 import logging
 import queue
@@ -35,15 +35,15 @@ class ReceiveStreamDataView(APIView):
         
 class ReceiveInitDataView(APIView):
     def post(self, request, *args, **kwargs):
-        serializer = StreamInfoSerializer(data=request.data)
+        serializer = EndpointsListSerializer(data=request.data)
         if serializer.is_valid():
-            service_type = serializer.validated_data['service_type']
-            endpoint_key = serializer.validated_data['endpoint_key']
+            endpoints = serializer.validated_data['endpoints']
             
-            log.info(f'service type ------>{service_type}')
-            log.info(f'endpoint_key ------>{endpoint_key}')
+            for endpoint in endpoints:
+                service_type = endpoint['service_type']
+                endpoint_key = endpoint['endpoint_key']
+                log.info(f'service_type ------> {service_type}')
+                log.info(f'endpoint_key ------> {endpoint_key}')
             
             return Response({"message": "Data received successfully"}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-    

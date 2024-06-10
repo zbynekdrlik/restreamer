@@ -11,4 +11,5 @@ class StreamDataSerializer(serializers.Serializer):
     chunk_id = serializers.IntegerField()
     
     
-    
+class EndpointsListSerializer(serializers.Serializer):
+    endpoints = StreamInfoSerializer(many=True)
