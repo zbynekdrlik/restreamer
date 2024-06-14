@@ -210,13 +210,16 @@ class EndPoint(multiprocessing.Process):
                     time.sleep(3)
                     ffmpeg_process = self.run_ffmpeg()
                     continue
-
+                log.info("datat queue ---------->{data_queue.get_nowait}")
                 try:
                     chunk_id, stream_identifier = data_queue.get_nowait()
                     log.info(f"chunk_id ------> {chunk_id} | stream id --------- > {stream_identifier}")
                 except Empty:
                     log.info("No data in queue, waiting for new data...")
                     time.sleep(1)
+                    continue
+                except Exception as e:
+                    log.info(e)
                     
                 s3 = settings.S3_CLIENT
                 bucket = settings.AWS_STORAGE_BUCKET_NAME
