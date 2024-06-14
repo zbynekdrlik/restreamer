@@ -57,7 +57,7 @@ class ReceiveInitDataView(APIView):
                 try:
                     endpoint_process = EndPoint(alias, service_type, stream_key)
                     endpoint_process.start()
-                    endpoint_list.append(endpoint)
+                    endpoint_list.append(endpoint_process)
                 except Exception as e:
                     print(f'An error occurred: {e}')
             try:
