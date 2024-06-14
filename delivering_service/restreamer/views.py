@@ -13,7 +13,6 @@ from .shared import data_queue
 
 log = logging.getLogger(__name__)
 
-data_queue = queue.Queue()
 
 class ReceiveStreamDataView(APIView):
     def post(self, request, *args, **kwargs):
