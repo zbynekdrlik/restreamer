@@ -45,7 +45,7 @@ class ReceiveInitDataView(APIView):
         serializer = EndpointsListSerializer(data=request.data)
         if serializer.is_valid():
             endpoints = serializer.validated_data['endpoints']
-            
+            endpoint_list = []
             for endpoint in endpoints:
                 alias = endpoint['alias']
                 service_type = endpoint['service_type']
@@ -57,12 +57,13 @@ class ReceiveInitDataView(APIView):
                 try:
                     endpoint_process = EndPoint(alias, service_type, stream_key)
                     endpoint_process.start()
+                    endpoint_list.append(endpoint)
                 except Exception as e:
                     print(f'An error occurred: {e}')
-                try:
-                    endpoints_info(endpoint)
-                except KeyboardInterrupt:
-                    log.info('Ctrl-C detected, terminating!')
-            
+            try:
+                endpoints_info(endpoint_list)
+            except KeyboardInterrupt:
+                log.info('Ctrl-C detected, terminating!')
+        
             return Response({"message": "Data received successfully endpoint started"}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
