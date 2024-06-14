@@ -213,7 +213,7 @@ class EndPoint(multiprocessing.Process):
 
                 try:
                     chunk_id, stream_identifier = data_queue.get_nowait()
-                
+                    log.info(f"chunk_id ------> {chunk_id} | stream id --------- > {stream_identifier}")
                 except Empty:
                     log.info("No data in queue, waiting for new data...")
                     time.sleep(1)
