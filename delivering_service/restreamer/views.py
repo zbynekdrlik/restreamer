@@ -6,6 +6,8 @@ from restreamer.endpoints import EndPoint
 import logging
 import queue
 
+from restreamer.endpoints import endpoints_info
+
 log = logging.getLogger(__name__)
 
 data_queue = queue.Queue()
@@ -57,6 +59,10 @@ class ReceiveInitDataView(APIView):
                     endpoint_process.start()
                 except Exception as e:
                     print(f'An error occurred: {e}')
+                try:
+                    endpoints_info(endpoint)
+                except KeyboardInterrupt:
+                    log.info('Ctrl-C detected, terminating!')
             
             return Response({"message": "Data received successfully endpoint started"}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
