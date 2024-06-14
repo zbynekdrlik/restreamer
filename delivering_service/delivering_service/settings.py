@@ -142,7 +142,6 @@ S3_CLIENT = boto3.client('s3',
 
 APPEND_SLASH = False
 
-
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -166,9 +165,9 @@ LOGGING = {
             "formatter": "format_with_thread",
         },
         "file": {
-            "class": "logging.handlers.RotatingFileHandler",
-            "filename": os.path.join(BASE_DIR / "endpoint_service.log"),
-            "formatter": "format_with_thread",
+            "class": "logging.FileHandler",
+            "filename": "debug.log",
+            "formatter": "verbose",
         },
     },
     "loggers": {
@@ -181,7 +180,7 @@ LOGGING = {
             "level": "DEBUG",
         },
         "restreamer.endpoints": {
-            "handlers": ["console_with_thread, console"],
+            "handlers": ["console_with_thread", "console"],
             "level": "DEBUG",
             "propagate": False,
         },
