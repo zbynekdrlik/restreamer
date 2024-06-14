@@ -14,8 +14,7 @@ import queue
 from queue import Empty
 
 
-data_queue = queue.Queue()
-
+from .shared import data_queue
 
 log = logging.getLogger(__name__)
 

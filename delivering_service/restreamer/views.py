@@ -9,6 +9,8 @@ from ast import literal_eval
 
 from restreamer.endpoints import endpoints_info
 
+from .shared import data_queue
+
 log = logging.getLogger(__name__)
 
 data_queue = queue.Queue()
