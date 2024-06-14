@@ -215,10 +215,11 @@ class EndPoint(multiprocessing.Process):
                     log.info(f"chunk_id ------> {chunk_id} | stream id --------- > {stream_identifier}")
                 except Empty:
                     log.info("No data in queue, waiting for new data...")
-                    time.sleep(1)
+                    time.sleep(3)
                     continue
                 except Exception as e:
-                    log.info(e)
+                    log.info(f"Erorr -------  |    {e}")
+                    time.sleep(3)
                     continue
                     
                 s3 = settings.S3_CLIENT
