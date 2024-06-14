@@ -29,7 +29,7 @@ class ReceiveStreamDataView(APIView):
             log.info(f"chunk_id ------> {chunk_id}")
             log.info(f"request.GET ------> {request.GET}")
             log.info(f"chunk_identifier ------> {stream_identifier}")
-           
+
             if chunk_id and stream_identifier:
                 data_queue.put((chunk_id, stream_identifier))
                 log.info(f"data_queue --- > {data_queue}")
@@ -43,11 +43,10 @@ class ReceiveStreamDataView(APIView):
             else:
                 log.error("Missing chunk_id or chunk_identifier")
                 return Response({'status': 'error', 'message': 'Missing chunk_id or stream_id'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         except Exception as e:
             log.exception("An error occurred", exc_info=e)
             return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
         
 class ReceiveInitDataView(APIView):
     def post(self, request, *args, **kwargs):

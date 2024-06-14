@@ -1,3 +1,3 @@
-import queue
+from multiprocessing import Queue
 
-data_queue = queue.Queue()
+data_queue = Queue()
