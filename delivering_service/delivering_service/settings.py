@@ -181,7 +181,7 @@ LOGGING = {
             "level": "DEBUG",
         },
         "restreamer.endpoints": {
-            "handlers": ["console_with_thread"],
+            "handlers": ["console_with_thread, console"],
             "level": "DEBUG",
             "propagate": False,
         },

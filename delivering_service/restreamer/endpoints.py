@@ -16,18 +16,17 @@ from queue import Empty
 
 data_queue = queue.Queue()
 
+
 log = logging.getLogger(__name__)
 
 
 
 class EndPoint(multiprocessing.Process):
-    def __init__(self, alias, service_type, stream_key, streaming_evnet, chunk_identifier):
+    def __init__(self, alias, service_type, stream_key):
         super().__init__(name=alias)
         self.alias = alias
         self.service_type = service_type
         self.stream_key = stream_key
-        self.chunk_identifier = chunk_identifier
-        self.streaming_event = streaming_evnet
         self.buff_size = multiprocessing.Value("L", 0)
         self.chunk_record_id = multiprocessing.Value("i", 0)
         self.reader_thread_terminate = Event()
@@ -213,7 +212,7 @@ class EndPoint(multiprocessing.Process):
                     continue
 
                 try:
-                    chunk_record = data_queue.get_nowait()
+                    chunk_id, stream_identifier = data_queue.get_nowait()
                 
                 except Empty:
                     log.info("No data in queue, waiting for new data...")
@@ -226,7 +225,7 @@ class EndPoint(multiprocessing.Process):
                 # Deliver data to ffmpeg over stdin pipe
                 if not ffmpeg_process.poll():
                     try:
-                        object_key = f"{chunk_record}_{self.chunk_identifier}.bin"
+                        object_key = f"{chunk_id}_{stream_identifier}.bin"
                         response = s3.get_object(Bucket=bucket, Key=object_key)
                         if response:
                             chunk_data = response['Body'].read()
@@ -297,3 +296,19 @@ class EndPoint(multiprocessing.Process):
 
 restr_manager = ManagerEndPoint() """
 
+def endpoints_info(endpoints):
+    
+    try:
+        while True:  
+            buff_string = ''
+            for n in endpoints:
+                buff_string += f'{n.alias}: {n.buff_size.value / 1024 / 1024:.2f}MB (id:{n.chunk_record_id.value})|'
+            log.debug(buff_string)
+        
+            time.sleep(10)
+            log.debug("Endpoint on")
+    except KeyboardInterrupt:
+        log.info('Ctrl-C detected, terminating!')
+        
+    except Exception as e:
+        log.exception(e)

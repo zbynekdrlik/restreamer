@@ -1,8 +1,5 @@
 from rest_framework import serializers
 
-
-
-
 class StreamDataSerializer(serializers.Serializer):
     chunk_data = serializers.FileField()
     chunk_id = serializers.IntegerField()
