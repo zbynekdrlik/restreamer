@@ -5,6 +5,7 @@ from restreamer.serializers import StreamInfoSerializer, EndpointsListSerializer
 from restreamer.endpoints import EndPoint
 import logging
 import queue
+from ast import literal_eval
 
 from restreamer.endpoints import endpoints_info
 
@@ -15,22 +16,35 @@ data_queue = queue.Queue()
 class ReceiveStreamDataView(APIView):
     def post(self, request, *args, **kwargs):
         try:
-            chunk_id = request.GET.get('chunk_id')
+            chunk_id_raw = request.GET.get('chunk_id')
             stream_identifier = request.GET.get('stream_id')
-            log.info(f"chunk_id ------> {chunk_id}")
+            
+            if chunk_id_raw:
+                chunk_id = literal_eval(chunk_id_raw).get('chunk_id')
+            
+            else:
+                chunk_id = None
+            
+            log.info(f"chunk_id ------> {chunk_id_raw}")
             log.info(f"request.GET ------> {request.GET}")
             log.info(f"chunk_identifier ------> {stream_identifier}")
+            
+            
            
-            if chunk_id and stream_identifier:
-                data_queue.put((chunk_id, stream_identifier))
+            if chunk_id_raw and stream_identifier:
+                data_queue.put((chunk_id_raw, stream_identifier))
                 log.info(f"data_queue --- > {data_queue}")
+                
                 try:
                     while not data_queue.empty():
                         queued_data = data_queue.get()
                         log.info(f"Processing queued data: {queued_data}")
+                        
                 except Exception as e:
                     log.exception("Error processing data from queue: ", exc_info=e)
+                    
                 return Response({'status': 'success'}, status=status.HTTP_200_OK)
+            
             else:
                 log.error("Missing chunk_id or chunk_identifier")
                 return Response({'status': 'error', 'message': 'Missing chunk_id or stream_id'}, status=status.HTTP_400_BAD_REQUEST)
