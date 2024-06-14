@@ -130,7 +130,7 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
-AWS_STORAGE_BUCKET_NAME = 'linode52'
+AWS_STORAGE_BUCKET_NAME = 'restreamer-chunks'
 AWS_SECRET_ACCESS_KEY = config('AWS_SECRET_ACCESS_KEY')
 AWS_ACCESS_KEY_ID = config('AWS_ACCESS_KEY_ID')
 OBJECT_STORAGE_URL = 'https://eu-central-1.linodeobjects.com'
