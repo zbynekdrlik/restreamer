@@ -1,6 +1,6 @@
 import logging
 import json
-import multiprocessing
+from multiprocessing import Event, Process
 import time
 from threading import Event, Thread
 from django.http import JsonResponse, HttpResponseBadRequest
@@ -12,6 +12,7 @@ from botocore.exceptions import BotoCoreError
 from django.conf import settings
 import queue 
 from queue import PriorityQueue, Empty
+import multiprocessing
 
 
 from .shared import data_queue
@@ -20,7 +21,7 @@ log = logging.getLogger(__name__)
 
 
 
-class EndPoint(multiprocessing.Process):
+class EndPoint(Process):
     def __init__(self, alias, service_type, stream_key):
         super().__init__(name=alias)
         self.alias = alias
@@ -29,11 +30,8 @@ class EndPoint(multiprocessing.Process):
         self.buff_size = multiprocessing.Value("L", 0)
         self.chunk_record_id = multiprocessing.Value("i", 0)
         self.reader_thread_terminate = Event()
-        # self.stdout_thread = None
-        self.stderr_thread = None
         self.last_processed_chunk_id = None
-        self.chunk_queue = []  # Indicates no chunks have been processed
-        self.chunk_queue = PriorityQueue()
+        self.chunk_queue = []
        
 
     def run_ffmpeg(self):
@@ -219,11 +217,9 @@ class EndPoint(multiprocessing.Process):
         from django.db import connection
         connection.close()
 
-        ffmpeg_process = None
+        ffmpeg_process = self.run_ffmpeg()
 
         try:
-            log.info(f"Starting end point: {self.alias}")
-            ffmpeg_process = self.run_ffmpeg()
             while True:
                 time.sleep(0.1)
 
@@ -242,25 +238,25 @@ class EndPoint(multiprocessing.Process):
                 except Empty:
                     pass
 
-                # Sort the chunk_queue by chunk_id
                 self.chunk_queue.sort()
 
                 if self.chunk_queue:
-                    next_chunk_id, next_stream_identifier = self.chunk_queue[0]  # Peek the next chunk
+                    next_chunk_id, next_stream_identifier = self.chunk_queue[0]
                     log.info(f"Getting next chunk -----> | {next_chunk_id}")
 
                     if self.last_processed_chunk_id is None:
                         self.last_processed_chunk_id = next_chunk_id - 1
 
                     if next_chunk_id == self.last_processed_chunk_id + 1:
-                        self.chunk_queue.pop(0)  # Remove the chunk from the queue
+                        self.chunk_queue.pop(0)
                         self.last_processed_chunk_id = next_chunk_id
                         log.info(f"Processing chunk_id ------> {next_chunk_id} | stream id --------- > {next_stream_identifier}")
                         self.process_chunk(next_chunk_id, next_stream_identifier, ffmpeg_process)
                     else:
                         log.info(f"Waiting for the next chunk in sequence. Expected: {self.last_processed_chunk_id + 1}, but got: {next_chunk_id}")
-                        time.sleep(1)  # Add delay to prevent tight loop
+                        time.sleep(1)
                         break
+
                         
                         
         except KeyboardInterrupt:
