@@ -219,7 +219,7 @@ class EndPoint(multiprocessing.Process):
                 except Empty:
                     pass
 
-                iwhile not self.chunk_queue.empty():
+                while not self.chunk_queue.empty():
                     next_chunk_id, next_stream_identifier = self.chunk_queue.queue[0]  # Peek the next chunk
                     log.info(f"Getting next chunk -----> | {next_chunk_id}")
                     
