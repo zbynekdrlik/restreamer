@@ -1,6 +1,6 @@
 import logging
 import json
-from multiprocessing import Event, Process
+import multiprocessing
 import time
 from threading import Event, Thread
 from django.http import JsonResponse, HttpResponseBadRequest
@@ -12,7 +12,6 @@ from botocore.exceptions import BotoCoreError
 from django.conf import settings
 import queue 
 from queue import PriorityQueue, Empty
-import multiprocessing
 
 
 from .shared import data_queue
@@ -21,7 +20,7 @@ log = logging.getLogger(__name__)
 
 
 
-class EndPoint(Process):
+class EndPoint(multiprocessing.Process):
     def __init__(self, alias, service_type, stream_key):
         super().__init__(name=alias)
         self.alias = alias
@@ -30,9 +29,12 @@ class EndPoint(Process):
         self.buff_size = multiprocessing.Value("L", 0)
         self.chunk_record_id = multiprocessing.Value("i", 0)
         self.reader_thread_terminate = Event()
+        # self.stdout_thread = None
+        self.stderr_thread = None
         self.last_processed_chunk_id = None
-        self.chunk_queue = []
-       
+        self.chunk_queue = []  # Indicates no chunks have been processed
+        self.chunk_queue = PriorityQueue()
+
 
     def run_ffmpeg(self):
         if self.service_type == "YT_HLS":
@@ -256,7 +258,6 @@ class EndPoint(Process):
                         log.info(f"Waiting for the next chunk in sequence. Expected: {self.last_processed_chunk_id + 1}, but got: {next_chunk_id}")
                         time.sleep(1)
                         break
-
                         
                         
         except KeyboardInterrupt:
