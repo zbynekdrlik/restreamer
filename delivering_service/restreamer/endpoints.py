@@ -10,8 +10,8 @@ import ffmpeg
 from boto3 import exceptions
 from botocore.exceptions import BotoCoreError
 from django.conf import settings
-import queue
-from queue import Empty
+import queue 
+from queue import PriorityQueue, Empty
 
 
 from .shared import data_queue
@@ -31,6 +31,8 @@ class EndPoint(multiprocessing.Process):
         self.reader_thread_terminate = Event()
         # self.stdout_thread = None
         self.stderr_thread = None
+        self.last_processed_chunk_id = -1  # Indicates no chunks have been processed
+        self.chunk_queue = PriorityQueue()
 
     def run_ffmpeg(self):
         if self.service_type == "YT_HLS":
@@ -209,44 +211,47 @@ class EndPoint(multiprocessing.Process):
                     time.sleep(3)
                     ffmpeg_process = self.run_ffmpeg()
                     continue
-                log.info(f"DATA QUEUE ---------->{data_queue.get_nowait}")
                 try:
-                    chunk_id, stream_identifier = data_queue.get_nowait()
-                    log.info(f"chunk_id ------> {chunk_id} | stream id --------- > {stream_identifier}")
+                    while not data_queue.empty():
+                        chunk_id, stream_identifier = data_queue.get_nowait()
+                        self.chunk_queue.put((chunk_id, stream_identifier))
+                        log.info(f"Adding chunk to queue: {chunk_id} | stream id --------- > {stream_identifier}")
                 except Empty:
-                    log.info("No data in queue, waiting for new data...")
-                    time.sleep(3)
-                    continue
-                except Exception as e:
-                    log.info(f"Erorr -------  |    {e}")
-                    time.sleep(3)
-                    continue
-                    
-                s3 = settings.S3_CLIENT
-                bucket = settings.AWS_STORAGE_BUCKET_NAME
+                    pass
 
+                if not self.chunk_queue.empty():
+                    next_chunk_id, next_stream_identifier = self.chunk_queue.queue[0]  # Peek the next chunk
+                    log.info(f"Getting next chunk -----> | {next_chunk_id}")
+                    if next_chunk_id == self.last_processed_chunk_id + 1:
+                        self.chunk_queue.get()  # Remove the chunk from the queue
+                        self.last_processed_chunk_id = next_chunk_id
+                        log.info(f"Processing chunk_id ------> {next_chunk_id} | stream id --------- > {next_stream_identifier}")
 
-                # Deliver data to ffmpeg over stdin pipe
-                if not ffmpeg_process.poll():
-                    try:
-                        object_key = f"{chunk_id}_{stream_identifier}.bin"
-                        response = s3.get_object(Bucket=bucket, Key=object_key)
-                        if response:
-                            chunk_data = response['Body'].read()
-                            ffmpeg_process.stdin.write(chunk_data)
-                            ffmpeg_process.stdin.flush()
-                            self.buff_size.value += len(chunk_data)
-                        else:
-                            log.warning("Chunk file not exists, skipping!")
-                        
+                        s3 = settings.S3_CLIENT
+                        bucket = settings.AWS_STORAGE_BUCKET_NAME
 
-                    except boto3.exceptions.S3UploadFailedError as e:
-                        log.error(f"Error uploading chunk to S3: {e}")
-                    except BotoCoreError as e:
-                        # Handle general Botocore errors
-                        log.error(f"Error: {e}")
-                    except BrokenPipeError:
-                        log.warning("Write to ffmpeg stdin unsuccessful")
+                        if not ffmpeg_process.poll():
+                            try:
+                                object_key = f"{next_chunk_id}_{next_stream_identifier}.bin"
+                                log.info(f"Objcet key processed --------> | {object_key}")
+                                response = s3.get_object(Bucket=bucket, Key=object_key)
+                                if response:
+                                    chunk_data = response['Body'].read()
+                                    ffmpeg_process.stdin.write(chunk_data)
+                                    ffmpeg_process.stdin.flush()
+                                    self.buff_size.value += len(chunk_data)
+                                else:
+                                    log.warning("Chunk file not exists, skipping!")
+
+                            except boto3.exceptions.S3UploadFailedError as e:
+                                log.error(f"Error uploading chunk to S3: {e}")
+                            except BotoCoreError as e:
+                                log.error(f"Error: {e}")
+                            except BrokenPipeError:
+                                log.warning("Write to ffmpeg stdin unsuccessful")
+                    else:
+                        log.info("The buffer is empty waiting for new chunks....")
+                        time.sleep(1)
                         
                         
         except KeyboardInterrupt:

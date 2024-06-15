@@ -26,13 +26,8 @@ class ReceiveStreamDataView(APIView):
             else:
                 chunk_id = None
 
-            log.info(f"chunk_id ------> {chunk_id}")
-            log.info(f"request.GET ------> {request.GET}")
-            log.info(f"chunk_identifier ------> {stream_identifier}")
-
             if chunk_id and stream_identifier:
                 data_queue.put((chunk_id, stream_identifier))
-                log.info(f"data_queue --- > {data_queue}")
                 try:
                     while not data_queue.empty():
                         queued_data = data_queue.get()
