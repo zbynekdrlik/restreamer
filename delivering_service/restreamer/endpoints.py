@@ -219,9 +219,10 @@ class EndPoint(multiprocessing.Process):
                 except Empty:
                     pass
 
-                if not self.chunk_queue.empty():
+                iwhile not self.chunk_queue.empty():
                     next_chunk_id, next_stream_identifier = self.chunk_queue.queue[0]  # Peek the next chunk
                     log.info(f"Getting next chunk -----> | {next_chunk_id}")
+                    
                     if next_chunk_id == self.last_processed_chunk_id + 1:
                         self.chunk_queue.get()  # Remove the chunk from the queue
                         self.last_processed_chunk_id = next_chunk_id
@@ -242,7 +243,6 @@ class EndPoint(multiprocessing.Process):
                                     self.buff_size.value += len(chunk_data)
                                 else:
                                     log.warning("Chunk file not exists, skipping!")
-
                             except boto3.exceptions.S3UploadFailedError as e:
                                 log.error(f"Error uploading chunk to S3: {e}")
                             except BotoCoreError as e:
@@ -250,8 +250,9 @@ class EndPoint(multiprocessing.Process):
                             except BrokenPipeError:
                                 log.warning("Write to ffmpeg stdin unsuccessful")
                     else:
-                        log.info("The buffer is empty waiting for new chunks....")
-                        time.sleep(1)
+                        log.info(f"Waiting for the next chunk in sequence. Expected: {self.last_processed_chunk_id + 1}, but got: {next_chunk_id}")
+                        break
+                
                         
                         
         except KeyboardInterrupt:
