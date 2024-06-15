@@ -21,18 +21,20 @@ log = logging.getLogger(__name__)
 
 
 class EndPoint(multiprocessing.Process):
-    def __init__(self, alias, service_type, stream_key, streaming_event):
+    def __init__(self, alias, service_type, stream_key):
         super().__init__(name=alias)
         self.alias = alias
         self.service_type = service_type
         self.stream_key = stream_key
-        self.streaming_event = streaming_event
         self.buff_size = multiprocessing.Value("L", 0)
         self.chunk_record_id = multiprocessing.Value("i", 0)
-        self.last_processed_chunk_id = None
-        self.chunk_queue = []
         self.reader_thread_terminate = Event()
+        # self.stdout_thread = None
         self.stderr_thread = None
+        self.last_processed_chunk_id = None
+        self.chunk_queue = []  # Indicates no chunks have been processed
+        self.chunk_queue = PriorityQueue()
+       
 
     def run_ffmpeg(self):
         if self.service_type == "YT_HLS":
