@@ -254,6 +254,7 @@ class EndPoint(multiprocessing.Process):
                                 log.warning("Write to ffmpeg stdin unsuccessful")
                     else:
                         log.info(f"Waiting for the next chunk in sequence. Expected: {self.last_processed_chunk_id + 1}, but got: {next_chunk_id}")
+                        time.sleep(1)  # Add delay to prevent tight loop
                         break
                 
                         
