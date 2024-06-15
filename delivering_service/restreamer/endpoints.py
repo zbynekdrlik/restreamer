@@ -31,7 +31,7 @@ class EndPoint(multiprocessing.Process):
         self.reader_thread_terminate = Event()
         # self.stdout_thread = None
         self.stderr_thread = None
-        self.last_processed_chunk_id = -1  # Indicates no chunks have been processed
+        self.last_processed_chunk_id = None  # Indicates no chunks have been processed
         self.chunk_queue = PriorityQueue()
 
     def run_ffmpeg(self):
@@ -222,7 +222,10 @@ class EndPoint(multiprocessing.Process):
                 while not self.chunk_queue.empty():
                     next_chunk_id, next_stream_identifier = self.chunk_queue.queue[0]  # Peek the next chunk
                     log.info(f"Getting next chunk -----> | {next_chunk_id}")
-                    
+
+                    if self.last_processed_chunk_id is None:
+                        self.last_processed_chunk_id = next_chunk_id - 1
+
                     if next_chunk_id == self.last_processed_chunk_id + 1:
                         self.chunk_queue.get()  # Remove the chunk from the queue
                         self.last_processed_chunk_id = next_chunk_id
@@ -234,7 +237,7 @@ class EndPoint(multiprocessing.Process):
                         if not ffmpeg_process.poll():
                             try:
                                 object_key = f"{next_chunk_id}_{next_stream_identifier}.bin"
-                                log.info(f"Objcet key processed --------> | {object_key}")
+                                log.info(f"Object key processed --------> | {object_key}")
                                 response = s3.get_object(Bucket=bucket, Key=object_key)
                                 if response:
                                     chunk_data = response['Body'].read()
