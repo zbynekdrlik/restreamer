@@ -237,7 +237,7 @@ class EndPoint(multiprocessing.Process):
                 
                 log.info(f"Last processed chunk id {self.last_processed_chunk_id}")
                 self.process_chunk( ffmpeg_process)
-                self.chunk_id + 1
+                self.chunk_id += 1
                 
                
  
