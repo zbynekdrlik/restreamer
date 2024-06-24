@@ -10,7 +10,8 @@ import ffmpeg
 from boto3 import exceptions
 from botocore.exceptions import BotoCoreError
 from django.conf import settings
-import queue 
+import queue
+from botocore import errorfactory
 from queue import PriorityQueue, Empty
 
 
@@ -195,11 +196,9 @@ class EndPoint(multiprocessing.Process):
     def process_chunk(self, ffmpeg_process):
         s3 = settings.S3_CLIENT
         bucket = settings.AWS_STORAGE_BUCKET_NAME
-        log.info(f"Last processed chunk id {self.chunk_id}")
         if not ffmpeg_process.poll():
             try:
                 object_key = f"{self.chunk_id}_{self.stream_identifier}.bin"
-                log.info(f"Object key processed --------> | {object_key}")
                 response = s3.get_object(Bucket=bucket, Key=object_key)
                 if response:
                     chunk_data = response['Body'].read()
@@ -208,12 +207,15 @@ class EndPoint(multiprocessing.Process):
                     self.buff_size.value += len(chunk_data)
                 else:
                     log.warning("Chunk file not exists, skipping!")
+            except s3.exceptions.NoSuchKey as e:
+                log.warning(f"The buffer is empty!!")
             except boto3.exceptions.S3UploadFailedError as e:
                 log.error(f"Error uploading chunk to S3: {e}")
             except BotoCoreError as e:
                 log.error(f"Error: {e}")
             except BrokenPipeError:
                 log.warning("Write to ffmpeg stdin unsuccessful")
+
 
     def run(self):
         from django.db import connection
@@ -235,12 +237,9 @@ class EndPoint(multiprocessing.Process):
                 if self.chunk_id is None:
                     continue
                 
-                log.info(f"Last processed chunk id {self.last_processed_chunk_id}")
-                self.process_chunk( ffmpeg_process)
+                self.process_chunk(ffmpeg_process)
                 self.chunk_id += 1
                 
-               
- 
         except KeyboardInterrupt:
             log.info("Ctrl-C detected, terminating!")
             log.info("Cleaning up EndPoint process...")
@@ -298,7 +297,7 @@ def endpoints_info(endpoints):
         while True:  
             buff_string = ''
             for n in endpoints:
-                buff_string += f'{n.alias}: {n.buff_size.value / 1024 / 1024:.2f}MB (id:{n.chunk_record_id.value})|'
+                buff_string += f'{n.alias}: {n.buff_size.value / 1024 / 1024:.2f}MB (id:{n.chunk_id.value})|'
             log.debug(buff_string)
         
             time.sleep(10)
