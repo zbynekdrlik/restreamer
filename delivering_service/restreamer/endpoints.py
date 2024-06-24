@@ -297,7 +297,7 @@ def endpoints_info(endpoints):
         while True:  
             buff_string = ''
             for n in endpoints:
-                buff_string += f'{n.alias}: {n.buff_size.value / 1024 / 1024:.2f}MB (id:{n.chunk_id.value})|'
+                buff_string += f'{n.alias}: {n.buff_size.value / 1024 / 1024:.2f}MB (id:{n.chunk_id})|'
             log.debug(buff_string)
         
             time.sleep(10)
