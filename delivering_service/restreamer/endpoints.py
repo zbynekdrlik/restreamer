@@ -33,7 +33,7 @@ class EndPoint(multiprocessing.Process):
         self.stderr_thread = None
         self.last_processed_chunk_id = None
         self.chunk_id = chunk_id
-        self.strem_identifier = stream_identifier
+        self.stream_identifier = stream_identifier
 
 
     def run_ffmpeg(self):
