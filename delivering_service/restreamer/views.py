@@ -48,17 +48,20 @@ class ReceiveInitDataView(APIView):
         serializer = EndpointsListSerializer(data=request.data)
         if serializer.is_valid():
             endpoints = serializer.validated_data['endpoints']
+            chunk_id = serializer.validated_data['chunk_id']
+            stream_id = serializer.validated_data['steram_id']
             endpoint_list = []
             for endpoint in endpoints:
                 alias = endpoint['alias']
                 service_type = endpoint['service_type']
                 stream_key = endpoint['stream_key']
+            
                 log.info(f'alias ------> {alias}')
                 log.info(f'service_type ------> {service_type}')
                 log.info(f'stream_key ------> {stream_key}')
                 
                 try:
-                    endpoint_process = EndPoint(alias, service_type, stream_key)
+                    endpoint_process = EndPoint(alias, service_type, stream_key, stream_id, chunk_id)
                     endpoint_process.start()
                     endpoint_list.append(endpoint_process)
                 except Exception as e:

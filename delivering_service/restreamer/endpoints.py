@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 
 class EndPoint(multiprocessing.Process):
-    def __init__(self, alias, service_type, stream_key):
+    def __init__(self, alias, service_type, stream_key, stream_identifier, chunk_id):
         super().__init__(name=alias)
         self.alias = alias
         self.service_type = service_type
@@ -32,8 +32,12 @@ class EndPoint(multiprocessing.Process):
         # self.stdout_thread = None
         self.stderr_thread = None
         self.last_processed_chunk_id = None
-        self.chunk_queue = []  # Indicates no chunks have been processed
-        self.chunk_queue = PriorityQueue()
+        self.chunk_id = chunk_id
+        self.strem_identifier = stream_identifier
+
+        
+        
+        
 
 
     def run_ffmpeg(self):
@@ -192,13 +196,13 @@ class EndPoint(multiprocessing.Process):
             log.exception(e)
             
             
-    def process_chunk(self, chunk_id, stream_identifier, ffmpeg_process):
+    def process_chunk(self, chunk_id, ffmpeg_process):
         s3 = settings.S3_CLIENT
         bucket = settings.AWS_STORAGE_BUCKET_NAME
 
         if not ffmpeg_process.poll():
             try:
-                object_key = f"{chunk_id}_{stream_identifier}.bin"
+                object_key = f"{chunk_id}_{self.stream_identifier}.bin"
                 log.info(f"Object key processed --------> | {object_key}")
                 response = s3.get_object(Bucket=bucket, Key=object_key)
                 if response:
@@ -232,34 +236,13 @@ class EndPoint(multiprocessing.Process):
                     ffmpeg_process = self.run_ffmpeg()
                     continue
 
-                try:
-                    while not data_queue.empty():
-                        chunk_id, stream_identifier = data_queue.get_nowait()
-                        self.chunk_queue.append((chunk_id, stream_identifier))
-                        log.info(f"Adding chunk to queue: {chunk_id} | stream id --------- > {stream_identifier}")
-                except Empty:
-                    pass
-
-                self.chunk_queue.sort()
-
-                if self.chunk_queue:
-                    next_chunk_id, next_stream_identifier = self.chunk_queue[0]
-                    log.info(f"Getting next chunk -----> | {next_chunk_id}")
-
-                    if self.last_processed_chunk_id is None:
-                        self.last_processed_chunk_id = next_chunk_id - 1
-
-                    if next_chunk_id == self.last_processed_chunk_id + 1:
-                        self.chunk_queue.pop(0)
-                        self.last_processed_chunk_id = next_chunk_id
-                        log.info(f"Processing chunk_id ------> {next_chunk_id} | stream id --------- > {next_stream_identifier}")
-                        self.process_chunk(next_chunk_id, next_stream_identifier, ffmpeg_process)
-                    else:
-                        log.info(f"Waiting for the next chunk in sequence. Expected: {self.last_processed_chunk_id + 1}, but got: {next_chunk_id}")
-                        time.sleep(1)
-                        break
-                        
-                        
+                if self.chunk_id is None:
+                    continue
+                self.last_processed_chunk_id == self.chunk_id
+                self.process_chunk(self.last_processed_chunk_id, ffmpeg_process)
+                self.chunk_id + 1
+               
+ 
         except KeyboardInterrupt:
             log.info("Ctrl-C detected, terminating!")
             log.info("Cleaning up EndPoint process...")
