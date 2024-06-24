@@ -51,7 +51,7 @@ class ReceiveInitDataView(APIView):
             print("validated data ----------->", serializer.validated_data)
             endpoints = serializer.validated_data['endpoints']
             chunk_id = serializer.validated_data['chunk_id']
-            stream_id = serializer.validated_data['steram_id']
+            stream_id = serializer.validated_data['stream_id']
             
             endpoint_list = []
             
