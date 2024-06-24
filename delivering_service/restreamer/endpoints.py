@@ -234,9 +234,12 @@ class EndPoint(multiprocessing.Process):
 
                 if self.chunk_id is None:
                     continue
+                
                 self.last_processed_chunk_id == self.chunk_id
+                log.info(f"Last processed chunk id {self.last_processed_chunk_id}")
                 self.process_chunk(self.last_processed_chunk_id, ffmpeg_process)
                 self.chunk_id + 1
+                
                
  
         except KeyboardInterrupt:
