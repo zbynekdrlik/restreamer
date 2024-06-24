@@ -192,13 +192,13 @@ class EndPoint(multiprocessing.Process):
             log.exception(e)
             
             
-    def process_chunk(self, chunk_id, ffmpeg_process):
+    def process_chunk(self, ffmpeg_process):
         s3 = settings.S3_CLIENT
         bucket = settings.AWS_STORAGE_BUCKET_NAME
-
+        log.info(f"Last processed chunk id {self.chunk_id}")
         if not ffmpeg_process.poll():
             try:
-                object_key = f"{chunk_id}_{self.stream_identifier}.bin"
+                object_key = f"{self.chunk_id}_{self.stream_identifier}.bin"
                 log.info(f"Object key processed --------> | {object_key}")
                 response = s3.get_object(Bucket=bucket, Key=object_key)
                 if response:
@@ -235,9 +235,8 @@ class EndPoint(multiprocessing.Process):
                 if self.chunk_id is None:
                     continue
                 
-                self.last_processed_chunk_id == self.chunk_id
                 log.info(f"Last processed chunk id {self.last_processed_chunk_id}")
-                self.process_chunk(self.last_processed_chunk_id, ffmpeg_process)
+                self.process_chunk( ffmpeg_process)
                 self.chunk_id + 1
                 
                
