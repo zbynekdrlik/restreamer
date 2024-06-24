@@ -35,10 +35,6 @@ class EndPoint(multiprocessing.Process):
         self.chunk_id = chunk_id
         self.strem_identifier = stream_identifier
 
-        
-        
-        
-
 
     def run_ffmpeg(self):
         if self.service_type == "YT_HLS":

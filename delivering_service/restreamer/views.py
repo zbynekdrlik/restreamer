@@ -46,11 +46,15 @@ class ReceiveStreamDataView(APIView):
 class ReceiveInitDataView(APIView):
     def post(self, request, *args, **kwargs):
         serializer = EndpointsListSerializer(data=request.data)
+        
         if serializer.is_valid():
+            print("validated data ----------->", serializer.validated_data)
             endpoints = serializer.validated_data['endpoints']
             chunk_id = serializer.validated_data['chunk_id']
             stream_id = serializer.validated_data['steram_id']
+            
             endpoint_list = []
+            
             for endpoint in endpoints:
                 alias = endpoint['alias']
                 service_type = endpoint['service_type']
