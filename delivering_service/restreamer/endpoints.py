@@ -1,19 +1,21 @@
-import logging
 import json
+import logging
+import threading
 import multiprocessing
+import queue
 import time
+from queue import Empty, PriorityQueue
 from threading import Event, Thread
-from django.http import JsonResponse, HttpResponseBadRequest
-from django.views.decorators.csrf import csrf_exempt
+
 import boto3
 import ffmpeg
+import requests
 from boto3 import exceptions
+from botocore import errorfactory
 from botocore.exceptions import BotoCoreError
 from django.conf import settings
-import queue
-from botocore import errorfactory
-from queue import PriorityQueue, Empty
-
+from django.http import HttpResponseBadRequest, JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 
 from .shared import data_queue
 
@@ -208,13 +210,15 @@ class EndPoint(multiprocessing.Process):
                 else:
                     log.warning("Chunk file not exists, skipping!")
             except s3.exceptions.NoSuchKey as e:
-                log.warning(f"The buffer is empty!!")
+                log.warning(f"The buffer is empty!! Waiting for new data.")
+                time.sleep(2)
             except boto3.exceptions.S3UploadFailedError as e:
                 log.error(f"Error uploading chunk to S3: {e}")
             except BotoCoreError as e:
                 log.error(f"Error: {e}")
             except BrokenPipeError:
                 log.warning("Write to ffmpeg stdin unsuccessful")
+            
 
 
     def run(self):
@@ -307,3 +311,94 @@ def endpoints_info(endpoints):
         
     except Exception as e:
         log.exception(e)
+        
+        
+        
+class ManagerEndPointControl:
+    def __init__(self):
+        self.endpoint_processes = {}
+        self.check_interval = 10
+        self.stop_event = Event()
+        self.signals = []
+
+    def add_signal(self, signal):
+        self.signals.append(signal)
+        
+    def start_endpoint(self, alias, service_type, stream_key, stream_id, chunk_id):
+        if alias in self.endpoint_processes:
+            log.info(f'Endpoint {alias} is alredy running')
+            return
+        
+        endpoint_process = EndPoint(alias, service_type, stream_key, stream_id, chunk_id)
+        endpoint_process.start()
+        self.endpoint_processes[alias] = endpoint_process
+        log.info(f'Started endpoint {alias}')
+        
+        
+    def stop_endpoint(self, alias):
+        if alias in self.endpoint_processes:
+            endpoint_process = self.endpoint_processes[alias]
+            endpoint_process.terminate()
+            endpoint_process.join()
+            del self.endpoint_processes[alias]
+            print(f"Stopped endpoint {alias}")
+
+        else:
+            log.info(f'Endpoing {alias} is not running')
+            
+    def stop_all_endpoints(self):
+        for alias in list(self.endpoint_processes.keys()):
+            self.stop_endpoint(alias)
+        log.info("All endpoints stopped.")
+        
+    def wait_for_signal(self, alias):
+        print(f"{alias} is now waiting for a signal to restart.")
+        while alias not in self.endpoint_processes:
+            time.sleep(self.check_interval)
+        print(f"{alias} received signal to restart.")
+        
+    def monitor_endpoints(self):
+        while not self.stop_event.is_set():
+            try:
+                while self.signals:
+                    signal = self.signals.pop(0)
+                    alias = signal['alias']
+                    action = signal['action']  # 'start', 'stop', or 'stop_all'
+                    service_type = signal.get('service_type')
+                    stream_key = signal.get('stream_key')
+                    stream_id = signal.get('stream_id')
+                    chunk_id = signal.get('chunk_id')
+
+                    if action == 'start':
+                        self.start_endpoint(alias, service_type, stream_key, stream_id, chunk_id)
+                    elif action == 'stop':
+                        self.stop_endpoint(alias)
+                        threading.Thread(target=self.wait_for_signal, args=(alias,), daemon=True).start()
+                    elif action == 'stop_all':
+                        self.stop_all_endpoints()
+                        for alias in list(self.endpoint_processes.keys()):
+                            threading.Thread(target=self.wait_for_signal, args=(alias,), daemon=True).start()
+
+                time.sleep(self.check_interval)
+            except Exception as e:
+                print(f"An error occurred: {e}")
+                
+    def log_endpoints_info(self):
+        try:
+            while not self.stop_event.is_set():
+                buff_string = ''
+                for alias, process in self.endpoint_processes.items():
+                    buff_string += f'{alias}: {process.buff_size.value / 1024 / 1024:.2f}MB (id:{process.chunk_id.value})|'
+                log.debug(buff_string)
+                time.sleep(10)
+                log.debug("Endpoint info logged")
+        except KeyboardInterrupt:
+            log.info('Ctrl-C detected, terminating!')
+        except Exception as e:
+            log.exception(e)
+
+    def stop(self):
+        self.stop_event.set()         
+        
+               
+endpoing_manger = ManagerEndPointControl()

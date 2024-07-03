@@ -1,17 +1,30 @@
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from restreamer.serializers import StreamInfoSerializer, EndpointsListSerializer
-from restreamer.endpoints import EndPoint
 import logging
 import queue
+import threading
 from ast import literal_eval
 
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from restreamer.endpoints import EndPoint
+from restreamer.endpoints import ManagerEndPointControl as central_manager , start_central_manager
 from restreamer.endpoints import endpoints_info
+from restreamer.serializers import (EndpointsListSerializer,
+                                    StreamInfoSerializer)
 
 from .shared import data_queue
 
 log = logging.getLogger(__name__)
+
+
+def start_central_manager():
+    if not hasattr(start_central_manager, "started"):
+        start_central_manager.started = True
+        central_manager_thread = threading.Thread(target=central_manager.monitor_endpoints, daemon=True)
+        central_manager_thread.start()
+        logging_thread = threading.Thread(target=central_manager.log_endpoints_info, daemon=True)
+        logging_thread.start()
+        log.info("Central Manager and Logging threads started.")
 
 
 class ReceiveStreamDataView(APIView):
@@ -54,7 +67,7 @@ class ReceiveInitDataView(APIView):
             stream_id = serializer.validated_data['stream_id']
             
             print("Chunk id --------------->", chunk_id)
-            endpoint_list = []
+            start_central_manager()
             
             for endpoint in endpoints:
                 alias = endpoint['alias']
@@ -65,16 +78,32 @@ class ReceiveInitDataView(APIView):
                 log.info(f'service_type ------> {service_type}')
                 log.info(f'stream_key ------> {stream_key}')
                 
-                try:
-                    endpoint_process = EndPoint(alias, service_type, stream_key, stream_id, chunk_id)
-                    endpoint_process.start()
-                    endpoint_list.append(endpoint_process)
-                except Exception as e:
-                    print(f'An error occurred: {e}')
-            try:
-                endpoints_info(endpoint_list)
-            except KeyboardInterrupt:
-                log.info('Ctrl-C detected, terminating!')
-        
+                signal = {
+                    "alias": alias,
+                    "action": "start",
+                    "service_type": service_type,
+                    "stream_key": stream_key,
+                    "stream_id": stream_id,
+                    "chunk_id": chunk_id
+                }
+                  
+                central_manager.add_signal(signal)
+            
             return Response({"message": "Data received successfully endpoint started"}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+               
+               
+class EndStreamView(APIView):
+    def post(self, request, *args, **kwargs):
+        alias = request.data.get('alias')
+        action = "stop_all" if alias is None else "stop"
+        
+        signal = {
+            "alias": alias if alias else "all",
+            "action": action
+        }
+        central_manager.add_signal(signal)
+        
+        message = "Signal sent to stop all endpoints" if action == "stop_all" else f"Signal sent to stop endpoint {alias}"
+        return Response({"message": message}, status=status.HTTP_200_OK)
