@@ -7,7 +7,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from restreamer.endpoints import EndPoint
-from restreamer.endpoints import ManagerEndPointControl as central_manager
+from restreamer.endpoints import endpoing_manger
 from restreamer.endpoints import endpoints_info
 from restreamer.serializers import (EndpointsListSerializer,
                                     StreamInfoSerializer)
@@ -20,9 +20,9 @@ log = logging.getLogger(__name__)
 def start_central_manager():
     if not hasattr(start_central_manager, "started"):
         start_central_manager.started = True
-        central_manager_thread = threading.Thread(target=central_manager.monitor_endpoints, daemon=True)
+        central_manager_thread = threading.Thread(target=endpoing_manger.monitor_endpoints, daemon=True)
         central_manager_thread.start()
-        logging_thread = threading.Thread(target=central_manager.log_endpoints_info, daemon=True)
+        logging_thread = threading.Thread(target=endpoing_manger.log_endpoints_info, daemon=True)
         logging_thread.start()
         log.info("Central Manager and Logging threads started.")
 
@@ -87,7 +87,7 @@ class ReceiveInitDataView(APIView):
                     "chunk_id": chunk_id
                 }
                   
-                central_manager.add_signal(signal)
+                endpoing_manger.add_signal(signal)
             
             return Response({"message": "Data received successfully endpoint started"}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -103,7 +103,7 @@ class EndStreamView(APIView):
             "alias": alias if alias else "all",
             "action": action
         }
-        central_manager.add_signal(signal)
+        endpoing_manger.add_signal(signal)
         
         message = "Signal sent to stop all endpoints" if action == "stop_all" else f"Signal sent to stop endpoint {alias}"
         return Response({"message": message}, status=status.HTTP_200_OK)
