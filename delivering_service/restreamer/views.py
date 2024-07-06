@@ -98,6 +98,7 @@ class EndStreamView(APIView):
     def post(self, request, *args, **kwargs):
         alias = request.data.get('alias')
         action = "stop_all" if alias is None else "stop"
+        log.info(f"Ending stream for {alias} ------------------------")
         
         signal = {
             "alias": alias if alias else "all",
