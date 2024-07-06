@@ -388,7 +388,7 @@ class ManagerEndPointControl:
             while not self.stop_event.is_set():
                 buff_string = ''
                 for alias, process in self.endpoint_processes.items():
-                    buff_string += f'{alias}: {process.buff_size.value / 1024 / 1024:.2f}MB (id:{process.chunk_id.value})|'
+                    buff_string += f'{alias}: {process.buff_size.value / 1024 / 1024:.2f}MB (id:{process.chunk_id})|'
                 log.debug(buff_string)
                 time.sleep(10)
                 log.debug("Endpoint info logged")
