@@ -7,7 +7,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from restreamer.endpoints import EndPoint
-from restreamer.endpoints import ManagerEndPointControl as central_manager , start_central_manager
+from restreamer.endpoints import ManagerEndPointControl as central_manager
 from restreamer.endpoints import endpoints_info
 from restreamer.serializers import (EndpointsListSerializer,
                                     StreamInfoSerializer)
