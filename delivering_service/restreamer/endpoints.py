@@ -122,52 +122,7 @@ class EndPoint(multiprocessing.Process):
 
         return process
 
-        """     def get_last_chunk_position(self):
-        try:
-            ChunkRecord.objects.get(
-                streaming_event=self.streaming_event,
-                local_id=self.end_point_cfg.position_last,
-            )
-        except ChunkRecord.DoesNotExist:
-            self.end_point_cfg.position_last = 0
-
-            # Try to locate first chunk in db
-            first_chunk = (
-                ChunkRecord.objects.filter(streaming_event=self.streaming_event)
-                .order_by("local_id")
-                .first()
-            )
-            if first_chunk:
-                self.end_point_cfg.position_last = first_chunk.local_id
-
-            self.end_point_cfg.position_last -= 1
-            self.end_point_cfg.save()
-        return self.end_point_cfg.position_last
-
-    def get_next_chunk_position(self):
-        self.stored_position = self.get_last_chunk_position() + 1
-        return self.stored_position """
-    
-    """ last_position = self.get_last_chunk_position()
-    self.current_position = last_position + 1
-    next_chunk = None
-    while True:
-        try:
-            chunk_record = ChunkRecord.objects.get(
-                streaming_event=self.streaming_event,
-                local_id=self.current_position
-            )
-            return self.current_position
-        except ChunkRecord.DoesNotExist:
-            if next_chunk is None:
-                next_chunk = ChunkRecord.objects.select_related('streaming_event').filter(local_id__gt=self.current_position).order_by('local_id').first()
-                if next_chunk is None:
-                    return None
-                self.current_position = next_chunk.local_id
-            else:
-                    self.current_position += 1 """ 
-
-   
+  
     def reader_thread(self, pipe, pipe_name):
         try:
             with open(
@@ -242,7 +197,7 @@ class EndPoint(multiprocessing.Process):
                     continue
                 
                 self.process_chunk(ffmpeg_process)
-                self.chunk_id += 1
+                self.chunk_id.value += 1
                 
         except KeyboardInterrupt:
             log.info("Ctrl-C detected, terminating!")
