@@ -35,7 +35,7 @@ class EndPoint(multiprocessing.Process):
         # self.stdout_thread = None
         self.stderr_thread = None
         self.last_processed_chunk_id = None
-        self.chunk_id = chunk_id
+        self.chunk_id = multiprocessing.Value("i", chunk_id)
         self.stream_identifier = stream_identifier
 
 
@@ -388,10 +388,10 @@ class ManagerEndPointControl:
             while not self.stop_event.is_set():
                 buff_string = ''
                 for alias, process in self.endpoint_processes.items():
-                    buff_string += f'{alias}: {process.buff_size.value / 1024 / 1024:.2f}MB (id:{process.chunk_id})|'
+                    buff_string += f'{alias}: {process.buff_size.value / 1024 / 1024:.2f}MB (id:{process.chunk_id.value})|'
                 log.debug(buff_string)
                 time.sleep(10)
-                log.debug("Endpoint info logged")
+                log.debug("Endpoint is running")
         except KeyboardInterrupt:
             log.info('Ctrl-C detected, terminating!')
         except Exception as e:
