@@ -155,7 +155,7 @@ class EndPoint(multiprocessing.Process):
         bucket = settings.AWS_STORAGE_BUCKET_NAME
         if not ffmpeg_process.poll():
             try:
-                object_key = f"{self.chunk_id}_{self.stream_identifier}.bin"
+                object_key = f"{self.chunk_id.value}_{self.stream_identifier}.bin"
                 response = s3.get_object(Bucket=bucket, Key=object_key)
                 if response:
                     chunk_data = response['Body'].read()
@@ -193,7 +193,7 @@ class EndPoint(multiprocessing.Process):
                     ffmpeg_process = self.run_ffmpeg()
                     continue
 
-                if self.chunk_id is None:
+                if self.chunk_id.value is None:
                     continue
                 
                 self.process_chunk(ffmpeg_process)
