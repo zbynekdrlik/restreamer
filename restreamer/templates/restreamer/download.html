@@ -1,0 +1,84 @@
+{% extends 'base/base.html' %}
+{% load static %}
+
+{% block content %}
+<div class="min-h-screen flex items-center justify-center">
+    <div class="max-w-md mx-auto p-8 bg-white rounded-lg shadow-lg">
+        <div class="text-center">
+            <h1 class="text-4xl font-bold mb-6 text-gray-900">Download Restreamer</h1>
+            <p class="text-gray-600 mb-8">Get your local restreaming engine with your user ID pre-configured.</p>
+            <a href="{% url 'control:download_zip' %}" class="inline-flex items-center px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-md shadow-md transition duration-300 ease-in-out">
+                <i class="fas fa-file-archive mr-2"></i> Download restreamer.zip
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block styles %}
+<style>
+    @keyframes gradient-xy {
+        0%, 100% {
+            background-position: 0% 50%;
+        }
+        50% {
+            background-position: 100% 50%;
+        }
+    }
+
+    @keyframes text-animation {
+        0%, 100% {
+            background-position: 0% 50%;
+        }
+        50% {
+            background-position: 100% 50%;
+        }
+    }
+
+    .animate-text {
+        animation: text-animation 5s ease infinite;
+    }
+
+    @keyframes bounce {
+        0%, 100% {
+            transform: translateY(-10%);
+        }
+        50% {
+            transform: translateY(0);
+        }
+    }
+
+    .animate-bounce {
+        animation: bounce 2s infinite;
+    }
+
+    .neon-glow {
+        box-shadow: 0 0 20px rgba(255, 105, 180, 0.8);
+    }
+
+    .neon-text {
+        text-shadow: 0 0 10px rgba(255, 105, 180, 0.8);
+    }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/particles.js@2.0.0/particles.min.js"></script>
+<script>
+    particlesJS.load('particles-js', '{% static "particles.json" %}', function() {
+        console.log('Particles loaded');
+    });
+</script>
+{% endblock %}
+
+
+
+<style>
+.neon-glow {
+    box-shadow: 0 0 20px rgba(255, 105, 180, 0.8);
+}
+
+.neon-text {
+    text-shadow: 0 0 10px rgba(255, 105, 180, 0.8);
+}
+</style>

@@ -1,0 +1,48 @@
+{% extends 'base/base.html' %}
+{% load crispy_forms_tags %}
+
+
+{% block content %}
+
+<h1>History for {{ user.first_name }} {{ user.last_name }}</h1>
+
+<h2>User History</h2>
+<ul>
+    {% for history in users_history %}
+        <li>{{ history.record.history_date }}: Changed by {{ history.record.history_user }}
+            <ul>
+                {% for field, change in history.changes.items %}
+                    <li>{{ field }}: {{ change.0 }} -> {{ change.1 }}</li>
+                {% endfor %}
+            </ul>
+        </li>
+    {% endfor %}
+</ul>
+
+<h2>Streaming Event History</h2>
+<ul>
+    {% for history in streaming_event_history %}
+        <li>{{ history.record.history_date }}: Changed by {{ history.record.history_user }}
+            <ul>
+                {% for field, change in history.changes.items %}
+                    <li>{{ field }}: {{ change.0 }} -> {{ change.1 }}</li>
+                {% endfor %}
+            </ul>
+        </li>
+    {% endfor %}
+</ul>
+
+<h2>Endpoints History</h2>
+<ul>
+    {% for history in endpoints_history %}
+        <li>{{ history.record.history_date }}: Changed by {{ history.record.history_user }}
+            <ul>
+                {% for field, change in history.changes.items %}
+                    <li>{{ field }}: {{ change.0 }} -> {{ change.1 }}</li>
+                {% endfor %}
+            </ul>
+        </li>
+    {% endfor %}
+</ul>
+{% endblock content %}
+    

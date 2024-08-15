@@ -1,0 +1,147 @@
+{% extends 'base/base.html' %}
+{% load crispy_forms_tags %}
+
+
+{% block content %}
+
+
+<div class="container mt-5v ">
+    <div class="card shadow-lg rounded-lg overflow-hidden">
+        <div class="card-header bg-gradient-to-r from-blue-500 to-indigo-500 text-white py-2 px-4">
+            <h4 class="text-xl font-bold">{{ streaming_event.short_description }}</h4>
+        </div>
+        <div class="card-body bg-gray-100 py-6 px-8 mb-5">
+            <h5 class="text-gray-700 font-semibold mb-4">Endpoints</h5>
+            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                {% if endpoints %}
+                    {% for endpoint in endpoints %}
+                    <div class="bg-white rounded-lg shadow-md p-4 relative">
+                        <p class="text-gray-700 font-semibold">{{ endpoint }}</p>
+                        <form action="{% url 'control:remove_endpoint' streaming_event.id endpoint.id %}" method="post" class="absolute top-2 right-2">
+                            {% csrf_token %}
+                            <button type="submit" class="text-gray-500 hover:text-red-500 transition-colors duration-300">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                </svg>
+                            </button>
+                        </form>
+                    </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+
+            <div class="flex justify-end mt-4">
+                <button type="button" id="showSelectButton" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full flex items-center" data-bs-toggle="modal" data-bs-target="#addEndpointModal">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clip-rule="evenodd" />
+                    </svg>
+                    Add Endpoint
+                </button>
+            </div>
+
+            <!-- Technical Details Section -->
+            <div class="mt-8">
+                <h5 class="text-gray-700 font-semibold">Details</h5>
+                <div class="bg-white rounded-lg shadow-md p-6">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <p class="text-gray-600 font-semibold">Identifier:</p>
+                            <p class="text-gray-800">{{ streaming_event.identifier }}</p>
+                        </div>
+                        <div>
+                            <p class="text-gray-600 font-semibold">Date of Event:</p>
+                            <p class="text-gray-800">{{ streaming_event.date_of_event }}</p>
+                        </div>
+                        <div>
+                            <p class="text-gray-600 font-semibold">Received Bytes:</p>
+                            <p class="text-gray-800">{{ streaming_event.received_bytes }}</p>
+                        </div>
+                        <div>
+                            <p class="text-gray-600 font-semibold">Receiving Activated:</p>
+                            <p class="text-gray-800">{{ streaming_event.receiving_activated|yesno:"Yes,No" }}</p>
+                        </div>
+                        <div>
+                            <p class="text-gray-600 font-semibold">Video Length:</p>
+                            <p class="text-gray-800">{{ video_length }}</p>
+                        </div>
+                        <div>
+                            <p class="text-gray-600 font-semibold">Buffer:</p>
+                            <p class="text-gray-800">{{ buffer }}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Modal for Adding Endpoints -->
+            <div class="modal fade" id="addEndpointModal" tabindex="-1" aria-labelledby="addEndpointModalLabel" aria-hidden="true">
+                <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title" id="addEndpointModalLabel">Select Endpoints</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <form action="{% url 'control:add_endpoint' streaming_event.id %}" method="post">
+                            {% csrf_token %}
+                            <div class="modal-body">
+                                <div class="custom-select-container">
+                                    <select id="endpointSelect" name="endpoint" class="custom-select" multiple>
+                                        {% for endpoint in available_endpoints %}
+                                        <option value="{{ endpoint.id }}">{{ endpoint }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="mt-4 flex items-center">
+                                    <label for="event-time" class="block text-gray-700 font-semibold mr-4">Video Time:</label>
+                                    <div class="flex">
+                                        <input type="text" id="event-time" name="time_point" class="form-input px-3 py-2 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="HH:MM:SS" pattern="\d{2}:\d{2}:\d{2}">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                                <button type="submit" class="btn btn-primary">Add Selected Endpoints</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js" integrity="sha384-geWF76RCwLtnZ8qwWowPQNguL3RmwHVBC9FhGdlKrxdiJJigb/j/68SIy3Te4Bkz" crossorigin="anonymous"></script>
+
+
+<script>
+    document.getElementById('event-time').addEventListener('input', function (e) {
+        const input = e.target.value.replace(/[^0-9]/g, '');
+        let formatted = '';
+
+        if (input.length <= 2) {
+            formatted = input;
+        } else if (input.length <= 4) {
+            formatted = input.slice(0, 2) + ':' + input.slice(2);
+        } else {
+            formatted = input.slice(0, 2) + ':' + input.slice(2, 4) + ':' + input.slice(4, 6);
+        }
+
+        e.target.value = formatted;
+    });
+
+    document.getElementById('event-time').addEventListener('blur', function (e) {
+        const input = e.target.value.split(':');
+        if (input.length === 3) {
+            const [hours, minutes, seconds] = input.map(part => part.padStart(2, '0'));
+            e.target.value = `${hours}:${minutes}:${seconds}`;
+        }
+    });
+
+    document.getElementById('add-endpoint-form').addEventListener('submit', function (e) {
+        const timeInput = document.getElementById('event-time').value;
+        if (!timeInput.match(/^\d{2}:\d{2}:\d{2}$/)) {
+            e.preventDefault();
+            alert('Please enter a valid time in HH:MM:SS format');
+        }
+    });
+</script>
+
+{% endblock content %}

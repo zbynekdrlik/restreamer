@@ -1,0 +1,89 @@
+html {
+ height: 100%;
+    box-sizing: border-box;
+}
+
+body {
+    position: relative;
+    margin: 0;
+    min-height: 100%;
+    padding-bottom: 0;
+    box-sizing: inherit;
+}
+
+main{
+    margin: 0 auto;
+    padding-top: 20px;
+}
+
+.footer {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    left: 0;
+    background-color: #f8f9fa; /* Adjust background color as needed */
+    padding: 0  0; /* Add padding for better appearance */
+    text-align: center; /* Center-align content */
+}
+
+.download-btn {
+    background-color: #4a4746;
+    border-radius: 5px;
+}
+
+.card-bg {
+        background-color: burlywood;
+    }
+
+
+.img-clickable {
+    cursor: pointer;
+    }
+
+.select2-container--default .select2-selection--multiple .select2-selection__choice {
+    background-color: #1d4ed8; /* Tailwind blue-700 */
+    color: rgb(146, 146, 146);
+    border: 1px solid #1d4ed8; /* Tailwind blue-700 */
+}
+.select2-container--default .select2-selection--multiple .select2-selection__choice__remove {
+    color: rgb(49, 49, 49);
+}
+
+
+.select2-container .select2-selection--multiple {
+    min-height: 38px; /* Adjust this value as needed */
+    padding: 5px; /* Adjust this value as needed */
+}
+.select2-container--default .select2-selection--multiple .select2-selection__rendered {
+    padding: 0 5px;
+}
+
+/* ----------------------- Custom styles for input and select ------------------------------*/
+
+.custom-select {
+    width: 100%;
+}
+
+/* Custom Scrollbar Styles */
+.custom-select-container {
+    position: relative;
+    max-height: 200px; /* Adjust the height as needed */
+    overflow-y: auto;
+}
+
+.custom-select-container::-webkit-scrollbar {
+    width: 8px; /* Width of the scrollbar */
+}
+
+.custom-select-container::-webkit-scrollbar-track {
+    background-color: #f1f1f1; /* Color of the scrollbar track */
+}
+
+.custom-select-container::-webkit-scrollbar-thumb {
+    background-color: #888; /* Color of the scrollbar thumb */
+    border-radius: 4px; /* Rounded corners of the scrollbar thumb */
+}
+
+.custom-select-container::-webkit-scrollbar-thumb:hover {
+    background-color: #555; /* Color of the scrollbar thumb on hover */
+}

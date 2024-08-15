@@ -1,0 +1,101 @@
+{% extends 'base/base.html' %}
+{% load crispy_forms_tags %}
+
+{% block content %}
+{% load custom_filters %}
+
+<div class="container mt-5 mb-2">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <h3 class="mb-4 text-2xl font-bold">New Streaming Event:</h3>
+            <form method="POST" action="{% url 'control:create_stream' %}" class="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
+                {% csrf_token %}
+                <div class="mb-4">
+                    {{ form.short_description|as_crispy_field }}
+                </div>
+                <div class="mb-4">
+                    {{ form.date_of_event|as_crispy_field }}
+                </div>
+                <div class="mb-4">
+                    <label for="end_points" class="block text-gray-700 mb-2">Endpoints:</label>
+                    <div class="flex items-center">
+                        <select id="end_points" name="end_points" multiple class="form-select w-full rounded-md shadow-sm select2">
+                            {% for endpoint in form.end_points.field.queryset %}
+                            <option value="{{ endpoint.id }}">{{ endpoint.alias }}</option>
+                            {% endfor %}
+                        </select>
+                        <button type="button" class="ms-2 bg-blue-500 hover:bg-blue-600 text-white font-bold py-1 px-2 rounded shadow-md transition-transform transform hover:scale-110" data-bs-toggle="modal" data-bs-target="#endpointModal">
+                            <i class="fas fa-plus"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="mb-4">
+                    {{ form.buffer|as_crispy_field }}
+                </div>
+                <button type="submit" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">Submit</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Endpoint Modal -->
+<div class="modal fade mt-5" id="endpointModal" tabindex="-1" aria-labelledby="endpointModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="endpointModalLabel">Add Endpoint</h5>
+                <button type="button" class="btn-close" data-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form action="{% url 'control:create_stream' %}" method="POST">
+                {% csrf_token %}
+                <div class="modal-body">
+                    <div class="mb-4">
+                        {{ endpoint_form.alias|as_crispy_field }}
+                    </div>
+                    <div class="mb-4">
+                        {{ endpoint_form.service_type|as_crispy_field }}
+                    </div>
+                    <div class="mb-4">
+                        {{ endpoint_form.stream_key|as_crispy_field }}
+                    </div>
+                    <div class="mb-4">
+                        {{ endpoint_form.enabled|as_crispy_field }}
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Add Endpoint</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Include jQuery -->
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+       
+   
+        // Ensure the modal is initialized correctly
+        var endpointModal = document.getElementById('endpointModal');
+        var modal = new bootstrap.Modal(endpointModal);
+
+        // Add click event listener to the "+" button
+        var addEndpointButton = document.querySelector('button[data-bs-target="#endpointModal"]');
+        addEndpointButton.addEventListener('click', function () {
+            modal.show();
+        });
+    });
+</script>
+
+<script>
+    $('.select2').select2({
+        placeholder: "Select endpoints",
+        allowClear: true
+    });
+</script>
+
+
+
+{% endblock %}
