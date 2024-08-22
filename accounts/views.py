@@ -14,6 +14,8 @@ class SignUpView(generic.CreateView):
     def form_valid(self, form):
         user = form.save()
         group = Group.objects.get(name='unknown-user')
+        for group in Group.objects.all():
+            print(group.name)
         user.groups.add(group)
         
         try:
