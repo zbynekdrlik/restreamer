@@ -35,7 +35,7 @@ class CreateStreamView(LoginRequiredMixin,TemplateView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context['form'] = StreamingEventForm()
+        context['form'] = StreamingEventForm(user=self.request.user)
         context['endpoint_form'] = EndPointForm()
         return context
 
