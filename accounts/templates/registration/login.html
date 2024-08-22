@@ -14,7 +14,8 @@
                     <button type="submit" class="btn btn-primary btn-block">Login</button>
                 </div>
                 <div>
-                    <p>Or you don't have an account <a href="{% url 'accounts:register' %}">Register</a> here</p>
+                    <p>Or you don't have an account <a href="{% url 'register' %}" class="text-secondary">Register</a> here</p>
+                    <p><a href="{% url 'password_reset' %}" class="text-primary">Lost password?</a></p>
                 </div>
             </form>
         </div>
