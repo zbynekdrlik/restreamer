@@ -23,7 +23,7 @@ class SignUpView(generic.CreateView):
             return self.form_invalid(form)
 
 class CustomLogoutView(LogoutView):
-    next_page = reverse_lazy('accounts:login')
+    next_page = reverse_lazy('login')
     
     def get(self, request, *args, **kwargs):
         return self.post(request, *args, **kwargs)
