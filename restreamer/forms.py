@@ -22,3 +22,4 @@ class EndPointForm(forms.ModelForm):
         model = EndPointCfg
         fields = ['alias', 'service_type', 'stream_key', 'enabled']
         widgets = {'stream_key': forms.PasswordInput()}
+   
