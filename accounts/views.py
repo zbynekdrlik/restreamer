@@ -3,6 +3,7 @@ from django.views import generic
 from .forms import RegistrationForm
 from django.urls import reverse_lazy
 from django.db import IntegrityError
+from django.contrib.auth.models import Group
 from django.contrib.auth.views import LogoutView, LoginView
 
 class SignUpView(generic.CreateView):
@@ -11,6 +12,10 @@ class SignUpView(generic.CreateView):
     success_url = reverse_lazy('control:home')
 
     def form_valid(self, form):
+        user = form.save()
+        group = Group.objects.get(name='unknown-user')
+        user.groups.add(group)
+        
         try:
             return super().form_valid(form)
         except IntegrityError:
