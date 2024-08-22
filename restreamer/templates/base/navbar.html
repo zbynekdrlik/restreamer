@@ -45,7 +45,7 @@
                 </ul>
             </li>
             <li class="nav-item mx-3">
-                <form action="{% url 'accounts:logout' %}" method="post" class="inline-block">
+                <form action="{% url 'logout' %}" method="post" class="inline-block">
                     {% csrf_token %}
                     <button type="submit" class="btn btn-danger">
                         <i class="fas fa-sign-out-alt mr-2"></i>
@@ -56,7 +56,7 @@
             </li>
             {% else %}
             <li class="nav-item mx-3">
-                <a class="nav-link btn btn-primary" href="{% url 'accounts:login' %}">
+                <a class="nav-link btn btn-primary" href="{% url 'login' %}">
                     <i class="fas fa-sign-in-alt mr-2"></i>
                     Login
                 </a>
