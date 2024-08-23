@@ -3,6 +3,7 @@ import os
 import zipfile
 
 from django.conf import settings
+from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import FileResponse
@@ -27,7 +28,6 @@ log = logging.getLogger(__name__)
 
 class DownloadPageView(LoginRequiredMixin, TemplateView,):
     template_name = 'restreamer/download.html'
-
 
 # Receiving data from user when create new streaming event
 class CreateStreamView(LoginRequiredMixin,TemplateView):
@@ -54,18 +54,23 @@ class CreateStreamView(LoginRequiredMixin,TemplateView):
                     endpoints = EndPointCfg.objects.filter(pk__in=endpoints)
                     streaming_event.end_points.add(*endpoints)
 
+                    messages.success(request, 'Streaming event successfully created!')
                     return redirect('home')
 
                 except Exception as e:
                     log.exception(f'Error saving form {e}')
+                    messages.error(request, 'There was an error saving the streaming event.')
 
             elif endpoint_form.is_valid():
                 endpoint = endpoint_form.save(commit=False)
                 endpoint.user = request.user
                 endpoint.save()
+                
+                messages.success(request, f'Endpoint {endpoint.alias} successfully created!')
                 return redirect('create_stream')
-
+                
             else:
+                messages.error(request, 'There was an error creating new endpoint.')
                 log.error(f'Invalid form {streaming_event_form.errors}')
 
         except Exception as e:
