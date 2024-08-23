@@ -67,7 +67,7 @@ class CreateStreamView(LoginRequiredMixin,TemplateView):
                 endpoint.save()
 
                 messages.success(request, f'Endpoint {endpoint.alias} successfully created!')
-                return redirect('create_stream')
+                return redirect('control:create_stream')
                 
             else:
                 messages.error(request, 'There was an error creating new endpoint.')
