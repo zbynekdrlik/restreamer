@@ -77,6 +77,8 @@ class CreateStreamView(LoginRequiredMixin,TemplateView):
             log.exception(f'Error: {e}')
             streaming_event_form = None
             endpoint_form = None
+            messages.error(request, 'Some error occured')
+
 
         context = self.get_context_data(streaming_event_form=streaming_event_form, endpoint_form=endpoint_form)
         return self.render_to_response(context)
@@ -139,12 +141,18 @@ class SetupStream(View):
         if streaming_event.receiving_activated:
             streaming_event.receiving_activated=False
             streaming_event.save()
+
             return redirect('control:home')
 
         if not streaming_event.receiving_activated:
             streaming_event.receiving_activated=True
-            IM(user_id=request.user.id).create_instance()
+            try:
+                IM(user_id=request.user.id).create_instance()
+            except Exception as e:
+                messages.error(request, f'There was a problem creating instance {e}')
+
             streaming_event.save()
+            messages.error(request, 'Streaming server successfuly scheduled for creation')
             return redirect('control:home')
 
 
@@ -160,10 +168,16 @@ class StartEndStream(View):
         if streaming_event.delivering_activated:
             streaming_event.delivering_activated=False
             streaming_event.save()
-            
-            end_stream(user_id, streaming_event)
-            #delete_instance_schedule(user_id)
+
+            try:
+                end_stream(user_id, streaming_event)
+            except Exception as e:
+                messages.error(request, f"There was a problem ending your streams {e}")
+
+
+            messages.success(request, f"Streams ended")
             return redirect('control:home')
+            
 
         if not streaming_event.delivering_activated:
             
@@ -173,16 +187,13 @@ class StartEndStream(View):
                 streaming_event.save()
                 
                 user_id = self.request.user.id
-                
-                log.info(f"Init data ------------->")
-                
-                
+                  
                 try:
                     init_stream.delay(user_id, streaming_event.id)
                 except Exception as e:
-                    print(f'An error occurred: {e}')
+                    messages.error(request, f"There was a problem initialize streams {e}")
                 
-            #start_delivering.delay(streaming_event.id, user_id)
+            messages.success(request, 'Streams initialized successfuly')
             return redirect('control:home')
 
 
@@ -191,12 +202,13 @@ class StartEndStream(View):
 class DeleteChunkData(View):
     def post(self, request):
         streaming_event_id = request.POST.get("streaming_event_id")
-        print("steraming evnet id ----------------------->", streaming_event_id)
+
         try:
             ChunkRecord.objects.filter(identifier=streaming_event_id).all().delete()
         except Exception as e:
-            print(f'An error occurred: {e}')
-        
+            messages.error(request, f"Error deleting data {e}" )
+            
+        messages.success(request, 'Chunks deleted successfuly!')
         return redirect('control:home')
         
 
@@ -205,7 +217,7 @@ class RemoveStreamingEvent(View):
     def post(self, request, *args, **kwargs):
         streaming_event = StreamingEvent.objects.get(id=self.kwargs['id'])
         streaming_event.delete()
-        log.info("Streaming Event deleted successfuly!!")
+        messages.success(request, 'Streaming event deleted successfuly!')
         return redirect('control:home')
 
 
@@ -218,13 +230,16 @@ class RemoveEndpoint(View):
         
         alias = EndPointCfg.objects.get(id=self.kwargs['endpoint_id']).alias
         if streaming_event.delivering_activated:
-            end_stream(user_id, streaming_event, alias=alias)
-        
+            try:
+                end_stream(user_id, streaming_event, alias=alias)
+            except Exception as e:
+                messages.error(request, f'Error ending stream for {alias}')
+                
         if success:
-            # Optionally, add a message indicating success
+            messages.success(request, f'Endpoint Removed stream for {alias} finished!')
             return redirect('control:streaming_event_detail', id=streaming_event.id)
         else:
-            # Optionally, add a message indicating failure ak budu messages v djangu 
+            messages.error(request, f'Removing {alias} failed!')
             return redirect('control:streaming_event_detail', id=streaming_event.id)
 
 
@@ -248,15 +263,14 @@ class AddEndpoint(View):
         chunk_id = video_manager.time_to_chunk(total_minutes)
          
         if streaming_event.delivering_activated:
-            print("We are here ----------------- 240")
             try:
                 init_stream.delay(user_id, streaming_event.id, chunk_id=chunk_id)
             except Exception as e:
-                print(f'An error occurred: {e}')
-         
+               messages.error(request, f'Error initialized stream!')
+        
+            messages.success(request, f'Endpoint added stream initialized!')
+        
         if endpoint_ids:
-            
-            print("We are here ----------------- 244")
             for endpoint in endpoint_ids:
                 streaming_event.add_endpoint(endpoint_id=endpoint, position_last=chunk_id)
           

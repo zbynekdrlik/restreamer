@@ -47,7 +47,7 @@ class GetBufferHealth(APIView):
         if serializer.is_valid():
             streaming_event_id = serializer.validated_data['streaming_event_id']
             buffer_duration = serializer.validated_data['buffer_duration']
-            print(f"buffer_duration ---------------> {buffer_duration}")
+
             channel_layer = get_channel_layer()
             async_to_sync(channel_layer.group_send)(
                 "buffer_health",
@@ -77,8 +77,7 @@ class DeliveringReady(View):
         video_manager = VideoDataManager(streaming_event=streaming_event.id)
         buffer_time = streaming_event.buffer
         buffer_filled = video_manager.is_buffer_filled(buffer_time)
-        print("Buffer time ------------> ", buffer_time)
-        print('buffer filed ------------------>', buffer_filled)
+
         return JsonResponse({
             'status': status,
             'buffer_filled': buffer_filled

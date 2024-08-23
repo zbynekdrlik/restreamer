@@ -56,7 +56,6 @@ def start_delivering(streaming_event, user_id):
 @shared_task(queue='init_stream_queue', acks_late=True)
 def init_stream(user_id, streaming_event_id, **kwargs):
     chunk_id = kwargs.get("chunk_id")
-    print("We are there 57 ------------------------------------------------------")
     try:
         streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
         DeliveringManger(user_id, streaming_event).send_init_data(chunk_id, kwargs.get("endpoint_id"))
