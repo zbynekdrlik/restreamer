@@ -59,7 +59,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "crum.CurrentRequestUserMiddleware",
     'simple_history.middleware.HistoryRequestMiddleware',
-    'manager_server.accounts.middleware.BlockUnknownUserMiddleware'
+    'accounts.middleware.BlockUnknownUserMiddleware'
 ]
 
 ROOT_URLCONF = "nl_restreamer.urls"
