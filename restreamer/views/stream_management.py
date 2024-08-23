@@ -107,7 +107,6 @@ class ChunkUploadView(APIView):
 class PositionLastUploadView(APIView):
     def post(self, request):
         serializer = PositionLastSerializer(data=request.data)
-        print(serializer)
         if serializer.is_valid():
             try:
                 position_last = serializer.validated_data.get("position_last")
