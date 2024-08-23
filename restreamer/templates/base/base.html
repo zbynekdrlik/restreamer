@@ -74,9 +74,7 @@
 </script>
 
  <!-- Notyf Messages -->
- <script id="notyf-messages" type="application/json">
-    {{ messages|safe|json_script:"notyf-messages" }}
-</script>
+ {{ messages|json_script:"notyf-messages" }}
 
 {% endblock %}
 
