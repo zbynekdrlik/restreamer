@@ -12,7 +12,7 @@ class BlockUnknownUserMiddleware:
             
             # Optionally, redirect them to a specific page (e.g., login page)
             response = HttpResponseForbidden("Ask admin to give you permissions for further actions")
-            response['Location'] = '/login/'  # Redirect to login page or another page
+            response['Location'] = '/accounts/login/'  # Redirect to login page or another page
             response.status_code = 302  # HTTP status code for redirection
             return response
 
