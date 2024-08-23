@@ -55,7 +55,7 @@ class CreateStreamView(LoginRequiredMixin,TemplateView):
                     streaming_event.end_points.add(*endpoints)
 
                     messages.success(request, 'Streaming event successfully created!')
-                    return redirect('home')
+                    return redirect('control:home')
 
                 except Exception as e:
                     log.exception(f'Error saving form {e}')
@@ -65,7 +65,7 @@ class CreateStreamView(LoginRequiredMixin,TemplateView):
                 endpoint = endpoint_form.save(commit=False)
                 endpoint.user = request.user
                 endpoint.save()
-                
+
                 messages.success(request, f'Endpoint {endpoint.alias} successfully created!')
                 return redirect('create_stream')
                 
