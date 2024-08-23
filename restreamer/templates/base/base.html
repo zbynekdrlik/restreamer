@@ -73,8 +73,16 @@
     };
 </script>
 
- <!-- Notyf Messages -->
- {{ messages|json_script:"notyf-messages" }}
+<script id="notyf-messages" type="application/json">
+    [
+    {% for message in messages %}
+        {
+            "message": "{{ message.message|escapejs }}",
+            "tags": "{{ message.tags }}"
+        }{% if not forloop.last %},{% endif %}
+    {% endfor %}
+    ]
+</script>
 
 {% endblock %}
 
