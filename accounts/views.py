@@ -13,12 +13,10 @@ class SignUpView(generic.CreateView):
 
     def form_valid(self, form):
         user = form.save()
-        group = Group.objects.get(name='unknown-user')
-        for group in Group.objects.all():
-            print(group.name)
-        user.groups.add(group)
-        
         try:
+            user = form.save()
+            group, created = Group.objects.get_or_create(name='unknown-user')
+            user.groups.add(group)
             return super().form_valid(form)
         except IntegrityError:
             form.add_error(None, "A user with that username or email already exists.")
