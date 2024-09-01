@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     'crispy_bootstrap5',
     'channels',
     'simple_history',
+    'django_celery_beat',
 
 ]
 
