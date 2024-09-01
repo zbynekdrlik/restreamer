@@ -75,6 +75,7 @@ class InstanceManager():
     
    
     def delete_instance(self):
+        print("we are here 78")
         se = StreamingEvent.objects.filter(user=self.user_id).last()
         if not se.delivering_activated and not se.receiving_activated:
             if chunk_not_arrived:

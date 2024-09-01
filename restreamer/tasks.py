@@ -46,6 +46,7 @@ def enable_stream(streaming_event):
 
 @shared_task(queue='custom_queue', acks_late=True)
 def delete_instance(user_id):
+    print(f'Running delete_instance task for user_id: {user_id}')
     im = InstanceManager(user_id)
     im.delete_instance()
     pass
