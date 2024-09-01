@@ -18,7 +18,7 @@ from django.views.generic import TemplateView
 from django_celery_beat.models import IntervalSchedule, PeriodicTask
 from restreamer.data_sending import ChunkSender
 from restreamer.scheduler import schedule_init_stream
-from restreamer.tasks import end_stream, init_stream, start_delivering
+from restreamer.tasks import end_stream, init_stream
 from restreamer.video_data import VideoDataManager
 
 from ..forms import EndPointForm, StreamingEventForm
