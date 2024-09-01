@@ -155,7 +155,7 @@ class SetupStream(View):
                 messages.error(request, f'There was a problem creating instance {e}')
 
             streaming_event.save()
-            messages.error(request, 'Streaming server successfuly scheduled for creation')
+            messages.success(request, 'Streaming server successfuly scheduled for creation')
             return redirect('control:home')
 
 
