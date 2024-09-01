@@ -1,27 +1,30 @@
+import json
 import logging
 import os
 import zipfile
 
+from accounts.models import RestreamerUser
 from django.conf import settings
+from django.contrib import messages
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import FileResponse
-from django.shortcuts import redirect, render , get_list_or_404, get_object_or_404
+from django.shortcuts import (get_list_or_404, get_object_or_404, redirect,
+                              render)
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.generic import TemplateView
+from django_celery_beat.models import IntervalSchedule, PeriodicTask
 from restreamer.data_sending import ChunkSender
-from restreamer.tasks import init_stream, start_delivering, end_stream
 from restreamer.scheduler import schedule_init_stream
-
-from ..forms import EndPointForm, StreamingEventForm
-from ..models import EndPointCfg, StreamingEvent, ChunkRecord
-from .delivering import DeliveringManger
-from .instances import InstanceManager as IM
+from restreamer.tasks import end_stream, init_stream, start_delivering
 from restreamer.video_data import VideoDataManager
 
-from accounts.models import RestreamerUser
+from ..forms import EndPointForm, StreamingEventForm
+from ..models import ChunkRecord, EndPointCfg, StreamingEvent
+from .delivering import DeliveringManger
+from .instances import InstanceManager as IM
 
 log = logging.getLogger(__name__)
 
@@ -168,14 +171,25 @@ class StartEndStream(View):
         if streaming_event.delivering_activated:
             streaming_event.delivering_activated=False
             streaming_event.save()
-
+            
             try:
                 end_stream(user_id, streaming_event)
             except Exception as e:
                 messages.error(request, f"There was a problem ending your streams {e}")
+            
+            schedule, created = IntervalSchedule.objects.get_or_create(
+                every=30,
+                period=IntervalSchedule.SECONDS,
+            )
 
-
-            messages.success(request, f"Streams ended")
+            # create periodic calery task
+            task = PeriodicTask.objects.create(
+                interval=schedule,             
+                name=f'Delete instance task {user_id}',
+                task='restreamer.tasks.delete_instance',  
+                args=json.dumps([user_id]),     
+            )
+            messages.warning(request, 'If you want to end streming for now click stop.')
             return redirect('control:home')
             
 
@@ -371,4 +385,4 @@ def user_history(request, user_id):
         'endpoints_history': endpoints_history,
         'users_history': users_history,
     }
-    return render(request, 'restreamer/user_history.html', context)
+    return render(request, 'restreamer/user_history.html', context) 
