@@ -177,18 +177,31 @@ class StartEndStream(View):
             except Exception as e:
                 messages.error(request, f"There was a problem ending your streams {e}")
             
-            schedule, created = IntervalSchedule.objects.get_or_create(
+            task_name = f'Delete instance task {user_id}'
+
+            # Get or create interval schedule
+            schedule, schedule_created = IntervalSchedule.objects.get_or_create(
                 every=30,
                 period=IntervalSchedule.SECONDS,
             )
 
-            # create periodic calery task
-            task = PeriodicTask.objects.create(
-                interval=schedule,             
-                name=f'Delete instance task {user_id}',
-                task='restreamer.tasks.delete_instance',  
-                args=json.dumps([user_id]),     
+            # Check if the periodic task already exists
+            task, task_created = PeriodicTask.objects.get_or_create(
+                name=task_name,
+                defaults={
+                    'interval': schedule,
+                    'task': 'restreamer.tasks.delete_instance',
+                    'args': json.dumps([user_id]),
+                }
             )
+
+            if not task_created:
+                # Task already exists, so you might want to update it
+                task.interval = schedule
+                task.task = 'restreamer.tasks.delete_instance'
+                task.args = json.dumps([user_id])
+                task.save()
+
             messages.warning(request, 'If you want to end streming for now click stop.')
             return redirect('control:home')
             
