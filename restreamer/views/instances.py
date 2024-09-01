@@ -1,12 +1,15 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.views import View
 from linode_api4 import Instance, objects
 from django.conf import settings
 from django.contrib.auth.decorators import login_required, permission_required
 from django.utils.decorators import method_decorator
 from restreamer.models import StreamingEvent
+from celery import shared_task
+from django_celery_beat.models import PeriodicTask, IntervalSchedule
+
 log = logging.getLogger('__name__')
 
 # Cloud-init script
@@ -36,6 +39,7 @@ class InstanceManager():
         self.user_id = user_id
         self.instance_label = f"delivering-server-{self.user_id}"
         self.image_label = "delivering-server"
+    
         
         
     def get_correct_image(self):
@@ -69,8 +73,18 @@ class InstanceManager():
     def create_image(self):
         pass
     
+   
     def delete_instance(self):
-        self.get_instance().delete()
+        se = StreamingEvent.objects.filter(user=self.user_id).last()
+        if not se.delivering_activated and not se.receiving_activated:
+            if chunk_not_arrived:
+                instance = self.get_instance()
+                if instance:
+                    instance.delete()
+                PeriodicTask.objects.filter(name=f'Delete instance task {self.user_id}').delete()
+                return True
+           
+        return False
                 
     def get_instance(self):
         for linode in self.linode_client.linode.instances():
@@ -114,7 +128,13 @@ class InstanceManager():
         return self.get_instance().status
         
         
-        
-        
-
+# if chunk didnt arried for 30 minutes from switching delivering and reaceiving shut down linode.        
+def chunk_not_arrived(user_id):
+    se = StreamingEvent.objects.filter(user=user_id).last()
+    last_chunk_time = se.chunks.latest('created_at').created_at
+    
+    can_delete = (datetime.now() - last_chunk_time) > timedelta(minutes=30)
+    
+    return can_delete
+    
          
