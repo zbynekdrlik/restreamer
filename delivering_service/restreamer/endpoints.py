@@ -167,7 +167,7 @@ class EndPoint(multiprocessing.Process):
                     log.warning("Chunk file not exists, skipping!")
             except s3.exceptions.NoSuchKey as e:
                 log.warning(f"The buffer is empty!! Waiting for new data.")
-                time.sleep(2)
+                time.sleep(10)
             except boto3.exceptions.S3UploadFailedError as e:
                 log.error(f"Error uploading chunk to S3: {e}")
             except BotoCoreError as e:
