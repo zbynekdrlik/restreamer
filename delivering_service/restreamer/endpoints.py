@@ -200,7 +200,7 @@ class EndPoint(multiprocessing.Process):
                     self.process_chunk(ffmpeg_process, response)
                 except self.s3.exceptions.NoSuchKey as e:
                     log.warning(f"The buffer is empty!! Waiting for new data.")
-                    time.sleep(20)
+                    time.sleep(30)
                 
                 
                 
