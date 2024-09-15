@@ -162,6 +162,7 @@ class EndPoint(multiprocessing.Process):
                     ffmpeg_process.stdin.write(chunk_data)
                     ffmpeg_process.stdin.flush()
                     self.buff_size.value += len(chunk_data)
+                    self.chunk_id.value += 1
                 else:
                     log.warning("Chunk file not exists, skipping!")
             except s3.exceptions.NoSuchKey as e:
@@ -174,7 +175,6 @@ class EndPoint(multiprocessing.Process):
             except BrokenPipeError:
                 log.warning("Write to ffmpeg stdin unsuccessful")
             
-
 
     def run(self):
         from django.db import connection
@@ -197,7 +197,7 @@ class EndPoint(multiprocessing.Process):
                     continue
                 
                 self.process_chunk(ffmpeg_process)
-                self.chunk_id.value += 1
+                
                 
         except KeyboardInterrupt:
             log.info("Ctrl-C detected, terminating!")
