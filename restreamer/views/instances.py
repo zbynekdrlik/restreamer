@@ -103,10 +103,11 @@ class InstanceManager():
             else:
                 linode_type = self.large_instance
             image_id = self.get_correct_image()
-            print("image_id = self.get_correct_image() -------------------> ", image_id)
+
             for linode in self.linode_client.linode.instances():
                 if linode.label == self.instance_label:
                     return
+                
             new_linode = self.linode_client.linode.instance_create(
                 ltype=linode_type,
                 region=self.region,

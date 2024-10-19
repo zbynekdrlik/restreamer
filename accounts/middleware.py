@@ -1,5 +1,7 @@
 from django.http import HttpResponseForbidden
 from django.contrib.auth import logout
+
+
 class BlockUnknownUserMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
@@ -12,8 +14,8 @@ class BlockUnknownUserMiddleware:
             
             # Optionally, redirect them to a specific page (e.g., login page)
             response = HttpResponseForbidden("Ask admin to give you permissions for further actions")
-            response['Location'] = '/accounts/login/'  # Redirect to login page or another page
-            response.status_code = 302  # HTTP status code for redirection
+            response['Location'] = '/accounts/login/'  
+            response.status_code = 302
             return response
 
         response = self.get_response(request)

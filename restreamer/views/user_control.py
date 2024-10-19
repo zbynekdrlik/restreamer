@@ -86,6 +86,7 @@ class CreateStreamView(LoginRequiredMixin,TemplateView):
         context = self.get_context_data(streaming_event_form=streaming_event_form, endpoint_form=endpoint_form)
         return self.render_to_response(context)
 
+
 @method_decorator(login_required, name='dispatch')
 class DownloadRestreamer(View):
     
@@ -108,6 +109,7 @@ class DownloadRestreamer(View):
         response = FileResponse(open(modified_zip_path, 'rb'), content_type='application/zip')
         response['Content-Disposition'] = 'attachment; filename=restreamer.zip'
         return response
+
 
 @method_decorator(login_required, name='dispatch')
 class StreamingEventDetailView(View):
@@ -348,7 +350,7 @@ class StreamSchedulerView(View):
            
            return redirect('control:stream-scheduler')
 
-
+@method_decorator(login_required, name='dispatch') 
 def user_history(request, user_id):
     user = RestreamerUser.objects.get(id=user_id)
     streaming_events = StreamingEvent.objects.filter(user=user)
