@@ -6,21 +6,21 @@ from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import FileResponse
-from django.shortcuts import redirect, render , get_list_or_404, get_object_or_404
+from django.shortcuts import (get_object_or_404, redirect,
+                              render)
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.generic import TemplateView
-from restreamer.data_sending import ChunkSender
-from restreamer.tasks import init_stream, start_delivering, end_stream
-from restreamer.scheduler import schedule_init_stream
-
-from ..forms import EndPointForm, StreamingEventForm
-from ..models import EndPointCfg, StreamingEvent, ChunkRecord
-from .delivering import DeliveringManger
-from .instances import InstanceManager as IM
-from restreamer.video_data import VideoDataManager
 
 from accounts.models import RestreamerUser
+
+from restreamer.scheduler import delete_instance_schedule, schedule_init_stream
+from restreamer.tasks import end_stream, init_stream
+from restreamer.video_data import VideoDataManager
+
+from ..forms import EndPointForm, StreamingEventForm
+from ..models import ChunkRecord, EndPointCfg, StreamingEvent
+from .instances import InstanceManager as IM
 
 log = logging.getLogger(__name__)
 
@@ -157,7 +157,7 @@ class StartEndStream(View):
             streaming_event.save()
             
             end_stream(user_id, streaming_event)
-            #delete_instance_schedule(user_id)
+            delete_instance_schedule(user_id)
             return redirect('control:home')
 
         if not streaming_event.delivering_activated:
