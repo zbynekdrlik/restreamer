@@ -176,6 +176,7 @@ class StartEndStream(View):
             
             end_stream(user_id, streaming_event)
             delete_instance_schedule(user_id)
+            print(" ------- deleting instance --------")
             return redirect('control:home')
             
 
