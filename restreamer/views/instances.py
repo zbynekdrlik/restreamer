@@ -70,7 +70,15 @@ class InstanceManager():
         pass
     
     def delete_instance(self):
-        self.get_instance().delete()
+        print("we are here 78")
+        se = StreamingEvent.objects.filter(user=self.user_id).last()
+        if not se.delivering_activated:
+            #if chunk_not_arrived:
+            instance = self.get_instance()
+            if instance:
+                instance.delete()
+                return True
+        return False
                 
     def get_instance(self):
         for linode in self.linode_client.linode.instances():
