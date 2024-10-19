@@ -42,13 +42,10 @@ def schedule_init_stream(user_id, streaming_event_id, start_time, chunk_id, endp
 
 
 def delete_instance_schedule(user_id):
-    print('Callled ----- deleting instance for user', user_id)
     run_time = datetime.now() + timedelta(minutes=1)
-    print("run time", run_time)
     scheduler.add_job(delete_instance, run_date=run_time, args=[user_id])
     
 
 def delete_instance(user_id):
-    print('deleting instance called by sheduler', user_id)
     instance_manager = InstanceManager(user_id)
     instance_manager.delete_instance()
