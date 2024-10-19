@@ -10,20 +10,20 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import FileResponse
-from django.shortcuts import (get_list_or_404, get_object_or_404, redirect,
+from django.shortcuts import (get_object_or_404, redirect,
                               render)
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.generic import TemplateView
-from django_celery_beat.models import IntervalSchedule, PeriodicTask
-from restreamer.data_sending import ChunkSender
-from restreamer.scheduler import schedule_init_stream
+
+from accounts.models import RestreamerUser
+
+from restreamer.scheduler import delete_instance_schedule, schedule_init_stream
 from restreamer.tasks import end_stream, init_stream
 from restreamer.video_data import VideoDataManager
 
 from ..forms import EndPointForm, StreamingEventForm
 from ..models import ChunkRecord, EndPointCfg, StreamingEvent
-from .delivering import DeliveringManger
 from .instances import InstanceManager as IM
 
 log = logging.getLogger(__name__)
@@ -174,37 +174,8 @@ class StartEndStream(View):
             streaming_event.delivering_activated=False
             streaming_event.save()
             
-            try:
-                end_stream(user_id, streaming_event)
-            except Exception as e:
-                messages.error(request, f"There was a problem ending your streams {e}")
-            
-            task_name = f'Delete instance task {user_id}'
-
-            # Get or create interval schedule
-            schedule, schedule_created = IntervalSchedule.objects.get_or_create(
-                every=30,
-                period=IntervalSchedule.SECONDS,
-            )
-
-            # Check if the periodic task already exists
-            task, task_created = PeriodicTask.objects.get_or_create(
-                name=task_name,
-                defaults={
-                    'interval': schedule,
-                    'task': 'restreamer.tasks.delete_instance',
-                    'args': json.dumps([user_id]),
-                }
-            )
-
-            if not task_created:
-                # Task already exists, so you might want to update it
-                task.interval = schedule
-                task.task = 'restreamer.tasks.delete_instance'
-                task.args = json.dumps([user_id])
-                task.save()
-
-            messages.warning(request, 'If you want to end streming for now click stop.')
+            end_stream(user_id, streaming_event)
+            delete_instance_schedule(user_id)
             return redirect('control:home')
             
 
