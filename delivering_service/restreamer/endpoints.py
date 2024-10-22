@@ -37,6 +37,8 @@ class EndPoint(multiprocessing.Process):
         self.last_processed_chunk_id = None
         self.chunk_id = multiprocessing.Value("i", chunk_id)
         self.stream_identifier = stream_identifier
+        self.s3 = settings.S3_CLIENT
+        self.bucket = settings.AWS_STORAGE_BUCKET_NAME
 
 
     def run_ffmpeg(self):
@@ -150,35 +152,31 @@ class EndPoint(multiprocessing.Process):
             log.exception(e)
             
             
-    def process_chunk(self, ffmpeg_process):
-        s3 = settings.S3_CLIENT
-        bucket = settings.AWS_STORAGE_BUCKET_NAME
+    def process_chunk(self, ffmpeg_process, response):
+       
         if not ffmpeg_process.poll():
             try:
-                object_key = f"{self.chunk_id.value}_{self.stream_identifier}.bin"
-                response = s3.get_object(Bucket=bucket, Key=object_key)
                 if response:
                     chunk_data = response['Body'].read()
                     ffmpeg_process.stdin.write(chunk_data)
                     ffmpeg_process.stdin.flush()
                     self.buff_size.value += len(chunk_data)
+                    self.chunk_id.value += 1
                 else:
                     log.warning("Chunk file not exists, skipping!")
-            except s3.exceptions.NoSuchKey as e:
-                log.warning(f"The buffer is empty!! Waiting for new data.")
-                time.sleep(2)
             except boto3.exceptions.S3UploadFailedError as e:
                 log.error(f"Error uploading chunk to S3: {e}")
             except BotoCoreError as e:
                 log.error(f"Error: {e}")
             except BrokenPipeError:
                 log.warning("Write to ffmpeg stdin unsuccessful")
+        
             
-
 
     def run(self):
         from django.db import connection
         connection.close()
+        
 
         ffmpeg_process = self.run_ffmpeg()
 
@@ -196,8 +194,16 @@ class EndPoint(multiprocessing.Process):
                 if self.chunk_id.value is None:
                     continue
                 
-                self.process_chunk(ffmpeg_process)
-                self.chunk_id.value += 1
+                try:
+                    object_key = f"{self.chunk_id.value}_{self.stream_identifier}.bin"
+                    response = self.s3.get_object(Bucket=self.bucket, Key=object_key)
+                    self.process_chunk(ffmpeg_process, response)
+                except self.s3.exceptions.NoSuchKey as e:
+                    log.warning(f"The buffer is empty!! Waiting for new data.")
+                    time.sleep(30)
+                
+                
+                
                 
         except KeyboardInterrupt:
             log.info("Ctrl-C detected, terminating!")
