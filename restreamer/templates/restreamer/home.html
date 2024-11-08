@@ -276,9 +276,9 @@ document.addEventListener("DOMContentLoaded", function() {
     startStopDButton.addEventListener('click', function() {
         const isActivated = startStopDButton.getAttribute('data-activated') === 'False';
         const isBuffering = startStopDButton.innerText === "Buffering...";
-        console.log("Traing to submit ")
+        console.log("Traing to submit 279")
         if (!isActivated && !isBuffering) {
-            console.log("Traing to submit ")
+            console.log("Traing to submit 281")
             const modal = $('#dataConfirmationModal_{{ forloop.counter }}');
             console.log("Modal", modal)
             modal.modal({
@@ -289,7 +289,7 @@ document.addEventListener("DOMContentLoaded", function() {
             // Submit the form directly if it's in the "yes" phase
             const form = document.querySelector('form[action*="start_stream"]#start_stream_form_{{ forloop.counter }}');
             if (form && !isBuffering) {
-                console.log("Traing to submit ")
+                console.log("Traing to submit 292")
                 form.submit();
             }
         }
@@ -410,6 +410,7 @@ document.addEventListener('DOMContentLoaded', function() {
 <script>
     document.addEventListener('DOMContentLoaded', function () {
         document.body.addEventListener('click', function (event) {
+            console.log("Traing to submit 413")
             // Check if the clicked element is a delivering action button
             const button = event.target.closest('button[id^="delivering_action_"]');
             if (!button) return;
