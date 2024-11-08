@@ -65,7 +65,7 @@
                             <form id="start_stream_form_{{ forloop.counter }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
                                 {% csrf_token %}
                                 <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start" value="0">
-                                <button type="button" id="delivering_action_{{ forloop.counter }}" data-activated="{{ streaming_event.delivering_activated }}" class="inline-flex items-center px-3 py-1 font-semibold leading-6 text-sm shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.delivering_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-secondary-500 hover:bg-secondary-600 text-white' }}" style="font-family: sans-serif;">
+                                <button type="button" id="delivering_action_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" data-activated="{{ streaming_event.delivering_activated }}" class="inline-flex items-center px-3 py-1 font-semibold leading-6 text-sm shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.delivering_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-secondary-500 hover:bg-secondary-600 text-white' }}" style="font-family: sans-serif;">
                                     <i class="{{ streaming_event.delivering_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} mr-2"></i>
                                     {{ streaming_event.delivering_activated|yesno:'End stream, Start stream' }}
                                 </button>
