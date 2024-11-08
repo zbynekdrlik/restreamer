@@ -39,6 +39,7 @@ class CreateStreamView(LoginRequiredMixin,TemplateView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context['form'] = StreamingEventForm(user=self.request.user)
+        context['form'] = StreamingEventForm(user=self.request.user)
         context['endpoint_form'] = EndPointForm()
         return context
 
@@ -87,6 +88,7 @@ class CreateStreamView(LoginRequiredMixin,TemplateView):
         return self.render_to_response(context)
 
 
+
 @method_decorator(login_required, name='dispatch')
 class DownloadRestreamer(View):
     
@@ -109,6 +111,7 @@ class DownloadRestreamer(View):
         response = FileResponse(open(modified_zip_path, 'rb'), content_type='application/zip')
         response['Content-Disposition'] = 'attachment; filename=restreamer.zip'
         return response
+
 
 
 @method_decorator(login_required, name='dispatch')
@@ -165,10 +168,14 @@ class SetupStream(View):
 class StartEndStream(View):
    
     def post(self, request, *args, **kwargs):
+        
+        data = request.POST
+        
         streaming_event = StreamingEvent.objects.get(id=self.kwargs['id'])
         video_manager = VideoDataManager(streaming_event=streaming_event.id)
         buffer_time = streaming_event.buffer
         user_id = request.user.id
+        
         
         if streaming_event.delivering_activated:
             streaming_event.delivering_activated=False
@@ -181,18 +188,17 @@ class StartEndStream(View):
 
         if not streaming_event.delivering_activated:
             
-            if video_manager.is_buffer_filled(buffer_time):
-                print("bufer is filed -------------------------------------")
+            if video_manager.is_buffer_filled(buffer_time) or data.get('confirm_start') == '1':
                 streaming_event.delivering_activated=True
                 streaming_event.save()
-                
                 user_id = self.request.user.id
                   
+                    
                 try:
                     init_stream.delay(user_id, streaming_event.id)
                 except Exception as e:
                     messages.error(request, f"There was a problem initialize streams {e}")
-                
+               
             messages.success(request, 'Streams initialized successfuly')
             return redirect('control:home')
 
@@ -321,6 +327,7 @@ class StreamSchedulerView(View):
            
            return redirect('control:stream-scheduler')
 
+@method_decorator(login_required, name='dispatch') 
 @method_decorator(login_required, name='dispatch') 
 def user_history(request, user_id):
     user = RestreamerUser.objects.get(id=user_id)
