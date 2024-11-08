@@ -36,7 +36,6 @@ class ChunkSender:
         return self.stored_position
 
     def sending_chunks(self):
-        log.info("We are here ")
         while True:
             time.sleep(1)
             self.streaming_event.refresh_from_db()
