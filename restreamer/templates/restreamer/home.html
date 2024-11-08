@@ -426,7 +426,9 @@ document.addEventListener('DOMContentLoaded', function() {
     
             const isBuffering = button.innerText === "Buffering...";
     
-            const isActivated = button.getAttribute('data-activated') === "yes";
+            const isActivated = button.getAttribute('data-activated') === 'True';
+
+            console.log('is activated ---->', isActivated)
 
             if (!isActivated) {
                 if (isBuffering) {
