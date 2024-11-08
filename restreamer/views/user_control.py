@@ -184,8 +184,7 @@ class StartEndStream(View):
             end_stream(user_id, streaming_event)
             delete_instance_schedule(user_id)
             return redirect('control:home')
-            
-
+        print(' ----------------> data confim start ------------>', data.get('confirm_start') )
         if not streaming_event.delivering_activated:
             
             if video_manager.is_buffer_filled(buffer_time) or data.get('confirm_start') == '1':
