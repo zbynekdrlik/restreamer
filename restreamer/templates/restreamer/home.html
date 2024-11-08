@@ -443,7 +443,8 @@ document.addEventListener('DOMContentLoaded', function() {
                             // Check if the hidden input exists before setting its value
                             if (confirmInput) {
                                 confirmInput.value = "1";
-                                document.getElementById(`start_stream_form_${eventId}`).submit();
+                                const form = document.querySelector(`form[data-event-id="${eventId}"]`);
+                                form.submit();
                             } else {
                                 console.error(`Hidden input for event ID ${eventId} not found.`);
                             }
