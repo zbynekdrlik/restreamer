@@ -410,8 +410,8 @@ document.addEventListener('DOMContentLoaded', function() {
 <script>
     document.addEventListener('DOMContentLoaded', function () {
         document.body.addEventListener('click', function (event) {
-            // Check if the clicked element is a delivering action button by class
-            const button = event.target.closest('.delivering-action');
+            // Check if the clicked element is a delivering action button
+            const button = event.target.closest('button[id^="delivering_action_"]');
             if (!button) return;
     
             event.preventDefault();
@@ -436,19 +436,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     // Ensure the confirm button exists
                     if (confirmButton) {
                         confirmButton.onclick = function () {
-                            // Find the hidden input with the matching event ID
+                            // Find the hidden input associated with the event ID
                             const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
                             
                             // Check if the hidden input exists before setting its value
                             if (confirmInput) {
                                 confirmInput.value = "1";
-                                // Submit the form with the matching event ID
-                                const form = document.querySelector(`form[data-event-id="${eventId}"]`);
-                                if (form) {
-                                    form.submit();
-                                } else {
-                                    console.error(`Form for event ID ${eventId} not found.`);
-                                }
+                                document.getElementById(`start_stream_form_${eventId}`).submit();
                             } else {
                                 console.error(`Hidden input for event ID ${eventId} not found.`);
                             }
@@ -459,11 +453,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
             } else {
                 // Directly submit the form if buffering is complete
-                const form = document.querySelector(`form[data-event-id="${eventId}"]`);
+                const form = document.getElementById(`start_stream_form_${eventId}`);
                 if (form) {
                     form.submit();
                 } else {
-                    console.error(`Form for event ID ${eventId} not found.`);
+                    console.error(`Form with ID start_stream_form_${eventId} not found.`);
                 }
             }
         });
