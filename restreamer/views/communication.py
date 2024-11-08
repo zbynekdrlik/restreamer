@@ -74,6 +74,7 @@ class DeliveringReady(View):
 
         # Check buffer status
         streaming_event = get_object_or_404(StreamingEvent, id=streaming_event_id)
+        live = streaming_event.delivering_activated
         video_manager = VideoDataManager(streaming_event=streaming_event.id)
         buffer_time = streaming_event.buffer
         buffer_filled = video_manager.is_buffer_filled(buffer_time)
@@ -81,6 +82,7 @@ class DeliveringReady(View):
         print('buffer filed ------------------>', buffer_filled)
         return JsonResponse({
             'status': status,
-            'buffer_filled': buffer_filled
+            'buffer_filled': buffer_filled,
+            'live': live
         })
     
