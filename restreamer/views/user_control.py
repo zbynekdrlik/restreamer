@@ -149,10 +149,14 @@ class SetupStream(View):
 class StartEndStream(View):
    
     def post(self, request, *args, **kwargs):
+        
+        data = request.POST
+        
         streaming_event = StreamingEvent.objects.get(id=self.kwargs['id'])
         video_manager = VideoDataManager(streaming_event=streaming_event.id)
         buffer_time = streaming_event.buffer
         user_id = request.user.id
+        
         
         if streaming_event.delivering_activated:
             streaming_event.delivering_activated=False
@@ -164,21 +168,16 @@ class StartEndStream(View):
 
         if not streaming_event.delivering_activated:
             
-            if video_manager.is_buffer_filled(buffer_time):
-                print("bufer is filed -------------------------------------")
+            if video_manager.is_buffer_filled(buffer_time) or data.get('confirm_start') == '1':
                 streaming_event.delivering_activated=True
                 streaming_event.save()
-                
                 user_id = self.request.user.id
-                
-                log.info(f"Init data ------------->")
-                
-                
+                    
                 try:
                     init_stream.delay(user_id, streaming_event.id)
                 except Exception as e:
                     print(f'An error occurred: {e}')
-                
+               
             #start_delivering.delay(streaming_event.id, user_id)
             return redirect('control:home')
 

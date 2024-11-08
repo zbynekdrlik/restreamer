@@ -55,7 +55,7 @@
                         <div class="col-md-2 text-center">
                             <form id="setup_stream_form_{{ forloop.counter }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
                                 {% csrf_token %}
-                                <button type="button" id="start_stop_{{ forloop.counter }}" class="inline-flex items-center px-3 py-1 font-semibold leading-5 text-xs shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.receiving_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-green-500 hover:bg-green-600 text-white' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}' style="font-family:sans-serif;">
+                                <button type="button" id="start_stop_{{ forloop.counter }}" class="inline-flex items-center px-3 py-1 font-semibold leading-5 text-xs shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.receiving_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-primary-500 hover:bg-primary-600 text-white' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}' style="font-family:sans-serif;">
                                     <i class="{{ streaming_event.receiving_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} mr-2"></i>
                                     {{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}
                                 </button>
@@ -64,9 +64,10 @@
                         <div class="col-md-2 text-center">
                             <form id="start_stream_form_{{ forloop.counter }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
                                 {% csrf_token %}
-                                <button type="button" id="delivering_action_{{ forloop.counter }}" data-activated="{{ streaming_event.delivering_activated }}" class="inline-flex items-center px-3 py-1 font-semibold leading-6 text-sm shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.delivering_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-green-500 hover:bg-green-600 text-white' }}" style="font-family: sans-serif;">
+                                <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start" value="0">
+                                <button type="button" id="delivering_action_{{ forloop.counter }}" data-activated="{{ streaming_event.delivering_activated }}" class="inline-flex items-center px-3 py-1 font-semibold leading-6 text-sm shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.delivering_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-primary-500 hover:bg-primary-600 text-white' }}" style="font-family: sans-serif;">
                                     <i class="{{ streaming_event.delivering_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} mr-2"></i>
-                                    {{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}
+                                    {{ streaming_event.delivering_activated|yesno:'End stream, Start stream' }}
                                 </button>
                             </form>
                         </div>
@@ -270,7 +271,6 @@ document.addEventListener("DOMContentLoaded", function() {
     });
 
     const startStopDButton = document.getElementById('delivering_action_{{ forloop.counter }}');
-    console.log('Start stop button', startStopButton)
     startStopDButton.addEventListener('click', function() {
         const isActivated = startStopDButton.getAttribute('data-activated') === 'False';
         console.log("Traing to submit ")
@@ -401,6 +401,37 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 </script>
 
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        // Use a single event listener on the container element
+        document.body.addEventListener('click', function (event) {
+            // Check if the clicked element is a delivering action button
+            const button = event.target.closest('button[id^="delivering_action_"]');
+            if (!button) return; // Ignore clicks that are not on the delivering action buttons
+
+            event.preventDefault();
+            
+            const eventId = button.getAttribute('data-event-id');
+            const isBuffering = button.innerText === "Buffering...";
+
+            if (isBuffering) {
+                // Show the modal
+                $('#confirmStreamStartModal').modal('show');
+
+                // Attach a single event listener to the confirmation button in the modal
+                document.getElementById('confirmStartStream').onclick = function () {
+                    // Set the confirm_start value and submit the form
+                    const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
+                    confirmInput.value = "1";
+                    document.getElementById(`start_stream_form_${eventId}`).submit();
+                };
+            } else {
+                // Directly submit the form if buffering is complete
+                document.getElementById(`start_stream_form_${eventId}`).submit();
+            }
+        });
+    });
+</script>
 {% endfor %}
 
 
