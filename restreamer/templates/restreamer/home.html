@@ -406,28 +406,41 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <script>
     document.addEventListener('DOMContentLoaded', function () {
-        // Use a single event listener on the container element
         document.body.addEventListener('click', function (event) {
             // Check if the clicked element is a delivering action button
             const button = event.target.closest('button[id^="delivering_action_"]');
-            if (!button) return; // Ignore clicks that are not on the delivering action buttons
-
+            if (!button) return;
+    
             event.preventDefault();
-            
+    
             const eventId = button.getAttribute('data-event-id');
             const isBuffering = button.innerText === "Buffering...";
-
+    
             if (isBuffering) {
                 // Show the modal
                 $('#confirmStreamStartModal').modal('show');
-
-                // Attach a single event listener to the confirmation button in the modal
-                document.getElementById('confirmStartStream').onclick = function () {
-                    // Set the confirm_start value and submit the form
-                    const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
-                    confirmInput.value = "1";
-                    document.getElementById(`start_stream_form_${eventId}`).submit();
-                };
+    
+                // Attach the event listener for the confirmation button only once the modal is shown
+                $('#confirmStreamStartModal').on('shown.bs.modal', function () {
+                    const confirmButton = document.getElementById('confirmStartStream');
+    
+                    // Ensure the confirm button exists
+                    if (confirmButton) {
+                        confirmButton.onclick = function () {
+                            const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
+                            
+                            // Check if the hidden input exists before setting its value
+                            if (confirmInput) {
+                                confirmInput.value = "1";
+                                document.getElementById(`start_stream_form_${eventId}`).submit();
+                            } else {
+                                console.error(`Hidden input for event ID ${eventId} not found.`);
+                            }
+                        };
+                    } else {
+                        console.error("Confirm button in the modal not found.");
+                    }
+                });
             } else {
                 // Directly submit the form if buffering is complete
                 document.getElementById(`start_stream_form_${eventId}`).submit();
