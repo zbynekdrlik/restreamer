@@ -62,7 +62,7 @@
                             </form>
                         </div>
                         <div class="col-md-2 text-center">
-                            <form id="start_stream_form_{{ forloop.counter }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
+                            <form id="start_stream_form_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
                                 {% csrf_token %}
                                 <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start" value="0">
                                 <button type="button" id="delivering_action_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" data-activated="{{ streaming_event.delivering_activated }}" class="inline-flex items-center px-3 py-1 font-semibold leading-6 text-sm shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.delivering_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-secondary-500 hover:bg-secondary-600 text-white' }}" style="font-family: sans-serif;">
@@ -404,11 +404,14 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 </script>
 
+
+{% endfor %}
+
 <script>
     document.addEventListener('DOMContentLoaded', function () {
         document.body.addEventListener('click', function (event) {
-            // Check if the clicked element is a delivering action button
-            const button = event.target.closest('button[id^="delivering_action_"]');
+            // Check if the clicked element is a delivering action button by class
+            const button = event.target.closest('.delivering-action');
             if (!button) return;
     
             event.preventDefault();
@@ -433,13 +436,19 @@ document.addEventListener('DOMContentLoaded', function() {
                     // Ensure the confirm button exists
                     if (confirmButton) {
                         confirmButton.onclick = function () {
-                            // Find the hidden input associated with the event ID
+                            // Find the hidden input with the matching event ID
                             const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
                             
                             // Check if the hidden input exists before setting its value
                             if (confirmInput) {
                                 confirmInput.value = "1";
-                                document.getElementById(`start_stream_form_${eventId}`).submit();
+                                // Submit the form with the matching event ID
+                                const form = document.querySelector(`form[data-event-id="${eventId}"]`);
+                                if (form) {
+                                    form.submit();
+                                } else {
+                                    console.error(`Form for event ID ${eventId} not found.`);
+                                }
                             } else {
                                 console.error(`Hidden input for event ID ${eventId} not found.`);
                             }
@@ -450,19 +459,16 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
             } else {
                 // Directly submit the form if buffering is complete
-                const form = document.getElementById(`start_stream_form_${eventId}`);
+                const form = document.querySelector(`form[data-event-id="${eventId}"]`);
                 if (form) {
                     form.submit();
                 } else {
-                    console.error(`Form with ID start_stream_form_${eventId} not found.`);
+                    console.error(`Form for event ID ${eventId} not found.`);
                 }
             }
         });
     });
 </script>
-{% endfor %}
-
-
 
 {% endblock %}
 
