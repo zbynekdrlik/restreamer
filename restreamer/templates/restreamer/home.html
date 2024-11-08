@@ -413,7 +413,13 @@ document.addEventListener('DOMContentLoaded', function() {
     
             event.preventDefault();
     
+            // Retrieve the event ID from the button's data attribute
             const eventId = button.getAttribute('data-event-id');
+            if (!eventId) {
+                console.error("Event ID not found on the button.");
+                return;
+            }
+    
             const isBuffering = button.innerText === "Buffering...";
     
             if (isBuffering) {
@@ -427,6 +433,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     // Ensure the confirm button exists
                     if (confirmButton) {
                         confirmButton.onclick = function () {
+                            // Find the hidden input associated with the event ID
                             const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
                             
                             // Check if the hidden input exists before setting its value
@@ -443,7 +450,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
             } else {
                 // Directly submit the form if buffering is complete
-                document.getElementById(`start_stream_form_${eventId}`).submit();
+                const form = document.getElementById(`start_stream_form_${eventId}`);
+                if (form) {
+                    form.submit();
+                } else {
+                    console.error(`Form with ID start_stream_form_${eventId} not found.`);
+                }
             }
         });
     });
