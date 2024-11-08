@@ -426,40 +426,44 @@ document.addEventListener('DOMContentLoaded', function() {
     
             const isBuffering = button.innerText === "Buffering...";
     
-            if (isBuffering) {
-                // Show the modal
-                $('#confirmStreamStartModal').modal('show');
-    
-                // Attach the event listener for the confirmation button only once the modal is shown
-                $('#confirmStreamStartModal').on('shown.bs.modal', function () {
-                    const confirmButton = document.getElementById('confirmStartStream');
-    
-                    // Ensure the confirm button exists
-                    if (confirmButton) {
-                        confirmButton.onclick = function () {
-                            // Find the hidden input associated with the event ID
-                            const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
-                            
-                            // Check if the hidden input exists before setting its value
-                            if (confirmInput) {
-                                confirmInput.value = "1";
-                                const form = document.querySelector(`form[data-event-id="${eventId}"]`);
-                                form.submit();
-                            } else {
-                                console.error(`Hidden input for event ID ${eventId} not found.`);
-                            }
-                        };
-                    } else {
-                        console.error("Confirm button in the modal not found.");
-                    }
-                });
-            } else {
-                // Directly submit the form if buffering is complete
-                const form = document.getElementById(`start_stream_form_${eventId}`);
-                if (form) {
-                    form.submit();
+            const isActivated = button.getAttribute('data-activated') === "yes";
+
+            if (!isActivated) {
+                if (isBuffering) {
+                    // Show the modal
+                    $('#confirmStreamStartModal').modal('show');
+        
+                    // Attach the event listener for the confirmation button only once the modal is shown
+                    $('#confirmStreamStartModal').on('shown.bs.modal', function () {
+                        const confirmButton = document.getElementById('confirmStartStream');
+        
+                        // Ensure the confirm button exists
+                        if (confirmButton) {
+                            confirmButton.onclick = function () {
+                                // Find the hidden input associated with the event ID
+                                const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
+                                
+                                // Check if the hidden input exists before setting its value
+                                if (confirmInput) {
+                                    confirmInput.value = "1";
+                                    const form = document.querySelector(`form[data-event-id="${eventId}"]`);
+                                    form.submit();
+                                } else {
+                                    console.error(`Hidden input for event ID ${eventId} not found.`);
+                                }
+                            };
+                        } else {
+                            console.error("Confirm button in the modal not found.");
+                        }
+                    });
                 } else {
-                    console.error(`Form with ID start_stream_form_${eventId} not found.`);
+                    // Directly submit the form if buffering is complete
+                    const form = document.getElementById(`start_stream_form_${eventId}`);
+                    if (form) {
+                        form.submit();
+                    } else {
+                        console.error(`Form with ID start_stream_form_${eventId} not found.`);
+                    }
                 }
             }
         });
