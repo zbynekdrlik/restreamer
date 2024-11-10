@@ -209,10 +209,6 @@ document.addEventListener("DOMContentLoaded", function() {
     setInterval(checkServerStatus, 5000);
 
     startStopButton.addEventListener('click', function() {
-        console.log(" --------------------------clicked ----------------------------")
-
-        
-        
         const buttonText = startStopButton.innerText.trim();
 
         if (buttonText === 'Ready') {
@@ -234,13 +230,9 @@ document.addEventListener("DOMContentLoaded", function() {
         });
     });
 
-    
-    
     // Handle the confirm button click
     confirmButton.addEventListener('click', function(event) {
-        console.log(" --------------------------clicked ----------------------------")
         event.preventDefault();
-        console.log("wer are here this si why it is confimred")
 
         const checkUrl = startStopButton.getAttribute('data-check-url');
         const eventId = startStopButton.getAttribute('data-event-id');       
@@ -252,7 +244,6 @@ document.addEventListener("DOMContentLoaded", function() {
         csrfInput.value = csrftoken;
         setupStreamForm.appendChild(csrfInput);
         
-        console.log('chec active interval !!!!! -------->', checkSeActiveInterval)
         if (wasReadyState) {
             localStorage.setItem(`checkSeActive_${eventId}`, 'true');
             startCheckSeActiveInterval(checkUrl, eventId);
@@ -262,13 +253,11 @@ document.addEventListener("DOMContentLoaded", function() {
             modal.modal('hide');
             setupStreamForm.submit();
 
-            // Ensure "Preparing stream..." is displayed for at least 2 seconds
             setTimeout(() => {
                 checkServerStatus();
             }, 2000);
 
         } else {
-            // Submit the setup stream form directly if the initial state was "Stop"
             modal.modal('hide');
             setupStreamForm.submit();
             localStorage.removeItem('preparingStream_{{ forloop.counter }}');
@@ -282,9 +271,7 @@ document.addEventListener("DOMContentLoaded", function() {
     function startCheckSeActiveInterval(url, eventId) {
 
         if (!checkSeActiveInterval) {
-            console.log('is check set active interval', checkSeActiveInterval)
             checkSeActiveInterval = setInterval(function() {
-                console.log('calling function  check se active')
                 checkSeActive(url, eventId);
             }, 10000);  // Check every 10 seconds
         }
@@ -306,20 +293,15 @@ document.addEventListener("DOMContentLoaded", function() {
     startStopDButton.addEventListener('click', function() {
         const isActivated = startStopDButton.getAttribute('data-activated') === 'False';
         const isBuffering = startStopDButton.innerText === "Buffering...";
-        console.log("Traing to submit 279")
         if (!isActivated && !isBuffering) {
-            console.log("Traing to submit 281")
             const modal = $('#dataConfirmationModal_{{ forloop.counter }}');
-            console.log("Modal", modal)
             modal.modal({
                 backdrop: 'static',
                 keyboard: false
             });
         } else {
-            // Submit the form directly if it's in the "yes" phase
             const form = document.querySelector('form[action*="start_stream"]#start_stream_form_{{ forloop.counter }}');
             if (form && !isBuffering) {
-                console.log("Traing to submit 292")
                 form.submit();
             }
 
@@ -352,7 +334,6 @@ document.addEventListener("DOMContentLoaded", function() {
 
     const confirmChunkSDeleteButton = document.getElementById('confirmChunksDelete_{{ forloop.counter }}');
     confirmChunkSDeleteButton.addEventListener('click', function() {
-        console.log("confirm clicked")
         const deleteChunksForm = document.getElementById('deleteChunksForm_{{ forloop.counter }}');
       
         if (deleteChunksForm) {
@@ -360,10 +341,8 @@ document.addEventListener("DOMContentLoaded", function() {
         }
     });
 
-    // Confirm delete button in modal click event
     const confirmDeleteButton = document.getElementById('confirmEventDelete_{{ forloop.counter }}');
     confirmDeleteButton.addEventListener('click', function() {
-        console.log("confirm clicked")
         const deleteForm = document.getElementById('deleteForm_{{ forloop.counter }}');
        
         if (deleteForm) {
@@ -372,7 +351,6 @@ document.addEventListener("DOMContentLoaded", function() {
 
     });
 
-    // Cancel button in modal click event
     const cancelDeleteButton = document.getElementById('discard_data_{{ forloop.counter }}');
     cancelDeleteButton.addEventListener('click', function() {
         $('#deleteStreamingEventModal_{{ forloop.counter }}').modal('hide');
@@ -387,13 +365,11 @@ document.addEventListener("DOMContentLoaded", function() {
 
         const form = document.querySelector('form[action*="start_stream"]#start_stream_form_{{ forloop.counter }}');
         
-        // Create a hidden input to store the additional data
         const hiddenInput = document.createElement('input');
         hiddenInput.type = 'hidden';
         hiddenInput.name = 'additional_data';
         hiddenInput.value = additionalDataValue;
 
-        // Append the hidden input to the form
         form.appendChild(hiddenInput);
 
         if (form) {
@@ -412,9 +388,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-   
     const socket = new WebSocket('wss://' + window.location.host + '/ws/buffer_health/');
-
     socket.onmessage = function(e) {
         const data = JSON.parse(e.data);
         document.getElementById('buffer-health_{{ forloop.counter }}').innerText = data.message.buffer_duration;
@@ -431,7 +405,7 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 <script>
-    // JavaScript to submit the form when the image is clicked
+
     document.querySelector('.img-clickable').addEventListener('click', function() {
         document.getElementById('deleteForm_{{ forloop.counter }}').submit();
     });
@@ -443,7 +417,6 @@ document.addEventListener('DOMContentLoaded', function() {
 <script>
     document.addEventListener('DOMContentLoaded', function () {
         document.body.addEventListener('click', function (event) {
-            // Check if the clicked element is a delivering action button
             const button = event.target.closest('button[id^="delivering_action_"]');
             if (!button) return;
     
@@ -462,20 +435,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (!isActivated) {
                 if (isBuffering) {
-                    // Show the modal
                     $('#confirmStreamStartModal').modal('show');
         
-                    // Attach the event listener for the confirmation button only once the modal is shown
                     $('#confirmStreamStartModal').on('shown.bs.modal', function () {
                         const confirmButton = document.getElementById('confirmStartStream');
         
-                        // Ensure the confirm button exists
                         if (confirmButton) {
                             confirmButton.onclick = function () {
-                                // Find the hidden input associated with the event ID
                                 const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
                                 
-                                // Check if the hidden input exists before setting its value
                                 if (confirmInput) {
                                     confirmInput.value = "1";
                                     const form = document.querySelector(`form[data-event-id="${eventId}"]`);
@@ -489,7 +457,6 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     });
                 } else {
-                    // Directly submit the form if buffering is complete
                     const form = document.getElementById(`start_stream_form_${eventId}`);
                     if (form) {
                         form.submit();
@@ -503,29 +470,19 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 <script>
-    // check if the streaming event is active
     function checkSeActive(url, eventId) {
-        console.log(" --------------------------url ------>", url)
         $.ajax({
             url: url,
             type: 'GET',
             success: function(response) {
-                console.log('Streaming event status:', response);
-                
-                // If the response is true, proceed as if confirm button was clicked
                 if (response.is_filled === true) {
-                    console.log('Streaming event is active. Proceeding with confirmation actions.');
-                    
-                    // Find the hidden input associated with the event ID and set its value to confirm start
                     const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
                     
                     if (confirmInput) {
-                        confirmInput.value = "1";  // Set the hidden input to indicate confirmation
-                        
-                        // Find and submit the form associated with the event ID
+                        confirmInput.value = "1";
                         const form = document.querySelector(`form[data-event-id="${eventId}"]`);
                         if (form) {
-                            form.submit();  // Submit the form as if the confirm button was clicked
+                            form.submit();
                         } else {
                             console.error(`Form with data-event-id="${eventId}" not found.`);
                         }
@@ -533,9 +490,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         console.error(`Hidden input for event ID ${eventId} not found.`);
                     }
 
-                    // Stop the interval to prevent further checks
                     stopCheckSeActiveInterval();
-                    localStorage.removeItem(`checkSeActive_${eventId}`);  // Clear the localStorage flag if needed
+                    localStorage.removeItem(`checkSeActive_${eventId}`);
                 }
             },
             error: function(error) {

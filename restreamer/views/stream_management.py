@@ -185,7 +185,6 @@ class IsDeliveringActive(View):
 
         if data_manager.is_buffer_filled(buffer_length):
             if time_difference < 10:
-                log.info("Buffer is filled")
                 return JsonResponse({
                     'is_filled': True,
                 })
