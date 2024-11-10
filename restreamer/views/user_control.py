@@ -37,11 +37,6 @@ from .instances import InstanceManager as IM
 
 from django.http import JsonResponse
 
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
-
-from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
 
 log = logging.getLogger(__name__)
 
@@ -396,3 +391,5 @@ def user_history(request, user_id):
         'users_history': users_history,
     }
     return render(request, 'restreamer/user_history.html', context)
+
+
