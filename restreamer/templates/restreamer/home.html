@@ -513,7 +513,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 console.log('Streaming event status:', response);
                 
                 // If the response is true, simulate a click on the delivering_action button with matching eventId
-                if (response === true) {
+                if (response.is_filled === true) {
                     const deliveringButton = document.querySelector(`button[data-event-id="${eventId}"]`);
                     
                     // Ensure the button ID contains 'delivering_action_'
