@@ -133,7 +133,7 @@ document.addEventListener("DOMContentLoaded", function() {
     const eventId = startStopButton.getAttribute('data-event-id');
     const checkUrl = startStopButton.getAttribute('data-check-url');
 
-    if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true') {
+    if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
         startCheckSeActiveInterval(checkUrl, eventId);
     }
     
@@ -440,7 +440,6 @@ document.addEventListener('DOMContentLoaded', function() {
 <script>
     document.addEventListener('DOMContentLoaded', function () {
         document.body.addEventListener('click', function (event) {
-            console.log("Traing to submit 413")
             // Check if the clicked element is a delivering action button
             const button = event.target.closest('button[id^="delivering_action_"]');
             if (!button) return;
@@ -503,7 +502,7 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 <script>
-    // check if is streaming event active
+    // check if the streaming event is active
     function checkSeActive(url, eventId) {
         console.log(" --------------------------url ------>", url)
         $.ajax({
@@ -512,16 +511,30 @@ document.addEventListener('DOMContentLoaded', function() {
             success: function(response) {
                 console.log('Streaming event status:', response);
                 
-                // If the response is true, simulate a click on the delivering_action button with matching eventId
+                // If the response is true, proceed as if confirm button was clicked
                 if (response.is_filled === true) {
-                    console.log('we are here ')
-                    const deliveringButton = document.querySelector(`button[id^="delivering_action_"][data-event-id="${eventId}"]`);
-                    console.log('delivgering button deliveringButton', deliveringButton, deliveringButton.id.includes('delivering_action_') )
-                    // Ensure the button ID contains 'delivering_action_'
-                    if (deliveringButton) {
-                        console.log('delivgering button includes delivering_action_')
-                        deliveringButton.click();  // Simulate the click event on delivering_action button
+                    console.log('Streaming event is active. Proceeding with confirmation actions.');
+                    
+                    // Find the hidden input associated with the event ID and set its value to confirm start
+                    const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
+                    
+                    if (confirmInput) {
+                        confirmInput.value = "1";  // Set the hidden input to indicate confirmation
+                        
+                        // Find and submit the form associated with the event ID
+                        const form = document.querySelector(`form[data-event-id="${eventId}"]`);
+                        if (form) {
+                            form.submit();  // Submit the form as if the confirm button was clicked
+                        } else {
+                            console.error(`Form with data-event-id="${eventId}" not found.`);
+                        }
+                    } else {
+                        console.error(`Hidden input for event ID ${eventId} not found.`);
                     }
+
+                    // Stop the interval to prevent further checks
+                    stopCheckSeActiveInterval();
+                    localStorage.removeItem(`checkSeActive_${eventId}`);  // Clear the localStorage flag if needed
                 }
             },
             error: function(error) {
