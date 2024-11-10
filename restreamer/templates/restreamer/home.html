@@ -127,6 +127,13 @@ document.addEventListener("DOMContentLoaded", function() {
     const serverDeliveryMessage = document.getElementById('server_delivery_message_{{ forloop.counter }}');
     const deliveringButton = document.getElementById('delivering_action_{{ forloop.counter }}');
     const setupStreamForm = document.getElementById('setup_stream_form_{{ forloop.counter }}');
+
+    const eventId = startStopButton.getAttribute('data-event-id');
+    const checkUrl = startStopButton.getAttribute('data-check-url');
+
+    if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true') {
+        startCheckSeActiveInterval(checkUrl, eventId);
+    }
     
     // Store the initial state of the delivering button
     const initialButtonClasses = deliveringButton.className;
@@ -271,8 +278,11 @@ document.addEventListener("DOMContentLoaded", function() {
 
     // Function to start the checkSeActive interval
     function startCheckSeActiveInterval(url, eventId) {
+
         if (!checkSeActiveInterval) {
+            console.log('is check set active interval', checkSeActiveInterval)
             checkSeActiveInterval = setInterval(function() {
+                console.log('calling function  check se active')
                 checkSeActive(url, eventId);
             }, 10000);  // Check every 10 seconds
         }
