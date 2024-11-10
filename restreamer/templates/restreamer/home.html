@@ -472,6 +472,37 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 </script>
 
+<script>
+const userId = "{{ request.user.id }}";  // Set this to the user's ID dynamically
+const socket = new WebSocket(`ws://${window.location.host}/ws/stream_status/${userId}/`);
+
+socket.onmessage = function(event) {
+    const data = JSON.parse(event.data);
+    const eventId = data.event_id;
+    
+    // Select the button based on the `data-event-id` attribute
+    const button = document.querySelector(`button[data-event-id="${eventId}"]`);
+    
+    if (button) {
+        // Toggle the button appearance based on the event status
+        const isStreaming = button.getAttribute('data-activated') === 'true';
+        if (isStreaming) {
+            button.classList.remove('bg-red-500', 'hover:bg-red-600');
+            button.classList.add('bg-blue-500', 'hover:bg-blue-600');
+            button.querySelector('i').className = 'fas fa-play-circle mr-2';
+            button.textContent = 'Start stream';
+            button.setAttribute('data-activated', 'false');
+        } else {
+            button.classList.remove('bg-blue-500', 'hover:bg-blue-600');
+            button.classList.add('bg-red-500', 'hover:bg-red-600');
+            button.querySelector('i').className = 'fas fa-stop-circle mr-2';
+            button.textContent = 'End stream';
+            button.setAttribute('data-activated', 'true');
+        }
+    }
+};
+</script>
+
 {% endblock %}
 
     

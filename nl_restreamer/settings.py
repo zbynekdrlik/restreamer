@@ -225,7 +225,7 @@ EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')  # App password or regula
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL')  # From email
 
 
-BASE_URL = 'https://restreamer.solarnyexprex.eu/'
+BASE_URL = 'https://restreamer.solarnyexprex.eu'
 CRON_SECRET_TOKEN = os.getenv('CRON_SECRET_TOKEN')
 
 

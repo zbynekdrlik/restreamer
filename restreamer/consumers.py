@@ -30,3 +30,29 @@ class BufferHealthConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps({
             "message": message
         }))
+
+class StreamStatusConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        self.user_id = self.scope["url_route"]["kwargs"]["user_id"]
+        self.group_name = f"user_{self.user_id}"
+        
+        # Join user-specific group
+        await self.channel_layer.group_add(
+            self.group_name,
+            self.channel_name
+        )
+
+        await self.accept()
+
+    async def disconnect(self, close_code):
+        await self.channel_layer.group_discard(
+            self.group_name,
+            self.channel_name
+        )
+
+    # Receive message from the view and send it to WebSocket
+    async def stream_update(self, event):
+        await self.send(text_data=json.dumps({
+            'message': event['message'],
+            'event_id': event['event_id']
+        }))
