@@ -55,7 +55,7 @@
                         <div class="col-md-2 text-center">
                             <form id="setup_stream_form_{{ forloop.counter }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
                                 {% csrf_token %}
-                                <button type="button" id="start_stop_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}"  class="inline-flex items-center px-3 py-1 font-semibold leading-5 text-xs shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.receiving_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-secondary-500 hover:bg-secondary-600 text-white' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}' style="font-family:sans-serif;">
+                                <button type="button" id="start_stop_{{ forloop.counter }}" data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}" data-event-id="{{ streaming_event.id }}"  class="inline-flex items-center px-3 py-1 font-semibold leading-5 text-xs shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.receiving_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-blue-500 hover:bg-blue-600 text-white' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}' style="font-family:sans-serif;">
                                     <i class="{{ streaming_event.receiving_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} mr-2"></i>
                                     {{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}
                                 </button>
