@@ -90,7 +90,7 @@ def enable_stream(streaming_event):
 @shared_task(queue='services', acks_late=True)
 def is_buffer_ready_action(streaming_event_id):
     streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
-    data_manager = VideoDataManager(streaming_event)
+    data_manager = VideoDataManager(streaming_event.id)
     
     while True:
         if data_manager.is_buffer_filled(streaming_event.buffer):
