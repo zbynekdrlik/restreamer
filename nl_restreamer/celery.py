@@ -16,6 +16,7 @@ app.autodiscover_tasks()
 app.conf.task_routes = {
     'restreamer.tasks.init_stream': {'queue': 'init_stream_queue'},
     'restreamer.tasks.delete_instance': {'queue': 'custom_queue'},
+    'restreamer.tasks.is_buffer_ready_action': {'queue': 'services'},
 }
 
 @app.task(bind=True)

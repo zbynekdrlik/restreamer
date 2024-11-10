@@ -225,6 +225,10 @@ EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')  # App password or regula
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL')  # From email
 
 
+BASE_URL = 'https://restreamer.solarnyexprex.eu/'
+CRON_SECRET_TOKEN = os.getenv('CRON_SECRET_TOKEN')
+
+
 AWS_STORAGE_BUCKET_NAME = 'linode52'
 AWS_SECRET_ACCESS_KEY = config('AWS_SECRET_ACCESS_KEY')
 AWS_ACCESS_KEY_ID = config('AWS_ACCESS_KEY_ID')
