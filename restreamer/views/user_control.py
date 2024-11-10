@@ -16,7 +16,7 @@ from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.generic import TemplateView
 from restreamer.data_sending import ChunkSender
-from restreamer.tasks import init_stream, start_delivering, end_stream
+from restreamer.tasks import init_stream, end_stream
 from restreamer.scheduler import schedule_init_stream
 
 from ..forms import EndPointForm, StreamingEventForm

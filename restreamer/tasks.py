@@ -17,8 +17,8 @@ from restreamer.video_data import VideoDataManager
 log = logging.getLogger(__name__)
 
 # celery -A nl_restreamer worker -l INFO --pool=threads -Q init_stream_queue
-# celery -A your_project_name worker --queue=custom_queue --loglevel=info --concurrency=1 --prefetch-multiplier=1
-  
+
+
 @shared_task(queue='init_stream_queue', acks_late=True)
 def init_stream(user_id, streaming_event_id, **kwargs):
     chunk_id = kwargs.get("chunk_id")
