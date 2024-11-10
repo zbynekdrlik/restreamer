@@ -201,6 +201,8 @@ document.addEventListener("DOMContentLoaded", function() {
 
     startStopButton.addEventListener('click', function() {
         console.log(" --------------------------clicked ----------------------------")
+
+        
         
         const buttonText = startStopButton.innerText.trim();
 
@@ -230,7 +232,9 @@ document.addEventListener("DOMContentLoaded", function() {
         console.log(" --------------------------clicked ----------------------------")
         event.preventDefault();
         console.log("wer are here this si why it is confimred")
+
         const checkUrl = startStopButton.getAttribute('data-check-url');
+        const eventId = startStopButton.getAttribute('data-event-id');       
        
         // Append CSRF token to the form
         const csrfInput = document.createElement('input');
@@ -241,13 +245,9 @@ document.addEventListener("DOMContentLoaded", function() {
         
         console.log('chec active interval !!!!! -------->', checkSeActiveInterval)
         if (wasReadyState) {
-            console.log(" ---- is confirmed is ready state  -----")
-            if (!checkSeActiveInterval) {
-                console.log(" check active interval is not set staring !!!!!!")
-                checkSeActiveInterval = setInterval(function() {
-                    checkSeActive(checkUrl, startStopButton.getAttribute('data-event-id'));
-                }, 10000);  // Check every 10 seconds
-            }
+            localStorage.setItem(`checkSeActive_${eventId}`, 'true');
+            startCheckSeActiveInterval(checkUrl, eventId);
+            
             deliveringButton.innerText = "Preparing stream...";
             localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
             modal.modal('hide');
@@ -264,12 +264,27 @@ document.addEventListener("DOMContentLoaded", function() {
             setupStreamForm.submit();
             localStorage.removeItem('preparingStream_{{ forloop.counter }}');
             
-            if (checkSeActiveInterval) {
-                clearInterval(checkSeActiveInterval);
-                checkSeActiveInterval = null;
-            }
+            localStorage.removeItem(`checkSeActive_${eventId}`);
+            stopCheckSeActiveInterval();
         }
     });
+
+    // Function to start the checkSeActive interval
+    function startCheckSeActiveInterval(url, eventId) {
+        if (!checkSeActiveInterval) {
+            checkSeActiveInterval = setInterval(function() {
+                checkSeActive(url, eventId);
+            }, 10000);  // Check every 10 seconds
+        }
+    }
+
+    // Function to stop the checkSeActive interval
+    function stopCheckSeActiveInterval() {
+        if (checkSeActiveInterval) {
+            clearInterval(checkSeActiveInterval);
+            checkSeActiveInterval = null;
+        }
+    }
 
     cancelButton.addEventListener('click', function() {
         modal.modal('hide');
