@@ -16,47 +16,7 @@ log = logging.getLogger(__name__)
 
 # celery -A nl_restreamer worker -l INFO --pool=threads -Q init_stream_queue
 
-@shared_task(queue='streaming_queue', acks_late=True)
-def start_delivering(streaming_event, user_id):
-    while True:
-        streaming_event_id = StreamingEvent.objects.get(id=streaming_event)
-        ChunkRecord.objects.filter(streaming_event=streaming_event, in_process=True).update(in_process=False)  # Chunks are redy to be send again.
-        if not streaming_event_id.delivering_activated:
-            log.info("Waiting until it is active")
-            log.debug("Press start buttom")
-            time.sleep(5)
-            continue
 
-        while True:
-            try:
-                while True:                   
-                    first_chunk = ChunkRecord.objects.filter(streaming_event=streaming_event_id).first()
-                    
-                    if not streaming_event_id.delivering_activated:
-                        log.info("Shutting down")
-                        break
-                    if first_chunk is not None:
-                        start_endpoint = ChunkSender(streaming_event_id, user_id)                
-                        start_endpoint.sending_chunks()
-                                                    
-                    else:
-                        log.info('No available chunks for this streaming event.')
-                        log.info("Waiting for new chunks")
-                        break
-                if not streaming_event_id.delivering_activated:
-                    log.info("Shutting down")
-                    break
-                
-                time.sleep(5)
-                continue
-            
-            except KeyboardInterrupt:
-                log.info('Ctrl-C detected, terminating!')
-                log.info('Koniec simulácie odosielania chunkov.')
-                time.sleep(1)
-                raise
-            
-            
 @shared_task(queue='init_stream_queue', acks_late=True)
 def init_stream(user_id, streaming_event_id, **kwargs):
     chunk_id = kwargs.get("chunk_id")
