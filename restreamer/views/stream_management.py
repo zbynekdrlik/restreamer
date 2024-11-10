@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+from datetime import datetime, timedelta
 
 from django.conf import settings
 from django.db.utils import IntegrityError
@@ -173,9 +174,21 @@ class IsDeliveringActive(View):
         se_id = int(streaming_event_id)
         streaming_event = get_object_or_404(StreamingEvent, id=se_id)
         data_manager = VideoDataManager(streaming_event.id)
+        buffer_length = streaming_event.buffer
+
+        stream_length_timedelta = timedelta(seconds=data_manager.stream_length())
+        stream_length_minutes = stream_length_timedelta.total_seconds() / 60 
+
+        time_difference = stream_length_minutes - buffer_length
+
+        log.info('time difference', time_difference)
+
+        if data_manager.is_buffer_filled(buffer_length):
+            if time_difference < 10:
+                log.info("Buffer is filled")
+                return JsonResponse({
+                    'is_filled': True,
+                })
         
-        if data_manager.is_buffer_filled(streaming_event.buffer):
-            log.info("Buffer is filled")
-            return JsonResponse({'is_filled':True})
-        return JsonResponse({'is_filled': False})
+        return JsonResponse({'is_filled': False,})
         
