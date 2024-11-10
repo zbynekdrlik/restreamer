@@ -29,8 +29,7 @@ urlpatterns = [
     path('stream-scheduler/', StreamSchedulerView.as_view(), name='stream-scheduler'),
     path('user/<int:user_id>/history/', user_history, name='user_history'),
 
-    path('<int:streaming_event_id>/streaming_event_active', IsDeliveringActive, name='streaming_event_active'),
-
+    path('<int:streaming_event_id>/streaming_event_active/', IsDeliveringActive.as_view(), name='streaming_event_active'),
 ]
 
 if settings.DEBUG:
