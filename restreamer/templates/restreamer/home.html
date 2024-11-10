@@ -199,29 +199,10 @@ document.addEventListener("DOMContentLoaded", function() {
     // Set an interval to periodically check the server status
     setInterval(checkServerStatus, 5000);
 
-    // Open modal and adjust content based on button state
-    startStopButton.addEventListener('click', function() {
-        const buttonText = startStopButton.innerText.trim();
-        if (buttonText === 'Ready') {
-            modalBodyText.innerText = 'Are you sure you want to start the stream?';
-            serverDeliveryMessage.style.display = 'list-item';
-            wasReadyState = true;
-        } else {
-            modalBodyText.innerText = 'Are you sure you want to stop the stream?';
-            serverDeliveryMessage.innerText = '';
-            wasReadyState = false;
-        }
-
-        // Ensure the modal does not close unless Cancel or Confirm is clicked
-        modal.modal({
-            backdrop: 'static',
-            keyboard: false
-        });
-    });
-
     let checkSeActiveInterval;
 
     startStopButton.addEventListener('click', function() {
+        console.log(" --------------------------clicked ----------------------------")
         const checkUrl = startStopButton.getAttribute('data-check-url');
         const buttonText = startStopButton.innerText.trim();
 
@@ -486,7 +467,7 @@ document.addEventListener('DOMContentLoaded', function() {
 <script>
     // check if is streaming event active
     function checkSeActive(url, eventId) {
-        console.log("url ------>", url)
+        console.log(" --------------------------url ------>", url)
         $.ajax({
             url: url,
             type: 'GET',
