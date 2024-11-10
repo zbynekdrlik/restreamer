@@ -199,19 +199,13 @@ document.addEventListener("DOMContentLoaded", function() {
     // Set an interval to periodically check the server status
     setInterval(checkServerStatus, 5000);
 
-    let checkSeActiveInterval;
-
     startStopButton.addEventListener('click', function() {
         console.log(" --------------------------clicked ----------------------------")
-        const checkUrl = startStopButton.getAttribute('data-check-url');
+        
         const buttonText = startStopButton.innerText.trim();
 
         if (buttonText === 'Ready') {
-            if (!checkSeActiveInterval) {
-                checkSeActiveInterval = setInterval(function() {
-                    checkSeActive(checkUrl, startStopButton.getAttribute('data-event-id'));
-                }, 10000);  // Check every 10 seconds
-            }
+            
             modalBodyText.innerText = 'Are you sure you want to start the stream?';
             serverDeliveryMessage.style.display = 'list-item';
             wasReadyState = true;
@@ -219,10 +213,7 @@ document.addEventListener("DOMContentLoaded", function() {
             modalBodyText.innerText = 'Are you sure you want to stop the stream?';
             serverDeliveryMessage.innerText = '';
             wasReadyState = false;
-            if (checkSeActiveInterval) {
-                clearInterval(checkSeActiveInterval);
-                checkSeActiveInterval = null;
-            }
+            
         }
 
         // Ensure the modal does not close unless Cancel or Confirm is clicked
@@ -232,11 +223,14 @@ document.addEventListener("DOMContentLoaded", function() {
         });
     });
 
+    let checkSeActiveInterval;
+    
     // Handle the confirm button click
     confirmButton.addEventListener('click', function(event) {
         event.preventDefault();
         console.log("wer are here this si why it is confimred")
-
+        const checkUrl = startStopButton.getAttribute('data-check-url');
+       
         // Append CSRF token to the form
         const csrfInput = document.createElement('input');
         csrfInput.type = 'hidden';
@@ -245,6 +239,11 @@ document.addEventListener("DOMContentLoaded", function() {
         setupStreamForm.appendChild(csrfInput);
         
         if (wasReadyState) {
+            if (!checkSeActiveInterval) {
+                checkSeActiveInterval = setInterval(function() {
+                    checkSeActive(checkUrl, startStopButton.getAttribute('data-event-id'));
+                }, 10000);  // Check every 10 seconds
+            }
             deliveringButton.innerText = "Preparing stream...";
             localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
             modal.modal('hide');
@@ -254,11 +253,17 @@ document.addEventListener("DOMContentLoaded", function() {
             setTimeout(() => {
                 checkServerStatus();
             }, 2000);
+
         } else {
             // Submit the setup stream form directly if the initial state was "Stop"
             modal.modal('hide');
             setupStreamForm.submit();
             localStorage.removeItem('preparingStream_{{ forloop.counter }}');
+            
+            if (checkSeActiveInterval) {
+                clearInterval(checkSeActiveInterval);
+                checkSeActiveInterval = null;
+            }
         }
     });
 
