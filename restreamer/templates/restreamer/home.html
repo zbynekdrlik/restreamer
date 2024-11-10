@@ -322,6 +322,9 @@ document.addEventListener("DOMContentLoaded", function() {
                 console.log("Traing to submit 292")
                 form.submit();
             }
+
+            stopCheckSeActiveInterval();
+            localStorage.removeItem(`checkSeActive_${eventId}`);
         }
     });
 
