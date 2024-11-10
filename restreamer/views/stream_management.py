@@ -181,7 +181,7 @@ class IsDeliveringActive(View):
 
         time_difference = stream_length_minutes - buffer_length
 
-        log.info('time difference', time_difference)
+        log.info(f'time difference {time_difference}')
 
         if data_manager.is_buffer_filled(buffer_length):
             if time_difference < 10:
