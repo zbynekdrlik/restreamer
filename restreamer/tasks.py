@@ -95,7 +95,7 @@ def is_buffer_ready_action(streaming_event_id):
     while True:
         if data_manager.is_buffer_filled(streaming_event.buffer):
 
-            url = f"{settings.BASE_URL}/control/start_stream/{streaming_event.id}/"
+            url = f"{settings.BASE_URL}/control/start_stream/{streaming_event_id}/"
             log.info("url", url)
 
             headers = {
