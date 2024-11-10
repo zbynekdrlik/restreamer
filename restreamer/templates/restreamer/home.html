@@ -227,6 +227,7 @@ document.addEventListener("DOMContentLoaded", function() {
     
     // Handle the confirm button click
     confirmButton.addEventListener('click', function(event) {
+        console.log(" --------------------------clicked ----------------------------")
         event.preventDefault();
         console.log("wer are here this si why it is confimred")
         const checkUrl = startStopButton.getAttribute('data-check-url');
@@ -238,8 +239,11 @@ document.addEventListener("DOMContentLoaded", function() {
         csrfInput.value = csrftoken;
         setupStreamForm.appendChild(csrfInput);
         
+        console.log('chec active interval !!!!! -------->', checkSeActiveInterval)
         if (wasReadyState) {
+            console.log(" ---- is confirmed is ready state  -----")
             if (!checkSeActiveInterval) {
+                console.log(" check active interval is not set staring !!!!!!")
                 checkSeActiveInterval = setInterval(function() {
                     checkSeActive(checkUrl, startStopButton.getAttribute('data-event-id'));
                 }, 10000);  // Check every 10 seconds
