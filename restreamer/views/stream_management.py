@@ -177,4 +177,5 @@ class IsDeliveringActive(View):
         if data_manager.is_buffer_filled(streaming_event.buffer):
             log.info("Buffer is filled")
             return JsonResponse({'is_filled':True})
+        return JsonResponse({'is_filled': False})
         
