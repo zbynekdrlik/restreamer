@@ -514,10 +514,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 // If the response is true, simulate a click on the delivering_action button with matching eventId
                 if (response.is_filled === true) {
+                    console.log('we are here ')
                     const deliveringButton = document.querySelector(`button[data-event-id="${eventId}"]`);
-                    
+                    console.log('delivgering button deliveringButton', deliveringButton, deliveringButton.id.includes('delivering_action_') )
                     // Ensure the button ID contains 'delivering_action_'
                     if (deliveringButton && deliveringButton.id.includes('delivering_action_')) {
+                        console.log('delivgering button includes delivering_action_')
                         deliveringButton.click();  // Simulate the click event on delivering_action button
                     }
                 }
