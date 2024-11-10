@@ -118,6 +118,8 @@
  </div>
 <script>
 document.addEventListener("DOMContentLoaded", function() {
+    let checkSeActiveInterval;
+    
     const deleteStreamingEventButton = document.getElementById('deleteStreamingEvent_{{ forloop.counter }}')
     const startStopButton = document.getElementById('start_stop_{{ forloop.counter }}');
     const confirmButton = document.getElementById('confirm_modal_{{ forloop.counter }}');
@@ -232,7 +234,7 @@ document.addEventListener("DOMContentLoaded", function() {
         });
     });
 
-    let checkSeActiveInterval;
+    
     
     // Handle the confirm button click
     confirmButton.addEventListener('click', function(event) {
