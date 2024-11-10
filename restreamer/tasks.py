@@ -1,13 +1,17 @@
 import time
 import logging
+import requests
 from celery import shared_task
 from restreamer.data_sending import ChunkSender
 from concurrent.futures import ThreadPoolExecutor
 from django.core.management.base import BaseCommand
 from restreamer.models import ChunkRecord, StreamingEvent
 from restreamer.views.delivering import DeliveringManger
-
 from restreamer.video_data import VideoDataManager
+from django.conf import settings
+from restreamer.video_data import VideoDataManager
+
+
 log = logging.getLogger(__name__)
 
 # celery -A nl_restreamer worker -l INFO --pool=threads -Q init_stream_queue
@@ -82,3 +86,30 @@ def enable_stream(streaming_event):
             continue
         
         return True
+    
+@shared_task(queue='services', acks_late=True)
+def is_buffer_ready_action(streaming_event):
+    data_manager = VideoDataManager(streaming_event)
+    while True:
+        if data_manager.is_buffer_filled(streaming_event.buffer):
+
+            url = f"{settings.BASE_URL}/control/start_stream/{streaming_event.id}/"
+            log.info("url", url)
+
+            headers = {
+                "Authorization": f"Bearer {settings.CRON_SECRET_TOKEN}"
+            }
+
+            try:
+                response = requests.post(url, headers=headers)
+                response.raise_for_status()
+                log.info("Stream started successfully.")
+            except requests.exceptions.RequestException as e:
+                log.exception(f"Failed to start the stream: {e}")
+
+            return True
+        
+        time.sleep(5)
+        
+
+

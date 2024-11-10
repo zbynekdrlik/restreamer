@@ -11,7 +11,7 @@ from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.generic import TemplateView
 from restreamer.data_sending import ChunkSender
-from restreamer.tasks import init_stream, start_delivering, end_stream
+from restreamer.tasks import init_stream, start_delivering, end_stream, is_buffer_ready_action
 from restreamer.scheduler import schedule_init_stream
 
 from ..forms import EndPointForm, StreamingEventForm
@@ -142,6 +142,7 @@ class SetupStream(View):
             streaming_event.receiving_activated=True
             IM(user_id=request.user.id).create_instance()
             streaming_event.save()
+            is_buffer_ready_action.delay(streaming_event.id)
             return redirect('control:home')
 
 
@@ -165,7 +166,7 @@ class StartEndStream(View):
             end_stream(user_id, streaming_event)
             #delete_instance_schedule(user_id)
             return redirect('control:home')
-        print(' ----------------> data confim start ------------>', data.get('confirm_start') )
+        
         if not streaming_event.delivering_activated:
             
             if video_manager.is_buffer_filled(buffer_time) or data.get('confirm_start') == '1':
