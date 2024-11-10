@@ -173,7 +173,6 @@ class SetupStream(View):
 
             streaming_event.save()
             messages.success(request, 'Streaming server successfuly scheduled for creation')
-            is_buffer_ready_action.delay(streaming_event.id)
             return redirect('control:home')
 
 
