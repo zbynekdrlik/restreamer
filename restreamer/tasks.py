@@ -86,36 +86,4 @@ def enable_stream(streaming_event):
             continue
         
         return True
-    
-@shared_task(queue='services', acks_late=True)
-def is_buffer_ready_action(streaming_event_id):
-    streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
-    data_manager = VideoDataManager(streaming_event.id)
-
-    while True:
-        if data_manager.is_buffer_filled(streaming_event.buffer):
-            url = f"{settings.BASE_URL}/control/deliverig_action/{streaming_event_id}/"
-            log.info("URL: %s", url)
-
-            headers = {
-                "Authorization": f"Bearer {settings.CRON_SECRET_TOKEN}",
-                "Content-Type": "application/json"
-            }
-
-            payload = {
-                "user_id": streaming_event.user.id,  # Assuming StreamingEvent has a user field
-                "streaming_event_id": streaming_event_id
-            }
-
-            try:
-                response = requests.post(url, headers=headers, json=payload)
-                response.raise_for_status()
-                log.info("Stream initialized successfully.")
-            except requests.exceptions.RequestException as e:
-                log.exception(f"Failed to initialize the stream: {e}")
-
-            return True
-        
-        time.sleep(5)
-
 

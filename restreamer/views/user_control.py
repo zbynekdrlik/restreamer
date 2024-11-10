@@ -24,11 +24,6 @@ from accounts.models import RestreamerUser
 
 from django.http import JsonResponse
 
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
-
-from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
 
 log = logging.getLogger(__name__)
 
@@ -365,24 +360,3 @@ def user_history(request, user_id):
     return render(request, 'restreamer/user_history.html', context)
 
 
-@csrf_exempt
-@require_POST
-def initialize_stream(request, id):
-    user_id = request.POST.get('user_id')
-    streaming_event_id = request.POST.get('streaming_event_id')
-
-    if not user_id or not streaming_event_id:
-        return JsonResponse({'error': 'Missing required parameters'}, status=400)
-
-    # Send a WebSocket message to update the frontend
-    channel_layer = get_channel_layer()
-    async_to_sync(channel_layer.group_send)(
-        f"user_{user_id}",
-        {
-            "type": "stream_update",
-            "message": "Stream has been initialized.",
-            "event_id": streaming_event_id
-        }
-    )
-
-    return JsonResponse({'message': 'Stream initialized successfully'})

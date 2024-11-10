@@ -55,7 +55,7 @@
                         <div class="col-md-2 text-center">
                             <form id="setup_stream_form_{{ forloop.counter }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
                                 {% csrf_token %}
-                                <button type="button" id="start_stop_{{ forloop.counter }}" class="inline-flex items-center px-3 py-1 font-semibold leading-5 text-xs shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.receiving_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-secondary-500 hover:bg-secondary-600 text-white' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}' style="font-family:sans-serif;">
+                                <button type="button" id="start_stop_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" data-check-url="{% url 'streaming_event_active' streaming_event %}"  class="inline-flex items-center px-3 py-1 font-semibold leading-5 text-xs shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.receiving_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-secondary-500 hover:bg-secondary-600 text-white' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}' style="font-family:sans-serif;">
                                     <i class="{{ streaming_event.receiving_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} mr-2"></i>
                                     {{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}
                                 </button>
@@ -219,9 +219,18 @@ document.addEventListener("DOMContentLoaded", function() {
         });
     });
 
+    let checkSeActiveInterval;
+
     startStopButton.addEventListener('click', function() {
+        const checkUrl = startStopButton.getAttribute('data-check-url');
         const buttonText = startStopButton.innerText.trim();
+
         if (buttonText === 'Ready') {
+            if (!checkSeActiveInterval) {
+                checkSeActiveInterval = setInterval(function() {
+                    checkSeActive(checkUrl, startStopButton.getAttribute('data-event-id'));
+                }, 10000);  // Check every 10 seconds
+            }
             modalBodyText.innerText = 'Are you sure you want to start the stream?';
             serverDeliveryMessage.style.display = 'list-item';
             wasReadyState = true;
@@ -229,6 +238,10 @@ document.addEventListener("DOMContentLoaded", function() {
             modalBodyText.innerText = 'Are you sure you want to stop the stream?';
             serverDeliveryMessage.innerText = '';
             wasReadyState = false;
+            if (checkSeActiveInterval) {
+                clearInterval(checkSeActiveInterval);
+                checkSeActiveInterval = null;
+            }
         }
 
         // Ensure the modal does not close unless Cancel or Confirm is clicked
@@ -471,34 +484,30 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 <script>
-const userId = "{{ request.user.id }}";  // Set this to the user's ID dynamically
-const socket = new WebSocket(`ws://${window.location.host}/ws/stream_status/${userId}/`);
-
-socket.onmessage = function(event) {
-    const data = JSON.parse(event.data);
-    const eventId = data.event_id;
-    
-    // Select the button based on the `data-event-id` attribute
-    const button = document.querySelector(`button[data-event-id="${eventId}"]`);
-    
-    if (button) {
-        // Toggle the button appearance based on the event status
-        const isStreaming = button.getAttribute('data-activated') === 'true';
-        if (isStreaming) {
-            button.classList.remove('bg-red-500', 'hover:bg-red-600');
-            button.classList.add('bg-blue-500', 'hover:bg-blue-600');
-            button.querySelector('i').className = 'fas fa-play-circle mr-2';
-            button.textContent = 'Start stream';
-            button.setAttribute('data-activated', 'false');
-        } else {
-            button.classList.remove('bg-blue-500', 'hover:bg-blue-600');
-            button.classList.add('bg-red-500', 'hover:bg-red-600');
-            button.querySelector('i').className = 'fas fa-stop-circle mr-2';
-            button.textContent = 'End stream';
-            button.setAttribute('data-activated', 'true');
-        }
+    // check if is streaming event active
+    function checkSeActive(url, eventId) {
+        console.log("url ------>", url)
+        $.ajax({
+            url: url,
+            type: 'GET',
+            success: function(response) {
+                console.log('Streaming event status:', response);
+                
+                // If the response is true, simulate a click on the delivering_action button with matching eventId
+                if (response === true) {
+                    const deliveringButton = document.querySelector(`button[data-event-id="${eventId}"]`);
+                    
+                    // Ensure the button ID contains 'delivering_action_'
+                    if (deliveringButton && deliveringButton.id.includes('delivering_action_')) {
+                        deliveringButton.click();  // Simulate the click event on delivering_action button
+                    }
+                }
+            },
+            error: function(error) {
+                console.error('Error checking streaming event status:', error);
+            }
+        });
     }
-};
 </script>
 
 {% endblock %}

@@ -7,8 +7,9 @@ from restreamer.views.user_control import (CreateStreamView, DeleteChunkData,
                                            DownloadRestreamer, SetupStream,
                                            StartEndStream,
                                            StreamingEventDetailView, RemoveStreamingEvent,
-                                           RemoveEndpoint, AddEndpoint, StreamSchedulerView, user_history, initialize_stream)
+                                           RemoveEndpoint, AddEndpoint, StreamSchedulerView, user_history)
 from restreamer.views.youtube import GoLiveYt, YtLivePage
+from restreamer.views.stream_management import IsDeliveringActive
 
 app_name = 'control'
 
@@ -20,7 +21,6 @@ urlpatterns = [
     path('downloads/', DownloadPageView.as_view(), name='downloads'),
     path('setup_stream/<int:id>/', SetupStream.as_view(), name='setup_stream'),
     path('start_stream/<int:id>/', StartEndStream.as_view(), name='start_stream'),
-    path('deliverig_action/<int:id>/', initialize_stream , name='deliverig_action'),
     path('go_live/', YtLivePage.as_view(), name='go_live'),
     path('delete_data/', DeleteChunkData.as_view(), name='delete_chunk_data'),
     path('remove-streaming-event/<int:id>/', RemoveStreamingEvent.as_view(), name='remove_streaming_event'),
@@ -28,6 +28,8 @@ urlpatterns = [
     path('add-endpoint/<int:streaming_event_id>/', AddEndpoint.as_view(), name='add_endpoint'),
     path('stream-scheduler/', StreamSchedulerView.as_view(), name='stream-scheduler'),
     path('user/<int:user_id>/history/', user_history, name='user_history'),
+
+    path('<int:streaming_event_id>/streaming_event_active', IsDeliveringActive, name='streaming_event_active'),
 
 ]
 

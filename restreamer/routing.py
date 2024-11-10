@@ -10,6 +10,5 @@ from . import consumers
 
 websocket_urlpatterns = [
     re_path(r'ws/buffer_health/$', BufferHealthConsumer.as_asgi()),
-    path("ws/stream_status/<str:user_id>/", consumers.StreamStatusConsumer.as_asgi()),
 ]
 
