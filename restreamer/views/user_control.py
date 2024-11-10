@@ -145,7 +145,6 @@ class SetupStream(View):
             streaming_event.receiving_activated=True
             IM(user_id=request.user.id).create_instance()
             streaming_event.save()
-            is_buffer_ready_action.delay(streaming_event.id)
             return redirect('control:home')
 
 
