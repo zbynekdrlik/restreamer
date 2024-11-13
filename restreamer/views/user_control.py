@@ -7,21 +7,21 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import FileResponse
-from django.shortcuts import redirect, render , get_list_or_404, get_object_or_404
+from django.shortcuts import (get_object_or_404, redirect,
+                              render)
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.generic import TemplateView
-from restreamer.data_sending import ChunkSender
-from restreamer.tasks import init_stream, start_delivering, end_stream
-from restreamer.scheduler import schedule_init_stream
-
-from ..forms import EndPointForm, StreamingEventForm
-from ..models import EndPointCfg, StreamingEvent, ChunkRecord
-from .delivering import DeliveringManger
-from .instances import InstanceManager as IM
-from restreamer.video_data import VideoDataManager
 
 from accounts.models import RestreamerUser
+
+from restreamer.scheduler import delete_instance_schedule, schedule_init_stream
+from restreamer.tasks import end_stream, init_stream
+from restreamer.video_data import VideoDataManager
+
+from ..forms import EndPointForm, StreamingEventForm
+from ..models import ChunkRecord, EndPointCfg, StreamingEvent
+from .instances import InstanceManager as IM
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ class CreateStreamView(LoginRequiredMixin,TemplateView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context['form'] = StreamingEventForm()
+        context['form'] = StreamingEventForm(user=self.request.user)
         context['endpoint_form'] = EndPointForm()
         return context
 
@@ -83,6 +83,7 @@ class CreateStreamView(LoginRequiredMixin,TemplateView):
         context = self.get_context_data(streaming_event_form=streaming_event_form, endpoint_form=endpoint_form)
         return self.render_to_response(context)
 
+
 @method_decorator(login_required, name='dispatch')
 class DownloadRestreamer(View):
     
@@ -105,6 +106,7 @@ class DownloadRestreamer(View):
         response = FileResponse(open(modified_zip_path, 'rb'), content_type='application/zip')
         response['Content-Disposition'] = 'attachment; filename=restreamer.zip'
         return response
+
 
 @method_decorator(login_required, name='dispatch')
 class StreamingEventDetailView(View):
@@ -174,8 +176,9 @@ class StartEndStream(View):
             except Exception as e:
                 messages.error(request, f"There was a problem ending your streams {e}")
 
-
             messages.success(request, f"Streams ended")
+            delete_instance_schedule(user_id)
+            
             return redirect('control:home')
             
 
@@ -321,7 +324,7 @@ class StreamSchedulerView(View):
            
            return redirect('control:stream-scheduler')
 
-
+@method_decorator(login_required, name='dispatch') 
 def user_history(request, user_id):
     user = RestreamerUser.objects.get(id=user_id)
     streaming_events = StreamingEvent.objects.filter(user=user)
