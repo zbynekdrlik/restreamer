@@ -35,60 +35,6 @@ log = logging.getLogger(__name__)
 class DownloadPageView(LoginRequiredMixin, TemplateView,):
     template_name = 'restreamer/download.html'
 
-# Receiving data from user when create new streaming event
-class CreateStreamView(LoginRequiredMixin,TemplateView):
-    template_name = 'restreamer/setup_stream.html'
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        context['form'] = StreamingEventForm(user=self.request.user)
-        context['endpoint_form'] = EndPointForm()
-        return context
-
-    def post(self, request, *args, **kwargs):
-        try:
-            streaming_event_form = StreamingEventForm(request.POST)
-            endpoint_form = EndPointForm(request.POST)
-
-            if streaming_event_form.is_valid():
-                try:
-                    streaming_event = streaming_event_form.save(commit=False)
-                    streaming_event.user = request.user
-                    streaming_event.save()
-
-                    endpoints = request.POST.getlist('end_points', [])
-                    endpoints = EndPointCfg.objects.filter(pk__in=endpoints)
-                    streaming_event.end_points.add(*endpoints)
-
-                    messages.success(request, 'Streaming event successfully created!')
-                    return redirect('control:home')
-
-                except Exception as e:
-                    log.exception(f'Error saving form {e}')
-                    messages.error(request, 'There was an error saving the streaming event.')
-
-            elif endpoint_form.is_valid():
-                endpoint = endpoint_form.save(commit=False)
-                endpoint.user = request.user
-                endpoint.save()
-
-                messages.success(request, f'Endpoint {endpoint.alias} successfully created!')
-                return redirect('control:create_stream')
-                
-            else:
-                messages.error(request, 'There was an error creating new endpoint.')
-                log.error(f'Invalid form {streaming_event_form.errors}')
-
-        except Exception as e:
-            log.exception(f'Error: {e}')
-            streaming_event_form = None
-            endpoint_form = None
-            messages.error(request, 'Some error occured')
-
-
-        context = self.get_context_data(streaming_event_form=streaming_event_form, endpoint_form=endpoint_form)
-        return self.render_to_response(context)
-
 
 @method_decorator(login_required, name='dispatch')
 class DownloadRestreamer(View):
@@ -114,32 +60,6 @@ class DownloadRestreamer(View):
         return response
 
 
-@method_decorator(login_required, name='dispatch')
-class StreamingEventDetailView(View):
-    def get(self, request, *args, **kwargs):
-        template_name = 'restreamer/streaming_event.html'
-        
-        streaming_event = StreamingEvent.objects.get(id=self.kwargs['id'])
-        
-        selected_endpoints = streaming_event.end_points.all()
-        endpoint_form = EndPointForm()
-        all_endpoints = EndPointCfg.objects.filter(user=request.user)
-        video_manager = VideoDataManager(streaming_event=streaming_event.id)
-        
-        video_length = video_manager.get_stream_length()
-        
-        buffer_display = streaming_event.get_buffer_display()
-        
-        context = {
-            'endpoints': selected_endpoints,
-            'streaming_event':streaming_event,
-            'endpoint_form': endpoint_form,
-            'available_endpoints': all_endpoints,
-            'video_length': video_length,
-            'buffer': buffer_display,
-            }
-        
-        return render(request, template_name, context)
 
 @method_decorator(login_required, name='dispatch')
 class SetupStream(View):
