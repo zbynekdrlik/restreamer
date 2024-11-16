@@ -7,14 +7,14 @@
 
 <div class="container mx-auto px-4 py-8 max-w-6xl">
     <div class="bg-white rounded-xl shadow-2xl overflow-hidden">
-        <div class="bg-gradient-to-r from-purple-500 to-indigo-600 text-white py-6 px-8">
+        <div class="bg-gradient-to-r from-blue-700 to-blue-900 text-white py-6 px-8">
             <h2 class="text-3xl font-bold">{{ streaming_event.short_description }}</h2>
         </div>
         
         <div class="p-8 space-y-12">
             <!-- Endpoints Section -->
             <section>
-                <h3 class="text-2xl text-purple-600 font-bold mb-6 flex items-center">
+                <h3 class="text-2xl text-blue-800 font-bold mb-6 flex items-center">
                     <svg class="w-7 h-7 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
                     </svg>
@@ -23,11 +23,11 @@
                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
                     {% if endpoints %}
                         {% for endpoint in endpoints %}
-                        <div class="bg-gray-50 rounded-lg shadow-md p-4 relative border-2 border-purple-100 transition-all duration-300 hover:shadow-lg hover:border-purple-300">
+                        <div class="bg-gray-50 rounded-lg shadow-md p-4 relative border-2 border-blue-100 transition-all duration-300 hover:shadow-lg hover:border-blue-300">
                             <p class="text-gray-700 font-semibold">{{ endpoint }}</p>
                             <form action="{% url 'control:remove_endpoint' streaming_event.id endpoint.id %}" method="post" class="absolute top-2 right-2">
                                 {% csrf_token %}
-                                <button type="submit" class="text-gray-400 hover:text-red-500 transition-colors duration-300">
+                                <button type="submit" class="text-gray-400 hover:text-red-600 transition-colors duration-300">
                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                                         <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
                                     </svg>
@@ -41,7 +41,7 @@
                 </div>
 
                 <div class="flex justify-end mt-6">
-                    <button type="button" id="showSelectButton" class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-3 px-6 rounded-full flex items-center transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-opacity-50" data-bs-toggle="modal" data-bs-target="#addEndpointModal">
+                    <button type="button" id="showSelectButton" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full flex items-center transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50" data-bs-toggle="modal" data-bs-target="#addEndpointModal">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
                             <path fill-rule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clip-rule="evenodd" />
                         </svg>
@@ -51,17 +51,17 @@
             </section>
 
             <!-- Technical Details Section -->
-            <div class="mt-8 max-w-4xl mx-auto">
-                <h5 class="text-2xl text-purple-600 font-bold mb-4 flex items-center">
-                    <svg class="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <section>
+                <h3 class="text-2xl text-blue-800 font-bold mb-6 flex items-center">
+                    <svg class="w-7 h-7 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                     </svg>
                     Event Details
-                </h5>
-                <div class="bg-white rounded-lg shadow-lg p-6 border-2 border-purple-200">
+                </h3>
+                <div class="bg-gray-50 rounded-lg shadow-lg p-6 border-2 border-blue-100">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                         <div class="flex items-center">
-                            <svg class="w-5 h-5 text-purple-500 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <svg class="w-5 h-5 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14"></path>
                             </svg>
                             <div>
@@ -70,7 +70,7 @@
                             </div>
                         </div>
                         <div class="flex items-center">
-                            <svg class="w-5 h-5 text-purple-500 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <svg class="w-5 h-5 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
                             </svg>
                             <div>
@@ -79,7 +79,7 @@
                             </div>
                         </div>
                         <div class="flex items-center">
-                            <svg class="w-5 h-5 text-purple-500 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <svg class="w-5 h-5 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16l2.879-2.879m0 0a3 3 0 104.243-4.242 3 3 0 00-4.243 4.242zM21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                             </svg>
                             <div>
@@ -88,7 +88,7 @@
                             </div>
                         </div>
                         <div class="flex items-center">
-                            <svg class="w-5 h-5 text-purple-500 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <svg class="w-5 h-5 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                             </svg>
                             <div>
@@ -97,7 +97,7 @@
                             </div>
                         </div>
                         <div class="flex items-center">
-                            <svg class="w-5 h-5 text-purple-500 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <svg class="w-5 h-5 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                             </svg>
                             <div>
@@ -107,23 +107,23 @@
                         </div>
                     </div>
                 </div>
-            </div>
+            </section>
 
             <!-- SE settings section -->
-            <div class="mt-12 max-w-4xl mx-auto">
-                <h5 class="text-2xl text-purple-600 font-bold mb-4 flex items-center">
-                    <svg class="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <section>
+                <h3 class="text-2xl text-blue-800 font-bold mb-6 flex items-center">
+                    <svg class="w-7 h-7 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
                     </svg>
                     Event Settings
-                </h5>
-                <div class="bg-white rounded-lg shadow-lg p-6 border-2 border-purple-200">
+                </h3>
+                <div class="bg-gray-50 rounded-lg shadow-lg p-6 border-2 border-blue-100">
                     <form method="POST" action="{% url 'control:streaming_event_edit' streaming_event.id %}">
                         {% csrf_token %}
-                        <div class="mb-4">
+                        <div class="mb-6">
                             <label for="buffer" class="block text-gray-700 font-semibold mb-2">Buffer:</label>
-                            <select id="buffer" name="buffer-time" class="w-full px-3 py-2 text-gray-700 border rounded-lg focus:outline-none focus:border-purple-500">
+                            <select id="buffer" name="buffer-time" class="w-full px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
                                 {% for value, label in streaming_event.BUFFER_CHOICES %}
                                     <option value="{{ value }}" {% if streaming_event.buffer == value %}selected{% endif %}>
                                         {{ label }}
@@ -131,8 +131,8 @@
                                 {% endfor %}
                             </select>
                         </div>
-                        <div class="mt-6">
-                            <button type="submit" class="bg-purple-500 hover:bg-purple-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-opacity-50">
+                        <div class="flex justify-end">
+                            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50">
                                 <svg class="w-5 h-5 inline-block mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path>
                                 </svg>
@@ -141,7 +141,8 @@
                         </div>
                     </form>
                 </div>
-            </div>
+            </section>
+
 
             <!-- Modal for Adding Endpoints -->
             <div class="modal fade" id="addEndpointModal" tabindex="-1" aria-labelledby="addEndpointModalLabel" aria-hidden="true">
