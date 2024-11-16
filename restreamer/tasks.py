@@ -26,7 +26,7 @@ def init_stream(user_id, streaming_event_id, **kwargs):
         streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
         DeliveringManger(user_id, streaming_event).send_init_data(chunk_id, kwargs.get("endpoint_id"))
     except Exception as e:
-        print(f'An error occurred: {e}')
+        log.exception(f'An error occurred: {e}')
         
         
 @shared_task(queue='init_stream_queue', acks_late=True)
@@ -35,7 +35,7 @@ def end_stream(user_id, streaming_event, alias=None):
         manager = DeliveringManger(user_id, streaming_event)
         manager.end_delivery(alias)
     except Exception as e:
-        print(f'An error occurred: {e}')
+        log.exception(f'An error occurred: {e}')
 
 
 @shared_task(queue='init_stream_queue', acks_late=True)

@@ -8,7 +8,7 @@
     <div class="row justify-content-center">
         <div class="col-md-8">
             <h3 class="mb-4 text-2xl font-bold">New Streaming Event:</h3>
-            <form method="POST" action="{% url 'control:create_stream' %}" class="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
+            <form method="POST" action="{% url 'control:streaming_event_create' %}" class="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
                 {% csrf_token %}
                 <div class="mb-4">
                     {{ form.short_description|as_crispy_field }}
@@ -46,7 +46,7 @@
                 <h5 class="modal-title" id="endpointModalLabel">Add Endpoint</h5>
                 <button type="button" class="btn-close" data-dismiss="modal" aria-label="Close"></button>
             </div>
-            <form action="{% url 'control:create_stream' %}" method="POST">
+            <form action="{% url 'control:streaming_event_create' %}" method="POST">
                 {% csrf_token %}
                 <div class="modal-body">
                     <div class="mb-4">

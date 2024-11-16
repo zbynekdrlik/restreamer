@@ -103,7 +103,7 @@ class ChunkUploadView(APIView):
 
         except Exception as e:
             log.info("Error", e)
-        print("Chunk successfully stored to bucket")
+        log.info("Chunk successfully stored to bucket")
 
 
 class PositionLastUploadView(APIView):

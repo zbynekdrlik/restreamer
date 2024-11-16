@@ -89,23 +89,22 @@ class StreamingEvent(models.Model):
             self.end_points.remove(endpont)
             return True
         except Exception as e:
-            print(f'An error occurred: {e}')
+            log.exception(f'An error occurred: {e}')
             
     def add_endpoint(self, endpoint_id, position_last=None):
         try:
             # Retrieve the endpoint object from the database
             endpoint = EndPointCfg.objects.get(id=endpoint_id)
-            print("postion last --------------------->", position_last)
             if position_last:
                 endpoint.position_last = position_last
                 endpoint.save()
             self.end_points.add(endpoint)
             return True
         except EndPointCfg.DoesNotExist:
-            print(f'Endpoint with id {endpoint_id} does not exist.')
+            log.info(f'Endpoint with id {endpoint_id} does not exist.')
             return False
         except Exception as e:
-            print(f'An error occurred: {e}')
+            log.info(f'An error occurred: {e}')
             return False
             
     
