@@ -17,6 +17,7 @@ app.conf.task_routes = {
     'restreamer.tasks.init_stream': {'queue': 'init_stream_queue'},
     'restreamer.tasks.start_delivering': {'queue': 'streaming_queue'},
 }
+
 @app.task(bind=True)
 def debug_task(self):
     print(f'Request: {self.request!r}')

@@ -1,13 +1,15 @@
 import hashlib
 import logging
 import os
+from datetime import datetime, timedelta
 
 from django.conf import settings
 from django.db.utils import IntegrityError
+from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.generics import GenericAPIView
 from rest_framework.response import Response
-from rest_framework.views import APIView
+from rest_framework.views import APIView, View
 from ..models import ChunkRecord, StreamingEvent
 from ..serializers import ChunkSerializer, PositionLastSerializer, ChunkRecordSerializer
 from django.utils.decorators import method_decorator
@@ -165,3 +167,27 @@ def check_buffer_status(request, streaming_event_id):
     buffer_filled = video_manager.is_buffer_filled(buffer_time)
     
     return JsonResponse({'buffer_filled': buffer_filled})
+
+
+class IsDeliveringActive(View):
+    def get(self, request, streaming_event_id):
+        se_id = int(streaming_event_id)
+        streaming_event = get_object_or_404(StreamingEvent, id=se_id)
+        data_manager = VideoDataManager(streaming_event.id)
+        buffer_length = streaming_event.buffer
+
+        stream_length_timedelta = timedelta(seconds=data_manager.stream_length())
+        stream_length_minutes = stream_length_timedelta.total_seconds() / 60 
+
+        time_difference = stream_length_minutes - buffer_length
+
+        log.info(f'time difference {time_difference}')
+
+        if data_manager.is_buffer_filled(buffer_length):
+            if time_difference < 10:
+                return JsonResponse({
+                    'is_filled': True,
+                })
+        
+        return JsonResponse({'is_filled': False,})
+        

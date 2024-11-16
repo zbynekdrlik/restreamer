@@ -55,18 +55,19 @@
                         <div class="col-md-2 text-center">
                             <form id="setup_stream_form_{{ forloop.counter }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
                                 {% csrf_token %}
-                                <button type="button" id="start_stop_{{ forloop.counter }}" class="inline-flex items-center px-3 py-1 font-semibold leading-5 text-xs shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.receiving_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-green-500 hover:bg-green-600 text-white' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}' style="font-family:sans-serif;">
+                                <button type="button" id="start_stop_{{ forloop.counter }}" data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}" data-event-id="{{ streaming_event.id }}"  class="inline-flex items-center px-3 py-1 font-semibold leading-5 text-xs shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.receiving_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-blue-500 hover:bg-blue-600 text-white' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}' style="font-family:sans-serif;">
                                     <i class="{{ streaming_event.receiving_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} mr-2"></i>
                                     {{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}
                                 </button>
                             </form>
                         </div>
                         <div class="col-md-2 text-center">
-                            <form id="start_stream_form_{{ forloop.counter }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
+                            <form id="start_stream_form_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
                                 {% csrf_token %}
-                                <button type="button" id="delivering_action_{{ forloop.counter }}" data-activated="{{ streaming_event.delivering_activated }}" class="inline-flex items-center px-3 py-1 font-semibold leading-6 text-sm shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.delivering_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-green-500 hover:bg-green-600 text-white' }}" style="font-family: sans-serif;">
+                                <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start" value="0">
+                                <button type="button" id="delivering_action_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" data-activated="{{ streaming_event.delivering_activated }}" class="inline-flex items-center px-3 py-1 font-semibold leading-6 text-sm shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.delivering_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-secondary-500 hover:bg-secondary-600 text-white' }}" style="font-family: sans-serif;">
                                     <i class="{{ streaming_event.delivering_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} mr-2"></i>
-                                    {{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}
+                                    {{ streaming_event.delivering_activated|yesno:'End stream, Start stream' }}
                                 </button>
                             </form>
                         </div>
@@ -117,6 +118,8 @@
  </div>
 <script>
 document.addEventListener("DOMContentLoaded", function() {
+    let checkSeActiveInterval;
+    
     const deleteStreamingEventButton = document.getElementById('deleteStreamingEvent_{{ forloop.counter }}')
     const startStopButton = document.getElementById('start_stop_{{ forloop.counter }}');
     const confirmButton = document.getElementById('confirm_modal_{{ forloop.counter }}');
@@ -126,6 +129,13 @@ document.addEventListener("DOMContentLoaded", function() {
     const serverDeliveryMessage = document.getElementById('server_delivery_message_{{ forloop.counter }}');
     const deliveringButton = document.getElementById('delivering_action_{{ forloop.counter }}');
     const setupStreamForm = document.getElementById('setup_stream_form_{{ forloop.counter }}');
+
+    const eventId = startStopButton.getAttribute('data-event-id');
+    const checkUrl = startStopButton.getAttribute('data-check-url');
+
+    if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
+        startCheckSeActiveInterval(checkUrl, eventId);
+    }
     
     // Store the initial state of the delivering button
     const initialButtonClasses = deliveringButton.className;
@@ -164,9 +174,10 @@ document.addEventListener("DOMContentLoaded", function() {
             success: function(response) {
                 const isRunning = response.status.toLowerCase() === 'running';
                 const bufferFilled = response.buffer_filled;
+                const live = response.live
 
                 if (isRunning) {
-                    if (bufferFilled) {
+                    if (bufferFilled && !live) {  // Use && for logical 'and'
                         deliveringButton.className = initialButtonClasses;
                         deliveringButton.innerHTML = initialButtonHtml;
                         localStorage.removeItem('preparingStream_{{ forloop.counter }}');
@@ -174,7 +185,7 @@ document.addEventListener("DOMContentLoaded", function() {
                         deliveringButton.innerText = "Buffering...";
                         localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
                     }
-                   
+                
                 } else {
                     deliveringButton.innerText = "Preparing stream...";
                     localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
@@ -197,10 +208,11 @@ document.addEventListener("DOMContentLoaded", function() {
     // Set an interval to periodically check the server status
     setInterval(checkServerStatus, 5000);
 
-    // Open modal and adjust content based on button state
     startStopButton.addEventListener('click', function() {
         const buttonText = startStopButton.innerText.trim();
+
         if (buttonText === 'Ready') {
+            
             modalBodyText.innerText = 'Are you sure you want to start the stream?';
             serverDeliveryMessage.style.display = 'list-item';
             wasReadyState = true;
@@ -208,25 +220,7 @@ document.addEventListener("DOMContentLoaded", function() {
             modalBodyText.innerText = 'Are you sure you want to stop the stream?';
             serverDeliveryMessage.innerText = '';
             wasReadyState = false;
-        }
-
-        // Ensure the modal does not close unless Cancel or Confirm is clicked
-        modal.modal({
-            backdrop: 'static',
-            keyboard: false
-        });
-    });
-
-    startStopButton.addEventListener('click', function() {
-        const buttonText = startStopButton.innerText.trim();
-        if (buttonText === 'Ready') {
-            modalBodyText.innerText = 'Are you sure you want to start the stream?';
-            serverDeliveryMessage.style.display = 'list-item';
-            wasReadyState = true;
-        } else {
-            modalBodyText.innerText = 'Are you sure you want to stop the stream?';
-            serverDeliveryMessage.innerText = '';
-            wasReadyState = false;
+            
         }
 
         // Ensure the modal does not close unless Cancel or Confirm is clicked
@@ -240,6 +234,9 @@ document.addEventListener("DOMContentLoaded", function() {
     confirmButton.addEventListener('click', function(event) {
         event.preventDefault();
 
+        const checkUrl = startStopButton.getAttribute('data-check-url');
+        const eventId = startStopButton.getAttribute('data-event-id');       
+       
         // Append CSRF token to the form
         const csrfInput = document.createElement('input');
         csrfInput.type = 'hidden';
@@ -248,47 +245,68 @@ document.addEventListener("DOMContentLoaded", function() {
         setupStreamForm.appendChild(csrfInput);
         
         if (wasReadyState) {
+            localStorage.setItem(`checkSeActive_${eventId}`, 'true');
+            startCheckSeActiveInterval(checkUrl, eventId);
+            
             deliveringButton.innerText = "Preparing stream...";
             localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
             modal.modal('hide');
             setupStreamForm.submit();
 
-            // Ensure "Preparing stream..." is displayed for at least 2 seconds
             setTimeout(() => {
                 checkServerStatus();
             }, 2000);
+
         } else {
-            // Submit the setup stream form directly if the initial state was "Stop"
             modal.modal('hide');
             setupStreamForm.submit();
             localStorage.removeItem('preparingStream_{{ forloop.counter }}');
+            
+            localStorage.removeItem(`checkSeActive_${eventId}`);
+            stopCheckSeActiveInterval();
         }
     });
+
+    // Function to start the checkSeActive interval
+    function startCheckSeActiveInterval(url, eventId) {
+
+        if (!checkSeActiveInterval) {
+            checkSeActiveInterval = setInterval(function() {
+                checkSeActive(url, eventId);
+            }, 10000);  // Check every 10 seconds
+        }
+    }
+
+    // Function to stop the checkSeActive interval
+    function stopCheckSeActiveInterval() {
+        if (checkSeActiveInterval) {
+            clearInterval(checkSeActiveInterval);
+            checkSeActiveInterval = null;
+        }
+    }
 
     cancelButton.addEventListener('click', function() {
         modal.modal('hide');
     });
 
     const startStopDButton = document.getElementById('delivering_action_{{ forloop.counter }}');
-    console.log('Start stop button', startStopButton)
     startStopDButton.addEventListener('click', function() {
         const isActivated = startStopDButton.getAttribute('data-activated') === 'False';
-        console.log("Traing to submit ")
-        if (!isActivated) {
-            console.log("Traing to submit ")
+        const isBuffering = startStopDButton.innerText === "Buffering...";
+        if (!isActivated && !isBuffering) {
             const modal = $('#dataConfirmationModal_{{ forloop.counter }}');
-            console.log("Modal", modal)
             modal.modal({
                 backdrop: 'static',
                 keyboard: false
             });
         } else {
-            // Submit the form directly if it's in the "yes" phase
             const form = document.querySelector('form[action*="start_stream"]#start_stream_form_{{ forloop.counter }}');
-            if (form) {
-                console.log("Traing to submit ")
+            if (form && !isBuffering) {
                 form.submit();
             }
+
+            stopCheckSeActiveInterval();
+            localStorage.removeItem(`checkSeActive_${eventId}`);
         }
     });
 
@@ -316,7 +334,6 @@ document.addEventListener("DOMContentLoaded", function() {
 
     const confirmChunkSDeleteButton = document.getElementById('confirmChunksDelete_{{ forloop.counter }}');
     confirmChunkSDeleteButton.addEventListener('click', function() {
-        console.log("confirm clicked")
         const deleteChunksForm = document.getElementById('deleteChunksForm_{{ forloop.counter }}');
       
         if (deleteChunksForm) {
@@ -324,10 +341,8 @@ document.addEventListener("DOMContentLoaded", function() {
         }
     });
 
-    // Confirm delete button in modal click event
     const confirmDeleteButton = document.getElementById('confirmEventDelete_{{ forloop.counter }}');
     confirmDeleteButton.addEventListener('click', function() {
-        console.log("confirm clicked")
         const deleteForm = document.getElementById('deleteForm_{{ forloop.counter }}');
        
         if (deleteForm) {
@@ -336,7 +351,6 @@ document.addEventListener("DOMContentLoaded", function() {
 
     });
 
-    // Cancel button in modal click event
     const cancelDeleteButton = document.getElementById('discard_data_{{ forloop.counter }}');
     cancelDeleteButton.addEventListener('click', function() {
         $('#deleteStreamingEventModal_{{ forloop.counter }}').modal('hide');
@@ -351,13 +365,11 @@ document.addEventListener("DOMContentLoaded", function() {
 
         const form = document.querySelector('form[action*="start_stream"]#start_stream_form_{{ forloop.counter }}');
         
-        // Create a hidden input to store the additional data
         const hiddenInput = document.createElement('input');
         hiddenInput.type = 'hidden';
         hiddenInput.name = 'additional_data';
         hiddenInput.value = additionalDataValue;
 
-        // Append the hidden input to the form
         form.appendChild(hiddenInput);
 
         if (form) {
@@ -376,9 +388,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-   
     const socket = new WebSocket('wss://' + window.location.host + '/ws/buffer_health/');
-
     socket.onmessage = function(e) {
         const data = JSON.parse(e.data);
         document.getElementById('buffer-health_{{ forloop.counter }}').innerText = data.message.buffer_duration;
@@ -395,15 +405,101 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 <script>
-    // JavaScript to submit the form when the image is clicked
+
     document.querySelector('.img-clickable').addEventListener('click', function() {
         document.getElementById('deleteForm_{{ forloop.counter }}').submit();
     });
 </script>
 
+
 {% endfor %}
 
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        document.body.addEventListener('click', function (event) {
+            const button = event.target.closest('button[id^="delivering_action_"]');
+            if (!button) return;
+    
+            event.preventDefault();
+    
+            // Retrieve the event ID from the button's data attribute
+            const eventId = button.getAttribute('data-event-id');
+            if (!eventId) {
+                console.error("Event ID not found on the button.");
+                return;
+            }
+    
+            const isBuffering = button.innerText === "Buffering...";
+    
+            const isActivated = button.getAttribute('data-activated') === "yes";
 
+            if (!isActivated) {
+                if (isBuffering) {
+                    $('#confirmStreamStartModal').modal('show');
+        
+                    $('#confirmStreamStartModal').on('shown.bs.modal', function () {
+                        const confirmButton = document.getElementById('confirmStartStream');
+        
+                        if (confirmButton) {
+                            confirmButton.onclick = function () {
+                                const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
+                                
+                                if (confirmInput) {
+                                    confirmInput.value = "1";
+                                    const form = document.querySelector(`form[data-event-id="${eventId}"]`);
+                                    form.submit();
+                                } else {
+                                    console.error(`Hidden input for event ID ${eventId} not found.`);
+                                }
+                            };
+                        } else {
+                            console.error("Confirm button in the modal not found.");
+                        }
+                    });
+                } else {
+                    const form = document.getElementById(`start_stream_form_${eventId}`);
+                    if (form) {
+                        form.submit();
+                    } else {
+                        console.error(`Form with ID start_stream_form_${eventId} not found.`);
+                    }
+                }
+            }
+        });
+    });
+</script>
+
+<script>
+    function checkSeActive(url, eventId) {
+        $.ajax({
+            url: url,
+            type: 'GET',
+            success: function(response) {
+                if (response.is_filled === true) {
+                    const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
+                    
+                    if (confirmInput) {
+                        confirmInput.value = "1";
+                        const form = document.querySelector(`form[data-event-id="${eventId}"]`);
+                        if (form) {
+                            form.submit();
+                        } else {
+                            console.error(`Form with data-event-id="${eventId}" not found.`);
+                        }
+                    } else {
+                        console.error(`Hidden input for event ID ${eventId} not found.`);
+                    }
+
+                    stopCheckSeActiveInterval();
+                    localStorage.removeItem(`checkSeActive_${eventId}`);
+                }
+            },
+            error: function(error) {
+                console.error('Error checking streaming event status:', error);
+            }
+        });
+    }
+</script>
 
 {% endblock %}
 

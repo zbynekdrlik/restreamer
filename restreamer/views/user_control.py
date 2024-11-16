@@ -22,6 +22,12 @@ from restreamer.video_data import VideoDataManager
 from ..forms import EndPointForm, StreamingEventForm
 from ..models import ChunkRecord, EndPointCfg, StreamingEvent
 from .instances import InstanceManager as IM
+from restreamer.video_data import VideoDataManager
+
+from accounts.models import RestreamerUser
+
+from django.http import JsonResponse
+
 
 log = logging.getLogger(__name__)
 
@@ -162,10 +168,14 @@ class SetupStream(View):
 class StartEndStream(View):
    
     def post(self, request, *args, **kwargs):
+        
+        data = request.POST
+        
         streaming_event = StreamingEvent.objects.get(id=self.kwargs['id'])
         video_manager = VideoDataManager(streaming_event=streaming_event.id)
         buffer_time = streaming_event.buffer
         user_id = request.user.id
+        
         
         if streaming_event.delivering_activated:
             streaming_event.delivering_activated=False
@@ -184,11 +194,9 @@ class StartEndStream(View):
 
         if not streaming_event.delivering_activated:
             
-            if video_manager.is_buffer_filled(buffer_time):
-                print("bufer is filed -------------------------------------")
+            if video_manager.is_buffer_filled(buffer_time) or data.get('confirm_start') == '1':
                 streaming_event.delivering_activated=True
                 streaming_event.save()
-                
                 user_id = self.request.user.id
                   
                 try:
@@ -375,3 +383,5 @@ def user_history(request, user_id):
         'users_history': users_history,
     }
     return render(request, 'restreamer/user_history.html', context)
+
+

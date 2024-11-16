@@ -9,6 +9,7 @@ from restreamer.views.user_control import (CreateStreamView, DeleteChunkData,
                                            StreamingEventDetailView, RemoveStreamingEvent,
                                            RemoveEndpoint, AddEndpoint, StreamSchedulerView, user_history)
 from restreamer.views.youtube import GoLiveYt, YtLivePage
+from restreamer.views.stream_management import IsDeliveringActive
 
 app_name = 'control'
 
@@ -27,8 +28,8 @@ urlpatterns = [
     path('add-endpoint/<int:streaming_event_id>/', AddEndpoint.as_view(), name='add_endpoint'),
     path('stream-scheduler/', StreamSchedulerView.as_view(), name='stream-scheduler'),
     path('user/<int:user_id>/history/', user_history, name='user_history'),
-    
 
+    path('<int:streaming_event_id>/streaming_event_active/', IsDeliveringActive.as_view(), name='streaming_event_active'),
 ]
 
 if settings.DEBUG:
