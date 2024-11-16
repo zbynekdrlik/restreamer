@@ -1,34 +1,40 @@
 from django.conf import settings
 from django.conf.urls.static import static
 from django.urls import path
-from restreamer.views.restreamer import StreamingEventView
-from restreamer.views.user_control import (CreateStreamView, DeleteChunkData,
+
+from restreamer.views.user_control import (DeleteChunkData,
                                            DownloadPageView,
                                            DownloadRestreamer, SetupStream,
                                            StartEndStream,
-                                           StreamingEventDetailView, RemoveStreamingEvent,
+                                           RemoveStreamingEvent,
                                            RemoveEndpoint, AddEndpoint, StreamSchedulerView, user_history)
 from restreamer.views.youtube import GoLiveYt, YtLivePage
+from restreamer.views.streaming_event import StreamingEventView, CreateStreamView, StreamingEventDetailView, StreamingEventEdit
 
 app_name = 'control'
 
 urlpatterns = [
     path('home/', StreamingEventView.as_view(), name='home'),
-    path('create-stream/', CreateStreamView.as_view(), name='create_stream'),
     path('streaming_event-detail/<int:id>/', StreamingEventDetailView.as_view(), name='streaming_event_detail'),
-    path('restreamer-download', DownloadRestreamer.as_view(), name='download_zip'),
+    path('create-stream/', CreateStreamView.as_view(), name='streaming_event_create'),
+    path('<int:streaming_event_id>/edit/', StreamingEventEdit.as_view(), name='streaming_event_edit'),
+
     path('downloads/', DownloadPageView.as_view(), name='downloads'),
+    path('restreamer-download', DownloadRestreamer.as_view(), name='download_zip'),
+
     path('setup_stream/<int:id>/', SetupStream.as_view(), name='setup_stream'),
     path('start_stream/<int:id>/', StartEndStream.as_view(), name='start_stream'),
     path('go_live/', YtLivePage.as_view(), name='go_live'),
+
     path('delete_data/', DeleteChunkData.as_view(), name='delete_chunk_data'),
     path('remove-streaming-event/<int:id>/', RemoveStreamingEvent.as_view(), name='remove_streaming_event'),
     path('remove-endpoint/<int:streaming_event_id>/<int:endpoint_id>/', RemoveEndpoint.as_view(), name='remove_endpoint'),
     path('add-endpoint/<int:streaming_event_id>/', AddEndpoint.as_view(), name='add_endpoint'),
+
     path('stream-scheduler/', StreamSchedulerView.as_view(), name='stream-scheduler'),
+
     path('user/<int:user_id>/history/', user_history, name='user_history'),
     
-
 ]
 
 if settings.DEBUG:
