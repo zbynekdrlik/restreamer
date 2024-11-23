@@ -1,3 +1,5 @@
+import logging
+
 from accounts.models import RestreamerUser
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -15,11 +17,18 @@ from restreamer.serializers import (BufferHealthSerializer,
                                     StreamingEventSerializer)
 from restreamer.video_data import VideoDataManager
 from restreamer.views.instances import InstanceManager
+from services.utils import get_client_ip
+
+log = logging.getLogger(__name__)
 
 
 class GetActiveStream(APIView):
     def get(self, request):
         user_id = request.GET.get('user_uuid')
+        ip_address = get_client_ip(request)
+        
+        log.info(f'user ip addres is {ip_address}')                                                                                                                       
+
         if not user_id:
             return Response({'error': 'user id parameter is required'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -84,4 +93,3 @@ class DeliveringReady(View):
             'buffer_filled': buffer_filled,
             'live': live
         })
-    

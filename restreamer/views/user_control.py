@@ -1,8 +1,11 @@
+import json
 import logging
 import os
 import zipfile
 
+from accounts.models import RestreamerUser
 from django.conf import settings
+from django.contrib import messages
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
@@ -12,6 +15,15 @@ from django.shortcuts import (get_object_or_404, redirect,
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.generic import TemplateView
+from restreamer.data_sending import ChunkSender
+from restreamer.tasks import init_stream, end_stream
+from restreamer.scheduler import schedule_init_stream
+
+from ..forms import EndPointForm, StreamingEventForm
+from ..models import EndPointCfg, StreamingEvent, ChunkRecord
+from .delivering import DeliveringManger
+from .instances import InstanceManager as IM
+from restreamer.video_data import VideoDataManager
 
 from accounts.models import RestreamerUser
 
@@ -22,9 +34,6 @@ from restreamer.video_data import VideoDataManager
 from ..forms import EndPointForm, StreamingEventForm
 from ..models import ChunkRecord, EndPointCfg, StreamingEvent
 from .instances import InstanceManager as IM
-from restreamer.video_data import VideoDataManager
-
-from accounts.models import RestreamerUser
 
 from django.http import JsonResponse
 
@@ -58,7 +67,6 @@ class DownloadRestreamer(View):
         response = FileResponse(open(modified_zip_path, 'rb'), content_type='application/zip')
         response['Content-Disposition'] = 'attachment; filename=restreamer.zip'
         return response
-
 
 
 @method_decorator(login_required, name='dispatch')
@@ -100,18 +108,11 @@ class StartEndStream(View):
         if streaming_event.delivering_activated:
             streaming_event.delivering_activated=False
             streaming_event.save()
-
-            try:
-                end_stream(user_id, streaming_event)
-            except Exception as e:
-                messages.error(request, f"There was a problem ending your streams {e}")
-
-            messages.success(request, f"Streams ended")
+            
+            end_stream(user_id, streaming_event)
             delete_instance_schedule(user_id)
-            
             return redirect('control:home')
-            
-
+        
         if not streaming_event.delivering_activated:
             
             if video_manager.is_buffer_filled(buffer_time) or data.get('confirm_start') == '1':
@@ -119,11 +120,12 @@ class StartEndStream(View):
                 streaming_event.save()
                 user_id = self.request.user.id
                   
+                    
                 try:
                     init_stream.delay(user_id, streaming_event.id)
                 except Exception as e:
                     messages.error(request, f"There was a problem initialize streams {e}")
-                
+               
             messages.success(request, 'Streams initialized successfuly')
             return redirect('control:home')
 
@@ -252,6 +254,7 @@ class StreamSchedulerView(View):
            
            return redirect('control:stream-scheduler')
 
+@method_decorator(login_required, name='dispatch') 
 @method_decorator(login_required, name='dispatch') 
 def user_history(request, user_id):
     user = RestreamerUser.objects.get(id=user_id)

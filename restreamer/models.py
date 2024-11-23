@@ -117,7 +117,7 @@ class StreamingEvent(models.Model):
 
 
 class ChunkRecord(models.Model):
-    streaming_event = models.ForeignKey(StreamingEvent, on_delete=models.CASCADE)
+    streaming_event = models.ForeignKey(StreamingEvent, on_delete=models.CASCADE, related_name='chunks')
     chunk_file = models.FileField(upload_to=chunk_directory_path)
     # data = models.BinaryField(default=b'', verbose_name='Chunk of data from input stream')
     data_size = models.IntegerField()

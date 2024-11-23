@@ -7,6 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from django.core.management.base import BaseCommand
 from restreamer.models import ChunkRecord, StreamingEvent
 from restreamer.views.delivering import DeliveringManger
+from restreamer.views.instances import InstanceManager
+from django_celery_beat.models import PeriodicTask, IntervalSchedule
 from restreamer.video_data import VideoDataManager
 from django.conf import settings
 from restreamer.video_data import VideoDataManager
