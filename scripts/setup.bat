@@ -7,7 +7,21 @@ REM Run the PowerShell commands as an administrator by calling the secondary scr
 powershell -Command "Start-Process cmd.exe -ArgumentList '/c call \"%ScriptDir%executionpolicy.bat\"' -Verb RunAs"
 
 rem Set the working directory to the main project directory
-cd ..\..\
+
+cd ..\
+
+REM Initialize Git repository and add origin
+if not exist .git (
+    echo Initializing Git repository...
+    git init
+    git remote add origin https://github.com/kuskryptus/restreamer-local.git
+    git fetch origin
+    git checkout -b development origin/development
+) else (
+    echo Git repository already exists. Skipping initialization.
+)
+
+cd ..\
 
 rem Create a virtual environment
 python -m venv venv

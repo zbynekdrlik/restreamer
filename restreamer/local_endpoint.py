@@ -19,8 +19,8 @@ class ChunkSender:
     def __init__(self, streaming_event_id):
         self.stored_position = 0
         self.streaming_event_id = streaming_event_id
-        self.api_url = f"https://restreamer.solarnyexprex.eu/chunk-upload/"
-        self.check_chunk_url = f"https://restreamer.solarnyexprex.eu/api/check-chunk/"
+        self.api_url = f"https://restreamer.newlevel.media/chunk-upload/"
+        self.check_chunk_url = f"https://restreamer.newlevel.media/api/check-chunk/"
 
     def get_last_chunk_position(self):
         try:
