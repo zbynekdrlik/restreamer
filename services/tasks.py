@@ -12,7 +12,7 @@ log = logging.getLogger("services")
 
 @app.task(name='services.tasks.check_stream_status')
 def check_stream_status():
-    url = "https://restreamer.solarnyexprex.eu/api/get_active_stream/"
+    url = "https://restreamer.newlevel.media/api/get_active_stream/"
     user = ClientProfile.objects.first()
     streaming_event = StreamingEvent.objects.first()
     user_uuid = user.user_id
@@ -68,7 +68,7 @@ def check_stream_status():
 
 @app.task(name='services.tasks.get_buffer_duration')
 def get_buffer_duration():
-    url = "https://restreamer.solarnyexprex.eu/api/get_buffer_health/"
+    url = "https://restreamer.newlevel.media/api/get_buffer_health/"
     streaming_event = StreamingEvent.objects.first()
     se_id = streaming_event.identifier
 
