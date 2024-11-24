@@ -9,15 +9,34 @@ import psutil
 import pystray
 from PIL import Image
 from pystray import MenuItem as item
+from services.utils import delete_local_chunks, get_buffer_time
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ICONS_DIR = BASE_DIR / "static" / "icons"
+
+E_LOG_FILE_DIR = BASE_DIR / "scripts" / "services_logs" / 'endpoint_service.txt'
+I_LOG_FILE_DIR = BASE_DIR / "scripts" / "services_logs" / 'inpoint_service.txt'
+
 log = logging.getLogger(__name__)
 
 
 class TrayIcon:
     def __init__(self, redis_client):
         self.redis_client = redis_client
+
+    def open_log_file(self, service):
+        if service == 'endpoint':
+            if os.path.exists(E_LOG_FILE_DIR):
+                # Use subprocess to open the log file
+                subprocess.Popen(['notepad.exe', str(E_LOG_FILE_DIR)])
+            else:
+                log.info(f"Log file does not exist: {E_LOG_FILE_DIR}")
+        else:
+            if os.path.exists(I_LOG_FILE_DIR):
+                # Use subprocess to open the log file
+                subprocess.Popen(['notepad.exe', str(I_LOG_FILE_DIR)])
+            else:
+                log.info(f"Log file does not exist: {I_LOG_FILE_DIR}")
 
     @staticmethod
     def tray_icon_actions(action):
@@ -27,6 +46,7 @@ class TrayIcon:
 
     @staticmethod
     def update_endpoint_icon(icon_state, icon):
+
         if icon_state == "endpoint_active":
             image = Image.open(ICONS_DIR / 'green_e.png')
             icon.title = "Endpoint Active"
@@ -59,32 +79,36 @@ class TrayIcon:
             service = psutil.win_service_get('endpoint_service')
             status = service.as_dict().get('status')
 
+            menu_items = []
+        
+            # Add "start" or "restart" based on the service status
             if status != 'running':
-                try:
-                    icon.menu = pystray.Menu(pystray.MenuItem(text="start",
-                                                              action=lambda: self.tray_icon_actions(
-                                                                  'start_endpoint'),
-                                                              default=True))
-                except Exception as e:
-                    log.info(e)
+                menu_items.append(pystray.MenuItem(text="Start",
+                                                action=lambda: self.tray_icon_actions('start_endpoint')))
             else:
-                try:
-                    icon.menu = pystray.Menu(pystray.MenuItem(text="restart",
-                                                              action=lambda: self.tray_icon_actions(
-                                                                  'restart_endpoint'),
-                                                              default=True))
-                except Exception as e:
-                    log.info(e)
+                menu_items.append(pystray.MenuItem(text="Restart",
+                                                action=lambda: self.tray_icon_actions('restart_endpoint')))
+            
+            menu_items.append(pystray.MenuItem(text="Log File",
+                                            action=lambda: self.open_log_file('endpoint')))
+            
+            # Update the menu with all items
+            icon.menu = pystray.Menu(*menu_items)
+
 
     def run_endpoint_icon(self):
+
         self.redis_client.delete('inpoint_icon_status', 'inpoint_icon_status')
         icon = pystray.Icon("endpoint")
         icon.icon = Image.open(ICONS_DIR / "red_e.png")  # Initial red icon
         endpoint_icon_thread = threading.Thread(target=self.monitor_endpoint_redis_queue, args=(icon,))
         endpoint_icon_thread.start()
+        
         time.sleep(2)
+
         icon.run_detached()
 
+    
     def update_inpoint_icon(self, icon_state, icon):
         if icon_state == "inpoint_active":
             image = Image.open(ICONS_DIR / "green_I.png")
@@ -118,20 +142,28 @@ class TrayIcon:
             service = psutil.win_service_get('inpoint_service')
             status = service.as_dict().get('status')
 
+            buffer_time = get_buffer_time()
+
+            menu_items = [
+                item(text=f"Time in buffer: {buffer_time}", action=None)
+            ]
+
             if status != 'running':
-                try:
-                    icon.menu = pystray.Menu(pystray.MenuItem(text="start",
-                                                              action=lambda: self.tray_icon_actions('start_inpoint'),
-                                                              default=True))
-                except Exception as e:
-                    log.info(e)
+                menu_items.append(pystray.MenuItem(text="Start",
+                                                action=lambda: self.tray_icon_actions('start_inpoint')))
             else:
-                try:
-                    icon.menu = pystray.Menu(pystray.MenuItem(text="restart",
-                                                              action=lambda: self.tray_icon_actions('restart_inpoint'),
-                                                              default=True))
-                except Exception as e:
-                    log.info(e)
+                menu_items.append(pystray.MenuItem(text="Restart",
+                                                action=lambda: self.tray_icon_actions('restart_inpoint')))
+
+            # Always add the "Log File" option for inpoint
+            menu_items.append(pystray.MenuItem(text="Log File",
+                                            action=lambda: self.open_log_file('inpoint')))
+            
+            menu_items.append(pystray.MenuItem(text="Delete Chunks",
+                                            action=lambda: delete_local_chunks()))
+
+            # Update the menu with all items
+            icon.menu = pystray.Menu(*menu_items)
 
     def run_inpoint_icon(self):
         self.redis_client.delete('endpoint_icon_status', 'inpoint_icon_status')
