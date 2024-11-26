@@ -17,6 +17,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from decouple import config
 
+import sentry_sdk
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -106,6 +108,10 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+
+sentry_sdk.init(
+    dsn="https://8c71a1a23d7b4b55298a353768d5860d@o4508366433026048.ingest.de.sentry.io/4508366469529680",
+)
 
 # Internationalization
 # https://docs.djangoproject.com/en/5.0/topics/i18n/
