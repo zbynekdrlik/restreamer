@@ -70,12 +70,12 @@ cscript.exe "%ScriptDir%run_trayicon.vbs"
 
 @echo off
 move "%ScriptDir%run_trayicon.vbs" "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+move "%ScriptDir%check_update.vbs" "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 echo File moved to startup folder
 
 python manage.py runserver 8571 
 
 Read-Host "Press Enter to exit"
-
 
 pause
 

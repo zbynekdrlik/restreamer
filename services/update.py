@@ -1,8 +1,14 @@
+import ctypes
+import logging
 import subprocess
-import time
 import threading
-from pystray import Icon, MenuItem, Menu
+import time
+from pathlib import Path
+
 from PIL import Image, ImageDraw
+from pystray import Icon, Menu, MenuItem
+
+log = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -26,15 +32,21 @@ def check_updates():
 
 # Function to trigger the update process
 def run_update():
-    if UPDATE_SCRIPT.exists():  # Ensure the script exists
-        subprocess.call([str(UPDATE_SCRIPT)])  # Run the update.bat file
+    if UPDATE_SCRIPT.exists():
+        # Run the update.bat file with admin privileges
+        try:
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", str(UPDATE_SCRIPT), None, None, 1
+            )
+        except Exception as e:
+            log.info(f"Failed to run update script: {e}")
     else:
-        print(f"Update script not found at {UPDATE_SCRIPT}")
+        log.info(f"Update script not found at {UPDATE_SCRIPT}")
 
 # Function triggered when the "Update Available" menu item is clicked
 def on_click_update(icon, item):
-    icon.stop()  # Close the tray icon
-    run_update()  # Trigger the update process
+    icon.stop()
+    run_update()
 
 # Function to display the tray icon
 def tray_icon():
@@ -54,6 +66,6 @@ def tray_icon():
 def monitor_updates():
     while True:
         if check_updates():
-            tray_icon()  # Show tray icon when updates are detected
+            tray_icon()
             break
-        time.sleep(300)  # Check every 5 minutes
+        time.sleep(10)
