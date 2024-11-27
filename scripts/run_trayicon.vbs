@@ -1,5 +1,5 @@
 Set objShell = CreateObject("WScript.Shell")
-strScriptPath = "%USERPROFILE%\Desktop\restreamer\local_client\restreamer-local-client\scripts\start_trayicon_service.ps1"
+strScriptPath = "%USERPROFILE%\Desktop\restreamer\local_client\scripts\start_trayicon_service.ps1"
 
 ' Unblock the PowerShell script
 strUnblockCommand = "powershell.exe -Command Unblock-File -Path """ & strScriptPath & """"

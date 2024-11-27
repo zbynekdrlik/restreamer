@@ -22,7 +22,7 @@ call venv\Scripts\activate
 
 
 REM Navigate to the restreamer-local-client directory
-cd restreamer-local-client
+cd 'local_client'
 echo Navigated to: %cd%
 
 echo Installing dependencies...

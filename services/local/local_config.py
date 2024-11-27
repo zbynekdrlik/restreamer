@@ -3,7 +3,7 @@ import os
 
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'restreamer-local-client.nl_restreamer.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'local_client.nl_restreamer.settings')
 
 import django
 django.setup()
