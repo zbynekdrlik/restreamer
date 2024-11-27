@@ -15,6 +15,8 @@ if not exist .git (
     echo Initializing Git repository...
     git init
     git remote add origin https://github.com/kuskryptus/restreamer-local.git
+    git add .
+    git commit -m "Initial commit with local files"
     git fetch origin
     git checkout -b integration origin/integration
 ) else (
@@ -31,7 +33,7 @@ call venv\Scripts\activate
 
 echo Current Directory: %cd%
 
-cd restreamer-local-client
+cd local_client
 
 echo Current Directory: %cd%
 
