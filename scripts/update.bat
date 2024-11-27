@@ -10,7 +10,7 @@ echo Navigated to: %cd%
 
 
 echo Pulling latest changes...
-git pull origin development
+git pull origin integration
 
 REM Navigate two directories up
 cd ..\

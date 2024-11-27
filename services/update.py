@@ -20,11 +20,11 @@ UPDATE_SCRIPT = BASE_DIR / "scripts" / "update.bat"
 def check_updates():
     try:
         remote_commit = subprocess.check_output(
-            "git ls-remote origin development | findstr /B /C:\"refs/heads/development\"",
+            "git ls-remote origin integration | findstr /B /C:\"refs/heads/integration\"",
             shell=True,
         ).decode().strip().split()[0]
         local_commit = subprocess.check_output(
-            "git rev-parse development", shell=True
+            "git rev-parse integration", shell=True
         ).decode().strip()
         return remote_commit != local_commit
     except subprocess.CalledProcessError:
