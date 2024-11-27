@@ -96,4 +96,4 @@ def monitor_updates():
         if check_updates():
             tray_icon()
             break
-        time.sleep(10)
+        time.sleep(10000)
