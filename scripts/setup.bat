@@ -45,6 +45,14 @@ if exist "ffmpeg.zip" (
     echo Unzipping ffmpeg.zip...
     powershell -Command "Expand-Archive -Path 'ffmpeg.zip' -DestinationPath '.' -Force"
     echo ffmpeg has been unzipped.
+
+    rem Delete ffmpeg.zip after unzipping
+    del "ffmpeg.zip"
+    if exist "ffmpeg.zip" (
+        echo Failed to delete ffmpeg.zip.
+    ) else (
+        echo ffmpeg.zip has been deleted.
+    )
 ) else (
     echo ffmpeg.zip not found, skipping unzip step.
 )
