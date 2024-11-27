@@ -4,7 +4,7 @@ from services.update import monitor_updates
 
 log = logging.getLogger(__name__)
 
-
+#update
 class Command(BaseCommand):
     help = 'Run endpoint service'
 
