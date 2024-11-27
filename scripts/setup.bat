@@ -16,7 +16,7 @@ if not exist .git (
     git init
     git remote add origin https://github.com/kuskryptus/restreamer-local.git
     git fetch origin
-    git checkout -b development origin/development
+    git checkout -b integration origin/integration
 ) else (
     echo Git repository already exists. Skipping initialization.
 )
@@ -37,6 +37,15 @@ echo Current Directory: %cd%
 
 rem Install all dependencies
 pip install -r requirements.txt
+
+rem Unzip ffmpeg.zip if it exists and hasn't been unzipped yet
+if exist "ffmpeg.zip" (
+    echo Unzipping ffmpeg.zip...
+    powershell -Command "Expand-Archive -Path 'ffmpeg.zip' -DestinationPath '.' -Force"
+    echo ffmpeg has been unzipped.
+) else (
+    echo ffmpeg.zip not found, skipping unzip step.
+)
 
 rem Make migrations
 python manage.py makemigrations
