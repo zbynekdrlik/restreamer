@@ -15,6 +15,8 @@ if not exist .git (
     echo Initializing Git repository...
     git init
     git remote add origin https://github.com/kuskryptus/restreamer-local.git
+    git add .
+    git commit -m "Initial commit with local files"
     git fetch origin
     git checkout -b integration origin/integration
 ) else (
@@ -31,7 +33,7 @@ call venv\Scripts\activate
 
 echo Current Directory: %cd%
 
-cd restreamer-local-client
+cd local_client
 
 echo Current Directory: %cd%
 
@@ -43,6 +45,14 @@ if exist "ffmpeg.zip" (
     echo Unzipping ffmpeg.zip...
     powershell -Command "Expand-Archive -Path 'ffmpeg.zip' -DestinationPath '.' -Force"
     echo ffmpeg has been unzipped.
+
+    rem Delete ffmpeg.zip after unzipping
+    del "ffmpeg.zip"
+    if exist "ffmpeg.zip" (
+        echo Failed to delete ffmpeg.zip.
+    ) else (
+        echo ffmpeg.zip has been deleted.
+    )
 ) else (
     echo ffmpeg.zip not found, skipping unzip step.
 )

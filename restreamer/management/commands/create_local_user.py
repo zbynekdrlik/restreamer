@@ -13,7 +13,7 @@ class Command(BaseCommand):
     help = 'Create new stream manager'
 
     def handle(self, *args, **options):
-        base_dir = settings.BASE_DIR.parent
+        base_dir = settings.BASE_DIR
         conf_dir = os.path.dirname(base_dir)
         log.info(conf_dir)
         conf_file = os.path.join(conf_dir, 'config.txt')
