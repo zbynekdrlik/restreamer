@@ -19,16 +19,44 @@ UPDATE_SCRIPT = BASE_DIR / "scripts" / "update.bat"
 # Function to check for updates
 def check_updates():
     try:
-        remote_commit = subprocess.check_output(
-            "git ls-remote origin integration | findstr /B /C:\"refs/heads/integration\"",
+        # Fetch remote commits for the 'integration' branch
+        log.info("Fetching remote commit...")
+        remote_commit_output = subprocess.check_output(
+            "git ls-remote origin integration",
             shell=True,
-        ).decode().strip().split()[0]
-        local_commit = subprocess.check_output(
-            "git rev-parse integration", shell=True
         ).decode().strip()
-        return remote_commit != local_commit
-    except subprocess.CalledProcessError:
+        
+        if not remote_commit_output:
+            log.error("No output from 'git ls-remote'. Is the branch 'integration' present on the remote?")
+            return False
+
+        remote_commit = remote_commit_output.split()[0]
+        log.info(f"Remote commit hash: {remote_commit}")
+
+        # Fetch the local commit hash
+        log.info("Fetching local commit...")
+        local_commit_output = subprocess.check_output(
+            "git rev-parse integration",
+            shell=True,
+        ).decode().strip()
+        
+        local_commit = local_commit_output
+        log.info(f"Local commit hash: {local_commit}")
+
+        # Compare commits
+        is_different = remote_commit != local_commit
+        log.info(f"Commits are different: {is_different}")
+        return is_different
+
+    except subprocess.CalledProcessError as e:
+        # Log detailed error information
+        log.error("Command failed with error:")
+        log.error(f"Return code: {e.returncode}")
+        log.error(f"Command: {e.cmd}")
+        log.error(f"Output: {e.output.decode() if e.output else 'No output'}")
+        log.error(f"Stderr: {e.stderr.decode() if e.stderr else 'No stderr'}")
         return False
+
 
 # Function to trigger the update process
 def run_update():
