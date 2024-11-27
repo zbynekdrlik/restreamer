@@ -10,6 +10,7 @@ echo Navigated to: %cd%
 
 
 echo Pulling latest changes...
+git fetch origin
 git reset --hard origin/integration
 
 REM Navigate two directories up
