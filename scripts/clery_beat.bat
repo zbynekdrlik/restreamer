@@ -4,6 +4,6 @@ cd ..\..\
 
 call venv\Scripts\activate
 
-cd restreamer-local-client
+cd local_client
 
 celery -A nl_restreamer beat -l debug
