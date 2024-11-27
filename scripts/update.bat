@@ -10,7 +10,7 @@ echo Navigated to: %cd%
 
 
 echo Pulling latest changes...
-git pull origin integration
+git reset --hard HEAD
 
 REM Navigate two directories up
 cd ..\
@@ -22,7 +22,7 @@ call venv\Scripts\activate
 
 
 REM Navigate to the restreamer-local-client directory
-cd 'local_client'
+cd "local_client"
 echo Navigated to: %cd%
 
 echo Installing dependencies...
