@@ -70,5 +70,3 @@ if %ERRORLEVEL% neq 0 (
     echo Failed to start RedisServer service
     
 )
-
-

@@ -7,7 +7,21 @@ REM Run the PowerShell commands as an administrator by calling the secondary scr
 powershell -Command "Start-Process cmd.exe -ArgumentList '/c call \"%ScriptDir%executionpolicy.bat\"' -Verb RunAs"
 
 rem Set the working directory to the main project directory
-cd ..\..\
+
+cd ..\
+
+REM Initialize Git repository and add origin
+if not exist .git (
+    echo Initializing Git repository...
+    git init
+    git remote add origin https://github.com/kuskryptus/restreamer-local.git
+    git fetch origin
+    git checkout -b integration origin/integration
+) else (
+    echo Git repository already exists. Skipping initialization.
+)
+
+cd ..\
 
 rem Create a virtual environment
 python -m venv venv
@@ -23,6 +37,15 @@ echo Current Directory: %cd%
 
 rem Install all dependencies
 pip install -r requirements.txt
+
+rem Unzip ffmpeg.zip if it exists and hasn't been unzipped yet
+if exist "ffmpeg.zip" (
+    echo Unzipping ffmpeg.zip...
+    powershell -Command "Expand-Archive -Path 'ffmpeg.zip' -DestinationPath '.' -Force"
+    echo ffmpeg has been unzipped.
+) else (
+    echo ffmpeg.zip not found, skipping unzip step.
+)
 
 rem Make migrations
 python manage.py makemigrations
@@ -56,12 +79,12 @@ cscript.exe "%ScriptDir%run_trayicon.vbs"
 
 @echo off
 move "%ScriptDir%run_trayicon.vbs" "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+move "%ScriptDir%check_update.vbs" "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 echo File moved to startup folder
 
 python manage.py runserver 8571 
 
 Read-Host "Press Enter to exit"
-
 
 pause
 
