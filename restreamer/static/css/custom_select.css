@@ -1,31 +1,12 @@
-.custom-select-wrapper-2 {
-    position: relative !important;
-    display: inline-block !important;
-    width: 100% !important;
-    max-width: 400px !important;
-}
-
-.custom-select-2 {
-    width: 100% !important;
-    padding: 10px !important;
-    font-size: 16px !important;
+.select2-container--default .select2-selection--multiple {
     border: 1px solid #ccc !important;
     border-radius: 5px !important;
-    appearance: none !important;
-    -webkit-appearance: none !important;
-    background: #fff url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" fill="gray" height="24" viewBox="0 0 24 24" width="24"><path d="M7 10l5 5 5-5z"/></svg>') no-repeat right 10px center !important;
-    background-size: 15px !important;
-    cursor: pointer !important;
-}
-
-.custom-select-2[multiple] {
     background: #fff !important;
-    height: auto !important;
-    overflow: auto !important;
-}
-
-.custom-select-2:focus {
-    border-color: #007bff !important;
-    box-shadow: 0 0 5px rgba(0, 123, 255, 0.5)  !important;
-    outline: none  !important;
-}
+    padding: 10px !important;
+    font-size: 16px !important;
+  }
+  
+  .select2-container--default .select2-selection--multiple .select2-selection__choice {
+    background-color: #e2e2e2 !important;
+    border: none !important;
+  }
