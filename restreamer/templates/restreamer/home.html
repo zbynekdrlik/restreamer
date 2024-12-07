@@ -56,7 +56,18 @@
                     <div class="col-md-4">
                         {% for endpoint in streaming_event.end_points.all %}
                             <p class="mb-1 d-inline-flex align-items-center gap-1 fw-normal text-dark">
-                                <i class="bi bi-link"></i>{{ endpoint.alias }}
+                                {% if endpoint.service_type == 'YT_HLS' or endpoint.service_type == 'YT_RTMP' %}
+                                    <i class="bi bi-youtube text-danger"></i>
+                                {% elif endpoint.service_type == 'FB' %}
+                                    <i class="bi bi-facebook text-primary"></i>
+                                {% elif endpoint.service_type == 'VIMEO' %}
+                                    <i class="bi bi-vimeo text-info"></i>
+                                {% elif endpoint.service_type == 'INSTAGRAM' %}
+                                    <i class="bi bi-instagram text-warning"></i>
+                                {% else %}
+                                    <i class="bi bi-link text-muted"></i>
+                                {% endif %}
+                                {{ endpoint.alias }}
                             </p>
                         {% empty %}
                             <p class="mb-1 small text-muted d-inline-flex align-items-center gap-1">
