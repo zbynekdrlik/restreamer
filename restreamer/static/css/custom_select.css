@@ -1,20 +1,68 @@
+/* --- Selected Tags Area --- */
 .select2-container--default .select2-selection--multiple {
-    border: 1px solid #ccc;
-    border-radius: 10px;
-    background-color: #f5f5f5;
-    padding: 10px 15px;
-    font-size: 16px;
-    font-weight: 400;
-    color: #666;
-}
-
-.select2-container--default .select2-selection--multiple .select2-selection__choice {
-    background-color: #e0e0e0;
-    border: none;
-    border-radius: 5px;
-    padding: 5px 10px;
-    margin-right: 5px;
-    margin-bottom: 5px;
-    font-size: 14px;
-    color: #333;
-}
+    border: 1px solid #ddd !important;
+    border-radius: 6px !important;
+    background: #fff !important;
+    padding: 0.5rem !important;
+    font-size: 16px !important;
+    color: #333 !important;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.05) !important;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  
+  .select2-container--default .select2-selection--multiple:hover {
+    border-color: #007bff !important;
+  }
+  
+  .select2-container--default.select2-container--focus .select2-selection--multiple {
+    border-color: #007bff !important;
+    box-shadow: 0 0 0 3px rgba(0,123,255,0.15) !important;
+    outline: none !important;
+  }
+  
+  /* Selected tags (choices) */
+  .select2-container--default .select2-selection--multiple .select2-selection__choice {
+    background-color: #f0f0f0 !important;
+    border: none !important;
+    border-radius: 4px !important;
+    margin: 4px 6px 4px 0 !important;
+    padding: 4px 10px !important;
+    font-size: 14px !important;
+    font-weight: 500 !important;
+    color: #333 !important;
+    transition: background-color 0.2s ease;
+  }
+  
+  .select2-container--default .select2-selection--multiple .select2-selection__choice:hover {
+    background-color: #e0e0e0 !important;
+    cursor: pointer !important;
+  }
+  
+  /* --- Dropdown List Styles --- */
+  .select2-container--default .select2-dropdown {
+    background: #fff !important;
+    border: 1px solid #ddd !important;
+    border-radius: 4px !important;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.1) !important;
+  }
+  
+  .select2-container--default .select2-results > .select2-results__options {
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 0.5rem !important;
+  }
+  
+  .select2-container--default .select2-results__option {
+    padding: 8px 12px !important;
+    font-size: 14px !important;
+    font-weight: 400 !important;
+    color: #333 !important;
+    background: transparent !important;
+    transition: background-color 0.2s ease !important;
+  }
+  
+  .select2-container--default .select2-results__option--highlighted {
+    background-color: #f0f0f0 !important;
+    cursor: pointer !important;
+    border-radius: 4px !important;
+  }
