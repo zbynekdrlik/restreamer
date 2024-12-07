@@ -114,7 +114,11 @@
                     </div>
                 </div>
 
-                <form data-event-id="{{ streaming_event.id }}" action="{% url 'control:remove_streaming_event' streaming_event.id %}" method="post" class="position-absolute top-0 end-0 mt-2 me-2">
+                <form data-event-id="{{ streaming_event.id }}" 
+                    data-action="remove_streaming_event"
+                    action="{% url 'control:remove_streaming_event' streaming_event.id %}" 
+                    method="post" 
+                    class="position-absolute top-0 end-0 mt-2 me-2">
                     {% csrf_token %}
                     <button type="button" data-event-id="{{ streaming_event.id }}" class="btn btn-link text-secondary p-0 delete-streaming-event" data-toggle="modal" data-target="#deleteStreamingEventModal_{{ streaming_event.id }}">
                         <i class="bi bi-x-lg"></i>
@@ -345,11 +349,12 @@ document.addEventListener("DOMContentLoaded", function() {
         // Handle "Confirm" button click in the modal
         if (event.target.matches('.confirm-delete-event')) {
             const button = event.target; // The clicked button
-            const eventId = button.getAttribute('data-event-id'); // Get the event ID from data attribute
-            const deleteForm = document.querySelector(`form[data-event-id="${eventId}"]`); // Find the corresponding form
+            const eventId = button.getAttribute('data-event-id'); // Get the event ID from the button
+            // More specific selector: searching for a form with data-event-id and a unique data-action attribute
+            const deleteForm = document.querySelector(`form[data-event-id="${eventId}"][data-action="remove_streaming_event"]`);
     
             if (deleteForm) {
-                deleteForm.submit(); // Submit the form
+                deleteForm.submit(); // Submit the correct form
             }
         }
     });
