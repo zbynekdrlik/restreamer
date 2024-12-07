@@ -20,12 +20,13 @@ app.conf.beat_schedule = {
     "stream_ready": {
         "task": "services.tasks.check_stream_status",
         "schedule": timedelta(seconds=5)
-    },
-    "buffer_health": {
-            "task": "services.tasks.get_buffer_duration",
-            "schedule": timedelta(seconds=7)  # Adjust the interval as needed
-        },
+    }
 }
 
 app.autodiscover_tasks()
+
+# "buffer_health": {
+#             "task": "services.tasks.get_buffer_duration",
+#             "schedule": timedelta(seconds=7)  # Adjust the interval as needed
+#         },
 
