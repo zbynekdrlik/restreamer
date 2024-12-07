@@ -26,16 +26,41 @@
     border: none !important;
     border-radius: 4px !important;
     margin: 4px 6px 4px 0 !important;
-    padding: 4px 10px !important;
+    padding: 4px 10px 4px 10px !important;
     font-size: 14px !important;
     font-weight: 500 !important;
     color: #333 !important;
     transition: background-color 0.2s ease;
+    display: inline-flex !important;
+    align-items: center !important; /* Align text and X icon vertically */
+    text-decoration: none !important; /* Ensure no text line-through */
   }
   
   .select2-container--default .select2-selection--multiple .select2-selection__choice:hover {
     background-color: #e0e0e0 !important;
     cursor: pointer !important;
+  }
+  
+  /* Remove (X) Button Styles */
+  .select2-container--default .select2-selection--multiple .select2-selection__choice__remove {
+    display: inline-block !important;
+    margin-left: 6px !important;
+    width: 16px !important;
+    height: 16px !important;
+    background: #ccc !important;
+    border-radius: 50% !important;
+    font-size: 12px !important;
+    line-height: 16px !important;
+    text-align: center !important;
+    color: #333 !important;
+    font-weight: bold !important;
+    text-decoration: none !important;
+    cursor: pointer !important;
+  }
+  
+  .select2-container--default .select2-selection--multiple .select2-selection__choice__remove:hover {
+    background: #b0b0b0 !important;
+    color: #000 !important;
   }
   
   /* --- Dropdown List Styles --- */
@@ -52,6 +77,25 @@
     padding: 0.5rem !important;
   }
   
+  /* Scrollbar styling (WebKit-based browsers) */
+  .select2-container--default .select2-results__options::-webkit-scrollbar {
+    width: 8px;
+  }
+  
+  .select2-container--default .select2-results__options::-webkit-scrollbar-track {
+    background: #f2f2f2;
+  }
+  
+  .select2-container--default .select2-results__options::-webkit-scrollbar-thumb {
+    background: #ccc;
+    border-radius: 4px;
+  }
+  
+  .select2-container--default .select2-results__options::-webkit-scrollbar-thumb:hover {
+    background: #aaa;
+  }
+  
+  /* Dropdown Options */
   .select2-container--default .select2-results__option {
     padding: 8px 12px !important;
     font-size: 14px !important;
@@ -59,6 +103,7 @@
     color: #333 !important;
     background: transparent !important;
     transition: background-color 0.2s ease !important;
+    border-radius: 4px;
   }
   
   .select2-container--default .select2-results__option--highlighted {
