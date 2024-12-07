@@ -98,23 +98,22 @@
                             {% csrf_token %}
                             <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
                             <button type="submit" id="delete_chunks_{{ forloop.counter }}" 
-                                    class="btn btn-outline-danger px-3 py-2 rounded-pill shadow-sm d-flex align-items-center gap-2">
-                                <i class="bi bi-trash-fill fs-5"></i>
-                                <span>Delete Chunks</span>
+                                    class="btn btn-link text-danger p-0 fw-medium d-inline-flex align-items-center small">
+                                <i class="bi bi-trash-fill me-1 text-danger fs-6"></i>
+                                <span class="text-dark">Delete Chunks</span>
                             </button>
                         </form>
                     </div>
                     <div class="col-md-4 text-center">
-                        <div class="d-flex flex-column align-items-center bg-light py-2 rounded shadow-sm">
-                            <p class="mb-1 text-muted small d-flex align-items-center">
-                                <i class="bi bi-clock-fill me-2 fs-5 text-primary"></i>
-                                <strong class="text-dark">Video Length</strong>
-                            </p>
-                            <span data-event-id="{{ streaming_event.id }}" id="video-length-value" 
-                                  class="badge bg-primary text-white fw-bold px-3 py-2 shadow-sm">
+                        <p class="mb-0 small d-inline-flex align-items-center">
+                            <i class="bi bi-clock-fill text-muted me-1 fs-6"></i>
+                            <strong class="text-dark">Video Length:</strong>
+                            <span data-event-id="{{ streaming_event.id }}" 
+                                  id="video-length-value" 
+                                  class="badge bg-info text-dark fw-medium ms-1">
                                 {{ video_length }}
                             </span>
-                        </div>
+                        </p>
                     </div>
                     <div class="col-md-4 text-end">
                         <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-outline-primary btn-sm rounded-pill d-inline-flex align-items-center small fw-medium px-2 py-0">
