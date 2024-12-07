@@ -156,11 +156,13 @@
                             {% csrf_token %}
                             <div class="modal-body">
                                 <div class="custom-select-container">
-                                    <select id="endpointSelect" name="endpoint" class="custom-select" multiple>
-                                        {% for endpoint in available_endpoints %}
-                                        <option value="{{ endpoint.id }}">{{ endpoint }}</option>
-                                        {% endfor %}
-                                    </select>
+                                    <div class="custom-select-wrapper">
+                                        <select id="endpointSelect" name="endpoint" class="custom-select" multiple>
+                                            {% for endpoint in available_endpoints %}
+                                            <option value="{{ endpoint.id }}">{{ endpoint }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
                                 </div>
                                 <div class="mt-4 flex items-center">
                                     <label for="event-time" class="block text-gray-700 font-semibold mr-4">Video Time:</label>
