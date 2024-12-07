@@ -17,106 +17,96 @@
 </div> -->
 
 
-<div class="container mx-auto p-5 mt-5 mb-5">
+<div class="container my-5">
     <div class="card border-0 shadow-lg">
-        <div class="card-header bg-gray-800 text-green-500 px-4  py-4 rounded-t-lg">
-            <h2 class="card-title text-xl font-mono font-bold mx-1" style="font-family: 'Roboto Condensed', serif;">Streaming Events</h2>
+        <div class="card-header bg-primary text-white p-4">
+            <h2 class="card-title h3 mb-0">Streaming Events</h2>
         </div>
-        <div class="card-body p-4">
-            <div class="row bg-white rounded-md p-2 mb-2 me-1">
-                <div class="col-md-4 my-1">
-                    <p class="font-semibold text-gray-800" style="font-family: 'Roboto Condensed', sans-serif;">Name</p>
-                </div>
-                <div class="col-md-4 my-1">
-                    <p class="font-semibold text-gray-800" style="font-family: 'Roboto Condensed', sans-serif;">Endpoints</p>
-                </div>
-                <div class="col-md-2 my-1 text-center">
-                    <p class="font-semibold text-gray-800" style="font-family: 'Roboto Condensed', sans-serif;">OBS/VMIX</p>
-                </div>
-                <div class="col-md-2 my-1 text-center">
-                    <p class="font-semibold text-gray-800" style="font-family: 'Roboto Condensed', sans-serif;">YT/FB...</p>
+        <div class="card-body p-0">
+            <div class="bg-light p-3 border-bottom">
+                <div class="row">
+                    <div class="col-md-4">
+                        <h6 class="mb-0">Name</h6>
+                    </div>
+                    <div class="col-md-4">
+                        <h6 class="mb-0">Endpoints</h6>
+                    </div>
+                    <div class="col-md-2 text-center">
+                        <h6 class="mb-0">OBS/VMIX</h6>
+                    </div>
+                    <div class="col-md-2 text-center">
+                        <h6 class="mb-0">YT/FB...</h6>
+                    </div>
                 </div>
             </div>
 
             {% for streaming_event in streaming_events %}
-            <div class="card my-2 shadow-sm relative" style="background-color: #e6e6e6c4; border: none;">
-                <div class="card-body">
-                    <div class="row me-2" style="min-height: 100px">
-                        <div class="col-md-4">
-                            <h5 class="card-text text-gray-700" style="font-size: 18px; font-family: 'Roboto Condensed'">{{ streaming_event.short_description }}</h5>
-                        </div>
-                        <div class="col-md-4">
-                            {% for endpoint in streaming_event.end_points.all %}
-                                <p class="text-gray-600" style="font-size: 16px; font-family: 'Roboto Condensed'">{{ endpoint.alias }}</p>
-                            {% empty %}
-                                <p class="text-gray-600" style="font-size: 16px; font-family: 'Roboto Condensed'">No endpoints available</p>
-                            {% endfor %}
-                        </div>
-                        <div class="col-md-2 text-center">
-                            <form id="setup_stream_form_{{ forloop.counter }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
-                                {% csrf_token %}
-                                <button type="button" id="start_stop_{{ forloop.counter }}" data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}" data-event-id="{{ streaming_event.id }}"  class="inline-flex items-center px-3 py-1 font-semibold leading-5 text-xs shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.receiving_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-blue-500 hover:bg-blue-600 text-white' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}' style="font-family:sans-serif;">
-                                    <i class="{{ streaming_event.receiving_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} mr-2"></i>
-                                    {{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}
-                                </button>
-                            </form>
-                        </div>
-                        <div class="col-md-2 text-center">
-                            <form id="start_stream_form_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
-                                {% csrf_token %}
-                                <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start" value="0">
-                                <button type="button" id="delivering_action_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" data-activated="{{ streaming_event.delivering_activated }}" class="inline-flex items-center px-3 py-1 font-semibold leading-6 text-sm shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.delivering_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-blue-500 hover:bg-blue-600 text-white' }}" style="font-family: sans-serif;">
-                                    <i class="{{ streaming_event.delivering_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} mr-2"></i>
-                                    {{ streaming_event.delivering_activated|yesno:'End stream, Start stream' }}
-                                </button>
-                            </form>
-                        </div>
+            <div class="border-bottom p-3 position-relative">
+                <div class="row align-items-center">
+                    <div class="col-md-4">
+                        <h5 class="mb-2 mb-md-0">{{ streaming_event.short_description }}</h5>
                     </div>
-                    <div class="row mt-3">
-                        <div class="col-md-8">
-                            <form id="deleteChunksForm_{{ forloop.counter }}" action="{% url 'control:delete_chunk_data' %}" method="post" class="delete-chunk-form">
-                                {% csrf_token %}
-                                <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
-                                <button type="submit" id="delete_chunks_{{ forloop.counter }}" class="btn btn-link p-0 m-0" style="font-family: 'Roboto Condensed', sans-serif;">
-                                    <i class="fa-solid fa-trash text-red-600 hover:text-red-800 transition duration-150"></i>
-                                </button>
-                            </form>
-                        </div>
-
-                        <div class="col-md-8">
-                            <div>
-                                <p class="text-gray-600 font-semibold">Video Length:</p>
-                                <!-- The JavaScript will dynamically update this value -->
-                                <p class="text-gray-800" data-event-id="{{ streaming_event.id }}" id="video-length-value">{{ video_length }}</p>
-                            </div>
-                        </div>
-                        
-                        <div class="col-md-1" style="margin-left: 2rem;">
-                            <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-sm btn-secondary rounded-lg px-2 py-1 text-sm font-semibold shadow-md hover:bg-blue-700 hover:shadow-lg transition-all duration-300" style="font-family: 'Roboto Condensed', sans-serif;">
-                                <span class="flex items-center">
-                                    <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 9l3 3m0 0l-3 3m3-3H8m13 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                                    </svg>
-                                    Detail
-                                </span>
-                            </a>
-                        </div>
+                    <div class="col-md-4">
+                        {% for endpoint in streaming_event.end_points.all %}
+                            <p class="mb-1 small">{{ endpoint.alias }}</p>
+                        {% empty %}
+                            <p class="mb-1 small text-muted">No endpoints available</p>
+                        {% endfor %}
                     </div>
-                    <form id="deleteForm_{{ forloop.counter }}" action="{% url 'control:remove_streaming_event' streaming_event.id %}" method="post" class="absolute top-0 right-0 mt-2 mr-2">
-                        {% csrf_token %}
-                        <button id="deleteStreamingEvent_{{ forloop.counter }}" type="submit" class="btn btn-link p-0 m-0 text-gray-600 hover:text-gray-800 transition-colors duration-300">
-                            <svg class="w-6 h-6 fill-current" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-                                <path d="M12 10.586l4.95-4.95 1.414 1.414-4.95 4.95 4.95 4.95-1.414 1.414-4.95-4.95-4.95 4.95-1.414-1.414 4.95-4.95-4.95-4.95L7.05 5.636z" />
-                            </svg>
-                        </button>
-                    </form>
+                    <div class="col-md-2 text-center">
+                        <form id="setup_stream_form_{{ forloop.counter }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
+                            {% csrf_token %}
+                            <button type="button" id="start_stop_{{ forloop.counter }}" data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}" data-event-id="{{ streaming_event.id }}" class="btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-danger,btn-primary' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}'>
+                                <i class="{{ streaming_event.receiving_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} me-1"></i>
+                                {{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}
+                            </button>
+                        </form>
+                    </div>
+                    <div class="col-md-2 text-center">
+                        <form id="start_stream_form_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
+                            {% csrf_token %}
+                            <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start" value="0">
+                            <button type="button" id="delivering_action_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" data-activated="{{ streaming_event.delivering_activated }}" class="btn btn-sm {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-success' }}">
+                                <i class="{{ streaming_event.delivering_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} me-1"></i>
+                                {{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}
+                            </button>
+                        </form>
+                    </div>
                 </div>
+                <div class="row mt-3">
+                    <div class="col-md-4">
+                        <form id="deleteChunksForm_{{ forloop.counter }}" action="{% url 'control:delete_chunk_data' %}" method="post" class="delete-chunk-form d-inline-block">
+                            {% csrf_token %}
+                            <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
+                            <button type="submit" id="delete_chunks_{{ forloop.counter }}" class="btn btn-link text-danger p-0">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </form>
+                    </div>
+                    <div class="col-md-4">
+                        <p class="mb-0 small">
+                            <strong>Video Length:</strong>
+                            <span data-event-id="{{ streaming_event.id }}" id="video-length-value">{{ video_length }}</span>
+                        </p>
+                    </div>
+                    <div class="col-md-4 text-end">
+                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-outline-secondary btn-sm">
+                            <i class="fas fa-info-circle me-1"></i> Details
+                        </a>
+                    </div>
+                </div>
+                <form id="deleteForm_{{ forloop.counter }}" action="{% url 'control:remove_streaming_event' streaming_event.id %}" method="post" class="position-absolute top-0 end-0 mt-2 me-2">
+                    {% csrf_token %}
+                    <button id="deleteStreamingEvent_{{ forloop.counter }}" type="submit" class="btn btn-link text-secondary p-0">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </form>
             </div>
-            {% include 'base/modal.html' %}
-
+            {% endfor %}
         </div>
     </div>
- </div>
+</div>
+{% include 'base/modal.html' %}
 <script>
 document.addEventListener("DOMContentLoaded", function() {
     let checkSeActiveInterval;
