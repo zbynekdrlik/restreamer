@@ -157,7 +157,10 @@
                                     <div class="custom-select-wrapper-2">
                                         <select id="endpointSelect" name="endpoint" class="custom-select-2" multiple>
                                             {% for endpoint in available_endpoints %}
-                                            <option value="{{ endpoint.id }}">{{ endpoint }}</option>
+                                            <option value="{{ endpoint.id }}"
+                                            {% if endpoint.id in selected_endpoints_ids %}
+                                                selected="selected"
+                                            {% endif %}>{{ endpoint }}</option>
                                             {% endfor %}
                                         </select>
                                     </div>
