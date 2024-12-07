@@ -25,7 +25,6 @@
             </h2>
             <div class="d-flex align-items-center gap-3 me-3">
                 <i class="bi bi-facebook fs-4"></i>
-                <i class="bi bi-youtube fs-4"></i>
                 <i class="bi bi-twitch fs-4"></i>
             </div>
         </div>
@@ -36,7 +35,7 @@
                         <i class="bi bi-tag-fill"></i><span>Name</span>
                     </div>
                     <div class="col-md-4 d-inline-flex justify-content-center align-items-center gap-1">
-                        <i class="bi bi-hdd-network-fill"></i><span>Endpoints</span>
+                        <i class="bi bi-youtube"></i><span>Endpoints</span>
                     </div>
                     <div class="col-md-2 d-inline-flex justify-content-center align-items-center gap-1">
                         <i class="bi bi-camera-video-fill"></i><span>OBS/VMIX</span>
@@ -96,11 +95,17 @@
                 <!-- Bottom Row: Separated by a subtle divider -->
                 <div class="row align-items-center border-top mt-3 pt-3">
                     <div class="col-md-4">
-                        <form id="deleteChunksForm_{{ forloop.counter }}" action="{% url 'control:delete_chunk_data' %}" method="post" class="delete-chunk-form d-inline-block">
+                        <form id="deleteChunksForm_{{ forloop.counter }}" 
+                              action="{% url 'control:delete_chunk_data' %}" 
+                              method="post" 
+                              class="delete-chunk-form d-inline-block">
                             {% csrf_token %}
                             <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
-                            <button type="submit" id="delete_chunks_{{ forloop.counter }}" class="btn btn-link text-danger p-0 fw-medium d-inline-flex align-items-center small">
-                                <i class="bi bi-trash-fill me-1"></i>Delete Chunks
+                            <button type="submit" 
+                                    id="delete_chunks_{{ forloop.counter }}" 
+                                    class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 border-0 text-danger">
+                                <i class="bi bi-trash me-2"></i>
+                                <span class="small">Delete Chunks</span>
                             </button>
                         </form>
                     </div>
@@ -116,8 +121,10 @@
                         </div>
                     </div>
                     <div class="col-md-4 text-end">
-                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-outline-primary btn-sm rounded-pill d-inline-flex align-items-center small fw-medium px-2 py-0">
-                            <i class="bi bi-arrow-right-short me-1"></i>Details
+                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" 
+                           class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 text-decoration-none">
+                            <span class="text-primary small me-2">Details</span>
+                            <i class="bi bi-chevron-right text-primary"></i>
                         </a>
                     </div>
                 </div>
