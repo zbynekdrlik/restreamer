@@ -22,6 +22,7 @@ class StreamingEventView(View):
         template_name = "restreamer/home.html"
         user = request.user
         streaming_events = StreamingEvent.objects.filter(user=user).order_by("id")
+        video_length = '00:00'
         
         try:
             streaming_event = StreamingEvent.objects.filter(chunks__isnull=False, user=user).first()
@@ -29,7 +30,6 @@ class StreamingEventView(View):
                 video_manager = VideoDataManager(streaming_event=streaming_event.id)
                 video_length = video_manager.get_stream_length
         except StreamingEvent.DoesNotExist:
-            video_length = '00:00'
             pass
 
         context = {
