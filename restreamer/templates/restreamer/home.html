@@ -82,14 +82,14 @@
                                 </button>
                             </form>
                         </div>
-                        
-                        <div class="col-md-2" style="margin-left: 3rem;" >
-                            <div class="d-flex align-items-center">
-                                <i class="fas fa-clock mr-2" style="font-size: 1.2rem; color: #6c757d;"></i>
-                                <p class="mb-0" style="font-family: 'Roboto Condensed', sans-serif; font-size: 0.9rem;">Buffer health</p>
+
+                        <div class="col-md-8">
+                            <div>
+                                <p class="text-gray-600 font-semibold">Video Length:</p>
+                                <p class="text-gray-800" data-event-id="{{ streaming_event.id }}" id="video-length-value"></p>>{{ video_length }}</p>
                             </div>
-                            <div id="buffer-health_{{ forloop.counter }}"></div>
                         </div>
+                        
                         <div class="col-md-1" style="margin-left: 2rem;">
                             <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-sm btn-secondary rounded-lg px-2 py-1 text-sm font-semibold shadow-md hover:bg-blue-700 hover:shadow-lg transition-all duration-300" style="font-family: 'Roboto Condensed', sans-serif;">
                                 <span class="flex items-center">
@@ -385,8 +385,8 @@ document.addEventListener("DOMContentLoaded", function() {
 </script>
 
 
-
-<script>
+<!-- start:: websocets -->
+<!-- <script>
 document.addEventListener('DOMContentLoaded', function() {
     const socket = new WebSocket('wss://' + window.location.host + '/ws/buffer_health/');
     socket.onmessage = function(e) {
@@ -402,10 +402,10 @@ document.addEventListener('DOMContentLoaded', function() {
         console.error('WebSocket closed unexpectedly', e);
     };
 });
-</script>
+</script> -->
+<!-- end:: websocets -->
 
 <script>
-
     document.querySelector('.img-clickable').addEventListener('click', function() {
         document.getElementById('deleteForm_{{ forloop.counter }}').submit();
     });
@@ -503,9 +503,45 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 </script>
 
+
+<!-- begin:: Video length -->
+<script>
+    const videoLengthElem = document.getElementById('video-length-value');
+    // Extract the ID from the data attribute
+    const streamingEventId = videoLengthElem.getAttribute('data-event-id');
+
+    // Function to fetch updated data
+    function updateVideoLength() {
+        fetch(`/video_length_data/${streamingEventId}/`)
+            .then(response => response.json())
+            .then(data => {
+                // Update the DOM element
+                videoLengthElem.textContent = data.video_length;
+            })
+            .catch(error => {
+                console.error('Error fetching video length:', error);
+            });
+    }
+
+    // Poll every 5 seconds
+    setInterval(updateVideoLength, 5000);
+</script>
+<!-- end:: Video length -->
+
+
 {% endblock %}
 
-    
+<!-- NOT USED NOW  -->
+
+<!-- buffer health -->
+
+<!-- <div class="col-md-2" style="margin-left: 3rem;" >
+<div class="d-flex align-items-center">
+    <i class="fas fa-clock mr-2" style="font-size: 1.2rem; color: #6c757d;"></i>
+    <p class="mb-0" style="font-family: 'Roboto Condensed', sans-serif; font-size: 0.9rem;">Buffer health</p>
+</div>
+<div id="buffer-health_{{ forloop.counter }}"></div>
+</div> -->
 
 
 

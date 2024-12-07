@@ -1,7 +1,7 @@
 from channels.generic.websocket import AsyncWebsocketConsumer
 import json
 
-class BufferHealthConsumer(AsyncWebsocketConsumer):
+""" class BufferHealthConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         await self.channel_layer.group_add(
             "buffer_health",
@@ -29,4 +29,4 @@ class BufferHealthConsumer(AsyncWebsocketConsumer):
         message = event["message"]
         await self.send(text_data=json.dumps({
             "message": message
-        }))
+})) """

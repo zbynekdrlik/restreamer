@@ -50,7 +50,7 @@ class GetActiveStream(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class GetBufferHealth(APIView):
+""" class GetBufferHealth(APIView):
     def post(self, request):
         serializer = BufferHealthSerializer(data=request.data)
         if serializer.is_valid():
@@ -70,7 +70,7 @@ class GetBufferHealth(APIView):
             )
 
             return Response({'status': 'success', 'message': 'Buffer health data received'}, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST) """
     
     
 @method_decorator(login_required, name='dispatch')

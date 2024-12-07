@@ -11,6 +11,8 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.views.generic import TemplateView
 
+from django.http import JsonResponse
+
 
 log = logging.getLogger(__name__)
 
@@ -20,11 +22,18 @@ class StreamingEventView(View):
         template_name = "restreamer/home.html"
         user = request.user
         streaming_events = StreamingEvent.objects.filter(user=user).order_by("id")
-
-        print(streaming_events)
+        
+        try:
+            streaming_event = StreamingEvent.objects.get(chunks__isnull=False)
+            video_manager = VideoDataManager(streaming_event=streaming_event.id)
+            video_length = video_manager.get_stream_length
+        except StreamingEvent.DoesNotExist:
+            video_length = '00:00'
+            pass
 
         context = {
             "streaming_events": streaming_events,
+            'video_length': video_length
         }
 
         return render(request, template_name, context)
@@ -123,4 +132,14 @@ class StreamingEventEdit(View):
         streaming_event.buffer = buffer_time
         streaming_event.save()
         return redirect('control:home')
+    
 
+
+class VideoLengthData(View):
+    def post(self, request):
+        
+        streaming_event = StreamingEvent.objects.get(id=id)
+        video_manager = VideoDataManager(streaming_event=streaming_event.id)
+        video_length = video_manager.get_stream_length()
+
+        return JsonResponse({'video_length': video_length})
