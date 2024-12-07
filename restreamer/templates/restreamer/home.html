@@ -86,7 +86,8 @@
                         <div class="col-md-8">
                             <div>
                                 <p class="text-gray-600 font-semibold">Video Length:</p>
-                                <p class="text-gray-800" data-event-id="{{ streaming_event.id }}" id="video-length-value"></p>{{ video_length }}</p>
+                                <!-- The JavaScript will dynamically update this value -->
+                                <p class="text-gray-800" data-event-id="{{ streaming_event.id }}" id="video-length-value">{{ video_length }}</p>
                             </div>
                         </div>
                         
@@ -530,7 +531,7 @@ document.addEventListener('DOMContentLoaded', function() {
             });
     }
 
-    // Poll every 5 seconds
+    // Poll every 10 seconds
     setInterval(updateVideoLength, 10000);
 </script>
 <!-- end:: Video length -->
