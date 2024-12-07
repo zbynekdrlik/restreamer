@@ -57,7 +57,18 @@
                     <div class="col-md-4">
                         {% for endpoint in streaming_event.end_points.all %}
                             <p class="mb-1 d-inline-flex align-items-center gap-1 fw-normal text-dark">
-                                <i class="bi bi-link"></i>{{ endpoint.alias }}
+                                {% if endpoint.service_type == 'YT_HLS' or endpoint.service_type == 'YT_RTMP' %}
+                                    <i class="bi bi-youtube text-danger"></i>
+                                {% elif endpoint.service_type == 'FB' %}
+                                    <i class="bi bi-facebook text-primary"></i>
+                                {% elif endpoint.service_type == 'VIMEO' %}
+                                    <i class="bi bi-vimeo text-info"></i>
+                                {% elif endpoint.service_type == 'INSTAGRAM' %}
+                                    <i class="bi bi-instagram text-warning"></i>
+                                {% else %}
+                                    <i class="bi bi-link text-muted"></i>
+                                {% endif %}
+                                {{ endpoint.alias }}
                             </p>
                         {% empty %}
                             <p class="mb-1 small text-muted d-inline-flex align-items-center gap-1">
@@ -96,11 +107,17 @@
                 <!-- Bottom Row: Separated by a subtle divider -->
                 <div class="row align-items-center border-top mt-3 pt-3">
                     <div class="col-md-4">
-                        <form id="deleteChunksForm_{{ forloop.counter }}" action="{% url 'control:delete_chunk_data' %}" method="post" class="delete-chunk-form d-inline-block">
+                        <form id="deleteChunksForm_{{ forloop.counter }}" 
+                              action="{% url 'control:delete_chunk_data' %}" 
+                              method="post" 
+                              class="delete-chunk-form d-inline-block">
                             {% csrf_token %}
                             <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
-                            <button type="submit" id="delete_chunks_{{ forloop.counter }}" class="btn btn-link text-danger p-0 fw-medium d-inline-flex align-items-center small">
-                                <i class="bi bi-trash-fill me-1"></i>Delete Chunks
+                            <button type="submit" 
+                                    id="delete_chunks_{{ forloop.counter }}" 
+                                    class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 border-0 text-danger">
+                                <i class="bi bi-trash me-2"></i>
+                                <span class="small">Delete Chunks</span>
                             </button>
                         </form>
                     </div>
@@ -116,8 +133,10 @@
                         </div>
                     </div>
                     <div class="col-md-4 text-end">
-                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-outline-primary btn-sm rounded-pill d-inline-flex align-items-center small fw-medium px-2 py-0">
-                            <i class="bi bi-arrow-right-short me-1"></i>Details
+                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" 
+                           class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 text-decoration-none">
+                            <span class="text-primary small me-2">Details</span>
+                            <i class="bi bi-chevron-right text-primary"></i>
                         </a>
                     </div>
                 </div>
