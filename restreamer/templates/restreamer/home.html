@@ -55,7 +55,7 @@
                     </div>
                     <div class="col-md-4">
                         {% for endpoint in streaming_event.end_points.all %}
-                            <p class="mb-1 d-inline-flex align-items-center gap-1 fw-normal text-dark">
+                            <p class="mb-1 d-inline-flex align-items-center gap-1 fw-normal text-dark mx-2">
                                 {% if endpoint.service_type == 'YT_HLS' or endpoint.service_type == 'YT_RTMP' %}
                                     <i class="bi bi-youtube text-danger"></i>
                                 {% elif endpoint.service_type == 'FB' %}
