@@ -104,7 +104,11 @@ class StreamingEventDetailView(View):
         
         selected_endpoints = streaming_event.end_points.all()
         endpoint_form = EndPointForm()
-        all_endpoints = EndPointCfg.objects.filter(user=request.user)
+        available_endpoints = EndPointCfg.objects.filter(
+            user=request.user
+        ).exclude(
+            id__in=selected_endpoints.values_list('id', flat=True)
+        )
         video_manager = VideoDataManager(streaming_event=streaming_event.id)
         
         video_length = video_manager.get_stream_length()
@@ -115,7 +119,7 @@ class StreamingEventDetailView(View):
             'endpoints': selected_endpoints,
             'streaming_event':streaming_event,
             'endpoint_form': endpoint_form,
-            'available_endpoints': all_endpoints,
+            'available_endpoints': available_endpoints,
             'video_length': video_length,
             'buffer': buffer_display,
             }
