@@ -19,38 +19,49 @@
 
 <div class="container my-5">
     <div class="card border-0 shadow-lg overflow-hidden">
-        <div class="card-header bg-gradient-dark text-white p-2">
-            <h2 class="card-title h5 mb-0 d-flex align-items-center">
-                <i class="fas fa-broadcast-tower me-2"></i> Streaming Events
+        <div class="card-header bg-gradient-primary text-white p-3">
+            <h2 class="card-title h4 mb-0 d-flex align-items-center">
+                <i class="fas fa-video me-2"></i> Streaming Events
             </h2>
         </div>
-        <div class="card-body p-0 bg-dark text-light">
-            <div class="bg-secondary p-2 border-bottom">
+        <div class="card-body p-0 bg-light">
+            <div class="bg-white p-3 border-bottom">
                 <div class="row text-center">
                     <div class="col-md-4">
-                        <h6 class="mb-0"><i class="fas fa-tag me-2"></i>Name</h6>
+                        <h6 class="mb-0 text-primary"><i class="fas fa-tag me-2"></i>Name</h6>
                     </div>
                     <div class="col-md-4">
-                        <h6 class="mb-0"><i class="fas fa-server me-2"></i>Endpoints</h6>
+                        <h6 class="mb-0 text-primary"><i class="fas fa-bullseye me-2"></i>Endpoints</h6>
                     </div>
                     <div class="col-md-2">
-                        <h6 class="mb-0"><i class="fas fa-desktop me-2"></i>OBS/VMIX</h6>
+                        <h6 class="mb-0 text-primary"><i class="fas fa-desktop me-2"></i>OBS/VMIX</h6>
                     </div>
                     <div class="col-md-2">
-                        <h6 class="mb-0"><i class="fas fa-share-alt me-2"></i>YT/FB...</h6>
+                        <h6 class="mb-0 text-primary"><i class="fas fa-share-alt me-2"></i>YT/FB...</h6>
                     </div>
                 </div>
             </div>
 
             {% for streaming_event in streaming_events %}
-            <div class="border-bottom border-secondary p-3 position-relative hover-bg-dark transition">
+            <div class="border-bottom p-3 position-relative hover-bg-light transition">
                 <div class="row align-items-center text-center">
                     <div class="col-md-4">
-                        <h5 class="mb-2 mb-md-0 text-info">{{ streaming_event.short_description }}</h5>
+                        <h5 class="mb-2 mb-md-0 text-dark">{{ streaming_event.short_description }}</h5>
                     </div>
                     <div class="col-md-4">
                         {% for endpoint in streaming_event.end_points.all %}
-                            <p class="mb-1 small"><i class="fas fa-link me-1"></i>{{ endpoint.alias }}</p>
+                            <p class="mb-1 small text-muted">
+                                {% if 'youtube' in endpoint.alias|lower %}
+                                    <i class="fab fa-youtube text-danger me-1"></i>
+                                {% elif 'facebook' in endpoint.alias|lower %}
+                                    <i class="fab fa-facebook text-primary me-1"></i>
+                                {% elif 'vimeo' in endpoint.alias|lower %}
+                                    <i class="fab fa-vimeo text-info me-1"></i>
+                                {% else %}
+                                    <i class="fas fa-globe text-success me-1"></i>
+                                {% endif %}
+                                {{ endpoint.alias }}
+                            </p>
                         {% empty %}
                             <p class="mb-1 small text-muted"><i class="fas fa-exclamation-circle me-1"></i>No endpoints available</p>
                         {% endfor %}
@@ -86,14 +97,14 @@
                         </form>
                     </div>
                     <div class="col-md-4 text-center">
-                        <p class="mb-0 small">
+                        <p class="mb-0 small text-muted">
                             <i class="fas fa-clock me-1"></i>
                             <strong>Video Length:</strong>
-                            <span data-event-id="{{ streaming_event.id }}" id="video-length-value" class="badge bg-info text-dark">{{ video_length }}</span>
+                            <span data-event-id="{{ streaming_event.id }}" id="video-length-value" class="badge bg-light text-dark border">{{ video_length }}</span>
                         </p>
                     </div>
                     <div class="col-md-4 text-end">
-                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-outline-info btn-sm rounded-pill">
+                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-outline-primary btn-sm rounded-pill">
                             <i class="fas fa-info-circle me-1"></i> Details
                         </a>
                     </div>
@@ -109,7 +120,6 @@
         </div>
     </div>
 </div>
-
 <script>
 document.addEventListener("DOMContentLoaded", function() {
     let checkSeActiveInterval;
@@ -519,11 +529,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
 {% block css %}
 <style>
-    .bg-gradient-dark {
-        background: linear-gradient(45deg, #1a1a1a, #2c3e50);
+    .bg-gradient-primary {
+        background: linear-gradient(45deg, #4a90e2, #63b3ed);
     }
-    .hover-bg-dark:hover {
-        background-color: rgba(255, 255, 255, 0.05);
+    .hover-bg-light:hover {
+        background-color: rgba(0, 0, 0, 0.03);
     }
     .transition {
         transition: all 0.3s ease;
