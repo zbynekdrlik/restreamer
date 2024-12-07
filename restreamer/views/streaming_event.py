@@ -122,7 +122,7 @@ class StreamingEventDetailView(View):
         
         return render(request, template_name, context)
 
-
+@method_decorator(login_required, name='dispatch')
 class StreamingEventEdit(View):
     def post(self, request, streaming_event_id):
         data = request.POST
@@ -135,9 +135,9 @@ class StreamingEventEdit(View):
         return redirect('control:home')
     
 
-
+@method_decorator(login_required, name='dispatch')
 class VideoLengthData(View):
-    def post(self, request):
+    def post(self, request, id):
         
         streaming_event = StreamingEvent.objects.get(id=id)
         video_manager = VideoDataManager(streaming_event=streaming_event.id)
