@@ -223,6 +223,14 @@
     $('#endpointSelect').select2({
         dropdownParent: $('#addEndpointModal') // the actual ID of your modal element
     });
+
+    $(document).ready(function () {
+        $('#endpointSelect').select2({
+            dropdownParent: $('#addEndpointModal'),
+            placeholder: "Select endpoints",
+            allowClear: true
+        });
+    });
 </script>
 
 {% endblock content %}
