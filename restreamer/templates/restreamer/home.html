@@ -18,95 +18,98 @@
 
 
 <div class="container my-5">
-    <div class="card border-0 shadow-lg">
-        <div class="card-header bg-primary text-white p-4">
-            <h2 class="card-title h3 mb-0">Streaming Events</h2>
+    <div class="card border-0 shadow-lg overflow-hidden">
+        <div class="card-header bg-gradient-primary text-white p-4">
+            <h2 class="card-title h3 mb-0 d-flex align-items-center">
+                <i class="fas fa-broadcast-tower me-2"></i> Streaming Events
+            </h2>
         </div>
         <div class="card-body p-0">
             <div class="bg-light p-3 border-bottom">
-                <div class="row">
+                <div class="row text-center">
                     <div class="col-md-4">
-                        <h6 class="mb-0">Name</h6>
+                        <h6 class="mb-0"><i class="fas fa-tag me-2"></i>Name</h6>
                     </div>
                     <div class="col-md-4">
-                        <h6 class="mb-0">Endpoints</h6>
+                        <h6 class="mb-0"><i class="fas fa-server me-2"></i>Endpoints</h6>
                     </div>
-                    <div class="col-md-2 text-center">
-                        <h6 class="mb-0">OBS/VMIX</h6>
+                    <div class="col-md-2">
+                        <h6 class="mb-0"><i class="fas fa-desktop me-2"></i>OBS/VMIX</h6>
                     </div>
-                    <div class="col-md-2 text-center">
-                        <h6 class="mb-0">YT/FB...</h6>
+                    <div class="col-md-2">
+                        <h6 class="mb-0"><i class="fas fa-share-alt me-2"></i>YT/FB...</h6>
                     </div>
                 </div>
             </div>
 
             {% for streaming_event in streaming_events %}
-            <div class="border-bottom p-3 position-relative">
-                <div class="row align-items-center">
+            <div class="border-bottom p-4 position-relative hover-bg-light transition">
+                <div class="row align-items-center text-center">
                     <div class="col-md-4">
-                        <h5 class="mb-2 mb-md-0">{{ streaming_event.short_description }}</h5>
+                        <h5 class="mb-2 mb-md-0 text-primary">{{ streaming_event.short_description }}</h5>
                     </div>
                     <div class="col-md-4">
                         {% for endpoint in streaming_event.end_points.all %}
-                            <p class="mb-1 small">{{ endpoint.alias }}</p>
+                            <p class="mb-1 small"><i class="fas fa-link me-1"></i>{{ endpoint.alias }}</p>
                         {% empty %}
-                            <p class="mb-1 small text-muted">No endpoints available</p>
+                            <p class="mb-1 small text-muted"><i class="fas fa-exclamation-circle me-1"></i>No endpoints available</p>
                         {% endfor %}
                     </div>
-                    <div class="col-md-2 text-center">
+                    <div class="col-md-2">
                         <form id="setup_stream_form_{{ forloop.counter }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
                             {% csrf_token %}
-                            <button type="button" id="start_stop_{{ forloop.counter }}" data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}" data-event-id="{{ streaming_event.id }}" class="btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-danger,btn-primary' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}'>
+                            <button type="button" id="start_stop_{{ forloop.counter }}" data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}" data-event-id="{{ streaming_event.id }}" class="btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}'>
                                 <i class="{{ streaming_event.receiving_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} me-1"></i>
                                 {{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}
                             </button>
                         </form>
                     </div>
-                    <div class="col-md-2 text-center">
+                    <div class="col-md-2">
                         <form id="start_stream_form_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
                             {% csrf_token %}
                             <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start" value="0">
-                            <button type="button" id="delivering_action_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" data-activated="{{ streaming_event.delivering_activated }}" class="btn btn-sm {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-success' }}">
+                            <button type="button" id="delivering_action_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" data-activated="{{ streaming_event.delivering_activated }}" class="btn btn-sm {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-success' }} rounded-pill shadow-sm">
                                 <i class="{{ streaming_event.delivering_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} me-1"></i>
                                 {{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}
                             </button>
                         </form>
                     </div>
                 </div>
-                <div class="row mt-3">
+                <div class="row mt-3 align-items-center">
                     <div class="col-md-4">
                         <form id="deleteChunksForm_{{ forloop.counter }}" action="{% url 'control:delete_chunk_data' %}" method="post" class="delete-chunk-form d-inline-block">
                             {% csrf_token %}
                             <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
                             <button type="submit" id="delete_chunks_{{ forloop.counter }}" class="btn btn-link text-danger p-0">
-                                <i class="fas fa-trash"></i>
+                                <i class="fas fa-trash-alt me-1"></i> Delete Chunks
                             </button>
                         </form>
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-4 text-center">
                         <p class="mb-0 small">
+                            <i class="fas fa-clock me-1"></i>
                             <strong>Video Length:</strong>
-                            <span data-event-id="{{ streaming_event.id }}" id="video-length-value">{{ video_length }}</span>
+                            <span data-event-id="{{ streaming_event.id }}" id="video-length-value" class="badge bg-info text-dark">{{ video_length }}</span>
                         </p>
                     </div>
                     <div class="col-md-4 text-end">
-                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-outline-secondary btn-sm">
+                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-outline-primary btn-sm rounded-pill">
                             <i class="fas fa-info-circle me-1"></i> Details
                         </a>
                     </div>
                 </div>
                 <form id="deleteForm_{{ forloop.counter }}" action="{% url 'control:remove_streaming_event' streaming_event.id %}" method="post" class="position-absolute top-0 end-0 mt-2 me-2">
                     {% csrf_token %}
-                    <button id="deleteStreamingEvent_{{ forloop.counter }}" type="submit" class="btn btn-link text-secondary p-0">
-                        <i class="fas fa-times"></i>
+                    <button type="submit" id="deleteStreamingEvent_{{ forloop.counter }}" class="btn btn-link text-secondary p-0">
+                        <i class="fas fa-times-circle"></i>
                     </button>
                 </form>
             </div>
-            
+            {% include 'base/modal.html' %}
         </div>
     </div>
 </div>
-{% include 'base/modal.html' %}
+
 <script>
 document.addEventListener("DOMContentLoaded", function() {
     let checkSeActiveInterval;
@@ -312,16 +315,6 @@ document.addEventListener("DOMContentLoaded", function() {
     })
 
    
-    
-    const deleteButton = document.getElementById('deleteStreamingEvent_{{ forloop.counter }}');
-    deleteButton.addEventListener('click', function(event) {
-        event.preventDefault();
-        const modal = $('#deleteStreamingEventModal_{{ forloop.counter }}');
-        modal.modal({
-            backdrop: 'static',
-            keyboard: false
-        });
-    });
 
     const confirmChunkSDeleteButton = document.getElementById('confirmChunksDelete_{{ forloop.counter }}');
     confirmChunkSDeleteButton.addEventListener('click', function() {
@@ -332,21 +325,21 @@ document.addEventListener("DOMContentLoaded", function() {
         }
     });
 
-    const confirmDeleteButton = document.getElementById('confirmEventDelete_{{ forloop.counter }}');
-    confirmDeleteButton.addEventListener('click', function() {
-        const deleteForm = document.getElementById('deleteForm_{{ forloop.counter }}');
-       
-        if (deleteForm) {
-            deleteForm.submit();
+
+    document.addEventListener('click', function (event) {
+        // Handle "Confirm" button click in the modal
+        if (event.target.matches('.confirm-delete-event')) {
+            const button = event.target; // The clicked button
+            const eventId = button.getAttribute('data-event-id'); // Get the event ID from data attribute
+            const deleteForm = document.querySelector(`form[data-event-id="${eventId}"]`); // Find the corresponding form
+    
+            if (deleteForm) {
+                deleteForm.submit(); // Submit the form
+            }
         }
-
     });
 
-    const cancelDeleteButton = document.getElementById('discard_data_{{ forloop.counter }}');
-    cancelDeleteButton.addEventListener('click', function() {
-        $('#deleteStreamingEventModal_{{ forloop.counter }}').modal('hide');
-    });
-
+   
     const confirmDButton = document.getElementById('confirm_data_delete_{{ forloop.counter }}');
     confirmDButton.addEventListener('click', function(event) {
         event.preventDefault();
@@ -401,8 +394,6 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('deleteForm_{{ forloop.counter }}').submit();
     });
 </script>
-
-
 {% endfor %}
 
 <script>
