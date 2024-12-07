@@ -24,7 +24,7 @@ class StreamingEventView(View):
         streaming_events = StreamingEvent.objects.filter(user=user).order_by("id")
         
         try:
-            streaming_event = StreamingEvent.objects.get(chunks__isnull=False)
+            streaming_event = StreamingEvent.objects.filter(chunks__isnull=False, user=user).first()
             video_manager = VideoDataManager(streaming_event=streaming_event.id)
             video_length = video_manager.get_stream_length
         except StreamingEvent.DoesNotExist:
