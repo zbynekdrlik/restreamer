@@ -507,13 +507,20 @@ document.addEventListener('DOMContentLoaded', function() {
 <!-- begin:: Video length -->
 <script>
     const videoLengthElem = document.getElementById('video-length-value');
-    // Extract the ID from the data attribute
+    // Get the event ID from the data attribute
     const streamingEventId = videoLengthElem.getAttribute('data-event-id');
 
-    // Function to fetch updated data
+    // Dynamically construct the URL using the streaming event ID
+    const fetchUrl = "{% url 'control:video_length_data' 0 %}".replace('0', streamingEventId);
+
     function updateVideoLength() {
-        fetch(`/video_length_data/${streamingEventId}/`)
-            .then(response => response.json())
+        fetch(fetchUrl)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
             .then(data => {
                 // Update the DOM element
                 videoLengthElem.textContent = data.video_length;
@@ -524,10 +531,9 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Poll every 5 seconds
-    setInterval(updateVideoLength, 5000);
+    setInterval(updateVideoLength, 10000);
 </script>
 <!-- end:: Video length -->
-
 
 {% endblock %}
 

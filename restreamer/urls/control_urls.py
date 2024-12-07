@@ -38,7 +38,7 @@ urlpatterns = [
 
     path('<int:streaming_event_id>/streaming_event_active/', IsDeliveringActive.as_view(), name='streaming_event_active'),
     
-     path('video_length_data/<int:id>/', VideoLengthData.as_view(), name='video_length_data'),
+    path('video_length_data/<int:id>/', VideoLengthData.as_view(), name='video_length_data'),
 ]
 
 if settings.DEBUG:
