@@ -45,6 +45,7 @@
 
             {% for streaming_event in streaming_events %}
             <div class="border-bottom p-4 position-relative hover-bg-light transition">
+                <!-- Top Row: Name, Endpoints, Start/Stop Actions -->
                 <div class="row align-items-center text-center">
                     <div class="col-md-4">
                         <h5 class="mb-2 mb-md-0 text-dark fw-bold">{{ streaming_event.short_description }}</h5>
@@ -87,7 +88,9 @@
                         </form>
                     </div>
                 </div>
-                <div class="row mt-2 align-items-center">
+
+                <!-- Bottom Row: Separated by a subtle divider -->
+                <div class="row align-items-center border-top mt-3 pt-3">
                     <div class="col-md-4">
                         <form id="deleteChunksForm_{{ forloop.counter }}" action="{% url 'control:delete_chunk_data' %}" method="post" class="delete-chunk-form d-inline-block">
                             {% csrf_token %}
@@ -110,9 +113,10 @@
                         </a>
                     </div>
                 </div>
+
                 <form data-event-id="{{ streaming_event.id }}" action="{% url 'control:remove_streaming_event' streaming_event.id %}" method="post" class="position-absolute top-0 end-0 mt-2 me-2">
                     {% csrf_token %}
-                    <button type="button" data-event-id="{{ streaming_event.id }}" class="btn btn-link text-secondary p-0 delete-streaming-event" data-bs-toggle="modal" data-bs-target="#deleteStreamingEventModal_{{ streaming_event.id }}">
+                    <button type="button" data-event-id="{{ streaming_event.id }}" class="btn btn-link text-secondary p-0 delete-streaming-event" data-toggle="modal" data-target="#deleteStreamingEventModal_{{ streaming_event.id }}">
                         <i class="bi bi-x-lg"></i>
                     </button>
                 </form>
