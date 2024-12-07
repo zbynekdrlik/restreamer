@@ -1,11 +1,11 @@
-.custom-select-wrapper {
+.custom-select-wrapper-2 {
     position: relative !important;
     display: inline-block !important;
     width: 100% !important;
     max-width: 400px !important;
 }
 
-.custom-select {
+.custom-select-2 {
     width: 100% !important;
     padding: 10px !important;
     font-size: 16px !important;
@@ -18,13 +18,13 @@
     cursor: pointer !important;
 }
 
-.custom-select[multiple] {
+.custom-select-2[multiple] {
     background: #fff !important;
     height: auto !important;
     overflow: auto !important;
 }
 
-.custom-select:focus {
+.custom-select-2:focus {
     border-color: #007bff !important;
     box-shadow: 0 0 5px rgba(0, 123, 255, 0.5)  !important;
     outline: none  !important;
