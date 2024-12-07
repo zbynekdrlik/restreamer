@@ -60,7 +60,7 @@
                             <button type="button"
                                     data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}"
                                     data-event-id="{{ streaming_event.id }}"
-                                    class="btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm">
+                                    class="btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-danger,btn-primary' }} shadow-sm">
                                 <i class="bi {{ streaming_event.receiving_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }} me-1"></i>
                                 {{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}
                             </button>
@@ -73,7 +73,7 @@
                             <button type="button"
                                     data-event-id="{{ streaming_event.id }}"
                                     data-activated="{{ streaming_event.delivering_activated }}"
-                                    class="btn btn-sm {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-success' }} rounded-pill shadow-sm">
+                                    class="btn btn-sm {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-success' }} shadow-sm">
                                 <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }} me-1"></i>
                                 {{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}
                             </button>
@@ -101,9 +101,9 @@
                         </p>
                     </div>
                     <div class="col-md-4 text-end">
-                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-primary btn-sm rounded-pill d-inline-flex align-items-center gap-1 px-3 py-1 shadow-sm">
+                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-info btn-sm d-inline-flex align-items-center gap-1 px-3 py-1 shadow-sm">
                             <span>View Details</span>
-                            <i class="bi bi-arrow-right-circle-fill"></i>
+                            <i class="bi bi-arrow-right-circle-fill text-dark"></i>
                         </a>
                     </div>
                 </div>
