@@ -19,13 +19,13 @@
 
 <div class="container my-5">
     <div class="card border-0 shadow-lg overflow-hidden">
-        <div class="card-header bg-gradient-primary text-white p-4">
-            <h2 class="card-title h3 mb-0 d-flex align-items-center">
+        <div class="card-header bg-gradient-dark text-white p-2">
+            <h2 class="card-title h5 mb-0 d-flex align-items-center">
                 <i class="fas fa-broadcast-tower me-2"></i> Streaming Events
             </h2>
         </div>
-        <div class="card-body p-0">
-            <div class="bg-light p-3 border-bottom">
+        <div class="card-body p-0 bg-dark text-light">
+            <div class="bg-secondary p-2 border-bottom">
                 <div class="row text-center">
                     <div class="col-md-4">
                         <h6 class="mb-0"><i class="fas fa-tag me-2"></i>Name</h6>
@@ -43,10 +43,10 @@
             </div>
 
             {% for streaming_event in streaming_events %}
-            <div class="border-bottom p-4 position-relative hover-bg-light transition">
+            <div class="border-bottom border-secondary p-3 position-relative hover-bg-dark transition">
                 <div class="row align-items-center text-center">
                     <div class="col-md-4">
-                        <h5 class="mb-2 mb-md-0 text-primary">{{ streaming_event.short_description }}</h5>
+                        <h5 class="mb-2 mb-md-0 text-info">{{ streaming_event.short_description }}</h5>
                     </div>
                     <div class="col-md-4">
                         {% for endpoint in streaming_event.end_points.all %}
@@ -93,15 +93,15 @@
                         </p>
                     </div>
                     <div class="col-md-4 text-end">
-                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-outline-primary btn-sm rounded-pill">
+                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-outline-info btn-sm rounded-pill">
                             <i class="fas fa-info-circle me-1"></i> Details
                         </a>
                     </div>
                 </div>
-                <form id="deleteForm_{{ forloop.counter }}" action="{% url 'control:remove_streaming_event' streaming_event.id %}" method="post" class="position-absolute top-0 end-0 mt-2 me-2">
+                <form data-event-id="{{ streaming_event.id }}" action="{% url 'control:remove_streaming_event' streaming_event.id %}" method="post" class="position-absolute top-0 end-0 mt-2 me-2">
                     {% csrf_token %}
-                    <button type="submit" id="deleteStreamingEvent_{{ forloop.counter }}" class="btn btn-link text-secondary p-0">
-                        <i class="fas fa-times-circle"></i>
+                    <button type="button" data-event-id="{{ streaming_event.id }}" class="btn btn-link text-secondary p-0 delete-streaming-event" data-toggle="modal" data-target="#deleteStreamingEventModal_{{ streaming_event.id }}">
+                        <i class="fas fa-times"></i>
                     </button>
                 </form>
             </div>
