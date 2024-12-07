@@ -137,7 +137,7 @@ class StreamingEventEdit(View):
 
 @method_decorator(login_required, name='dispatch')
 class VideoLengthData(View):
-    def post(self, request, id):
+    def get(self, request, id):
         
         streaming_event = StreamingEvent.objects.get(id=id)
         video_manager = VideoDataManager(streaming_event=streaming_event.id)
