@@ -219,17 +219,4 @@
     });
 </script>
 
-<script>
-$('#addEndpointModal').on('shown.bs.modal', function () {
-    $('#endpointSelect').select2({
-        dropdownParent: $('#addEndpointModal'),
-        placeholder: "Select endpoints",
-        allowClear: true
-    });
-
-    // Trigger a redraw
-    $(window).trigger('resize');
-});
-</script>
-
 {% endblock content %}
