@@ -220,21 +220,19 @@
 </script>
 
 <script>
-    $(document).ready(function () {
-        // Initialize Select2 when the modal is shown
-        $('#addEndpointModal').on('shown.bs.modal', function () {
-            $('#endpointSelect').select2({
-                dropdownParent: $('#addEndpointModal'),
-                placeholder: "Select endpoints",
-                allowClear: true
-            });
-        });
-    
-        // Destroy Select2 when the modal is hidden
-        $('#addEndpointModal').on('hidden.bs.modal', function () {
-            $('#endpointSelect').select2('destroy');
+$(document).ready(function () {
+    $('#addEndpointModal').on('shown.bs.modal', function () {
+        $('#endpointSelect').select2({
+            dropdownParent: $('#addEndpointModal'),
+            placeholder: "Select endpoints",
+            allowClear: true
         });
     });
+
+    $('#addEndpointModal').on('hidden.bs.modal', function () {
+        $('#endpointSelect').select2('destroy');
+    });
+});
 </script>
 
 {% endblock content %}
