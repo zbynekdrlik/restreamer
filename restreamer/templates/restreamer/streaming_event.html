@@ -220,13 +220,14 @@
 </script>
 
 <script>
-    $(document).ready(function () {
-        $('#endpointSelect').select2({
-            dropdownParent: $('#addEndpointModal'),
-            placeholder: "Select endpoints",
-            allowClear: true
-        });
+$(document).ready(function () {
+    $('#endpointSelect').select2({
+        dropdownParent: $('#addEndpointModal'),
+        placeholder: "Select endpoints",
+        allowClear: true,
+        cache: false
     });
+});
 </script>
 
 {% endblock content %}
