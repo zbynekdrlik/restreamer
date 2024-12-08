@@ -143,7 +143,7 @@
 
 
             <!-- Modal for Adding Endpoints -->
-            <div class="modal fade" id="addEndpointModal" tabindex="-1" aria-labelledby="addEndpointModalLabel" aria-hidden="true">
+            <div class="modal fade" id="addEndpointModal" aria-labelledby="addEndpointModalLabel" aria-hidden="true">
                 <div class="modal-dialog modal-lg">
                     <div class="modal-content">
                         <div class="modal-header">
@@ -217,6 +217,17 @@
             alert('Please enter a valid time in HH:MM:SS format');
         }
     });
+    
+$('#addEndpointModal').on('shown.bs.modal', function () {
+    $('#endpointSelect').select2({
+        dropdownParent: $('#addEndpointModal'),
+        placeholder: "Select endpoints",
+        allowClear: true
+    });
+
+    // Trigger a redraw
+    $(window).trigger('resize');
+});
 </script>
 
 {% endblock content %}
