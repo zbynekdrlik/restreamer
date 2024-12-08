@@ -222,11 +222,13 @@
 <script>
 $(document).ready(function () {
     $('#addEndpointModal').on('shown.bs.modal', function () {
-        $('#endpointSelect').select2({
-            dropdownParent: $('#addEndpointModal'),
-            placeholder: "Select endpoints",
-            allowClear: true
-        });
+        setTimeout(function () {
+            $('#endpointSelect').select2({
+                dropdownParent: $('#addEndpointModal'),
+                placeholder: "Select endpoints",
+                allowClear: true
+            });
+        }, 100);
     });
 
     $('#addEndpointModal').on('hidden.bs.modal', function () {
