@@ -60,7 +60,7 @@ class ChunkSender:
                         chunk_data = f.read()
 
                     chunk_id = {"chunk_id": int(chunk_record.id)}
-                    chunk_data = {"chunk_data": chunk_data}
+                    chunk_data = chunk_data
                     log.info(
                         f"Chunks in buffer: {ChunkRecord.objects.all().count()}"
                     )
