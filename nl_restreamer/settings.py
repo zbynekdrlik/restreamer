@@ -192,6 +192,16 @@ OBJECT_STORAGE_URL = 'https://eu-central-1.linodeobjects.com'
 LINODE_API_KEY = os.getenv('LINODE_TOKEN')
 
 
+AWS_SECRET_ACCESS_KEY = config('AWS_SECRET_ACCESS_KEY')
+AWS_ACCESS_KEY_ID = config('AWS_ACCESS_KEY_ID')
+OBJECT_STORAGE_URL = 'https://eu-central-1.linodeobjects.com'
+
+S3_CLIENT = boto3.client('s3',
+                         endpoint_url=OBJECT_STORAGE_URL,
+                         aws_access_key_id=AWS_ACCESS_KEY_ID,
+                         aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+
+
 CELERY_BROKER_URL = 'redis://localhost:6379'
 CELERY_RESULT_BACKEND = 'redis://localhost:6379'
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True

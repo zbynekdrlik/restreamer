@@ -16,9 +16,10 @@ redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
 
 
 class ChunkSender:
-    def __init__(self, streaming_event_id):
+    def __init__(self, streaming_event):
         self.stored_position = 0
-        self.streaming_event_id = streaming_event_id
+        self.streaming_event = streaming_event
+        self.streaming_event_identifier = streaming_event.identifier
         self.api_url = f"https://restreamer.newlevel.media/chunk-upload/"
         self.check_chunk_url = f"https://restreamer.newlevel.media/api/check-chunk/"
 
@@ -28,7 +29,7 @@ class ChunkSender:
 
         except ChunkRecord.DoesNotExist:
             self.stored_position = 0
-            first_chunk = ChunkRecord.objects.filter(streaming_event=self.streaming_event_id, in_process=False,
+            first_chunk = ChunkRecord.objects.filter(streaming_event=self.streaming_event, in_process=False,
                                                      send=False).first()
             if first_chunk:
                 self.stored_position = first_chunk.id
@@ -42,8 +43,8 @@ class ChunkSender:
     def sending_chunks(self):
         while True:
             time.sleep(0.1)
-            self.streaming_event_id.refresh_from_db()
-            if not self.streaming_event_id.delivering_activated:
+            self.streaming_event.refresh_from_db()
+            if not self.streaming_event.delivering_activated:
                 log.info(f'Shutting down')
                 return
             redis_client.rpush('endpoint_icon_status', 'endpoint_active')
@@ -93,7 +94,18 @@ class ChunkSender:
                 continue
 
     def chunk_send_thread(self, chunk_id, chunk_data, chunk):
-        chunk_identifier = {"chunk_identifier": self.streaming_event_id.identifier}
+        chunk_identifier = {"chunk_identifier": self.streaming_event_identifier}
+        identifier = f"{chunk_id}_{chunk_identifier}.bin"
+        
+        while True:
+            try:
+                upload_to_s3(chunk_data, identifier)
+                log.info(f"S3 upload for chunk {chunk_id} succeeded!")
+                break
+            except Exception as e:
+                log.warning(f"S3 upload failed for chunk {chunk_id}: {e}")
+                time.sleep(3) 
+            
         retries = 0
         while True:
             if retries == 1:
@@ -103,14 +115,14 @@ class ChunkSender:
                     chunk.save()
                     return
             retries += 1
-            self.streaming_event_id.refresh_from_db()
-            if not self.streaming_event_id.delivering_activated:
+            self.streaming_event.refresh_from_db()
+            if not self.streaming_event.delivering_activated:
                 log.info(f'Shutting down chunk send thread: {chunk_id}')
                 return
             try:
                 data_payload = {**chunk_id, **chunk_identifier}
                 response = requests.post(
-                    self.api_url, data=data_payload, files=chunk_data, timeout=5
+                    self.api_url, data=data_payload, timeout=5
                 )
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
                 log.warning(f"Lost internet connection and {e}")
@@ -150,3 +162,15 @@ class ChunkSender:
         except requests.exceptions.RequestException as e:
             print(f"Error checking chunk on server: {e}")
             return False
+    
+    def upload_to_s3(self, chunk_data, filename):
+        try:
+            bucket_name = os.environ.get('AWS_STORAGE_BUCKET_NAME')
+            client = settings.S3_CLIENT
+
+            client.put_object(Body=chunk_data,
+                            Bucket= bucket_name,
+                            Key=filename,)
+        except Exception as e:
+            log.exception(e)
+        
