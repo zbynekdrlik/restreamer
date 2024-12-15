@@ -95,10 +95,10 @@ class ChunkSender:
     def chunk_send_thread(self, chunk_id, chunk_data, chunk):
         chunk_identifier = {"chunk_identifier": self.streaming_event_identifier}
         identifier = f"{chunk_id}_{chunk_identifier}.bin"
-        
+        chunk_size = {"chunk_size" : len(chunk_data)}
         while True:
             try:
-                upload_to_s3(chunk_data, identifier)
+                self.upload_to_s3(chunk_data, identifier)
                 log.info(f"S3 upload for chunk {chunk_id} succeeded!")
                 break
             except Exception as e:
@@ -119,7 +119,7 @@ class ChunkSender:
                 log.info(f'Shutting down chunk send thread: {chunk_id}')
                 return
             try:
-                data_payload = {**chunk_id, **chunk_identifier}
+                data_payload = {**chunk_id, **chunk_identifier, **chunk_size}
                 response = requests.post(
                     self.api_url, data=data_payload, timeout=5
                 )
@@ -150,10 +150,12 @@ class ChunkSender:
     def check_chunk_server(self, chunk_id):
         chunk = ChunkRecord.objects.get(id=chunk_id['chunk_id'])
         check_sum = chunk.md5
-        id = {'md5': check_sum}
+        chunk_id = {'chunk_id': chunk_id}
+        se_id = {'se_identifier': self.streaming_event_identifier}
 
         try:
-            response = requests.post(self.check_chunk_url, data=id, timeout=1)
+            data_payload = {**chunk_id, **se_id}
+            response = requests.post(self.check_chunk_url, data=data_payload, timeout=1)
             response.raise_for_status()
             chunk_exists = response.json()['chunk_exists']
             return chunk_exists
