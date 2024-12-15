@@ -3,9 +3,9 @@ from .models import ChunkRecord, StreamingEvent
 
 
 class ChunkSerializer(serializers.Serializer):
-    chunk_data = serializers.FileField()
     chunk_id = serializers.IntegerField()
     chunk_identifier = serializers.CharField()
+    chunk_size = serializers.IntegerField()
 
 
 class PositionLastSerializer(serializers.Serializer):
