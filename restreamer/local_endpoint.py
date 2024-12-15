@@ -4,11 +4,10 @@ import threading
 import time
 import redis
 import requests
+import boto3
 from restreamer.models import ChunkRecord
 
-
 importlib.invalidate_caches()
-
 
 log = logging.getLogger(__name__)
 
