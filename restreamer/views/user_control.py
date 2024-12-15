@@ -254,7 +254,7 @@ class StreamSchedulerView(View):
            
            return redirect('control:stream-scheduler')
 
-@method_decorator(login_required, name='dispatch') 
+
 @method_decorator(login_required, name='dispatch') 
 def user_history(request, user_id):
     user = RestreamerUser.objects.get(id=user_id)
@@ -306,5 +306,7 @@ def user_history(request, user_id):
         'users_history': users_history,
     }
     return render(request, 'restreamer/user_history.html', context)
+
+
 
 

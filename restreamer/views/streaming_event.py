@@ -112,7 +112,7 @@ class StreamingEventDetailView(View):
         
         return render(request, template_name, context)
 
-
+@method_decorator(login_required, name='dispatch')
 class StreamingEventEdit(View):
     def post(self, request, streaming_event_id):
         data = request.POST
