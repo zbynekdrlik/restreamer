@@ -66,7 +66,7 @@ def check_stream_status():
         return {"status": "error unexpected", "message": response_data.get("error")}
 
 
-@app.task(name='services.tasks.get_buffer_duration')
+""" @app.task(name='services.tasks.get_buffer_duration')
 def get_buffer_duration():
     url = "https://restreamer.newlevel.media/api/get_buffer_health/"
     streaming_event = StreamingEvent.objects.first()
@@ -86,6 +86,6 @@ def get_buffer_duration():
         response.raise_for_status()  # Raise an exception for HTTP errors
         return response.json()
     except requests.exceptions.RequestException as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": str(e)} """
 
 
