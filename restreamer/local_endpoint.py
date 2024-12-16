@@ -99,10 +99,9 @@ class ChunkSender:
         chunk_identifier = {"chunk_identifier": self.streaming_event_identifier}
         identifier = f"{chunk_id['chunk_id']}_{self.streaming_event_identifier}.bin"
         chunk_size = {"chunk_size" : len(chunk_data)}
-        log.info(f'identifier {identifier}')
+    
         while True:
             try:
-                
                 self.upload_to_s3(chunk_data , identifier)
                 log.info(f"S3 upload for chunk {chunk_id} succeeded!")
                 break
@@ -155,7 +154,6 @@ class ChunkSender:
 
     def check_chunk_server(self, chunk_id):
         chunk = ChunkRecord.objects.get(id=chunk_id['chunk_id'])
-        check_sum = chunk.md5
         chunk_id = {'chunk_id': chunk_id}
         se_id = {'se_identifier': self.streaming_event_identifier}
 
