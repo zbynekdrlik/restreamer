@@ -97,13 +97,13 @@ class ChunkSender:
 
     def chunk_send_thread(self, chunk_id, chunk_data, chunk):
         chunk_identifier = {"chunk_identifier": self.streaming_event_identifier}
-        identifier = f"{chunk_id}_{chunk_identifier}.bin"
+        identifier = f"{chunk_id['chunk_id']}_{self.streaming_event_identifier}.bin"
         chunk_size = {"chunk_size" : len(chunk_data)}
-        chunk_data_ = chunk_data.read()
+        log.info(f'identifier {identifier}')
         while True:
             try:
                 
-                self.upload_to_s3(chunk_data_ , identifier)
+                self.upload_to_s3(chunk_data , identifier)
                 log.info(f"S3 upload for chunk {chunk_id} succeeded!")
                 break
             except Exception as e:
