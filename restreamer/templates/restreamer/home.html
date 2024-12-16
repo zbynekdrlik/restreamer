@@ -17,105 +17,144 @@
 </div> -->
 
 
-<div class="container mx-auto p-5 mt-5 mb-5">
-    <div class="card border-0 shadow-lg">
-        <div class="card-header bg-gray-800 text-green-500 px-4  py-4 rounded-t-lg">
-            <h2 class="card-title text-xl font-mono font-bold mx-1" style="font-family: 'Roboto Condensed', serif;">Streaming Events</h2>
+<div class="container my-5" style="font-family: 'Roboto Condensed', sans-serif;">
+    <div class="card border-0 shadow-lg overflow-hidden">
+        <div class="card-header bg-dark text-white p-2 d-flex align-items-center justify-content-between">
+            <h2 class="card-title h3 mb-0 d-flex align-items-center">
+                <span class="ps-2 ms-2 fs-3 fw-medium">Streaming Events</span>
+            </h2>
+            <div class="d-flex align-items-center gap-3 me-3">
+                <i class="bi bi-facebook fs-4"></i>
+                <i class="bi bi-twitch fs-4"></i>
+            </div>
         </div>
-        <div class="card-body p-4">
-            <div class="row bg-white rounded-md p-2 mb-2 me-1">
-                <div class="col-md-4 my-1">
-                    <p class="font-semibold text-gray-800" style="font-family: 'Roboto Condensed', sans-serif;">Name</p>
-                </div>
-                <div class="col-md-4 my-1">
-                    <p class="font-semibold text-gray-800" style="font-family: 'Roboto Condensed', sans-serif;">Endpoints</p>
-                </div>
-                <div class="col-md-2 my-1 text-center">
-                    <p class="font-semibold text-gray-800" style="font-family: 'Roboto Condensed', sans-serif;">OBS/VMIX</p>
-                </div>
-                <div class="col-md-2 my-1 text-center">
-                    <p class="font-semibold text-gray-800" style="font-family: 'Roboto Condensed', sans-serif;">YT/FB...</p>
+        <div class="card-body p-0">
+            <div class="bg-light p-2 border-bottom">
+                <div class="row text-center text-secondary fw-medium">
+                    <div class="col-md-4 d-inline-flex justify-content-center align-items-center gap-1">
+                        <i class="bi bi-tag-fill"></i><span>Name</span>
+                    </div>
+                    <div class="col-md-4 d-inline-flex justify-content-center align-items-center gap-1">
+                        <i class="bi bi-hdd-network-fill"></i><span>Endpoints</span>
+                    </div>
+                    <div class="col-md-2 d-inline-flex justify-content-center align-items-center gap-1">
+                        <i class="bi bi-camera-video-fill"></i><span>OBS/VMIX</span>
+                    </div>
+                    <div class="col-md-2 d-inline-flex justify-content-center align-items-center gap-1">
+                        <i class="bi bi-share-fill"></i><span>YT/FB...</span>
+                    </div>
                 </div>
             </div>
 
             {% for streaming_event in streaming_events %}
-            <div class="card my-2 shadow-sm relative" style="background-color: #e6e6e6c4; border: none;">
-                <div class="card-body">
-                    <div class="row me-2" style="min-height: 100px">
-                        <div class="col-md-4">
-                            <h5 class="card-text text-gray-700" style="font-size: 18px; font-family: 'Roboto Condensed'">{{ streaming_event.short_description }}</h5>
-                        </div>
-                        <div class="col-md-4">
-                            {% for endpoint in streaming_event.end_points.all %}
-                                <p class="text-gray-600" style="font-size: 16px; font-family: 'Roboto Condensed'">{{ endpoint.alias }}</p>
-                            {% empty %}
-                                <p class="text-gray-600" style="font-size: 16px; font-family: 'Roboto Condensed'">No endpoints available</p>
-                            {% endfor %}
-                        </div>
-                        <div class="col-md-2 text-center">
-                            <form id="setup_stream_form_{{ forloop.counter }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
-                                {% csrf_token %}
-                                <button type="button" id="start_stop_{{ forloop.counter }}" data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}" data-event-id="{{ streaming_event.id }}"  class="inline-flex items-center px-3 py-1 font-semibold leading-5 text-xs shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.receiving_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-blue-500 hover:bg-blue-600 text-white' }}" data-toggle='modal' data-target='#startStreamModal_{{ forloop.counter }}' style="font-family:sans-serif;">
-                                    <i class="{{ streaming_event.receiving_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} mr-2"></i>
-                                    {{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}
-                                </button>
-                            </form>
-                        </div>
-                        <div class="col-md-2 text-center">
-                            <form id="start_stream_form_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
-                                {% csrf_token %}
-                                <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start" value="0">
-                                <button type="button" id="delivering_action_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" data-activated="{{ streaming_event.delivering_activated }}" class="inline-flex items-center px-3 py-1 font-semibold leading-6 text-sm shadow rounded-md transition ease-in-out duration-150 {{ streaming_event.delivering_activated|yesno:'bg-red-500 hover:bg-red-600 text-white,bg-blue-500 hover:bg-blue-600 text-white' }}" style="font-family: sans-serif;">
-                                    <i class="{{ streaming_event.delivering_activated|yesno:'fas fa-stop-circle,fas fa-play-circle' }} mr-2"></i>
-                                    {{ streaming_event.delivering_activated|yesno:'End stream, Start stream' }}
-                                </button>
-                            </form>
-                        </div>
+            <div class="border-bottom p-4 position-relative hover-bg-light transition">
+                <!-- Top Row: Name, Endpoints, Start/Stop Actions -->
+                <div class="row align-items-center text-center">
+                    <div class="col-md-4">
+                        <h5 class="mb-2 mb-md-0 text-dark fw-bold">{{ streaming_event.short_description }}</h5>
                     </div>
-                    <div class="row mt-3">
-                        <div class="col-md-8">
-                            <form id="deleteChunksForm_{{ forloop.counter }}" action="{% url 'control:delete_chunk_data' %}" method="post" class="delete-chunk-form">
-                                {% csrf_token %}
-                                <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
-                                <button type="submit" id="delete_chunks_{{ forloop.counter }}" class="btn btn-link p-0 m-0" style="font-family: 'Roboto Condensed', sans-serif;">
-                                    <i class="fa-solid fa-trash text-red-600 hover:text-red-800 transition duration-150"></i>
-                                </button>
-                            </form>
-                        </div>
-                        
-                        <div class="col-md-2" style="margin-left: 3rem;" >
-                            <div class="d-flex align-items-center">
-                                <i class="fas fa-clock mr-2" style="font-size: 1.2rem; color: #6c757d;"></i>
-                                <p class="mb-0" style="font-family: 'Roboto Condensed', sans-serif; font-size: 0.9rem;">Buffer health</p>
-                            </div>
-                            <div id="buffer-health_{{ forloop.counter }}"></div>
-                        </div>
-                        <div class="col-md-1" style="margin-left: 2rem;">
-                            <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="btn btn-sm btn-secondary rounded-lg px-2 py-1 text-sm font-semibold shadow-md hover:bg-blue-700 hover:shadow-lg transition-all duration-300" style="font-family: 'Roboto Condensed', sans-serif;">
-                                <span class="flex items-center">
-                                    <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 9l3 3m0 0l-3 3m3-3H8m13 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                                    </svg>
-                                    Detail
-                                </span>
-                            </a>
-                        </div>
+                    <div class="col-md-4">
+                        {% for endpoint in streaming_event.end_points.all %}
+                            <p class="mb-1 d-inline-flex align-items-center gap-1 fw-normal text-dark mx-2">
+                                {% if endpoint.service_type == 'YT_HLS' or endpoint.service_type == 'YT_RTMP' %}
+                                    <i class="bi bi-youtube text-danger"></i>
+                                {% elif endpoint.service_type == 'FB' %}
+                                    <i class="bi bi-facebook text-primary"></i>
+                                {% elif endpoint.service_type == 'VIMEO' %}
+                                    <i class="bi bi-vimeo text-info"></i>
+                                {% elif endpoint.service_type == 'INSTAGRAM' %}
+                                    <i class="bi bi-instagram text-warning"></i>
+                                {% else %}
+                                    <i class="bi bi-link text-muted"></i>
+                                {% endif %}
+                                {{ endpoint.alias }}
+                            </p>
+                        {% empty %}
+                            <p class="mb-1 small text-muted d-inline-flex align-items-center gap-1">
+                                <i class="bi bi-exclamation-circle"></i>No endpoints available
+                            </p>
+                        {% endfor %}
                     </div>
-                    <form id="deleteForm_{{ forloop.counter }}" action="{% url 'control:remove_streaming_event' streaming_event.id %}" method="post" class="absolute top-0 right-0 mt-2 mr-2">
-                        {% csrf_token %}
-                        <button id="deleteStreamingEvent_{{ forloop.counter }}" type="submit" class="btn btn-link p-0 m-0 text-gray-600 hover:text-gray-800 transition-colors duration-300">
-                            <svg class="w-6 h-6 fill-current" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-                                <path d="M12 10.586l4.95-4.95 1.414 1.414-4.95 4.95 4.95 4.95-1.414 1.414-4.95-4.95-4.95 4.95-1.414-1.414 4.95-4.95-4.95-4.95L7.05 5.636z" />
-                            </svg>
-                        </button>
-                    </form>
+                    <div class="col-md-2">
+                        <form id="setup_stream_form_{{ forloop.counter }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
+                            {% csrf_token %}
+                            <button type="button" id="start_stop_{{ forloop.counter }}"
+                                    data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}"
+                                    data-event-id="{{ streaming_event.id }}"
+                                    class="btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1"
+                                    data-bs-toggle="modal" data-bs-target="#startStreamModal_{{ forloop.counter }}">
+                                <i class="bi {{ streaming_event.receiving_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
+                                <span>{{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}</span>
+                            </button>
+                        </form>
+                    </div>
+                    <div class="col-md-2">
+                        <form id="start_stream_form_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
+                            {% csrf_token %}
+                            <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start" value="0">
+                            <button type="button" id="delivering_action_{{ forloop.counter }}"
+                                    data-event-id="{{ streaming_event.id }}"
+                                    data-activated="{{ streaming_event.delivering_activated }}"
+                                    class="btn btn-sm {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1">
+                                <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
+                                <span>{{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}</span>
+                            </button>
+                        </form>
+                    </div>
                 </div>
+
+                <!-- Bottom Row: Separated by a subtle divider -->
+                <div class="row align-items-center border-top mt-3 pt-3">
+                    <div class="col-md-4">
+                        <form id="deleteChunksForm_{{ forloop.counter }}" 
+                              action="{% url 'control:delete_chunk_data' %}" 
+                              method="post" 
+                              class="delete-chunk-form d-inline-block">
+                            {% csrf_token %}
+                            <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
+                            <button type="submit" 
+                                    id="delete_chunks_{{ forloop.counter }}" 
+                                    class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 border-0 text-danger">
+                                <i class="bi bi-trash me-2"></i>
+                                <span class="small">Delete Chunks</span>
+                            </button>
+                        </form>
+                    </div>
+                    <div class="col-md-4 text-center">
+                        <div class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1">
+                            <i class="bi bi-clock text-primary me-2"></i>
+                            <span class="text-muted small me-2">Length:</span>
+                            <span data-event-id="{{ streaming_event.id }}" 
+                                  id="video-length-value" 
+                                  class="fw-bold">
+                                {{ video_length }}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="col-md-4 text-end">
+                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" 
+                           class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 text-decoration-none">
+                            <span class="text-primary small me-2">Details</span>
+                            <i class="bi bi-chevron-right text-primary"></i>
+                        </a>
+                    </div>
+                </div>
+
+                <form data-event-id="{{ streaming_event.id }}" 
+                    data-action="remove_streaming_event"
+                    action="{% url 'control:remove_streaming_event' streaming_event.id %}" 
+                    method="post" 
+                    class="position-absolute top-0 end-0 mt-2 me-2">
+                    {% csrf_token %}
+                    <button type="button" data-event-id="{{ streaming_event.id }}" class="btn btn-link text-secondary p-0 delete-streaming-event" data-toggle="modal" data-target="#deleteStreamingEventModal_{{ streaming_event.id }}">
+                        <i class="bi bi-x-lg"></i>
+                    </button>
+                </form>
             </div>
             {% include 'base/modal.html' %}
-
         </div>
     </div>
- </div>
+</div>
 <script>
 document.addEventListener("DOMContentLoaded", function() {
     let checkSeActiveInterval;
@@ -321,16 +360,6 @@ document.addEventListener("DOMContentLoaded", function() {
     })
 
    
-    
-    const deleteButton = document.getElementById('deleteStreamingEvent_{{ forloop.counter }}');
-    deleteButton.addEventListener('click', function(event) {
-        event.preventDefault();
-        const modal = $('#deleteStreamingEventModal_{{ forloop.counter }}');
-        modal.modal({
-            backdrop: 'static',
-            keyboard: false
-        });
-    });
 
     const confirmChunkSDeleteButton = document.getElementById('confirmChunksDelete_{{ forloop.counter }}');
     confirmChunkSDeleteButton.addEventListener('click', function() {
@@ -341,21 +370,22 @@ document.addEventListener("DOMContentLoaded", function() {
         }
     });
 
-    const confirmDeleteButton = document.getElementById('confirmEventDelete_{{ forloop.counter }}');
-    confirmDeleteButton.addEventListener('click', function() {
-        const deleteForm = document.getElementById('deleteForm_{{ forloop.counter }}');
-       
-        if (deleteForm) {
-            deleteForm.submit();
+
+    document.addEventListener('click', function (event) {
+        // Handle "Confirm" button click in the modal
+        if (event.target.matches('.confirm-delete-event')) {
+            const button = event.target; // The clicked button
+            const eventId = button.getAttribute('data-event-id'); // Get the event ID from the button
+            // More specific selector: searching for a form with data-event-id and a unique data-action attribute
+            const deleteForm = document.querySelector(`form[data-event-id="${eventId}"][data-action="remove_streaming_event"]`);
+    
+            if (deleteForm) {
+                deleteForm.submit(); // Submit the correct form
+            }
         }
-
     });
 
-    const cancelDeleteButton = document.getElementById('discard_data_{{ forloop.counter }}');
-    cancelDeleteButton.addEventListener('click', function() {
-        $('#deleteStreamingEventModal_{{ forloop.counter }}').modal('hide');
-    });
-
+   
     const confirmDButton = document.getElementById('confirm_data_delete_{{ forloop.counter }}');
     confirmDButton.addEventListener('click', function(event) {
         event.preventDefault();
@@ -385,8 +415,8 @@ document.addEventListener("DOMContentLoaded", function() {
 </script>
 
 
-
-<script>
+<!-- start:: websocets -->
+<!-- <script>
 document.addEventListener('DOMContentLoaded', function() {
     const socket = new WebSocket('wss://' + window.location.host + '/ws/buffer_health/');
     socket.onmessage = function(e) {
@@ -402,16 +432,14 @@ document.addEventListener('DOMContentLoaded', function() {
         console.error('WebSocket closed unexpectedly', e);
     };
 });
-</script>
+</script> -->
+<!-- end:: websocets -->
 
 <script>
-
     document.querySelector('.img-clickable').addEventListener('click', function() {
         document.getElementById('deleteForm_{{ forloop.counter }}').submit();
     });
 </script>
-
-
 {% endfor %}
 
 <script>
@@ -503,9 +531,67 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 </script>
 
+
+<!-- begin:: Video length -->
+<script>
+    const videoLengthElem = document.getElementById('video-length-value');
+    // Get the event ID from the data attribute
+    const streamingEventId = videoLengthElem.getAttribute('data-event-id');
+
+    // Dynamically construct the URL using the streaming event ID
+    const fetchUrl = "{% url 'control:video_length_data' 0 %}".replace('0', streamingEventId);
+
+    function updateVideoLength() {
+        fetch(fetchUrl)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                // Update the DOM element
+                videoLengthElem.textContent = data.video_length;
+            })
+            .catch(error => {
+                console.error('Error fetching video length:', error);
+            });
+    }
+
+    // Poll every 10 seconds
+    setInterval(updateVideoLength, 10000);
+</script>
+<!-- end:: Video length -->
+
+{% block css %}
+<style>
+    .bg-gradient-primary {
+        background: linear-gradient(45deg, #4a0e95, #ff0099);
+    }
+    .hover-bg-light:hover {
+        background-color: rgba(0, 0, 0, 0.03);
+    }
+    .transition {
+        transition: all 0.3s ease;
+    }
+</style>
+{% endblock css %}
+
 {% endblock %}
 
+<!-- NOT USED NOW  -->
+
+<!-- buffer health -->
+
+<!-- <div class="col-md-2" style="margin-left: 3rem;" >
+<div class="d-flex align-items-center">
+    <i class="fas fa-clock mr-2" style="font-size: 1.2rem; color: #6c757d;"></i>
+    <p class="mb-0" style="font-family: 'Roboto Condensed', sans-serif; font-size: 0.9rem;">Buffer health</p>
+</div>
+<div id="buffer-health_{{ forloop.counter }}"></div>
+</div> -->
+
+
+
+
     
-
-
-

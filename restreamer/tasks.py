@@ -38,6 +38,7 @@ def end_stream(user_id, streaming_event, alias=None):
         log.exception(f'An error occurred: {e}')
 
 
+# i dont now what is this 
 @shared_task(queue='init_stream_queue', acks_late=True)
 def enable_stream(streaming_event):
     video_manger = VideoDataManager(streaming_event=streaming_event)
