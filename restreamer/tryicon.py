@@ -143,6 +143,9 @@ class TrayIcon:
             status = service.as_dict().get('status')
 
             buffer_time = get_buffer_time()
+            
+            menu_items.append(pystray.MenuItem(text="Delete Chunks",
+                                            action=lambda: delete_local_chunks()))
 
             menu_items = [
                 item(text=f"Time in buffer: {buffer_time}", action=None)
@@ -159,9 +162,6 @@ class TrayIcon:
             menu_items.append(pystray.MenuItem(text="Log File",
                                             action=lambda: self.open_log_file('inpoint')))
             
-            menu_items.append(pystray.MenuItem(text="Delete Chunks",
-                                            action=lambda: delete_local_chunks()))
-
             # Update the menu with all items
             icon.menu = pystray.Menu(*menu_items)
 
