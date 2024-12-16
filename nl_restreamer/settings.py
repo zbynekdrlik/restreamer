@@ -15,6 +15,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+from decouple import config
 load_dotenv()
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.1/howto/deployment/checklist/
@@ -190,6 +191,16 @@ AWS_STORAGE_BUCKET_NAME = 'linode52'
 AWS_S3_REGION_NAME = 'eu-central-1'  # Set your region
 OBJECT_STORAGE_URL = 'https://eu-central-1.linodeobjects.com'
 LINODE_API_KEY = os.getenv('LINODE_TOKEN')
+
+
+AWS_SECRET_ACCESS_KEY = config('AWS_SECRET_ACCESS_KEY')
+AWS_ACCESS_KEY_ID = config('AWS_ACCESS_KEY_ID')
+OBJECT_STORAGE_URL = 'https://eu-central-1.linodeobjects.com'
+
+S3_CLIENT = boto3.client('s3',
+                         endpoint_url=OBJECT_STORAGE_URL,
+                         aws_access_key_id=AWS_ACCESS_KEY_ID,
+                         aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
 
 
 CELERY_BROKER_URL = 'redis://localhost:6379'
