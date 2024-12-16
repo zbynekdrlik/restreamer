@@ -143,13 +143,11 @@ class TrayIcon:
             status = service.as_dict().get('status')
 
             buffer_time = get_buffer_time()
+            icon.title = buffer_time
+            menu_items = []
             
             menu_items.append(pystray.MenuItem(text="Delete Chunks",
                                             action=lambda: delete_local_chunks()))
-
-            menu_items = [
-                item(text=f"Time in buffer: {buffer_time}", action=None)
-            ]
 
             if status != 'running':
                 menu_items.append(pystray.MenuItem(text="Start",
