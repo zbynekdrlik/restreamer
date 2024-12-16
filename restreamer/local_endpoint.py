@@ -99,10 +99,11 @@ class ChunkSender:
         chunk_identifier = {"chunk_identifier": self.streaming_event_identifier}
         identifier = f"{chunk_id}_{chunk_identifier}.bin"
         chunk_size = {"chunk_size" : len(chunk_data)}
-     
+        chunk_data_ = chunk_data.read()
         while True:
             try:
-                self.upload_to_s3(chunk_data, identifier)
+                
+                self.upload_to_s3(chunk_data_ , identifier)
                 log.info(f"S3 upload for chunk {chunk_id} succeeded!")
                 break
             except Exception as e:
