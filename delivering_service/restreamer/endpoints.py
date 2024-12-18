@@ -199,7 +199,7 @@ class EndPoint(multiprocessing.Process):
                     self.process_chunk(ffmpeg_process, response)
                 except self.s3.exceptions.NoSuchKey:
                     log.warning(
-                        f"NoSuchKey: The requested object does not exist. Waiting for new data "
+                        f"NoSuchKey: The requested object does not exist. Waiting for new data."
                         f"Bucket: {self.bucket}, Key: {object_key}, "
                         f"Stream Identifier: {self.stream_identifier}, Chunk ID: {self.chunk_id.value}."
                     )
