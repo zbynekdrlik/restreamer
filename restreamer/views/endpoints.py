@@ -12,11 +12,14 @@ from django.contrib.auth.decorators import login_required
 
 @method_decorator(login_required, name='dispatch')
 class EditEndpoint(View):
-    
-    def get(self, request, endpoint_id):
-    
-        # Replace `Endpoint` with your actual model name
-        endpoint = get_object_or_404(EndPointCfg, id=endpoint_id)
+    def get(self, request):
+        # Fetch `endpoint_id` from query parameters
+        endpoint_id = request.GET.get('endpoint_id', None)
+        if not endpoint_id:
+            return JsonResponse({'error': 'Missing endpoint_id'}, status=400)
+
+        # Fetch the endpoint data
+        endpoint = get_object_or_404(EndPointCfg, id=endpoint_id, user=request.user)
         data = {
             'id': endpoint.id,
             'name': endpoint.name,
@@ -24,23 +27,20 @@ class EditEndpoint(View):
             'stream_key': endpoint.stream_key,
         }
         return JsonResponse(data)
-        
+
     def post(self, request):
+        # Handle form submission
         data = request.POST
-        
-        endpoint_id = data.get('endpint_id', None)
-        endpint_name = data.get('endpoint_name', None)
-        service_type = data.get('service_type', None)
-        stream_key = data.get('stream_key', None)
-        enabled =  data.get('enabled', None)
-        
-        endpoint = EndPointCfg.objects.get(id=endpoint_id, user=request.user)
-        
-        endpoint.alias = endpint_name
-        endpoint.service_type = service_type
-        endpoint.stream_key = stream_key
-        endpoint.enabled = enabled
-        
+        endpoint_id = data.get('endpoint_id', None)
+        if not endpoint_id:
+            return JsonResponse({'error': 'Missing endpoint_id'}, status=400)
+
+        # Fetch and update the endpoint
+        endpoint = get_object_or_404(EndPointCfg, id=endpoint_id, user=request.user)
+        endpoint.alias = data.get('endpoint_name')
+        endpoint.service_type = data.get('service_type')
+        endpoint.stream_key = data.get('stream_key')
+        endpoint.enabled = data.get('enabled', 'off') == 'on'  # Handle checkbox
         endpoint.save()
-        
-        return redirect('control:endpoint_edit')
+
+        return JsonResponse({'success': True})
