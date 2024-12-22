@@ -286,7 +286,7 @@
         document.getElementById('streamKey').value = streamKey;
         // Update form action with the correct endpoint ID
         const form = document.querySelector('#addEndpointModal form');
-        form.action = `{% url 'control:edit_endpoint' %}`.replace('undefined', id);
+        form.action = `{% url 'control:endpoint_edit' %}`.replace('undefined', id);
     }
 </script>
 
