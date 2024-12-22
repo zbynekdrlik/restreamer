@@ -22,7 +22,7 @@ class EditEndpoint(View):
         endpoint = get_object_or_404(EndPointCfg, id=endpoint_id, user=request.user)
         data = {
             'id': endpoint.id,
-            'name': endpoint.name,
+            'name': endpoint.alias,
             'service_type': endpoint.service_type,
             'stream_key': endpoint.stream_key,
         }
