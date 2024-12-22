@@ -33,7 +33,7 @@ urlpatterns = [
     
     path('remove-endpoint/<int:streaming_event_id>/<int:endpoint_id>/', RemoveEndpoint.as_view(), name='remove_endpoint'),
     path('add-endpoint/<int:streaming_event_id>/', AddEndpoint.as_view(), name='add_endpoint'),
-    path('endpoint-edit/<int:endpoint_id>/', EditEndpoint.as_view(), name='endpoint_edit'),
+    path('endpoint-edit/', EditEndpoint.as_view(), name='endpoint_edit'),
 
     path('stream-scheduler/', StreamSchedulerView.as_view(), name='stream-scheduler'),
 

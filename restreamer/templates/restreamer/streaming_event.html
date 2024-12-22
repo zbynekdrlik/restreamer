@@ -29,7 +29,7 @@
                             <!-- start :: edit endpoint button -->
                             <button type="button" class="text-gray-400 hover:text-blue-600 transition-colors duration-300"
                                     data-bs-toggle="modal" data-bs-target="#addEndpointModal"
-                                    onclick="openEditModal('/control/endpoint-edit/', '{{ endpoint.id }}')">
+                                    onclick="openEditModal('{{ endpoint.id }}')">
                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                                     <path d="M17.414 2.586a2 2 0 010 2.828l-10 10A2 2 0 015.586 16H3a1 1 0 01-1-1v-2.586a2 2 0 01.586-1.414l10-10a2 2 0 012.828 0zM6 13.586V15h1.414L16 6.414l-1.414-1.414L6 13.586z" />
                                 </svg>
@@ -205,32 +205,29 @@
                 <h5 class="modal-title" id="addEndpointModalLabel">Add Endpoint</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <form id="editEndpointForm" method="post">
+            <form id="editEndpointForm" method="post" action="{% url 'control:endpoint_edit' %}">
                 {% csrf_token %}
-                <input type="hidden"  id="endpoint-id" name="endpoint_id" placeholder="Enter streaming key" required>
+                <input type="hidden" id="endpoint-id" name="endpoint_id" required>
                 <div class="modal-body">
                     <div class="mb-3">
                         <label for="endpointName" class="form-label">Endpoint Name</label>
-                        <input type="text" class="form-control" id="endpointName" name="endpoint_name" placeholder="Enter endpoint name" required>
+                        <input type="text" class="form-control" id="endpointName" name="endpoint_name" required>
                     </div>
                     <div class="mb-3">
                         <label for="serviceType" class="form-label">Service Type</label>
                         <select class="form-select" id="serviceType" name="service_type" required>
-                            <option selected disabled>Select a service type</option>
                             <option value="streaming">Streaming</option>
                             <option value="backup">Backup</option>
                             <option value="analytics">Analytics</option>
                         </select>
                     </div>
                     <div class="mb-3">
-                        <label for="streamingKey" class="form-label">Streaming Key</label>
-                        <input type="text" class="form-control" id="streamKey" name="stream_key" placeholder="Enter streaming key" required>
+                        <label for="streamKey" class="form-label">Streaming Key</label>
+                        <input type="text" class="form-control" id="streamKey" name="stream_key" required>
                     </div>
                     <div class="form-check">
                         <input class="form-check-input" type="checkbox" id="enableEndpoint" name="enabled">
-                        <label class="form-check-label" for="enableEndpoint">
-                            Enable Endpoint
-                        </label>
+                        <label class="form-check-label" for="enableEndpoint">Enable Endpoint</label>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -292,18 +289,10 @@
 
 
 <script>
-    // fill the edit endpoint modal with data
-    function openEditModal(baseUrl, endpointId) {
-        // Construct the full URL
-        const url = `${baseUrl}${endpointId}/`;
+    function openEditModal(endpointId) {
+        // Make a GET request to fetch endpoint data
+        const url = `/control/endpoint-edit/?endpoint_id=${endpointId}`;
     
-        // Update the form's action attribute
-        document.querySelector('#editEndpointForm').action = url;
-    
-        // Populate the hidden input field for endpoint_id
-        document.querySelector('#endpoint-id').value = endpointId;
-    
-        // Optionally fetch data for pre-filling the modal
         fetch(url, {
             method: 'GET',
             headers: {
@@ -313,6 +302,7 @@
         .then(response => response.json())
         .then(data => {
             // Populate modal fields with fetched data
+            document.querySelector('#endpoint-id').value = data.id;
             document.querySelector('#endpointName').value = data.name;
             document.querySelector('#serviceType').value = data.service_type;
             document.querySelector('#streamKey').value = data.stream_key;
