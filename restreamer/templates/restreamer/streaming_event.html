@@ -204,7 +204,7 @@
                 <h5 class="modal-title" id="addEndpointModalLabel">Add Endpoint</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <form action="{% url 'control:endpoint_edit' %}" method="post">
+            <form method="post">
                 {% csrf_token %}
                 <input type="hidden"  id="endpoint-id" name="endpoint_id" placeholder="Enter streaming key" required>
                 <div class="modal-body">
