@@ -29,7 +29,7 @@
                             <!-- start :: edit endpoint button -->
                             <button type="button" class="text-gray-400 hover:text-blue-600 transition-colors duration-300"
                                     data-bs-toggle="modal" data-bs-target="#addEndpointModal"
-                                    onclick="openEditModal('{% url 'control:endpoint_edit' endpoint.id %}')">
+                                    onclick="openEditModal('{% url 'control:endpoint_edit' endpoint.id %}', '{{ endpoint.id }}')">
                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                                     <path d="M17.414 2.586a2 2 0 010 2.828l-10 10A2 2 0 015.586 16H3a1 1 0 01-1-1v-2.586a2 2 0 01.586-1.414l10-10a2 2 0 012.828 0zM6 13.586V15h1.414L16 6.414l-1.414-1.414L6 13.586z" />
                                 </svg>
@@ -292,7 +292,14 @@
 
 <script>
     // fill the edit endpoint modal with data
-    function openEditModal(url) {
+    function openEditModal(url, endpointId) {
+        // Update the form's action attribute
+        document.querySelector('#editEndpointForm').action = url;
+    
+        // Populate the hidden field for endpoint_id
+        document.querySelector('#endpoint-id').value = endpointId;
+    
+        // Optionally fetch data for pre-filling the modal
         fetch(url, {
             method: 'GET',
             headers: {
@@ -301,9 +308,7 @@
         })
         .then(response => response.json())
         .then(data => {
-
-            console.log(data);
-            document.querySelector('#endpoint-id').value = data.id;
+            // Populate modal fields with fetched data
             document.querySelector('#endpointName').value = data.name;
             document.querySelector('#serviceType').value = data.service_type;
             document.querySelector('#streamKey').value = data.stream_key;
