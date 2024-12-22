@@ -5,11 +5,26 @@ from django.shortcuts import (get_object_or_404, redirect,
                               render)
 from django.utils.decorators import method_decorator
 from django.contrib import messages
-
+from django.http import JsonResponse
 from restreamer.models import EndPointCfg
+from django.contrib.auth.decorators import login_required
 
 
+@method_decorator(login_required, name='dispatch')
 class EditEndpoint(View):
+    
+    def get(self, request, endpoint_id):
+    
+        # Replace `Endpoint` with your actual model name
+        endpoint = get_object_or_404(EndPointCfg, id=endpoint_id)
+        data = {
+            'id': endpoint.id,
+            'name': endpoint.name,
+            'service_type': endpoint.service_type,
+            'stream_key': endpoint.stream_key,
+        }
+        return JsonResponse(data)
+        
     def post(self, request):
         data = request.POST
         
@@ -26,4 +41,6 @@ class EditEndpoint(View):
         endpoint.stream_key = stream_key
         endpoint.enabled = enabled
         
+        endpoint.save()
         
+        return redirect('control:endpoint_edit')

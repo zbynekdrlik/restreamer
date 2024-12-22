@@ -27,11 +27,14 @@
                             <p class="text-gray-700 font-semibold">{{ endpoint }}</p>
 
                             <!-- start :: edit endpoint button -->
-                            <button type="button" class="text-gray-400 hover:text-blue-600 transition-colors duration-300" data-bs-toggle="modal" data-bs-target="#addEndpointModal" onclick="populateEditModal('{{ endpoint.id }}', '{{ endpoint.name }}', '{{ endpoint.service_type }}', '{{ endpoint.stream_key }}')">
+                            <button type="button" class="text-gray-400 hover:text-blue-600 transition-colors duration-300"
+                                    data-bs-toggle="modal" data-bs-target="#addEndpointModal"
+                                    onclick="openEditModal('{% url 'control:endpoint_edit' endpoint.id %}')">
                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                                     <path d="M17.414 2.586a2 2 0 010 2.828l-10 10A2 2 0 015.586 16H3a1 1 0 01-1-1v-2.586a2 2 0 01.586-1.414l10-10a2 2 0 012.828 0zM6 13.586V15h1.414L16 6.414l-1.414-1.414L6 13.586z" />
                                 </svg>
                             </button>
+
                             <!-- end :: edit endpiont button -->
 
                             <!-- begin::remove endpoint -->
@@ -283,6 +286,29 @@
         // Update form action with the correct endpoint ID
         const form = document.querySelector('#addEndpointModal form');
         form.action = `{% url 'control:edit_endpoint' %}`.replace('undefined', id);
+    }
+</script>
+
+
+<script>
+    // fill the edit endpoint modal with data
+    function openEditModal(url) {
+        fetch(url, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        })
+        .then(response => response.json())
+        .then(data => {
+
+            console.log(data);
+            document.querySelector('#endpoint-id').value = data.id;
+            document.querySelector('#endpointName').value = data.name;
+            document.querySelector('#serviceType').value = data.service_type;
+            document.querySelector('#streamKey').value = data.stream_key;
+        })
+        .catch(error => console.error('Error fetching endpoint data:', error));
     }
 </script>
 
