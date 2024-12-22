@@ -39,7 +39,7 @@ class EditEndpoint(View):
         # Fetch and update the endpoint
         endpoint = get_object_or_404(EndPointCfg, id=endpoint_id, user=request.user)
         
-        se_id = request.user.users_stream.filter(end_points__is_null=False).first().id
+        se_id = request.user.users_stream.filter(end_points__isnull=False).first().id
         
         endpoint.alias = data.get('endpoint_name')
         endpoint.service_type = data.get('service_type')
