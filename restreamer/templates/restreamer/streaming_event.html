@@ -24,37 +24,39 @@
                     {% if endpoints %}
                         {% for endpoint in endpoints %}
                         <div class="bg-white rounded-xl shadow-sm p-4 relative border border-gray-200 transition-all duration-300 hover:shadow-md hover:border-blue-300 group">
-                            <div class="absolute top-2 right-2 flex items-center space-x-2 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                                <!-- start :: edit endpoint button -->
-                                <button type="button" class="text-gray-400 hover:text-blue-600 transition-colors duration-300"
-                                        data-bs-toggle="modal" data-bs-target="#editEndpointModal"
-                                        data-endpoint-id="{{ endpoint.id }}">
-                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                                        <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-                                    </svg>
-                                </button>
-                                <!-- end :: edit endpoint button -->
-                        
-                                <!-- begin::remove endpoint -->
-                                <form action="{% url 'control:remove_endpoint' streaming_event.id endpoint.id %}" method="post">
-                                    {% csrf_token %}
-                                    <button type="submit" class="text-gray-400 hover:text-red-600 transition-colors duration-300">
-                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                                            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
-                                        </svg>
-                                    </button>
-                                </form>
-                                <!-- end :: remove endpoint -->
-                            </div>
-                        
                             <div class="flex items-center space-x-3">
                                 <div class="flex-shrink-0">
                                     <div class="w-2 h-2 bg-green-400 rounded-full"></div>
                                 </div>
                                 <p class="text-gray-700 font-medium text-sm">{{ endpoint }}</p>
                             </div>
+                        
+                            <div class="mt-2 flex justify-end space-x-2">
+                                <!-- start :: edit endpoint button -->
+                                <button type="button" class="text-gray-400 hover:text-blue-600 transition-colors duration-300"
+                                        data-bs-toggle="modal" data-bs-target="#editEndpointModal"
+                                        data-endpoint-id="{{ endpoint.id }}">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                        <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+                                    </svg>
+                                </button>
+                                <!-- end :: edit endpoint button -->
+                        
+                                <!-- begin::remove endpoint -->
+                                <form action="{% url 'control:remove_endpoint' streaming_event.id endpoint.id %}" method="post" class="inline">
+                                    {% csrf_token %}
+                                    <button type="submit" class="text-gray-400 hover:text-red-600 transition-colors duration-300">
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                        </svg>
+                                    </button>
+                                </form>
+                                <!-- end :: remove endpoint -->
+                            </div>
                         </div>
                         {% endfor %}
+                    
+
                     {% else %}
                         <p class="text-gray-500 italic col-span-full">No endpoints available.</p>
                     {% endif %}
