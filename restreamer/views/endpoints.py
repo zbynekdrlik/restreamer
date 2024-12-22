@@ -38,10 +38,13 @@ class EditEndpoint(View):
 
         # Fetch and update the endpoint
         endpoint = get_object_or_404(EndPointCfg, id=endpoint_id, user=request.user)
+        
+        se_id = request.user.users_stream.filter(end_points__is_null=False).first().id
+        
         endpoint.alias = data.get('endpoint_name')
         endpoint.service_type = data.get('service_type')
         endpoint.stream_key = data.get('stream_key')
         endpoint.enabled = data.get('enabled', 'off') == 'on'  # Handle checkbox
         endpoint.save()
 
-        return JsonResponse({'success': True})
+        return redirect('control:streaming_event_detail', id=se_id)
