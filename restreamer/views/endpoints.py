@@ -25,6 +25,7 @@ class EditEndpoint(View):
             'name': endpoint.alias,
             'service_type': endpoint.service_type,
             'stream_key': endpoint.stream_key,
+            'enabled': endpoint.enabled
         }
         return JsonResponse(data)
 

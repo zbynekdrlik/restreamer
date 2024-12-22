@@ -215,10 +215,13 @@
                     </div>
                     <div class="mb-3">
                         <label for="serviceType" class="form-label">Service Type</label>
-                        <select class="form-select" id="serviceType" name="service_type" required>
-                            <option value="streaming">Streaming</option>
-                            <option value="backup">Backup</option>
-                            <option value="analytics">Analytics</option>
+                        <select class="form-select" id="serviceType" name="service_type" required onchange="toggleStreamKey()">
+                            <option value="" disabled selected>Select a service type</option>
+                            <option value="YT_HLS">YouTube HLS</option>
+                            <option value="FB">Facebook</option>
+                            <option value="YT_RTMP">YouTube RTMP</option>
+                            <option value="VIMEO">Vimeo RTMP</option>
+                            <option value="INSTAGRAM">Instagram RTMP</option>
                         </select>
                     </div>
                     <div class="mb-3">
