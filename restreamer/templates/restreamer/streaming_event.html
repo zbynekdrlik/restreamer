@@ -45,7 +45,7 @@
                                     <!-- begin::remove endpoint -->
                                     <form action="{% url 'control:remove_endpoint' streaming_event.id endpoint.id %}" method="post" class="inline">
                                         {% csrf_token %}
-                                        <button type="submit" class="text-gray-400 hover:text-red-600 transition-colors duration-300">
+                                        <button type="submit" class="text-gray-400 hover:text-red-600 transition-colors duration-300" data-bs-toggle="modal" data-bs-target="#confirmEndpointRemove">
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                                                 <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
                                             </svg>
@@ -248,6 +248,25 @@
     </div>
 </div>
 
+<!-- Remove Endpoint Modal -->
+<div class="modal fade" id="confirmEndpointRemove" tabindex="-1" role="dialog" aria-labelledby="confirmEndpointRemoveLabel" aria-hidden="true">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h5 class="modal-title" id="removeEndpointModalLabel">Remove Endpoint</h5>
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                <span aria-hidden="true">&times;</span>
+            </button>
+        </div>
+        <div class="modal-body">
+            Are you sure you want to remove this endpoint from the streaming event?
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-danger" id="confirmRemoveEndpoint">Remove Endpoint</button>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js" integrity="sha384-geWF76RCwLtnZ8qwWowPQNguL3RmwHVBC9FhGdlKrxdiJJigb/j/68SIy3Te4Bkz" crossorigin="anonymous"></script>
 
 
@@ -330,5 +349,14 @@
         });
     });
 </script>
+
+
+<script>
+    // sumbit the endpint removal
+    document.getElementById('confirmRemoveEndpoint').addEventListener('click', function () {
+        document.getElementById('removeEndpointForm').submit();
+    });
+</script>
+
 
 {% endblock content %}
