@@ -43,7 +43,7 @@
                                     <!-- end :: edit endpoint button -->
                             
                                     <!-- begin::remove endpoint -->
-                                    <form action="{% url 'control:remove_endpoint' streaming_event.id endpoint.id %}" method="post" class="inline">
+                                    <form id="removeEndpointForm" action="{% url 'control:remove_endpoint' streaming_event.id endpoint.id %}" method="post" class="inline">
                                         {% csrf_token %}
                                         <button type="button" class="text-gray-400 hover:text-red-600 transition-colors duration-300" data-toggle="modal" data-target="#confirmEndpointRemove">
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
