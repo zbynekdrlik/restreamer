@@ -350,11 +350,17 @@
     });
 </script>
 
-
 <script>
-    // sumbit the endpint removal
-    document.getElementById('confirmRemoveEndpoint').addEventListener('click', function () {
-        document.getElementById('removeEndpointForm').submit();
+    document.addEventListener('DOMContentLoaded', function () {
+        // Submit the endpoint removal form
+        document.getElementById('confirmRemoveEndpoint').addEventListener('click', function () {
+            const form = document.getElementById('removeEndpointForm');
+            if (form) {
+                form.submit();
+            } else {
+                console.error('Form with ID "removeEndpointForm" not found.');
+            }
+        });
     });
 </script>
 
