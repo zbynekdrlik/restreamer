@@ -22,7 +22,7 @@ from decouple import config
 SECRET_KEY = config('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = False
 hostname, _, ips = socket.gethostbyname_ex(socket.gethostname())
 ALLOWED_HOSTS = ['*'] + ips
 
