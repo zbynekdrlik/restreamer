@@ -10,7 +10,12 @@ from restreamer.views.user_control import (DeleteChunkData,
                                            RemoveEndpoint, AddEndpoint, StreamSchedulerView, user_history)
 from restreamer.views.youtube import GoLiveYt, YtLivePage
 from restreamer.views.stream_management import IsDeliveringActive
+<<<<<<< HEAD
 from restreamer.views.streaming_event import StreamingEventView, CreateStreamView, StreamingEventDetailView, StreamingEventEdit, VideoLengthData
+=======
+from restreamer.views.streaming_event import StreamingEventView, CreateStreamView, StreamingEventDetailView, StreamingEventEdit
+from restreamer.views.endpoints import EditEndpoint
+>>>>>>> endpoint_edit
 
 app_name = 'control'
 
@@ -29,8 +34,10 @@ urlpatterns = [
 
     path('delete_data/', DeleteChunkData.as_view(), name='delete_chunk_data'),
     path('remove-streaming-event/<int:id>/', RemoveStreamingEvent.as_view(), name='remove_streaming_event'),
+    
     path('remove-endpoint/<int:streaming_event_id>/<int:endpoint_id>/', RemoveEndpoint.as_view(), name='remove_endpoint'),
     path('add-endpoint/<int:streaming_event_id>/', AddEndpoint.as_view(), name='add_endpoint'),
+    path('endpoint-edit/', EditEndpoint.as_view(), name='endpoint_edit'),
 
     path('stream-scheduler/', StreamSchedulerView.as_view(), name='stream-scheduler'),
 
