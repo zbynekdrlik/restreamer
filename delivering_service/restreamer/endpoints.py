@@ -175,6 +175,7 @@ class EndPoint(multiprocessing.Process):
         """
         Fetch the next chunk ID greater than the current chunk_id from the server.
         """
+        log.info("------ Traing to get next chunk --------")
         try:
             # Example API URL (adjust as necessary for your setup)
             api_url = "http://restreamer.newlevel.media/api/get-next-chunk/"
@@ -228,12 +229,14 @@ class EndPoint(multiprocessing.Process):
                     self.process_chunk(ffmpeg_process, response)
                 except self.s3.exceptions.NoSuchKey:
                     log.warning(
-                        f"NoSuchKey: The requested object does not exist. Waiting for new data."
+                        f"NoSuchKey: The requested object does not exist."
                         f"Bucket: {self.bucket}, Key: {object_key}, "
                         f"Stream Identifier: {self.stream_identifier}, Chunk ID: {self.chunk_id.value}."
                     )
                     if self.get_next_chunk():
+                        time.sleep(10)
                         continue
+                    log.warning('The buffer is empty !!! Waiting for new data.')
                     time.sleep(20)
                 except Exception as e:
                     log.error(
@@ -243,7 +246,7 @@ class EndPoint(multiprocessing.Process):
                         f"Error: {str(e)}"
                     )
                     log.exception(e)
-                    time.sleep(20)
+                    time.sleep(5)
                 
                       
         except KeyboardInterrupt:
