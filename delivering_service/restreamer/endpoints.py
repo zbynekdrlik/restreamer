@@ -164,12 +164,11 @@ class EndPoint(multiprocessing.Process):
                     self.chunk_id.value += 1
                 else:
                     log.warning("Chunk file not exists, skipping!")
-            except boto3.exceptions.S3UploadFailedError as e:
-                log.error(f"Error uploading chunk to S3: {e}")
-            except BotoCoreError as e:
-                log.error(f"Error: {e}")
+            
             except BrokenPipeError:
                 log.warning("Write to ffmpeg stdin unsuccessful")
+            except Exception as e:
+                log.error(f"Error {e}")
         
             
 
@@ -198,13 +197,24 @@ class EndPoint(multiprocessing.Process):
                     object_key = f"{self.chunk_id.value}_{self.stream_identifier}.bin"
                     response = self.s3.get_object(Bucket=self.bucket, Key=object_key)
                     self.process_chunk(ffmpeg_process, response)
-                except self.s3.exceptions.NoSuchKey as e:
-                    log.warning(f"The buffer is empty!! Waiting for new data.")
+                except self.s3.exceptions.NoSuchKey:
+                    log.warning(
+                        f"NoSuchKey: The requested object does not exist. Waiting for new data."
+                        f"Bucket: {self.bucket}, Key: {object_key}, "
+                        f"Stream Identifier: {self.stream_identifier}, Chunk ID: {self.chunk_id.value}."
+                    )
+                    time.sleep(30)
+                except Exception as e:
+                    log.error(
+                        f"An error occurred while accessing S3. "
+                        f"Bucket: {self.bucket}, Key: {object_key}, "
+                        f"Stream Identifier: {self.stream_identifier}, Chunk ID: {self.chunk_id.value}. "
+                        f"Error: {str(e)}"
+                    )
+                    log.exception(e)
                     time.sleep(30)
                 
-                
-                
-                
+                      
         except KeyboardInterrupt:
             log.info("Ctrl-C detected, terminating!")
             log.info("Cleaning up EndPoint process...")
