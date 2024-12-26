@@ -102,24 +102,24 @@ class GetNextChunkView(APIView):
     """
     
     def get(self, request, *args, **kwargs):
-        current_chunk_id = request.query_params.get("current_chunk_id")
+        current_local_id = request.query_params.get("current_local_id")
         stream_identifier = request.query_params.get("stream_identifier")
 
-        if not current_chunk_id or not stream_identifier:
+        if not current_local_id or not stream_identifier:
             return JsonResponse(
                 {"error": "Missing required parameters: current_chunk_id or stream_identifier"},
                 status=400,
             )
 
         try:
-            current_chunk_id = int(current_chunk_id)
+            current_local_id = int(current_local_id)
         except ValueError:
             return JsonResponse({"error": "Invalid chunk ID format"}, status=400)
 
         # Fetch the next chunk greater than the current chunk ID
         next_chunk = (
-            ChunkRecord.objects.filter(stream_identifier=stream_identifier, chunk_id__gt=current_chunk_id)
-            .order_by("chunk_id")
+            ChunkRecord.objects.filter(stream_identifier=stream_identifier, local_id__gt=current_local_id)
+            .order_by("local_id")
             .first()
         )
 
