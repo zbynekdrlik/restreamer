@@ -179,7 +179,7 @@ class EndPoint(multiprocessing.Process):
             # Example API URL (adjust as necessary for your setup)
             api_url = "http://restreamer.newlevel.media/api/get-next-chunk/"
             params = {
-                "current_chunk_id": self.chunk_id.value,
+                "current_local_id": self.chunk_id.value,
                 "stream_identifier": self.stream_identifier,
             }
 
