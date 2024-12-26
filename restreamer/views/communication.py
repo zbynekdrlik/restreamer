@@ -1,6 +1,5 @@
 import logging
 
-from accounts.models import RestreamerUser
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.contrib.auth.decorators import login_required
@@ -11,8 +10,11 @@ from django.utils.decorators import method_decorator
 from django.views import View
 from rest_framework import status
 from rest_framework.response import Response
+from rest_framework.exceptions import NotFound
 from rest_framework.views import APIView
-from restreamer.models import StreamingEvent
+
+from accounts.models import RestreamerUser
+from restreamer.models import StreamingEvent, ChunkRecord
 from restreamer.serializers import (BufferHealthSerializer,
                                     StreamingEventSerializer)
 from restreamer.video_data import VideoDataManager
@@ -93,3 +95,37 @@ class DeliveringReady(View):
             'buffer_filled': buffer_filled,
             'live': live
         })
+        
+class GetNextChunkView(APIView):
+    """
+    API View to retrieve the next available chunk ID greater than the given one.
+    """
+    
+    def get(self, request, *args, **kwargs):
+        current_chunk_id = request.query_params.get("current_chunk_id")
+        stream_identifier = request.query_params.get("stream_identifier")
+
+        if not current_chunk_id or not stream_identifier:
+            return JsonResponse(
+                {"error": "Missing required parameters: current_chunk_id or stream_identifier"},
+                status=400,
+            )
+
+        try:
+            current_chunk_id = int(current_chunk_id)
+        except ValueError:
+            return JsonResponse({"error": "Invalid chunk ID format"}, status=400)
+
+        # Fetch the next chunk greater than the current chunk ID
+        next_chunk = (
+            ChunkRecord.objects.filter(stream_identifier=stream_identifier, chunk_id__gt=current_chunk_id)
+            .order_by("chunk_id")
+            .first()
+        )
+
+        if not next_chunk:
+            raise NotFound(
+                detail="No chunk found greater than the current chunk ID for the given stream identifier."
+            )
+
+        return Response({"next_chunk_id": next_chunk.local_id}, status=200)
