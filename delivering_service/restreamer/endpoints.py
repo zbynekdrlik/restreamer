@@ -169,14 +169,43 @@ class EndPoint(multiprocessing.Process):
                 log.warning("Write to ffmpeg stdin unsuccessful")
             except Exception as e:
                 log.error(f"Error {e}")
-        
-            
+                
+    
+    def get_next_chunk(self):
+        """
+        Fetch the next chunk ID greater than the current chunk_id from the server.
+        """
+        try:
+            # Example API URL (adjust as necessary for your setup)
+            api_url = "http://restreamer.newlevel.media/api/get-next-chunk/"
+            params = {
+                "current_chunk_id": self.chunk_id.value,
+                "stream_identifier": self.stream_identifier,
+            }
 
+            response = requests.get(api_url, params=params, timeout=3)
+            response.raise_for_status()
+
+            data = response.json()
+            next_chunk_id = data.get("next_chunk_id")
+            if next_chunk_id is None:
+                log.warning("No next_chunk_id found in the response.")
+                return None
+
+            log.info(f"Next chunk ID retrieved: {next_chunk_id}")
+            self.chunk_id.value = next_chunk_id
+            return self.chunk_id.value
+        except requests.exceptions.RequestException as e:
+            log.error(f"Failed to fetch next chunk ID: {e}")
+            time.sleep(1)
+        except Exception as e:
+            log.exception(f"Unexpected error in get_next_chunk: {e}") 
+        
+    
     def run(self):
         from django.db import connection
         connection.close()
         
-
         ffmpeg_process = self.run_ffmpeg()
 
         try:
@@ -203,7 +232,9 @@ class EndPoint(multiprocessing.Process):
                         f"Bucket: {self.bucket}, Key: {object_key}, "
                         f"Stream Identifier: {self.stream_identifier}, Chunk ID: {self.chunk_id.value}."
                     )
-                    time.sleep(30)
+                    if self.get_next_chunk()
+                        continue
+                    time.sleep(20)
                 except Exception as e:
                     log.error(
                         f"An error occurred while accessing S3. "
@@ -212,7 +243,7 @@ class EndPoint(multiprocessing.Process):
                         f"Error: {str(e)}"
                     )
                     log.exception(e)
-                    time.sleep(30)
+                    time.sleep(20)
                 
                       
         except KeyboardInterrupt:
