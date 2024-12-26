@@ -232,7 +232,7 @@ class EndPoint(multiprocessing.Process):
                         f"Bucket: {self.bucket}, Key: {object_key}, "
                         f"Stream Identifier: {self.stream_identifier}, Chunk ID: {self.chunk_id.value}."
                     )
-                    if self.get_next_chunk()
+                    if self.get_next_chunk():
                         continue
                     time.sleep(20)
                 except Exception as e:
