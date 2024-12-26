@@ -118,7 +118,7 @@ class GetNextChunkView(APIView):
 
         # Fetch the next chunk greater than the current chunk ID
         next_chunk = (
-            ChunkRecord.objects.filter(stream_identifier=stream_identifier, local_id__gt=current_local_id)
+            ChunkRecord.objects.filter(identifier=stream_identifier, local_id__gt=current_local_id)
             .order_by("local_id")
             .first()
         )
