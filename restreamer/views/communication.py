@@ -117,12 +117,14 @@ class GetNextChunkView(APIView):
             return JsonResponse({"error": "Invalid chunk ID format"}, status=400)
 
         # Fetch the next chunk greater than the current chunk ID
-        ChunkRecord.refresh_from_db()
+        #ChunkRecord.refresh_from_db()
         next_chunk = (
             ChunkRecord.objects.filter(identifier=stream_identifier, local_id__gt=current_local_id)
             .order_by("local_id")
             .first()
         )
+        
+        log.info('----------------- Next chunk id ------------>', next_chunk.local_id)
 
         if not next_chunk:
             raise NotFound(
