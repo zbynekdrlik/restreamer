@@ -115,7 +115,7 @@ class StartEndStream(View):
         
         if not streaming_event.delivering_activated:
             
-            cancel_delete_instance_jobs(user_id, streaming_event.id)
+            cancel_delete_instance_jobs(user_id, streaming_event.identifier)
             
             if video_manager.is_buffer_filled(buffer_time) or data.get('confirm_start') == '1':
                 streaming_event.delivering_activated=True
