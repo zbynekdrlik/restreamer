@@ -27,7 +27,7 @@ from restreamer.video_data import VideoDataManager
 
 from accounts.models import RestreamerUser
 
-from restreamer.scheduler import delete_instance_schedule, schedule_init_stream
+from restreamer.scheduler import delete_instance_schedule, schedule_init_stream, cancel_delete_instance_jobs
 from restreamer.tasks import end_stream, init_stream
 from restreamer.video_data import VideoDataManager
 
@@ -110,10 +110,12 @@ class StartEndStream(View):
             streaming_event.save()
             
             end_stream(user_id, streaming_event)
-            delete_instance_schedule(user_id)
+            delete_instance_schedule(user_id, streaming_event.identifier)
             return redirect('control:home')
         
         if not streaming_event.delivering_activated:
+            
+            cancel_delete_instance_jobs(user_id, streaming_event.id)
             
             if video_manager.is_buffer_filled(buffer_time) or data.get('confirm_start') == '1':
                 streaming_event.delivering_activated=True

@@ -34,6 +34,7 @@ class InstanceManager():
         self.linode_client = settings.LINODE_CLIENT
         self.large_instance = settings.INSTANCE_TYPE_4G
         self.larger_instance = settings.INSTANCE_TYPE_8G
+        self.cheapest_instance = settings.INSTANCE_TYPE_1G
         self.region = settings.REGION
         self.root_password = settings.ROOT_PASSWORD
         self.user_id = user_id
@@ -93,8 +94,11 @@ class InstanceManager():
     def create_instance(self):
         try:
             se = StreamingEvent.objects.filter(user=self.user_id).last()
-            if se.end_points.count() > 7:
-                linode_type = self.larger_instance        
+            se_count = se.end_points.count() 
+            if se_count > 7:
+                linode_type = self.larger_instance
+            elif se_count == 1 or 'test' in se.short_description.lower():
+                linode_type = self.cheapest_instance 
             else:
                 linode_type = self.large_instance
             image_id = self.get_correct_image()

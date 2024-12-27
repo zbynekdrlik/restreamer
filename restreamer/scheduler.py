@@ -34,11 +34,25 @@ def schedule_init_stream(user_id, streaming_event_id, start_time, chunk_id, endp
     for job in jobs:
         log.info(f"Job id: {job.id}, Next run time: {job.next_run_time}")
 
-def delete_instance_schedule(user_id):
+def delete_instance_schedule(user_id, streaming_event_id):
     run_time = datetime.now() + timedelta(minutes=30)
-    scheduler.add_job(delete_instance, run_date=run_time, args=[user_id])
+    job_id = f"delete_instance_user_{user_id}_event_{streaming_event_id}"
+    scheduler.add_job(
+        delete_instance,
+        id=job_id,
+        run_date=run_time,
+        args=[user_id]
+    )
+    return job_id
     
 
 def delete_instance(user_id):
     instance_manager = InstanceManager(user_id)
     instance_manager.delete_instance()
+    
+
+def cancel_delete_instance_jobs(user_id, streaming_event_id):
+    job_id_pattern = f"delete_instance_user_{user_id}_event_{streaming_event_id}"
+    for job in scheduler.get_jobs():
+        if job.id.startswith(job_id_pattern):
+            scheduler.remove_job(job.id)
