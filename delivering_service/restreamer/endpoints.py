@@ -234,8 +234,8 @@ class EndPoint(multiprocessing.Process):
                         f"Stream Identifier: {self.stream_identifier}, Chunk ID: {self.chunk_id.value}."
                     )
                     if self.get_next_chunk():
-                        time.sleep(10)
                         continue
+                    
                     log.warning('The buffer is empty !!! Waiting for new data.')
                     time.sleep(20)
                 except Exception as e:
