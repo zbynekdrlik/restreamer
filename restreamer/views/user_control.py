@@ -160,7 +160,6 @@ class RemoveStreamingEvent(View):
 class RemoveEndpoint(View):
     def post(self, request, *args, **kwargs):
         streaming_event = get_object_or_404(StreamingEvent, id=self.kwargs['streaming_event_id'])
-        print('endpint id ---------------->', self.kwargs['endpoint_id'])
         success = streaming_event.remove_endpoint(endpoint_id=self.kwargs['endpoint_id'])
         user_id = request.user.id
         
