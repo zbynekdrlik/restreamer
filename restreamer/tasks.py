@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 # celery -A nl_restreamer worker -l INFO --pool=threads -Q init_stream_queue
 
 
-@shared_task(queue='init_stream_queue', acks_late=True)
+@shared_task(queue='init_stream_queue')
 def init_stream(user_id, streaming_event_id, **kwargs):
     chunk_id = kwargs.get("chunk_id")
     try:

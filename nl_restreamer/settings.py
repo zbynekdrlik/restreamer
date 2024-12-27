@@ -243,6 +243,7 @@ S3_CLIENT = boto3.client('s3',
 token = os.getenv('LINODE_TOKEN')
 LINODE_CLIENT = LinodeClient(token)
 INSTANCE_TYPE_4G = os.getenv('INSTANCE_TYPE_4G')
+INSTANCE_TYPE_1G = os.getenv('INSTANCE_TYPE_1G')
 INSTANCE_TYPE_8G = os.getenv('INSTANCE_TYPE_8G')
 REGION = os.getenv('INSTANCE_REGION')
 ROOT_PASSWORD = os.getenv('ROOT_SERVER_PASSWORD')
