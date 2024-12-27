@@ -124,7 +124,7 @@ class GetNextChunkView(APIView):
             .first()
         )
         
-        log.info('----------------- Next chunk id ------------>', next_chunk.local_id)
+        log.info(f'----------------- Next chunk id ------------> {next_chunk.local_id}')
 
         if not next_chunk:
             raise NotFound(
