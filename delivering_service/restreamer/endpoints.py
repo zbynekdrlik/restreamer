@@ -175,7 +175,6 @@ class EndPoint(multiprocessing.Process):
         """
         Fetch the next chunk ID greater than the current chunk_id from the server.
         """
-        log.info("------ Traing to get next chunk --------")
         try:
             # Example API URL (adjust as necessary for your setup)
             api_url = "http://restreamer.newlevel.media/api/get-next-chunk/"
@@ -190,6 +189,7 @@ class EndPoint(multiprocessing.Process):
             data = response.json()
             next_chunk_id = data.get("next_chunk_id")
             if next_chunk_id is None:
+                self.chunk_id.value = None
                 log.warning("No next_chunk_id found in the response.")
                 return None
 
@@ -221,6 +221,9 @@ class EndPoint(multiprocessing.Process):
                     continue
 
                 if self.chunk_id.value is None:
+                    log.warning('The buffer is empty !!! Waiting for new data.')
+                    self.get_next_chunk_id()
+                    time.sleep(20)
                     continue
                 
                 try:
@@ -234,7 +237,7 @@ class EndPoint(multiprocessing.Process):
                         f"Stream Identifier: {self.stream_identifier}, Chunk ID: {self.chunk_id.value}."
                     )
                     if self.get_next_chunk_id():
-                        time.sleep(10)
+                        time.sleep(2)
                         continue
                     
                     log.warning('The buffer is empty !!! Waiting for new data.')
