@@ -200,7 +200,9 @@ class EndPoint(multiprocessing.Process):
             log.error(f"Failed to fetch next chunk ID: {e}")
             time.sleep(1)
         except Exception as e:
-            log.exception(f"Unexpected error in get_next_chunk: {e}") 
+            log.exception(f"Unexpected error in get_next_chunk: {e}")
+             
+        self.chunk_id.value = None
         
     
     def run(self):
