@@ -161,7 +161,7 @@ class EndPoint(multiprocessing.Process):
                     ffmpeg_process.stdin.write(chunk_data)
                     ffmpeg_process.stdin.flush()
                     self.buff_size.value += len(chunk_data)
-                    self.chunk_id.value += 1
+                    self.get_next_chunk_id()
                 else:
                     log.warning("Chunk file not exists, skipping!")
             
@@ -171,7 +171,7 @@ class EndPoint(multiprocessing.Process):
                 log.error(f"Error {e}")
                 
     
-    def get_next_chunk(self):
+    def get_next_chunk_id(self):
         """
         Fetch the next chunk ID greater than the current chunk_id from the server.
         """
@@ -233,7 +233,7 @@ class EndPoint(multiprocessing.Process):
                         f"Bucket: {self.bucket}, Key: {object_key}, "
                         f"Stream Identifier: {self.stream_identifier}, Chunk ID: {self.chunk_id.value}."
                     )
-                    if self.get_next_chunk():
+                    if self.get_next_chunk_id():
                         time.sleep(10)
                         continue
                     
