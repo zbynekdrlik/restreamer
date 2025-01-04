@@ -161,7 +161,6 @@ class EndPoint(multiprocessing.Process):
                     ffmpeg_process.stdin.write(chunk_data)
                     ffmpeg_process.stdin.flush()
                     self.buff_size.value += len(chunk_data)
-                    self.get_next_chunk_id()
                 else:
                     log.warning("Chunk file not exists, skipping!")
             
@@ -189,7 +188,6 @@ class EndPoint(multiprocessing.Process):
             data = response.json()
             next_chunk_id = data.get("next_chunk_id")
             if next_chunk_id is None:
-                self.chunk_id.value = None
                 log.warning("No next_chunk_id found in the response.")
                 return None
 
@@ -202,7 +200,7 @@ class EndPoint(multiprocessing.Process):
         except Exception as e:
             log.exception(f"Unexpected error in get_next_chunk: {e}")
              
-        self.chunk_id.value = None
+        return None
         
     
     def run(self):
@@ -222,9 +220,8 @@ class EndPoint(multiprocessing.Process):
                     ffmpeg_process = self.run_ffmpeg()
                     continue
 
-                if self.chunk_id.value is None:
+                if not self.get_next_chunk_id():
                     log.warning('The buffer is empty !!! Waiting for new data.')
-                    self.get_next_chunk_id()
                     time.sleep(20)
                     continue
                 
