@@ -1,3 +1,9 @@
+import logging
+import os
+
+from django.conf import settings
+
+log = logging.getLogger(__name__)
 
 def get_client_ip(request):
     """
@@ -10,3 +16,36 @@ def get_client_ip(request):
     else:
         ip = request.META.get('REMOTE_ADDR')
     return ip
+
+
+def delete_s3_chunks(chunk_keys):
+    """
+    Deletes the specified chunks from the S3 bucket.
+
+    Args:
+        chunk_keys (list): List of S3 keys for the chunks to delete.
+    """
+    bucket_name = os.environ.get('AWS_STORAGE_BUCKET_NAME')
+    client = settings.S3_CLIENT
+
+    try:
+        # Prepare objects for batch deletion
+        objects_to_delete = [{'Key': key} for key in chunk_keys]
+
+        if objects_to_delete:
+            response = client.delete_objects(
+                Bucket=bucket_name,
+                Delete={
+                    'Objects': objects_to_delete,
+                    'Quiet': True
+                }
+            )
+
+            errors = response.get('Errors', [])
+
+            for err in errors:
+                log.warning(f"Failed to delete chunk from S3: {err['Key']} - {err['Message']}")
+
+    except Exception as e:
+        log.error(f"Error while deleting chunks from S3: {e}")
+    
