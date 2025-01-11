@@ -46,6 +46,35 @@ def delete_s3_chunks(chunk_keys):
 
             for err in errors:
                 log.warning(f"Failed to delete chunk from S3: {err['Key']} - {err['Message']}")
-
+        
     except Exception as e:
         log.error(f"Error while deleting chunks from S3: {e}")
+    calculate_bucket_size() 
+        
+def calculate_bucket_size():
+    """
+    Calculates the total size of all objects in an S3 bucket.
+
+    Args:
+        bucket_name (str): Name of the S3 bucket.
+
+    Returns:
+        float: Total size in GB.
+    """
+    client = settings.S3_CLIENT  # Use your configured client if not default
+    total_size_bytes = 0
+    bucket_name = os.environ.get('AWS_STORAGE_BUCKET_NAME')
+
+    try:
+        paginator = client.get_paginator('list_objects_v2')
+        for page in paginator.paginate(Bucket=bucket_name):
+            if 'Contents' in page:
+                total_size_bytes += sum(obj['Size'] for obj in page['Contents'])
+
+    except Exception as e:
+        print(f"Error calculating bucket size: {e}")
+        return None
+
+    total_size_gb = total_size_bytes / (1024 ** 3)  # Convert bytes to GB
+    log.info(f'toto size in the bucket --------------> {total_size_gb}')
+    return total_size_gb
