@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'channels',
     'simple_history',
     'django_celery_beat',
+    'services'
 
 ]
 
