@@ -35,7 +35,7 @@ from ..forms import EndPointForm, StreamingEventForm
 from ..models import ChunkRecord, EndPointCfg, StreamingEvent
 from .instances import InstanceManager as IM
 
-from services.utils import delete_s3_chunks
+from restreamer.utils import delete_s3_chunks
 print("delete_s3_chunks function imported successfully")
 from django.http import JsonResponse
 
