@@ -25,9 +25,10 @@ def delete_s3_chunks(chunk_keys):
     Args:
         chunk_keys (list): List of S3 keys for the chunks to delete.
     """
+    log.info("------------------- Delete chunks called ----------------------")
     bucket_name = os.environ.get('AWS_STORAGE_BUCKET_NAME')
     client = settings.S3_CLIENT
-
+    
     try:
         # Prepare objects for batch deletion
         objects_to_delete = [{'Key': key} for key in chunk_keys]
@@ -48,4 +49,3 @@ def delete_s3_chunks(chunk_keys):
 
     except Exception as e:
         log.error(f"Error while deleting chunks from S3: {e}")
-    

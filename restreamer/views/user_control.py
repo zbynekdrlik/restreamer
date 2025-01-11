@@ -137,7 +137,7 @@ class StartEndStream(View):
 class DeleteChunkData(View):
     def post(self, request):
         streaming_event_id = request.POST.get("streaming_event_id")
-
+        log.info("---------------Delete chunks called ----------------------")
         try:
             chunks_to_delete = ChunkRecord.objects.filter(identifier=streaming_event_id)
             
@@ -152,7 +152,7 @@ class DeleteChunkData(View):
         except Exception as e:
             messages.error(request, f"Error deleting data: {e}")
             return redirect('control:home')
-
+        log.info(f'Chunks identifiers {chunk_identifiers}')
         messages.success(request, 'Chunks deleted successfully!')
         return redirect('control:home')
         
