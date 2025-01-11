@@ -46,10 +46,10 @@ def delete_s3_chunks(chunk_keys):
 
             for err in errors:
                 log.warning(f"Failed to delete chunk from S3: {err['Key']} - {err['Message']}")
-
+        
     except Exception as e:
         log.error(f"Error while deleting chunks from S3: {e}")
-        
+    calculate_bucket_size() 
         
 def calculate_bucket_size():
     """
@@ -76,4 +76,5 @@ def calculate_bucket_size():
         return None
 
     total_size_gb = total_size_bytes / (1024 ** 3)  # Convert bytes to GB
+    log.info(f'toto size in the bucket --------------> {total_size_gb}')
     return total_size_gb
