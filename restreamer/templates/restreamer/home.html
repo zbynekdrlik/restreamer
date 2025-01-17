@@ -308,7 +308,6 @@ document.addEventListener("DOMContentLoaded", function() {
 
     // Function to start the checkSeActive interval
     function startCheckSeActiveInterval(url, eventId) {
-
         if (!checkSeActiveInterval) {
             checkSeActiveInterval = setInterval(function() {
                 checkSeActive(url, eventId);
@@ -516,9 +515,10 @@ document.addEventListener('DOMContentLoaded', function() {
                             if(!isPreparing) {
                                 setTimeout(() => {
                                     form.submit();
+                                    stopCheckSeActiveInterval();
+                                    localStorage.removeItem(`checkSeActive_${eventId}`);
                                 }, 80000);
-                                stopCheckSeActiveInterval();
-                                localStorage.removeItem(`checkSeActive_${eventId}`);
+                                
                             }
                         } else {
                             console.error(`Form with data-event-id="${eventId}" not found.`);
@@ -526,7 +526,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     } else {
                         console.error(`Hidden input for event ID ${eventId} not found.`);
                     }
-
                 }
             },
             error: function(error) {
