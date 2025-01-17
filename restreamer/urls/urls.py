@@ -1,6 +1,6 @@
 from django.urls import path
 from restreamer.views.stream_management import ChunkUploadView, PositionLastUploadView, DeleteChunksView, ChunkExistsView
-from restreamer.views.communication import GetActiveStream, DeliveringReady, GetNextChunkView
+from restreamer.views.communication import GetActiveStream, DeliveringReady, GetNextChunkIdView
 
 
 
@@ -12,7 +12,7 @@ urlpatterns = [
     path("api/delete_all_chunks/", DeleteChunksView.as_view(), name="delete_all_chunks"),
     path('api/check-chunk/', ChunkExistsView.as_view(), name='check_chunk'),
     path('api/get_active_stream/', GetActiveStream.as_view(), name='get_active_stream'),
-    path("api/get-next-chunk/", GetNextChunkView.as_view(), name="get_next_chunk"),
+    path("api/get-next-chunk/", GetNextChunkIdView.as_view(), name="get_next_chunk"),
     
     path('check-status/<int:streaming_event_id>/', DeliveringReady.as_view(), name='stream_ready')
 ]
