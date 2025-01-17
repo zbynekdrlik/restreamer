@@ -216,10 +216,12 @@ document.addEventListener("DOMContentLoaded", function() {
                 const live = response.live
 
                 if (isRunning) {
-                    if (bufferFilled || live) {  // Use && for logical 'and'
-                        deliveringButton.className = initialButtonClasses;
-                        deliveringButton.innerHTML = initialButtonHtml;
-                        localStorage.removeItem('preparingStream_{{ forloop.counter }}');
+                    if (bufferFilled || live) {
+                        setTimeout(() => {
+                            deliveringButton.className = initialButtonClasses;
+                            deliveringButton.innerHTML = initialButtonHtml;
+                            localStorage.removeItem('preparingStream_{{ forloop.counter }}');
+                        }, 10000)
                     } else {
                         deliveringButton.innerText = "Buffering...";
                         localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
