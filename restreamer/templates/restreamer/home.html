@@ -516,9 +516,9 @@ document.addEventListener('DOMContentLoaded', function() {
                             if(!isPreparing) {
                                 setTimeout(() => {
                                     form.submit();
-                                }, 80000);
-                                stopCheckSeActiveInterval();
-                                localStorage.removeItem(`checkSeActive_${eventId}`);
+                                    stopCheckSeActiveInterval();
+                                    localStorage.removeItem(`checkSeActive_${eventId}`);
+                                }, 8000);
                             }
                         } else {
                             console.error(`Form with data-event-id="${eventId}" not found.`);
