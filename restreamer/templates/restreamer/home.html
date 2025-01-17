@@ -517,8 +517,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                     form.submit();
                                     stopCheckSeActiveInterval();
                                     localStorage.removeItem(`checkSeActive_${eventId}`);
-                                }, 80000);
-                                
+                                }, 8000);
                             }
                         } else {
                             console.error(`Form with data-event-id="${eventId}" not found.`);
