@@ -38,8 +38,6 @@ from .instances import InstanceManager as IM
 from restreamer.utils import delete_s3_chunks
 from django.http import JsonResponse
 
-from celery.result import AsyncResult
-
 
 
 log = logging.getLogger(__name__)

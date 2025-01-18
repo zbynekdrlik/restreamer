@@ -52,41 +52,38 @@ def enable_stream(streaming_event):
 # start control stream that have only 10s in buffer
 @shared_task(queue='init_stream_queue')
 def init_fast_stream(streaming_event_id):
-    try:
-        log.info('init_fast_stream function called')
-        streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
-        fast_stream = streaming_event.end_points.filter(is_fast=True).first()
-        user = streaming_event.user.id
-        if not fast_stream:
-            return
     
-        delivery_manager = DeliveringManger(user_id=user, streamign_event=streaming_event)
-        instance_manager = InstanceManager(user)
+    log.info('init_fast_stream function called')
+    streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
+    fast_stream = streaming_event.end_points.filter(is_fast=True).first()
+    user = streaming_event.user.id
+    if not fast_stream:
+        return
+
+    delivery_manager = DeliveringManger(user_id=user, streamign_event=streaming_event)
+    instance_manager = InstanceManager(user)
+    
+    while True:
+        is_active = instance_manager.check_status() == 'running'
+        log.info(f'is active ----------> {is_active}')
         
-        while True:
-            is_active = instance_manager.check_status() == 'running'
-            log.info(f'is active ----------> {is_active}')
-            
-            if is_active:
-                # Fetch only the fifth most recent chunk
-                chunks = (
-                    ChunkRecord.objects.filter(streaming_event=streaming_event)
-                    .order_by('-local_id')[4:5]
-                )
+        if is_active:
+            # Fetch only the fifth most recent chunk
+            chunks = (
+                ChunkRecord.objects.filter(streaming_event=streaming_event)
+                .order_by('-local_id')[4:5]
+            )
 
-                # Extract the chunk or None if not found
-                fast_chunk = chunks.first() if chunks.exists() else None
+            # Extract the chunk or None if not found
+            fast_chunk = chunks.first() if chunks.exists() else None
 
-                log.info(f"fast chunk {fast_chunk.local_id}")
-                time.sleep(3)
-
-                if fast_chunk:
-                    delivery_manager.send_init_data(fast_chunk.local_id, fast_stream.id)
-                    streaming_event.end_points.add(fast_stream)
-                    log.info(f"Fast stream {fast_stream.alias} initialized successfully !!!")
-                    return
-            
+            log.info(f"fast chunk {fast_chunk.local_id}")
             time.sleep(3)
-    except Exception as e:
-        log.info(f"There was problem initialize fast stream {e}")
-        raise
+
+            if fast_chunk:
+                delivery_manager.send_init_data(fast_chunk.local_id, fast_stream.id)
+                streaming_event.end_points.add(fast_stream)
+                log.info(f"Fast stream {fast_stream.alias} initialized successfully !!!")
+                return
+        
+        time.sleep(3)
