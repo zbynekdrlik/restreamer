@@ -29,7 +29,7 @@ def init_stream(user_id, streaming_event_id, **kwargs):
         log.exception(f'An error occurred: {e}')
         
         
-@shared_task(queue='init_stream_queue', acks_late=True)
+@shared_task(queue='init_stream_queue')
 def end_stream(user_id, streaming_event, alias=None):
     try:
         manager = DeliveringManger(user_id, streaming_event)
@@ -39,7 +39,7 @@ def end_stream(user_id, streaming_event, alias=None):
 
 
 # i dont now what is this 
-@shared_task(queue='init_stream_queue', acks_late=True)
+@shared_task(queue='init_stream_queue')
 def enable_stream(streaming_event):
     video_manger = VideoDataManager(streaming_event=streaming_event)
     buffer = streaming_event.buffer
@@ -50,7 +50,7 @@ def enable_stream(streaming_event):
         return True
 
 # start control stream that have only 10s in buffer
-@shared_task(queue='init_stream_queue', acks_late=True)
+@shared_task(queue='init_stream_queue')
 def init_fast_stream(streaming_event_id):
     log.info('init_fast_stream function called')
     streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
