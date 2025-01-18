@@ -59,7 +59,7 @@ def init_fast_stream(streaming_event_id):
     if not fast_stream:
         return
  
-    delivery_manager = DeliveringManger()
+    delivery_manager = DeliveringManger(user_id=user, streamign_event=streaming_event)
     instance_manager = InstanceManager(user)
     
     while True:
