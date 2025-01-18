@@ -125,7 +125,6 @@ class InstanceManager():
         return self.get_instance().ipv4[0]
             
     def check_status(self):
-        log.info(" self.get_instance().status -------------------> ",  self.get_instance().status)
         return self.get_instance().status
         
         
