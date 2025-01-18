@@ -37,6 +37,8 @@ from .instances import InstanceManager as IM
 
 from django.http import JsonResponse
 
+from celery.result import AsyncResult
+
 
 log = logging.getLogger(__name__)
 
@@ -87,8 +89,10 @@ class SetupStream(View):
                 IM(user_id=request.user.id).create_instance()
             except Exception as e:
                 messages.error(request, f'There was a problem creating instance {e}')
-            init_fast_stream.delay(streaming_event.id)
-            streaming_event.save()
+            try:
+                init_fast_stream.delay(streaming_event.id)
+            except Exception as e:
+                messages.error(request, 'There was problem initialize fast stream')
             messages.success(request, 'Streaming server successfuly scheduled for creation')
             return redirect('control:home')
 
