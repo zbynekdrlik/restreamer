@@ -52,6 +52,7 @@ def enable_stream(streaming_event):
 # start control stream that have only 10s in buffer
 @shared_task(queue='init_stream_queue', acks_late=True)
 def init_fast_stream(streaming_event_id):
+    log.info('init_fast_stream function called')
     streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
     fast_stream = streaming_event.end_points.filter(is_fast=True).first()
     user = streaming_event.user
@@ -63,6 +64,7 @@ def init_fast_stream(streaming_event_id):
     
     while True:
         is_active = instance_manager.check_status() == 'running'
+        log.info('is active ---------->', is_active)
         if is_active:
             chunks = ChunkRecord.objects.filter(streaming_event=streaming_event).order_by('-id')  # Order by descending ID
             fast_chunk = chunks[4] if chunks.count() >= 5 else None
@@ -70,6 +72,7 @@ def init_fast_stream(streaming_event_id):
             if fast_chunk:
                 delivery_manager.send_init_data(fast_chunk.id, fast_stream.id)
                 streaming_event.add(fast_stream)
+                log.info(f"Fast stream {fast_stream.alias} initialized successfuly !!!")
                 return
         time.sleep(3)
     
