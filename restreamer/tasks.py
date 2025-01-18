@@ -81,4 +81,4 @@ def init_fast_stream(streaming_event_id):
                 log.info(f"Fast stream {fast_stream.alias} initialized successfully !!!")
                 return
         
-        time.sleep(3)
+        time.sleep(10)
