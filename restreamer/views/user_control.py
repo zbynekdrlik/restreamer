@@ -28,7 +28,7 @@ from restreamer.video_data import VideoDataManager
 from accounts.models import RestreamerUser
 
 from restreamer.scheduler import delete_instance_schedule, schedule_init_stream, cancel_delete_instance_jobs
-from restreamer.tasks import end_stream, init_stream
+from restreamer.tasks import end_stream, init_stream, init_fast_stream
 from restreamer.video_data import VideoDataManager
 
 from ..forms import EndPointForm, StreamingEventForm
@@ -88,7 +88,7 @@ class SetupStream(View):
                 IM(user_id=request.user.id).create_instance()
             except Exception as e:
                 messages.error(request, f'There was a problem creating instance {e}')
-
+            init_fast_stream.delay(streaming_event)
             streaming_event.save()
             messages.success(request, 'Streaming server successfuly scheduled for creation')
             return redirect('control:home')

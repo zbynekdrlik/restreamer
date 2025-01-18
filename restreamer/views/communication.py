@@ -96,7 +96,7 @@ class DeliveringReady(View):
             'live': live
         })
         
-class GetNextChunkView(APIView):
+class GetNextChunkIdView(APIView):
     """
     API View to retrieve the next available chunk ID greater than the given one.
     """
@@ -129,6 +129,4 @@ class GetNextChunkView(APIView):
                 detail="No chunk found greater than the current chunk ID for the given stream identifier."
             )
             
-        log.info(f'----------------- Next chunk id ------------> {next_chunk.local_id}')
-
         return Response({"next_chunk_id": next_chunk.local_id}, status=200)
