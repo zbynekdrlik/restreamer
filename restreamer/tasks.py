@@ -53,7 +53,6 @@ def enable_stream(streaming_event):
 @shared_task(queue='init_stream_queue')
 def init_fast_stream(streaming_event_id):
     
-    log.info('init_fast_stream function called')
     streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
     fast_stream = streaming_event.end_points.filter(is_fast=True).first()
     user = streaming_event.user.id
@@ -65,8 +64,6 @@ def init_fast_stream(streaming_event_id):
     
     while True:
         is_active = instance_manager.check_status() == 'running'
-        log.info(f'is active ----------> {is_active}')
-        
         if is_active:
             # Fetch only the fifth most recent chunk
             chunks = (
@@ -76,8 +73,6 @@ def init_fast_stream(streaming_event_id):
 
             # Extract the chunk or None if not found
             fast_chunk = chunks.first() if chunks.exists() else None
-
-            log.info(f"fast chunk {fast_chunk.local_id}")
             time.sleep(3)
 
             if fast_chunk:
