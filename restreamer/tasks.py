@@ -76,7 +76,7 @@ def init_fast_stream(streaming_event_id):
             # Extract the chunk or None if not found
             fast_chunk = chunks.first() if chunks.exists() else None
 
-            log.info(f"fast chunk {fast_chunk}")
+            log.info(f"fast chunk {fast_chunk.local_id}")
             time.sleep(5)
 
             if fast_chunk:
