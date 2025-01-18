@@ -46,13 +46,12 @@ class DeliveringManger:
     # This is actualy initalization of stream so from witch particular chunk and where to stream.
     def send_init_data(self, chunk_id=None, endpoint_id=None):
         if endpoint_id is None:
-            endpoints = self.streaming_event.end_points.all().values("alias", "service_type", "stream_key")
+            endpoints = self.streaming_event.end_points.exclude(is_fast=True).values("alias", "service_type", "stream_key")
         
         else:
             endpoints = EndPointCfg.objects.filter(id=endpoint_id).values("alias", 'service_type', "stream_key")
     
         stream_id = self.streaming_event.identifier
-        
         chunk_id = chunk_id
         if chunk_id is None:
             chunk_record = ChunkRecord.objects.filter(identifier=stream_id).first()
