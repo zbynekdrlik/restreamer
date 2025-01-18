@@ -37,8 +37,6 @@ from .instances import InstanceManager as IM
 
 from django.http import JsonResponse
 
-from celery.result import AsyncResult
-
 
 log = logging.getLogger(__name__)
 
