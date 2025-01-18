@@ -66,11 +66,11 @@ def init_fast_stream(streaming_event_id):
         is_active = instance_manager.check_status() == 'running'
         log.info(f'is active ----------> {is_active}')
         if is_active:
-            chunks = ChunkRecord.objects.filter(streaming_event=streaming_event).order_by('-id')  # Order by descending ID
+            chunks = ChunkRecord.objects.filter(streaming_event=streaming_event).order_by('-local_id')  # Order by descending ID
             fast_chunk = chunks[4] if chunks.count() >= 5 else None
             time.sleep(5)
             if fast_chunk:
-                delivery_manager.send_init_data(fast_chunk.id, fast_stream.id)
+                delivery_manager.send_init_data(fast_chunk.local_id, fast_stream.id)
                 streaming_event.end_points.add(fast_stream)
                 log.info(f"Fast stream {fast_stream.alias} initialized successfuly !!!")
                 return
