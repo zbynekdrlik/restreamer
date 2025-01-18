@@ -47,6 +47,7 @@ class EditEndpoint(View):
         endpoint.stream_key = data.get('stream_key')
         endpoint.enabled = data.get('enabled', 'off') == 'on'  # Handle checkbox
         endpoint.is_fast = data.get('enabled_fast', 'off') == 'on'
+        print("is fast ---->", endpoint.is_fast)
         endpoint.save()
 
         return redirect('control:streaming_event_detail', id=se_id)
