@@ -91,10 +91,9 @@ class SetupStream(View):
                 IM(user_id=request.user.id).create_instance()
             except Exception as e:
                 messages.error(request, f'There was a problem creating instance {e}')
-            try:
-                init_fast_stream.delay(streaming_event.id)
-            except Exception as e:
-                messages.error(request, 'There was problem initialize fast stream')
+           
+            init_fast_stream.delay(streaming_event.id)
+        
             messages.success(request, 'Streaming server successfuly scheduled for creation')
             return redirect('control:home')
 
