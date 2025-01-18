@@ -51,7 +51,8 @@ def enable_stream(streaming_event):
 
 # start control stream that have only 10s in buffer
 @shared_task(queue='init_stream_queue', acks_late=True)
-def init_fast_stream(streaming_event):
+def init_fast_stream(streaming_event_id):
+    streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
     fast_stream = streaming_event.end_points.filter(is_fast=True).first()
     user = streaming_event.user
     if not fast_stream:
