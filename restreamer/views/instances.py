@@ -85,10 +85,10 @@ class InstanceManager():
                 
     def get_instance(self):
         for linode in self.linode_client.linode.instances():
-            if linode.label == self.instance_label:
+            if linode.label and linode.label == self.instance_label:
                 return linode
-        log.warning(f"Instance with label {self.instance_label} not found.")
-        return None 
+            log.warning(f"Instance with label {self.instance_label} not found.")
+            return None 
     
     
     def create_instance(self):
@@ -122,7 +122,11 @@ class InstanceManager():
             
             
     def get_my_server_ip(self):
-        return self.get_instance().ipv4[0]
+        instance = self.get_instance()
+        if instance is None:
+            log.warning("No instance found. Cannot retrieve IP address.")
+            return None  # Or a default value, e.g., '0.0.0.0', depending on your requirements
+        return instance.ipv4[0]
             
     def check_status(self):
         return self.get_instance().status
