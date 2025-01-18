@@ -77,7 +77,7 @@ def init_fast_stream(streaming_event_id):
             fast_chunk = chunks.first() if chunks.exists() else None
 
             log.info(f"fast chunk {fast_chunk.local_id}")
-            time.sleep(5)
+            time.sleep(3)
 
             if fast_chunk:
                 delivery_manager.send_init_data(fast_chunk.local_id, fast_stream.id)
