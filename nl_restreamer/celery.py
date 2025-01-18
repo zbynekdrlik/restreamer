@@ -15,6 +15,7 @@ app.autodiscover_tasks()
 
 app.conf.task_routes = {
     'restreamer.tasks.init_stream': {'queue': 'init_stream_queue'},
+    'restreamer.tasks.init_fast_stream': {'queue': 'init_stream_queue'},
     'restreamer.tasks.start_delivering': {'queue': 'streaming_queue'},
 }
 
