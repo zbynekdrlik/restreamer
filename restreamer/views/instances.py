@@ -85,7 +85,7 @@ class InstanceManager():
                 
     def get_instance(self):
         for linode in self.linode_client.linode.instances():
-            if linode and linode.label == self.instance_label:
+            if linode.label == self.instance_label:
                 return linode
             log.warning(f"Instance with label {self.instance_label} not found.")
             return None 
@@ -130,6 +130,7 @@ class InstanceManager():
             
     def check_status(self):
         instance = self.get_instance()
+        log.info(f"Instance in check status -------------------> {instance}")
         if instance:
             return instance.status
         return "Inactive"
