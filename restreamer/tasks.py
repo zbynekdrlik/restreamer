@@ -55,7 +55,7 @@ def init_fast_stream(streaming_event_id):
     log.info('init_fast_stream function called')
     streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
     fast_stream = streaming_event.end_points.filter(is_fast=True).first()
-    user = streaming_event.user
+    user = streaming_event.user.id
     if not fast_stream:
         return
  
