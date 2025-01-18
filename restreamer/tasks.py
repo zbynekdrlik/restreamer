@@ -53,19 +53,22 @@ def enable_stream(streaming_event):
 @shared_task(queue='init_stream_queue', acks_late=True)
 def init_fast_stream(streaming_event):
     fast_stream = streaming_event.end_points.filter(is_fast=True).first()
-    
+    user = streaming_event.user
     if not fast_stream:
         return
-    
-    video_manager = VideoDataManager(streaming_event)
+ 
     delivery_manager = DeliveringManger()
-    first_chunk = ChunkRecord.objects.filter(streaming_event=streaming_event).first()
+    instance_manager = InstanceManager(user)
     
     while True:
-        stream_time = video_manager.stream_length()
-        if stream_time >= 10:
-            delivery_manager.send_init_data(first_chunk.id, fast_stream.id)
-            streaming_event.add(fast_stream)
-            return
+        is_active = instance_manager.check_status() == 'running'
+        if is_active:
+            chunks = ChunkRecord.objects.filter(streaming_event=streaming_event).order_by('-id')  # Order by descending ID
+            fast_chunk = chunks[4] if chunks.count() >= 5 else None
+            time.sleep(5)
+            if fast_chunk:
+                delivery_manager.send_init_data(fast_chunk.id, fast_stream.id)
+                streaming_event.add(fast_stream)
+                return
         time.sleep(3)
     
