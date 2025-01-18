@@ -25,7 +25,8 @@ class DeliveringManger:
         instance_ip = server_manger.get_my_server_ip()
         url = f'{instance_ip}:8000'
         return url
-        
+    
+    # unused
     def init_delivery(self):
         response = self.session.get(f"{self.get_url}/connect", params={"init_data": self.stream_data})
         
