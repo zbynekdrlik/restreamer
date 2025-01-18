@@ -82,7 +82,7 @@ class DeliveringReady(View):
         # Check server status
         manager = InstanceManager(request.user.id)
         status = manager.check_status()
-
+        log.info(f'status {status}')
         # Check buffer status
         streaming_event = get_object_or_404(StreamingEvent, id=streaming_event_id)
         live = streaming_event.delivering_activated

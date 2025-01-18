@@ -132,7 +132,7 @@ class InstanceManager():
         instance = self.get_instance()
         if instance:
             return instance.status
-        
+        return "Inactive"
         
 # if chunk didnt arried for 30 minutes from switching delivering and reaceiving shut down linode.        
 def chunk_not_arrived(user_id):
