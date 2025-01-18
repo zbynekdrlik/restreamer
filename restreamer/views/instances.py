@@ -129,7 +129,9 @@ class InstanceManager():
         return instance.ipv4[0]
             
     def check_status(self):
-        return self.get_instance().status
+        instance = self.get_instance()
+        if instance:
+            return instance.status
         
         
 # if chunk didnt arried for 30 minutes from switching delivering and reaceiving shut down linode.        
