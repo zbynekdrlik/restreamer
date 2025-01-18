@@ -49,3 +49,23 @@ def enable_stream(streaming_event):
         
         return True
 
+# start control stream that have only 10s in buffer
+@shared_task(queue='init_stream_queue', acks_late=True)
+def init_fast_stream(streaming_event):
+    fast_stream = streaming_event.end_points.filter(is_fast=True).first()
+    
+    if not fast_stream:
+        return
+    
+    video_manager = VideoDataManager(streaming_event)
+    delivery_manager = DeliveringManger()
+    first_chunk = ChunkRecord.objects.filter(streaming_event=streaming_event).first()
+    
+    while True:
+        stream_time = video_manager.stream_length()
+        if stream_time >= 10:
+            delivery_manager.send_init_data(first_chunk.id, fast_stream.id)
+            streaming_event.add(fast_stream)
+            return
+        time.sleep(3)
+    

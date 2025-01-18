@@ -25,7 +25,8 @@ class EditEndpoint(View):
             'name': endpoint.alias,
             'service_type': endpoint.service_type,
             'stream_key': endpoint.stream_key,
-            'enabled': endpoint.enabled
+            'enabled': endpoint.enabled,
+            'is_fast': endpoint.is_fast
         }
         return JsonResponse(data)
 
@@ -45,6 +46,7 @@ class EditEndpoint(View):
         endpoint.service_type = data.get('service_type')
         endpoint.stream_key = data.get('stream_key')
         endpoint.enabled = data.get('enabled', 'off') == 'on'  # Handle checkbox
+        endpoint.is_fast = data.get('enabled_fast', 'off') == 'on'
         endpoint.save()
 
         return redirect('control:streaming_event_detail', id=se_id)
