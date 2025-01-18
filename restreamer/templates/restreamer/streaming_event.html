@@ -364,6 +364,7 @@
                 document.querySelector('#serviceType').value = data.service_type;
                 document.querySelector('#streamKey').value = data.stream_key;
                 document.querySelector('#enableEndpoint').checked = data.enabled;
+                document.querySelector('#isFast').checked = data.is_fast;
             })
             .catch(error => console.error('Error fetching endpoint data:', error));
         });
