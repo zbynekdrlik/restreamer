@@ -85,10 +85,11 @@ class InstanceManager():
                 
     def get_instance(self):
         for linode in self.linode_client.linode.instances():
+            log.info(f"linode label {linode.label}")
             if linode.label == self.instance_label:
                 return linode
             log.warning(f"Instance with label {self.instance_label} not found.")
-            return None 
+        return None
     
     
     def create_instance(self):
