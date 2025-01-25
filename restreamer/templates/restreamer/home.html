@@ -212,9 +212,10 @@ document.addEventListener("DOMContentLoaded", function() {
 
     // Check local storage for previous state and execute initial AJAX request
     function checkServerStatus() {
-        let isLive = localStorage.getItem('isLive')
+        const isLiveSet = localStorage.getItem('isLive')
+        console.log('is live set ------>', isLiveSet)
         // Initial AJAX request to check server status on page load
-        if (!isLive) {
+        if (!isLiveSet) {
             $.ajax({
                 url: '{% url "stream_ready" streaming_event.id  %}',
                 type: 'GET',
@@ -246,7 +247,6 @@ document.addEventListener("DOMContentLoaded", function() {
                         }  
                     }
                     else {
-                        isLive = true;
                         deliveringButton.className = initialButtonClasses;
                         deliveringButton.innerHTML = initialButtonHtml;
                         localStorage.removeItem('preparingStream_{{ forloop.counter }}');
