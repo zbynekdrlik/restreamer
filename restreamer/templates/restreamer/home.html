@@ -240,6 +240,9 @@ document.addEventListener("DOMContentLoaded", function() {
                     }
                     else {
                         isLive = true;
+                        deliveringButton.className = initialButtonClasses;
+                        deliveringButton.innerHTML = initialButtonHtml;
+                        localStorage.removeItem('preparingStream_{{ forloop.counter }}');
                     }
                 },
                 error: function(error) {
@@ -248,9 +251,6 @@ document.addEventListener("DOMContentLoaded", function() {
             }); 
         }
     }
-
-    // Initial call to check server status on document load
-
     // Set an interval to periodically check the server status
     setInterval(checkServerStatus, 5000);
 
