@@ -159,7 +159,7 @@
 document.addEventListener("DOMContentLoaded", function() {
     const deliveringButton = document.getElementById('delivering_action_{{ forloop.counter }}');
     let checkSeActiveInterval;
-    let isLive = deliveringButton.getAttribute('data-activated') === 'False'
+    let isLive = deliveringButton.getAttribute('data-activated') !== 'False'
     
     checkServerStatus();
     setInterval(checkServerStatus, 5000);
