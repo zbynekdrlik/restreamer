@@ -157,6 +157,7 @@
 </div>
 <script>
 document.addEventListener("DOMContentLoaded", function() {
+    let isLive = false; 
     checkServerStatus();
     let checkSeActiveInterval;
     
@@ -203,7 +204,7 @@ document.addEventListener("DOMContentLoaded", function() {
     const csrftoken = getCookie('csrftoken');
 
     /* if fasle then we check if endpint is prepered for reaceving data */
-    let isLive = false; 
+    
 
     // Check local storage for previous state and execute initial AJAX request
     function checkServerStatus() {
@@ -217,28 +218,29 @@ document.addEventListener("DOMContentLoaded", function() {
                     const isRunning = response.ready;
                     const bufferFilled = response.buffer_filled;
                     const live = response.live
-                    if (live) {
+                    if (!live) {
+                        if (isRunning) {
+                            if (bufferFilled || live) {
+                                deliveringButton.className = initialButtonClasses;
+                                deliveringButton.innerHTML = initialButtonHtml;
+                                localStorage.removeItem('preparingStream_{{ forloop.counter }}');
+                            } else {
+                                deliveringButton.innerText = "Buffering...";
+                                localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
+                            }
+                        
+                        } else {
+                            deliveringButton.innerText = "Preparing stream...";
+                            localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
+
+                            if (localStorage.getItem('preparingStream_{{ forloop.counter }}') === 'true') {
+                                deliveringButton.innerText = "Preparing stream...";
+                            }
+                        }  
+                    }
+                    else {
                         isLive = true;
                     }
-                    if (isRunning) {
-                        if (bufferFilled || live) {
-                            deliveringButton.className = initialButtonClasses;
-                            deliveringButton.innerHTML = initialButtonHtml;
-                            localStorage.removeItem('preparingStream_{{ forloop.counter }}');
-                        } else {
-                            deliveringButton.innerText = "Buffering...";
-                            localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
-                        }
-                    
-                    } else {
-                        deliveringButton.innerText = "Preparing stream...";
-                        localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
-
-                        if (localStorage.getItem('preparingStream_{{ forloop.counter }}') === 'true') {
-                            deliveringButton.innerText = "Preparing stream...";
-                        }
-                    }  
-                    
                 },
                 error: function(error) {
                     console.error('Error checking status and buffer:', error);
