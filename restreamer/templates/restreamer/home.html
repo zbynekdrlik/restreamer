@@ -212,6 +212,7 @@ document.addEventListener("DOMContentLoaded", function() {
             type: 'GET',
             success: function(response) {
                 const isRunning = response.ready;
+                console.log('is running --------->', isRunning)
                 const bufferFilled = response.buffer_filled;
                 const live = response.live
 
