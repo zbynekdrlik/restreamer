@@ -32,7 +32,7 @@ class StreamingEventView(View):
         server_ready = del_mangaer.is_server_ready
         
         is_preparing = instance_status != 'Inactive' and not server_ready
-        log.info('is preparing ---->', is_preparing)
+        log.info(f'is preparing ----> {is_preparing}')
         
         try:
             streaming_event = StreamingEvent.objects.filter(chunks__isnull=False, user=user).first()
