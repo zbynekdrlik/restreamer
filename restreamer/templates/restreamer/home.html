@@ -211,7 +211,7 @@ document.addEventListener("DOMContentLoaded", function() {
             url: '{% url "stream_ready" streaming_event.id  %}',
             type: 'GET',
             success: function(response) {
-                const isRunning = response.status.toLowerCase() === 'running';
+                const isRunning = response.ready;
                 const bufferFilled = response.buffer_filled;
                 const live = response.live
 

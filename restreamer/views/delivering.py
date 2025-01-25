@@ -13,18 +13,32 @@ log = logging.getLogger('__name__')
 
 class DeliveringManger:
     
-    def __init__(self, user_id=None, streamign_event=None):
+    def __init__(self, user_id=None, streamign_event_id=None):
         user = RestreamerUser.objects.get(id=user_id)
         self.user_id = user_id
-        self.stream_data = StreamingEvent.objects.get(id=streamign_event.pk, user=user).stream_info()
+        self.streaming_event = StreamingEvent.objects.get(id=streamign_event_id, user=user)
+        self.stream_data = self.streaming_event.stream_info()
         self.session = requests.Session()
-        self.streaming_event = streamign_event
+        
 
     def get_url(self):
         server_manger = IM(self.user_id)
         instance_ip = server_manger.get_my_server_ip()
         url = f'{instance_ip}:8000'
         return url
+    
+    def is_server_ready(self):
+        """
+        Check if Django is initialized and ready to accept requests.
+        """
+        url = f"http://{self.get_url()}/api/raceive_init_data/"
+        try:
+            response = self.session.get(url, timeout=2)  # Timeout ensures it doesn't hang
+            if response.status_code == 200:
+                return True
+        except requests.ConnectionError:
+            return False
+        return False
     
     # unused
     def init_delivery(self):

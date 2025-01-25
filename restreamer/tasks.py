@@ -24,7 +24,7 @@ def init_stream(user_id, streaming_event_id, **kwargs):
     chunk_id = kwargs.get("chunk_id")
     try:
         streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
-        DeliveringManger(user_id, streaming_event).send_init_data(chunk_id, kwargs.get("endpoint_id"))
+        DeliveringManger(user_id, streaming_event_id).send_init_data(chunk_id, kwargs.get("endpoint_id"))
     except Exception as e:
         log.exception(f'An error occurred: {e}')
         
@@ -32,7 +32,7 @@ def init_stream(user_id, streaming_event_id, **kwargs):
 @shared_task(queue='init_stream_queue')
 def end_stream(user_id, streaming_event, alias=None):
     try:
-        manager = DeliveringManger(user_id, streaming_event)
+        manager = DeliveringManger(user_id, streaming_event.id)
         manager.end_delivery(alias)
     except Exception as e:
         log.exception(f'An error occurred: {e}')
@@ -59,13 +59,11 @@ def init_fast_stream(streaming_event_id):
     if not fast_stream:
         return
 
-    delivery_manager = DeliveringManger(user_id=user, streamign_event=streaming_event)
-    instance_manager = InstanceManager(user)
+    delivery_manager = DeliveringManger(user_id=user, streaming_event_id=streaming_event_id)
     
     while True:
-        is_active = instance_manager.check_status() == 'running'
-        if is_active:
-            time.sleep(10)
+        is_ready = delivery_manager.is_server_ready()
+        if is_ready:
             # Fetch only the fifth most recent chunk
             chunks = (
                 ChunkRecord.objects.filter(streaming_event=streaming_event)
@@ -80,6 +78,6 @@ def init_fast_stream(streaming_event_id):
                 delivery_manager.send_init_data(fast_chunk.local_id, fast_stream.id)
                 streaming_event.end_points.add(fast_stream)
                 log.info(f"Fast stream {fast_stream.alias} initialized successfully !!!")
-                return
+                return True
         
         time.sleep(3)
