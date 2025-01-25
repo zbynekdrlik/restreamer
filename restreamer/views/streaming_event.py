@@ -28,8 +28,8 @@ class StreamingEventView(View):
         
         in_manager = InstanceManager(user.id)
         del_mangaer = DeliveringManger(user.id, streaming_events.first().id)
-        instance_status = in_manager.check_status
-        server_ready = del_mangaer.is_server_ready
+        instance_status = in_manager.check_status()
+        server_ready = del_mangaer.is_server_ready()
         
         is_preparing = instance_status != 'Inactive' and not server_ready
         log.info(f'instance_status ----> {instance_status}')
