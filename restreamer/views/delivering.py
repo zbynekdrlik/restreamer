@@ -38,7 +38,8 @@ class DeliveringManger:
             log.info(f"response {response}")
             if response.status_code == 200:
                 return True
-        except requests.ConnectionError:
+        except requests.ConnectionError as e:
+            log.error(f'There is error connecting {url} !!! {e}')
             return False
         return False
     
