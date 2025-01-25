@@ -157,7 +157,7 @@
 </div>
 <script>
 document.addEventListener("DOMContentLoaded", function() {
-    
+    const deliveringButton = document.getElementById('delivering_action_{{ forloop.counter }}');
     let checkSeActiveInterval;
     let isLive = deliveringButton.getAttribute('data-activated') === 'False'
     
@@ -171,7 +171,7 @@ document.addEventListener("DOMContentLoaded", function() {
     const modal = $('#startStreamModal_{{ forloop.counter }}');
     const modalBodyText = document.getElementById('modal-body-text_{{ forloop.counter }}');
     const serverDeliveryMessage = document.getElementById('server_delivery_message_{{ forloop.counter }}');
-    const deliveringButton = document.getElementById('delivering_action_{{ forloop.counter }}');
+    
     const setupStreamForm = document.getElementById('setup_stream_form_{{ forloop.counter }}');
 
     const eventId = startStopButton.getAttribute('data-event-id');
