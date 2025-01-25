@@ -7,6 +7,8 @@ from django.contrib.auth.decorators import login_required
 from ..models import ChunkRecord, EndPointCfg, StreamingEvent
 from ..forms import EndPointForm, StreamingEventForm
 from restreamer.video_data import VideoDataManager
+from restreamer.views.instances import InstanceManager
+from restreamer.views.delivering import DeliveringManger
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.views.generic import TemplateView
@@ -24,6 +26,13 @@ class StreamingEventView(View):
         streaming_events = StreamingEvent.objects.filter(user=user).order_by("id")
         video_length = '00:00'
         
+        in_manager = InstanceManager(user.id)
+        del_mangaer = DeliveringManger(user.id, streaming_events.first().id)
+        instance_status = in_manager.check_status
+        server_ready = del_mangaer.is_server_ready
+        
+        is_preparing = instance_status != 'Inactive' and not server_ready
+        
         try:
             streaming_event = StreamingEvent.objects.filter(chunks__isnull=False, user=user).first()
             if streaming_event:
@@ -34,7 +43,8 @@ class StreamingEventView(View):
 
         context = {
             "streaming_events": streaming_events,
-            'video_length': video_length
+            'video_length': video_length,
+            'is_preparing': is_preparing,
         }
 
         return render(request, template_name, context)
