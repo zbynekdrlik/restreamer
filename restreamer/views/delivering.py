@@ -32,10 +32,9 @@ class DeliveringManger:
         Check if Django is initialized and ready to accept requests.
         """
         url = f"http://{self.get_url()}/api/raceive_init_data/"
-        
         try:
-            response = self.session.post(url, timeout=2)  # Timeout ensures it doesn't hang
-            log.info(f"response {response}")
+            response = self.session.get(url, timeout=2)  # Timeout ensures it doesn't hang
+            log.info(f"response {response.status_code}: {response.text}")
             if response.status_code == 200:
                 return True
         except requests.ConnectionError as e:
