@@ -32,6 +32,8 @@ class StreamingEventView(View):
         server_ready = del_mangaer.is_server_ready
         
         is_preparing = instance_status != 'Inactive' and not server_ready
+        log.info(f'instance_status ----> {instance_status}')
+        log.info(f'server_ready ----> {server_ready}')
         log.info(f'is preparing ----> {is_preparing}')
         
         try:
