@@ -157,10 +157,14 @@
 </div>
 <script>
 document.addEventListener("DOMContentLoaded", function() {
-    let isLive = false; 
     checkServerStatus();
     let checkSeActiveInterval;
-    
+
+    if (localStorage.getItem('isLive') === null) {
+    // If it doesn't exist, set it to false
+        localStorage.setItem('isLive', false); // Store it as a string
+    }
+
     const deleteStreamingEventButton = document.getElementById('deleteStreamingEvent_{{ forloop.counter }}')
     const startStopButton = document.getElementById('start_stop_{{ forloop.counter }}');
     const confirmButton = document.getElementById('confirm_modal_{{ forloop.counter }}');
@@ -208,7 +212,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
     // Check local storage for previous state and execute initial AJAX request
     function checkServerStatus() {
-
+        let isLive = localStorage.getItem('isLive')
         // Initial AJAX request to check server status on page load
         if (!isLive) {
             $.ajax({
@@ -220,6 +224,7 @@ document.addEventListener("DOMContentLoaded", function() {
                     const live = response.live
 
                     localStorage.setItem('isRunning', isRunning);
+                    localStorage.setItem('isLive', live);
                     if (!live) {
                         if (isRunning) {
                             if (bufferFilled || live) {
