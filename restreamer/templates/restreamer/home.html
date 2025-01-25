@@ -97,7 +97,11 @@
                                     data-activated="{{ streaming_event.delivering_activated }}"
                                     class="btn btn-sm start_delivering {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1">
                                 <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
-                                <span>{{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}</span>
+                                {% if is_preparing %}
+                                    <span>Preparing stream...</span>
+                                {% else %}
+                                    <span>{{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}</span>
+                                {% endif %}
                             </button>
                         </form>
                     </div>
