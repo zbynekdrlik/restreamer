@@ -59,7 +59,7 @@ def init_fast_stream(streaming_event_id):
     if not fast_stream:
         return
 
-    delivery_manager = DeliveringManger(user_id=user, streaming_event_id=streaming_event_id)
+    delivery_manager = DeliveringManger(user, streaming_event_id)
     
     while True:
         is_ready = delivery_manager.is_server_ready()
