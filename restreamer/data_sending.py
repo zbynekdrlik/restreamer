@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 class ChunkSender:
     def __init__(self, streaming_event, user_id=None):
-        server_addres = DeliveringManger(user_id, streaming_event).get_url()
+        server_addres = DeliveringManger(user_id, streaming_event.id).get_url()
         self.stored_position = 0
         self.streaming_event = streaming_event
         self.api_url = f"http://{server_addres}/api/receive_data/"
