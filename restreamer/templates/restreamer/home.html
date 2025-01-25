@@ -218,6 +218,8 @@ document.addEventListener("DOMContentLoaded", function() {
                     const isRunning = response.ready;
                     const bufferFilled = response.buffer_filled;
                     const live = response.live
+
+                    localStorage.setItem('isRunning', isRunning);
                     if (!live) {
                         if (isRunning) {
                             if (bufferFilled || live) {
@@ -293,9 +295,14 @@ document.addEventListener("DOMContentLoaded", function() {
         if (wasReadyState) {
             localStorage.setItem(`checkSeActive_${eventId}`, 'true');
             startCheckSeActiveInterval(checkUrl, eventId);
+
+            const serverIsRunning = localStorage.getItem('isRunning');
             
-            deliveringButton.innerText = "Preparing stream...";
-            localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
+            if (!serverIsRunning === 'true') {
+                deliveringButton.innerText = "Preparing stream...";
+                localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
+            } 
+
             modal.modal('hide');
             setupStreamForm.submit();
 
