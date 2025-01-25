@@ -29,12 +29,13 @@ class StreamingEventView(View):
         in_manager = InstanceManager(user.id)
         del_mangaer = DeliveringManger(user.id, streaming_events.first().id)
         instance_status = in_manager.check_status()
-        server_ready = del_mangaer.is_server_ready()
+        is_preparing = False
         
-        is_preparing = instance_status != 'Inactive' and not server_ready
-        log.info(f'instance_status ----> {instance_status}')
-        log.info(f'server_ready ----> {server_ready}')
-        log.info(f'is preparing ----> {is_preparing}')
+        if instance_status != 'Inactive':
+            server_ready = del_mangaer.is_server_ready()
+            if not server_ready:
+                is_preparing = True
+       
         
         try:
             streaming_event = StreamingEvent.objects.filter(chunks__isnull=False, user=user).first()
