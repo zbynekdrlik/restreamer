@@ -35,7 +35,9 @@ from ..forms import EndPointForm, StreamingEventForm
 from ..models import ChunkRecord, EndPointCfg, StreamingEvent
 from .instances import InstanceManager as IM
 
+from restreamer.utils import delete_s3_chunks
 from django.http import JsonResponse
+
 
 
 log = logging.getLogger(__name__)
@@ -139,13 +141,21 @@ class StartEndStream(View):
 class DeleteChunkData(View):
     def post(self, request):
         streaming_event_id = request.POST.get("streaming_event_id")
-
         try:
-            ChunkRecord.objects.filter(identifier=streaming_event_id).all().delete()
-        except Exception as e:
-            messages.error(request, f"Error deleting data {e}" )
+            chunks_to_delete = ChunkRecord.objects.filter(identifier=streaming_event_id)
             
-        messages.success(request, 'Chunks deleted successfuly!')
+            # Collect S3 keys (constructing them based on your upload logic)
+            chunk_identifiers = [f"{chunk.local_id}_{chunk.identifier}.bin" for chunk in chunks_to_delete]
+
+            # Delete chunks from S3
+            delete_s3_chunks(chunk_identifiers)
+
+            # Delete chunks from the database
+            chunks_to_delete.delete()
+        except Exception as e:
+            messages.error(request, f"Error deleting data: {e}")
+            return redirect('control:home')
+        messages.success(request, 'Chunks deleted successfully!')
         return redirect('control:home')
         
 
