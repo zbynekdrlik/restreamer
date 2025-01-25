@@ -157,14 +157,13 @@
 </div>
 <script>
 document.addEventListener("DOMContentLoaded", function() {
-    checkServerStatus();
+    
     let checkSeActiveInterval;
-
-    if (localStorage.getItem('isLive') === null) {
-    // If it doesn't exist, set it to false
-        localStorage.setItem('isLive', false); // Store it as a string
-    }
-
+    let isLive = deliveringButton.getAttribute('data-activated') === 'False'
+    
+    checkServerStatus();
+    setInterval(checkServerStatus, 5000);
+    
     const deleteStreamingEventButton = document.getElementById('deleteStreamingEvent_{{ forloop.counter }}')
     const startStopButton = document.getElementById('start_stop_{{ forloop.counter }}');
     const confirmButton = document.getElementById('confirm_modal_{{ forloop.counter }}');
@@ -212,10 +211,9 @@ document.addEventListener("DOMContentLoaded", function() {
 
     // Check local storage for previous state and execute initial AJAX request
     function checkServerStatus() {
-        const isLiveSet = localStorage.getItem('isLive')
-        console.log('is live set ------>', isLiveSet)
+        console.log('is live set ------>', isLive)
         // Initial AJAX request to check server status on page load
-        if (!isLiveSet) {
+        if (!isLive) {
             $.ajax({
                 url: '{% url "stream_ready" streaming_event.id  %}',
                 type: 'GET',
@@ -223,10 +221,10 @@ document.addEventListener("DOMContentLoaded", function() {
                     const isRunning = response.ready;
                     const bufferFilled = response.buffer_filled;
                     const live = response.live
-
+                    isLive = live
                     localStorage.setItem('isRunning', isRunning);
-                    localStorage.setItem('isLive', live);
-                    if (!live) {
+
+                    if (!isLive) {
                         if (isRunning) {
                             if (bufferFilled || live) {
                                 deliveringButton.className = initialButtonClasses;
@@ -247,6 +245,7 @@ document.addEventListener("DOMContentLoaded", function() {
                         }  
                     }
                     else {
+                        
                         deliveringButton.className = initialButtonClasses;
                         deliveringButton.innerHTML = initialButtonHtml;
                         localStorage.removeItem('preparingStream_{{ forloop.counter }}');
@@ -258,8 +257,7 @@ document.addEventListener("DOMContentLoaded", function() {
             }); 
         }
     }
-    // Set an interval to periodically check the server status
-    setInterval(checkServerStatus, 5000);
+    
 
     startStopButton.addEventListener('click', function() {
         const buttonText = startStopButton.innerText.trim();
