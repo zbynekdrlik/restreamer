@@ -93,7 +93,7 @@ class StartEndStream(View):
         data = request.POST
         
         streaming_event = StreamingEvent.objects.get(id=self.kwargs['id'])
-        video_manager = VideoDataManager(streaming_event=streaming_event.id)
+        video_manager = VideoDataManager(streaming_event.id)
         buffer_time = streaming_event.buffer
         user_id = request.user.id
         
@@ -178,7 +178,7 @@ class AddEndpoint(View):
         streaming_event = get_object_or_404(StreamingEvent, id=self.kwargs['streaming_event_id'])
         user_id = request.user.id
         
-        video_manager = VideoDataManager(streaming_event=streaming_event.id)
+        video_manager = VideoDataManager(streaming_event.id)
         time_point = request.POST.get("time_point", None)
         
         if time_point:
@@ -231,7 +231,7 @@ class StreamSchedulerView(View):
            len(data.get("end_points", 0)) >= 1 and \
            data.get('streaming_event'):
            streaming_event = StreamingEvent.objects.get(id=data['streaming_event'])
-           video_manager = VideoDataManager(streaming_event=streaming_event.id)
+           video_manager = VideoDataManager(streaming_event.id)
             
            start_time = data['start_time']
            chunk_time = data['chunk_time']
