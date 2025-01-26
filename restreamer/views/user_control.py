@@ -191,9 +191,6 @@ class AddEndpoint(View):
         user_id = request.user.id
         
         video_manager = VideoDataManager(streaming_event=streaming_event.id)
-        init_chunk_id = video_manager.get_init_chunk_id()
-        
-        log.info(f"Init chunk id ------------------> {init_chunk_id}")
         time_point = request.POST.get("time_point", None)
         
         if time_point:

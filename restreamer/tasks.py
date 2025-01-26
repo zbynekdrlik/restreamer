@@ -24,7 +24,7 @@ def init_stream(user_id, streaming_event_id, **kwargs):
     
     video_manger = VideoDataManager(streaming_event=streaming_event)
     init_chunk = video_manger.get_init_chunk_id()
-    
+    log.info(f'init chunk -----> {init_chunk}')
     try:
         streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
         DeliveringManger(user_id, streaming_event_id).send_init_data(init_chunk, kwargs.get("endpoint_id"))
