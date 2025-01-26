@@ -73,7 +73,6 @@ class DeliveringManger:
         if chunk_id is None:
             chunk_record = ChunkRecord.objects.filter(identifier=stream_id).first()
             chunk_id = chunk_record.local_id if chunk_record else None
-    
         
         data = {
             'endpoints': list(endpoints),
