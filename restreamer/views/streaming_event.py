@@ -40,7 +40,7 @@ class StreamingEventView(View):
         try:
             streaming_event = StreamingEvent.objects.filter(chunks__isnull=False, user=user).first()
             if streaming_event:
-                video_manager = VideoDataManager(streaming_event=streaming_event.id)
+                video_manager = VideoDataManager(streaming_event.id)
                 video_length = video_manager.get_stream_length
         except StreamingEvent.DoesNotExist:
             pass
@@ -123,7 +123,7 @@ class StreamingEventDetailView(View):
         ).exclude(
             id__in=selected_endpoints.values_list('id', flat=True)
         )
-        video_manager = VideoDataManager(streaming_event=streaming_event.id)
+        video_manager = VideoDataManager(streaming_event.id)
         
         video_length = video_manager.get_stream_length()
         
@@ -156,7 +156,7 @@ class VideoLengthData(View):
     def get(self, request, id):
         
         streaming_event = StreamingEvent.objects.get(id=id)
-        video_manager = VideoDataManager(streaming_event=streaming_event.id)
+        video_manager = VideoDataManager(streaming_event.id)
         video_length = video_manager.get_stream_length()
 
         return JsonResponse({'video_length': video_length})
