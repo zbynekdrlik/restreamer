@@ -1,11 +1,17 @@
+import logging
 from datetime import timedelta , datetime
 from .models import ChunkRecord, StreamingEvent
 import pytz
+
+
+log = logging.getLogger(__name__)
+
 
 class VideoDataManager:
     def __init__(self, streaming_event):
         self.streaming_event = StreamingEvent.objects.get(id=streaming_event)
         self.video_data = ChunkRecord.objects.filter(streaming_event=self.streaming_event).order_by('created_at')
+        self.event_buffer = self.streaming_event.buffer
         pass
     
     def is_buffer_filled(self, buffer_time):
@@ -16,11 +22,12 @@ class VideoDataManager:
                 return True
         return False
     
-    def stream_length(self):
+    def stream_length(self) -> int:
         if not self.video_data.exists():
             return 0
 
         total_length = self.video_data.count()
+        log.info(f'total lenght {total_length}')
         return total_length
     
     def format_duration(self, seconds):
@@ -64,5 +71,18 @@ class VideoDataManager:
                 return chunk.local_id
 
         return None
+    
+    def get_init_chunk_id(self):
+        latest_chunk_id = self.streaming_event.chunks.last().local_id
+        buffer_length = self.event_buffer * 60
+        chunk_id = latest_chunk_id - buffer_length
+        try:
+            init_chunk = self.streaming_event.chunks.get(local_id=chunk_id)
+            log.info(f"Getting chunk with id {init_chunk.local_id} {init_chunk.created_at}")
+            return init_chunk
+        except ChunkRecord.DoesNotExist:
+            
+            return None
+        
             
             

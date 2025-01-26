@@ -130,9 +130,7 @@ class StreamingEventDetailView(View):
 class StreamingEventEdit(View):
     def post(self, request, streaming_event_id):
         data = request.POST
-        log.info(f"Data ---------------> {data}")
         buffer_time = data.get('buffer-time')
-        log.info('buffer time ----->', buffer_time)
         streaming_event = get_object_or_404(StreamingEvent, id=streaming_event_id)
         streaming_event.buffer = buffer_time
         streaming_event.save()

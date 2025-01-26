@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import zipfile
@@ -15,27 +14,21 @@ from django.shortcuts import (get_object_or_404, redirect,
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.generic import TemplateView
-from restreamer.data_sending import ChunkSender
 from restreamer.tasks import init_stream, end_stream
 from restreamer.scheduler import schedule_init_stream
 
-from ..forms import EndPointForm, StreamingEventForm
 from ..models import EndPointCfg, StreamingEvent, ChunkRecord
-from .delivering import DeliveringManger
 from .instances import InstanceManager as IM
 from restreamer.video_data import VideoDataManager
 
 from accounts.models import RestreamerUser
 
 from restreamer.scheduler import delete_instance_schedule, schedule_init_stream, cancel_delete_instance_jobs
-from restreamer.tasks import end_stream, init_stream
 from restreamer.video_data import VideoDataManager
 
-from ..forms import EndPointForm, StreamingEventForm
 from ..models import ChunkRecord, EndPointCfg, StreamingEvent
 from .instances import InstanceManager as IM
 
-from django.http import JsonResponse
 
 
 log = logging.getLogger(__name__)
@@ -184,7 +177,11 @@ class AddEndpoint(View):
         endpoint_ids = request.POST.getlist("endpoint", [])
         streaming_event = get_object_or_404(StreamingEvent, id=self.kwargs['streaming_event_id'])
         user_id = request.user.id
+        
         video_manager = VideoDataManager(streaming_event=streaming_event.id)
+        init_chunk_id = video_manager.get_init_chunk_id()
+        
+        log.info(f"Init chunk id ------------------> {init_chunk_id}")
         time_point = request.POST.get("time_point", None)
         
         if time_point:
@@ -245,13 +242,9 @@ class StreamSchedulerView(View):
            
            endpoint = EndPointCfg.objects.get(id=endpoint)
            e_id = endpoint.id
-           print('data repeat', data.get('repeat', None))
            if data.get('repeat'):
                 repeat = data['repeat'] == "on"
-                print("reapeat post ------>", repeat)
            chunk_id = video_manager.stream_time_to_chunk(chunk_time)
-           
-           print("Chunk id view --------------------->", chunk_id)
            schedule_init_stream(request.user.id, streaming_event.id, start_time, chunk_id, e_id, repeat)
            
            return redirect('control:stream-scheduler')
