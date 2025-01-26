@@ -9,7 +9,7 @@ log = logging.getLogger(__name__)
 
 class VideoDataManager:
     def __init__(self, streaming_event):
-        self.streaming_event = StreamingEvent.objects.get(id=streaming_event.id)
+        self.streaming_event = streaming_event
         self.video_data = ChunkRecord.objects.filter(streaming_event=self.streaming_event).order_by('created_at')
         self.event_buffer = self.streaming_event.buffer
         pass
