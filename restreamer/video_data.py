@@ -77,11 +77,10 @@ class VideoDataManager:
         buffer_length = self.event_buffer * 60
         chunk_id = latest_chunk_id - buffer_length
         try:
-            init_chunk = self.streaming_event.chunks.get(local_id=chunk_id)
+            init_chunk = self.streaming_event.chunks.get(local_id=chunk_id).local_id
             log.info(f"Getting chunk with id {init_chunk.local_id} {init_chunk.created_at}")
             return init_chunk
         except ChunkRecord.DoesNotExist:
-            
             return None
         
             
