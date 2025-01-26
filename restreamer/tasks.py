@@ -24,7 +24,7 @@ def init_stream(user_id, streaming_event_id, **kwargs):
 
     try:
         streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
-        video_manger = VideoDataManager(streaming_event=streaming_event)
+        video_manger = VideoDataManager(streaming_event=streaming_event.id)
         init_chunk = video_manger.get_init_chunk_id()
         DeliveringManger(user_id, streaming_event_id).send_init_data(init_chunk, kwargs.get("endpoint_id"))
     except Exception as e:
@@ -43,7 +43,7 @@ def end_stream(user_id, streaming_event, alias=None):
 # i dont now what is this 
 @shared_task(queue='init_stream_queue')
 def enable_stream(streaming_event):
-    video_manger = VideoDataManager(streaming_event=streaming_event)
+    video_manger = VideoDataManager(streaming_event=streaming_event.id)
     buffer = streaming_event.buffer
     while True:
         if not video_manger.mange_buffer(buffer):

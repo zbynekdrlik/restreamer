@@ -8,11 +8,11 @@ log = logging.getLogger(__name__)
 
 
 class VideoDataManager:
-    def __init__(self, streaming_event):
-        self.streaming_event = streaming_event
+    def __init__(self, streaming_event_id):
+        self.streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
         self.video_data = ChunkRecord.objects.filter(streaming_event=self.streaming_event).order_by('created_at')
         self.event_buffer = self.streaming_event.buffer
-        pass
+        
     
     def is_buffer_filled(self, buffer_time):
         if buffer_time:
