@@ -21,11 +21,11 @@ log = logging.getLogger(__name__)
 
 @shared_task(queue='init_stream_queue')
 def init_stream(user_id, streaming_event_id, **kwargs):
-
+    chunk_id = kwargs.get('chunk_id', None)
     try:
         streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
         video_manger = VideoDataManager(streaming_event.id)
-        init_chunk = video_manger.get_init_chunk_id()
+        init_chunk = video_manger.get_init_chunk_id() if not chunk_id else chunk_id
         DeliveringManger(user_id, streaming_event_id).send_init_data(init_chunk, kwargs.get("endpoint_id"))
     except Exception as e:
         log.exception(f'An error occurred: {e}')
