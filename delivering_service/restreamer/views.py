@@ -57,6 +57,10 @@ class ReceiveStreamDataView(APIView):
             return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 class ReceiveInitDataView(APIView):
+    def get(self, request, *args, **kwargs):
+        # Logic to handle GET requests (used for readiness check)
+        return Response({"status": "ready", "message": "Django is ready to serve responses."}, status=status.HTTP_200_OK)
+    
     def post(self, request, *args, **kwargs):
         serializer = EndpointsListSerializer(data=request.data)
         print("regeust data", request.data)
