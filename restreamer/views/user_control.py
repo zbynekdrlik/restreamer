@@ -14,7 +14,7 @@ from django.shortcuts import (get_object_or_404, redirect,
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.generic import TemplateView
-from restreamer.tasks import init_stream, end_stream
+from restreamer.tasks import init_stream, end_stream, init_fast_stream
 from restreamer.scheduler import schedule_init_stream
 
 from ..models import EndPointCfg, StreamingEvent, ChunkRecord
