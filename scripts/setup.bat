@@ -10,6 +10,25 @@ rem Set the working directory to the main project directory
 
 cd ..\
 
+:: Load the GitHub token from .env file
+for /f "tokens=1,2 delims==" %%A in ('type "..\.env"') do (
+    if "%%A"=="GITHUB_TOKEN" set GITHUB_TOKEN=%%B
+)
+
+:: Check if the token is loaded
+if "%GITHUB_TOKEN%"=="" (
+    echo ERROR: GitHub token is missing! Make sure to set it in the .env file.
+    exit /b 1
+)
+
+:: Set global Git configuration
+git config --global user.name "user"
+git config --global user.email "kukos700@gmail.com"
+
+:: Store GitHub credentials securely
+git config --global credential.helper store
+echo https://kukos700@gmail.com:%GITHUB_TOKEN%@github.com > "%USERPROFILE%\.git-credentials"
+
 REM Initialize Git repository and add origin
 if not exist .git (
     echo Initializing Git repository...
