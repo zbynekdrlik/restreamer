@@ -17,37 +17,40 @@
 </div> -->
 
 
-<div class="container my-5" style="font-family: 'Roboto Condensed', sans-serif;">
-    <div class="card border-0 shadow-lg overflow-hidden">
-        <div class="card-header bg-dark text-white p-2 d-flex align-items-center justify-content-between">
-            <h2 class="card-title h3 mb-0 d-flex align-items-center">
-                <span class="ps-2 ms-2 fs-3 fw-medium">Streaming Events</span>
-            </h2>
-            <div class="d-flex align-items-center gap-3 me-3">
-                <i class="bi bi-facebook fs-4"></i>
-                <i class="bi bi-twitch fs-4"></i>
+<div class="container my-5" style="font-family: 'Roboto', sans-serif;">
+    <div class="card border-0 shadow-lg overflow-hidden" style="background-color: #f8f9fa; background-image: url('data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23000000' fill-opacity='0.05'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E');">
+        <div class="card-header p-3" style="background: linear-gradient(45deg, #4a148c, #7b1fa2); border-bottom: none;">
+            <div class="d-flex justify-content-between align-items-center">
+                <h2 class="card-title h3 mb-0 text-white d-flex align-items-center">
+                    <i class="bi bi-broadcast me-2"></i>
+                    <span class="fw-bold">Streaming Events</span>
+                </h2>
+                <div class="d-flex align-items-center gap-3">
+                    <i class="bi bi-facebook text-white fs-4"></i>
+                    <i class="bi bi-twitch text-white fs-4"></i>
+                </div>
             </div>
         </div>
         <div class="card-body p-0">
-            <div class="bg-light p-2 border-bottom">
+            <div class="bg-white p-3 border-bottom">
                 <div class="row text-center text-secondary fw-medium">
-                    <div class="col-md-4 d-inline-flex justify-content-center align-items-center gap-1">
-                        <i class="bi bi-tag-fill"></i><span>Name</span>
+                    <div class="col-md-4 d-inline-flex justify-content-center align-items-center gap-2">
+                        <i class="bi bi-tag-fill text-primary"></i><span>Name</span>
                     </div>
-                    <div class="col-md-4 d-inline-flex justify-content-center align-items-center gap-1">
-                        <i class="bi bi-hdd-network-fill"></i><span>Endpoints</span>
+                    <div class="col-md-4 d-inline-flex justify-content-center align-items-center gap-2">
+                        <i class="bi bi-hdd-network-fill text-success"></i><span>Endpoints</span>
                     </div>
-                    <div class="col-md-2 d-inline-flex justify-content-center align-items-center gap-1">
-                        <i class="bi bi-camera-video-fill"></i><span>OBS/VMIX</span>
+                    <div class="col-md-2 d-inline-flex justify-content-center align-items-center gap-2">
+                        <i class="bi bi-camera-video-fill text-info"></i><span>OBS/VMIX</span>
                     </div>
-                    <div class="col-md-2 d-inline-flex justify-content-center align-items-center gap-1">
-                        <i class="bi bi-share-fill"></i><span>YT/FB...</span>
+                    <div class="col-md-2 d-inline-flex justify-content-center align-items-center gap-2">
+                        <i class="bi bi-share-fill text-warning"></i><span>YT/FB...</span>
                     </div>
                 </div>
             </div>
 
             {% for streaming_event in streaming_events %}
-            <div class="border-bottom p-4 position-relative hover-bg-light transition">
+            <div class="border-bottom p-4 position-relative" style="transition: all 0.3s ease;">
                 <!-- Top Row: Name, Endpoints, Start/Stop Actions -->
                 <div class="row align-items-center text-center">
                     <div class="col-md-4">
@@ -55,24 +58,24 @@
                     </div>
                     <div class="col-md-4">
                         {% for endpoint in streaming_event.end_points.all %}
-                            <p class="mb-1 d-inline-flex align-items-center gap-1 fw-normal text-dark mx-2">
+                            <span class="badge bg-light text-dark mb-1 me-1 p-2 d-inline-flex align-items-center" style="font-size: 0.9rem;">
                                 {% if endpoint.service_type == 'YT_HLS' or endpoint.service_type == 'YT_RTMP' %}
-                                    <i class="bi bi-youtube text-danger"></i>
+                                    <i class="bi bi-youtube text-danger me-1"></i>
                                 {% elif endpoint.service_type == 'FB' %}
-                                    <i class="bi bi-facebook text-primary"></i>
+                                    <i class="bi bi-facebook text-primary me-1"></i>
                                 {% elif endpoint.service_type == 'VIMEO' %}
-                                    <i class="bi bi-vimeo text-info"></i>
+                                    <i class="bi bi-vimeo text-info me-1"></i>
                                 {% elif endpoint.service_type == 'INSTAGRAM' %}
-                                    <i class="bi bi-instagram text-warning"></i>
+                                    <i class="bi bi-instagram text-warning me-1"></i>
                                 {% else %}
-                                    <i class="bi bi-link text-muted"></i>
+                                    <i class="bi bi-link text-muted me-1"></i>
                                 {% endif %}
                                 {{ endpoint.alias }}
-                            </p>
+                            </span>
                         {% empty %}
-                            <p class="mb-1 small text-muted d-inline-flex align-items-center gap-1">
-                                <i class="bi bi-exclamation-circle"></i>No endpoints available
-                            </p>
+                            <span class="badge bg-light text-muted p-2">
+                                <i class="bi bi-exclamation-circle me-1"></i>No endpoints available
+                            </span>
                         {% endfor %}
                     </div>
                     <div class="col-md-2">
@@ -81,8 +84,9 @@
                             <button type="button" id="start_stop_{{ forloop.counter }}"
                                     data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}"
                                     data-event-id="{{ streaming_event.id }}"
-                                    class="btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1"
-                                    data-bs-toggle="modal" data-bs-target="#startStreamModal_{{ forloop.counter }}">
+                                    class="btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-outline-danger,btn-outline-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1"
+                                    data-bs-toggle="modal" data-bs-target="#startStreamModal_{{ forloop.counter }}"
+                                    style="transition: all 0.3s ease;">
                                 <i class="bi {{ streaming_event.receiving_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
                                 <span>{{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}</span>
                             </button>
@@ -95,12 +99,13 @@
                             <button type="button" id="delivering_action_{{ forloop.counter }}"
                                     data-event-id="{{ streaming_event.id }}"
                                     data-activated="{{ streaming_event.delivering_activated }}"
-                                    class="btn btn-sm start_delivering {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1">
+                                    class="btn btn-sm start_delivering {{ streaming_event.delivering_activated|yesno:'btn-outline-danger,btn-outline-success' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1"
+                                    style="transition: all 0.3s ease;">
                                 <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
                                 {% if is_preparing %}
-                                    <span>Preparing stream...</span>
+                                    <span>Preparing...</span>
                                 {% else %}
-                                    <span>{{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}</span>
+                                    <span>{{ streaming_event.delivering_activated|yesno:'End,Start' }}</span>
                                 {% endif %}
                             </button>
                         </form>
@@ -118,9 +123,10 @@
                             <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
                             <button type="submit" 
                                     id="delete_chunks_{{ forloop.counter }}" 
-                                    class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 border-0 text-danger">
+                                    class="btn btn-sm btn-outline-danger rounded-pill px-3 py-1"
+                                    style="transition: all 0.3s ease;">
                                 <i class="bi bi-trash me-2"></i>
-                                <span class="small">Delete Chunks</span>
+                                <span>Delete Chunks</span>
                             </button>
                         </form>
                     </div>
@@ -137,9 +143,10 @@
                     </div>
                     <div class="col-md-4 text-end">
                         <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" 
-                           class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 text-decoration-none">
-                            <span class="text-primary small me-2">Details</span>
-                            <i class="bi bi-chevron-right text-primary"></i>
+                           class="btn btn-sm btn-outline-primary rounded-pill px-3 py-1"
+                           style="transition: all 0.3s ease;">
+                            <span class="me-2">Details</span>
+                            <i class="bi bi-chevron-right"></i>
                         </a>
                     </div>
                 </div>
@@ -156,6 +163,7 @@
                 </form>
             </div>
             {% include 'base/modal.html' %}
+            {% endfor %}
         </div>
     </div>
 </div>
