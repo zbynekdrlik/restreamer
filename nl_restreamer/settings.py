@@ -34,15 +34,19 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     'daphne',
     "django.contrib.staticfiles",
-    "restreamer.apps.RestreamerConfig",
     "admin_object_actions",
     "rest_framework",
+    
     "accounts.apps.AccountsConfig",
+    "services.apps.ServicesConfig",
+    "restreamer.apps.RestreamerConfig",
+    
     'crispy_forms',
     'crispy_bootstrap5',
     'channels',
     'simple_history',
     'django_celery_beat',
+    
 
 ]
 

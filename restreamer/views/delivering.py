@@ -13,19 +13,36 @@ log = logging.getLogger('__name__')
 
 class DeliveringManger:
     
-    def __init__(self, user_id=None, streamign_event=None):
+    def __init__(self, user_id=None, streamign_event_id=None):
         user = RestreamerUser.objects.get(id=user_id)
         self.user_id = user_id
-        self.stream_data = StreamingEvent.objects.get(id=streamign_event.pk, user=user).stream_info()
+        self.streaming_event = StreamingEvent.objects.get(id=streamign_event_id, user=user)
+        self.stream_data = self.streaming_event.stream_info()
         self.session = requests.Session()
-        self.streaming_event = streamign_event
+        
 
     def get_url(self):
         server_manger = IM(self.user_id)
         instance_ip = server_manger.get_my_server_ip()
         url = f'{instance_ip}:8000'
         return url
-        
+    
+    def is_server_ready(self):
+        """
+        Check if Django is initialized and ready to accept requests.
+        """
+        url = f"http://{self.get_url()}/api/raceive_init_data/"
+        try:
+            response = self.session.get(url, timeout=1)  # Timeout ensures it doesn't hang
+            log.info(f"response {response.status_code}: {response.text}")
+            if response.status_code == 200:
+                return True
+        except requests.ConnectionError as e:
+            log.error(f'There is error connecting {url} !!! {e}')
+            return False
+        return False
+    
+    # unused
     def init_delivery(self):
         response = self.session.get(f"{self.get_url}/connect", params={"init_data": self.stream_data})
         
@@ -46,13 +63,12 @@ class DeliveringManger:
     # This is actualy initalization of stream so from witch particular chunk and where to stream.
     def send_init_data(self, chunk_id=None, endpoint_id=None):
         if endpoint_id is None:
-            endpoints = self.streaming_event.end_points.all().values("alias", "service_type", "stream_key")
+            endpoints = self.streaming_event.end_points.exclude(is_fast=True).values("alias", "service_type", "stream_key")
         
         else:
             endpoints = EndPointCfg.objects.filter(id=endpoint_id).values("alias", 'service_type', "stream_key")
     
         stream_id = self.streaming_event.identifier
-        
         chunk_id = chunk_id
         if chunk_id is None:
             chunk_record = ChunkRecord.objects.filter(identifier=stream_id).first()

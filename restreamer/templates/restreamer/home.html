@@ -97,7 +97,11 @@
                                     data-activated="{{ streaming_event.delivering_activated }}"
                                     class="btn btn-sm start_delivering {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1">
                                 <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
-                                <span>{{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}</span>
+                                {% if is_preparing %}
+                                    <span>Preparing stream...</span>
+                                {% else %}
+                                    <span>{{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}</span>
+                                {% endif %}
                             </button>
                         </form>
                     </div>
@@ -157,7 +161,12 @@
 </div>
 <script>
 document.addEventListener("DOMContentLoaded", function() {
+    const deliveringButton = document.getElementById('delivering_action_{{ forloop.counter }}');
     let checkSeActiveInterval;
+    let isLive = deliveringButton.getAttribute('data-activated') !== 'False'
+    
+    checkServerStatus();
+    setInterval(checkServerStatus, 5000);
     
     const deleteStreamingEventButton = document.getElementById('deleteStreamingEvent_{{ forloop.counter }}')
     const startStopButton = document.getElementById('start_stop_{{ forloop.counter }}');
@@ -166,7 +175,7 @@ document.addEventListener("DOMContentLoaded", function() {
     const modal = $('#startStreamModal_{{ forloop.counter }}');
     const modalBodyText = document.getElementById('modal-body-text_{{ forloop.counter }}');
     const serverDeliveryMessage = document.getElementById('server_delivery_message_{{ forloop.counter }}');
-    const deliveringButton = document.getElementById('delivering_action_{{ forloop.counter }}');
+    
     const setupStreamForm = document.getElementById('setup_stream_form_{{ forloop.counter }}');
 
     const eventId = startStopButton.getAttribute('data-event-id');
@@ -201,53 +210,58 @@ document.addEventListener("DOMContentLoaded", function() {
 
     const csrftoken = getCookie('csrftoken');
 
+    /* if fasle then we check if endpint is prepered for reaceving data */
+    
+
     // Check local storage for previous state and execute initial AJAX request
     function checkServerStatus() {
-        // Check local storage for previous state
-        
-
+        console.log('is live set ------>', isLive)
         // Initial AJAX request to check server status on page load
-        $.ajax({
-            url: '{% url "stream_ready" streaming_event.id  %}',
-            type: 'GET',
-            success: function(response) {
-                const isRunning = response.status.toLowerCase() === 'running';
-                const bufferFilled = response.buffer_filled;
-                const live = response.live
+        if (!isLive) {
+            $.ajax({
+                url: '{% url "stream_ready" streaming_event.id  %}',
+                type: 'GET',
+                success: function(response) {
+                    const isRunning = response.ready;
+                    const bufferFilled = response.buffer_filled;
+                    const live = response.live
+                    isLive = live
+                    localStorage.setItem('isRunning', isRunning);
 
-                if (isRunning) {
-                    if (bufferFilled || live) {
-                        setTimeout(() => {
-                            deliveringButton.className = initialButtonClasses;
-                            deliveringButton.innerHTML = initialButtonHtml;
-                            localStorage.removeItem('preparingStream_{{ forloop.counter }}');
-                        }, 10000)
-                    } else {
-                        deliveringButton.innerText = "Buffering...";
-                        localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
-                    }
-                
-                } else {
-                    deliveringButton.innerText = "Preparing stream...";
-                    localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
+                    if (!isLive) {
+                        if (isRunning) {
+                            if (bufferFilled || live) {
+                                deliveringButton.className = initialButtonClasses;
+                                deliveringButton.innerHTML = initialButtonHtml;
+                                localStorage.removeItem('preparingStream_{{ forloop.counter }}');
+                            } else {
+                                deliveringButton.innerText = "Buffering...";
+                                localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
+                            }
+                        
+                        } else {
+                            deliveringButton.innerText = "Preparing stream...";
+                            localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
 
-                    if (localStorage.getItem('preparingStream_{{ forloop.counter }}') === 'true') {
-                        deliveringButton.innerText = "Preparing stream...";
+                            if (localStorage.getItem('preparingStream_{{ forloop.counter }}') === 'true') {
+                                deliveringButton.innerText = "Preparing stream...";
+                            }
+                        }  
                     }
-                }  
-                
-            },
-            error: function(error) {
-                console.error('Error checking status and buffer:', error);
-            }
-        });
+                    else {
+                        
+                        deliveringButton.className = initialButtonClasses;
+                        deliveringButton.innerHTML = initialButtonHtml;
+                        localStorage.removeItem('preparingStream_{{ forloop.counter }}');
+                    }
+                },
+                error: function(error) {
+                    console.error('Error checking status and buffer:', error);
+                }
+            }); 
+        }
     }
-
-    // Initial call to check server status on document load
-    checkServerStatus();
-
-    // Set an interval to periodically check the server status
-    setInterval(checkServerStatus, 5000);
+    
 
     startStopButton.addEventListener('click', function() {
         const buttonText = startStopButton.innerText.trim();
@@ -288,9 +302,14 @@ document.addEventListener("DOMContentLoaded", function() {
         if (wasReadyState) {
             localStorage.setItem(`checkSeActive_${eventId}`, 'true');
             startCheckSeActiveInterval(checkUrl, eventId);
+
+            const serverIsRunning = localStorage.getItem('isRunning');
             
-            deliveringButton.innerText = "Preparing stream...";
-            localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
+            if (!serverIsRunning === 'true') {
+                deliveringButton.innerText = "Preparing stream...";
+                localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
+            } 
+
             modal.modal('hide');
             setupStreamForm.submit();
 
@@ -310,7 +329,6 @@ document.addEventListener("DOMContentLoaded", function() {
 
     // Function to start the checkSeActive interval
     function startCheckSeActiveInterval(url, eventId) {
-
         if (!checkSeActiveInterval) {
             checkSeActiveInterval = setInterval(function() {
                 checkSeActive(url, eventId);
@@ -516,11 +534,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         
                         if (form) {
                             if(!isPreparing) {
-                                setTimeout(() => {
-                                    form.submit();
-                                    stopCheckSeActiveInterval();
-                                    localStorage.removeItem(`checkSeActive_${eventId}`);
-                                }, 8000);
+                                form.submit();
+                                stopCheckSeActiveInterval();
+                                localStorage.removeItem(`checkSeActive_${eventId}`);
                             }
                         } else {
                             console.error(`Form with data-event-id="${eventId}" not found.`);
@@ -529,6 +545,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         console.error(`Hidden input for event ID ${eventId} not found.`);
                     }
 
+                    stopCheckSeActiveInterval();
+                    localStorage.removeItem(`checkSeActive_${eventId}`);
                 }
             },
             error: function(error) {

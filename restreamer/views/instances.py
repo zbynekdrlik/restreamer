@@ -85,10 +85,11 @@ class InstanceManager():
                 
     def get_instance(self):
         for linode in self.linode_client.linode.instances():
+            log.info(f"linode label {linode.label}")
             if linode.label == self.instance_label:
                 return linode
-        log.warning(f"Instance with label {self.instance_label} not found.")
-        return None 
+            log.warning(f"Instance with label {self.instance_label} not found.")
+        return None
     
     
     def create_instance(self):
@@ -122,12 +123,18 @@ class InstanceManager():
             
             
     def get_my_server_ip(self):
-        return self.get_instance().ipv4[0]
+        instance = self.get_instance()
+        if instance is None:
+            log.warning("No instance found. Cannot retrieve IP address.")
+            return None  # Or a default value, e.g., '0.0.0.0', depending on your requirements
+        return instance.ipv4[0]
             
     def check_status(self):
-        log.info(" self.get_instance().status -------------------> ",  self.get_instance().status)
-        return self.get_instance().status
-        
+        instance = self.get_instance()
+        log.info(f"Instance in check status -------------------> {instance}")
+        if instance:
+            return instance.status
+        return "Inactive"
         
 # if chunk didnt arried for 30 minutes from switching delivering and reaceiving shut down linode.        
 def chunk_not_arrived(user_id):

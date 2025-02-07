@@ -41,7 +41,8 @@ def delete_instance_schedule(user_id, streaming_event_id):
         delete_instance,
         id=job_id,
         run_date=run_time,
-        args=[user_id]
+        args=[user_id],
+        replace_existing=True
     )
     return job_id
     

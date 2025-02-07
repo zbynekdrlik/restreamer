@@ -19,6 +19,7 @@ from restreamer.serializers import (BufferHealthSerializer,
                                     StreamingEventSerializer)
 from restreamer.video_data import VideoDataManager
 from restreamer.views.instances import InstanceManager
+from restreamer.views.delivering import DeliveringManger
 from services.utils import get_client_ip
 
 log = logging.getLogger(__name__)
@@ -80,9 +81,9 @@ class DeliveringReady(View):
 
     def get(self, request, streaming_event_id):
         # Check server status
-        manager = InstanceManager(request.user.id)
-        status = manager.check_status()
-
+        manager = DeliveringManger(request.user.id, streaming_event_id)
+        is_ready = manager.is_server_ready()
+        
         # Check buffer status
         streaming_event = get_object_or_404(StreamingEvent, id=streaming_event_id)
         live = streaming_event.delivering_activated
@@ -91,7 +92,7 @@ class DeliveringReady(View):
         buffer_filled = video_manager.is_buffer_filled(buffer_time)
 
         return JsonResponse({
-            'status': status,
+            'ready': is_ready,
             'buffer_filled': buffer_filled,
             'live': live
         })

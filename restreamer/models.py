@@ -39,6 +39,7 @@ class EndPointCfg(models.Model):
     enabled = models.BooleanField(default=False)
     position_last = models.IntegerField(default=0, verbose_name='Last id of processed chunk record')
     delivered_bytes = models.PositiveBigIntegerField(default=0, verbose_name='Delivered bytes')
+    is_fast = models.BooleanField(default=False)
     history = HistoricalRecords()
 
     def __str__(self):
