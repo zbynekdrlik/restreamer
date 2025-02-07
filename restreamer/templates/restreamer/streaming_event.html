@@ -167,36 +167,37 @@
 
             <!-- Modal for Adding Endpoints -->
             <div class="modal fade" id="addEndpointModal" aria-labelledby="addEndpointModalLabel" aria-hidden="true">
-                <div class="modal-dialog modal-lg">
-                    <div class="modal-content">
-                        <div class="modal-header">
-                            <h5 class="modal-title" id="addEndpointModalLabel">Select Endpoints</h5>
-                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                <div class="modal-dialog modal-lg modal-dialog-centered">
+                    <div class="modal-content" style="border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1);">
+                        <div class="modal-header bg-light" style="border-bottom: 2px solid #e9ecef; border-top-left-radius: 15px; border-top-right-radius: 15px;">
+                            <h5 class="modal-title" id="addEndpointModalLabel" style="color: #333; font-weight: 600;">
+                                <i class="bi bi-plus-circle-fill me-2" style="color: #28a745;"></i>Select Endpoints
+                            </h5>
+                            <button type="button" class="btn-close" data-dismiss="modal" aria-label="Close"></button>
                         </div>
                         <form action="{% url 'control:add_endpoint' streaming_event.id %}" method="post">
                             {% csrf_token %}
-                            <div class="modal-body">
-                                <div class="custom-select-container-2">
-                                    <div class="custom-select-wrapper-2">
-                                        <select id="endpointSelect" name="endpoint" class="custom-select-2" multiple>
-                                            {% for endpoint in available_endpoints %}
-                                            <option value="{{ endpoint.id }}"
-                                            {% if endpoint.id in selected_endpoints_ids %}
-                                                selected="selected"
-                                            {% endif %}>{{ endpoint }}</option>
-                                            {% endfor %}
-                                        </select>
-                                    </div>
+                            <div class="modal-body" style="padding: 2rem;">
+                                <div class="mb-4">
+                                    <label for="endpointSelect" class="form-label">Available Endpoints</label>
+                                    <select id="endpointSelect" name="endpoint" multiple
+                                        style="width: 100%; padding: 0.375rem 1.75rem 0.375rem 0.75rem; font-size: 1rem; font-weight: 400; line-height: 1.5; color: #212529; background-color: #fff; background-clip: padding-box; border: 1px solid #ced4da; border-radius: 0.25rem; transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;">
+                                        {% for endpoint in available_endpoints %}
+                                        <option value="{{ endpoint.id }}"
+                                        {% if endpoint.id in selected_endpoints_ids %}
+                                            selected="selected"
+                                        {% endif %}>{{ endpoint }}</option>
+                                        {% endfor %}
+                                    </select>
                                 </div>
-                                <div class="mt-4 flex items-center">
-                                    <label for="event-time" class="block text-gray-700 font-semibold mr-4">Video Time:</label>
-                                    <div class="flex">
-                                        <input type="text" id="event-time" name="time_point" class="form-input px-3 py-2 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="HH:MM:SS" pattern="\d{2}:\d{2}:\d{2}">
-                                    </div>
+                                <div class="mb-4">
+                                    <label for="event-time" class="form-label">Video Time</label>
+                                    <input type="text" id="event-time" name="time_point" class="form-control" placeholder="HH:MM:SS" pattern="\d{2}:\d{2}:\d{2}"
+                                        style="width: 100%; padding: 0.375rem 0.75rem; font-size: 1rem; font-weight: 400; line-height: 1.5; color: #212529; background-color: #fff; background-clip: padding-box; border: 1px solid #ced4da; border-radius: 0.25rem; transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;">
                                 </div>
                             </div>
-                            <div class="modal-footer">
-                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                            <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
+                                <button type="button" class="btn btn-outline-secondary" data-dismiss="modal">Close</button>
                                 <button type="submit" class="btn btn-primary">Add Selected Endpoints</button>
                             </div>
                         </form>
@@ -210,18 +211,18 @@
 <!-- Remove Endpoint Modal -->
 <div class="modal fade" id="confirmEndpointRemove" tabindex="-1" role="dialog" aria-labelledby="confirmEndpointRemoveLabel" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered" role="document">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="removeEndpointModalLabel">Remove Endpoint</h5>
-                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                    <span aria-hidden="true">&times;</span>
-                </button>
+        <div class="modal-content" style="border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1);">
+            <div class="modal-header bg-light" style="border-bottom: 2px solid #e9ecef; border-top-left-radius: 15px; border-top-right-radius: 15px;">
+                <h5 class="modal-title" id="removeEndpointModalLabel" style="color: #333; font-weight: 600;">
+                    <i class="bi bi-trash-fill me-2" style="color: #dc3545;"></i>Remove Endpoint
+                </h5>
+                <button type="button" class="btn-close" data-dismiss="modal" aria-label="Close"></button>
             </div>
-            <div class="modal-body">
-                Are you sure you want to remove this endpoint from the streaming event?
+            <div class="modal-body" style="padding: 2rem;">
+                <p style="font-size: 1.1rem; color: #555;">Are you sure you want to remove this endpoint from the streaming event?</p>
             </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+            <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
+                <button type="button" class="btn btn-outline-secondary" data-dismiss="modal">Cancel</button>
                 <button type="button" class="btn btn-danger" id="confirmRemoveEndpoint">Remove Endpoint</button>
             </div>
         </div>
@@ -230,18 +231,20 @@
 
 
 
-<!-- edit endpoint modal -->
+<!-- Edit Endpoint Modal -->
 <div class="modal fade" id="editEndpointModal" tabindex="-1" aria-labelledby="editEndpointModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="editEndpointModalLabel">Edit Endpoint</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content" style="border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1);">
+            <div class="modal-header bg-light" style="border-bottom: 2px solid #e9ecef; border-top-left-radius: 15px; border-top-right-radius: 15px;">
+                <h5 class="modal-title" id="editEndpointModalLabel" style="color: #333; font-weight: 600;">
+                    <i class="bi bi-pencil-square me-2" style="color: #007bff;"></i>Edit Endpoint
+                </h5>
+                <button type="button" class="btn-close" data-dismiss="modal" aria-label="Close"></button>
             </div>
             <form id="editEndpointForm" method="post" action="{% url 'control:endpoint_edit' %}">
                 {% csrf_token %}
                 <input type="hidden" id="endpoint-id" name="endpoint_id" required>
-                <div class="modal-body">
+                <div class="modal-body" style="padding: 2rem;">
                     <div class="mb-3">
                         <label for="endpointName" class="form-label">Endpoint Name</label>
                         <input type="text" class="form-control" id="endpointName" name="endpoint_name" required>
@@ -261,27 +264,26 @@
                         <label for="streamKey" class="form-label">Streaming Key</label>
                         <input type="text" class="form-control" id="streamKey" name="stream_key" required>
                     </div>
-                    <!-- is enabled -->
-                    <div class="form-check">
+                    <div class="form-check mb-3">
                         <input class="form-check-input" type="checkbox" id="enableEndpoint" name="enabled">
                         <label class="form-check-label" for="enableEndpoint">Enable Endpoint</label>
                     </div>
-                    <!-- is fast -->
                     <div class="form-check">
                         <input class="form-check-input" type="checkbox" id="isFast" name="enabled_fast"
-                         data-bs-toggle="tooltip" 
-                         data-bs-placement="top" 
-                         title="The stream will start immediately after there are 10 seconds of video data in the buffer.">
+                            data-bs-toggle="tooltip" 
+                            data-bs-placement="top" 
+                            title="The stream will start immediately after there are 10 seconds of video data in the buffer.">
                         <label class="form-check-label" for="isFast">Is Fast</label>
                     </div>
                 </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
+                    <button type="button" class="btn btn-outline-secondary" data-dismiss="modal">Close</button>
                     <button type="submit" class="btn btn-primary">Save</button>
                 </div>
             </form>
         </div>
     </div>
+</div>
 </div>
 
 
