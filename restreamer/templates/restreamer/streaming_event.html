@@ -173,7 +173,7 @@
                             <h5 class="modal-title" id="addEndpointModalLabel" style="color: #333; font-weight: 600;">
                                 <i class="bi bi-plus-circle-fill me-2" style="color: #28a745;"></i>Select Endpoints
                             </h5>
-                            <button type="button" class="btn-close" data-dismiss="modal" aria-label="Close"></button>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                         </div>
                         <form action="{% url 'control:add_endpoint' streaming_event.id %}" method="post">
                             {% csrf_token %}
@@ -197,7 +197,7 @@
                                 </div>
                             </div>
                             <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
-                                <button type="button" class="btn btn-outline-secondary" data-dismiss="modal">Close</button>
+                                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
                                 <button type="submit" class="btn btn-primary">Add Selected Endpoints</button>
                             </div>
                         </form>
