@@ -30,6 +30,7 @@ from ..models import ChunkRecord, EndPointCfg, StreamingEvent
 from .instances import InstanceManager as IM
 
 from restreamer.utils import delete_s3_chunks
+from django.http import JsonResponse
 
 
 
