@@ -257,9 +257,5 @@ CELERY_BROKER_URL = 'redis://localhost:6379'
 CELERY_RESULT_BACKEND = 'redis://localhost:6379'
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
-
-DISCORD_BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN', '')
-DISCORD_CHANNEL_ID = os.environ.get('DISCORD_CHANNEL_ID', '')  # or store as needed
-
 GOOGLE_CLIENT_SECRETS_FILE = BASE_DIR / "mtoken.json"
 YOUTUBE_REDIRECT_URI = "https://restreamer.newlevel.media/youtube/auth/callback"

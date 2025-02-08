@@ -1,4 +1,7 @@
 from django.contrib import admin
-from services.models import YouTubeOAuthCredentials
-# Register your models here.
+from .models import YouTubeOAuthCredentials, DiscordApp, DiscrodChannel
+
 admin.site.register(YouTubeOAuthCredentials)
+admin.site.register(DiscordApp)
+admin.site.register(DiscrodChannel)
+# Register your models here.
