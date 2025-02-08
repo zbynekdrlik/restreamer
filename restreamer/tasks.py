@@ -12,10 +12,16 @@ from django_celery_beat.models import PeriodicTask, IntervalSchedule
 from restreamer.video_data import VideoDataManager
 from django.conf import settings
 from restreamer.video_data import VideoDataManager
+from services.discord_service import send_discord_bot_message
+from services.youtube import get_control_stream_url_if_live
 
 
 log = logging.getLogger(__name__)
 
+credentials_path = settings.GOOGLE_CREDENTIALS_JSON_PATH
+token_file = settings.GOOGLE_TOKEN_JSON_PATH
+bot_token = settings.DISCORD_BOT_TOKEN
+channel_id = settings.DISCORD_CHANNEL_ID
 # celery -A nl_restreamer worker -l INFO --pool=threads -Q init_stream_queue
 
 
@@ -80,6 +86,35 @@ def init_fast_stream(streaming_event_id):
                 delivery_manager.send_init_data(fast_chunk.local_id, fast_stream.id)
                 streaming_event.end_points.add(fast_stream)
                 log.info(f"Fast stream {fast_stream.alias} initialized successfully !!!")
+                check_yt_live.delay()
                 return True
         
         time.sleep(3)
+
+
+@shared_task(queue='init_stream_queue')
+def check_yt_live():
+    """
+    Poll YouTube for the "Control Stream" to go live.
+    Once live, send the link to Discord. 
+    """
+
+    youtube_url = None
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        youtube_url = get_control_stream_url_if_live(credentials_path)
+        if youtube_url:
+            log.info(f"Control Stream is LIVE at: {youtube_url}")
+            send_discord_bot_message(
+                bot_token,
+                channel_id,
+                f"The stream is now LIVE at {youtube_url}"
+            )
+            break
+        else:
+            log.info(f"Attempt {attempt + 1}/{max_attempts}: stream not live yet.")
+            time.sleep(15)
+
+    if not youtube_url:
+        log.warning("Control Stream did not go live within expected time.")
+    return

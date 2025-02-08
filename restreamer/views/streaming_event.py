@@ -23,25 +23,35 @@ class StreamingEventView(View):
     def get(self, request):
         template_name = "restreamer/home.html"
         user = request.user
-        streaming_events = StreamingEvent.objects.filter(user=user).order_by("id")
+
+        # Get streaming events and handle the case where there are none
+        streaming_events = StreamingEvent.objects.filter(user=user).order_by("id") 
         video_length = '00:00'
-        
+
         in_manager = InstanceManager(user.id)
-        del_mangaer = DeliveringManger(user.id, streaming_events.first().id)
+
+        # Default `streaming_event_id` to `None` if no events exist
+        
+        streaming_event_id = streaming_events.first().id if streaming_events.exists() else None
+        del_manager = None
+
+        if streaming_event_id:
+            del_manager = DeliveringManger(user.id, streaming_event_id)
+
         instance_status = in_manager.check_status()
         is_preparing = False
-        
-        if instance_status != 'Inactive':
-            server_ready = del_mangaer.is_server_ready()
+
+        if instance_status != 'Inactive' and del_manager:
+            server_ready = del_manager.is_server_ready()
             if not server_ready:
                 is_preparing = True
-       
-        
+
+        # Handle a streaming event with chunks or set a default value
         try:
             streaming_event = StreamingEvent.objects.filter(chunks__isnull=False, user=user).first()
             if streaming_event:
-                video_manager = VideoDataManager(streaming_event.id)
-                video_length = video_manager.get_stream_length
+                video_manager = VideoDataManager(streaming_event=streaming_event.id)
+                video_length = video_manager.get_stream_length()
         except StreamingEvent.DoesNotExist:
             pass
 

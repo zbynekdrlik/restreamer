@@ -14,13 +14,20 @@ from channels.routing import ProtocolTypeRouter, URLRouter
 from channels.auth import AuthMiddlewareStack
 from restreamer.routing import websocket_urlpatterns
 
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'nl_restreamer.settings')
 django.setup()
-application = ProtocolTypeRouter({
-    "http": get_asgi_application(),
-    "websocket": AuthMiddlewareStack(
-        URLRouter(
-            websocket_urlpatterns
-        )
-    ),
-})
+
+
+if ENVIRONMENT == 'production':
+    application = ProtocolTypeRouter({
+        "http": get_asgi_application(),
+        "websocket": AuthMiddlewareStack(
+            URLRouter(
+                websocket_urlpatterns
+            )
+        ),
+    })
+else:
+    # Localhost (development) without WebSocket support
+    application = get_asgi_application()
