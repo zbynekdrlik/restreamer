@@ -79,6 +79,7 @@ def get_control_stream_url_if_live(
     # 4. Find "Control Stream" that's truly "live"
     for item in response.get('items', []):
         title = item['snippet']['title']
+        print('title -------> ', title)
         if title == 'Control Stream':
             life_cycle_status = item['status']['lifeCycleStatus']
             logger.info(f"Found broadcast '{title}' with lifeCycleStatus={life_cycle_status}")

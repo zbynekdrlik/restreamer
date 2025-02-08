@@ -13,7 +13,8 @@ from restreamer.video_data import VideoDataManager
 from django.conf import settings
 from restreamer.video_data import VideoDataManager
 from services.discord_service import send_discord_bot_message
-from services.youtube import get_control_stream_url_if_live
+from django.contrib.auth import get_user_model
+from services.youtube.client import get_active_live_broadcasts
 
 
 log = logging.getLogger(__name__)
@@ -63,11 +64,13 @@ def init_fast_stream(streaming_event_id):
     
     streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
     fast_stream = streaming_event.end_points.filter(is_fast=True).first()
-    user = streaming_event.user.id
+    
+    user_id = streaming_event.user.id
+    
     if not fast_stream:
         return
 
-    delivery_manager = DeliveringManger(user, streaming_event_id)
+    delivery_manager = DeliveringManger(user_id, streaming_event_id)
     
     while True:
         is_ready = delivery_manager.is_server_ready()
@@ -86,35 +89,61 @@ def init_fast_stream(streaming_event_id):
                 delivery_manager.send_init_data(fast_chunk.local_id, fast_stream.id)
                 streaming_event.end_points.add(fast_stream)
                 log.info(f"Fast stream {fast_stream.alias} initialized successfully !!!")
-                check_yt_live.delay()
+                check_yt_live.delay(user_id)
                 return True
         
         time.sleep(3)
 
 
 @shared_task(queue='init_stream_queue')
-def check_yt_live():
+def check_yt_live(user_id):
     """
-    Poll YouTube for the "Control Stream" to go live.
-    Once live, send the link to Discord. 
+    Poll up to 5 times, checking if the 'Control Stream' broadcast is live.
+    If found, send the link to Discord.
     """
-
-    youtube_url = None
+    
+    
     max_attempts = 5
-    for attempt in range(max_attempts):
-        youtube_url = get_control_stream_url_if_live(token_file, credentials_path)
-        if youtube_url:
-            log.info(f"Control Stream is LIVE at: {youtube_url}")
-            send_discord_bot_message(
-                bot_token,
-                channel_id,
-                f"The stream is now LIVE at {youtube_url}"
-            )
-            break
-        else:
-            log.info(f"Attempt {attempt + 1}/{max_attempts}: stream not live yet.")
-            time.sleep(15)
+    delay_seconds = 15
 
-    if not youtube_url:
-        log.warning("Control Stream did not go live within expected time.")
-    return
+    User = get_user_model()
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        log.error(f"User {user_id} not found.")
+        return None
+
+    
+    for attempt in range(max_attempts):
+        items = get_active_live_broadcasts()
+        log.info(f"Attempt {attempt+1}/{max_attempts}: Found {len(items)} active broadcast(s).")
+        found_live = False
+        for item in items:
+            title = item['snippet']['title']
+            life_cycle_status = item['status']['lifeCycleStatus']
+            log.info(f"Broadcast '{title}' status={life_cycle_status}")
+
+            if title == "Control Stream" and life_cycle_status == 'live':
+                broadcast_id = item['id']
+                youtube_url = f"https://www.youtube.com/watch?v={broadcast_id}"
+                log.info(f"Control Stream is LIVE at: {youtube_url}")
+
+                # Post to Discord
+                bot_token = settings.DISCORD_BOT_TOKEN
+                channel_id = settings.DISCORD_CHANNEL_ID
+                message = f"The stream is now LIVE at {youtube_url}"
+                send_discord_bot_message(bot_token, channel_id, message)
+
+                found_live = True
+                break  # Stop checking other broadcasts if we found the one we want
+
+        if found_live:
+            return youtube_url
+
+        # Not found or not live yet; wait before next attempt
+        if attempt < max_attempts - 1:
+            log.info(f"Not live yet. Retrying in {delay_seconds} seconds...")
+            time.sleep(delay_seconds)
+
+    log.warning("No 'Control Stream' broadcast became live after 5 attempts.")
+    return None
