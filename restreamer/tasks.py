@@ -114,7 +114,7 @@ def check_yt_live(user_id):
 
     
     for attempt in range(max_attempts):
-        items = get_active_live_broadcasts()
+        items = get_active_live_broadcasts(user)
         log.info(f"Attempt {attempt+1}/{max_attempts}: Found {len(items)} active broadcast(s).")
         found_live = False
         for item in items:
