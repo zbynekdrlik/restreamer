@@ -46,7 +46,11 @@ def youtube_auth_callback(request):
     
     # Convert creds.expiry (Python datetime) to something storable
     if creds.expiry:
-        youtube_oauth.expiry = creds.expiry.replace(tzinfo=timezone.utc) if not creds.expiry.tzinfo else creds.expiry
+        if timezone.is_naive(creds.expiry):
+            youtube_oauth.expiry = timezone.make_aware(creds.expiry, timezone.utc)
+        else:
+            youtube_oauth.expiry = creds.expiry
+            
     youtube_oauth.save()
 
     # Redirect somewhere
