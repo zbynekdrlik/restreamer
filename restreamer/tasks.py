@@ -102,7 +102,7 @@ def check_yt_live():
     youtube_url = None
     max_attempts = 5
     for attempt in range(max_attempts):
-        youtube_url = get_control_stream_url_if_live(credentials_path)
+        youtube_url = get_control_stream_url_if_live(token_file, credentials_path)
         if youtube_url:
             log.info(f"Control Stream is LIVE at: {youtube_url}")
             send_discord_bot_message(
