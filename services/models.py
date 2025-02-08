@@ -27,5 +27,5 @@ class DiscrodChannel(models.Model):
 class DiscordApp(models.Model):
     user = models.ForeignKey(RestreamerUser, on_delete=models.CASCADE, blank=True, null=True, related_name='discord_apps')
     bot_token = models.CharField(max_length=255)
-    channel = models.ForeignKey(DiscrodChannel, on_delete=models.SET_NULL, related_name="bots")
+    channel = models.ForeignKey(DiscrodChannel, on_delete=models.SET_NULL, null=True, related_name="bots")
     
