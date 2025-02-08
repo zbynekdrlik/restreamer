@@ -116,18 +116,16 @@ def check_yt_live(user_id):
         for item in items:
             title = item['snippet']['title']
             life_cycle_status = item['status']['lifeCycleStatus']
-            log.info(f"Broadcast '{title}' status={life_cycle_status}")
 
             if title == "Control Stream" and life_cycle_status == 'live':
                 broadcast_id = item['id']
                 youtube_url = f"https://www.youtube.com/watch?v={broadcast_id}"
-                log.info(f"Control Stream is LIVE at: {youtube_url}")
-
+                
                 # Post to Discord
                 discord_app = DiscordApp.objects.filter(user=user).first()
                 bot_token = discord_app.bot_token
                 channel_id = discord_app.channel.channel_id
-                message = f"The stream is now LIVE at {youtube_url}"
+                message = f"The control stream is now LIVE at {youtube_url}"
                 send_discord_bot_message(bot_token, channel_id, message)
 
                 found_live = True
