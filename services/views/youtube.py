@@ -54,4 +54,4 @@ def youtube_auth_callback(request):
     youtube_oauth.save()
 
     # Redirect somewhere
-    return redirect('some_success_page')
+    return redirect('control:home')
