@@ -128,7 +128,7 @@ def check_yt_live(user_id):
                 # Post to Discord
                 discord_app = DiscordApp.objects.filter(user=user).first()
                 bot_token = discord_app.bot_token
-                channel_id = discord_app.channel.id
+                channel_id = discord_app.channel.channel_id
                 message = f"The stream is now LIVE at {youtube_url}"
                 send_discord_bot_message(bot_token, channel_id, message)
 
