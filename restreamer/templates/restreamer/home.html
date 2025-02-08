@@ -26,9 +26,9 @@
             <div class="d-flex align-items-center gap-3 me-3">
                 <i class="bi bi-facebook fs-4"></i>
                 <i class="bi bi-twitch fs-4"></i>
-                <a href="{% url 'services:youtube_auth_start' %}" class="btn-youtube-cute">
-                    <i class="fab fa-youtube"></i>
-                    Connect YouTube
+                <a href="{% url 'services:youtube_auth_start' %}" class="youtube-btn">
+                    <i class="bi bi-youtube"></i>
+                    Connect
                   </a>
             </div>
         </div>
@@ -607,38 +607,35 @@ document.addEventListener('DOMContentLoaded', function() {
 </style>
 
 <style>
-    .btn-youtube-cute {
-      display: inline-flex;
-      align-items: center;
-      padding: 12px 24px;
-      background-color: #FF9999; /* Softer red */
-      color: #8B0000; /* Dark red text for contrast */
+    .youtube-btn {
+      display: inline-flex;          /* so icon & text align nicely */
+      align-items: center;           /* vertical centering */
+      gap: 4px;                      /* space between icon & text */
+      padding: 6px 10px;            /* smaller button size */
+      font-size: 0.875rem;          /* slightly smaller text */
+      font-weight: 500;             
+      background-color: #FF0000;     /* YouTube red */
+      color: #fff;
+      border-radius: 4px;
       text-decoration: none;
-      font-family: 'Comic Sans MS', 'Chalkboard SE', 'Arial', sans-serif;
-      font-size: 18px;
-      font-weight: bold;
-      border-radius: 50px; /* Very rounded corners */
-      transition: all 0.3s ease;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-      border: 2px solid #FF6666;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);  /* subtle shadow */
+      transition: background-color 0.3s, box-shadow 0.3s;
     }
-    .btn-youtube-cute:hover {
-      background-color: #FFB3B3;
-      transform: scale(1.05) rotate(2deg);
-      box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
+  
+    .youtube-btn:hover {
+      background-color: #cc0000;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
     }
-    .btn-youtube-cute i {
-      margin-right: 10px;
-      font-size: 24px;
+  
+    .youtube-btn:active {
+      background-color: #990000;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2) inset;
     }
-    @keyframes bounce {
-      0%, 100% { transform: translateY(0); }
-      50% { transform: translateY(-5px); }
+  
+    .youtube-btn i {
+      font-size: 1rem;
     }
-    .btn-youtube-cute:hover i {
-      animation: bounce 0.5s infinite;
-    }
-</style>
+  </style>
 {% endblock css %}
 
 {% endblock %}
