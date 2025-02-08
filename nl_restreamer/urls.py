@@ -15,11 +15,13 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from services.views.youtube import youtube_auth_callback
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('', include("restreamer.urls.urls")),
     path('control/', include("restreamer.urls.control_urls")),
     path('accounts/', include("accounts.urls")),
-    path('services/', include("services.urls"))
+    path('services/', include("services.urls")),
+    path('youtube/auth/callback', youtube_auth_callback, name='youtube_auth_callback'),
 ]
