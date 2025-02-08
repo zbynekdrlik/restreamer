@@ -19,8 +19,7 @@ from services.youtube.client import get_active_live_broadcasts
 
 log = logging.getLogger(__name__)
 
-credentials_path = settings.GOOGLE_CREDENTIALS_JSON_PATH
-token_file = settings.GOOGLE_TOKEN_JSON_PATH
+
 bot_token = settings.DISCORD_BOT_TOKEN
 channel_id = settings.DISCORD_CHANNEL_ID
 # celery -A nl_restreamer worker -l INFO --pool=threads -Q init_stream_queue
