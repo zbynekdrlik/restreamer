@@ -20,5 +20,6 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('', include("restreamer.urls.urls")),
     path('control/', include("restreamer.urls.control_urls")),
-    path('accounts/', include("accounts.urls"))
+    path('accounts/', include("accounts.urls")),
+    path('services/', include("services.urls"))
 ]
