@@ -1,5 +1,6 @@
 from django.db import models
 from django.conf import settings
+from accounts.models import RestreamerUser
 # Create your models here.
 
 class YouTubeOAuthCredentials(models.Model):
@@ -18,3 +19,13 @@ class YouTubeOAuthCredentials(models.Model):
 
     def __str__(self):
         return f"YouTube OAuth for {self.user.username}"
+    
+class DiscrodChannel(models.Model):
+    name = models.CharField(max_length=250)
+    id = models.BigIntegerField(null=True, blank=True)
+    
+class DiscordApp(models.Model):
+    user = models.ForeignKey(RestreamerUser, on_delete=models.CASCADE, blank=True, null=True, related_name='discord_apps')
+    bot_token = models.CharField(max_length=255)
+    channel = models.ForeignKey(DiscrodChannel, on_delete=models.SET_NULL, related_name="bots")
+    
