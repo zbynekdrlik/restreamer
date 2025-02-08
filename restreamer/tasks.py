@@ -20,9 +20,6 @@ from services.models import DiscordApp, DiscrodChannel
 
 log = logging.getLogger(__name__)
 
-
-bot_token = settings.DISCORD_BOT_TOKEN
-channel_id = settings.DISCORD_CHANNEL_ID
 # celery -A nl_restreamer worker -l INFO --pool=threads -Q init_stream_queue
 
 
