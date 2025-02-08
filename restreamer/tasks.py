@@ -15,6 +15,7 @@ from restreamer.video_data import VideoDataManager
 from services.discord_service import send_discord_bot_message
 from django.contrib.auth import get_user_model
 from services.youtube.client import get_active_live_broadcasts
+from services.models import DiscordApp, DiscrodChannel
 
 
 log = logging.getLogger(__name__)
@@ -126,8 +127,9 @@ def check_yt_live(user_id):
                 log.info(f"Control Stream is LIVE at: {youtube_url}")
 
                 # Post to Discord
-                bot_token = settings.DISCORD_BOT_TOKEN
-                channel_id = settings.DISCORD_CHANNEL_ID
+                discord_app = DiscordApp.objects.filter(user=user).first()
+                bot_token = discord_app.bot_token
+                channel_id = discord_app.channel.id
                 message = f"The stream is now LIVE at {youtube_url}"
                 send_discord_bot_message(bot_token, channel_id, message)
 
