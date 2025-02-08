@@ -22,7 +22,7 @@ class YouTubeOAuthCredentials(models.Model):
     
 class DiscrodChannel(models.Model):
     name = models.CharField(max_length=250)
-    id = models.BigIntegerField(null=True, blank=True)
+    channel_id = models.BigIntegerField(null=True, blank=True)
     
 class DiscordApp(models.Model):
     user = models.ForeignKey(RestreamerUser, on_delete=models.CASCADE, blank=True, null=True, related_name='discord_apps')
