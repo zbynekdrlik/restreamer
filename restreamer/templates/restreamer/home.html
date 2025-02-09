@@ -1,7 +1,7 @@
 {% extends 'base/base.html' %}
 {% load static %}
 {% block content %}
-{{ context|json_script:"context-data" }}
+{{ is_preparing|json_script:"is-preparing-data" }}
 <!-- <div class="container mx-auto text-center mt-0 p-0" style="margin-bottom: 5rem">
     <div class="relative w-96 h-48 mx-auto">
         <div class="absolute inset-0 rounded-xl blur-3xl bg-gradient-to-r from-gray-900 to-black animate-pulse"></div>
@@ -289,6 +289,7 @@
             const isPreparing = localStorage.getItem('is_preparing') === 'true'
             const activated = deliverBtn.getAttribute("data-activated");
             if (activated === "False" && !(isBuffering || isPreparing)) {
+                console.log('prerparing', isPreparing, 'buffering', isBuffering)
             // Open the Data Confirmation Modal
             $("#dataConfirmationModal_" + eventId).modal({ backdrop: "static", keyboard: false });
             } else {
@@ -459,8 +460,8 @@
 
 <script>
     // Retrieve the JSON data embedded in the template
-    const contextData = JSON.parse(document.getElementById('context-data').textContent);
-    localStorage.setItem('is_preparing', contextData.is_preparing);
+    const isPreparing = JSON.parse(document.getElementById('is-preparing-data').textContent);
+    localStorage.setItem('is_preparing', isPreparing);
 </script>
 
     
