@@ -133,7 +133,7 @@
                     <div class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1">
                     <i class="bi bi-clock text-primary me-2"></i>
                     <span class="text-muted small me-2">Length:</span>
-                    <span data-event-id="{{ streaming_event.id }}" id="video-length-value_{{ streaming_event.id }}" class="fw-bold">
+                    <span data-event-id="{{ streaming_event.id }}" id="video-length-value" class="fw-bold">
                         {{ video_length }}
                     </span>
                     </div>
@@ -193,16 +193,19 @@
         const eventId = container.getAttribute("data-event-id");
         const streamReadyUrl = container.getAttribute("data-stream-ready-url");
         const deliveringButton = container.querySelector("#delivering_action_" + eventId);
+        console.log('delivering button -------> ', deliveringButton)
         const initialButtonClasses = deliveringButton.getAttribute("data-initial-classes") || deliveringButton.className;
         const initialButtonHtml = deliveringButton.getAttribute("data-initial-html") || deliveringButton.innerHTML;
         
         // Suppose your server returns a JSON with properties: ready, buffer_filled, live
         if (deliveringButton.getAttribute("data-live") === "False") {
+            console.log("we are there 202")
             $.ajax({
             url: streamReadyUrl,
             type: "GET",
             success: function(response) {
                 const isRunning = response.ready;
+                console.log(" response is there congrats  is running --->", isRunning)
                 const bufferFilled = response.buffer_filled;
                 const live = response.live;
                 deliveringButton.setAttribute("data-live", live ? "True" : "False");
