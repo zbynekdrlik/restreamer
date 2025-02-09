@@ -291,13 +291,13 @@
             if (activated === "False" && !(isBuffering || isPreparing)) {
                 console.log('prerparing', isPreparing, 'buffering', isBuffering)
             // Open the Data Confirmation Modal
-            $("#dataConfirmationModal_" + eventId).modal({ backdrop: "static", keyboard: false });
             } else {
                 console.log('else block executed herer 296')
             const form = document.getElementById("start_stream_form_" + eventId);
             if (form && !(isBuffering || isPreparing) ) { form.submit(); }
             stopCheckSeActiveInterval(eventId);
             }
+            return;
         }
     
         // Handle Delete Streaming Event button click
