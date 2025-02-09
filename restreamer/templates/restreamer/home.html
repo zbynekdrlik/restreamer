@@ -239,6 +239,8 @@
     
         // --- Interval functions for periodic checking ---
         let checkIntervals = {}; // Store intervals per event id
+
+        /* starting checking the status of the button (start streaming)  */
         function startCheckSeActiveInterval(checkUrl, eventId) {
         if (!checkIntervals[eventId]) {
             checkIntervals[eventId] = setInterval(function() {
@@ -247,6 +249,7 @@
             }, 10000);
         }
         }
+        /* stopoing checking the status of the button (start streaming)  */
         function stopCheckSeActiveInterval(eventId) {
         if (checkIntervals[eventId]) {
             clearInterval(checkIntervals[eventId]);
@@ -327,7 +330,7 @@
             return;
         }
     
-        // Handle Confirm Data Deletion button click in Data Confirmation Modal
+        // confirm of ending delivivering (stop streaming) 
         let confirmDataDeleteBtn = target.closest("[id^='confirm_data_delete_']");
         if (confirmDataDeleteBtn) {
             e.preventDefault();
@@ -347,7 +350,7 @@
             return;
         }
         
-        // Handle Cancel Data Deletion button click in Data Confirmation Modal
+        // click in end streaming modal
         let cancelDataDeleteBtn = target.closest("[id^='discard_data_']");
         if (cancelDataDeleteBtn) {
             e.preventDefault();
@@ -362,11 +365,15 @@
         // --- Additional: Attach a delegated event for the confirm button in the Start Stream Modal ---
         document.body.addEventListener("click", function(e) {
         let confirmModalBtn = e.target.closest("[id^='confirm_modal_']");
+        console.log('confirm modal button ', confirmModalBtn)
         if (confirmModalBtn) {
+            console.log("confirm modal button is there !!!!", confirmModalBtn)
             e.preventDefault();
             const eventId = confirmModalBtn.getAttribute("data-event-id") ||
                             confirmModalBtn.closest(".streaming-event-container").getAttribute("data-event-id");
+            console.log("event id after clicking on start stream confirm", eventId)
             const container = document.querySelector('.streaming-event-container[data-event-id="' + eventId + '"]');
+            console.log('container ------>', container)
             if (!container) return;
         
             const startStopButton = container.querySelector("#start_stop_" + eventId);
@@ -391,6 +398,7 @@
             localStorage.setItem(`checkSeActive_${eventId}`, "true");
             startCheckSeActiveInterval(checkUrl, eventId);
             const serverIsRunning = localStorage.getItem("isRunning");
+            console.log('server is running ', serverIsRunning)
             if (serverIsRunning !== "true") {
                 const deliveringButton = container.querySelector("#delivering_action_" + eventId);
                 deliveringButton.innerText = "Preparing stream...";
@@ -401,6 +409,7 @@
             setTimeout(function(){ checkServerStatus(container); }, 2000);
             } else {
             modal.modal("hide");
+            console.log("we aer here else server is running")
             setupStreamForm.submit();
             localStorage.removeItem(`preparingStream_${eventId}`);
             localStorage.removeItem(`checkSeActive_${eventId}`);
