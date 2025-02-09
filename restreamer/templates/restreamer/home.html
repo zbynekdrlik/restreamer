@@ -1,7 +1,7 @@
 {% extends 'base/base.html' %}
 {% load static %}
 {% block content %}
-
+{{ context|json_script:"context-data" }}
 <!-- <div class="container mx-auto text-center mt-0 p-0" style="margin-bottom: 5rem">
     <div class="relative w-96 h-48 mx-auto">
         <div class="absolute inset-0 rounded-xl blur-3xl bg-gradient-to-r from-gray-900 to-black animate-pulse"></div>
@@ -291,13 +291,14 @@
             e.preventDefault();
             const eventId = deliverBtn.getAttribute("data-event-id");
             const isBuffering = deliverBtn.innerText.trim() === "Buffering...";
+            const isPreparing = localStorage.getItem('is_preparing') === 'true'
             const activated = deliverBtn.getAttribute("data-activated");
-            if (activated === "False" && !isBuffering) {
+            if (activated === "False" && !(isBuffering || isPreparing)) {
             // Open the Data Confirmation Modal
             $("#dataConfirmationModal_" + eventId).modal({ backdrop: "static", keyboard: false });
             } else {
             const form = document.getElementById("start_stream_form_" + eventId);
-            if (form && !isBuffering) { form.submit(); }
+            if (form && !(isBuffering || isPreparing) ) { form.submit(); }
             stopCheckSeActiveInterval(eventId);
             }
             return;
@@ -459,6 +460,13 @@
         });
     </script>
     <!-- previous end for was ended here  -->
+
+
+<script>
+    // Retrieve the JSON data embedded in the template
+    const contextData = JSON.parse(document.getElementById('context-data').textContent);
+    localStorage.setItem('is_preparing', contextData.is_preparing);
+</script>
 
     
 <script>
