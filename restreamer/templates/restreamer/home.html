@@ -211,7 +211,7 @@
         const initialButtonHtml = deliveringButton.getAttribute("data-initial-html") || deliveringButton.innerHTML;
         
         // Suppose your server returns a JSON with properties: ready, buffer_filled, live
-        if (deliveringButton.getAttribute("data-live") === "False") {
+        if (deliveringButton.getAttribute("data-activated") === "False") {
             console.log("we are there 202")
             $.ajax({
             url: streamReadyUrl,
