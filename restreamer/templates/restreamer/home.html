@@ -174,7 +174,8 @@
 
 <script>
     document.addEventListener("DOMContentLoaded", function() {
-
+        checkServerStatus();
+        setInterval(checkServerStatus, 5000);
         // --- Utility: Get CSRF token ---
         function getCookie(name) {
         let cookieValue = null;
@@ -373,7 +374,6 @@
         console.log('confirm modal button ', confirmModalBtn)
         if (confirmModalBtn) {
             console.log("confirm modal button is there !!!!", confirmModalBtn)
-            e.preventDefault();
             const eventId = confirmModalBtn.getAttribute("data-event-id") ||
                             confirmModalBtn.closest(".streaming-event-container").getAttribute("data-event-id");
             console.log("event id after clicking on start stream confirm", eventId)
