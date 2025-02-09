@@ -148,264 +148,248 @@
         </div>
     </div>
 </div>
+
+
 <script>
     document.addEventListener("DOMContentLoaded", function() {
-        const deliveringButton = document.getElementById('delivering_action_{{ streaming_event.id }}');
-        let checkSeActiveInterval;
-        let isLive = deliveringButton.getAttribute('data-activated') !== 'False';
+        // Loop over each streaming event container on the page.
+        const containers = document.querySelectorAll(
+            '.border-bottom.p-4.position-relative.hover-bg-light.transition[data-event-id]'
+        );
         
-        checkServerStatus();
-        setInterval(checkServerStatus, 5000);
-        
-        // Use querySelector for buttons that may not have an ID attribute.
-        const deleteStreamingEventButton = document.querySelector('button.delete-streaming-event[data-event-id="{{ streaming_event.id }}"]');
-        const startStopButton = document.getElementById('start_stop_{{ streaming_event.id }}');
-        const confirmButton = document.getElementById('confirm_modal_{{ streaming_event.id }}');
-        const cancelButton = document.getElementById('cancel_modal_{{ streaming_event.id }}');
-        const modal = $('#startStreamModal_{{ streaming_event.id }}');
-        const modalBodyText = document.getElementById('modal-body-text_{{ streaming_event.id }}');
-        const serverDeliveryMessage = document.getElementById('server_delivery_message_{{ streaming_event.id }}');
-        
-        const setupStreamForm = document.getElementById('setup_stream_form_{{ streaming_event.id }}');
-    
-        const eventId = startStopButton.getAttribute('data-event-id');
-        const checkUrl = startStopButton.getAttribute('data-check-url');
-    
-        if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
-            startCheckSeActiveInterval(checkUrl, eventId);
-        }
-        
-        // Store the initial state of the delivering button
-        const initialButtonClasses = deliveringButton.className;
-        const initialButtonHtml = deliveringButton.innerHTML;
-    
-        // Flag to track if the initial state was "Ready"
-        let wasReadyState = false;
-    
-        // Get CSRF token
-        function getCookie(name) {
-            let cookieValue = null;
-            if (document.cookie && document.cookie !== '') {
-                const cookies = document.cookie.split(';');
-                for (let i = 0; i < cookies.length; i++) {
-                    const cookie = cookies[i].trim();
-                    if (cookie.substring(0, name.length + 1) === (name + '=')) {
-                        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
-                        break;
+        containers.forEach(function(container) {
+            // Extract the unique event ID from the container's data attribute.
+            const eventId = container.getAttribute('data-event-id');
+            
+            // Retrieve elements from this container using the eventId.
+            const deliveringButton         = container.querySelector(`#delivering_action_${eventId}`);
+            const startStopButton          = container.querySelector(`#start_stop_${eventId}`);
+            const setupStreamForm          = container.querySelector(`#setup_stream_form_${eventId}`);
+            const deleteStreamingEventBtn  = container.querySelector(`button.delete-streaming-event[data-event-id="${eventId}"]`);
+            const confirmButton            = container.querySelector(`#confirm_modal_${eventId}`);
+            const cancelButton             = container.querySelector(`#cancel_modal_${eventId}`);
+            const modal                    = $(`#startStreamModal_${eventId}`);
+            const modalBodyText            = container.querySelector(`#modal-body-text_${eventId}`);
+            const serverDeliveryMessage    = container.querySelector(`#server_delivery_message_${eventId}`);
+            const startStopDButton         = container.querySelector(`#delivering_action_${eventId}`);
+            const deleteChunksButton       = container.querySelector(`#delete_chunks_${eventId}`);
+            const confirmChunkSDeleteBtn   = container.querySelector(`#confirmChunksDelete_${eventId}`);
+            const confirmDButton           = container.querySelector(`#confirm_data_delete_${eventId}`);
+            const cancelDButton            = container.querySelector(`#discard_data_${eventId}`);
+            
+            // Variables for interval handling and initial state.
+            let checkSeActiveInterval;
+            let isLive = deliveringButton.getAttribute('data-activated') !== 'False';
+            const initialButtonClasses = deliveringButton.className;
+            const initialButtonHtml    = deliveringButton.innerHTML;
+            let wasReadyState = false;
+            
+            // Function to get the CSRF token.
+            function getCookie(name) {
+                let cookieValue = null;
+                if (document.cookie && document.cookie !== '') {
+                    const cookies = document.cookie.split(';');
+                    for (let i = 0; i < cookies.length; i++) {
+                        const cookie = cookies[i].trim();
+                        if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                            cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                            break;
+                        }
                     }
                 }
+                return cookieValue;
             }
-            return cookieValue;
-        }
-    
-        const csrftoken = getCookie('csrftoken');
-    
-        // Check local storage for previous state and execute initial AJAX request
-        function checkServerStatus() {
-            console.log('is live set ------>', isLive);
-            // Initial AJAX request to check server status on page load
-            if (!isLive) {
-                $.ajax({
-                    url: '{% url "stream_ready" streaming_event.id  %}',
-                    type: 'GET',
-                    success: function(response) {
-                        const isRunning = response.ready;
-                        const bufferFilled = response.buffer_filled;
-                        const live = response.live;
-                        isLive = live;
-                        localStorage.setItem('isRunning', isRunning);
-    
-                        if (!isLive) {
-                            if (isRunning) {
-                                if (bufferFilled || live) {
-                                    deliveringButton.className = initialButtonClasses;
-                                    deliveringButton.innerHTML = initialButtonHtml;
-                                    localStorage.removeItem('preparingStream_{{ streaming_event.id }}');
-                                } else {
-                                    deliveringButton.innerText = "Buffering...";
-                                    localStorage.setItem('preparingStream_{{ streaming_event.id }}', 'true');
-                                }
-                            
-                            } else {
-                                deliveringButton.innerText = "Preparing stream...";
-                                localStorage.setItem('preparingStream_{{ streaming_event.id }}', 'true');
-    
-                                if (localStorage.getItem('preparingStream_{{ streaming_event.id }}') === 'true') {
-                                    deliveringButton.innerText = "Preparing stream...";
-                                }
-                            }  
-                        }
-                        else {
-                            deliveringButton.className = initialButtonClasses;
-                            deliveringButton.innerHTML = initialButtonHtml;
-                            localStorage.removeItem('preparingStream_{{ streaming_event.id }}');
-                        }
-                    },
-                    error: function(error) {
-                        console.error('Error checking status and buffer:', error);
-                    }
-                }); 
-            }
-        }
-        
-        startStopButton.addEventListener('click', function() {
-            const buttonText = startStopButton.innerText.trim();
-    
-            if (buttonText === 'Ready') {
-                modalBodyText.innerText = 'Are you sure you want to start the stream?';
-                serverDeliveryMessage.style.display = 'list-item';
-                wasReadyState = true;
-            } else {
-                modalBodyText.innerText = 'Are you sure you want to stop the stream?';
-                serverDeliveryMessage.innerText = '';
-                wasReadyState = false;
-            }
-    
-            // Ensure the modal does not close unless Cancel or Confirm is clicked
-            modal.modal({
-                backdrop: 'static',
-                keyboard: false
-            });
-        });
-    
-        // Handle the confirm button click
-        confirmButton.addEventListener('click', function(event) {
-            event.preventDefault();
-    
-            const checkUrl = startStopButton.getAttribute('data-check-url');
-            const eventId = startStopButton.getAttribute('data-event-id');       
-           
-            // Append CSRF token to the form
-            const csrfInput = document.createElement('input');
-            csrfInput.type = 'hidden';
-            csrfInput.name = 'csrfmiddlewaretoken';
-            csrfInput.value = csrftoken;
-            setupStreamForm.appendChild(csrfInput);
+            const csrftoken = getCookie('csrftoken');
             
-            if (wasReadyState) {
-                localStorage.setItem(`checkSeActive_${eventId}`, 'true');
+            // Retrieve the check URL from the start/stop button.
+            const checkUrl = startStopButton.getAttribute('data-check-url');
+            
+            // If a localStorage flag is set and the stream is not activated, start the check interval.
+            if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
                 startCheckSeActiveInterval(checkUrl, eventId);
-    
-                const serverIsRunning = localStorage.getItem('isRunning');
+            }
+            
+            // Function to check the server status for this streaming event.
+            function checkServerStatus() {
+                console.log('is live set ------>', isLive, 'for event', eventId);
+                if (!isLive) {
+                    // Build the URL dynamically by replacing the placeholder "0" with the eventId.
+                    const url = "{% url 'stream_ready' 0 %}".replace('0', eventId);
+                    $.ajax({
+                        url: url,
+                        type: 'GET',
+                        success: function(response) {
+                            const isRunning    = response.ready;
+                            const bufferFilled = response.buffer_filled;
+                            const live         = response.live;
+                            isLive             = live;
+                            localStorage.setItem('isRunning', isRunning);
+        
+                            if (!isLive) {
+                                if (isRunning) {
+                                    if (bufferFilled || live) {
+                                        deliveringButton.className = initialButtonClasses;
+                                        deliveringButton.innerHTML = initialButtonHtml;
+                                        localStorage.removeItem(`preparingStream_${eventId}`);
+                                    } else {
+                                        deliveringButton.innerText = "Buffering...";
+                                        localStorage.setItem(`preparingStream_${eventId}`, 'true');
+                                    }
+                                } else {
+                                    deliveringButton.innerText = "Preparing stream...";
+                                    localStorage.setItem(`preparingStream_${eventId}`, 'true');
+                                }
+                            } else {
+                                deliveringButton.className = initialButtonClasses;
+                                deliveringButton.innerHTML = initialButtonHtml;
+                                localStorage.removeItem(`preparingStream_${eventId}`);
+                            }
+                        },
+                        error: function(error) {
+                            console.error('Error checking status and buffer for event', eventId, error);
+                        }
+                    });
+                }
+            }
+            
+            // Immediately check status and then set an interval (every 5 seconds).
+            checkServerStatus();
+            setInterval(checkServerStatus, 5000);
+            
+            // Event listener for the start/stop button.
+            startStopButton.addEventListener('click', function() {
+                const buttonText = startStopButton.innerText.trim();
+                if (buttonText === 'Ready') {
+                    modalBodyText.innerText = 'Are you sure you want to start the stream?';
+                    serverDeliveryMessage.style.display = 'list-item';
+                    wasReadyState = true;
+                } else {
+                    modalBodyText.innerText = 'Are you sure you want to stop the stream?';
+                    serverDeliveryMessage.innerText = '';
+                    wasReadyState = false;
+                }
+                // Show the modal with a static backdrop.
+                modal.modal({ backdrop: 'static', keyboard: false });
+            });
+            
+            // Handle the confirm button click in the modal.
+            confirmButton.addEventListener('click', function(event) {
+                event.preventDefault();
+                // Append CSRF token to the form.
+                const csrfInput = document.createElement('input');
+                csrfInput.type = 'hidden';
+                csrfInput.name = 'csrfmiddlewaretoken';
+                csrfInput.value = csrftoken;
+                setupStreamForm.appendChild(csrfInput);
                 
-                if (!serverIsRunning === 'true') {
-                    deliveringButton.innerText = "Preparing stream...";
-                    localStorage.setItem('preparingStream_{{ streaming_event.id }}', 'true');
-                } 
-    
+                if (wasReadyState) {
+                    localStorage.setItem(`checkSeActive_${eventId}`, 'true');
+                    startCheckSeActiveInterval(checkUrl, eventId);
+                    const serverIsRunning = localStorage.getItem('isRunning');
+                    if (!serverIsRunning === 'true') {
+                        deliveringButton.innerText = "Preparing stream...";
+                        localStorage.setItem(`preparingStream_${eventId}`, 'true');
+                    }
+                    modal.modal('hide');
+                    setupStreamForm.submit();
+                    setTimeout(checkServerStatus, 2000);
+                } else {
+                    modal.modal('hide');
+                    setupStreamForm.submit();
+                    localStorage.removeItem(`preparingStream_${eventId}`);
+                    localStorage.removeItem(`checkSeActive_${eventId}`);
+                    stopCheckSeActiveInterval();
+                }
+            });
+            
+            // Function to start an interval for additional server status checks.
+            function startCheckSeActiveInterval(url, eventId) {
+                if (!checkSeActiveInterval) {
+                    checkSeActiveInterval = setInterval(function() {
+                        checkSeActive(url, eventId);
+                    }, 10000); // every 10 seconds
+                }
+            }
+            
+            // Function to stop the check interval.
+            function stopCheckSeActiveInterval() {
+                if (checkSeActiveInterval) {
+                    clearInterval(checkSeActiveInterval);
+                    checkSeActiveInterval = null;
+                }
+            }
+            
+            // Cancel button for the modal.
+            cancelButton.addEventListener('click', function() {
                 modal.modal('hide');
-                setupStreamForm.submit();
-    
-                setTimeout(() => {
-                    checkServerStatus();
-                }, 2000);
-    
-            } else {
-                modal.modal('hide');
-                setupStreamForm.submit();
-                localStorage.removeItem('preparingStream_{{ streaming_event.id }}');
-                localStorage.removeItem(`checkSeActive_${eventId}`);
-                stopCheckSeActiveInterval();
-            }
-        });
-    
-        // Function to start the checkSeActive interval
-        function startCheckSeActiveInterval(url, eventId) {
-            if (!checkSeActiveInterval) {
-                checkSeActiveInterval = setInterval(function() {
-                    checkSeActive(url, eventId);
-                }, 10000);  // Check every 10 seconds
-            }
-        }
-    
-        // Function to stop the checkSeActive interval
-        function stopCheckSeActiveInterval() {
-            if (checkSeActiveInterval) {
-                clearInterval(checkSeActiveInterval);
-                checkSeActiveInterval = null;
-            }
-        }
-    
-        cancelButton.addEventListener('click', function() {
-            modal.modal('hide');
-        });
-    
-        const startStopDButton = document.getElementById('delivering_action_{{ streaming_event.id }}');
-        startStopDButton.addEventListener('click', function() {
-            const isActivated = startStopDButton.getAttribute('data-activated') === 'False';
-            const isBuffering = startStopDButton.innerText === "Buffering...";
-            if (!isActivated && !isBuffering) {
-                const modal = $('#dataConfirmationModal_{{ streaming_event.id }}');
-                modal.modal({
-                    backdrop: 'static',
-                    keyboard: false
-                });
-            } else {
-                const form = document.querySelector('form[action*="start_stream"]#start_stream_form_{{ streaming_event.id }}');
-                if (form && !isBuffering) {
+            });
+            
+            // Event listener for the delivering action button.
+            startStopDButton.addEventListener('click', function() {
+                const isActivated = startStopDButton.getAttribute('data-activated') === 'False';
+                const isBuffering = startStopDButton.innerText === "Buffering...";
+                if (!isActivated && !isBuffering) {
+                    const dataModal = $(`#dataConfirmationModal_${eventId}`);
+                    dataModal.modal({ backdrop: 'static', keyboard: false });
+                } else {
+                    const form = container.querySelector(`form[action*="start_stream"]#start_stream_form_${eventId}`);
+                    if (form && !isBuffering) {
+                        form.submit();
+                    }
+                    stopCheckSeActiveInterval();
+                    localStorage.removeItem(`checkSeActive_${eventId}`);
+                }
+            });
+            
+            // Event listener for the delete chunks button.
+            deleteChunksButton.addEventListener('click', function(event) {
+                event.preventDefault();
+                const deleteChunksModal = $(`#deleteChunksModal_${eventId}`);
+                deleteChunksModal.modal({ backdrop: 'static', keyboard: false });
+            });
+            
+            // Event listener for the confirm chunks deletion button.
+            confirmChunkSDeleteBtn.addEventListener('click', function() {
+                const deleteChunksForm = container.querySelector(`#deleteChunksForm_${eventId}`);
+                if (deleteChunksForm) {
+                    deleteChunksForm.submit();
+                }
+            });
+            
+            // Global listener for the "confirm-delete-event" button.
+            document.addEventListener('click', function (event) {
+                if (event.target.matches('.confirm-delete-event')) {
+                    const btn = event.target;
+                    const btnEventId = btn.getAttribute('data-event-id');
+                    const deleteForm = document.querySelector(
+                        `form[data-event-id="${btnEventId}"][data-action="remove_streaming_event"]`
+                    );
+                    if (deleteForm) {
+                        deleteForm.submit();
+                    }
+                }
+            });
+            
+            // Event listener for the confirm data delete button.
+            confirmDButton.addEventListener('click', function(event) {
+                event.preventDefault();
+                const additionalDataCheckbox = container.querySelector(`#additionalData_${eventId}`);
+                const additionalDataValue = additionalDataCheckbox.checked ? '1' : '0';
+                const form = container.querySelector(`form[action*="start_stream"]#start_stream_form_${eventId}`);
+                const hiddenInput = document.createElement('input');
+                hiddenInput.type = 'hidden';
+                hiddenInput.name = 'additional_data';
+                hiddenInput.value = additionalDataValue;
+                form.appendChild(hiddenInput);
+                if (form) {
                     form.submit();
                 }
-                stopCheckSeActiveInterval();
-                localStorage.removeItem(`checkSeActive_${eventId}`);
-            }
-        });
-    
-        const deleteChunksButton = document.getElementById("delete_chunks_{{ streaming_event.id }}");
-        deleteChunksButton.addEventListener('click', function(event) {
-            event.preventDefault();
-            const modal = $('#deleteChunksModal_{{ streaming_event.id }}');
-            modal.modal({
-                backdrop: 'static',
-                keyboard: false
             });
-        });
-    
-        const confirmChunkSDeleteButton = document.getElementById('confirmChunksDelete_{{ streaming_event.id }}');
-        confirmChunkSDeleteButton.addEventListener('click', function() {
-            const deleteChunksForm = document.getElementById('deleteChunksForm_{{ streaming_event.id }}');
-            if (deleteChunksForm) {
-                deleteChunksForm.submit();
-            }
-        });
-    
-        document.addEventListener('click', function (event) {
-            // Handle "Confirm" button click in the modal
-            if (event.target.matches('.confirm-delete-event')) {
-                const button = event.target; // The clicked button
-                const eventId = button.getAttribute('data-event-id'); // Get the event ID from the button
-                // More specific selector: searching for a form with data-event-id and a unique data-action attribute
-                const deleteForm = document.querySelector(`form[data-event-id="${eventId}"][data-action="remove_streaming_event"]`);
-        
-                if (deleteForm) {
-                    deleteForm.submit(); // Submit the correct form
-                }
-            }
-        });
-    
-        const confirmDButton = document.getElementById('confirm_data_delete_{{ streaming_event.id }}');
-        confirmDButton.addEventListener('click', function(event) {
-            event.preventDefault();
             
-            const additionalDataCheckbox = document.getElementById('additionalData_{{ streaming_event.id }}');
-            const additionalDataValue = additionalDataCheckbox.checked ? '1' : '0';
-    
-            const form = document.querySelector('form[action*="start_stream"]#start_stream_form_{{ streaming_event.id }}');
-            
-            const hiddenInput = document.createElement('input');
-            hiddenInput.type = 'hidden';
-            hiddenInput.name = 'additional_data';
-            hiddenInput.value = additionalDataValue;
-    
-            form.appendChild(hiddenInput);
-    
-            if (form) {
-                form.submit();
-            }
-        });
-    
-        const cancelDButton = document.getElementById('discard_data_{{ streaming_event.id }}');
-        cancelDButton.addEventListener('click', function() {
-            $('#dataConfirmationModal_{{ streaming_event.id }}').modal('hide');
+            // Event listener for the cancel data delete button.
+            cancelDButton.addEventListener('click', function() {
+                $(`#dataConfirmationModal_${eventId}`).modal('hide');
+            });
         });
     });
     </script>
