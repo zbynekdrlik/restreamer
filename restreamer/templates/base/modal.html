@@ -5,30 +5,53 @@
   <!-- Button to trigger the modal -->
 
  <!-- Start Stream Modal -->
-<div class="modal fade" id="startStreamModal_{{ forloop.counter }}" tabindex="-1" role="dialog" aria-labelledby="startStreamModalLabel_{{ forloop.counter }}" aria-hidden="true">
-    <div class="modal-dialog" role="document">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="startStreamModalLabel_{{ forloop.counter }}">Confirmation</h5>
-                <button type="button" class="col close" data-dismiss="modal" aria-label="Close">
-                    <span aria-hidden="true">&times;</span>
-                </button>
+<div class="modal fade"
+     id="startStreamModal_{{ streaming_event.id }}"
+     tabindex="-1"
+     role="dialog"
+     aria-labelledby="startStreamModalLabel_{{ streaming_event.id }}"
+     aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered" role="document">
+        <div class="modal-content" style="border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1);">
+            <div class="modal-header bg-light" style="border-bottom: 2px solid #e9ecef; border-top-left-radius: 15px; border-top-right-radius: 15px;">
+                <h5 class="modal-title" id="startStreamModalLabel_{{ streaming_event.id }}" style="color: #333; font-weight: 600;">
+                    <i class="bi bi-exclamation-triangle-fill me-2" style="color: #ffc107;"></i>Confirmation
+                </h5>
+                <!-- 
+                  For Bootstrap 5, the attribute is data-bs-dismiss="modal". 
+                  If you're on older Bootstrap 4, it’s data-dismiss="modal".
+                -->
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <div class="modal-body">
-                <p id="modal-body-text_{{ forloop.counter }}">Are you sure you want to start the stream?</p>
-                <p>The following actions will occur:</p><br>
-                <ul>
-                    <li id="server_delivery_message_{{ forloop.counter }}">A new virtual server will be created to handle the streaming process.</li>
+            <div class="modal-body" style="padding: 2rem;">
+                <p id="modal-body-text_{{ streaming_event.id }}" style="font-size: 1.1rem; color: #555;">
+                    Are you sure you want to start the stream?
+                </p>
+                <p style="font-weight: 500; color: #333;">The following actions will occur:</p>
+                <ul style="list-style-type: none; padding-left: 0;">
+                    <li id="server_delivery_message_{{ streaming_event.id }}" style="margin-bottom: 0.5rem;">
+                        <i class="bi bi-check-circle-fill me-2" style="color: #28a745;"></i>
+                        A new virtual server will be created to handle the streaming process.
+                    </li>
                 </ul>
             </div>
-            <div class="modal-footer">
-                <div class="container">
+            <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
+                <div class="container-fluid">
                     <div class="row justify-content-between">
                         <div class="col-auto">
-                            <button type="button" class="btn btn-secondary" data-dismiss="modal" id="cancel_modal_{{ forloop.counter }}">Cancel</button>
+                            <button type="button"
+                                    class="btn btn-outline-secondary"
+                                    data-bs-dismiss="modal"
+                                    id="cancel_modal_{{ streaming_event.id }}">
+                                Cancel
+                            </button>
                         </div>
                         <div class="col-auto">
-                            <button type="button" class="btn btn-primary" id="confirm_modal_{{ forloop.counter }}">Confirm</button>
+                            <button type="button"
+                                    class="btn btn-primary"
+                                    id="confirm_modal_{{ streaming_event.id }}">
+                                Confirm
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -38,30 +61,50 @@
 </div>
 
 <!-- Data Confirmation Modal -->
-<div class="modal fade" id="dataConfirmationModal_{{ forloop.counter }}" tabindex="-1" role="dialog" aria-labelledby="dataConfirmationModalLabel_{{ forloop.counter }}" aria-hidden="true">
-    <div class="modal-dialog" role="document">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="dataConfirmationModalLabel_{{ forloop.counter }}">Confirm Data Deletion</h5>
-                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                    <span aria-hidden="true">&times;</span>
-                </button>
+<div class="modal fade"
+     id="dataConfirmationModal_{{ streaming_event.id }}"
+     tabindex="-1"
+     role="dialog"
+     aria-labelledby="dataConfirmationModalLabel_{{ streaming_event.id }}"
+     aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered" role="document">
+        <div class="modal-content" style="border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1);">
+            <div class="modal-header bg-light" style="border-bottom: 2px solid #e9ecef; border-top-left-radius: 15px; border-top-right-radius: 15px;">
+                <h5 class="modal-title" id="dataConfirmationModalLabel_{{ streaming_event.id }}" style="color: #333; font-weight: 600;">
+                    <i class="bi bi-exclamation-triangle-fill me-2" style="color: #ffc107;"></i>Confirm Data Deletion
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <div class="modal-body">
-                <p>Do you want to delete the streaming data?</p>
+            <div class="modal-body" style="padding: 2rem;">
+                <p style="font-size: 1.1rem; color: #555;">Do you want to delete the streaming data?</p>
                 <div class="form-check">
-                    <input type="checkbox" class="form-check-input" id="additionalData_{{ forloop.counter }}" value="1">
-                    <label class="form-check-label" for="additionalData_{{ forloop.counter }}">Keep Data</label>
+                    <input type="checkbox"
+                           class="form-check-input"
+                           id="additionalData_{{ streaming_event.id }}"
+                           value="1">
+                    <label class="form-check-label"
+                           for="additionalData_{{ streaming_event.id }}"
+                           style="color: #333;">
+                        Keep Data
+                    </label>
                 </div>
             </div>
-            <div class="modal-footer">
-                <button type="button" id="discard_data_{{ forloop.counter }}" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
-                <button type="button" id="confirm_data_delete_{{ forloop.counter }}" class="btn btn-danger">Confirm</button>
+            <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
+                <button type="button"
+                        id="discard_data_{{ streaming_event.id }}"
+                        class="btn btn-outline-secondary"
+                        data-bs-dismiss="modal">
+                    Cancel
+                </button>
+                <button type="button"
+                        id="confirm_data_delete_{{ streaming_event.id }}"
+                        class="btn btn-danger">
+                    Confirm
+                </button>
             </div>
         </div>
     </div>
 </div>
-
 
 <!-- Data Confirmation Modal -->
 <div class="modal fade" id="deleteStreamingEventModal_{{ streaming_event.id }}" tabindex="-1" role="dialog" aria-labelledby="deleteStreamingEventModalLabel_{{ streaming_event.id }}" aria-hidden="true">
@@ -82,40 +125,66 @@
 </div>
 
 
-<!-- Data Confirmation Modal -->
-<div class="modal fade" id="deleteChunksModal_{{ forloop.counter }}" tabindex="-1" role="dialog" aria-labelledby="deleteChunksModalLabel_{{ forloop.counter }}" aria-hidden="true">
-    <div class="modal-dialog" role="document">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="dataConfirmationModalLabel_{{ forloop.counter }}">Are you shure ?</h5>
-                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                    <span aria-hidden="true">&times;</span>
-                </button>
+<!-- Delete Chunks Modal -->
+<div class="modal fade"
+     id="deleteChunksModal_{{ streaming_event.id }}"
+     tabindex="-1"
+     role="dialog"
+     aria-labelledby="deleteChunksModalLabel_{{ streaming_event.id }}"
+     aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered" role="document">
+        <div class="modal-content" style="border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1);">
+            <div class="modal-header bg-light" style="border-bottom: 2px solid #e9ecef; border-top-left-radius: 15px; border-top-right-radius: 15px;">
+                <h5 class="modal-title" id="deleteChunksModalLabel_{{ streaming_event.id }}" style="color: #333; font-weight: 600;">
+                    <i class="bi bi-question-circle-fill me-2" style="color: #ffc107;"></i>Are you sure?
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <div class="modal-footer">
-                <button type="button" id="discard_chunk-data_{{ forloop.counter }}" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
-                <button type="button" id="confirmChunksDelete_{{ forloop.counter }}" class="btn btn-danger">Confirm</button>
+            <div class="modal-body" style="padding: 2rem;">
+                <p style="font-size: 1.1rem; color: #555;">Do you want to delete these chunks?</p>
+            </div>
+            <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
+                <button type="button"
+                        id="discard_chunk-data_{{ streaming_event.id }}"
+                        class="btn btn-outline-secondary"
+                        data-bs-dismiss="modal">
+                    Cancel
+                </button>
+                <button type="button"
+                        id="confirmChunksDelete_{{ streaming_event.id }}"
+                        class="btn btn-danger">
+                    Confirm
+                </button>
             </div>
         </div>
     </div>
 </div>
 
-<!-- Confirmation Modal -->
-<div class="modal fade" id="confirmStreamStartModal" tabindex="-1" role="dialog" aria-labelledby="confirmStreamStartModalLabel" aria-hidden="true">
-    <div class="modal-dialog" role="document">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="confirmStreamStartModalLabel">Are you sure?</h5>
-                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                    <span aria-hidden="true">&times;</span>
+<!-- Optional: If you have a global "confirmStreamStartModal" for all events, 
+     you can either keep it singular or replicate it for each event. 
+     If you want a unique modal per event, then do _{{ streaming_event.id }}. -->
+     <div class="modal fade"
+     id="confirmStreamStartModal_{{ streaming_event.id }}"
+     tabindex="-1"
+     role="dialog"
+     aria-labelledby="confirmStreamStartModalLabel_{{ streaming_event.id }}"
+     aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered" role="document">
+        <div class="modal-content" style="border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1);">
+            <div class="modal-header bg-light" style="border-bottom: 2px solid #e9ecef; border-top-left-radius: 15px; border-top-right-radius: 15px;">
+                <h5 class="modal-title" id="confirmStreamStartModalLabel_{{ streaming_event.id }}" style="color: #333; font-weight: 600;">
+                    <i class="bi bi-exclamation-triangle-fill me-2" style="color: #ffc107;"></i>Are you sure?
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" style="padding: 2rem;">
+                <p style="font-size: 1.1rem; color: #555;">Buffer is not filled. Do you still want to start the stream?</p>
+            </div>
+            <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="confirmStartStream_{{ streaming_event.id }}">
+                    Confirm
                 </button>
-            </div>
-            <div class="modal-body">
-                Buffer is not filled. Do you still want to start the stream?
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-danger" id="confirmStartStream">Confirm</button>
             </div>
         </div>
     </div>
