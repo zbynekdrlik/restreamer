@@ -293,6 +293,7 @@
             // Open the Data Confirmation Modal
             $("#dataConfirmationModal_" + eventId).modal({ backdrop: "static", keyboard: false });
             } else {
+                console.log('else block executed herer 296')
             const form = document.getElementById("start_stream_form_" + eventId);
             if (form && !(isBuffering || isPreparing) ) { form.submit(); }
             stopCheckSeActiveInterval(eventId);
