@@ -169,8 +169,15 @@
 
 <script>
     document.addEventListener("DOMContentLoaded", function() {
-        checkServerStatus();
-        setInterval(checkServerStatus, 5000);
+        const containers = document.querySelectorAll(".streaming-event-container");
+        containers.forEach(function(container) {
+            // Run the function once for this container
+            checkServerStatus(container);
+            // Then, call it every 5 seconds
+            setInterval(function() {
+            checkServerStatus(container);
+            }, 5000);
+        });
         // --- Utility: Get CSRF token ---
         function getCookie(name) {
         let cookieValue = null;
