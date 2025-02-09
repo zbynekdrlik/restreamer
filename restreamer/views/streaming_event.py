@@ -46,6 +46,7 @@ class StreamingEventView(View):
             pass
 
         context = {
+            "instance_status": instance_status,
             "streaming_events": streaming_events,
             'video_length': video_length,
             'is_preparing': is_preparing,
