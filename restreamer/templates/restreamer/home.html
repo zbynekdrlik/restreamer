@@ -286,15 +286,29 @@
         if (deliverBtn) {
             e.preventDefault();
             const eventId = deliverBtn.getAttribute("data-event-id");
+            // Check the button text for "Buffering..."
             const isBuffering = deliverBtn.innerText.trim() === "Buffering...";
-            const isPreparing = localStorage.getItem('is_preparing') === 'true'
-            const instanceInactive = localStorage.getItem('is_inactive') === 'Inactive'
-            const activated = deliverBtn.getAttribute("data-activated");
-            console.log("is buffering ", isBuffering, "isPreparing", isPreparing, "instanceInactive", instanceInactive)
+            // Retrieve flags from local storage
+            const isPreparing = localStorage.getItem('is_preparing') === 'true';
+            const instanceInactive = localStorage.getItem('is_inactive') === 'Inactive';
+            // Log values for debugging
+            console.log("is buffering:", isBuffering, "isPreparing:", isPreparing, "instanceInactive:", instanceInactive);
+
+            // Get the form reference
             const form = document.getElementById("start_stream_form_" + eventId);
-            if (form && !(isBuffering || isPreparing || instanceInactive)) { ;
-                 console.log("is buffering ", isBuffering, "isPreparing", isPreparing, "instanceInactive", instanceInactive) }
-            stopCheckSeActiveInterval(eventId);
+
+            // If any of the conditions (buffering, preparing, inactive) is true, disable the button
+            if (form && (isBuffering || isPreparing || instanceInactive)) {
+                // Disable the button form submit
+                deliverBtn.disabled = true;
+                console.log("Button disabled due to condition: buffering, preparing, or inactive state is true.");
+            } else if (form) {
+                // Ensure the button is enabled for submission when none of the conditions apply
+                deliverBtn.disabled = false;
+                console.log("Button enabled. Form is being submitted.");
+                form.submit();
+                stopCheckSeActiveInterval(eventId);
+            }
             return;
         }
     
