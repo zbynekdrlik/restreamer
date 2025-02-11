@@ -37,9 +37,9 @@ INSTALLED_APPS = [
     "admin_object_actions",
     "rest_framework",
     
-    "accounts.apps.AccountsConfig",
-    "services.apps.ServicesConfig",
-    "restreamer.apps.RestreamerConfig",
+    "accounts",
+    "services",
+    "restreamer",
     
     'crispy_forms',
     'crispy_bootstrap5',
@@ -104,11 +104,11 @@ CHANNEL_LAYERS = {
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": "restreamer-manager",
-        "USER": "manager-admin",
-        "PASSWORD": "Grwz2180",
-        "HOST": "localhost",
-        "PORT": "5432",
+        "NAME": os.getenv("DB_NAME"),
+        "USER": os.getenv("DB_USER"),
+        "PASSWORD": os.getenv("DB_PASSWORD"),
+        "HOST": os.getenv("DB_HOST"),
+        "PORT": os.getenv("DB_PORT"),
     },
     "client_db": {
         "ENGINE": "django.db.backends.sqlite3",
@@ -256,3 +256,6 @@ ROOT_PASSWORD = os.getenv('ROOT_SERVER_PASSWORD')
 CELERY_BROKER_URL = 'redis://localhost:6379'
 CELERY_RESULT_BACKEND = 'redis://localhost:6379'
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+GOOGLE_CLIENT_SECRETS_FILE = BASE_DIR / "mtoken.json"
+YOUTUBE_REDIRECT_URI = "https://restreamer.newlevel.media/youtube/auth/callback"
