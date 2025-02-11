@@ -495,7 +495,8 @@
     localStorage.setItem('is_inactive', is_inactive);
 </script>
 
-<script src="{% static 'js/allert_messages.js' %}"></script>   
+<script src="{% static 'js/allert_messages.js' %}"></script>
+{{ block.super }}
 <script>
     /**
      * Technical: Listens for clicks on stream delivery buttons, checks if the stream is buffering or active,
@@ -503,6 +504,7 @@
      *
      * User-Centric: When a user clicks the stream button, it confirms the action if buffering, or starts the stream immediately.
      */
+
     document.addEventListener('DOMContentLoaded', function () {
         document.body.addEventListener('click', function (event) {
             const button = event.target.closest('button[id^="delivering_action_"]');
