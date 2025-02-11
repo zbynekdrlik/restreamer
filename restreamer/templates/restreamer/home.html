@@ -550,6 +550,9 @@
                         console.error(`Form with ID start_stream_form_${eventId} not found.`);
                     }
                 }
+            } else {
+                Notify("Streaming is currently unavailable. Unable to initialize stream.", "error");
+                console.log("Streaming initialization prevented due to active, inactive, or preparing state.");
             }
         });
     });
