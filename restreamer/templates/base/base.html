@@ -93,6 +93,21 @@
 </script>
 <!-- end:: messages -->
 
+<script>
+    function Notify(message, type) {
+      const notif = document.createElement('div');
+      notif.className = `notification ${type}`;
+      notif.textContent = message;
+      document.body.appendChild(notif);
+  
+      // Remove the notification after 3 seconds
+      setTimeout(() => {
+        notif.style.opacity = 0;
+        setTimeout(() => document.body.removeChild(notif), 500);
+      }, 3000);
+    }
+</script>
+
 {% endblock %}
 
 
