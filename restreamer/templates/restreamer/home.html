@@ -377,6 +377,7 @@
             const additionalDataValue = (additionalDataCheckbox && additionalDataCheckbox.checked) ? "1" : "0";
             const form = container.querySelector("#start_stream_form_" + eventId);
             if (form) {
+                console.log("Form found. Submitting...");
             const hiddenInput = document.createElement("input");
             hiddenInput.type = "hidden";
             hiddenInput.name = "additional_data";
