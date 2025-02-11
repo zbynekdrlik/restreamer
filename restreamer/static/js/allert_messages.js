@@ -68,5 +68,7 @@ function showBootstrapToast(message, type) {
     bsToast.show();
 
     // Remove the toast from the DOM once it has been hidden.
-    
+    toast.addEventListener('hidden.bs.toast', () => {
+      toast.remove();
+    });
   }
