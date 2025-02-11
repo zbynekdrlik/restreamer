@@ -307,9 +307,7 @@
 
             // Check if any condition prevents streaming from being initiated
             if (form && (isBuffering || isPreparing || instanceInactive)) {
-            // Disable the button to prevent accidental further submits
-            deliverBtn.disabled = true;
-            // Use the Notyf library to display an error notification
+
             let errorMessage = "Streaming is not available. It might be buffering, preparing, or inactive.";
             notyf.error(errorMessage);
             console.log("Button action prevented. " + errorMessage);
@@ -518,8 +516,9 @@
         
             const isBuffering = button.innerText === "Buffering...";
             const isActivated = button.getAttribute('data-activated') === 'True';
-    
-            if (!isActivated) {
+            const isInactive = localStorage.getItem('is_inactive') === 'Inactive';
+            const isPreparing = localStorage.getItem('is_preparing') === 'true';
+            if (!isActivated && !(isInactive || isPreparing)) {
                 if (isBuffering) {
                     $('#confirmStreamStartModal').modal('show');
             
@@ -544,6 +543,7 @@
                     });
                 } else {
                     const form = document.getElementById(`start_stream_form_${eventId}`);
+
                     if (form) {
                         form.submit();
                     } else {
