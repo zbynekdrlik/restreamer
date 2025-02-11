@@ -172,7 +172,8 @@
         </div>
     </div>
 </div>
-
+ 
+{% block javascript %}
 <script>
     document.addEventListener("DOMContentLoaded", function() {
         const containers = document.querySelectorAll(".streaming-event-container");
@@ -631,7 +632,9 @@
     // Poll every 10 seconds to update the video length
     setInterval(updateVideoLength, 10000);
 </script>
-<!-- end:: Video length -->
+<!-- end:: Video length -->    
+{% endblock javascript %}
+    
 
 {% block css %}
 <style>
