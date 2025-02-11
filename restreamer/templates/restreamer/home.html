@@ -496,7 +496,7 @@
 </script>
 
 <script src="{% static 'js/allert_messages.js' %}"></script>
-{{ block.super }}
+
 <script>
     /**
      * Technical: Listens for clicks on stream delivery buttons, checks if the stream is buffering or active,
@@ -504,63 +504,61 @@
      *
      * User-Centric: When a user clicks the stream button, it confirms the action if buffering, or starts the stream immediately.
      */
-
-    document.addEventListener('DOMContentLoaded', function () {
-        document.body.addEventListener('click', function (event) {
-            const button = event.target.closest('button[id^="delivering_action_"]');
-            if (!button) return;
+    document.body.addEventListener('click', function (event) {
+        const button = event.target.closest('button[id^="delivering_action_"]');
+        if (!button) return;
+    
+        event.preventDefault();
+    
+        // Get the event ID from the button's data attribute
+        const eventId = button.getAttribute('data-event-id');
+        if (!eventId) {
+            console.error("Event ID not found on the button.");
+            return;
+        }
+    
+        const isBuffering = button.innerText === "Buffering...";
+        const isActivated = button.getAttribute('data-activated') === 'True';
+        const isInactive = localStorage.getItem('is_inactive') === 'Inactive';
+        const isPreparing = localStorage.getItem('is_preparing') === 'true';
+        if (!isActivated && !(isInactive || isPreparing)) {
+            if (isBuffering) {
+                $('#confirmStreamStartModal').modal('show');
         
-            event.preventDefault();
+                $('#confirmStreamStartModal').on('shown.bs.modal', function () {
+                    const confirmButton = document.getElementById('confirmStartStream');
         
-            // Get the event ID from the button's data attribute
-            const eventId = button.getAttribute('data-event-id');
-            if (!eventId) {
-                console.error("Event ID not found on the button.");
-                return;
-            }
-        
-            const isBuffering = button.innerText === "Buffering...";
-            const isActivated = button.getAttribute('data-activated') === 'True';
-            const isInactive = localStorage.getItem('is_inactive') === 'Inactive';
-            const isPreparing = localStorage.getItem('is_preparing') === 'true';
-            if (!isActivated && !(isInactive || isPreparing)) {
-                if (isBuffering) {
-                    $('#confirmStreamStartModal').modal('show');
-            
-                    $('#confirmStreamStartModal').on('shown.bs.modal', function () {
-                        const confirmButton = document.getElementById('confirmStartStream');
-            
-                        if (confirmButton) {
-                            confirmButton.onclick = function () {
-                                const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
-                                
-                                if (confirmInput) {
-                                    confirmInput.value = "1";
-                                    const form = document.querySelector(`form[data-event-id="${eventId}"]`);
-                                    form.submit();
-                                } else {
-                                    console.error(`Hidden input for event ID ${eventId} not found.`);
-                                }
-                            };
-                        } else {
-                            console.error("Confirm button in the modal not found.");
-                        }
-                    });
-                } else {
-                    const form = document.getElementById(`start_stream_form_${eventId}`);
-
-                    if (form) {
-                        form.submit();
+                    if (confirmButton) {
+                        confirmButton.onclick = function () {
+                            const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
+                            
+                            if (confirmInput) {
+                                confirmInput.value = "1";
+                                const form = document.querySelector(`form[data-event-id="${eventId}"]`);
+                                form.submit();
+                            } else {
+                                console.error(`Hidden input for event ID ${eventId} not found.`);
+                            }
+                        };
                     } else {
-                        console.error(`Form with ID start_stream_form_${eventId} not found.`);
+                        console.error("Confirm button in the modal not found.");
                     }
+                });
+            } else {
+                const form = document.getElementById(`start_stream_form_${eventId}`);
+
+                if (form) {
+                    form.submit();
+                } else {
+                    console.error(`Form with ID start_stream_form_${eventId} not found.`);
                 }
-            }  else {
-                showBootstrapToast("Streaming is currently unavailable. Unable to initialize stream.", "error");
-                console.log("Streaming initialization prevented due to active, inactive, or preparing state.");
             }
-        });
+        }  else {
+            showBootstrapToast("Streaming is currently unavailable. Unable to initialize stream.", "error");
+            console.log("Streaming initialization prevented due to active, inactive, or preparing state.");
+        }
     });
+
 </script>
 
 <script>
