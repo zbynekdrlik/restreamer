@@ -13,7 +13,7 @@ document.addEventListener('DOMContentLoaded', function(){
             }
         });
     }
-
+});
 
 function showBootstrapToast(message, type) {
     // Create (or get) a container for the toasts.
@@ -71,4 +71,3 @@ function showBootstrapToast(message, type) {
       toast.remove();
     });
   }
-});
