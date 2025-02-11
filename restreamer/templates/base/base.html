@@ -25,6 +25,28 @@
     <title>Restreamer</title>
     
     {% block css %}
+    <style>
+        .notification {
+          position: fixed;
+          top: 20px;
+          right: 20px;
+          padding: 15px;
+          border-radius: 5px;
+          font-size: 14px;
+          color: #fff;
+          opacity: 1;
+          transition: opacity 0.5s;
+          z-index: 1000;
+        }
+        
+        .notification.success {
+          background-color: #28a745; /* green */
+        }
+        
+        .notification.error {
+          background-color: #dc3545; /* red */
+        }
+      </style>
     {% endblock css %}
         
 </head>
@@ -95,16 +117,16 @@
 
 <script>
     function Notify(message, type) {
-      const notif = document.createElement('div');
-      notif.className = `notification ${type}`;
-      notif.textContent = message;
-      document.body.appendChild(notif);
-  
-      // Remove the notification after 3 seconds
-      setTimeout(() => {
+    const notif = document.createElement('div');
+    notif.className = `notification ${type}`;
+    notif.textContent = message;
+    document.body.appendChild(notif);
+
+    // Remove the notification after 3 seconds
+    setTimeout(() => {
         notif.style.opacity = 0;
         setTimeout(() => document.body.removeChild(notif), 500);
-      }, 3000);
+    }, 3000);
     }
 </script>
 
