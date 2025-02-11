@@ -550,8 +550,8 @@
                         console.error(`Form with ID start_stream_form_${eventId} not found.`);
                     }
                 }
-            } else {
-                Notify("Streaming is currently unavailable. Unable to initialize stream.", "error");
+            }  else {
+                showBootstrapToast("Streaming is currently unavailable. Unable to initialize stream.", "error");
                 console.log("Streaming initialization prevented due to active, inactive, or preparing state.");
             }
         });
@@ -676,6 +676,29 @@
     .youtube-btn i {
       font-size: 1rem;
     }
+  </style>
+
+  <style>
+    .notification {
+          position: fixed;
+          top: 20px;
+          right: 20px;
+          padding: 15px;
+          border-radius: 5px;
+          font-size: 14px;
+          color: #fff;
+          opacity: 1;
+          transition: opacity 0.5s;
+          z-index: 1000;
+        }
+        
+        .notification.success {
+          background-color: #28a745; /* green */
+        }
+        
+        .notification.error {
+          background-color: #dc3545; /* red */
+        }
   </style>
 {% endblock css %}
 

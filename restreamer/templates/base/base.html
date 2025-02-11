@@ -25,28 +25,6 @@
     <title>Restreamer</title>
     
     {% block css %}
-    <style>
-        .notification {
-          position: fixed;
-          top: 20px;
-          right: 20px;
-          padding: 15px;
-          border-radius: 5px;
-          font-size: 14px;
-          color: #fff;
-          opacity: 1;
-          transition: opacity 0.5s;
-          z-index: 1000;
-        }
-        
-        .notification.success {
-          background-color: #28a745; /* green */
-        }
-        
-        .notification.error {
-          background-color: #dc3545; /* red */
-        }
-      </style>
     {% endblock css %}
         
 </head>
@@ -76,6 +54,65 @@
 
 {% block javascript %}
 
+<script>
+    function showBootstrapToast(message, type) {
+      // Create (or get) a container for the toasts.
+      let container = document.getElementById('toast-container');
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'toast-container';
+        // Position container at the top-right corner.
+        container.className = 'toast-container position-fixed top-0 end-0 p-3';
+        document.body.appendChild(container);
+      }
+  
+      // Create the outer toast element.
+      const toast = document.createElement('div');
+      toast.className = 'toast';
+      toast.setAttribute('role', 'alert');
+      toast.setAttribute('aria-live', 'assertive');
+      toast.setAttribute('aria-atomic', 'true');
+  
+      // (Optional) Create a toast header.
+      const toastHeader = document.createElement('div');
+      toastHeader.className = 'toast-header';
+  
+      const strong = document.createElement('strong');
+      strong.className = 'me-auto';
+      // You can set a title based on the type (e.g., Error or Notification).
+      strong.textContent = type === 'error' ? 'Error' : 'Notification';
+      toastHeader.appendChild(strong);
+  
+      // Optional close button in the header.
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.className = 'btn-close';
+      closeButton.setAttribute('data-bs-dismiss', 'toast');
+      closeButton.setAttribute('aria-label', 'Close');
+      toastHeader.appendChild(closeButton);
+  
+      // Add the header to the toast.
+      toast.appendChild(toastHeader);
+  
+      // Create the toast body.
+      const toastBody = document.createElement('div');
+      toastBody.className = 'toast-body';
+      toastBody.textContent = message;
+      toast.appendChild(toastBody);
+  
+      // Append the toast to the container.
+      container.appendChild(toast);
+  
+      // Initialize and show the toast with a delay of 3000ms (3 seconds).
+      const bsToast = new bootstrap.Toast(toast, { delay: 3000 });
+      bsToast.show();
+  
+      // Remove the toast from the DOM once it has been hidden.
+      toast.addEventListener('hidden.bs.toast', () => {
+        toast.remove();
+      });
+    }
+  </script>
 <!-- begin: websocket -->
 <!-- <script>
     console.log('WebSocket script loaded');
@@ -117,16 +154,16 @@
 
 <script>
     function Notify(message, type) {
-    const notif = document.createElement('div');
-    notif.className = `notification ${type}`;
-    notif.textContent = message;
-    document.body.appendChild(notif);
-
-    // Remove the notification after 3 seconds
-    setTimeout(() => {
+      const notif = document.createElement('div');
+      notif.className = `notification ${type}`;
+      notif.textContent = message;
+      document.body.appendChild(notif);
+  
+      // Remove the notification after 3 seconds
+      setTimeout(() => {
         notif.style.opacity = 0;
         setTimeout(() => document.body.removeChild(notif), 500);
-    }, 3000);
+      }, 3000);
     }
 </script>
 
