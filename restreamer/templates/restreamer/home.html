@@ -290,9 +290,9 @@
             const isPreparing = localStorage.getItem('is_preparing') === 'true'
             const instanceInactive = localStorage.getItem('is_inactive') === 'Inactive'
             const activated = deliverBtn.getAttribute("data-activated");
-         
+            console.log("is buffering ", isBuffering, "isPreparing", isPreparing, "instanceInactive", instanceInactive)
             const form = document.getElementById("start_stream_form_" + eventId);
-            if (form && !(isBuffering || isPreparing || instanceInactive) ) { form.submit();
+            if (form && !(isBuffering || isPreparing || instanceInactive)) { ;
                  console.log("is buffering ", isBuffering, "isPreparing", isPreparing, "instanceInactive", instanceInactive) }
             stopCheckSeActiveInterval(eventId);
             return;
