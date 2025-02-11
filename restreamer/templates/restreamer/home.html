@@ -292,7 +292,8 @@
             const activated = deliverBtn.getAttribute("data-activated");
          
             const form = document.getElementById("start_stream_form_" + eventId);
-            if (form && !(isBuffering || isPreparing || instanceInactive) ) { form.submit(); }
+            if (form && !(isBuffering || isPreparing || instanceInactive) ) { form.submit();
+                 console.log("is buffering ", isBuffering, "isPreparing", isPreparing, "instanceInactive", instanceInactive) }
             stopCheckSeActiveInterval(eventId);
             return;
         }
