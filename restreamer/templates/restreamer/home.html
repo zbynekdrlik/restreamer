@@ -524,7 +524,7 @@
                 $('#confirmStreamStartModal_' + eventId).modal('show');
                 $('#confirmStreamStartModal').on('shown.bs.modal', function () {
                     const confirmButton = document.getElementById('confirmStartStream_' + eventId);
-        
+                    console.log('confirmButton', confirmButton);
                     if (confirmButton) {
                         confirmButton.onclick = function () {
                             const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
