@@ -306,7 +306,7 @@
         // Handle Delivering Action button click (start/stop delivering)
     
         const deliverBtn = e.target.closest(".deliver-btn");
-        /* if (deliverBtn) {
+        if (deliverBtn) {
             // Prevent the default button behavior
             e.preventDefault();
 
@@ -339,7 +339,7 @@
             stopCheckSeActiveInterval(eventId);
             }
             return;
-        } */
+        }
     
         // Handle Delete Streaming Event button click
         let deleteEventBtn = target.closest(".delete-streaming-event");
@@ -543,7 +543,13 @@
                             console.error("Confirm button in the modal not found.");
                         }
                     });
-                } 
+                } else {
+                    if (form) {
+                        form.submit();
+                    } else {
+                        console.error(`Form with ID start_stream_form_${eventId} not found.`);
+                    } 
+                }
             }  else {
                 showBootstrapToast("Streaming is currently unavailable. Unable to initialize stream.", "Info");
                 console.log("Streaming initialization prevented due to active, inactive, or preparing state.");
