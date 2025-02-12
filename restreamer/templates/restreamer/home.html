@@ -511,6 +511,7 @@
                         }
                     });
                 } else {
+                    const form = document.querySelector(`form[data-event-id="${eventId}"]`);
                     if (form) {
                         form.submit();
                     } else {
