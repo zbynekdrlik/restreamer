@@ -519,40 +519,41 @@
         const isActivated = button.getAttribute('data-activated') === 'True';
         const isInactive = localStorage.getItem('is_inactive') === 'Inactive';
         const isPreparing = localStorage.getItem('is_preparing') === 'true';
-        if (!isActivated && !(isInactive || isPreparing)) {
-            if (isBuffering) {
-                $('#confirmStreamStartModal_' + eventId).modal('show');
-                $('#confirmStreamStartModal_' + eventId).on('shown.bs.modal', function () {
-                    const confirmButton = document.getElementById('confirmStartStream_' + eventId);
-                    console.log('confirmButton', confirmButton);
-                    if (confirmButton) {
-                        confirmButton.onclick = function () {
-                            const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
-                            
-                            if (confirmInput) {
-                                confirmInput.value = "1";
-                                const form = document.querySelector(`form[data-event-id="${eventId}"]`);
-                                form.submit();
-                            } else {
-                                console.error(`Hidden input for event ID ${eventId} not found.`);
-                            }
-                        };
-                    } else {
-                        console.error("Confirm button in the modal not found.");
-                    }
-                });
-            } else {
-                const form = document.getElementById(`start_stream_form_${eventId}`);
-
-                if (form) {
-                    form.submit();
-                } else {
-                    console.error(`Form with ID start_stream_form_${eventId} not found.`);
-                }
+        if (!isActivated) {
+            if (!(isInactive || isPreparing)) {
+                if (isBuffering) {
+                    $('#confirmStreamStartModal_' + eventId).modal('show');
+                    $('#confirmStreamStartModal_' + eventId).on('shown.bs.modal', function () {
+                        const confirmButton = document.getElementById('confirmStartStream_' + eventId);
+                        console.log('confirmButton', confirmButton);
+                        if (confirmButton) {
+                            confirmButton.onclick = function () {
+                                const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
+                                
+                                if (confirmInput) {
+                                    confirmInput.value = "1";
+                                    const form = document.querySelector(`form[data-event-id="${eventId}"]`);
+                                    form.submit();
+                                } else {
+                                    console.error(`Hidden input for event ID ${eventId} not found.`);
+                                }
+                            };
+                        } else {
+                            console.error("Confirm button in the modal not found.");
+                        }
+                    });
+                } 
+            }  else {
+                showBootstrapToast("Streaming is currently unavailable. Unable to initialize stream.", "Info");
+                console.log("Streaming initialization prevented due to active, inactive, or preparing state.");
             }
-        }  else {
-            showBootstrapToast("Streaming is currently unavailable. Unable to initialize stream.", "Info");
-            console.log("Streaming initialization prevented due to active, inactive, or preparing state.");
+        } else {
+            const form = document.getElementById(`start_stream_form_${eventId}`);
+            if (form) {
+                form.submit();
+            } else {
+                console.error(`Form with ID start_stream_form_${eventId} not found.`);
+            }
         }
     });
 
