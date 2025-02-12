@@ -521,8 +521,8 @@
         const isPreparing = localStorage.getItem('is_preparing') === 'true';
         if (!isActivated && !(isInactive || isPreparing)) {
             if (isBuffering) {
-                $("#confirmStreamStartModal" + eventId).modal({ backdrop: "static", keyboard: false });
-                $('#confirmStreamStartModal').on('shown.bs.modal', function () {
+                $("#confirmStreamStartModal_" + eventId).modal({ backdrop: "static", keyboard: false });
+                $("#confirmStreamStartModal_" + eventId).on('shown.bs.modal', function () {
                     const confirmButton = document.getElementById('confirmStartStream');
         
                     if (confirmButton) {
