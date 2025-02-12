@@ -245,6 +245,7 @@
                     deliveringButton.className = initialButtonClasses;
                     deliveringButton.innerHTML = initialButtonHtml;
                     localStorage.removeItem(`preparingStream_${eventId}`);
+                    localStorage.setItem("is_inactive", "running");
                     } else {
                     deliveringButton.innerText = "Buffering...";
                     localStorage.setItem(`preparingStream_${eventId}`, "true");
@@ -551,7 +552,7 @@
                 }
             }
         }  else {
-            showBootstrapToast("Streaming is currently unavailable. Unable to initialize stream.", "error");
+            showBootstrapToast("Streaming is currently unavailable. Unable to initialize stream.", "Info");
             console.log("Streaming initialization prevented due to active, inactive, or preparing state.");
         }
     });
