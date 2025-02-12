@@ -306,7 +306,7 @@
         // Handle Delivering Action button click (start/stop delivering)
     
         const deliverBtn = e.target.closest(".deliver-btn");
-        if (deliverBtn) {
+        /* if (deliverBtn) {
             // Prevent the default button behavior
             e.preventDefault();
 
@@ -339,7 +339,7 @@
             stopCheckSeActiveInterval(eventId);
             }
             return;
-        }
+        } */
     
         // Handle Delete Streaming Event button click
         let deleteEventBtn = target.closest(".delete-streaming-event");
@@ -519,6 +519,7 @@
         const isActivated = button.getAttribute('data-activated') === 'True';
         const isInactive = localStorage.getItem('is_inactive') === 'Inactive';
         const isPreparing = localStorage.getItem('is_preparing') === 'true';
+
         if (!isActivated) {
             if (!(isInactive || isPreparing)) {
                 if (isBuffering) {
