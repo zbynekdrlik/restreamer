@@ -523,7 +523,7 @@
             if (isBuffering) {
                 $('#confirmStreamStartModal_' + eventId).modal('show');
                 $('#confirmStreamStartModal').on('shown.bs.modal', function () {
-                    const confirmButton = document.getElementById('confirmStartStream' + eventId);
+                    const confirmButton = document.getElementById('confirmStartStream_' + eventId);
         
                     if (confirmButton) {
                         confirmButton.onclick = function () {
