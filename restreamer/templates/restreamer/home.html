@@ -365,7 +365,7 @@
             // Retrieve the event id from the parent container’s data attribute
             const container = deleteChunksBtn.closest(".streaming-event-container");
             const eventId = container.getAttribute("data-event-id");
-            $("#deleteChunksModal_" + eventId).modal({ backdrop: "static", keyboard: false });
+            $('#deleteChunksModal_' + eventId).modal('show');
             return;
         }
         
