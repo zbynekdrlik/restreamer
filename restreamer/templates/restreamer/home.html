@@ -180,6 +180,14 @@
 {% block javascript %}
 
 <script>
+    // Retrieve the JSON data embedded in the template
+    const isPreparing = JSON.parse(document.getElementById('is-preparing-data').textContent);
+    const is_inactive = JSON.parse(document.getElementById('instance-status').textContent);
+    localStorage.setItem('is_preparing', isPreparing);
+    localStorage.setItem('is_inactive', is_inactive);
+</script>
+
+<script>
     document.addEventListener("DOMContentLoaded", function() {
         const containers = document.querySelectorAll(".streaming-event-container");
         containers.forEach(function(container) {
@@ -228,9 +236,10 @@
                 console.log(" response is there congrats  is running --->", isRunning)
                 const bufferFilled = response.buffer_filled;
                 const live = response.live;
+                const server_off = localStorage.getItem('is_inactive') === 'Inactive';
                 deliveringButton.setAttribute("data-live", live ? "True" : "False");
                 localStorage.setItem("isRunning", isRunning);
-                if (!live) {
+                if (!live && !server_off) {
                 if (isRunning) {
                     if (bufferFilled || live) {
                     deliveringButton.className = initialButtonClasses;
@@ -247,6 +256,7 @@
                 } else {
                 deliveringButton.className = initialButtonClasses;
                 deliveringButton.innerHTML = initialButtonHtml;
+                
                 localStorage.removeItem(`preparingStream_${eventId}`);
                 }
             },
@@ -483,17 +493,6 @@
     
 
     <!-- previous end for was ended here  -->
-
-
-<script>
-    // Retrieve the JSON data embedded in the template
-    const isPreparing = JSON.parse(document.getElementById('is-preparing-data').textContent);
-    const is_inactive = JSON.parse(document.getElementById('instance-status').textContent);
-    localStorage.setItem('is_preparing', isPreparing);
-    localStorage.setItem('is_inactive', is_inactive);
-</script>
-
-
 
 <script>
     /**
