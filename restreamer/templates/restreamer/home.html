@@ -306,40 +306,7 @@
         // Handle Delivering Action button click (start/stop delivering)
     
         const deliverBtn = e.target.closest(".deliver-btn");
-        if (deliverBtn) {
-            // Prevent the default button behavior
-            e.preventDefault();
 
-            const eventId = deliverBtn.getAttribute("data-event-id");
-            // Determine if the button indicates buffering from its text (case-sensitive exact match)
-            const isBuffering = deliverBtn.innerText.trim() === "Buffering...";
-            // Check flags from localStorage
-            const isPreparing = localStorage.getItem('is_preparing') === 'true';
-            const instanceInactive = localStorage.getItem('is_inactive') === 'Inactive';
-            // Debug logs
-            console.log("is buffering:", isBuffering, "isPreparing:", isPreparing, "instanceInactive:", instanceInactive);
-
-            // Retrieve the form element
-            const form = document.getElementById("start_stream_form_" + eventId);
-
-            // Check if any condition prevents streaming from being initiated
-            if (form && (isBuffering || isPreparing || instanceInactive)) {
-
-            let errorMessage = "Streaming is not available. It might be buffering, preparing, or inactive.";
-            console.log("Button action prevented. " + errorMessage);
-            // Optionally, re-enable button after a delay if you want to allow retries
-            setTimeout(() => {
-                deliverBtn.disabled = false;
-            }, 3000);
-            } else if (form) {
-            // No blocking conditions. Ensure the button is enabled and submit the form.
-            deliverBtn.disabled = false;
-            console.log("Conditions met. Form is being submitted.");
-            form.submit();
-            stopCheckSeActiveInterval(eventId);
-            }
-            return;
-        }
     
         // Handle Delete Streaming Event button click
         let deleteEventBtn = target.closest(".delete-streaming-event");
