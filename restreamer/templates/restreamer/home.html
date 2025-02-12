@@ -548,14 +548,20 @@
                 console.log("Streaming initialization prevented due to active, inactive, or preparing state.");
             }
         } else {
-            const form = document.getElementById(`start_stream_form_${eventId}`);
-            if (form) {
-                form.submit();
-            } else {
-                console.error(`Form with ID start_stream_form_${eventId} not found.`);
+            $('#dataConfirmationModal_' + eventId).modal('show');
+            $('#dataConfirmationModal_' + eventId).on('shown.bs.modal', function () {
+                const confirmButton = document.getElementById('confirm_data_delete_' + eventId);
+                confirmButton.onclick = function () {
+                    const form = document.getElementById(`start_stream_form_${eventId}`);
+                    if (form) {
+                        form.submit();
+                    } else {
+                        console.error(`Form with ID start_stream_form_${eventId} not found.`);
+                    } 
+                }
+            });
             }
-        }
-    });
+        });
 
 </script>
 
