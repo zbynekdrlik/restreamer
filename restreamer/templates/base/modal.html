@@ -12,7 +12,7 @@
           <h5 class="modal-title" id="startStreamModalLabel_{{ event_id }}" style="color: #333; font-weight: 600;">
             <i class="bi bi-exclamation-triangle-fill me-2" style="color: #ffc107;"></i>Confirmation
           </h5>
-          <button type="button" class="btn-close" data-dismiss="modal" aria-label="Close"></button>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body" style="padding: 2rem;">
           <p id="modal-body-text_{{ event_id }}" style="font-size: 1.1rem; color: #555;">Are you sure you want to start the stream?</p>
@@ -28,7 +28,7 @@
           <div class="container-fluid">
             <div class="row justify-content-between">
               <div class="col-auto">
-                <button type="button" class="btn btn-outline-secondary" data-dismiss="modal" id="cancel_modal_{{ event_id }}">Cancel</button>
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="cancel_modal_{{ event_id }}">Cancel</button>
               </div>
               <div class="col-auto">
                 <button type="button" class="btn btn-primary" id="confirm_modal_{{ event_id }}" data-event-id="{{ event_id }}">Confirm</button>
