@@ -376,7 +376,7 @@
 <script>
     document.addEventListener('DOMContentLoaded', function () {
         // Add event listener to each "Remove" button
-        const removeButtons = document.querySelectorAll('[data-toggle="modal"][data-target="#confirmEndpointRemoveModal"]');
+        const removeButtons = document.querySelectorAll('[data-bs-toggle="modal"][data-bs-target="#confirmEndpointRemoveModal"]');
         removeButtons.forEach(button => {
             button.addEventListener('click', function () {
                 const formId = this.getAttribute('data-form-id');
