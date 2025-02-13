@@ -44,7 +44,7 @@
                                     <form id="removeEndpointForm-{{ endpoint.id }}" action="{% url 'control:remove_endpoint' streaming_event.id endpoint.id %}" method="post" class="inline">
                                         {% csrf_token %}
                                         <button type="button" class="text-gray-400 hover:text-red-600 transition-colors duration-300" 
-                                                data-toggle="modal" data-target="#confirmEndpointRemove" 
+                                                data-toggle="modal" data--bs-target="#confirmEndpointRemoveModal" 
                                                 data-form-id="removeEndpointForm-{{ endpoint.id }}">
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                                                 <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
@@ -209,20 +209,20 @@
 </div>
 
 <!-- Remove Endpoint Modal -->
-<div class="modal fade" id="confirmEndpointRemove" tabindex="-1" role="dialog" aria-labelledby="confirmEndpointRemoveLabel" aria-hidden="true">
+<div class="modal fade" id="confirmEndpointRemoveModal" tabindex="-1" role="dialog" aria-labelledby="confirmEndpointRemoveModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered" role="document">
         <div class="modal-content" style="border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1);">
             <div class="modal-header bg-light" style="border-bottom: 2px solid #e9ecef; border-top-left-radius: 15px; border-top-right-radius: 15px;">
                 <h5 class="modal-title" id="removeEndpointModalLabel" style="color: #333; font-weight: 600;">
                     <i class="bi bi-trash-fill me-2" style="color: #dc3545;"></i>Remove Endpoint
                 </h5>
-                <button type="button" class="btn-close" data-dismiss="modal" aria-label="Close"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body" style="padding: 2rem;">
                 <p style="font-size: 1.1rem; color: #555;">Are you sure you want to remove this endpoint from the streaming event?</p>
             </div>
             <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
-                <button type="button" class="btn btn-outline-secondary" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
                 <button type="button" class="btn btn-danger" id="confirmRemoveEndpoint">Remove Endpoint</button>
             </div>
         </div>
@@ -376,7 +376,7 @@
 <script>
     document.addEventListener('DOMContentLoaded', function () {
         // Add event listener to each "Remove" button
-        const removeButtons = document.querySelectorAll('[data-toggle="modal"][data-target="#confirmEndpointRemove"]');
+        const removeButtons = document.querySelectorAll('[data-toggle="modal"][data-target="#confirmEndpointRemoveModal"]');
         removeButtons.forEach(button => {
             button.addEventListener('click', function () {
                 const formId = this.getAttribute('data-form-id');
