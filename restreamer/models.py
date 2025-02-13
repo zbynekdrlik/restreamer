@@ -43,8 +43,7 @@ class EndPointCfg(models.Model):
     history = HistoricalRecords()
     
     class Meta:
-        order_by = ['alias']
-        
+        ordering = ['alias']
 
     def __str__(self):
         return self.alias
