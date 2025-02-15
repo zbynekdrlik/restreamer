@@ -191,6 +191,8 @@
 <script>
     document.addEventListener("DOMContentLoaded", function() {
         const containers = document.querySelectorAll(".streaming-event-container");
+
+       
         containers.forEach(function(container) {
             // Run the function once for this container
             checkServerStatus(container);
@@ -220,6 +222,11 @@
         function checkServerStatus(container) {
         // Retrieve data from the container
         const eventId = container.getAttribute("data-event-id");
+
+        if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
+            startCheckSeActiveInterval(checkUrl, eventId);
+        }
+
         const streamReadyUrl = container.getAttribute("data-stream-ready-url");
         const deliveringButton = container.querySelector("#delivering_action_" + eventId);
         const initialButtonClasses = deliveringButton.getAttribute("data-initial-classes") || deliveringButton.className;
@@ -293,6 +300,7 @@
 
         /* starting checking the status of the button (start streaming)  */
         function startCheckSeActiveInterval(checkUrl, eventId) {
+            console.log("startCheckSeActiveInterval called")
         if (!checkIntervals[eventId]) {
             checkIntervals[eventId] = setInterval(function() {
                 checkSeActive(url, eventId);
@@ -564,6 +572,7 @@
     // every 10 seconds check if the buffer and video data lenght is the same and start delivering
     // if not preparing stream phase 
     function checkSeActive(url, eventId) {
+        console.log("Check se interval called")
         $.ajax({
             url: url,
             type: 'GET',
