@@ -245,8 +245,14 @@
                     if (isRunning) {
                         console.log("we are in second if ")
                         if (bufferFilled || live) {
-                        deliveringButton.className = initialButtonClasses;
-                        deliveringButton.innerHTML = initialButtonHtml;
+                            if (deliveringButton) {
+                                // Set the button to the "End stream" state
+                                deliveringButton.className = `deliver-btn btn btn-sm start_delivering btn-danger rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1`;
+                                deliveringButton.innerHTML = `
+                                    <i class="bi bi-stop-circle-fill"></i>
+                                    <span>Start stream</span>
+                                `;
+                            }
                         localStorage.removeItem(`preparingStream_${eventId}`);
                         localStorage.setItem("is_inactive", "running");
                         } else {
@@ -259,8 +265,14 @@
                     }
                 } else {
                     console.log('initial buttton state set')
-                    deliveringButton.className = initialButtonClasses;
-                    deliveringButton.innerHTML = initialButtonHtml;
+                    if (deliveringButton) {
+                        // Set the button to the "End stream" state
+                        deliveringButton.className = `deliver-btn btn btn-sm start_delivering btn-danger rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1`;
+                        deliveringButton.innerHTML = `
+                            <i class="bi bi-stop-circle-fill"></i>
+                            <span>Start stream</span>
+                        `;
+                    }
                     localStorage.removeItem(`preparingStream_${eventId}`);
                 }
             },
