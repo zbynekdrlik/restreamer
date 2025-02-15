@@ -87,9 +87,7 @@ class DeliveringReady(View):
         streaming_event = get_object_or_404(StreamingEvent, id=streaming_event_id)
         live = streaming_event.delivering_activated
         status = InstanceManager(request.user.id).check_status()
-        print("status --------------------------->", status)
         server_running = InstanceManager(request.user.id).check_status() != "Inactive"
-        print("server running --------------------------->", server_running)
         video_manager = VideoDataManager(streaming_event.id)
         buffer_time = streaming_event.buffer
         buffer_filled = video_manager.is_buffer_filled(buffer_time)
