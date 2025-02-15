@@ -232,6 +232,10 @@
         
         const startStopButton = container.querySelector("#start_stop_" + eventId);
         const checkUrl = startStopButton.getAttribute('data-check-url');
+
+        // --- Interval functions for periodic checking ---
+        let checkIntervals = {}; // Store intervals per event id
+
         if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
             startCheckSeActiveInterval(checkUrl, eventId);
         }
@@ -297,20 +301,17 @@
             }
             });
         }
-        }
-    
-        // --- Interval functions for periodic checking ---
-        let checkIntervals = {}; // Store intervals per event id
+        } 
 
         /* starting checking the status of the button (start streaming)  */
         function startCheckSeActiveInterval(checkUrl, eventId) {
             console.log("startCheckSeActiveInterval called")
-        if (!checkIntervals[eventId]) {
-            checkIntervals[eventId] = setInterval(function() {
-                checkSeActive(url, eventId);
-            console.log("Checking active status for event", eventId, "at", checkUrl);
-            }, 10000);
-        }
+            if (!checkIntervals[eventId]) {
+                checkIntervals[eventId] = setInterval(function() {
+                    checkSeActive(url, eventId);
+                console.log("Checking active status for event", eventId, "at", checkUrl);
+                }, 10000);
+            }
         }
         /* stopoing checking the status of the button (start streaming)  */
         function stopCheckSeActiveInterval(eventId) {
