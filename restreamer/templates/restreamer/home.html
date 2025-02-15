@@ -231,34 +231,34 @@
             url: streamReadyUrl,
             type: "GET",
             success: function(response) {
-                const isRunning = response.ready;
+                const isRunning = response.ready; // server is ready to reaceive responses
                 const bufferFilled = response.buffer_filled;
-                const live = response.live;
+                const live = response.live;  // delivering button state
+                const serverRunning = response.server_running // instance is running
                 const server_off = localStorage.getItem('is_inactive') === 'Inactive';
                 deliveringButton.setAttribute("data-live", live ? "True" : "False");
                 localStorage.setItem("isRunning", isRunning);
-                if (!live) {
-                    console.log('first if ok')
-                if (isRunning) {
-                    console.log("we are in second if ")
-                    if (bufferFilled || live) {
+                if (!live && serverRunning) {
+                        console.log('first if ok')
+                    if (isRunning) {
+                        console.log("we are in second if ")
+                        if (bufferFilled || live) {
+                        deliveringButton.className = initialButtonClasses;
+                        deliveringButton.innerHTML = initialButtonHtml;
+                        localStorage.removeItem(`preparingStream_${eventId}`);
+                        localStorage.setItem("is_inactive", "running");
+                        } else {
+                        deliveringButton.innerText = "Buffering...";
+                        localStorage.setItem(`preparingStream_${eventId}`, "true");
+                        }
+                    } else {
+                        deliveringButton.innerText = "Preparing stream...";
+                        localStorage.setItem(`preparingStream_${eventId}`, "true");
+                    }
+                } else {
                     deliveringButton.className = initialButtonClasses;
                     deliveringButton.innerHTML = initialButtonHtml;
                     localStorage.removeItem(`preparingStream_${eventId}`);
-                    localStorage.setItem("is_inactive", "running");
-                    } else {
-                    deliveringButton.innerText = "Buffering...";
-                    localStorage.setItem(`preparingStream_${eventId}`, "true");
-                    }
-                } else {
-                    deliveringButton.innerText = "Preparing stream...";
-                    localStorage.setItem(`preparingStream_${eventId}`, "true");
-                }
-                } else {
-                deliveringButton.className = initialButtonClasses;
-                deliveringButton.innerHTML = initialButtonHtml;
-                
-                localStorage.removeItem(`preparingStream_${eventId}`);
                 }
             },
             error: function(error) {

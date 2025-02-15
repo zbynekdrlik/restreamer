@@ -78,7 +78,6 @@ class GetActiveStream(APIView):
     
 @method_decorator(login_required, name='dispatch')
 class DeliveringReady(View):
-
     def get(self, request, streaming_event_id):
         # Check server status
         manager = DeliveringManger(request.user.id, streaming_event_id)
@@ -87,6 +86,7 @@ class DeliveringReady(View):
         # Check buffer status
         streaming_event = get_object_or_404(StreamingEvent, id=streaming_event_id)
         live = streaming_event.delivering_activated
+        server_running = InstanceManager(streaming_event_id).check_status() != "Inactive"
         video_manager = VideoDataManager(streaming_event.id)
         buffer_time = streaming_event.buffer
         buffer_filled = video_manager.is_buffer_filled(buffer_time)
@@ -94,7 +94,8 @@ class DeliveringReady(View):
         return JsonResponse({
             'ready': is_ready,
             'buffer_filled': buffer_filled,
-            'live': live
+            'live': live,
+            'server_running':server_running
         })
         
 class GetNextChunkIdView(APIView):
