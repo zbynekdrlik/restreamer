@@ -189,9 +189,11 @@
 </script>
 
 <script>
+    
+
     document.addEventListener("DOMContentLoaded", function() {
         const containers = document.querySelectorAll(".streaming-event-container");
-
+        const checkIntervals = {}; // Store intervals per event id
        
         containers.forEach(function(container) {
             // Run the function once for this container
@@ -234,7 +236,7 @@
         const checkUrl = startStopButton.getAttribute('data-check-url');
 
         // --- Interval functions for periodic checking ---
-        let checkIntervals = {}; // Store intervals per event id
+        
 
         if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
             startCheckSeActiveInterval(checkUrl, eventId);
@@ -315,10 +317,10 @@
         }
         /* stopoing checking the status of the button (start streaming)  */
         function stopCheckSeActiveInterval(eventId) {
-        if (checkIntervals[eventId]) {
-            clearInterval(checkIntervals[eventId]);
-            delete checkIntervals[eventId];
-        }
+            if (checkIntervals[eventId]) {
+                clearInterval(checkIntervals[eventId]);
+                delete checkIntervals[eventId];
+            }
         }
     
         // --- Event delegation for all actions ---
