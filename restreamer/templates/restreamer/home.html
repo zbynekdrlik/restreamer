@@ -236,7 +236,7 @@
                 const live = response.live;  // delivering button state
                 const serverRunning = response.server_running // instance is running
 
-                console.log("server is running")
+                console.log("server is running --------->", serverRunning)
                 const server_off = localStorage.getItem('is_inactive') === 'Inactive';
                 deliveringButton.setAttribute("data-live", live ? "True" : "False");
                 localStorage.setItem("isRunning", isRunning);
