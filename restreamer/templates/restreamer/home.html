@@ -235,6 +235,8 @@
                 const bufferFilled = response.buffer_filled;
                 const live = response.live;  // delivering button state
                 const serverRunning = response.server_running // instance is running
+
+                console.log("server is running")
                 const server_off = localStorage.getItem('is_inactive') === 'Inactive';
                 deliveringButton.setAttribute("data-live", live ? "True" : "False");
                 localStorage.setItem("isRunning", isRunning);
@@ -256,6 +258,7 @@
                         localStorage.setItem(`preparingStream_${eventId}`, "true");
                     }
                 } else {
+                    console.log('initial buttton state set')
                     deliveringButton.className = initialButtonClasses;
                     deliveringButton.innerHTML = initialButtonHtml;
                     localStorage.removeItem(`preparingStream_${eventId}`);
