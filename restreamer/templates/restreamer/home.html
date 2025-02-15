@@ -223,14 +223,16 @@
         // Retrieve data from the container
         const eventId = container.getAttribute("data-event-id");
 
-        if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
-            startCheckSeActiveInterval(checkUrl, eventId);
-        }
+        
 
         const streamReadyUrl = container.getAttribute("data-stream-ready-url");
         const deliveringButton = container.querySelector("#delivering_action_" + eventId);
         const initialButtonClasses = deliveringButton.getAttribute("data-initial-classes") || deliveringButton.className;
         const initialButtonHtml = deliveringButton.getAttribute("data-initial-html") || deliveringButton.innerHTML;
+
+        if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
+            startCheckSeActiveInterval(checkUrl, eventId);
+        }
         
         // Suppose your server returns a JSON with properties: ready, buffer_filled, live
         if (deliveringButton.getAttribute("data-activated") === "False") {
