@@ -247,9 +247,9 @@
                         if (bufferFilled || live) {
                             if (deliveringButton) {
                                 // Set the button to the "End stream" state
-                                deliveringButton.className = `deliver-btn btn btn-sm start_delivering btn-danger rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1`;
+                                deliveringButton.className = `deliver-btn btn btn-sm start_delivering btn-primary rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1`;
                                 deliveringButton.innerHTML = `
-                                    <i class="bi bi-stop-circle-fill"></i>
+                                    <i class="bi bi-play-circle-fill"></i>
                                     <span>Start stream</span>
                                 `;
                             }
@@ -267,9 +267,9 @@
                     console.log('initial buttton state set')
                     if (deliveringButton) {
                         // Set the button to the "End stream" state
-                        deliveringButton.className = `deliver-btn btn btn-sm start_delivering btn-danger rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1`;
+                        deliveringButton.className = `deliver-btn btn btn-sm start_delivering btn-primary rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1`;
                         deliveringButton.innerHTML = `
-                            <i class="bi bi-stop-circle-fill"></i>
+                            <i class="bi bi-play-circle-fill"></i>
                             <span>Start stream</span>
                         `;
                     }
