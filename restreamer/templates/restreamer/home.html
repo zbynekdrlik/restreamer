@@ -222,26 +222,25 @@
         const eventId = container.getAttribute("data-event-id");
         const streamReadyUrl = container.getAttribute("data-stream-ready-url");
         const deliveringButton = container.querySelector("#delivering_action_" + eventId);
-        console.log('delivering button -------> ', deliveringButton)
         const initialButtonClasses = deliveringButton.getAttribute("data-initial-classes") || deliveringButton.className;
         const initialButtonHtml = deliveringButton.getAttribute("data-initial-html") || deliveringButton.innerHTML;
         
         // Suppose your server returns a JSON with properties: ready, buffer_filled, live
         if (deliveringButton.getAttribute("data-activated") === "False") {
-            console.log("we are there 202")
             $.ajax({
             url: streamReadyUrl,
             type: "GET",
             success: function(response) {
                 const isRunning = response.ready;
-                console.log(" response is there congrats  is running --->", isRunning)
                 const bufferFilled = response.buffer_filled;
                 const live = response.live;
                 const server_off = localStorage.getItem('is_inactive') === 'Inactive';
                 deliveringButton.setAttribute("data-live", live ? "True" : "False");
                 localStorage.setItem("isRunning", isRunning);
-                if (!live && !server_off) {
+                if (!live) {
+                    console.log('first if ok')
                 if (isRunning) {
+                    console.log("we are in second if ")
                     if (bufferFilled || live) {
                     deliveringButton.className = initialButtonClasses;
                     deliveringButton.innerHTML = initialButtonHtml;
