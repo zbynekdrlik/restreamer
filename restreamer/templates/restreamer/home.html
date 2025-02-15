@@ -253,14 +253,11 @@
                 const live = response.live;  // delivering button state
                 const serverRunning = response.server_running // instance is running
 
-                console.log("server is running --------->", serverRunning)
                 const server_off = localStorage.getItem('is_inactive') === 'Inactive';
                 deliveringButton.setAttribute("data-live", live ? "True" : "False");
                 localStorage.setItem("isRunning", isRunning);
                 if (!live && serverRunning) {
-                        console.log('first if ok')
                     if (isRunning) {
-                        console.log("we are in second if ")
                         if (bufferFilled || live) {
                             if (deliveringButton) {
                                 // Set the button to the "End stream" state
@@ -284,7 +281,6 @@
                 }  
                 if (isRunning) {
                 
-                    console.log('initial buttton state set')
                     if (deliveringButton) {
                         // Set the button to the "End stream" state
                         deliveringButton.className = `deliver-btn btn btn-sm start_delivering btn-primary rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1`;
@@ -307,11 +303,9 @@
 
         /* starting checking the status of the button (start streaming)  */
         function startCheckSeActiveInterval(checkUrl, eventId) {
-            console.log("startCheckSeActiveInterval called")
             if (!checkIntervals[eventId]) {
                 checkIntervals[eventId] = setInterval(function() {
                     checkSeActive(checkUrl, eventId);
-                console.log("Checking active status for event", eventId, "at", checkUrl);
                 }, 10000);
             }
         }
@@ -393,7 +387,6 @@
             const additionalDataValue = (additionalDataCheckbox && additionalDataCheckbox.checked) ? "1" : "0";
             const form = container.querySelector("#start_stream_form_" + eventId);
             if (form) {
-                console.log("Form found. Submitting...");
             const hiddenInput = document.createElement("input");
             hiddenInput.type = "hidden";
             hiddenInput.name = "additional_data";
@@ -419,14 +412,11 @@
         // --- Additional: Attach a delegated event for the confirm button in the Start Stream Modal ---
         document.body.addEventListener("click", function(e) {
         let confirmModalBtn = e.target.closest("[id^='confirm_modal_']");
-        console.log('confirm modal button ', confirmModalBtn)
+    
         if (confirmModalBtn) {
-            console.log("confirm modal button is there !!!!", confirmModalBtn)
             const eventId = confirmModalBtn.getAttribute("data-event-id") ||
                             confirmModalBtn.closest(".streaming-event-container").getAttribute("data-event-id");
-            console.log("event id after clicking on start stream confirm", eventId)
             const container = document.querySelector('.streaming-event-container[data-event-id="' + eventId + '"]');
-            console.log('container ------>', container)
             if (!container) return;
         
             const startStopButton = container.querySelector("#start_stop_" + eventId);
@@ -451,7 +441,6 @@
             localStorage.setItem(`checkSeActive_${eventId}`, "true");
             startCheckSeActiveInterval(checkUrl, eventId);
             const serverIsRunning = localStorage.getItem("isRunning");
-            console.log('server is running ', serverIsRunning)
             if (serverIsRunning !== "true") {
                 const deliveringButton = container.querySelector("#delivering_action_" + eventId);
                 deliveringButton.innerText = "Preparing stream...";
@@ -462,7 +451,6 @@
             setTimeout(function(){ checkServerStatus(container); }, 2000);
             } else {
             modal.modal("hide");
-            console.log("we aer here else server is running")
             setupStreamForm.submit();
             localStorage.removeItem(`preparingStream_${eventId}`);
             localStorage.removeItem(`checkSeActive_${eventId}`);
@@ -528,7 +516,6 @@
                     $('#confirmStreamStartModal_' + eventId).modal('show');
                     $('#confirmStreamStartModal_' + eventId).on('shown.bs.modal', function () {
                         const confirmButton = document.getElementById('confirmStartStream_' + eventId);
-                        console.log('confirmButton', confirmButton);
                         if (confirmButton) {
                             confirmButton.onclick = function () {
                                 const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
@@ -555,7 +542,6 @@
                 }
             }  else {
                 showBootstrapToast("Streaming is currently unavailable. Unable to initialize stream.", "Info");
-                console.log("Streaming initialization prevented due to active, inactive, or preparing state.");
             }
         } else {
             $('#dataConfirmationModal_' + eventId).modal('show');
@@ -579,7 +565,6 @@
     // every 10 seconds check if the buffer and video data lenght is the same and start delivering
     // if not preparing stream phase 
     function checkSeActive(url, eventId) {
-        console.log("Check se interval called")
         $.ajax({
             url: url,
             type: 'GET',
