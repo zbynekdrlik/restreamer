@@ -255,6 +255,7 @@
                             }
                         localStorage.removeItem(`preparingStream_${eventId}`);
                         localStorage.setItem("is_inactive", "running");
+                        localStorage.setItem('is_preparing', 'false')
                         } else {
                         deliveringButton.innerText = "Buffering...";
                         localStorage.setItem(`preparingStream_${eventId}`, "true");
@@ -263,7 +264,9 @@
                         deliveringButton.innerText = "Preparing stream...";
                         localStorage.setItem(`preparingStream_${eventId}`, "true");
                     }
-                } else {
+                }  
+                if (isRunning) {
+                
                     console.log('initial buttton state set')
                     if (deliveringButton) {
                         // Set the button to the "End stream" state
@@ -275,6 +278,7 @@
                     }
                     localStorage.removeItem(`preparingStream_${eventId}`);
                     localStorage.setItem("is_inactive", "running");
+                    localStorage.setItem('is_preparing', 'false')
                 }
             },
             error: function(error) {
