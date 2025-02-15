@@ -310,7 +310,7 @@
             console.log("startCheckSeActiveInterval called")
             if (!checkIntervals[eventId]) {
                 checkIntervals[eventId] = setInterval(function() {
-                    checkSeActive(url, eventId);
+                    checkSeActive(checkUrl, eventId);
                 console.log("Checking active status for event", eventId, "at", checkUrl);
                 }, 10000);
             }
