@@ -229,7 +229,9 @@
         const deliveringButton = container.querySelector("#delivering_action_" + eventId);
         const initialButtonClasses = deliveringButton.getAttribute("data-initial-classes") || deliveringButton.className;
         const initialButtonHtml = deliveringButton.getAttribute("data-initial-html") || deliveringButton.innerHTML;
-
+        
+        const startStopButton = container.querySelector("#start_stop_" + eventId);
+        const checkUrl = startStopButton.getAttribute('data-check-url');
         if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
             startCheckSeActiveInterval(checkUrl, eventId);
         }
