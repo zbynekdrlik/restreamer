@@ -63,24 +63,18 @@ class ReceiveInitDataView(APIView):
     
     def post(self, request, *args, **kwargs):
         serializer = EndpointsListSerializer(data=request.data)
-        print("regeust data", request.data)
         if serializer.is_valid():
-            print("validated data ----------->", serializer.validated_data)
+            
             endpoints = serializer.validated_data['endpoints']
             chunk_id = serializer.validated_data['chunk_id']
             stream_id = serializer.validated_data['stream_id']
             
-            print("Chunk id --------------->", chunk_id)
             start_central_manager()
             
             for endpoint in endpoints:
                 alias = endpoint['alias']
                 service_type = endpoint['service_type']
                 stream_key = endpoint['stream_key']
-            
-                log.info(f'alias ------> {alias}')
-                log.info(f'service_type ------> {service_type}')
-                log.info(f'stream_key ------> {stream_key}')
                 
                 signal = {
                     "alias": alias,
@@ -102,7 +96,6 @@ class EndStreamView(APIView):
     def post(self, request, *args, **kwargs):
         alias = request.data.get('alias')
         action = "stop_all" if alias is None else "stop"
-        log.info(f"Ending stream for {alias} ------------------------")
         
         signal = {
             "alias": alias if alias else "all",
