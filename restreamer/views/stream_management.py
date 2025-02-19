@@ -122,7 +122,7 @@ class ChunkExistsView(APIView):
 
 def check_buffer_status(request, streaming_event_id):
     streaming_event = StreamingEvent.objects.get(id=streaming_event_id)
-    video_manager = VideoDataManager(streaming_event=streaming_event.id)
+    video_manager = VideoDataManager(streaming_event.id)
     buffer_time = streaming_event.buffer
     buffer_filled = video_manager.is_buffer_filled(buffer_time)
     
