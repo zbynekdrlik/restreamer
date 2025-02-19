@@ -1,7 +1,10 @@
+<!-- Bootstrap Bundle: Must come first -->
+
 {% extends 'base/base.html' %}
 {% load static %}
 {% block content %}
-
+{{ is_preparing|json_script:"is-preparing-data" }}
+{{ instance_status|json_script:"instance-status" }}
 <!-- <div class="container mx-auto text-center mt-0 p-0" style="margin-bottom: 5rem">
     <div class="relative w-96 h-48 mx-auto">
         <div class="absolute inset-0 rounded-xl blur-3xl bg-gradient-to-r from-gray-900 to-black animate-pulse"></div>
@@ -52,446 +55,467 @@
             </div>
 
             {% for streaming_event in streaming_events %}
-            <div class="border-bottom p-4 position-relative hover-bg-light transition">
+            <div class="streaming-event-container border-bottom p-4 position-relative hover-bg-light transition"
+                data-event-id="{{ streaming_event.id }}"
+                data-stream-ready-url="{% url 'stream_ready' streaming_event.id %}">
+            
                 <!-- Top Row: Name, Endpoints, Start/Stop Actions -->
                 <div class="row align-items-center text-center">
-                    <div class="col-md-4">
-                        <h5 class="mb-2 mb-md-0 text-dark fw-bold">{{ streaming_event.short_description }}</h5>
-                    </div>
-                    <div class="col-md-4">
-                        {% for endpoint in streaming_event.end_points.all %}
-                            <p class="mb-1 d-inline-flex align-items-center gap-1 fw-normal text-dark mx-2">
-                                {% if endpoint.service_type == 'YT_HLS' or endpoint.service_type == 'YT_RTMP' %}
-                                    <i class="bi bi-youtube text-danger"></i>
-                                {% elif endpoint.service_type == 'FB' %}
-                                    <i class="bi bi-facebook text-primary"></i>
-                                {% elif endpoint.service_type == 'VIMEO' %}
-                                    <i class="bi bi-vimeo text-info"></i>
-                                {% elif endpoint.service_type == 'INSTAGRAM' %}
-                                    <i class="bi bi-instagram text-warning"></i>
-                                {% else %}
-                                    <i class="bi bi-link text-muted"></i>
-                                {% endif %}
-                                {{ endpoint.alias }}
-                            </p>
-                        {% empty %}
-                            <p class="mb-1 small text-muted d-inline-flex align-items-center gap-1">
-                                <i class="bi bi-exclamation-circle"></i>No endpoints available
-                            </p>
-                        {% endfor %}
-                    </div>
-                    <div class="col-md-2">
-                        <form id="setup_stream_form_{{ forloop.counter }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
-                            {% csrf_token %}
-                            <button type="button" id="start_stop_{{ forloop.counter }}"
-                                    data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}"
-                                    data-event-id="{{ streaming_event.id }}"
-                                    class="btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1"
-                                    data-bs-toggle="modal" data-bs-target="#startStreamModal_{{ forloop.counter }}">
-                                <i class="bi {{ streaming_event.receiving_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
-                                <span>{{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}</span>
-                            </button>
-                        </form>
-                    </div>
-                    <div class="col-md-2">
-                        <form id="start_stream_form_{{ forloop.counter }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
-                            {% csrf_token %}
-                            <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start" value="0">
-                            <button type="button" id="delivering_action_{{ forloop.counter }}"
-                                    data-event-id="{{ streaming_event.id }}"
-                                    data-activated="{{ streaming_event.delivering_activated }}"
-                                    class="btn btn-sm start_delivering {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1">
-                                <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
-                                {% if is_preparing %}
-                                    <span>Preparing stream...</span>
-                                {% else %}
-                                    <span>{{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}</span>
-                                {% endif %}
-                            </button>
-                        </form>
-                    </div>
+                <div class="col-md-4">
+                    <h5 class="mb-2 mb-md-0 text-dark fw-bold">{{ streaming_event.short_description }}</h5>
                 </div>
-
-                <!-- Bottom Row: Separated by a subtle divider -->
+                <div class="col-md-4">
+                    {% for endpoint in streaming_event.end_points.all %}
+                    <p class="mb-1 d-inline-flex align-items-center gap-1 fw-normal text-dark mx-2">
+                        {% if endpoint.service_type == 'YT_HLS' or endpoint.service_type == 'YT_RTMP' %}
+                        <i class="bi bi-youtube text-danger"></i>
+                        {% elif endpoint.service_type == 'FB' %}
+                        <i class="bi bi-facebook text-primary"></i>
+                        {% elif endpoint.service_type == 'VIMEO' %}
+                        <i class="bi bi-vimeo text-info"></i>
+                        {% elif endpoint.service_type == 'INSTAGRAM' %}
+                        <i class="bi bi-instagram text-warning"></i>
+                        {% else %}
+                        <i class="bi bi-link text-muted"></i>
+                        {% endif %}
+                        {{ endpoint.alias }}
+                    </p>
+                    {% empty %}
+                    <p class="mb-1 small text-muted d-inline-flex align-items-center gap-1">
+                        <i class="bi bi-exclamation-circle"></i>No endpoints available
+                    </p>
+                    {% endfor %}
+                </div>
+                <div class="col-md-2">
+                    <form id="setup_stream_form_{{ streaming_event.id }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
+                    {% csrf_token %}
+                    <!-- The button below has a class "start-stop-btn" so the JS can delegate events -->
+                    <button type="button" id="start_stop_{{ streaming_event.id }}"
+                            data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}"
+                            data-event-id="{{ streaming_event.id }}"
+                            class="start-stop-btn btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1"
+                            data-bs-toggle="modal" data-bs-target="#startStreamModal_{{ streaming_event.id }}">
+                        <i class="bi {{ streaming_event.receiving_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
+                        <span>{{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}</span>
+                    </button>
+                    </form>
+                </div>
+                <div class="col-md-2">
+                    <form id="start_stream_form_{{ streaming_event.id }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
+                    {% csrf_token %}
+                    <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start_{{ streaming_event.id }}" value="0">
+                    <!-- The button below has a class "deliver-btn" for event delegation -->
+                    <button type="button" id="delivering_action_{{ streaming_event.id }}"
+                            data-event-id="{{ streaming_event.id }}"
+                            data-activated="{{ streaming_event.delivering_activated }}"
+                            class="deliver-btn btn btn-sm start_delivering {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1">
+                        
+                        {% if is_preparing %}
+                        <span>Preparing stream...</span>
+                        {% else %}
+                        <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
+                        <span>{{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}</span>
+                        {% endif %}
+                    </button>
+                    </form>
+                </div>
+                </div>
+            
+                <!-- Bottom Row -->
                 <div class="row align-items-center border-top mt-3 pt-3">
-                    <div class="col-md-4">
-                        <form id="deleteChunksForm_{{ forloop.counter }}" 
-                              action="{% url 'control:delete_chunk_data' %}" 
-                              method="post" 
-                              class="delete-chunk-form d-inline-block">
-                            {% csrf_token %}
-                            <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
-                            <button type="submit" 
-                                    id="delete_chunks_{{ forloop.counter }}" 
-                                    class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 border-0 text-danger">
-                                <i class="bi bi-trash me-2"></i>
-                                <span class="small">Delete Chunks</span>
-                            </button>
-                        </form>
-                    </div>
-                    <div class="col-md-4 text-center">
-                        <div class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1">
-                            <i class="bi bi-clock text-primary me-2"></i>
-                            <span class="text-muted small me-2">Length:</span>
-                            <span data-event-id="{{ streaming_event.id }}" 
-                                  id="video-length-value" 
-                                  class="fw-bold">
-                                {{ video_length }}
-                            </span>
-                        </div>
-                    </div>
-                    <div class="col-md-4 text-end">
-                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" 
-                           class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 text-decoration-none">
-                            <span class="text-primary small me-2">Details</span>
-                            <i class="bi bi-chevron-right text-primary"></i>
-                        </a>
+                <div class="col-md-4">
+                    <form id="deleteChunksForm_{{ streaming_event.id }}" 
+                        action="{% url 'control:delete_chunk_data' %}" 
+                        method="post" 
+                        class="delete-chunk-form d-inline-block">
+                    {% csrf_token %}
+                    <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
+                    <button type="submit" 
+                            id="delete_chunks_{{ streaming_event.id }}" 
+                            class="btn btn-link d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 border-0 text-danger">
+                        <i class="bi bi-trash me-2"></i>
+                        <span class="small">Delete Chunks</span>
+                    </button>
+                    </form>
+                </div>
+                <div class="col-md-4 text-center">
+                    <div class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1">
+                    <i class="bi bi-clock text-primary me-2"></i>
+                    <span class="text-muted small me-2">Length:</span>
+                    <span data-event-id="{{ streaming_event.id }}" id="video-length-value" class="fw-bold">
+                        {{ video_length }}
+                    </span>
                     </div>
                 </div>
-
+                <div class="col-md-4 text-end">
+                    <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 text-decoration-none">
+                    <span class="text-primary small me-2">Details</span>
+                    <i class="bi bi-chevron-right text-primary"></i>
+                    </a>
+                </div>
+                </div>
+            
+                <!-- Delete Streaming Event Form -->
                 <form data-event-id="{{ streaming_event.id }}" 
                     data-action="remove_streaming_event"
                     action="{% url 'control:remove_streaming_event' streaming_event.id %}" 
                     method="post" 
                     class="position-absolute top-0 end-0 mt-2 me-2">
-                    {% csrf_token %}
-                    <button type="button" data-event-id="{{ streaming_event.id }}" class="btn btn-link text-secondary p-0 delete-streaming-event" data-toggle="modal" data-target="#deleteStreamingEventModal_{{ streaming_event.id }}">
-                        <i class="bi bi-x-lg"></i>
-                    </button>
+                {% csrf_token %}
+                <!-- The button below has a class "delete-streaming-event" -->
+                <button type="button" data-event-id="{{ streaming_event.id }}" class="delete-streaming-event btn btn-link text-secondary p-0" data-toggle="modal" data-target="#deleteStreamingEventModal_{{ streaming_event.id }}">
+                    <i class="bi bi-x-lg"></i>
+                </button>
                 </form>
+            
+                {# Include the modals. In your modal file, all IDs must use the passed variable "event_id" #}
+                {% include 'base/modal.html' with event_id=streaming_event.id %}
             </div>
-            {% include 'base/modal.html' %}
+            {% endfor %}
         </div>
     </div>
 </div>
+
+<script src="{% static 'js/allert_messages.js' %}"></script>
+
+
+
 <script>
-document.addEventListener("DOMContentLoaded", function() {
-    const deliveringButton = document.getElementById('delivering_action_{{ forloop.counter }}');
-    let checkSeActiveInterval;
-    let isLive = deliveringButton.getAttribute('data-activated') !== 'False'
-    
-    checkServerStatus();
-    setInterval(checkServerStatus, 5000);
-    
-    const deleteStreamingEventButton = document.getElementById('deleteStreamingEvent_{{ forloop.counter }}')
-    const startStopButton = document.getElementById('start_stop_{{ forloop.counter }}');
-    const confirmButton = document.getElementById('confirm_modal_{{ forloop.counter }}');
-    const cancelButton = document.getElementById('cancel_modal_{{ forloop.counter }}');
-    const modal = $('#startStreamModal_{{ forloop.counter }}');
-    const modalBodyText = document.getElementById('modal-body-text_{{ forloop.counter }}');
-    const serverDeliveryMessage = document.getElementById('server_delivery_message_{{ forloop.counter }}');
-    
-    const setupStreamForm = document.getElementById('setup_stream_form_{{ forloop.counter }}');
+    // Retrieve the JSON data embedded in the template
+    const isPreparing = JSON.parse(document.getElementById('is-preparing-data').textContent);
+    const is_inactive = JSON.parse(document.getElementById('instance-status').textContent);
+    localStorage.setItem('is_preparing', isPreparing);
+    localStorage.setItem('is_inactive', is_inactive);
+</script>
 
-    const eventId = startStopButton.getAttribute('data-event-id');
-    const checkUrl = startStopButton.getAttribute('data-check-url');
-
-    if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
-        startCheckSeActiveInterval(checkUrl, eventId);
-    }
+<script>
     
-    // Store the initial state of the delivering button
-    const initialButtonClasses = deliveringButton.className;
-    const initialButtonHtml = deliveringButton.innerHTML;
 
-    // Flag to track if the initial state was "Ready"
-    let wasReadyState = false;
-
-    // Get CSRF token
-    function getCookie(name) {
+    document.addEventListener("DOMContentLoaded", function() {
+        const containers = document.querySelectorAll(".streaming-event-container");
+        const checkIntervals = {}; // Store intervals per event id
+       
+        containers.forEach(function(container) {
+            // Run the function once for this container
+            checkServerStatus(container);
+            // Then, call it every 5 seconds
+            setInterval(function() {
+            checkServerStatus(container);
+            }, 5000);
+        });
+        // --- Utility: Get CSRF token ---
+        function getCookie(name) {
         let cookieValue = null;
         if (document.cookie && document.cookie !== '') {
             const cookies = document.cookie.split(';');
             for (let i = 0; i < cookies.length; i++) {
-                const cookie = cookies[i].trim();
-                if (cookie.substring(0, name.length + 1) === (name + '=')) {
-                    cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
-                    break;
-                }
+            const cookie = cookies[i].trim();
+            if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                break;
+            }
             }
         }
         return cookieValue;
-    }
-
-    const csrftoken = getCookie('csrftoken');
-
-    /* if fasle then we check if endpint is prepered for reaceving data */
-    
-
-    // Check local storage for previous state and execute initial AJAX request
-    function checkServerStatus() {
-        console.log('is live set ------>', isLive)
-        // Initial AJAX request to check server status on page load
-        if (!isLive) {
-            $.ajax({
-                url: '{% url "stream_ready" streaming_event.id  %}',
-                type: 'GET',
-                success: function(response) {
-                    const isRunning = response.ready;
-                    const bufferFilled = response.buffer_filled;
-                    const live = response.live
-                    isLive = live
-                    localStorage.setItem('isRunning', isRunning);
-
-                    if (!isLive) {
-                        if (isRunning) {
-                            if (bufferFilled || live) {
-                                deliveringButton.className = initialButtonClasses;
-                                deliveringButton.innerHTML = initialButtonHtml;
-                                localStorage.removeItem('preparingStream_{{ forloop.counter }}');
-                            } else {
-                                deliveringButton.innerText = "Buffering...";
-                                localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
-                            }
-                        
-                        } else {
-                            deliveringButton.innerText = "Preparing stream...";
-                            localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
-
-                            if (localStorage.getItem('preparingStream_{{ forloop.counter }}') === 'true') {
-                                deliveringButton.innerText = "Preparing stream...";
-                            }
-                        }  
-                    }
-                    else {
-                        
-                        deliveringButton.className = initialButtonClasses;
-                        deliveringButton.innerHTML = initialButtonHtml;
-                        localStorage.removeItem('preparingStream_{{ forloop.counter }}');
-                    }
-                },
-                error: function(error) {
-                    console.error('Error checking status and buffer:', error);
-                }
-            }); 
         }
-    }
+        const csrftoken = getCookie('csrftoken');
     
+        // --- Functions for checking stream status ---
+        function checkServerStatus(container) {
+        // Retrieve data from the container
+        const eventId = container.getAttribute("data-event-id");
 
-    startStopButton.addEventListener('click', function() {
-        const buttonText = startStopButton.innerText.trim();
+        
 
-        if (buttonText === 'Ready') {
-            
-            modalBodyText.innerText = 'Are you sure you want to start the stream?';
-            serverDeliveryMessage.style.display = 'list-item';
-            wasReadyState = true;
-        } else {
-            modalBodyText.innerText = 'Are you sure you want to stop the stream?';
-            serverDeliveryMessage.innerText = '';
-            wasReadyState = false;
-            
-        }
-
-        // Ensure the modal does not close unless Cancel or Confirm is clicked
-        modal.modal({
-            backdrop: 'static',
-            keyboard: false
-        });
-    });
-
-    // Handle the confirm button click
-    confirmButton.addEventListener('click', function(event) {
-        event.preventDefault();
-
+        const streamReadyUrl = container.getAttribute("data-stream-ready-url");
+        const deliveringButton = container.querySelector("#delivering_action_" + eventId);
+        const initialButtonClasses = deliveringButton.getAttribute("data-initial-classes") || deliveringButton.className;
+        const initialButtonHtml = deliveringButton.getAttribute("data-initial-html") || deliveringButton.innerHTML;
+        
+        const startStopButton = container.querySelector("#start_stop_" + eventId);
         const checkUrl = startStopButton.getAttribute('data-check-url');
-        const eventId = startStopButton.getAttribute('data-event-id');       
-       
-        // Append CSRF token to the form
-        const csrfInput = document.createElement('input');
-        csrfInput.type = 'hidden';
-        csrfInput.name = 'csrfmiddlewaretoken';
-        csrfInput.value = csrftoken;
-        setupStreamForm.appendChild(csrfInput);
+
+        // --- Interval functions for periodic checking ---
         
-        if (wasReadyState) {
-            localStorage.setItem(`checkSeActive_${eventId}`, 'true');
+
+        if (localStorage.getItem(`checkSeActive_${eventId}`) === 'true' && deliveringButton.getAttribute('data-activated') === 'False') {
             startCheckSeActiveInterval(checkUrl, eventId);
-
-            const serverIsRunning = localStorage.getItem('isRunning');
-            
-            if (!serverIsRunning === 'true') {
-                deliveringButton.innerText = "Preparing stream...";
-                localStorage.setItem('preparingStream_{{ forloop.counter }}', 'true');
-            } 
-
-            modal.modal('hide');
-            setupStreamForm.submit();
-
-            setTimeout(() => {
-                checkServerStatus();
-            }, 2000);
-
-        } else {
-            modal.modal('hide');
-            setupStreamForm.submit();
-            localStorage.removeItem('preparingStream_{{ forloop.counter }}');
-            
-            localStorage.removeItem(`checkSeActive_${eventId}`);
-            stopCheckSeActiveInterval();
         }
-    });
+        
+        // Suppose your server returns a JSON with properties: ready, buffer_filled, live
+        if (deliveringButton.getAttribute("data-activated") === "False") {
+            $.ajax({
+            url: streamReadyUrl,
+            type: "GET",
+            success: function(response) {
+                const isRunning = response.ready; // server is ready to reaceive responses
+                const bufferFilled = response.buffer_filled;
+                const live = response.live;  // delivering button state
+                const serverRunning = response.server_running // instance is running
 
-    // Function to start the checkSeActive interval
-    function startCheckSeActiveInterval(url, eventId) {
-        if (!checkSeActiveInterval) {
-            checkSeActiveInterval = setInterval(function() {
-                checkSeActive(url, eventId);
-            }, 10000);  // Check every 10 seconds
-        }
-    }
-
-    // Function to stop the checkSeActive interval
-    function stopCheckSeActiveInterval() {
-        if (checkSeActiveInterval) {
-            clearInterval(checkSeActiveInterval);
-            checkSeActiveInterval = null;
-        }
-    }
-
-    cancelButton.addEventListener('click', function() {
-        modal.modal('hide');
-    });
-
-    const startStopDButton = document.getElementById('delivering_action_{{ forloop.counter }}');
-    startStopDButton.addEventListener('click', function() {
-        const isActivated = startStopDButton.getAttribute('data-activated') === 'False';
-        const isBuffering = startStopDButton.innerText === "Buffering...";
-        if (!isActivated && !isBuffering) {
-            const modal = $('#dataConfirmationModal_{{ forloop.counter }}');
-            modal.modal({
-                backdrop: 'static',
-                keyboard: false
+                const server_off = localStorage.getItem('is_inactive') === 'Inactive';
+                deliveringButton.setAttribute("data-live", live ? "True" : "False");
+                localStorage.setItem("isRunning", isRunning);
+                if (!live && serverRunning) {
+                    if (isRunning) {
+                        if (bufferFilled || live) {
+                            if (deliveringButton) {
+                                // Set the button to the "End stream" state
+                                deliveringButton.className = `deliver-btn btn btn-sm start_delivering btn-primary rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1`;
+                                deliveringButton.innerHTML = `
+                                    <i class="bi bi-play-circle-fill"></i>
+                                    <span>Start stream</span>
+                                `;
+                            }
+                        localStorage.removeItem(`preparingStream_${eventId}`);
+                        localStorage.setItem("is_inactive", "running");
+                        localStorage.setItem('is_preparing', 'false')
+                        } else {
+                        deliveringButton.innerText = "Buffering...";
+                        localStorage.setItem(`preparingStream_${eventId}`, "true");
+                        }
+                    } else {
+                        deliveringButton.innerText = "Preparing stream...";
+                        localStorage.setItem(`preparingStream_${eventId}`, "true");
+                    }
+                }  
+                if (isRunning) {
+                
+                    if (deliveringButton) {
+                        // Set the button to the "End stream" state
+                        deliveringButton.className = `deliver-btn btn btn-sm start_delivering btn-primary rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1`;
+                        deliveringButton.innerHTML = `
+                            <i class="bi bi-play-circle-fill"></i>
+                            <span>Start stream</span>
+                        `;
+                    }
+                    localStorage.removeItem(`preparingStream_${eventId}`);
+                    localStorage.setItem("is_inactive", "running");
+                    localStorage.setItem('is_preparing', 'false')
+                }
+            },
+            error: function(error) {
+                console.error("Error checking status and buffer:", error);
+            }
             });
-        } else {
-            const form = document.querySelector('form[action*="start_stream"]#start_stream_form_{{ forloop.counter }}');
-            if (form && !isBuffering) {
-                form.submit();
+        }
+        } 
+
+        /* starting checking the status of the button (start streaming)  */
+        function startCheckSeActiveInterval(checkUrl, eventId) {
+            if (!checkIntervals[eventId]) {
+                checkIntervals[eventId] = setInterval(function() {
+                    checkSeActive(checkUrl, eventId);
+                }, 10000);
             }
-
-            stopCheckSeActiveInterval();
-            localStorage.removeItem(`checkSeActive_${eventId}`);
         }
-    });
-
-    const deleteChunksButton = document.getElementById("delete_chunks_{{ forloop.counter }}")
-    deleteChunksButton.addEventListener('click', function(event) {
-        event.preventDefault();
-        const modal = $('#deleteChunksModal_{{ forloop.counter }}');
-        modal.modal({
-            backdrop: 'static',
-            keyboard: false
-        });
-    })
-
-   
-
-    const confirmChunkSDeleteButton = document.getElementById('confirmChunksDelete_{{ forloop.counter }}');
-    confirmChunkSDeleteButton.addEventListener('click', function() {
-        const deleteChunksForm = document.getElementById('deleteChunksForm_{{ forloop.counter }}');
-      
-        if (deleteChunksForm) {
-            deleteChunksForm.submit();
+        /* stopoing checking the status of the button (start streaming)  */
+        function stopCheckSeActiveInterval(eventId) {
+            if (checkIntervals[eventId]) {
+                clearInterval(checkIntervals[eventId]);
+                delete checkIntervals[eventId];
+            }
         }
-    });
-
-
-    document.addEventListener('click', function (event) {
-        // Handle "Confirm" button click in the modal
-        if (event.target.matches('.confirm-delete-event')) {
-            const button = event.target; // The clicked button
-            const eventId = button.getAttribute('data-event-id'); // Get the event ID from the button
-            // More specific selector: searching for a form with data-event-id and a unique data-action attribute
-            const deleteForm = document.querySelector(`form[data-event-id="${eventId}"][data-action="remove_streaming_event"]`);
     
-            if (deleteForm) {
-                deleteForm.submit(); // Submit the correct form
-            }
+        // --- Event delegation for all actions ---
+        document.body.addEventListener("click", function(e) {
+        const target = e.target;
+    
+        // For elements that might be inside a button, use closest()
+        // Handle Start/Stop button click (opens modal)
+        let startStopBtn = target.closest(".start-stop-btn");
+        if (startStopBtn) {
+            e.preventDefault();
+            const eventId = startStopBtn.getAttribute("data-event-id");
+            // Open the modal
+            $("#startStreamModal_" + eventId).modal({ backdrop: "static", keyboard: false });
+            return;
         }
-    });
+    
+        // Handle Delivering Action button click (start/stop delivering)
+    
+        const deliverBtn = e.target.closest(".deliver-btn");
 
-   
-    const confirmDButton = document.getElementById('confirm_data_delete_{{ forloop.counter }}');
-    confirmDButton.addEventListener('click', function(event) {
-        event.preventDefault();
+    
+        // Handle Delete Streaming Event button click
+        let deleteEventBtn = target.closest(".delete-streaming-event");
+        if (deleteEventBtn) {
+            // The modal is already triggered by data attributes.
+            return;
+        }
+    
+        // Handle Confirm Delete Streaming Event (delegated)
+        let confirmDeleteBtn = target.closest(".confirm-delete-event");
+        if (confirmDeleteBtn) {
+            e.preventDefault();
+            const eventId = confirmDeleteBtn.getAttribute("data-event-id");
+            const deleteForm = document.querySelector('form[data-event-id="' + eventId + '"][data-action="remove_streaming_event"]');
+            if (deleteForm) { deleteForm.submit(); }
+            return;
+        }
+    
+        // Handle Delete Chunks button click
+        let deleteChunksBtn = target.closest("[id^='delete_chunks_']");
+        if (deleteChunksBtn) {
+            e.preventDefault();
+            // Retrieve the event id from the parent container’s data attribute
+            const container = deleteChunksBtn.closest(".streaming-event-container");
+            const eventId = container.getAttribute("data-event-id");
+            $('#deleteChunksModal_' + eventId).modal('show');
+            return;
+        }
         
-        const additionalDataCheckbox = document.getElementById('additionalData_{{ forloop.counter }}');
-        const additionalDataValue = additionalDataCheckbox.checked ? '1' : '0';
-
-        const form = document.querySelector('form[action*="start_stream"]#start_stream_form_{{ forloop.counter }}');
-        
-        const hiddenInput = document.createElement('input');
-        hiddenInput.type = 'hidden';
-        hiddenInput.name = 'additional_data';
-        hiddenInput.value = additionalDataValue;
-
-        form.appendChild(hiddenInput);
-
-        if (form) {
+        // Handle Confirm Delete Chunks button click
+        let confirmChunksDeleteBtn = target.closest("[id^='confirmChunksDelete_']");
+        if (confirmChunksDeleteBtn) {
+            e.preventDefault();
+            // Get event id from the button id (if encoded) or from its container
+            const container = confirmChunksDeleteBtn.closest(".streaming-event-container");
+            const eventId = container.getAttribute("data-event-id");
+            const deleteChunksForm = container.querySelector("#deleteChunksForm_" + eventId);
+            if (deleteChunksForm) { deleteChunksForm.submit(); }
+            return;
+        }
+    
+        // confirm of ending delivivering (stop streaming) 
+        let confirmDataDeleteBtn = target.closest("[id^='confirm_data_delete_']");
+        if (confirmDataDeleteBtn) {
+            e.preventDefault();
+            const container = confirmDataDeleteBtn.closest(".streaming-event-container");
+            const eventId = container.getAttribute("data-event-id");
+            const additionalDataCheckbox = container.querySelector("#additionalData_" + eventId);
+            const additionalDataValue = (additionalDataCheckbox && additionalDataCheckbox.checked) ? "1" : "0";
+            const form = container.querySelector("#start_stream_form_" + eventId);
+            if (form) {
+            const hiddenInput = document.createElement("input");
+            hiddenInput.type = "hidden";
+            hiddenInput.name = "additional_data";
+            hiddenInput.value = additionalDataValue;
+            form.appendChild(hiddenInput);
             form.submit();
-        }
-    });
-
-    const cancelDButton = document.getElementById('discard_data_{{ forloop.counter }}');
-    cancelDButton.addEventListener('click', function() {
-        $('#dataConfirmationModal_{{ forloop.counter }}').modal('hide');
-    });
-});
-</script>
-
-
-<!-- start:: websocets -->
-<!-- <script>
-document.addEventListener('DOMContentLoaded', function() {
-    const socket = new WebSocket('wss://' + window.location.host + '/ws/buffer_health/');
-    socket.onmessage = function(e) {
-        const data = JSON.parse(e.data);
-        document.getElementById('buffer-health_{{ forloop.counter }}').innerText = data.message.buffer_duration;
-    };
-
-    socket.onerror = function(e) {
-        console.error('WebSocket error:', e);
-    };
-
-    socket.onclose = function(e) {
-        console.error('WebSocket closed unexpectedly', e);
-    };
-});
-</script> -->
-<!-- end:: websocets -->
-
-<script>
-    document.querySelector('.img-clickable').addEventListener('click', function() {
-        document.getElementById('deleteForm_{{ forloop.counter }}').submit();
-    });
-</script>
-{% endfor %}
-
-<script>
-    document.addEventListener('DOMContentLoaded', function () {
-        document.body.addEventListener('click', function (event) {
-            const button = event.target.closest('button[id^="delivering_action_"]');
-            if (!button) return;
-    
-            event.preventDefault();
-    
-            // Retrieve the event ID from the button's data attribute
-            const eventId = button.getAttribute('data-event-id');
-            if (!eventId) {
-                console.error("Event ID not found on the button.");
-                return;
             }
+            return;
+        }
+        
+        // click in end streaming modal
+        let cancelDataDeleteBtn = target.closest("[id^='discard_data_']");
+        if (cancelDataDeleteBtn) {
+            e.preventDefault();
+            const container = cancelDataDeleteBtn.closest(".streaming-event-container");
+            const eventId = container.getAttribute("data-event-id");
+            $("#dataConfirmationModal_" + eventId).modal("hide");
+            return;
+        }
+        
+        }); // End of delegation
     
-            const isBuffering = button.innerText === "Buffering...";
-            const isActivated = button.getAttribute('data-activated') === 'True';
+        // --- Additional: Attach a delegated event for the confirm button in the Start Stream Modal ---
+        document.body.addEventListener("click", function(e) {
+        let confirmModalBtn = e.target.closest("[id^='confirm_modal_']");
+    
+        if (confirmModalBtn) {
+            const eventId = confirmModalBtn.getAttribute("data-event-id") ||
+                            confirmModalBtn.closest(".streaming-event-container").getAttribute("data-event-id");
+            const container = document.querySelector('.streaming-event-container[data-event-id="' + eventId + '"]');
+            if (!container) return;
+        
+            const startStopButton = container.querySelector("#start_stop_" + eventId);
+            const setupStreamForm = container.querySelector("#setup_stream_form_" + eventId);
+            const modal = $('#startStreamModal_' + eventId);
+            const modalBodyText = container.querySelector("#modal-body-text_" + eventId);
+            const serverDeliveryMessage = container.querySelector("#server_delivery_message_" + eventId);
+        
+            // Get check URL and event id from the startStopButton
+            const checkUrl = startStopButton.getAttribute("data-check-url");
+        
+            // Append CSRF token
+            const csrfInput = document.createElement("input");
+            csrfInput.type = "hidden";
+            csrfInput.name = "csrfmiddlewaretoken";
+            csrfInput.value = csrftoken;
+            setupStreamForm.appendChild(csrfInput);
+        
+            // Here you may decide if you are starting or stopping based on button text
+            const buttonText = startStopButton.innerText.trim();
+            if (buttonText === "Ready") {
+            localStorage.setItem(`checkSeActive_${eventId}`, "true");
+            startCheckSeActiveInterval(checkUrl, eventId);
+            const serverIsRunning = localStorage.getItem("isRunning");
+            if (serverIsRunning !== "true") {
+                const deliveringButton = container.querySelector("#delivering_action_" + eventId);
+                deliveringButton.innerText = "Preparing stream...";
+                localStorage.setItem(`preparingStream_${eventId}`, "true");
+            }
+            modal.modal("hide");
+            setupStreamForm.submit();
+            setTimeout(function(){ checkServerStatus(container); }, 2000);
+            } else {
+            modal.modal("hide");
+            setupStreamForm.submit();
+            localStorage.removeItem(`preparingStream_${eventId}`);
+            localStorage.removeItem(`checkSeActive_${eventId}`);
+            stopCheckSeActiveInterval(eventId);
+            }
+        }
+        });
+    
+    });
+  </script>
+    
+    <!-- start:: websocets -->
+    <!-- <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const socket = new WebSocket('wss://' + window.location.host + '/ws/buffer_health/');
+        socket.onmessage = function(e) {
+            const data = JSON.parse(e.data);
+            document.getElementById('buffer-health_{{ forloop.counter }}').innerText = data.message.buffer_duration;
+        };
+    
+        socket.onerror = function(e) {
+            console.error('WebSocket error:', e);
+        };
+    
+        socket.onclose = function(e) {
+            console.error('WebSocket closed unexpectedly', e);
+        };
+    });
+    </script> -->
+    <!-- end:: websocets -->
+    
 
-            if (!isActivated) {
+    <!-- previous end for was ended here  -->
+
+<script>
+    /**
+     * Technical: Listens for clicks on stream delivery buttons, checks if the stream is buffering or active,
+     * and either shows a confirmation modal or submits the corresponding form.
+     *
+     * User-Centric: When a user clicks the stream button, it confirms the action if buffering, or starts the stream immediately.
+     */
+    document.body.addEventListener('click', function (event) {
+        const button = event.target.closest('button[id^="delivering_action_"]');
+        if (!button) return;
+    
+        event.preventDefault();
+    
+        // Get the event ID from the button's data attribute
+        const eventId = button.getAttribute('data-event-id');
+        if (!eventId) {
+            console.error("Event ID not found on the button.");
+            return;
+        }
+    
+        const isBuffering = button.innerText === "Buffering...";
+        const isActivated = button.getAttribute('data-activated') === 'True';
+        const isInactive = localStorage.getItem('is_inactive') === 'Inactive';
+        const isPreparing = localStorage.getItem('is_preparing') === 'true';
+
+        if (!isActivated) {
+            if (!(isInactive || isPreparing)) {
                 if (isBuffering) {
-                    $('#confirmStreamStartModal').modal('show');
-        
-                    $('#confirmStreamStartModal').on('shown.bs.modal', function () {
-                        const confirmButton = document.getElementById('confirmStartStream');
-        
+                    $('#confirmStreamStartModal_' + eventId).modal('show');
+                    $('#confirmStreamStartModal_' + eventId).on('shown.bs.modal', function () {
+                        const confirmButton = document.getElementById('confirmStartStream_' + eventId);
                         if (confirmButton) {
                             confirmButton.onclick = function () {
                                 const confirmInput = document.querySelector(`input[name="confirm_start"][data-event-id="${eventId}"]`);
@@ -509,16 +533,32 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     });
                 } else {
+                    const form = document.querySelector(`form[data-event-id="${eventId}"]`);
+                    if (form) {
+                        form.submit();
+                    } else {
+                        console.error(`Form with ID start_stream_form_${eventId} not found.`);
+                    } 
+                }
+            }  else {
+                showBootstrapToast("Streaming is currently unavailable. Unable to initialize stream.", "Info");
+            }
+        } else {
+            $('#dataConfirmationModal_' + eventId).modal('show');
+            $('#dataConfirmationModal_' + eventId).on('shown.bs.modal', function () {
+                const confirmButton = document.getElementById('confirm_data_delete_' + eventId);
+                confirmButton.onclick = function () {
                     const form = document.getElementById(`start_stream_form_${eventId}`);
                     if (form) {
                         form.submit();
                     } else {
                         console.error(`Form with ID start_stream_form_${eventId} not found.`);
-                    }
+                    } 
                 }
+            });
             }
         });
-    });
+
 </script>
 
 <script>
@@ -564,6 +604,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <!-- begin:: Video length -->
 <script>
+    /**
+     * Technical: Retrieves the video length element's event ID, builds a fetch URL, and updates the element with the latest video length every 10 seconds.
+     * User-Centric: This ensures that users always see the current video length, reflecting real-time updates.
+     */
     const videoLengthElem = document.getElementById('video-length-value');
     // Get the event ID from the data attribute
     const streamingEventId = videoLengthElem.getAttribute('data-event-id');
@@ -580,7 +624,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 return response.json();
             })
             .then(data => {
-                // Update the DOM element
+                // Update the DOM element with the latest video length
                 videoLengthElem.textContent = data.video_length;
             })
             .catch(error => {
@@ -588,10 +632,11 @@ document.addEventListener('DOMContentLoaded', function() {
             });
     }
 
-    // Poll every 10 seconds
+    // Poll every 10 seconds to update the video length
     setInterval(updateVideoLength, 10000);
 </script>
-<!-- end:: Video length -->
+<!-- end:: Video length -->    
+
 
 {% block css %}
 <style>

@@ -54,31 +54,6 @@
 
 {% block javascript %}
 
-<!-- begin: websocket -->
-<!-- <script>
-    console.log('WebSocket script loaded');
-
-    const socket = new WebSocket('wss://' + window.location.host + '/ws/buffer_health/');
-
-    socket.onopen = function(e) {
-        console.log('WebSocket connection established');
-    };
-
-    socket.onmessage = function(e) {
-        const data = JSON.parse(e.data);
-        console.log('Received data:', data);
-        document.getElementById('buffer-health').innerText = data.message.buffer_duration;
-    };
-
-    socket.onerror = function(e) {
-        console.error('WebSocket error:', e);
-    };
-
-    socket.onclose = function(e) {
-        console.error('WebSocket closed unexpectedly');
-    };
-</script> -->
-<!-- end: websocket -->
 
 <!-- begin:: messages -->
 <script id="notyf-messages" type="application/json">
@@ -93,14 +68,26 @@
 </script>
 <!-- end:: messages -->
 
-{% endblock %}
+<script>
+    function Notify(message, type) {
+      const notif = document.createElement('div');
+      notif.className = `notification ${type}`;
+      notif.textContent = message;
+      document.body.appendChild(notif);
+  
+      // Remove the notification after 3 seconds
+      setTimeout(() => {
+        notif.style.opacity = 0;
+        setTimeout(() => document.body.removeChild(notif), 500);
+      }, 3000);
+    }
+</script>
+
+<script src="{% static 'js/script.js' %}"></script>
 
 
-<script src="{% static 'js/script.js' %}" type="text/javascript"></script>
-<script src="https://cdn.jsdelivr.net/npm/popper.js@1.14.3/dist/umd/popper.min.js" integrity="sha384-ZMP7rVo3mIykV+2+9J3UJ46jBk0WLaUAdn689aCwoqbBJiSnjAK/l8WvCWPIPm49" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@4.1.3/dist/js/bootstrap.min.js" integrity="sha384-ChfqqxuZUCnJSK3+MXmPNIyE6ZbWh2IMqE241rYiqJxyMiZ6OW/JmZQ5stwEULTy" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.js"></script>
-<script src="{% static 'js/allert_messages.js' %}" type="text/javascript"></script>
-
+{% endblock javascript %}
+<script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.9.2/dist/umd/popper.min.js" integrity="sha384-IQsoLXl5PILFhosVNubq5LC7Qb9DXgDA9i+tQ8Zj3iwWAwPtgFTxbJ8NT4GN1R8p" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.min.js" integrity="sha384-cVKIPhGWiC2Al4u+LWgxfKTRIcfu0JTxR+EQDz/bgldoEyl4H0zUF0QKbrJ0EcQF" crossorigin="anonymous"></script>
 </body>
 </html>

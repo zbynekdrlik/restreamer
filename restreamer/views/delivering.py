@@ -99,7 +99,6 @@ class DeliveringManger:
         try:
             response = self.session.post(url, json=data)
             response.raise_for_status()  # Raises an HTTPError for bad responses
-            print("Request send ------------------------------------ !!!!")
         except Exception as e:
             log.info(f"Failed to send data: {e}")
         log.info(f" Sygnal for interuption for {alias if alias else 'All'} {'stream' if alias else 'streams'} sent")

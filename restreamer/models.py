@@ -41,6 +41,9 @@ class EndPointCfg(models.Model):
     delivered_bytes = models.PositiveBigIntegerField(default=0, verbose_name='Delivered bytes')
     is_fast = models.BooleanField(default=False)
     history = HistoricalRecords()
+    
+    class Meta:
+        ordering = ['alias']
 
     def __str__(self):
         return self.alias
