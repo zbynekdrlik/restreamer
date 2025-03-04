@@ -61,7 +61,7 @@ class StreamingEventView(View):
             "streaming_events": streaming_events,
             'video_length': video_length,
             'is_preparing': is_preparing,
-            'is_buffering' : video_manager.is_buffer_filled(buffer_time)
+            'is_buffering' : video_manager.is_buffer_filled(buffer_time) or None
         }
 
         return render(request, template_name, context)
