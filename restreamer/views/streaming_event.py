@@ -27,7 +27,7 @@ class StreamingEventView(View):
         # Get streaming events and handle the case where there are none
         streaming_events = StreamingEvent.objects.filter(user=user).order_by("id")
         video_length = '00:00'
-
+        video_manager = None
         in_manager = InstanceManager(user.id)
 
         # Default `streaming_event_id` to `None` if no events exist
@@ -61,7 +61,7 @@ class StreamingEventView(View):
             "streaming_events": streaming_events,
             'video_length': video_length,
             'is_preparing': is_preparing,
-            'is_buffering' : video_manager.is_buffer_filled(buffer_time) or None
+            'is_buffering' : video_manager.is_buffer_filled(buffer_time) if video_manager else None
         }
 
         return render(request, template_name, context)
