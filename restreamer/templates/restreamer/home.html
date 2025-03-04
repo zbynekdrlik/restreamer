@@ -100,6 +100,8 @@
                     </button>
                     </form>
                 </div>
+                <span>Buffering...</span>
+                <span>{{ is_buffering }}</span>
                 <div class="col-md-2">
                     <form id="start_stream_form_{{ streaming_event.id }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
                     {% csrf_token %}
