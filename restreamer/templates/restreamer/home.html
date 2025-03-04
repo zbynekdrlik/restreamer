@@ -53,128 +53,143 @@
                     </div>
                 </div>
             </div>
-
-            {% for streaming_event in streaming_events %}
-            <div class="streaming-event-container border-bottom p-4 position-relative hover-bg-light transition"
-                data-event-id="{{ streaming_event.id }}"
-                data-stream-ready-url="{% url 'stream_ready' streaming_event.id %}">
-            
-                <!-- Top Row: Name, Endpoints, Start/Stop Actions -->
-                <div class="row align-items-center text-center">
-                <div class="col-md-4">
-                    <h5 class="mb-2 mb-md-0 text-dark fw-bold">{{ streaming_event.short_description }}</h5>
-                </div>
-                <div class="col-md-4">
-                    {% for endpoint in streaming_event.end_points.all %}
-                    <p class="mb-1 d-inline-flex align-items-center gap-1 fw-normal text-dark mx-2">
-                        {% if endpoint.service_type == 'YT_HLS' or endpoint.service_type == 'YT_RTMP' %}
-                        <i class="bi bi-youtube text-danger"></i>
-                        {% elif endpoint.service_type == 'FB' %}
-                        <i class="bi bi-facebook text-primary"></i>
-                        {% elif endpoint.service_type == 'VIMEO' %}
-                        <i class="bi bi-vimeo text-info"></i>
-                        {% elif endpoint.service_type == 'INSTAGRAM' %}
-                        <i class="bi bi-instagram text-warning"></i>
-                        {% else %}
-                        <i class="bi bi-link text-muted"></i>
-                        {% endif %}
-                        {{ endpoint.alias }}
-                    </p>
-                    {% empty %}
-                    <p class="mb-1 small text-muted d-inline-flex align-items-center gap-1">
-                        <i class="bi bi-exclamation-circle"></i>No endpoints available
-                    </p>
-                    {% endfor %}
-                </div>
-                <div class="col-md-2">
-                    <form id="setup_stream_form_{{ streaming_event.id }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
-                    {% csrf_token %}
-                    <!-- The button below has a class "start-stop-btn" so the JS can delegate events -->
-                    <button type="button" id="start_stop_{{ streaming_event.id }}"
-                            data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}"
-                            data-event-id="{{ streaming_event.id }}"
-                            class="start-stop-btn btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1"
-                            data-bs-toggle="modal" data-bs-target="#startStreamModal_{{ streaming_event.id }}">
-                        <i class="bi {{ streaming_event.receiving_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
-                        <span>{{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}</span>
-                    </button>
-                    </form>
-                </div>
-                <div class="col-md-2">
-                    <form id="start_stream_form_{{ streaming_event.id }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
-                    {% csrf_token %}
-                    <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start_{{ streaming_event.id }}" value="0">
-                    <!-- The button below has a class "deliver-btn" for event delegation -->
-                    <button type="button" id="delivering_action_{{ streaming_event.id }}"
-                            data-event-id="{{ streaming_event.id }}"
-                            data-activated="{{ streaming_event.delivering_activated }}"
-                            class="deliver-btn btn btn-sm start_delivering {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1">
-                        
-                        {% if is_preparing %}
-                        <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
-                        <span>Preparing stream...</span>
-                        {% elif not is_buffering %}
-                        <span>Buffering...</span>
-                        {% else %}
-                        <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
-                        <span>{{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}</span>
-                        {% endif %}
-                    </button>
-                    </form>
-                </div>
-                </div>
-            
-                <!-- Bottom Row -->
-                <div class="row align-items-center border-top mt-3 pt-3">
-                <div class="col-md-4">
-                    <form id="deleteChunksForm_{{ streaming_event.id }}" 
-                        action="{% url 'control:delete_chunk_data' %}" 
-                        method="post" 
-                        class="delete-chunk-form d-inline-block">
-                    {% csrf_token %}
-                    <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
-                    <button type="submit" 
-                            id="delete_chunks_{{ streaming_event.id }}" 
-                            class="btn btn-link d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 border-0 text-danger">
-                        <i class="bi bi-trash me-2"></i>
-                        <span class="small">Delete Chunks</span>
-                    </button>
-                    </form>
-                </div>
-                <div class="col-md-4 text-center">
-                    <div class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1">
-                    <i class="bi bi-clock text-primary me-2"></i>
-                    <span class="text-muted small me-2">Length:</span>
-                    <span data-event-id="{{ streaming_event.id }}" id="video-length-value" class="fw-bold">
-                        {{ video_length }}
-                    </span>
+            {% if streaming_events %}
+                {% for streaming_event in streaming_events %}
+                <div class="streaming-event-container border-bottom p-4 position-relative hover-bg-light transition"
+                    data-event-id="{{ streaming_event.id }}"
+                    data-stream-ready-url="{% url 'stream_ready' streaming_event.id %}">
+                
+                    <!-- Top Row: Name, Endpoints, Start/Stop Actions -->
+                    <div class="row align-items-center text-center">
+                    <div class="col-md-4">
+                        <h5 class="mb-2 mb-md-0 text-dark fw-bold">{{ streaming_event.short_description }}</h5>
                     </div>
+                    <div class="col-md-4">
+                        {% for endpoint in streaming_event.end_points.all %}
+                        <p class="mb-1 d-inline-flex align-items-center gap-1 fw-normal text-dark mx-2">
+                            {% if endpoint.service_type == 'YT_HLS' or endpoint.service_type == 'YT_RTMP' %}
+                            <i class="bi bi-youtube text-danger"></i>
+                            {% elif endpoint.service_type == 'FB' %}
+                            <i class="bi bi-facebook text-primary"></i>
+                            {% elif endpoint.service_type == 'VIMEO' %}
+                            <i class="bi bi-vimeo text-info"></i>
+                            {% elif endpoint.service_type == 'INSTAGRAM' %}
+                            <i class="bi bi-instagram text-warning"></i>
+                            {% else %}
+                            <i class="bi bi-link text-muted"></i>
+                            {% endif %}
+                            {{ endpoint.alias }}
+                        </p>
+                        {% empty %}
+                        <p class="mb-1 small text-muted d-inline-flex align-items-center gap-1">
+                            <i class="bi bi-exclamation-circle"></i>No endpoints available
+                        </p>
+                        {% endfor %}
+                    </div>
+                    <div class="col-md-2">
+                        <form id="setup_stream_form_{{ streaming_event.id }}" action="{% url 'control:setup_stream' streaming_event.id %}" method="post">
+                        {% csrf_token %}
+                        <!-- The button below has a class "start-stop-btn" so the JS can delegate events -->
+                        <button type="button" id="start_stop_{{ streaming_event.id }}"
+                                data-check-url="{% url 'control:streaming_event_active' streaming_event.id %}"
+                                data-event-id="{{ streaming_event.id }}"
+                                class="start-stop-btn btn btn-sm {{ streaming_event.receiving_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1"
+                                data-bs-toggle="modal" data-bs-target="#startStreamModal_{{ streaming_event.id }}">
+                            <i class="bi {{ streaming_event.receiving_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
+                            <span>{{ streaming_event.receiving_activated|yesno:'Stop,Ready' }}</span>
+                        </button>
+                        </form>
+                    </div>
+                    <div class="col-md-2">
+                        <form id="start_stream_form_{{ streaming_event.id }}" data-event-id="{{ streaming_event.id }}" action="{% url 'control:start_stream' streaming_event.id %}" method="post">
+                        {% csrf_token %}
+                        <input type="hidden" name="confirm_start" data-event-id="{{ streaming_event.id }}" id="confirm_start_{{ streaming_event.id }}" value="0">
+                        <!-- The button below has a class "deliver-btn" for event delegation -->
+                        <button type="button" id="delivering_action_{{ streaming_event.id }}"
+                                data-event-id="{{ streaming_event.id }}"
+                                data-activated="{{ streaming_event.delivering_activated }}"
+                                class="deliver-btn btn btn-sm start_delivering {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1">
+                            
+                            {% if is_preparing %}
+                            <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
+                            <span>Preparing stream...</span>
+                            {% elif not is_buffering %}
+                            <span>Buffering...</span>
+                            {% else %}
+                            <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
+                            <span>{{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}</span>
+                            {% endif %}
+                        </button>
+                        </form>
+                    </div>
+                    </div>
+                
+                    <!-- Bottom Row -->
+                    <div class="row align-items-center border-top mt-3 pt-3">
+                    <div class="col-md-4">
+                        <form id="deleteChunksForm_{{ streaming_event.id }}" 
+                            action="{% url 'control:delete_chunk_data' %}" 
+                            method="post" 
+                            class="delete-chunk-form d-inline-block">
+                        {% csrf_token %}
+                        <input type="hidden" name="streaming_event_id" value="{{ streaming_event.identifier }}">
+                        <button type="submit" 
+                                id="delete_chunks_{{ streaming_event.id }}" 
+                                class="btn btn-link d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 border-0 text-danger">
+                            <i class="bi bi-trash me-2"></i>
+                            <span class="small">Delete Chunks</span>
+                        </button>
+                        </form>
+                    </div>
+                    <div class="col-md-4 text-center">
+                        <div class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1">
+                        <i class="bi bi-clock text-primary me-2"></i>
+                        <span class="text-muted small me-2">Length:</span>
+                        <span data-event-id="{{ streaming_event.id }}" id="video-length-value" class="fw-bold">
+                            {{ video_length }}
+                        </span>
+                        </div>
+                    </div>
+                    <div class="col-md-4 text-end">
+                        <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 text-decoration-none">
+                        <span class="text-primary small me-2">Details</span>
+                        <i class="bi bi-chevron-right text-primary"></i>
+                        </a>
+                    </div>
+                    </div>
+                
+                    <!-- Delete Streaming Event Form -->
+                    <form data-event-id="{{ streaming_event.id }}" 
+                        data-action="remove_streaming_event"
+                        action="{% url 'control:remove_streaming_event' streaming_event.id %}" 
+                        method="post" 
+                        class="position-absolute top-0 end-0 mt-2 me-2">
+                    {% csrf_token %}
+                    <!-- The button below has a class "delete-streaming-event" -->
+                    <button type="button" data-event-id="{{ streaming_event.id }}" class="delete-streaming-event btn btn-link text-secondary p-0" data-bs-toggle="modal" data-bs-target="#deleteStreamingEventModal_{{ streaming_event.id }}">
+                        <i class="bi bi-x-lg"></i>
+                    </button>
+                    </form>
+                
+                    {# Include the modals. In your modal file, all IDs must use the passed variable "event_id" #}
+                    {% include 'base/modal.html' with event_id=streaming_event.id %}
                 </div>
-                <div class="col-md-4 text-end">
-                    <a href="{% url 'control:streaming_event_detail' streaming_event.id %}" class="d-inline-flex align-items-center bg-light rounded-pill px-3 py-1 text-decoration-none">
-                    <span class="text-primary small me-2">Details</span>
-                    <i class="bi bi-chevron-right text-primary"></i>
+                {% endfor %}
+            {% else %}
+                <div class="empty-state-container p-5 text-center">
+                    <div class="empty-state-icon mb-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="text-muted">
+                            <path d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"></path>
+                            <path d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z"></path>
+                        </svg>
+                    </div>
+                    <h4 class="mb-2">No Streaming Events Available</h4>
+                    <p class="text-muted mb-4">There are currently no streaming events to display.</p>
+                    <a href="{% url control 'streaming_event_create' %}" class="btn btn-primary">
+                        Create New Streaming Event
                     </a>
                 </div>
-                </div>
-            
-                <!-- Delete Streaming Event Form -->
-                <form data-event-id="{{ streaming_event.id }}" 
-                    data-action="remove_streaming_event"
-                    action="{% url 'control:remove_streaming_event' streaming_event.id %}" 
-                    method="post" 
-                    class="position-absolute top-0 end-0 mt-2 me-2">
-                {% csrf_token %}
-                <!-- The button below has a class "delete-streaming-event" -->
-                <button type="button" data-event-id="{{ streaming_event.id }}" class="delete-streaming-event btn btn-link text-secondary p-0" data-bs-toggle="modal" data-bs-target="#deleteStreamingEventModal_{{ streaming_event.id }}">
-                    <i class="bi bi-x-lg"></i>
-                </button>
-                </form>
-            
-                {# Include the modals. In your modal file, all IDs must use the passed variable "event_id" #}
-                {% include 'base/modal.html' with event_id=streaming_event.id %}
-            </div>
-            {% endfor %}
+            {% endif %}
         </div>
     </div>
 </div>
