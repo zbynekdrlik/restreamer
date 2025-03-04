@@ -166,7 +166,7 @@
                     class="position-absolute top-0 end-0 mt-2 me-2">
                 {% csrf_token %}
                 <!-- The button below has a class "delete-streaming-event" -->
-                <button type="button" data-event-id="{{ streaming_event.id }}" class="delete-streaming-event btn btn-link text-secondary p-0" data-toggle="modal" data-target="#deleteStreamingEventModal_{{ streaming_event.id }}">
+                <button type="button" data-event-id="{{ streaming_event.id }}" class="delete-streaming-event btn btn-link text-secondary p-0" data-bs-toggle="modal" data-bs-target="#deleteStreamingEventModal_{{ streaming_event.id }}">
                     <i class="bi bi-x-lg"></i>
                 </button>
                 </form>
