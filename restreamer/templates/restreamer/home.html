@@ -249,6 +249,7 @@
             success: function(response) {
                 const isRunning = response.ready; // server is ready to reaceive responses
                 const bufferFilled = response.buffer_filled;
+                console.log("buffer filled", bufferFilled)
                 const live = response.live;  // delivering button state
                 const serverRunning = response.server_running // instance is running
 
