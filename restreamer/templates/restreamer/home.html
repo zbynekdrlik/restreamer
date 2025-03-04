@@ -111,6 +111,7 @@
                             class="deliver-btn btn btn-sm start_delivering {{ streaming_event.delivering_activated|yesno:'btn-danger,btn-primary' }} rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1">
                         
                         {% if is_preparing %}
+                        <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
                         <span>Preparing stream...</span>
                         {% else %}
                         <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
@@ -197,8 +198,6 @@
        
         containers.forEach(function(container) {
             // Run the function once for this container
-            checkServerStatus(container);
-            // Then, call it every 5 seconds
             setInterval(function() {
             checkServerStatus(container);
             }, 5000);
