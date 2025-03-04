@@ -114,6 +114,7 @@
                         <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
                         <span>Preparing stream...</span>
                         {% elif is_buffering %}
+                        <span>Buffering...</span>
                         {% else %}
                         <i class="bi {{ streaming_event.delivering_activated|yesno:'bi-stop-circle-fill,bi-play-circle-fill' }}"></i>
                         <span>{{ streaming_event.delivering_activated|yesno:'End stream,Start stream' }}</span>
