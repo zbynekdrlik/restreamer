@@ -33,7 +33,7 @@ class StreamingEventView(View):
         # Default `streaming_event_id` to `None` if no events exist
         
         streaming_event_id = streaming_events.first().id if streaming_events.exists() else None
-        buffer_time = streaming_events.first().buffer
+        buffer_time = streaming_events.first().buffer if streaming_events.exists() else None
         del_manager = None
 
         if streaming_event_id:
