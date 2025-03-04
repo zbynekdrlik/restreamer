@@ -282,7 +282,7 @@
                         localStorage.setItem(`preparingStream_${eventId}`, "true");
                     }
                 }  
-                if (isRunning) {
+                if (isRunning && bufferFilled) {
                     console.log("we are here isRunning first if")
                     if (deliveringButton) {
                         // Set the button to the "End stream" state
