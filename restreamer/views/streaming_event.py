@@ -49,7 +49,7 @@ class StreamingEventView(View):
 
         # Handle a streaming event with chunks or set a default value
         try:
-            streaming_event = StreamingEvent.objects.filter(chunks__isnull=False, user=user).first()
+            streaming_event = StreamingEvent.objects.filter(user=user).first()
             if streaming_event:
                 video_manager = VideoDataManager(streaming_event.id)
                 video_length = video_manager.get_stream_length()
