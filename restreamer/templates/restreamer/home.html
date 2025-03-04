@@ -260,7 +260,6 @@
             success: function(response) {
                 const isRunning = response.ready; // server is ready to reaceive responses
                 const bufferFilled = response.buffer_filled;
-                console.log("buffer filled", bufferFilled)
                 const live = response.live;  // delivering button state
                 const serverRunning = response.server_running // instance is running
 
@@ -268,11 +267,8 @@
                 deliveringButton.setAttribute("data-live", live ? "True" : "False");
                 localStorage.setItem("isRunning", isRunning);
                 if (!live && serverRunning) {
-                    console.log("we are here first if")
                     if (isRunning) {
-                        console.log("we are here second if")
                         if (bufferFilled || live) {
-                            console.log("we are here third if")
                             if (deliveringButton) {
                                 // Set the button to the "End stream" state
                                 deliveringButton.className = `deliver-btn btn btn-sm start_delivering btn-primary rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1`;
@@ -294,7 +290,6 @@
                     }
                 }  
                 if (isRunning && bufferFilled) {
-                    console.log("we are here isRunning first if")
                     if (deliveringButton) {
                         // Set the button to the "End stream" state
                         deliveringButton.className = `deliver-btn btn btn-sm start_delivering btn-primary rounded-pill shadow-sm fw-medium d-inline-flex align-items-center gap-1`;
