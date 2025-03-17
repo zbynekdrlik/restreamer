@@ -112,10 +112,10 @@ class TrayIcon:
     def update_inpoint_icon(self, icon_state, icon):
         if icon_state == "inpoint_active":
             image = Image.open(ICONS_DIR / "green_I.png")
-            icon.title = "Inpoint Active"
+            icon.title = get_buffer_time()
         elif icon_state == "inpoint_waiting":
             image = Image.open(ICONS_DIR / "orange_I.png")
-            icon.title = "Inpoint Waiting"
+            icon.title = get_buffer_time()
         else:
             log.info("Invalid icon state")
             return
@@ -125,6 +125,7 @@ class TrayIcon:
     def monitor_inpoint_redis_queue(self, icon):
 
         while True:
+            buffer_time = get_buffer_time()
             result = self.redis_client.brpop('inpoint_icon_status', timeout=10)
             if result:
                 _, message = result
@@ -136,17 +137,18 @@ class TrayIcon:
                 time.sleep(3)
             else:
                 log.info("Inactive")
-                icon.title = "Inpoint Inactive"
+                icon.title = buffer_time
                 icon.icon = Image.open(ICONS_DIR / "red_I.png")
 
             service = psutil.win_service_get('inpoint_service')
             status = service.as_dict().get('status')
 
-            buffer_time = get_buffer_time()
-
-            menu_items = [
-                item(text=f"Time in buffer: {buffer_time}", action=None)
-            ]
+            
+            icon.title = buffer_time
+            menu_items = []
+            
+            menu_items.append(pystray.MenuItem(text="Delete Chunks",
+                                            action=lambda: delete_local_chunks()))
 
             if status != 'running':
                 menu_items.append(pystray.MenuItem(text="Start",
@@ -159,9 +161,6 @@ class TrayIcon:
             menu_items.append(pystray.MenuItem(text="Log File",
                                             action=lambda: self.open_log_file('inpoint')))
             
-            menu_items.append(pystray.MenuItem(text="Delete Chunks",
-                                            action=lambda: delete_local_chunks()))
-
             # Update the menu with all items
             icon.menu = pystray.Menu(*menu_items)
 
