@@ -272,7 +272,7 @@ class EndPoint(multiprocessing.Process):
                     continue
                 
                 try:
-                    object_key = f"{self.stream_identifier}/{current_chunk}_{self.stream_identifier}.bin"
+                    object_key = f"{self.stream_identifier}/{self.chunk_id.value}_{self.stream_identifier}.bin"
                     response = self.s3.get_object(Bucket=self.bucket, Key=object_key)
                     self.process_chunk(ffmpeg_process, response)
                 except self.s3.exceptions.NoSuchKey:
