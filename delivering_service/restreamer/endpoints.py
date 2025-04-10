@@ -170,7 +170,7 @@ class EndPoint(multiprocessing.Process):
                 log.error(f"Error {e}")
                 
     
-    def get_next_chunk_id(self):
+    def retreive_next_chunk_id(self):
         """
         Fetch the next chunk ID greater than the current chunk_id from the server.
         """
@@ -220,7 +220,7 @@ class EndPoint(multiprocessing.Process):
                     ffmpeg_process = self.run_ffmpeg()
                     continue
 
-                if not self.get_next_chunk_id():
+                if not self.retreive_next_chunk_id():
                     log.warning('The buffer is empty !!! Waiting for new data.')
                     time.sleep(20)
                     continue
@@ -235,7 +235,7 @@ class EndPoint(multiprocessing.Process):
                         f"Bucket: {self.bucket}, Key: {object_key}, "
                         f"Stream Identifier: {self.stream_identifier}, Chunk ID: {self.chunk_id.value}."
                     )
-                    if self.get_next_chunk_id():
+                    if self.retreive_next_chunk_id():
                         time.sleep(2)
                         continue
                     
