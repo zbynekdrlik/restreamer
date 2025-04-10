@@ -16,6 +16,7 @@ from botocore.exceptions import BotoCoreError
 from django.conf import settings
 from django.http import HttpResponseBadRequest, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
+from multiprocessing import Queue
 
 from .shared import data_queue
 
@@ -303,6 +304,7 @@ class EndPoint(multiprocessing.Process):
 
 restr_manager = ManagerEndPoint() """
 
+
 def endpoints_info(endpoints):
     
     try:
@@ -320,17 +322,16 @@ def endpoints_info(endpoints):
     except Exception as e:
         log.exception(e)
         
-        
-        
+             
 class ManagerEndPointControl:
     def __init__(self):
         self.endpoint_processes = {}
-        self.check_interval = 10
+        self.check_interval = 5
         self.stop_event = Event()
-        self.signals = []
+        self.signals = Queue()
 
     def add_signal(self, signal):
-        self.signals.append(signal)
+        self.signals.put(signal)
         
     def start_endpoint(self, alias, service_type, stream_key, stream_id, chunk_id):
         if alias in self.endpoint_processes:
@@ -342,14 +343,12 @@ class ManagerEndPointControl:
         self.endpoint_processes[alias] = endpoint_process
         log.info(f'Started endpoint {alias}')
         
-        
     def stop_endpoint(self, alias):
         if alias in self.endpoint_processes:
             endpoint_process = self.endpoint_processes[alias]
             endpoint_process.terminate()
             endpoint_process.join()
             del self.endpoint_processes[alias]
-            print(f"Stopped endpoint {alias}")
 
         else:
             log.info(f'Endpoing {alias} is not running')
@@ -359,17 +358,11 @@ class ManagerEndPointControl:
             self.stop_endpoint(alias)
         log.info("All endpoints stopped.")
         
-    def wait_for_signal(self, alias):
-        print(f"{alias} is now waiting for a signal to restart.")
-        while alias not in self.endpoint_processes:
-            time.sleep(self.check_interval)
-        print(f"{alias} received signal to restart.")
-        
     def monitor_endpoints(self):
         while not self.stop_event.is_set():
             try:
-                while self.signals:
-                    signal = self.signals.pop(0)
+                while not self.signals.empty():
+                    signal = self.signals.get()
                     alias = signal['alias']
                     action = signal['action']  # 'start', 'stop', or 'stop_all'
                     service_type = signal.get('service_type')
@@ -381,16 +374,13 @@ class ManagerEndPointControl:
                         self.start_endpoint(alias, service_type, stream_key, stream_id, chunk_id)
                     elif action == 'stop':
                         self.stop_endpoint(alias)
-                        threading.Thread(target=self.wait_for_signal, args=(alias,), daemon=True).start()
                     elif action == 'stop_all':
                         self.stop_all_endpoints()
-                        for alias in list(self.endpoint_processes.keys()):
-                            threading.Thread(target=self.wait_for_signal, args=(alias,), daemon=True).start()
-
+        
                 time.sleep(self.check_interval)
             except Exception as e:
                 print(f"An error occurred: {e}")
-                
+                     
     def log_endpoints_info(self):
         try:
             while not self.stop_event.is_set():
