@@ -136,22 +136,78 @@ class StartEndStream(View):
 class DeleteChunkData(View):
     def post(self, request):
         streaming_event_id = request.POST.get("streaming_event_id")
+        se_identifier = StreamingEvent.objects.get(id=streaming_event_id).identifier
+        bucket_name = os.environ.get('AWS_STORAGE_BUCKET_NAME')
+        s3 = settings.S3_CLIENT
+        
         try:
-            chunks_to_delete = ChunkRecord.objects.filter(identifier=streaming_event_id)
             
-            # Collect S3 keys (constructing them based on your upload logic)
-            chunk_identifiers = [f"{chunk.local_id}_{chunk.identifier}.bin" for chunk in chunks_to_delete]
-
-            # Delete chunks from S3
-            delete_s3_chunks(chunk_identifiers)
-
+            # Debug: Print starting deletion info
+            log.debug(f"Starting deletion process for streaming event: {se_identifier}")
+            log.debug(f"Bucket: {bucket_name}")
+            
+            # List all objects with the streaming event prefix
+            objects_to_delete = []
+            paginator = s3.get_paginator('list_objects_v2')
+            
+            # Debug: Count objects before deletion
+            object_count = 0
+            for page in paginator.paginate(Bucket=bucket_name, Prefix=f"{se_identifier}/"):
+                if 'Contents' in page:
+                    object_count += len(page['Contents'])
+                    objects_to_delete.extend([{'Key': obj['Key']} for obj in page['Contents']])
+            
+            log.debug(f"Found {object_count} objects to delete in folder {se_identifier}/")
+            
+            # Delete all found objects in batches
+            if objects_to_delete:
+                deleted_count = 0
+                for i in range(0, len(objects_to_delete), 1000):
+                    batch = objects_to_delete[i:i+1000]
+                    response = s3.delete_objects(
+                        Bucket=bucket_name,
+                        Delete={'Objects': batch}
+                    )
+                    deleted_count += len(batch)
+                    
+                    # Debug: Log deletion response
+                    log.debug(f"Deleted batch {i//1000 + 1}: {len(batch)} objects")
+                    if 'Deleted' in response:
+                        log.debug(f"Successfully deleted objects: {[obj['Key'] for obj in response['Deleted']]}")
+                    if 'Errors' in response:
+                        log.error(f"Errors during deletion: {response['Errors']}")
+                
+                log.debug(f"Total objects deleted: {deleted_count}")
+                
+                # Verify deletion by listing objects again
+                remaining_objects = []
+                for page in paginator.paginate(Bucket=bucket_name, Prefix=f"{se_identifier}/"):
+                    if 'Contents' in page:
+                        remaining_objects.extend(page['Contents'])
+                
+                if remaining_objects:
+                    log.error(f"Deletion verification failed! {len(remaining_objects)} objects remain")
+                    for obj in remaining_objects:
+                        log.error(f"Object still exists: {obj['Key']}")
+                else:
+                    log.debug("Deletion verification successful - no objects remain in the folder")
+            
+            else:
+                log.debug(f"No objects found to delete in folder {se_identifier}/")
+            
             # Delete chunks from the database
-            chunks_to_delete.delete()
+            db_deleted_count = ChunkRecord.objects.filter(identifier=se_identifier).delete()
+            log.debug(f"Deleted {db_deleted_count[0]} database records")
+            
         except Exception as e:
+            log.exception(f"Error deleting data for streaming event {se_identifier}")
             messages.error(request, f"Error deleting data: {e}")
             return redirect('control:home')
-        messages.success(request, 'Chunks deleted successfully!')
+        
+        messages.success(request, f'All chunks for streaming event {se_identifier} deleted successfully!')
+        log.info(f"Successfully completed deletion for streaming event {se_identifier}")
         return redirect('control:home')
+
         
 
 @method_decorator(login_required, name='dispatch')
