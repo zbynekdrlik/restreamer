@@ -102,14 +102,14 @@ class ChunkSender:
     
         while True:
             try:
-                self.upload_to_s3(chunk_data , identifier)
+                self.upload_to_s3(chunk_data , identifier, self.streaming_event_identifier)
                 log.info(f"S3 upload for chunk {chunk_id} succeeded!")
                 break
             except Exception as e:
                 log.warning(f"S3 upload failed for chunk {chunk_id}: {e}")
                 time.sleep(3)
                 continue
-       
+        
         retries = 0
         while True:
             if retries == 1:
@@ -168,14 +168,16 @@ class ChunkSender:
             print(f"Error checking chunk on server: {e}")
             return False
     
-    def upload_to_s3(self, chunk_data, filename):
+    def upload_to_s3(self, chunk_data, filename, streaming_event_identifier):
         try:
             bucket_name = os.environ.get('AWS_STORAGE_BUCKET_NAME')
             client = settings.S3_CLIENT
-
+            
+            full_key = f"{streaming_event_identifier}/{filename}"
+            
             client.put_object(Body=chunk_data,
                             Bucket= bucket_name,
-                            Key=filename,)
+                            Key=full_key,)
         except Exception as e:
             log.exception(e)
             raise
