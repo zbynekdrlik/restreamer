@@ -224,12 +224,7 @@ class EndPoint(multiprocessing.Process):
                 return None
 
             self.chunk_id.value = next_chunk_id
-            
-            log.info("Retrieved new chunk ID", extra={
-                'chunk_id_truncated': str(next_chunk_id)[:4] + '...',
-                'operation': 'chunk_fetch'
-            })
-            
+             
             return next_chunk_id
 
         except requests.exceptions.SSLError:
