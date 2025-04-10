@@ -136,14 +136,13 @@ class StartEndStream(View):
 class DeleteChunkData(View):
     def post(self, request):
         streaming_event_id = request.POST.get("streaming_event_id")
-        se_identifier = StreamingEvent.objects.get(id=streaming_event_id).identifier
         bucket_name = os.environ.get('AWS_STORAGE_BUCKET_NAME')
         s3 = settings.S3_CLIENT
         
         try:
             
             # Debug: Print starting deletion info
-            log.debug(f"Starting deletion process for streaming event: {se_identifier}")
+            log.debug(f"Starting deletion process for streaming event: {streaming_event_id}")
             log.debug(f"Bucket: {bucket_name}")
             
             # List all objects with the streaming event prefix
@@ -152,12 +151,12 @@ class DeleteChunkData(View):
             
             # Debug: Count objects before deletion
             object_count = 0
-            for page in paginator.paginate(Bucket=bucket_name, Prefix=f"{se_identifier}/"):
+            for page in paginator.paginate(Bucket=bucket_name, Prefix=f"{streaming_event_id}/"):
                 if 'Contents' in page:
                     object_count += len(page['Contents'])
                     objects_to_delete.extend([{'Key': obj['Key']} for obj in page['Contents']])
             
-            log.debug(f"Found {object_count} objects to delete in folder {se_identifier}/")
+            log.debug(f"Found {object_count} objects to delete in folder {streaming_event_id}/")
             
             # Delete all found objects in batches
             if objects_to_delete:
@@ -181,7 +180,7 @@ class DeleteChunkData(View):
                 
                 # Verify deletion by listing objects again
                 remaining_objects = []
-                for page in paginator.paginate(Bucket=bucket_name, Prefix=f"{se_identifier}/"):
+                for page in paginator.paginate(Bucket=bucket_name, Prefix=f"{streaming_event_id}/"):
                     if 'Contents' in page:
                         remaining_objects.extend(page['Contents'])
                 
@@ -193,19 +192,19 @@ class DeleteChunkData(View):
                     log.debug("Deletion verification successful - no objects remain in the folder")
             
             else:
-                log.debug(f"No objects found to delete in folder {se_identifier}/")
+                log.debug(f"No objects found to delete in folder {streaming_event_id}/")
             
             # Delete chunks from the database
-            db_deleted_count = ChunkRecord.objects.filter(identifier=se_identifier).delete()
+            db_deleted_count = ChunkRecord.objects.filter(identifier=streaming_event_id).delete()
             log.debug(f"Deleted {db_deleted_count[0]} database records")
             
         except Exception as e:
-            log.exception(f"Error deleting data for streaming event {se_identifier}")
+            log.exception(f"Error deleting data for streaming event {streaming_event_id}")
             messages.error(request, f"Error deleting data: {e}")
             return redirect('control:home')
         
-        messages.success(request, f'All chunks for streaming event {se_identifier} deleted successfully!')
-        log.info(f"Successfully completed deletion for streaming event {se_identifier}")
+        messages.success(request, f'All chunks for streaming event {streaming_event_id} deleted successfully!')
+        log.info(f"Successfully completed deletion for streaming event {streaming_event_id}")
         return redirect('control:home')
 
         
