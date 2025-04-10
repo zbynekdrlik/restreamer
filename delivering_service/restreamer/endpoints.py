@@ -172,36 +172,81 @@ class EndPoint(multiprocessing.Process):
                 
     
     def retreive_next_chunk_id(self):
-        """
-        Fetch the next chunk ID greater than the current chunk_id from the server.
-        """
+        
+        """ Retrieves the next available chunk ID from the streaming API and updates the current chunk ID. """
+
+        # Validate inputs first
+        if not hasattr(self.chunk_id, 'value') or not isinstance(self.chunk_id.value, int):
+            log.error("Invalid current chunk ID state")
+            return None
+
+        if not isinstance(self.stream_identifier, str) or not self.stream_identifier:
+            log.error("Invalid stream identifier")
+            return None
+
         try:
-            # Example API URL (adjust as necessary for your setup)
-            api_url = "http://restreamer.newlevel.media/api/get-next-chunk/"
+            api_url = "https://restreamer.newlevel.media/api/get-next-chunk/"
             params = {
-                "current_local_id": self.chunk_id.value,
+                "current_local_id": str(self.chunk_id.value),
                 "stream_identifier": self.stream_identifier,
             }
 
-            response = requests.get(api_url, params=params, timeout=3)
+            response = requests.get(
+                api_url,
+                params=params,
+                timeout=(3.0),
+                verify=True,
+            )
             response.raise_for_status()
-
-            data = response.json()
-            next_chunk_id = data.get("next_chunk_id")
-            if next_chunk_id is None:
-                log.warning("No next_chunk_id found in the response.")
+            
+            if 'application/json' not in response.headers.get('Content-Type', ''):
+                log.error("Invalid content type in response")
                 return None
 
-            log.info(f"Next chunk ID retrieved: {next_chunk_id}")
+            try:
+                data = response.json()
+            except ValueError:
+                log.error("Invalid JSON response")
+                return None
+
+            if not isinstance(data, dict):
+                log.error("Response is not a JSON object")
+                return None
+
+            next_chunk_id = data.get("next_chunk_id")
+    
+            if next_chunk_id is None:
+                log.warning("No next_chunk_id in response")
+                return None
+                
+            if not isinstance(next_chunk_id, int) or next_chunk_id <= self.chunk_id.value:
+                log.error(f"Invalid chunk ID received: {next_chunk_id}")
+                return None
+
             self.chunk_id.value = next_chunk_id
-            return self.chunk_id.value
+            
+            log.info("Retrieved new chunk ID", extra={
+                'chunk_id_truncated': str(next_chunk_id)[:4] + '...',
+                'operation': 'chunk_fetch'
+            })
+            
+            return next_chunk_id
+
+        except requests.exceptions.SSLError:
+            log.error("SSL certificate verification failed")
+            return None
+        except requests.exceptions.Timeout:
+            log.warning("API request timed out")
+            return None
+        except requests.exceptions.TooManyRedirects:
+            log.error("Too many redirects")
+            return None
         except requests.exceptions.RequestException as e:
-            log.error(f"Failed to fetch next chunk ID: {e}")
-            time.sleep(1)
+            log.error(f"Network error: {type(e).__name__}")  # Don't log full exception
+            return None
         except Exception as e:
-            log.exception(f"Unexpected error in get_next_chunk: {e}")
-             
-        return None
+            log.error("Unexpected error in chunk fetch", exc_info=True)  # Structured logging
+            return None
         
     
     def run(self):
@@ -227,7 +272,7 @@ class EndPoint(multiprocessing.Process):
                     continue
                 
                 try:
-                    object_key = f"{self.chunk_id.value}_{self.stream_identifier}.bin"
+                    object_key = f"{self.stream_identifier}/{current_chunk}_{self.stream_identifier}.bin"
                     response = self.s3.get_object(Bucket=self.bucket, Key=object_key)
                     self.process_chunk(ffmpeg_process, response)
                 except self.s3.exceptions.NoSuchKey:
