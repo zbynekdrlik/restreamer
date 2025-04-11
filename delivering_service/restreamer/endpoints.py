@@ -154,7 +154,7 @@ class EndPoint(multiprocessing.Process):
             
             
     def process_chunk(self, ffmpeg_process, response):
-       
+
         if not ffmpeg_process.poll():
             try:
                 if response:
@@ -162,7 +162,6 @@ class EndPoint(multiprocessing.Process):
                     ffmpeg_process.stdin.write(chunk_data)
                     ffmpeg_process.stdin.flush()
                     self.buff_size.value += len(chunk_data)
-                    self.chunk_id.value += 1
                 else:
                     log.warning("Chunk file not exists, skipping!")
             
@@ -170,9 +169,81 @@ class EndPoint(multiprocessing.Process):
                 log.warning("Write to ffmpeg stdin unsuccessful")
             except Exception as e:
                 log.error(f"Error {e}")
+                
+    
+    def retreive_next_chunk_id(self):
         
-            
+        """ Retrieves the next available chunk ID from the streaming API and updates the current chunk ID. """
 
+        # Validate inputs first
+        if not hasattr(self.chunk_id, 'value') or not isinstance(self.chunk_id.value, int):
+            log.error("Invalid current chunk ID state")
+            return None
+
+        if not isinstance(self.stream_identifier, str) or not self.stream_identifier:
+            log.error("Invalid stream identifier")
+            return None
+
+        try:
+            api_url = "https://restreamer.newlevel.media/api/get-next-chunk/"
+            params = {
+                "current_local_id": str(self.chunk_id.value),
+                "stream_identifier": self.stream_identifier,
+            }
+
+            response = requests.get(
+                api_url,
+                params=params,
+                timeout=(3.0),
+                verify=True,
+            )
+            response.raise_for_status()
+            
+            if 'application/json' not in response.headers.get('Content-Type', ''):
+                log.error("Invalid content type in response")
+                return None
+
+            try:
+                data = response.json()
+            except ValueError:
+                log.error("Invalid JSON response")
+                return None
+
+            if not isinstance(data, dict):
+                log.error("Response is not a JSON object")
+                return None
+
+            next_chunk_id = data.get("next_chunk_id")
+    
+            if next_chunk_id is None:
+                log.warning("No next_chunk_id in response")
+                return None
+                
+            if not isinstance(next_chunk_id, int) or next_chunk_id <= self.chunk_id.value:
+                log.error(f"Invalid chunk ID received: {next_chunk_id}")
+                return None
+
+            self.chunk_id.value = next_chunk_id
+             
+            return next_chunk_id
+
+        except requests.exceptions.SSLError:
+            log.error("SSL certificate verification failed")
+            return None
+        except requests.exceptions.Timeout:
+            log.warning("API request timed out")
+            return None
+        except requests.exceptions.TooManyRedirects:
+            log.error("Too many redirects")
+            return None
+        except requests.exceptions.RequestException as e:
+            log.error(f"Network error: {type(e).__name__}")  # Don't log full exception
+            return None
+        except Exception as e:
+            log.error("Unexpected error in chunk fetch", exc_info=True)  # Structured logging
+            return None
+        
+    
     def run(self):
         from django.db import connection
         connection.close()
@@ -190,20 +261,27 @@ class EndPoint(multiprocessing.Process):
                     ffmpeg_process = self.run_ffmpeg()
                     continue
 
-                if self.chunk_id.value is None:
+                if not self.retreive_next_chunk_id():
+                    log.warning('The buffer is empty !!! Waiting for new data.')
+                    time.sleep(20)
                     continue
                 
                 try:
-                    object_key = f"{self.chunk_id.value}_{self.stream_identifier}.bin"
+                    object_key = f"{self.stream_identifier}/{self.chunk_id.value}_{self.stream_identifier}.bin"
                     response = self.s3.get_object(Bucket=self.bucket, Key=object_key)
                     self.process_chunk(ffmpeg_process, response)
                 except self.s3.exceptions.NoSuchKey:
                     log.warning(
-                        f"NoSuchKey: The requested object does not exist. Waiting for new data."
+                        f"NoSuchKey: The requested object does not exist."
                         f"Bucket: {self.bucket}, Key: {object_key}, "
                         f"Stream Identifier: {self.stream_identifier}, Chunk ID: {self.chunk_id.value}."
                     )
-                    time.sleep(30)
+                    if self.retreive_next_chunk_id():
+                        time.sleep(2)
+                        continue
+                    
+                    log.warning('The buffer is empty !!! Waiting for new data.')
+                    time.sleep(20)
                 except Exception as e:
                     log.error(
                         f"An error occurred while accessing S3. "
@@ -212,7 +290,7 @@ class EndPoint(multiprocessing.Process):
                         f"Error: {str(e)}"
                     )
                     log.exception(e)
-                    time.sleep(30)
+                    time.sleep(5)
                 
                       
         except KeyboardInterrupt:
