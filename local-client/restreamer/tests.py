@@ -1,8 +1,40 @@
+import contextlib
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
+from django.core.management import call_command
 from django.test import TestCase
 
+from restreamer.models import StreamingEvent
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "local-client" / "scripts"
+
+
+class InpointServiceTests(TestCase):
+    """Test the inpoint_service management command handles missing/inactive streaming events."""
+
+    @patch("restreamer.management.commands.inpoint_service.redis_client")
+    @patch("restreamer.management.commands.inpoint_service.time.sleep", side_effect=KeyboardInterrupt)
+    def test_no_streaming_event_does_not_crash(self, mock_sleep, mock_redis):
+        """inpoint_service must not crash when no StreamingEvent exists."""
+        self.assertFalse(StreamingEvent.objects.exists())
+        with contextlib.suppress(KeyboardInterrupt):
+            call_command("inpoint_service", stdout=StringIO(), stderr=StringIO())
+        mock_redis.rpush.assert_called_with("inpoint_icon_status", "inpoint_waiting")
+
+    @patch("restreamer.management.commands.inpoint_service.redis_client")
+    @patch("restreamer.management.commands.inpoint_service.time.sleep", side_effect=KeyboardInterrupt)
+    def test_inactive_streaming_event_waits(self, mock_sleep, mock_redis):
+        """inpoint_service must wait when streaming event has receiving_activated=False."""
+        StreamingEvent.objects.create(
+            identifier="test-event",
+            short_description="test",
+            receiving_activated=False,
+        )
+        with contextlib.suppress(KeyboardInterrupt):
+            call_command("inpoint_service", stdout=StringIO(), stderr=StringIO())
+        mock_redis.rpush.assert_called_with("inpoint_icon_status", "inpoint_waiting")
 
 
 class ScriptPathTests(TestCase):
