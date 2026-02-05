@@ -18,10 +18,21 @@
 - Every feature, bugfix, and refactor must have corresponding tests that verify the actual behavior.
 - ALL tests must pass — never skip, ignore, or disable tests. Never produce false-positive green results that hide real issues. A passing test suite must reflect genuinely working code.
 
-### Deployment Target: stream.lan
+### Deployment Target: stream.lan (Local Client)
 
 - **Host**: `stream.lan` (Windows 11 IoT Enterprise LTSC)
-- **SSH User**: `newlevel`
-- **SSH Password**: `newlevel`
 - **Install Path**: `C:\Users\newlevel\restreamer\`
 - **Legacy Path**: `C:\Users\newlevel\Desktop\restreamer\` (backup as `restreamer_old_backup`)
+- **Credentials**: See `~/.restreamer-secrets/stream-lan.env` (not tracked by git)
+
+### Deployment Target: restreamer.newlevel.media (Manager Server)
+
+- **Host**: `restreamer.newlevel.media` (Linode VPS, IP `172.105.95.118`)
+- **Install Path**: `/root/kristian/manager-server/restreamer-manager/`
+- **Virtualenv**: `/root/.virtualenvs/venv/`
+- **Django Admin**: `https://restreamer.newlevel.media/admin/`
+- **Process Manager**: tmux session `restreamer`, gunicorn + nginx
+- **Celery**: worker on `init_stream_queue`
+- **DB**: PostgreSQL 16
+- **Credentials**: See `~/.restreamer-secrets/manager-server.env` (not tracked by git)
+- **SNV-stream client** is our church streaming client
