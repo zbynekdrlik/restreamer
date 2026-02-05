@@ -119,6 +119,21 @@ class ScriptPathTests(TestCase):
         content = script.read_text()
         self.assertIn("--pool=threads", content)
 
+    def test_celery_scripts_use_python_m_celery(self):
+        """Celery bat scripts must use 'python -m celery' not bare 'celery' shim.
+
+        The celery.exe shim fails under NSSM on Python 3.13 Windows.
+        Using 'python -m celery' avoids the shim and works reliably.
+        """
+        for name in ("stream_ready_worker.bat", "clery_beat.bat"):
+            script = SCRIPTS_DIR / name
+            content = script.read_text()
+            self.assertIn(
+                "python -m celery",
+                content,
+                f"{name} must use 'python -m celery' instead of bare 'celery' command",
+            )
+
     def test_all_ps1_activate_venv(self):
         """All PS1 service scripts must activate the virtual environment."""
         ps1_service_scripts = [
