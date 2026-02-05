@@ -27,7 +27,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-le7+a=@f0srkltg0_-mj=0u=+z%fimls3*f4c&b_au)paa$w10'
+SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-me-on-production')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
@@ -109,9 +109,9 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 
-sentry_sdk.init(
-    dsn="https://8c71a1a23d7b4b55298a353768d5860d@o4508366433026048.ingest.de.sentry.io/4508366469529680",
-)
+SENTRY_DSN = config('SENTRY_DSN', default='')
+if SENTRY_DSN:
+    sentry_sdk.init(dsn=SENTRY_DSN)
 
 # Internationalization
 # https://docs.djangoproject.com/en/5.0/topics/i18n/

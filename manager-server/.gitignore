@@ -8,7 +8,6 @@ requirements
 *.rdb
 .env
 __pycache__/
-**/migrations/
 stream_chunks/
 *.db.sqlite3-journal
 client/db.sqlite3-journal

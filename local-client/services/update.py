@@ -19,15 +19,15 @@ UPDATE_SCRIPT = BASE_DIR / "scripts" / "update.bat"
 # Function to check for updates
 def check_updates():
     try:
-        # Fetch remote commits for the 'integration' branch
+        # Fetch remote commits for the 'main' branch
         log.info("Fetching remote commit...")
         remote_commit_output = subprocess.check_output(
-            "git ls-remote origin integration",
+            "git ls-remote origin main",
             shell=True,
         ).decode().strip()
-        
+
         if not remote_commit_output:
-            log.error("No output from 'git ls-remote'. Is the branch 'integration' present on the remote?")
+            log.error("No output from 'git ls-remote'. Is the branch 'main' present on the remote?")
             return False
 
         remote_commit = remote_commit_output.split()[0]
@@ -36,7 +36,7 @@ def check_updates():
         # Fetch the local commit hash
         log.info("Fetching local commit...")
         local_commit_output = subprocess.check_output(
-            "git rev-parse integration",
+            "git rev-parse main",
             shell=True,
         ).decode().strip()
         

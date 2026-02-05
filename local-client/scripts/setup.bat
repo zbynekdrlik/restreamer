@@ -1,120 +1,105 @@
 @echo off
+setlocal enabledelayedexpansion
+
+echo ============================================================
+echo   Restreamer Local Client - Setup
+echo ============================================================
+echo.
 
 REM Set the directory of the batch file as the working directory
 set "ScriptDir=%~dp0"
 
-REM Run the PowerShell commands as an administrator by calling the secondary script
+REM Set execution policy for PowerShell scripts
 powershell -Command "Start-Process cmd.exe -ArgumentList '/c call \"%ScriptDir%executionpolicy.bat\"' -Verb RunAs"
 
-rem Set the working directory to the main project directory
+REM Navigate to local-client root (one level up from scripts/)
+cd /d "%ScriptDir%.."
+set "LOCAL_CLIENT_DIR=%cd%"
+echo Local client directory: %LOCAL_CLIENT_DIR%
 
-cd ..\
-
-:: Load the GitHub token from .env file
-for /f "tokens=1,2 delims==" %%A in ('type "..\.env"') do (
-    if "%%A"=="GITHUB_TOKEN" set GITHUB_TOKEN=%%B
-)
-
-:: Check if the token is loaded
-if "%GITHUB_TOKEN%"=="" (
-    echo ERROR: GitHub token is missing! Make sure to set it in the .env file.
+REM Check that .env exists
+if not exist ".env" (
+    echo.
+    echo ERROR: .env file not found!
+    echo Please copy .env.example to .env and fill in your credentials before running setup.
+    echo.
+    pause
     exit /b 1
 )
 
-:: Set global Git configuration
-git config --global user.name "user"
-git config --global user.email "kukos700@gmail.com"
+REM Navigate to parent directory (repo root or wherever venv should live)
+cd ..
+set "REPO_ROOT=%cd%"
 
-:: Store GitHub credentials securely
-git config --global credential.helper store
-echo https://kukos700@gmail.com:%GITHUB_TOKEN%@github.com > "%USERPROFILE%\.git-credentials"
-
-REM Initialize Git repository and add origin
-if not exist .git (
-    echo Initializing Git repository...
-    git init
-    git remote add origin https://github.com/kuskryptus/restreamer-local.git
-    git add .
-    git commit -m "Initial commit with local files"
-    git fetch origin
-    git checkout -b integration origin/integration
+REM Create virtual environment
+if not exist "venv" (
+    echo Creating virtual environment...
+    python -m venv venv
 ) else (
-    echo Git repository already exists. Skipping initialization.
+    echo Virtual environment already exists.
 )
 
-cd ..\
-
-rem Create a virtual environment
-python -m venv venv
-
-rem Activate the virtual environment
+REM Activate the virtual environment
 call venv\Scripts\activate
 
-echo Current Directory: %cd%
+REM Navigate back to local-client
+cd /d "%LOCAL_CLIENT_DIR%"
 
-cd local_client
-
-echo Current Directory: %cd%
-
-rem Install all dependencies
+REM Install dependencies
+echo Installing dependencies...
 pip install -r requirements.txt
 
-rem Unzip ffmpeg.zip if it exists and hasn't been unzipped yet
+REM Unzip ffmpeg.zip if it exists
 if exist "ffmpeg.zip" (
     echo Unzipping ffmpeg.zip...
     powershell -Command "Expand-Archive -Path 'ffmpeg.zip' -DestinationPath '.' -Force"
     echo ffmpeg has been unzipped.
-
-    rem Delete ffmpeg.zip after unzipping
     del "ffmpeg.zip"
-    if exist "ffmpeg.zip" (
-        echo Failed to delete ffmpeg.zip.
-    ) else (
-        echo ffmpeg.zip has been deleted.
-    )
 ) else (
     echo ffmpeg.zip not found, skipping unzip step.
 )
 
-rem Make migrations
-python manage.py makemigrations
+REM Run migrations (migrations are committed, no makemigrations needed)
+echo Applying database migrations...
+python manage.py migrate
 
-rem Migrate
-python manage.py migrate 
+REM Create superuser interactively
+echo.
+echo Creating admin superuser...
+echo Please enter credentials for the Django admin account:
+python manage.py createsuperuser
 
-
-echo from django.contrib.auth.models import User; User.objects.create_superuser('admin', '', 'Milostsnv123!') | python manage.py shell
-
-start "" http://127.0.0.1:8571/admin/
-
-python manage.py create_local_user
-
-rem Make migrations
-python manage.py makemigrations
-
-rem Migrate
-python manage.py migrate 
+REM Create local user profile
+echo.
+set /p USER_UUID="Enter the client UUID from the manager server (or press Enter to skip): "
+if not "!USER_UUID!"=="" (
+    python manage.py create_local_user --uuid "!USER_UUID!"
+) else (
+    echo Skipping local user creation.
+)
 
 REM Create directory for logs
-mkdir "%ScriptDir%services_logs"
+if not exist "%ScriptDir%services_logs" (
+    mkdir "%ScriptDir%services_logs"
+)
 
-REM Run a specific line as administrator
+REM Install and start services (Redis, NSSM services) as admin
+echo.
+echo Installing services (requires Administrator privileges)...
 powershell.exe -Command "Start-Process cmd.exe -ArgumentList '/c call \"%ScriptDir%run_services.bat\"' -Verb RunAs"
 
-@echo off
-set "shortcutTarget=%USERPROFILE%\Desktop\PowerShell.lnk"
-
+REM Start tray icon
 cscript.exe "%ScriptDir%run_trayicon.vbs"
 
-@echo off
-move "%ScriptDir%run_trayicon.vbs" "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
-move "%ScriptDir%check_update.vbs" "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
-echo File moved to startup folder
+REM Copy VBS launchers to startup folder
+copy "%ScriptDir%run_trayicon.vbs" "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\" >nul
+copy "%ScriptDir%check_update.vbs" "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\" >nul
+echo Startup scripts installed.
 
-python manage.py runserver 8571 
-
-Read-Host "Press Enter to exit"
+REM Open admin page and start server
+echo.
+echo Starting Django development server on port 8571...
+start "" http://127.0.0.1:8571/admin/
+python manage.py runserver 8571
 
 pause
-
-

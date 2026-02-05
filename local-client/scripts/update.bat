@@ -2,36 +2,29 @@
 
 REM Set working directory to the directory of this script
 cd /d %~dp0
-echo Starting script in: %cd%
+echo Starting update in: %cd%
 
-REM Navigate one directory down
+REM Navigate to local-client root
 cd ..\
-echo Navigated to: %cd%
+set "LOCAL_CLIENT_DIR=%cd%"
+echo Local client directory: %LOCAL_CLIENT_DIR%
 
+REM Navigate to repo root
+cd ..\
+echo Repo root: %cd%
 
 echo Pulling latest changes...
 git fetch origin
-git reset --hard origin/integration
-
-REM Navigate two directories up
-cd ..\
-echo Navigated to: %cd%
-
+git reset --hard origin/main
 
 REM Activate the virtual environment
 call venv\Scripts\activate
 
-
-REM Navigate to the restreamer-local-client directory
-cd "local_client"
-echo Navigated to: %cd%
+REM Navigate to local-client
+cd /d "%LOCAL_CLIENT_DIR%"
 
 echo Installing dependencies...
 pip install -r requirements.txt
-
-
-echo Making migrations...
-python manage.py makemigrations
 
 echo Applying migrations...
 python manage.py migrate
@@ -39,7 +32,7 @@ python manage.py migrate
 rem Get the directory of the batch script
 set "ScriptDir=%~dp0"
 
-rem Navigate one step up to the 'client' directory, then to the 'bin' directory
+rem Navigate to the bin directory
 cd /d "%ScriptDir%..\bin"
 
 REM Stop services with a delay
@@ -60,4 +53,3 @@ nssm start inpoint_service confirm
 nssm start endpoint_service confirm
 nssm start CeleryWorker confirm
 nssm start CeleryBeat confirm
-

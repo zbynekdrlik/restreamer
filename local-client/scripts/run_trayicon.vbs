@@ -1,5 +1,9 @@
+Set objFSO = CreateObject("Scripting.FileSystemObject")
 Set objShell = CreateObject("WScript.Shell")
-strScriptPath = "%USERPROFILE%\Desktop\restreamer\local_client\scripts\start_trayicon_service.ps1"
+
+' Resolve path relative to this script's location
+strScriptDir = objFSO.GetParentFolderName(WScript.ScriptFullName)
+strScriptPath = objFSO.BuildPath(strScriptDir, "start_trayicon_service.ps1")
 
 ' Unblock the PowerShell script
 strUnblockCommand = "powershell.exe -Command Unblock-File -Path """ & strScriptPath & """"
@@ -10,3 +14,4 @@ strCommand = "powershell.exe -ExecutionPolicy Bypass -File """ & strScriptPath &
 objShell.Run strCommand, 0, False
 
 Set objShell = Nothing
+Set objFSO = Nothing

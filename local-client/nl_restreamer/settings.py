@@ -14,18 +14,19 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 import boto3
+from decouple import config
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-from decouple import config
-load_dotenv()
+
+load_dotenv(BASE_DIR / '.env')
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-ye-wdbl&9f=%%l=jd7t#zc)a7$2m0o#&mn+%!iha9mbxusvzgk"
+SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-me-on-production')
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = config('DEBUG', default=True, cast=bool)
 
 ALLOWED_HOSTS = ["*"]
 
@@ -121,7 +122,6 @@ USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/4.1/howto/static-files/
-# PROJECT_ROOT = os.path.normpath(os.path.dirname(__file__))
 STATIC_URL = "static/"
 STATIC_ROOT = os.path.join(BASE_DIR, "static")
 
@@ -186,17 +186,13 @@ CHANNEL_LAYERS = {
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 30000
 
 # S3 Object Storage settings
-AWS_ACCESS_KEY_ID = 'MLY58YUGUBYVT50BTZTP'
-AWS_SECRET_ACCESS_KEY = 'jSa8YnzBe7nic5bvTYyDoL1MtBzDD4daqQGBr5FW'
-AWS_STORAGE_BUCKET_NAME = 'linode52'
-AWS_S3_REGION_NAME = 'eu-central-1'  # Set your region
-OBJECT_STORAGE_URL = 'https://eu-central-1.linodeobjects.com'
-LINODE_API_KEY = os.getenv('LINODE_TOKEN')
-
+AWS_STORAGE_BUCKET_NAME = config('AWS_STORAGE_BUCKET_NAME', default='linode52')
+AWS_S3_REGION_NAME = config('AWS_S3_REGION_NAME', default='eu-central-1')
+OBJECT_STORAGE_URL = config('OBJECT_STORAGE_URL', default='https://eu-central-1.linodeobjects.com')
+LINODE_API_KEY = config('LINODE_TOKEN', default='')
 
 AWS_SECRET_ACCESS_KEY = config('AWS_SECRET_ACCESS_KEY')
 AWS_ACCESS_KEY_ID = config('AWS_ACCESS_KEY_ID')
-OBJECT_STORAGE_URL = 'https://eu-central-1.linodeobjects.com'
 
 S3_CLIENT = boto3.client('s3',
                          endpoint_url=OBJECT_STORAGE_URL,
@@ -204,13 +200,8 @@ S3_CLIENT = boto3.client('s3',
                          aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
 
 
-CELERY_BROKER_URL = 'redis://localhost:6379'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379'
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://localhost:6379')
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://localhost:6379')
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
-from celery import Celery
-
-
-
-
-
+MANAGER_SERVER_URL = config('MANAGER_SERVER_URL', default='https://restreamer.newlevel.media')
