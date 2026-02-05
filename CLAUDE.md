@@ -17,3 +17,11 @@
 - Prefer integration and E2E tests over unit tests with heavy mocking. Mocks are only acceptable for external API calls and third-party services.
 - Every feature, bugfix, and refactor must have corresponding tests that verify the actual behavior.
 - ALL tests must pass — never skip, ignore, or disable tests. Never produce false-positive green results that hide real issues. A passing test suite must reflect genuinely working code.
+
+### Deployment Target: stream.lan
+
+- **Host**: `stream.lan` (Windows 11 IoT Enterprise LTSC)
+- **SSH User**: `newlevel`
+- **SSH Password**: `newlevel`
+- **Install Path**: `C:\Users\newlevel\restreamer\`
+- **Legacy Path**: `C:\Users\newlevel\Desktop\restreamer\` (backup as `restreamer_old_backup`)
