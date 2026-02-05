@@ -8,6 +8,7 @@
 - Never provide a PR URL that has failing checks or merge conflicts.
 - After creating a PR, monitor the CI pipeline status. If checks fail, fix the issues, push fixes, and only then share the final green PR URL.
 - Every PR MUST include tests covering the implemented changes. No PR is complete without tests.
+- NEVER merge a PR. Only the user may merge pull requests. The agent must only create the PR, ensure CI is green, and provide the URL. Merging is exclusively the user's action.
 
 ### Testing
 
