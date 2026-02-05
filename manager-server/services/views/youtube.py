@@ -1,34 +1,33 @@
-from django.shortcuts import redirect
-from google_auth_oauthlib.flow import Flow
-from google.auth.transport.requests import Request
-from django.utils import timezone
 import datetime
-from services.models import YouTubeOAuthCredentials
+
 from django.conf import settings
+from django.shortcuts import redirect
+from django.utils import timezone
+from google_auth_oauthlib.flow import Flow
+from services.models import YouTubeOAuthCredentials
 
 
 def youtube_auth_start(request):
     flow = Flow.from_client_secrets_file(
         settings.GOOGLE_CLIENT_SECRETS_FILE,  # This is your client_id/client_secret JSON from Google Cloud
-        scopes=['https://www.googleapis.com/auth/youtube'],
-        redirect_uri=request.build_absolute_uri('/youtube/auth/callback')
+        scopes=["https://www.googleapis.com/auth/youtube"],
+        redirect_uri=request.build_absolute_uri("/youtube/auth/callback"),
     )
     # Generate the authorization URL
     authorization_url, state = flow.authorization_url(
-        access_type='offline',
-        prompt='consent',
-        include_granted_scopes='true'
+        access_type="offline", prompt="consent", include_granted_scopes="true"
     )
     # Store the state in session for security
-    request.session['oauth_state'] = state
+    request.session["oauth_state"] = state
     return redirect(authorization_url)
 
+
 def youtube_auth_callback(request):
-    state = request.session.pop('oauth_state', '')
+    state = request.session.pop("oauth_state", "")
     flow = Flow.from_client_secrets_file(
         settings.GOOGLE_CLIENT_SECRETS_FILE,
-        scopes=['https://www.googleapis.com/auth/youtube'],
-        redirect_uri=request.build_absolute_uri('/youtube/auth/callback')
+        scopes=["https://www.googleapis.com/auth/youtube"],
+        redirect_uri=request.build_absolute_uri("/youtube/auth/callback"),
     )
     flow.fetch_token(authorization_response=request.build_absolute_uri(), state=state)
     creds = flow.credentials  # This is a google.oauth2.credentials.Credentials object
@@ -42,16 +41,16 @@ def youtube_auth_callback(request):
     youtube_oauth.token_uri = creds.token_uri
     youtube_oauth.client_id = creds.client_id
     youtube_oauth.client_secret = creds.client_secret
-    youtube_oauth.scopes = ' '.join(creds.scopes) if creds.scopes else ''
-    
+    youtube_oauth.scopes = " ".join(creds.scopes) if creds.scopes else ""
+
     # Convert creds.expiry (Python datetime) to something storable
     if creds.expiry:
         if timezone.is_naive(creds.expiry):
-            youtube_oauth.expiry = timezone.make_aware(creds.expiry, datetime.timezone.utc)
+            youtube_oauth.expiry = timezone.make_aware(creds.expiry, datetime.UTC)
         else:
             youtube_oauth.expiry = creds.expiry
-            
+
     youtube_oauth.save()
 
     # Redirect somewhere
-    return redirect('control:home')
+    return redirect("control:home")

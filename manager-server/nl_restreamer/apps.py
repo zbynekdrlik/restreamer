@@ -1,18 +1,18 @@
+from django.contrib.admin.apps import AdminConfig
+from django.template.response import TemplateResponse
 from django.urls import reverse
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
-from django.contrib.admin.apps import AdminConfig
-from django.template.response import TemplateResponse
 
 
 class MyAdminConfig(AdminConfig):
-    default_site = 'nl_restreamer.admin.MyAdminSite'
+    default_site = "nl_restreamer.admin.MyAdminSite"
 
     def index(self, request, extra_context=None):
         app_list = self.get_app_list(request)
 
         # Add your button HTML code to the context
-        button_html = '''
+        button_html = """
             <div style="padding: 10px;">
                 <button id="my-ajax-button" class="button">Perform Action</button>
             </div>
@@ -32,11 +32,11 @@ class MyAdminConfig(AdminConfig):
                     });
                 });
             </script>
-        '''
-        button_url = reverse('ajax_action')
+        """
+        button_url = reverse("ajax_action")
         button_html = format_html(button_html, url=button_url)
         extra_context = extra_context or {}
-        extra_context['button_html'] = mark_safe(button_html)
+        extra_context["button_html"] = mark_safe(button_html)
 
         context = dict(
             self.each_context(request),
@@ -47,5 +47,4 @@ class MyAdminConfig(AdminConfig):
 
         request.current_app = self.name
 
-        return TemplateResponse(request, self.index_template or
-                                'admin/index.html', context)
+        return TemplateResponse(request, self.index_template or "admin/index.html", context)

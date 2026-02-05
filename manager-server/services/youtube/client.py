@@ -1,19 +1,19 @@
 import logging
 
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
 from django.utils import timezone
-from services.models import YouTubeOAuthCredentials
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 
 log = logging.getLogger(__name__)
+
 
 def build_youtube_client(user):
     """
     Build the youtube client from the user's stored OAuth tokens in DB.
     Returns the youtube API client or None if the user is not connected.
     """
-    youtube_oauth = getattr(user, 'youtube_oauth', None)
+    youtube_oauth = getattr(user, "youtube_oauth", None)
     if not youtube_oauth:
         return None
 
@@ -23,7 +23,7 @@ def build_youtube_client(user):
         token_uri=youtube_oauth.token_uri,
         client_id=youtube_oauth.client_id,
         client_secret=youtube_oauth.client_secret,
-        scopes=youtube_oauth.scopes.split()
+        scopes=youtube_oauth.scopes.split(),
     )
 
     # Refresh if needed
@@ -40,15 +40,16 @@ def build_youtube_client(user):
             youtube_oauth.expiry = creds.expiry if creds.expiry.tzinfo else creds.expiry.replace(tzinfo=timezone.utc)
         youtube_oauth.save()
 
-    return build('youtube', 'v3', credentials=creds)
+    return build("youtube", "v3", credentials=creds)
+
 
 def get_active_live_broadcasts(user):
     youtube = build_youtube_client(user)
     if not youtube:
         return []
-    response = youtube.liveBroadcasts().list(
-        part='id,snippet,contentDetails,status',
-        broadcastStatus='active',
-        broadcastType='all'
-    ).execute()
-    return response.get('items', [])
+    response = (
+        youtube.liveBroadcasts()
+        .list(part="id,snippet,contentDetails,status", broadcastStatus="active", broadcastType="all")
+        .execute()
+    )
+    return response.get("items", [])

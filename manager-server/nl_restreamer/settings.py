@@ -1,15 +1,15 @@
-
 # daphne -u /tmp/daphne.sock -p 8001 nl_restreamer.asgi:application
 # celery -A nl_restreamer worker -l INFO --pool=threads -Q init_stream_queue
 
 import os
 import socket
-import boto3
 from pathlib import Path
-from dotenv import load_dotenv
-from linode_api4 import Instance, LinodeClient, objects
 
-env_path = Path('.') / '.env'
+import boto3
+from dotenv import load_dotenv
+from linode_api4 import LinodeClient
+
+env_path = Path(".") / ".env"
 load_dotenv(dotenv_path=env_path)
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -19,12 +19,12 @@ from decouple import config
 # See https://docs.djangoproject.com/en/4.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = config('SECRET_KEY')
+SECRET_KEY = config("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
 hostname, _, ips = socket.gethostbyname_ex(socket.gethostname())
-ALLOWED_HOSTS = ['*'] + ips
+ALLOWED_HOSTS = ["*"] + ips
 
 INSTALLED_APPS = [
     "nl_restreamer.apps.MyAdminConfig",
@@ -32,26 +32,22 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
-    'daphne',
+    "daphne",
     "django.contrib.staticfiles",
     "admin_object_actions",
     "rest_framework",
-    
     "accounts",
     "services",
     "restreamer",
-    
-    'crispy_forms',
-    'crispy_bootstrap5',
-    'channels',
-    'simple_history',
-    'django_celery_beat',
-    
-
+    "crispy_forms",
+    "crispy_bootstrap5",
+    "channels",
+    "simple_history",
+    "django_celery_beat",
 ]
 
 
-CRISPY_TEMPLATE_PACK = 'bootstrap5'
+CRISPY_TEMPLATE_PACK = "bootstrap5"
 CRISPY_ALLOWED_TEMPLATE_PACKS = "bootstrap5"
 
 MIDDLEWARE = [
@@ -63,8 +59,8 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "crum.CurrentRequestUserMiddleware",
-    'simple_history.middleware.HistoryRequestMiddleware',
-    'accounts.middleware.BlockUnknownUserMiddleware'
+    "simple_history.middleware.HistoryRequestMiddleware",
+    "accounts.middleware.BlockUnknownUserMiddleware",
 ]
 
 ROOT_URLCONF = "nl_restreamer.urls"
@@ -72,9 +68,10 @@ ROOT_URLCONF = "nl_restreamer.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [os.path.join(BASE_DIR, 'restreamer', 'templates'),
-                 os.path.join(BASE_DIR, 'accounts', 'templates'),
-                ],
+        "DIRS": [
+            os.path.join(BASE_DIR, "restreamer", "templates"),
+            os.path.join(BASE_DIR, "accounts", "templates"),
+        ],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -88,13 +85,13 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "nl_restreamer.wsgi.application"
-ASGI_APPLICATION = 'nl_restreamer.asgi.application'
+ASGI_APPLICATION = "nl_restreamer.asgi.application"
 
 CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        'CONFIG': {
-            "hosts": [('127.0.0.1', 6379)],
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("127.0.0.1", 6379)],
         },
     },
 }
@@ -153,11 +150,11 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/4.1/howto/static-files/
 
 STATIC_URL = "static/"
-STATIC_ROOT = os.path.join(BASE_DIR, "restreamer",  "static/")
+STATIC_ROOT = os.path.join(BASE_DIR, "restreamer", "static/")
 
 
-LOGOUT_REDIRECT_URL = '/'
-LOGIN_REDIRECT_URL = '/control/home/'
+LOGOUT_REDIRECT_URL = "/"
+LOGIN_REDIRECT_URL = "/control/home/"
 
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
@@ -214,47 +211,49 @@ LOGGING = {
 
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 30000
 
-AUTH_USER_MODEL = 'accounts.RestreamerUser'
+AUTH_USER_MODEL = "accounts.RestreamerUser"
 
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 CSRF_TRUSTED_ORIGINS = ["https://restreamer.solarnyexprex.eu"]
 
 
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_USE_TLS = True  # Use TLS (Transport Layer Security)
-EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_HOST = "smtp.gmail.com"
 EMAIL_PORT = 587  # Correct port for TLS
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')  # Replace with your email
-EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')  # App password or regular password if 2FA is not enabled
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL')  # From email
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")  # Replace with your email
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")  # App password or regular password if 2FA is not enabled
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")  # From email
 
 
-BASE_URL = 'https://restreamer.solarnyexprex.eu'
-CRON_SECRET_TOKEN = os.getenv('CRON_SECRET_TOKEN')
+BASE_URL = "https://restreamer.solarnyexprex.eu"
+CRON_SECRET_TOKEN = os.getenv("CRON_SECRET_TOKEN")
 
 
-AWS_STORAGE_BUCKET_NAME = 'linode52'
-AWS_SECRET_ACCESS_KEY = config('AWS_SECRET_ACCESS_KEY')
-AWS_ACCESS_KEY_ID = config('AWS_ACCESS_KEY_ID')
-OBJECT_STORAGE_URL = 'https://eu-central-1.linodeobjects.com'
+AWS_STORAGE_BUCKET_NAME = "linode52"
+AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY")
+AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID")
+OBJECT_STORAGE_URL = "https://eu-central-1.linodeobjects.com"
 
-S3_CLIENT = boto3.client('s3',
-                         endpoint_url=OBJECT_STORAGE_URL,
-                         aws_access_key_id=AWS_ACCESS_KEY_ID,
-                         aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+S3_CLIENT = boto3.client(
+    "s3",
+    endpoint_url=OBJECT_STORAGE_URL,
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+)
 
 
-token = os.getenv('LINODE_TOKEN')
+token = os.getenv("LINODE_TOKEN")
 LINODE_CLIENT = LinodeClient(token)
-INSTANCE_TYPE_4G = os.getenv('INSTANCE_TYPE_4G')
-INSTANCE_TYPE_1G = os.getenv('INSTANCE_TYPE_1G')
-INSTANCE_TYPE_8G = os.getenv('INSTANCE_TYPE_8G')
-REGION = os.getenv('INSTANCE_REGION')
-ROOT_PASSWORD = os.getenv('ROOT_SERVER_PASSWORD')
+INSTANCE_TYPE_4G = os.getenv("INSTANCE_TYPE_4G")
+INSTANCE_TYPE_1G = os.getenv("INSTANCE_TYPE_1G")
+INSTANCE_TYPE_8G = os.getenv("INSTANCE_TYPE_8G")
+REGION = os.getenv("INSTANCE_REGION")
+ROOT_PASSWORD = os.getenv("ROOT_SERVER_PASSWORD")
 
 
-CELERY_BROKER_URL = 'redis://localhost:6379'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379'
+CELERY_BROKER_URL = "redis://localhost:6379"
+CELERY_RESULT_BACKEND = "redis://localhost:6379"
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
 GOOGLE_CLIENT_SECRETS_FILE = BASE_DIR / "mtoken.json"

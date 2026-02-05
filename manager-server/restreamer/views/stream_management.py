@@ -1,21 +1,16 @@
-import hashlib
 import logging
-import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 
-from django.conf import settings
 from django.db.utils import IntegrityError
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status
-from rest_framework.generics import GenericAPIView
 from rest_framework.response import Response
 from rest_framework.views import APIView, View
-from ..models import ChunkRecord, StreamingEvent
-from ..serializers import ChunkSerializer, PositionLastSerializer, ChunkRecordSerializer
-from django.utils.decorators import method_decorator
-from django.contrib.auth.decorators import login_required
-from django.http import JsonResponse
 from restreamer.video_data import VideoDataManager
+
+from ..models import ChunkRecord, StreamingEvent
+from ..serializers import ChunkSerializer, PositionLastSerializer
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +18,6 @@ log = logging.getLogger(__name__)
 class ChunkUploadView(APIView):
     def post(self, request):
         serializer = ChunkSerializer(data=request.data)
-
 
         if serializer.is_valid():
             try:
@@ -37,7 +31,6 @@ class ChunkUploadView(APIView):
                     log.info("Streaming Event not valid !!")
                     return Response({"message": "Streaming Event not valid"}, status=status.HTTP_400_BAD_REQUEST)
 
-
                 chunk_record = ChunkRecord()
                 chunk_record.data_size = chunk_size
                 chunk_record.streaming_event = streaming_event
@@ -45,7 +38,6 @@ class ChunkUploadView(APIView):
                 chunk_record.identifier = chunk_identifier
                 chunk_record.save()
 
-               
             except IntegrityError as e:
                 log.info("IntegrityError occurred while saving chunk_record_1: %s" % str(e))
                 pass
@@ -64,7 +56,7 @@ class ChunkUploadView(APIView):
             log.error(serializer.errors)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    
+
 class PositionLastUploadView(APIView):
     def post(self, request):
         serializer = PositionLastSerializer(data=request.data)
@@ -101,8 +93,8 @@ class DeleteChunksView(APIView):
 
 class ChunkExistsView(APIView):
     def post(self, request):
-        se_id = request.data.get('se_identifier')
-        chunk_id = request.data.get('chunk_id')
+        se_id = request.data.get("se_identifier")
+        chunk_id = request.data.get("chunk_id")
 
         if not chunk_id and se_id:
             return Response("Missing data in request", status=status.HTTP_400_BAD_REQUEST)
@@ -110,14 +102,13 @@ class ChunkExistsView(APIView):
         try:
             chunk_exists = ChunkRecord.objects.filter(identifier=se_id, local_id=chunk_id).exists()
             if chunk_exists:
-                return Response({'chunk_exists': True}, status=status.HTTP_200_OK)
+                return Response({"chunk_exists": True}, status=status.HTTP_200_OK)
             else:
-                log.info('Chunk Record dosnt exsist')
-                return Response({'chunk_exists': False}, status=status.HTTP_200_OK)
+                log.info("Chunk Record dosnt exsist")
+                return Response({"chunk_exists": False}, status=status.HTTP_200_OK)
 
         except ChunkRecord.DoesNotExist:
-            return Response({'chunk_exists': False }, status=status.HTTP_200_OK)
-
+            return Response({"chunk_exists": False}, status=status.HTTP_200_OK)
 
 
 def check_buffer_status(request, streaming_event_id):
@@ -125,8 +116,8 @@ def check_buffer_status(request, streaming_event_id):
     video_manager = VideoDataManager(streaming_event.id)
     buffer_time = streaming_event.buffer
     buffer_filled = video_manager.is_buffer_filled(buffer_time)
-    
-    return JsonResponse({'buffer_filled': buffer_filled})
+
+    return JsonResponse({"buffer_filled": buffer_filled})
 
 
 class IsDeliveringActive(View):
@@ -137,17 +128,22 @@ class IsDeliveringActive(View):
         buffer_length = streaming_event.buffer
 
         stream_length_timedelta = timedelta(seconds=data_manager.stream_length())
-        stream_length_minutes = stream_length_timedelta.total_seconds() / 60 
+        stream_length_minutes = stream_length_timedelta.total_seconds() / 60
 
         time_difference = stream_length_minutes - buffer_length
 
-        log.info(f'time difference {time_difference}')
+        log.info(f"time difference {time_difference}")
 
         if data_manager.is_buffer_filled(buffer_length):
             if time_difference < 10:
-                return JsonResponse({
-                    'is_filled': True,
-                })
-        
-        return JsonResponse({'is_filled': False,})
-        
+                return JsonResponse(
+                    {
+                        "is_filled": True,
+                    }
+                )
+
+        return JsonResponse(
+            {
+                "is_filled": False,
+            }
+        )

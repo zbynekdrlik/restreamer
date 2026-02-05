@@ -1,19 +1,18 @@
+import hashlib
 import logging
+import threading
 import time
 from collections import deque
-import threading
-import redis
-import ffmpeg
-import hashlib
-from threading import Thread, Event
-from django.core.files.base import ContentFile
-import codecs
+from threading import Event, Thread
 
-from restreamer.models import StreamingEvent
-from restreamer.models import ChunkRecord
+import ffmpeg
+import redis
+from django.core.files.base import ContentFile
+
+from restreamer.models import ChunkRecord, StreamingEvent
 
 log = logging.getLogger(__name__)
-redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
+redis_client = redis.StrictRedis(host="localhost", port=6379, db=0)
 
 
 class InPoint(threading.Thread):
@@ -79,7 +78,7 @@ class InPoint(threading.Thread):
 
                 chunk = ffmpeg_process.stdout.read(1024 * 100)
                 if not chunk:
-                    redis_client.rpush('inpoint_icon_status', 'inpoint_active')
+                    redis_client.rpush("inpoint_icon_status", "inpoint_active")
                     continue
 
                 chunks_received.append(chunk)
@@ -89,9 +88,7 @@ class InPoint(threading.Thread):
                     big_chunk = bytearray()
                     for n in chunks_received:
                         big_chunk.extend(n)
-                    chunk_record = ChunkRecord(
-                        data_size=buff_temp_size, streaming_event=self.streaming_event
-                    )
+                    chunk_record = ChunkRecord(data_size=buff_temp_size, streaming_event=self.streaming_event)
                     md5_hash = hashlib.md5()
                     md5_hash.update(big_chunk)
                     chunk_record.md5 = md5_hash.hexdigest()
@@ -101,9 +98,7 @@ class InPoint(threading.Thread):
                     content = ContentFile(big_chunk)
                     while True:
                         try:
-                            chunk_record.chunk_file.save(
-                                f"{chunk_record.id}.bin", content
-                            )
+                            chunk_record.chunk_file.save(f"{chunk_record.id}.bin", content)
                         except OSError as e:
                             log.exception(e)
                             log.warning("Please fix it immediately!!!")
@@ -112,9 +107,7 @@ class InPoint(threading.Thread):
                         break
 
                     self.chunk_record_id = chunk_record.id
-                    self.streaming_event = StreamingEvent.objects.get(
-                        id=self.streaming_event.id
-                    )
+                    self.streaming_event = StreamingEvent.objects.get(id=self.streaming_event.id)
                     self.streaming_event.refresh_from_db()
                     if not self.streaming_event.receiving_activated:
                         ffmpeg_process.terminate()
@@ -143,9 +136,9 @@ class InPoint(threading.Thread):
     def reader_thread(self, pipe, pipe_name):
         try:
             with open(
-                    f'{self.streaming_event.short_description.replace(" ", "_")}_{pipe_name}.log',
-                    "a",
-                    encoding="utf-8",
+                f"{self.streaming_event.short_description.replace(' ', '_')}_{pipe_name}.log",
+                "a",
+                encoding="utf-8",
             ) as logfile:
                 while True:
                     if self.reader_thread_terminate.is_set():

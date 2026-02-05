@@ -1,50 +1,53 @@
-import requests
 import logging
-from restreamer.models import StreamingEvent, ClientProfile, ChunkRecord
-from django.http import JsonResponse
-from celery import shared_task
+
+import requests
 from nl_restreamer.celery import app
+from restreamer.models import ClientProfile, StreamingEvent
+
 log = logging.getLogger("services")
 
 # celery -A nl_restreamer worker -l INFO --pool=threads
 # celery -A nl_restreamer beat -l debug
 
 
-@app.task(name='services.tasks.check_stream_status')
+@app.task(name="services.tasks.check_stream_status")
 def check_stream_status():
     url = "https://restreamer.newlevel.media/api/get_active_stream/"
     user = ClientProfile.objects.first()
     streaming_event = StreamingEvent.objects.first()
     user_uuid = user.user_id
-   
+
     response = requests.get(url, params={"user_uuid": user_uuid})
     response_data = response.json()
     log.info(f"Response Data ---------->{response_data}")
     if response.status_code == 200 and response_data.get("identifier") and response_data.get("short_description"):
-
         streaming_event_name = response_data["short_description"]
         streaming_event_id = response_data["identifier"]
-        # ptoreubujem tu poriesit to aby sa zrusil ten ktroy je tam vytvoreny len kvoli scriptu skriptu 
+        # ptoreubujem tu poriesit to aby sa zrusil ten ktroy je tam vytvoreny len kvoli scriptu skriptu
         if not streaming_event:
-            streaming_event = StreamingEvent(identifier=streaming_event_id, short_description=streaming_event_name,
-                                             receiving_activated=True, delivering_activated=True)
+            streaming_event = StreamingEvent(
+                identifier=streaming_event_id,
+                short_description=streaming_event_name,
+                receiving_activated=True,
+                delivering_activated=True,
+            )
 
             log.info(f"Streaming event saved: {streaming_event_id} - {streaming_event_name}")
             streaming_event.save()
             return {"status": "success", "message": "Streaming event saved"}
-        
+
         elif streaming_event.identifier != streaming_event_id:
             streaming_event.delete()
             log.info("Streaming Event Deleted !!!")
-            
+
         elif not streaming_event.delivering_activated:
             streaming_event.delivering_activated = True
             streaming_event.save()
             log.info("Data sending enabled again !!")
-            
+
         else:
             log.info("Streaming Event already created")
-            
+
     elif response.status_code == 403:
         if streaming_event.delivering_activated:
             streaming_event.delivering_activated = False
@@ -87,5 +90,3 @@ def get_buffer_duration():
         return response.json()
     except requests.exceptions.RequestException as e:
         return {"status": "error", "message": str(e)} """
-
-

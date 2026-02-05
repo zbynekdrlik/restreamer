@@ -13,15 +13,16 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+
 from django.contrib import admin
-from django.urls import path, include
+from django.urls import include, path
 from services.views.youtube import youtube_auth_callback
 
 urlpatterns = [
-    path('admin/', admin.site.urls),
-    path('', include("restreamer.urls.urls")),
-    path('control/', include("restreamer.urls.control_urls")),
-    path('accounts/', include("accounts.urls")),
-    path('services/', include("services.urls")),
-    path('youtube/auth/callback', youtube_auth_callback, name='youtube_auth_callback'),
+    path("admin/", admin.site.urls),
+    path("", include("restreamer.urls.urls")),
+    path("control/", include("restreamer.urls.control_urls")),
+    path("accounts/", include("accounts.urls")),
+    path("services/", include("services.urls")),
+    path("youtube/auth/callback", youtube_auth_callback, name="youtube_auth_callback"),
 ]

@@ -1,11 +1,7 @@
 import logging
 import os
 
-import requests
 from django.conf import settings
-from requests import RequestException
-
-from .models import StreamingEvent
 
 log = logging.getLogger(__name__)
 
@@ -17,25 +13,24 @@ def delete_s3_chunks(chunk_keys):
     Args:
         chunk_keys (list): List of S3 keys for the chunks to delete.
     """
-    bucket_name = os.environ.get('AWS_STORAGE_BUCKET_NAME')
+    bucket_name = os.environ.get("AWS_STORAGE_BUCKET_NAME")
     client = settings.S3_CLIENT
 
     try:
         # Prepare objects for batch deletion
-        objects_to_delete = [{'Key': key} for key in chunk_keys]
+        objects_to_delete = [{"Key": key} for key in chunk_keys]
 
         if objects_to_delete:
-         
             # Perform the delete operation
             response = client.delete_objects(
                 Bucket=bucket_name,
                 Delete={
-                    'Objects': objects_to_delete,
-                    'Quiet': False  # Set to False to get detailed feedback
-                }
+                    "Objects": objects_to_delete,
+                    "Quiet": False,  # Set to False to get detailed feedback
+                },
             )
             # Check for errors in the response
-            errors = response.get('Errors', [])
+            errors = response.get("Errors", [])
             if errors:
                 log.warning("Some objects failed to delete:")
                 for err in errors:
