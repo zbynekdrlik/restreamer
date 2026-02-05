@@ -1,0 +1,104 @@
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
+
+
+<nav class="navbar navbar-expand-md navbar-light text-light justify-content-center" style="font-family: 'Montserrat', sans-serif; font-weight: 500;">
+    <div class="container-fluid">
+      <a class="navbar-brand mx-2 mb-1" href="{% url 'control:home' %}">
+          <i class="bi bi-broadcast mt-1 me-1 fs-4" style="margin-top: 1px;"></i><span class="fs-5">NL Restreamer</span>
+      </a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+          <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse justify-content-center" id="navbarNav">
+          <ul class="navbar-nav mb-2 mb-md-0">
+              <li class="nav-item mx-5">
+                  <a class="nav-link" href="{% url 'control:downloads' %}">
+                      <i class="lni lni-download me-2"></i>Download
+                  </a>
+              </li>
+              <li class="nav-item mx-3">
+                  <a class="nav-link" href="{% url 'control:streaming_event_create' %}">
+                      <i class="bi bi-youtube me-2"></i>Add Stream
+                  </a>
+              </li>
+             <!--  <li class="nav-item mx-5">
+                  <a class="nav-link" href="{% url 'control:go_live' %}">
+                      <i class="bi bi-youtube me-2"></i>Live YT
+                  </a>
+              </li> -->
+              <li class="nav-item mx-3">
+                <a class="nav-link" href="{% url 'control:stream-scheduler' %}">
+                    <i class="bi bi-clock-history me-2"></i>Scheduler
+                </a>
+            </li>
+
+          </ul>
+        <ul class="navbar-nav ms-auto mb-2 mb-md-0 flex items-center">
+            {% if user.is_authenticated %}
+            <li class="nav-item mr-4 mx-3">
+                <a class="nav-link dropdown-toggle flex items-center" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                    <i class="fas fa-user mr-2 text-gray-500"></i>
+                    {{ user.username }}
+                </a>
+                <ul class="dropdown-menu">
+                    <li><a class="dropdown-item" href="{% url 'control:user_history' user.id %}">User Activity</a></li>
+                </ul>
+            </li>
+            <li class="nav-item mx-3">
+                <form action="{% url 'logout' %}" method="post" class="inline-block">
+                    {% csrf_token %}
+                    <button type="submit" class="btn btn-danger">
+                        <i class="fas fa-sign-out-alt mr-2"></i>
+                        Logout
+                    </button>
+                </form>
+            </li>
+            </li>
+            {% else %}
+            <li class="nav-item mx-3">
+                <a class="nav-link btn btn-primary" href="{% url 'login' %}">
+                    <i class="fas fa-sign-in-alt mr-2"></i>
+                    Login
+                </a>
+            </li>
+            {% endif %}
+        </ul>
+    </div>
+</div>
+</nav>
+<style>
+  .wrapper {
+      max-width: fit-content;
+  }
+  .sidebar {
+      top: 30%;
+      left: 0;
+  }
+
+  @media screen and (max-width: 768px) {
+      .sidebar {
+          position: static;
+          width: 100%;
+          margin: 0 auto;
+          top: auto;
+          left: auto;
+      }
+      .wrapper {
+          max-width: 100%;
+          margin: 0;
+      }
+      .sidebar-nav {
+          text-align: center;
+      }
+  }
+</style>
+
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        var dropdownElementList = [].slice.call(document.querySelectorAll('.dropdown-toggle'));
+        dropdownElementList.map(function(dropdownToggleEl) {
+            return new bootstrap.Dropdown(dropdownToggleEl);
+        });
+    });
+</script>

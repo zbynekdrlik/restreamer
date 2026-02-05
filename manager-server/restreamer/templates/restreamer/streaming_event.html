@@ -1,0 +1,395 @@
+{% extends 'base/base.html' %}
+{% load crispy_forms_tags %}
+{% block content %}
+
+
+<div class="container mx-auto px-4 py-8 max-w-6xl">
+    <div class="bg-white rounded-xl shadow-2xl overflow-hidden">
+        <div class="bg-gradient-to-r from-blue-700 to-blue-900 text-white py-6 px-8">
+            <h2 class="text-3xl font-bold">{{ streaming_event.short_description }}</h2>
+        </div>
+        
+        <div class="p-8 space-y-12">
+            <!-- Endpoints Section -->
+            <section>
+                <h3 class="text-2xl text-blue-800 font-bold mb-6 flex items-center">
+                    <svg class="w-7 h-7 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
+                    </svg>
+                    Endpoints
+                </h3>
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                    {% if endpoints %}
+                        {% for endpoint in endpoints %}
+                            <div class="bg-white rounded-xl shadow-sm p-3 relative border border-gray-200 transition-all duration-300 hover:shadow-md hover:border-blue-300 group">
+                                <div class="flex items-center">
+                                    <div class="flex-shrink-0">
+                                        <div class="w-2 h-2 bg-green-400 rounded-full"></div>
+                                    </div>
+                                    <p class="text-gray-700 font-medium text-sm ml-2">{{ endpoint }}</p>
+                                </div>
+                            
+                                <div class="mt-1 flex justify-end space-x-2">
+                                    <!-- start :: edit endpoint button -->
+                                    <button type="button" class="text-gray-400 hover:text-blue-600 transition-colors duration-300"
+                                            data-bs-toggle="modal" data-bs-target="#editEndpointModal"
+                                            data-endpoint-id="{{ endpoint.id }}">
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                            <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+                                        </svg>
+                                    </button>
+                                    <!-- end :: edit endpoint button -->
+                            
+                                    <!-- begin::remove endpoint -->
+                                    <form id="removeEndpointForm-{{ endpoint.id }}" action="{% url 'control:remove_endpoint' streaming_event.id endpoint.id %}" method="post" class="inline">
+                                        {% csrf_token %}
+                                        <button type="button" class="text-gray-400 hover:text-red-600 transition-colors duration-300" 
+                                                data-bs-toggle="modal" data-bs-target="#confirmEndpointRemoveModal" 
+                                                data-form-id="removeEndpointForm-{{ endpoint.id }}">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                                <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                            </svg>
+                                        </button>
+                                    </form>
+                                    <!-- end :: remove endpoint -->
+                                </div>
+                            </div>
+                        {% endfor %}
+                    
+                    {% else %}
+                        <p class="text-gray-500 italic col-span-full">No endpoints available.</p>
+                    {% endif %}
+                </div>
+
+                <div class="flex justify-end mt-6">
+                    <button type="button" id="showSelectButton" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full flex items-center transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50" data-bs-toggle="modal" data-bs-target="#addEndpointModal">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clip-rule="evenodd" />
+                        </svg>
+                        Add Endpoint
+                    </button>
+                </div>
+            </section>
+
+            <!-- Technical Details Section -->
+            <section>
+                <h3 class="text-2xl text-blue-800 font-bold mb-6 flex items-center">
+                    <svg class="w-7 h-7 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    Event Details
+                </h3>
+                <div class="bg-gray-50 rounded-lg shadow-lg p-6 border-2 border-blue-100">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="flex items-center">
+                            <svg class="w-5 h-5 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14"></path>
+                            </svg>
+                            <div>
+                                <p class="text-gray-600 font-semibold">Identifier:</p>
+                                <p class="text-gray-800">{{ streaming_event.identifier }}</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center">
+                            <svg class="w-5 h-5 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                            </svg>
+                            <div>
+                                <p class="text-gray-600 font-semibold">Date of Event:</p>
+                                <p class="text-gray-800">{{ streaming_event.date_of_event }}</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center">
+                            <svg class="w-5 h-5 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16l2.879-2.879m0 0a3 3 0 104.243-4.242 3 3 0 00-4.243 4.242zM21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                            <div>
+                                <p class="text-gray-600 font-semibold">Received Bytes:</p>
+                                <p class="text-gray-800">{{ streaming_event.received_bytes }}</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center">
+                            <svg class="w-5 h-5 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                            <div>
+                                <p class="text-gray-600 font-semibold">Receiving Activated:</p>
+                                <p class="text-gray-800">{{ streaming_event.receiving_activated|yesno:"Yes,No" }}</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center">
+                            <svg class="w-5 h-5 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                            <div>
+                                <p class="text-gray-600 font-semibold">Video Length:</p>
+                                <p class="text-gray-800">{{ video_length }}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SE settings section -->
+            <section>
+                <h3 class="text-2xl text-blue-800 font-bold mb-6 flex items-center">
+                    <svg class="w-7 h-7 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                    </svg>
+                    Event Settings
+                </h3>
+                <div class="bg-gray-50 rounded-lg shadow-lg p-6 border-2 border-blue-100">
+                    <form method="POST" action="{% url 'control:streaming_event_edit' streaming_event.id %}">
+                        {% csrf_token %}
+                        <div class="mb-6">
+                            <label for="buffer" class="block text-gray-700 font-semibold mb-2">Buffer:</label>
+                            <select id="buffer" name="buffer-time" class="w-full px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                {% for value, label in streaming_event.BUFFER_CHOICES %}
+                                    <option value="{{ value }}" {% if streaming_event.buffer == value %}selected{% endif %}>
+                                        {{ label }}
+                                    </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="flex justify-end">
+                            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50">
+                                <svg class="w-5 h-5 inline-block mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path>
+                                </svg>
+                                Save Changes
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+
+            <!-- Modal for Adding Endpoints -->
+            <div class="modal fade" id="addEndpointModal" aria-labelledby="addEndpointModalLabel" aria-hidden="true">
+                <div class="modal-dialog modal-lg modal-dialog-centered">
+                    <div class="modal-content" style="border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1);">
+                        <div class="modal-header bg-light" style="border-bottom: 2px solid #e9ecef; border-top-left-radius: 15px; border-top-right-radius: 15px;">
+                            <h5 class="modal-title" id="addEndpointModalLabel" style="color: #333; font-weight: 600;">
+                                <i class="bi bi-plus-circle-fill me-2" style="color: #28a745;"></i>Select Endpoints
+                            </h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <form action="{% url 'control:add_endpoint' streaming_event.id %}" method="post">
+                            {% csrf_token %}
+                            <div class="modal-body" style="padding: 2rem;">
+                                <div class="mb-4">
+                                    <label for="endpointSelect" class="form-label">Available Endpoints</label>
+                                    <select id="endpointSelect" name="endpoint" multiple
+                                        style="width: 100%; padding: 0.375rem 1.75rem 0.375rem 0.75rem; font-size: 1rem; font-weight: 400; line-height: 1.5; color: #212529; background-color: #fff; background-clip: padding-box; border: 1px solid #ced4da; border-radius: 0.25rem; transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;">
+                                        {% for endpoint in available_endpoints %}
+                                        <option value="{{ endpoint.id }}"
+                                        {% if endpoint.id in selected_endpoints_ids %}
+                                            selected="selected"
+                                        {% endif %}>{{ endpoint }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="mb-4">
+                                    <label for="event-time" class="form-label">Video Time</label>
+                                    <input type="text" id="event-time" name="time_point" class="form-control" placeholder="HH:MM:SS" pattern="\d{2}:\d{2}:\d{2}"
+                                        style="width: 100%; padding: 0.375rem 0.75rem; font-size: 1rem; font-weight: 400; line-height: 1.5; color: #212529; background-color: #fff; background-clip: padding-box; border: 1px solid #ced4da; border-radius: 0.25rem; transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;">
+                                </div>
+                            </div>
+                            <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
+                                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+                                <button type="submit" class="btn btn-primary">Add Selected Endpoints</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Remove Endpoint Modal -->
+<div class="modal fade" id="confirmEndpointRemoveModal" tabindex="-1" role="dialog" aria-labelledby="confirmEndpointRemoveModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered" role="document">
+        <div class="modal-content" style="border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1);">
+            <div class="modal-header bg-light" style="border-bottom: 2px solid #e9ecef; border-top-left-radius: 15px; border-top-right-radius: 15px;">
+                <h5 class="modal-title" id="removeEndpointModalLabel" style="color: #333; font-weight: 600;">
+                    <i class="bi bi-trash-fill me-2" style="color: #dc3545;"></i>Remove Endpoint
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" style="padding: 2rem;">
+                <p style="font-size: 1.1rem; color: #555;">Are you sure you want to remove this endpoint from the streaming event?</p>
+            </div>
+            <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="confirmRemoveEndpoint">Remove Endpoint</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+<!-- Edit Endpoint Modal -->
+<div class="modal fade" id="editEndpointModal" tabindex="-1" aria-labelledby="editEndpointModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content" style="border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1);">
+            <div class="modal-header bg-light" style="border-bottom: 2px solid #e9ecef; border-top-left-radius: 15px; border-top-right-radius: 15px;">
+                <h5 class="modal-title" id="editEndpointModalLabel" style="color: #333; font-weight: 600;">
+                    <i class="bi bi-pencil-square me-2" style="color: #007bff;"></i>Edit Endpoint
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form id="editEndpointForm" method="post" action="{% url 'control:endpoint_edit' %}">
+                {% csrf_token %}
+                <input type="hidden" id="endpoint-id" name="endpoint_id" required>
+                <div class="modal-body" style="padding: 2rem;">
+                    <div class="mb-3">
+                        <label for="endpointName" class="form-label">Endpoint Name</label>
+                        <input type="text" class="form-control" id="endpointName" name="endpoint_name" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="serviceType" class="form-label">Service Type</label>
+                        <select class="form-select" id="serviceType" name="service_type" required onchange="toggleStreamKey()">
+                            <option value="" disabled selected>Select a service type</option>
+                            <option value="YT_HLS">YouTube HLS</option>
+                            <option value="FB">Facebook</option>
+                            <option value="YT_RTMP">YouTube RTMP</option>
+                            <option value="VIMEO">Vimeo RTMP</option>
+                            <option value="INSTAGRAM">Instagram RTMP</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="streamKey" class="form-label">Streaming Key</label>
+                        <input type="text" class="form-control" id="streamKey" name="stream_key" required>
+                    </div>
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" id="enableEndpoint" name="enabled">
+                        <label class="form-check-label" for="enableEndpoint">Enable Endpoint</label>
+                    </div>
+                    <div class="form-check" data-toggle="tooltip" data-placement="top" title="The stream will start immediately after there are 10 seconds of video data in the buffer.">
+                        <input class="form-check-input" type="checkbox" id="isFast" name="enabled_fast">
+                        <label class="form-check-label" for="isFast">Is Fast</label>
+                    </div>
+                </div>
+                <div class="modal-footer" style="border-top: 2px solid #e9ecef; border-bottom-left-radius: 15px; border-bottom-right-radius: 15px;">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+</div>
+
+<script>
+    document.getElementById('event-time').addEventListener('input', function (e) {
+        const input = e.target.value.replace(/[^0-9]/g, '');
+        let formatted = '';
+
+        if (input.length <= 2) {
+            formatted = input;
+        } else if (input.length <= 4) {
+            formatted = input.slice(0, 2) + ':' + input.slice(2);
+        } else {
+            formatted = input.slice(0, 2) + ':' + input.slice(2, 4) + ':' + input.slice(4, 6);
+        }
+
+        e.target.value = formatted;
+    });
+
+    document.getElementById('event-time').addEventListener('blur', function (e) {
+        const input = e.target.value.split(':');
+        if (input.length === 3) {
+            const [hours, minutes, seconds] = input.map(part => part.padStart(2, '0'));
+            e.target.value = `${hours}:${minutes}:${seconds}`;
+        }
+    });
+
+    document.getElementById('add-endpoint-form').addEventListener('submit', function (e) {
+        const timeInput = document.getElementById('event-time').value;
+        if (!timeInput.match(/^\d{2}:\d{2}:\d{2}$/)) {
+            e.preventDefault();
+            alert('Please enter a valid time in HH:MM:SS format');
+        }
+    });
+    
+
+</script>
+
+<script>
+    // populate edit endpoint modal 
+    function populateEditModal(id, name, serviceType, streamKey) {
+        document.getElementById('endpointName').value = name;
+        document.getElementById('serviceType').value = serviceType;
+        document.getElementById('streamKey').value = streamKey;
+        // Update form action with the correct endpoint ID
+        const form = document.querySelector('#addEndpointModal form');
+        form.action = `{% url 'control:endpoint_edit' %}`.replace('undefined', id);
+    }
+</script>
+
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const modal = document.getElementById('editEndpointModal');
+    
+        modal.addEventListener('shown.bs.modal', function (event) {
+            // Get the button that triggered the modal
+            const button = event.relatedTarget;
+    
+            // Get the endpoint ID from the button's data attribute
+            const endpointId = button.getAttribute('data-endpoint-id');
+    
+            // Make a GET request to fetch endpoint data
+            const url = `/control/endpoint-edit/?endpoint_id=${endpointId}`;
+    
+            fetch(url, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            })
+            .then(response => response.json())
+            .then(data => {
+                // Populate modal fields with fetched data
+                document.querySelector('#endpoint-id').value = data.id;
+                document.querySelector('#endpointName').value = data.name;
+                document.querySelector('#serviceType').value = data.service_type;
+                document.querySelector('#streamKey').value = data.stream_key;
+                document.querySelector('#enableEndpoint').checked = data.enabled;
+                document.querySelector('#isFast').checked = data.is_fast;
+            })
+            .catch(error => console.error('Error fetching endpoint data:', error));
+        });
+    });
+</script>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        // Add event listener to each "Remove" button
+        const removeButtons = document.querySelectorAll('[data-bs-toggle="modal"][data-bs-target="#confirmEndpointRemoveModal"]');
+        removeButtons.forEach(button => {
+            button.addEventListener('click', function () {
+                const formId = this.getAttribute('data-form-id');
+                const confirmButton = document.getElementById('confirmRemoveEndpoint');
+                confirmButton.setAttribute('data-form-id', formId);
+            });
+        });
+    
+        // Handle form submission when "Confirm Remove" is clicked
+        document.getElementById('confirmRemoveEndpoint').addEventListener('click', function () {
+            const formId = this.getAttribute('data-form-id');
+            const form = document.getElementById(formId);
+            if (form) {
+                form.submit();
+            } else {
+                console.error(`Form with ID "${formId}" not found.`);
+            }
+        });
+    });
+</script>
+
+
+{% endblock content %}
