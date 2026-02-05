@@ -18,7 +18,7 @@ class Command(BaseCommand):
         while True:
             while True:
                 streaming_event = StreamingEvent.objects.last()
-                if not streaming_event.receiving_activated:
+                if streaming_event is None or not streaming_event.receiving_activated:
                     redis_client.rpush("inpoint_icon_status", "inpoint_waiting")
                     log.info("Waiting until it is active")
                     log.debug("Press start button")

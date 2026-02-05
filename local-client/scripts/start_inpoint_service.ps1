@@ -7,7 +7,7 @@ Set-Location -Path (Join-Path $scriptDirectory "..\..")
 . .\venv\Scripts\Activate
 
 # Navigate to the 'server' directory
-Set-Location -Path '.\local_client'
+Set-Location -Path '.\local-client'
 
 # Run the Django development server
 python manage.py inpoint_service
