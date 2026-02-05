@@ -1,0 +1,209 @@
+name: CI
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+
+  test-local-client:
+    name: Test local-client
+    needs: lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies (filter Windows-only packages)
+        run: |
+          grep -ivE "^(pystray|pyuac|pywin32|Win32Security)" requirements.txt > requirements_ci.txt
+          pip install -r requirements_ci.txt
+      - name: Django check
+        run: python manage.py check
+        env:
+          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
+      - name: Run tests
+        run: python manage.py test --verbosity=2
+        env:
+          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
+
+  test-delivering-service:
+    name: Test delivering-service
+    needs: lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: delivering-service/delivering_service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r ../requirements.txt
+      - name: Django check
+        run: python manage.py check
+        env:
+          DJANGO_SETTINGS_MODULE: delivering_service.settings_ci
+      - name: Run tests
+        run: python manage.py test --verbosity=2
+        env:
+          DJANGO_SETTINGS_MODULE: delivering_service.settings_ci
+
+  test-manager-server:
+    name: Test manager-server
+    needs: lint
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ci_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: manager-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Django check
+        run: python manage.py check
+        env:
+          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
+      - name: Run migrations
+        run: python manage.py migrate --verbosity=0
+        env:
+          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
+      - name: Run tests
+        run: python manage.py test --verbosity=2
+        env:
+          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
+
+  version-check:
+    name: Version check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compare VERSION against main
+        run: |
+          PR_VERSION=$(cat VERSION | tr -d '[:space:]')
+          git fetch origin main
+          MAIN_VERSION=$(git show origin/main:VERSION | tr -d '[:space:]')
+
+          echo "PR version:   $PR_VERSION"
+          echo "Main version: $MAIN_VERSION"
+
+          pip install packaging --quiet
+
+          python3 -c "
+          from packaging.version import Version
+          pr = Version('$PR_VERSION')
+          main = Version('$MAIN_VERSION')
+          if pr <= main:
+              import sys
+              print()
+              print('ERROR: VERSION must be bumped higher than main.')
+              print(f'  Current main: {main}')
+              print(f'  This PR:      {pr}')
+              parts = str(main).split('.')
+              major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
+              print()
+              print('Suggested next versions:')
+              print(f'  Patch: {major}.{minor}.{patch + 1}')
+              print(f'  Minor: {major}.{minor + 1}.0')
+              print(f'  Major: {major + 1}.0.0')
+              sys.exit(1)
+          print(f'Version bump OK: {main} -> {pr}')
+          "
+
+  ci-gate:
+    name: CI Gate (all checks)
+    if: always()
+    needs:
+      [
+        lint,
+        test-local-client,
+        test-delivering-service,
+        test-manager-server,
+        version-check,
+      ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all results
+        run: |
+          echo "lint:                ${{ needs.lint.result }}"
+          echo "test-local-client:   ${{ needs.test-local-client.result }}"
+          echo "test-delivering:     ${{ needs.test-delivering-service.result }}"
+          echo "test-manager:        ${{ needs.test-manager-server.result }}"
+          echo "version-check:       ${{ needs.version-check.result }}"
+
+          # All test/lint jobs must succeed
+          if [[ "${{ needs.lint.result }}" != "success" ]]; then
+            echo "FAIL: lint did not succeed"
+            exit 1
+          fi
+          if [[ "${{ needs.test-local-client.result }}" != "success" ]]; then
+            echo "FAIL: test-local-client did not succeed"
+            exit 1
+          fi
+          if [[ "${{ needs.test-delivering-service.result }}" != "success" ]]; then
+            echo "FAIL: test-delivering-service did not succeed"
+            exit 1
+          fi
+          if [[ "${{ needs.test-manager-server.result }}" != "success" ]]; then
+            echo "FAIL: test-manager-server did not succeed"
+            exit 1
+          fi
+
+          # Version check: required on PRs, skipped on pushes
+          if [[ "${{ needs.version-check.result }}" == "failure" ]]; then
+            echo "FAIL: version-check failed"
+            exit 1
+          fi
+
+          echo "All checks passed!"
