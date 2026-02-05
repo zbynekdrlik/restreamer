@@ -11,8 +11,54 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  preflight:
+    name: Preflight checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check dev is synced with main
+        if: github.ref == 'refs/heads/dev' || github.event_name == 'pull_request'
+        run: |
+          git fetch origin main dev
+          MAIN_SHA=$(git rev-parse origin/main)
+          if ! git merge-base --is-ancestor "$MAIN_SHA" origin/dev; then
+            echo "ERROR: dev branch is NOT synced with main."
+            echo "  main HEAD: $MAIN_SHA"
+            echo "  dev is missing commits from main. Please merge or rebase."
+            exit 1
+          fi
+          echo "OK: dev contains all commits from main."
+
+      - name: Check dev VERSION > main VERSION
+        run: |
+          git fetch origin main
+          DEV_VERSION=$(cat VERSION | tr -d '[:space:]')
+          MAIN_VERSION=$(git show origin/main:VERSION 2>/dev/null | tr -d '[:space:]' || echo "0.0.0")
+
+          echo "Dev version:  $DEV_VERSION"
+          echo "Main version: $MAIN_VERSION"
+
+          pip install packaging --quiet
+
+          python3 -c "
+          from packaging.version import Version
+          dev = Version('$DEV_VERSION')
+          main = Version('$MAIN_VERSION')
+          if dev <= main:
+              import sys
+              print('ERROR: dev VERSION must be greater than main VERSION.')
+              print(f'  main: {main}')
+              print(f'  dev:  {dev}')
+              sys.exit(1)
+          print(f'Version OK: {main} < {dev}')
+          "
+
   lint:
     name: Lint (ruff)
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,9 +90,22 @@ jobs:
         env:
           DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
       - name: Run tests
-        run: python manage.py test --verbosity=2
+        run: python manage.py test --verbosity=2 2>&1 | tee test_output.txt
         env:
           DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
+      - name: Verify no tests skipped
+        run: |
+          if grep -qE "^(SKIP|skip|Skipped)" test_output.txt; then
+            echo "ERROR: Tests were skipped! All tests must run."
+            grep -E "^(SKIP|skip|Skipped)" test_output.txt
+            exit 1
+          fi
+          if grep -qE "skipped=[1-9]" test_output.txt; then
+            echo "ERROR: Tests were skipped! All tests must run."
+            grep -E "skipped=" test_output.txt
+            exit 1
+          fi
+          echo "OK: No tests were skipped."
 
   test-delivering-service:
     name: Test delivering-service
@@ -67,9 +126,22 @@ jobs:
         env:
           DJANGO_SETTINGS_MODULE: delivering_service.settings_ci
       - name: Run tests
-        run: python manage.py test --verbosity=2
+        run: python manage.py test --verbosity=2 2>&1 | tee test_output.txt
         env:
           DJANGO_SETTINGS_MODULE: delivering_service.settings_ci
+      - name: Verify no tests skipped
+        run: |
+          if grep -qE "^(SKIP|skip|Skipped)" test_output.txt; then
+            echo "ERROR: Tests were skipped! All tests must run."
+            grep -E "^(SKIP|skip|Skipped)" test_output.txt
+            exit 1
+          fi
+          if grep -qE "skipped=[1-9]" test_output.txt; then
+            echo "ERROR: Tests were skipped! All tests must run."
+            grep -E "skipped=" test_output.txt
+            exit 1
+          fi
+          echo "OK: No tests were skipped."
 
   test-manager-server:
     name: Test manager-server
@@ -112,14 +184,31 @@ jobs:
         run: python manage.py check
         env:
           DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
+      - name: Generate migrations
+        run: python manage.py makemigrations --verbosity=0
+        env:
+          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
       - name: Run migrations
         run: python manage.py migrate --verbosity=0
         env:
           DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
       - name: Run tests
-        run: python manage.py test --verbosity=2
+        run: python manage.py test --verbosity=2 2>&1 | tee test_output.txt
         env:
           DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
+      - name: Verify no tests skipped
+        run: |
+          if grep -qE "^(SKIP|skip|Skipped)" test_output.txt; then
+            echo "ERROR: Tests were skipped! All tests must run."
+            grep -E "^(SKIP|skip|Skipped)" test_output.txt
+            exit 1
+          fi
+          if grep -qE "skipped=[1-9]" test_output.txt; then
+            echo "ERROR: Tests were skipped! All tests must run."
+            grep -E "skipped=" test_output.txt
+            exit 1
+          fi
+          echo "OK: No tests were skipped."
 
   version-check:
     name: Version check
@@ -166,6 +255,7 @@ jobs:
     if: always()
     needs:
       [
+        preflight,
         lint,
         test-local-client,
         test-delivering-service,
@@ -176,13 +266,18 @@ jobs:
     steps:
       - name: Check all results
         run: |
+          echo "preflight:           ${{ needs.preflight.result }}"
           echo "lint:                ${{ needs.lint.result }}"
           echo "test-local-client:   ${{ needs.test-local-client.result }}"
           echo "test-delivering:     ${{ needs.test-delivering-service.result }}"
           echo "test-manager:        ${{ needs.test-manager-server.result }}"
           echo "version-check:       ${{ needs.version-check.result }}"
 
-          # All test/lint jobs must succeed
+          # All jobs must succeed
+          if [[ "${{ needs.preflight.result }}" != "success" ]]; then
+            echo "FAIL: preflight did not succeed"
+            exit 1
+          fi
           if [[ "${{ needs.lint.result }}" != "success" ]]; then
             echo "FAIL: lint did not succeed"
             exit 1
