@@ -1,5 +1,6 @@
 from django.contrib import admin
-from .models import YouTubeOAuthCredentials, DiscordApp, DiscrodChannel
+
+from .models import DiscordApp, DiscrodChannel, YouTubeOAuthCredentials
 
 admin.site.register(YouTubeOAuthCredentials)
 admin.site.register(DiscordApp)

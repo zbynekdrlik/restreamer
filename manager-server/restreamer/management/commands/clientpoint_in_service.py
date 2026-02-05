@@ -1,8 +1,7 @@
-import time
 import logging
+import time
 
 from django.core.management.base import BaseCommand
-
 from restreamer.client_in_point import ClientInPoint
 from restreamer.models import StreamingEvent
 
@@ -10,11 +9,11 @@ log = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    help = 'Run client_point service'
+    help = "Run client_point service"
 
     def handle(self, *args, **options):
-        streaming_event = StreamingEvent.objects.using('client_db').get(active=True)
-        client_in_point = ClientInPoint('NL_RTMP', '9998', streaming_event)
+        streaming_event = StreamingEvent.objects.using("client_db").get(active=True)
+        client_in_point = ClientInPoint("NL_RTMP", "9998", streaming_event)
 
         try:
             while True:
@@ -26,6 +25,6 @@ class Command(BaseCommand):
                 time.sleep(1)
 
         except KeyboardInterrupt:
-            log.info('Ctrl-C detected, terminating!')
+            log.info("Ctrl-C detected, terminating!")
             # in_point.control_queue.put('Terminate')
             # client_in_point.join()

@@ -1,25 +1,20 @@
 import logging
 
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
+from accounts.models import RestreamerUser
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
-from django.shortcuts import (get_list_or_404, get_object_or_404, redirect,
-                              render)
+from django.shortcuts import get_object_or_404
 from django.utils.decorators import method_decorator
 from django.views import View
 from rest_framework import status
-from rest_framework.response import Response
 from rest_framework.exceptions import NotFound
+from rest_framework.response import Response
 from rest_framework.views import APIView
-
-from accounts.models import RestreamerUser
-from restreamer.models import StreamingEvent, ChunkRecord
-from restreamer.serializers import (BufferHealthSerializer,
-                                    StreamingEventSerializer)
+from restreamer.models import ChunkRecord, StreamingEvent
+from restreamer.serializers import StreamingEventSerializer
 from restreamer.video_data import VideoDataManager
-from restreamer.views.instances import InstanceManager
 from restreamer.views.delivering import DeliveringManger
+from restreamer.views.instances import InstanceManager
 from services.utils import get_client_ip
 
 log = logging.getLogger(__name__)
@@ -27,13 +22,13 @@ log = logging.getLogger(__name__)
 
 class GetActiveStream(APIView):
     def get(self, request):
-        user_id = request.GET.get('user_uuid')
+        user_id = request.GET.get("user_uuid")
         ip_address = get_client_ip(request)
-        
-        log.info(f'user ip addres is {ip_address}')                                                                                                                       
+
+        log.info(f"user ip addres is {ip_address}")
 
         if not user_id:
-            return Response({'error': 'user id parameter is required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "user id parameter is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             user = RestreamerUser.objects.get(api_key=user_id)
@@ -42,7 +37,7 @@ class GetActiveStream(APIView):
                 serializer = StreamingEventSerializer(streaming_event)
                 return Response(serializer.data, status=status.HTTP_200_OK)
             elif not streaming_event.receiving_activated:
-                return Response({'warning': 'Streaming Event is not activated'}, status=status.HTTP_403_FORBIDDEN)
+                return Response({"warning": "Streaming Event is not activated"}, status=status.HTTP_403_FORBIDDEN)
 
             if not streaming_event.exist():
                 return Response({"warning": "No streaming event found"}, status=status.HTTP_404_NOT_FOUND)
@@ -74,36 +69,34 @@ class GetActiveStream(APIView):
 
             return Response({'status': 'success', 'message': 'Buffer health data received'}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST) """
-    
-    
-@method_decorator(login_required, name='dispatch')
+
+
+@method_decorator(login_required, name="dispatch")
 class DeliveringReady(View):
     def get(self, request, streaming_event_id):
         # Check server status
         manager = DeliveringManger(request.user.id, streaming_event_id)
         is_ready = manager.is_server_ready()
-        
+
         # Check buffer status
         streaming_event = get_object_or_404(StreamingEvent, id=streaming_event_id)
         live = streaming_event.delivering_activated
-        status = InstanceManager(request.user.id).check_status()
+        InstanceManager(request.user.id).check_status()
         server_running = InstanceManager(request.user.id).check_status() != "Inactive"
         video_manager = VideoDataManager(streaming_event.id)
         buffer_time = streaming_event.buffer
         buffer_filled = video_manager.is_buffer_filled(buffer_time)
 
-        return JsonResponse({
-            'ready': is_ready,
-            'buffer_filled': buffer_filled,
-            'live': live,
-            'server_running':server_running
-        })
-        
+        return JsonResponse(
+            {"ready": is_ready, "buffer_filled": buffer_filled, "live": live, "server_running": server_running}
+        )
+
+
 class GetNextChunkIdView(APIView):
     """
     API View to retrieve the next available chunk ID greater than the given one.
     """
-    
+
     def get(self, request, *args, **kwargs):
         current_local_id = request.query_params.get("current_local_id")
         stream_identifier = request.query_params.get("stream_identifier")
@@ -120,16 +113,14 @@ class GetNextChunkIdView(APIView):
             return JsonResponse({"error": "Invalid chunk ID format"}, status=400)
 
         # Fetch the next chunk greater than the current chunk ID
-        #ChunkRecord.refresh_from_db()
+        # ChunkRecord.refresh_from_db()
         next_chunk = (
             ChunkRecord.objects.filter(identifier=stream_identifier, local_id__gt=current_local_id)
             .order_by("local_id")
             .first()
         )
-        
+
         if not next_chunk:
-            raise NotFound(
-                detail="No chunk found greater than the current chunk ID for the given stream identifier."
-            )
-            
+            raise NotFound(detail="No chunk found greater than the current chunk ID for the given stream identifier.")
+
         return Response({"next_chunk_id": next_chunk.local_id}, status=200)

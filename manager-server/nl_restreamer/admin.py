@@ -2,7 +2,7 @@ from django.contrib import admin
 
 
 class MyAdminSite(admin.AdminSite):
-    site_header = 'NL Restreamer'
+    site_header = "NL Restreamer"
 
 
-admin_site = MyAdminSite(name='myadmin')
+admin_site = MyAdminSite(name="myadmin")

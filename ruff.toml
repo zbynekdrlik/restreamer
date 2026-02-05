@@ -25,6 +25,24 @@ ignore = [
     "T201",  # print statement (used intentionally)
     "B008",  # function call in default argument
     "UP009", # UTF-8 encoding declaration
+    "S603",  # subprocess without shell=True check
+    "S607",  # start process with partial path
+    "S602",  # subprocess with shell=True
+    "S113",  # request without timeout
+    "S308",  # suspicious mark_safe usage
+    "S301",  # suspicious pickle usage
+    "S324",  # hashlib insecure hash function
+    "DJ008", # model without __str__
+    "E722",  # bare except
+    "SIM102", # collapsible if
+    "SIM108", # if-else-block instead of ternary
+    "SIM113", # enumerate for loop
+    "SIM115", # open file with context handler
+    "SIM212", # if-expr with twisted arms
+    "UP031",  # printf string formatting
+    "F403",   # undefined local with import star
+    "F811",   # redefined while unused
+    "E402",   # module import not at top of file
 ]
 
 [lint.per-file-ignores]

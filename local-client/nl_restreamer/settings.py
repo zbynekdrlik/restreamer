@@ -9,40 +9,39 @@ https://docs.djangoproject.com/en/4.1/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.1/ref/settings/
 """
+
 import os
-import sys
 from pathlib import Path
-from dotenv import load_dotenv
+
 import boto3
 from decouple import config
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-load_dotenv(BASE_DIR / '.env')
+load_dotenv(BASE_DIR / ".env")
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.1/howto/deployment/checklist/
 
-SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-me-on-production')
+SECRET_KEY = config("SECRET_KEY", default="django-insecure-change-me-on-production")
 
-DEBUG = config('DEBUG', default=True, cast=bool)
+DEBUG = config("DEBUG", default=True, cast=bool)
 
 ALLOWED_HOSTS = ["*"]
 
 # Application definition
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
+    "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-
     "restreamer",
     "services",
-
     "admin_object_actions",
     "rest_framework",
     "channels",
@@ -126,7 +125,6 @@ STATIC_URL = "static/"
 STATIC_ROOT = os.path.join(BASE_DIR, "static")
 
 
-
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.1/ref/settings/#default-auto-field
 
@@ -169,10 +167,10 @@ LOGGING = {
             "handlers": ["console", "file"],
             "level": "DEBUG",
         },
-        'services': {
-            'handlers': ['file', 'console'],
-            'level': 'DEBUG',
-            'propagate': True,
+        "services": {
+            "handlers": ["file", "console"],
+            "level": "DEBUG",
+            "propagate": True,
         },
     },
 }
@@ -186,22 +184,24 @@ CHANNEL_LAYERS = {
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 30000
 
 # S3 Object Storage settings
-AWS_STORAGE_BUCKET_NAME = config('AWS_STORAGE_BUCKET_NAME', default='linode52')
-AWS_S3_REGION_NAME = config('AWS_S3_REGION_NAME', default='eu-central-1')
-OBJECT_STORAGE_URL = config('OBJECT_STORAGE_URL', default='https://eu-central-1.linodeobjects.com')
-LINODE_API_KEY = config('LINODE_TOKEN', default='')
+AWS_STORAGE_BUCKET_NAME = config("AWS_STORAGE_BUCKET_NAME", default="linode52")
+AWS_S3_REGION_NAME = config("AWS_S3_REGION_NAME", default="eu-central-1")
+OBJECT_STORAGE_URL = config("OBJECT_STORAGE_URL", default="https://eu-central-1.linodeobjects.com")
+LINODE_API_KEY = config("LINODE_TOKEN", default="")
 
-AWS_SECRET_ACCESS_KEY = config('AWS_SECRET_ACCESS_KEY')
-AWS_ACCESS_KEY_ID = config('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY")
+AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID")
 
-S3_CLIENT = boto3.client('s3',
-                         endpoint_url=OBJECT_STORAGE_URL,
-                         aws_access_key_id=AWS_ACCESS_KEY_ID,
-                         aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+S3_CLIENT = boto3.client(
+    "s3",
+    endpoint_url=OBJECT_STORAGE_URL,
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+)
 
 
-CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://localhost:6379')
-CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://localhost:6379')
+CELERY_BROKER_URL = config("CELERY_BROKER_URL", default="redis://localhost:6379")
+CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default="redis://localhost:6379")
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
-MANAGER_SERVER_URL = config('MANAGER_SERVER_URL', default='https://restreamer.newlevel.media')
+MANAGER_SERVER_URL = config("MANAGER_SERVER_URL", default="https://restreamer.newlevel.media")

@@ -1,16 +1,13 @@
 import logging
-import queue
 import threading
 from ast import literal_eval
 
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from restreamer.endpoints import EndPoint
+
 from restreamer.endpoints import endpoing_manger
-from restreamer.endpoints import endpoints_info
-from restreamer.serializers import (EndpointsListSerializer,
-                                    StreamInfoSerializer)
+from restreamer.serializers import EndpointsListSerializer
 
 from .shared import data_queue
 
@@ -30,12 +27,12 @@ def start_central_manager():
 class ReceiveStreamDataView(APIView):
     def post(self, request, *args, **kwargs):
         try:
-            chunk_id_raw = request.GET.get('chunk_id')
-            stream_identifier = request.GET.get('stream_id')
+            chunk_id_raw = request.GET.get("chunk_id")
+            stream_identifier = request.GET.get("stream_id")
 
             if chunk_id_raw:
                 chunk_id_dict = literal_eval(chunk_id_raw)
-                chunk_id = chunk_id_dict.get('chunk_id')
+                chunk_id = chunk_id_dict.get("chunk_id")
             else:
                 chunk_id = None
 
@@ -47,61 +44,63 @@ class ReceiveStreamDataView(APIView):
                         log.info(f"Processing queued data: {queued_data}")
                 except Exception as e:
                     log.exception("Error processing data from queue: ", exc_info=e)
-                return Response({'status': 'success'}, status=status.HTTP_200_OK)
+                return Response({"status": "success"}, status=status.HTTP_200_OK)
             else:
                 log.error("Missing chunk_id or chunk_identifier")
-                return Response({'status': 'error', 'message': 'Missing chunk_id or stream_id'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {"status": "error", "message": "Missing chunk_id or stream_id"}, status=status.HTTP_400_BAD_REQUEST
+                )
 
         except Exception as e:
             log.exception("An error occurred", exc_info=e)
-            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 class ReceiveInitDataView(APIView):
     def get(self, request, *args, **kwargs):
         # Logic to handle GET requests (used for readiness check)
-        return Response({"status": "ready", "message": "Django is ready to serve responses."}, status=status.HTTP_200_OK)
-    
+        return Response(
+            {"status": "ready", "message": "Django is ready to serve responses."}, status=status.HTTP_200_OK
+        )
+
     def post(self, request, *args, **kwargs):
         serializer = EndpointsListSerializer(data=request.data)
         if serializer.is_valid():
-            
-            endpoints = serializer.validated_data['endpoints']
-            chunk_id = serializer.validated_data['chunk_id']
-            stream_id = serializer.validated_data['stream_id']
-            
+            endpoints = serializer.validated_data["endpoints"]
+            chunk_id = serializer.validated_data["chunk_id"]
+            stream_id = serializer.validated_data["stream_id"]
+
             start_central_manager()
-            
+
             for endpoint in endpoints:
-                alias = endpoint['alias']
-                service_type = endpoint['service_type']
-                stream_key = endpoint['stream_key']
-                
+                alias = endpoint["alias"]
+                service_type = endpoint["service_type"]
+                stream_key = endpoint["stream_key"]
+
                 signal = {
                     "alias": alias,
                     "action": "start",
                     "service_type": service_type,
                     "stream_key": stream_key,
                     "stream_id": stream_id,
-                    "chunk_id": chunk_id
+                    "chunk_id": chunk_id,
                 }
-                  
+
                 endpoing_manger.add_signal(signal)
-            
+
             return Response({"message": "Data received successfully endpoint started"}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-               
-               
+
 class EndStreamView(APIView):
     def post(self, request, *args, **kwargs):
-        alias = request.data.get('alias')
+        alias = request.data.get("alias")
         action = "stop_all" if alias is None else "stop"
-        
-        signal = {
-            "alias": alias if alias else "all",
-            "action": action
-        }
+
+        signal = {"alias": alias if alias else "all", "action": action}
         endpoing_manger.add_signal(signal)
-        
-        message = "Signal sent to stop all endpoints" if action == "stop_all" else f"Signal sent to stop endpoint {alias}"
+
+        message = (
+            "Signal sent to stop all endpoints" if action == "stop_all" else f"Signal sent to stop endpoint {alias}"
+        )
         return Response({"message": message}, status=status.HTTP_200_OK)

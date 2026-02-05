@@ -8,26 +8,25 @@ https://docs.djangoproject.com/en/4.1/howto/deployment/asgi/
 """
 
 import os
+
 import django
-from django.core.asgi import get_asgi_application
-from channels.routing import ProtocolTypeRouter, URLRouter
 from channels.auth import AuthMiddlewareStack
+from channels.routing import ProtocolTypeRouter, URLRouter
+from django.core.asgi import get_asgi_application
 from restreamer.routing import websocket_urlpatterns
 
-ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'nl_restreamer.settings')
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "nl_restreamer.settings")
 django.setup()
 
 
-if ENVIRONMENT == 'production':
-    application = ProtocolTypeRouter({
-        "http": get_asgi_application(),
-        "websocket": AuthMiddlewareStack(
-            URLRouter(
-                websocket_urlpatterns
-            )
-        ),
-    })
+if ENVIRONMENT == "production":
+    application = ProtocolTypeRouter(
+        {
+            "http": get_asgi_application(),
+            "websocket": AuthMiddlewareStack(URLRouter(websocket_urlpatterns)),
+        }
+    )
 else:
     # Localhost (development) without WebSocket support
     application = get_asgi_application()

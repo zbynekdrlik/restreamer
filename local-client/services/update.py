@@ -1,11 +1,10 @@
 import ctypes
 import logging
 import subprocess
-import threading
 import time
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image
 from pystray import Icon, Menu, MenuItem
 
 log = logging.getLogger(__name__)
@@ -16,15 +15,20 @@ ICONS_DIR = BASE_DIR / "static" / "icons"
 ICON_PATH = ICONS_DIR / "update_info.png"
 UPDATE_SCRIPT = BASE_DIR / "scripts" / "update.bat"
 
+
 # Function to check for updates
 def check_updates():
     try:
         # Fetch remote commits for the 'main' branch
         log.info("Fetching remote commit...")
-        remote_commit_output = subprocess.check_output(
-            "git ls-remote origin main",
-            shell=True,
-        ).decode().strip()
+        remote_commit_output = (
+            subprocess.check_output(
+                "git ls-remote origin main",
+                shell=True,
+            )
+            .decode()
+            .strip()
+        )
 
         if not remote_commit_output:
             log.error("No output from 'git ls-remote'. Is the branch 'main' present on the remote?")
@@ -35,11 +39,15 @@ def check_updates():
 
         # Fetch the local commit hash
         log.info("Fetching local commit...")
-        local_commit_output = subprocess.check_output(
-            "git rev-parse main",
-            shell=True,
-        ).decode().strip()
-        
+        local_commit_output = (
+            subprocess.check_output(
+                "git rev-parse main",
+                shell=True,
+            )
+            .decode()
+            .strip()
+        )
+
         local_commit = local_commit_output
         log.info(f"Local commit hash: {local_commit}")
 
@@ -63,18 +71,18 @@ def run_update():
     if UPDATE_SCRIPT.exists():
         # Run the update.bat file with admin privileges
         try:
-            ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", str(UPDATE_SCRIPT), None, None, 1
-            )
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", str(UPDATE_SCRIPT), None, None, 1)
         except Exception as e:
             log.info(f"Failed to run update script: {e}")
     else:
         log.info(f"Update script not found at {UPDATE_SCRIPT}")
 
+
 # Function triggered when the "Update Available" menu item is clicked
 def on_click_update(icon, item):
     icon.stop()
     run_update()
+
 
 # Function to display the tray icon
 def tray_icon():
@@ -82,13 +90,12 @@ def tray_icon():
     icon_image = Image.open(ICON_PATH)
 
     # Define actions for the tray menu
-    menu = Menu(
-        MenuItem("Update Available", on_click_update)
-    )
+    menu = Menu(MenuItem("Update Available", on_click_update))
 
     # Create and display the tray icon
     icon = Icon("Updater", icon_image, menu=menu)
     icon.run()
+
 
 # Background thread for monitoring updates
 def monitor_updates():

@@ -1,8 +1,7 @@
-import time
 import logging
+import time
 
 from django.core.management.base import BaseCommand
-
 from restreamer.client_out_point import ClientOutPoint
 
 log = logging.getLogger(__name__)

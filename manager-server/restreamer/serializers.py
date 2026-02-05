@@ -1,4 +1,5 @@
 from rest_framework import serializers
+
 from .models import ChunkRecord, StreamingEvent
 
 
@@ -15,14 +16,14 @@ class PositionLastSerializer(serializers.Serializer):
 class ChunkRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChunkRecord
-        fields = ['md5']
+        fields = ["md5"]
 
 
 class StreamingEventSerializer(serializers.ModelSerializer):
-
     class Meta:
         model = StreamingEvent
-        fields = ['identifier', 'short_description']
+        fields = ["identifier", "short_description"]
+
 
 class BufferHealthSerializer(serializers.Serializer):
     streaming_event_id = serializers.CharField(max_length=255)
