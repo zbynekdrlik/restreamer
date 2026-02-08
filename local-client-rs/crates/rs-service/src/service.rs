@@ -42,13 +42,6 @@ impl ServiceRunner {
         }
     }
 
-    /// For testing: use custom paths.
-    pub fn with_paths(mut self, db_path: PathBuf, chunk_dir: PathBuf) -> Self {
-        self.db_path = db_path;
-        self.chunk_dir = chunk_dir;
-        self
-    }
-
     /// Start all service components and wait for shutdown.
     pub async fn run(self) -> anyhow::Result<()> {
         let shutdown = ShutdownCoordinator::new();

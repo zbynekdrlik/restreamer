@@ -26,10 +26,6 @@ impl ShutdownCoordinator {
         let _ = self.tx.send(());
     }
 
-    /// Get a clone of the sender for passing to components that need to trigger shutdown.
-    pub fn sender(&self) -> broadcast::Sender<()> {
-        self.tx.clone()
-    }
 }
 
 impl Default for ShutdownCoordinator {

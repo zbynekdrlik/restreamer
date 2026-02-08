@@ -58,8 +58,7 @@ impl TsMuxer {
         let mut payload = self.buffer.split_to(self.buffer.len()).to_vec();
         // Pad with 0xFF (stuffing bytes)
         payload.resize(payload_size, 0xFF);
-        let packet = self.build_ts_packet(&payload, true);
-        packet
+        self.build_ts_packet(&payload, true)
     }
 
     fn build_ts_packet(&mut self, payload: &[u8], payload_unit_start: bool) -> Vec<u8> {

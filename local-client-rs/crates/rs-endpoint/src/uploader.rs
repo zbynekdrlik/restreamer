@@ -9,7 +9,6 @@ use tracing::{error, info, warn};
 use rs_core::db;
 use rs_core::models::WsEvent;
 
-use crate::EndpointError;
 use crate::manager_api::{ChunkUploadNotification, ManagerClient};
 use crate::s3::S3Client;
 

@@ -38,12 +38,6 @@ impl Poller {
         }
     }
 
-    /// For testing: set a custom poll interval.
-    pub fn with_interval(mut self, interval: Duration) -> Self {
-        self.interval = interval;
-        self
-    }
-
     /// Run the poller until shutdown.
     pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) {
         info!("Poller started (interval: {:?})", self.interval);
