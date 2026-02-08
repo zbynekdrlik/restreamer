@@ -1,0 +1,219 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect Rust changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'local-client-rs/**'
+              - '.github/workflows/rust-ci.yml'
+              - '.github/workflows/rust-release.yml'
+
+  version-check:
+    name: Version check
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Cargo.toml version is not already tagged
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          TAG="local-client-rs-v${VERSION}"
+          echo "Version: $VERSION"
+          echo "Tag: $TAG"
+          if git tag -l | grep -qx "$TAG"; then
+            echo "ERROR: Tag $TAG already exists. Bump the version in Cargo.toml."
+            exit 1
+          fi
+          echo "OK: Tag $TAG does not exist yet."
+
+  lint:
+    name: Lint (fmt + clippy)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: local-client-rs
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: local-client-rs
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - name: Run tests
+        run: cargo test --workspace --verbose
+        env:
+          SQLX_OFFLINE: true
+
+  security:
+    name: Security audit
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Run audit
+        run: cargo audit --deny warnings
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: [lint, test]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: local-client-rs
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - name: Build release (service)
+        run: cargo build --release -p rs-service
+
+  file-size:
+    name: File size check
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check no .rs file exceeds 1000 lines
+        run: |
+          OVERSIZED=$(find local-client-rs -name '*.rs' -exec sh -c 'lines=$(wc -l < "$1"); if [ "$lines" -gt 1000 ]; then echo "$1: $lines lines"; fi' _ {} \;)
+          if [ -n "$OVERSIZED" ]; then
+            echo "ERROR: The following Rust files exceed 1000 lines:"
+            echo "$OVERSIZED"
+            exit 1
+          fi
+          echo "OK: All Rust files are within the 1000-line limit."
+
+  rust-ci-gate:
+    name: Rust CI Gate
+    if: always()
+    needs: [changes, version-check, lint, test, security, build, file-size]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          echo "changes:       ${{ needs.changes.result }}"
+          echo "version-check: ${{ needs.version-check.result }}"
+          echo "lint:          ${{ needs.lint.result }}"
+          echo "test:          ${{ needs.test.result }}"
+          echo "security:      ${{ needs.security.result }}"
+          echo "build:         ${{ needs.build.result }}"
+          echo "file-size:     ${{ needs.file-size.result }}"
+
+          # If no Rust changes, all skipped jobs are fine
+          if [[ "${{ needs.changes.outputs.rust }}" != "true" ]]; then
+            echo "No Rust changes detected — gate passes."
+            exit 0
+          fi
+
+          # All must succeed when Rust files changed
+          for job in version-check lint test security build file-size; do
+            result="${{ needs[job].result }}"
+            if [[ "$result" != "success" ]]; then
+              echo "FAIL: $job did not succeed (result: $result)"
+              exit 1
+            fi
+          done
+
+          echo "All Rust CI checks passed!"
+
+  auto-release:
+    name: Auto-release tag
+    needs: [rust-ci-gate]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create release tag
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          TAG="local-client-rs-v${VERSION}"
+          if git tag -l | grep -qx "$TAG"; then
+            echo "Tag $TAG already exists, skipping."
+            exit 0
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "Created and pushed tag: $TAG"

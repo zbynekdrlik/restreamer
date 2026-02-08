@@ -1,0 +1,144 @@
+name: Rust Release
+
+on:
+  push:
+    tags:
+      - "local-client-rs-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. local-client-rs-v0.1.0)"
+        required: true
+
+concurrency:
+  group: rust-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Extract and validate version
+        id: version
+        working-directory: local-client-rs
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#local-client-rs-v}"
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+          echo "Tag version:   $VERSION"
+          echo "Cargo version: $CARGO_VERSION"
+
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "ERROR: Tag version ($VERSION) does not match Cargo.toml ($CARGO_VERSION)"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  build-service:
+    name: Build service (Windows)
+    needs: validate
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: local-client-rs
+      - name: Build service binary
+        run: cargo build --release -p rs-service
+        env:
+          SQLX_OFFLINE: true
+      - name: Rename artifact
+        run: |
+          $VERSION = "${{ needs.validate.outputs.version }}"
+          Copy-Item "target/release/restreamer-service.exe" "restreamer-service-${VERSION}-windows-x64.exe"
+      - name: Generate checksum
+        run: |
+          $VERSION = "${{ needs.validate.outputs.version }}"
+          $hash = Get-FileHash "restreamer-service-${VERSION}-windows-x64.exe" -Algorithm SHA256
+          "$($hash.Hash.ToLower())  restreamer-service-${VERSION}-windows-x64.exe" | Out-File -Encoding ASCII "restreamer-service-${VERSION}-windows-x64.exe.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: service-binary
+          path: |
+            local-client-rs/restreamer-service-*-windows-x64.exe
+            local-client-rs/restreamer-service-*-windows-x64.exe.sha256
+
+  build-tauri:
+    name: Build Tauri app (Windows)
+    needs: validate
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: local-client-rs
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SQLX_OFFLINE: true
+        with:
+          projectPath: local-client-rs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tauri-installer
+          path: local-client-rs/src-tauri/target/release/bundle/nsis/*.exe
+
+  release:
+    name: Create GitHub Release
+    needs: [validate, build-service, build-tauri]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: List artifacts
+        run: find artifacts -type f | sort
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: local-client-rs-v${{ needs.validate.outputs.version }}
+          name: Restreamer Local Client v${{ needs.validate.outputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/service-binary/*
+            artifacts/tauri-installer/*
+          body: |
+            ## Restreamer Local Client v${{ needs.validate.outputs.version }}
+
+            ### Assets
+            - `restreamer-service-*-windows-x64.exe` — Headless Windows service binary
+            - `Restreamer_*_x64-setup.exe` — Tauri NSIS installer (tray app + dashboard)
+
+            ### Installation
+            ```powershell
+            irm https://raw.githubusercontent.com/zbynekdrlik/restreamer/main/local-client-rs/install.ps1 | iex
+            ```
