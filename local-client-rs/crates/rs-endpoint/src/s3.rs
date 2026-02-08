@@ -43,10 +43,10 @@ impl S3Client {
             .map_err(|e| EndpointError::Io(e.to_string()))?;
 
         debug!(
-            "Uploading {} ({} bytes) to s3://{}",
+            "Uploading to s3://{}/{} ({} bytes)",
+            self.bucket.name,
             s3_key,
-            data.len(),
-            s3_key
+            data.len()
         );
 
         let response = self

@@ -17,7 +17,6 @@ pub struct ChunkUploader {
     pool: SqlitePool,
     s3: Arc<S3Client>,
     manager: Arc<ManagerClient>,
-    event_identifier: String,
     max_concurrent: usize,
     ws_tx: broadcast::Sender<WsEvent>,
 }
@@ -27,14 +26,12 @@ impl ChunkUploader {
         pool: SqlitePool,
         s3: S3Client,
         manager: ManagerClient,
-        event_identifier: String,
         ws_tx: broadcast::Sender<WsEvent>,
     ) -> Self {
         Self {
             pool,
             s3: Arc::new(s3),
             manager: Arc::new(manager),
-            event_identifier,
             max_concurrent: 4,
             ws_tx,
         }
@@ -42,15 +39,13 @@ impl ChunkUploader {
 
     /// Run the upload loop until shutdown signal.
     pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) {
-        let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
-
         loop {
             tokio::select! {
                 _ = shutdown.recv() => {
                     info!("Chunk uploader shutting down");
                     break;
                 }
-                _ = self.upload_batch(&semaphore) => {}
+                _ = self.upload_batch() => {}
             }
 
             // Brief pause between batches
@@ -61,7 +56,20 @@ impl ChunkUploader {
         }
     }
 
-    async fn upload_batch(&self, semaphore: &Arc<Semaphore>) {
+    async fn upload_batch(&self) {
+        // Get current event identifier from DB (fresh each batch)
+        let event_identifier = match db::get_streaming_event(&self.pool).await {
+            Ok(Some(event)) => match event.identifier {
+                Some(id) => id,
+                None => return,
+            },
+            Ok(None) => return,
+            Err(e) => {
+                error!("Failed to query streaming event: {e}");
+                return;
+            }
+        };
+
         let chunks = match db::get_unsent_chunks(&self.pool, 20).await {
             Ok(c) => c,
             Err(e) => {
@@ -77,13 +85,14 @@ impl ChunkUploader {
 
         info!("Found {} unsent chunks to upload", chunks.len());
 
+        let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
         let mut handles = Vec::new();
         for chunk in chunks {
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             let pool = self.pool.clone();
             let s3 = Arc::clone(&self.s3);
             let manager = Arc::clone(&self.manager);
-            let event_id = self.event_identifier.clone();
+            let event_id = event_identifier.clone();
             let ws_tx = self.ws_tx.clone();
 
             handles.push(tokio::spawn(async move {

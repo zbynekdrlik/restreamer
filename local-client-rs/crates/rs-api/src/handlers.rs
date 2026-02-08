@@ -56,12 +56,15 @@ pub struct PaginationParams {
     pub limit: Option<i64>,
 }
 
+/// Maximum allowed pagination limit to prevent excessive queries.
+const MAX_PAGINATION_LIMIT: i64 = 500;
+
 pub async fn get_chunks(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<PaginationParams>,
 ) -> Result<Json<Vec<rs_core::models::ChunkRecord>>, StatusCode> {
     let offset = params.offset.unwrap_or(0);
-    let limit = params.limit.unwrap_or(50);
+    let limit = params.limit.unwrap_or(50).min(MAX_PAGINATION_LIMIT);
     let chunks = db::get_chunks_paginated(&state.pool, offset, limit)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -84,23 +87,14 @@ pub async fn delete_chunks(State(state): State<AppState>) -> Result<Json<u64>, S
     Ok(Json(deleted))
 }
 
-pub async fn action_restart_inpoint(State(state): State<AppState>) -> StatusCode {
-    let _ = state.ws_tx.send(WsEvent::InpointStatus {
-        state: "restarting".to_string(),
-        received_bytes: 0,
-        chunk_count: 0,
-    });
-    StatusCode::ACCEPTED
+pub async fn action_restart_inpoint() -> StatusCode {
+    // TODO: implement actual restart logic via service handle
+    StatusCode::NOT_IMPLEMENTED
 }
 
-pub async fn action_restart_endpoint(State(state): State<AppState>) -> StatusCode {
-    let _ = state.ws_tx.send(WsEvent::EndpointStatus {
-        state: "restarting".to_string(),
-        pending_chunks: 0,
-        active_uploads: 0,
-        buffer_duration: "00:00:00".to_string(),
-    });
-    StatusCode::ACCEPTED
+pub async fn action_restart_endpoint() -> StatusCode {
+    // TODO: implement actual restart logic via service handle
+    StatusCode::NOT_IMPLEMENTED
 }
 
 pub async fn action_toggle_receiving(
@@ -162,5 +156,9 @@ pub async fn action_toggle_delivering(
 }
 
 pub async fn get_config(State(state): State<AppState>) -> Json<rs_core::config::Config> {
-    Json((*state.config).clone())
+    let mut config = (*state.config).clone();
+    // Redact sensitive credentials before sending over the API
+    config.s3.access_key_id = "***".to_string();
+    config.s3.secret_access_key = "***".to_string();
+    Json(config)
 }

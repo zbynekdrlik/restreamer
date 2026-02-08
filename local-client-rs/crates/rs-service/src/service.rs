@@ -127,21 +127,7 @@ impl ServiceRunner {
         let s3_client = S3Client::new(&self.config.s3).context("failed to create S3 client")?;
         let manager_client = ManagerClient::new(&self.config.manager_url);
 
-        // Get event identifier for uploader (may not exist yet)
-        let event_identifier = db::get_streaming_event(&pool)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|e| e.identifier)
-            .unwrap_or_default();
-
-        let uploader = ChunkUploader::new(
-            pool.clone(),
-            s3_client,
-            manager_client,
-            event_identifier,
-            ws_tx.clone(),
-        );
+        let uploader = ChunkUploader::new(pool.clone(), s3_client, manager_client, ws_tx.clone());
         let upload_shutdown = shutdown.subscribe();
         let upload_handle = tokio::spawn(async move { uploader.run(upload_shutdown).await });
 

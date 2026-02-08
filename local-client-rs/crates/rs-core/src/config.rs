@@ -183,6 +183,7 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn config_serde_roundtrip() {
@@ -232,6 +233,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn env_overrides() {
         // SAFETY: This test runs in isolation; env var mutation is acceptable.

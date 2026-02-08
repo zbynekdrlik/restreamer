@@ -11,7 +11,8 @@ pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
     let options = SqliteConnectOptions::from_str(&url)?
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-        .create_if_missing(true);
+        .create_if_missing(true)
+        .pragma("foreign_keys", "1");
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -23,38 +24,48 @@ pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
 
 /// Create an in-memory SQLite pool for testing.
 pub async fn create_memory_pool() -> Result<SqlitePool> {
+    let options = SqliteConnectOptions::from_str("sqlite::memory:")?.pragma("foreign_keys", "1");
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
-        .connect("sqlite::memory:")
+        .connect_with(options)
         .await?;
     Ok(pool)
 }
 
+/// Schema version for migration tracking.
+const SCHEMA_VERSION: i32 = 1;
+
 /// Run database migrations.
 ///
-/// Creates the schema tables if they don't exist.
+/// Uses a version tracking table to support incremental schema changes.
 pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
-    enable_foreign_keys(pool).await?;
-    // SQLite doesn't support multiple statements in a single query,
-    // so we split by semicolons and execute each.
-    for statement in MIGRATION_SQL.split(';') {
-        let trimmed = statement.trim();
-        if !trimmed.is_empty() {
-            sqlx::query(trimmed).execute(pool).await?;
-        }
-    }
-    Ok(())
-}
-
-/// Enable foreign key support (needed for CASCADE deletes in SQLite).
-async fn enable_foreign_keys(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("PRAGMA foreign_keys = ON")
+    sqlx::query("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         .execute(pool)
         .await?;
+
+    let current: i32 = sqlx::query("SELECT COALESCE(MAX(version), 0) as v FROM schema_version")
+        .fetch_one(pool)
+        .await
+        .map(|r| r.get("v"))
+        .unwrap_or(0);
+
+    if current < SCHEMA_VERSION {
+        for statement in MIGRATION_V1_SQL.split(';') {
+            let trimmed = statement.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(pool).await?;
+            }
+        }
+        sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
+            .bind(SCHEMA_VERSION)
+            .execute(pool)
+            .await?;
+    }
+
     Ok(())
 }
 
-const MIGRATION_SQL: &str = r#"
+const MIGRATION_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS client_profile (
     id        INTEGER PRIMARY KEY,
     user_uuid TEXT NOT NULL UNIQUE
@@ -83,7 +94,7 @@ CREATE TABLE IF NOT EXISTS chunk_records (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_unsent ON chunk_records(streaming_event_id, sent, in_process)
-    WHERE sent = 0 AND in_process = 0;
+    WHERE sent = 0 AND in_process = 0
 "#;
 
 // --- Client Profile ---
@@ -477,5 +488,16 @@ mod tests {
         delete_streaming_event(&pool, event_id).await.unwrap();
         let stats = get_chunk_stats(&pool).await.unwrap();
         assert_eq!(stats.total_chunks, 0);
+    }
+
+    #[tokio::test]
+    async fn migration_is_idempotent() {
+        let pool = setup_db().await;
+        // Running migrations again should not fail
+        run_migrations(&pool).await.unwrap();
+        // Tables should still work
+        upsert_client_profile(&pool, "test").await.unwrap();
+        let profile = get_client_profile(&pool).await.unwrap().unwrap();
+        assert_eq!(profile.user_uuid, "test");
     }
 }

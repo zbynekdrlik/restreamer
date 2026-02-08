@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -32,8 +34,13 @@ pub struct CheckChunkResponse {
 
 impl ManagerClient {
     pub fn new(base_url: &str) -> Self {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("failed to build HTTP client");
         Self {
-            client: Client::new(),
+            client,
             base_url: base_url.trim_end_matches('/').to_string(),
         }
     }
@@ -44,15 +51,13 @@ impl ManagerClient {
         &self,
         user_uuid: &str,
     ) -> Result<Option<ActiveStreamResponse>, EndpointError> {
-        let url = format!(
-            "{}/api/get_active_stream/?user_uuid={user_uuid}",
-            self.base_url
-        );
+        let url = format!("{}/api/get_active_stream/", self.base_url);
         debug!("Polling manager: {url}");
 
         let response = self
             .client
             .get(&url)
+            .query(&[("user_uuid", user_uuid)])
             .send()
             .await
             .map_err(|e| EndpointError::Manager(format!("failed to reach manager: {e}")))?;

@@ -4,7 +4,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{App, Manager};
 
 /// Generate a 32x32 RGBA icon with the given color.
-fn make_icon(r: u8, g: u8, b: u8, label: char) -> Vec<u8> {
+fn make_icon(r: u8, g: u8, b: u8) -> Vec<u8> {
     let size = 32usize;
     let mut pixels = vec![0u8; size * size * 4];
     for y in 0..size {
@@ -53,7 +53,7 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         ],
     )?;
 
-    let inpoint_icon_data = make_icon(255, 165, 0, 'I'); // Orange = waiting
+    let inpoint_icon_data = make_icon(255, 165, 0); // Orange = waiting
     let inpoint_icon = Image::new_owned(inpoint_icon_data, 32, 32);
 
     let _inpoint_tray = TrayIconBuilder::with_id("inpoint")
@@ -90,7 +90,7 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         ],
     )?;
 
-    let endpoint_icon_data = make_icon(255, 165, 0, 'E'); // Orange = waiting
+    let endpoint_icon_data = make_icon(255, 165, 0); // Orange = waiting
     let endpoint_icon = Image::new_owned(endpoint_icon_data, 32, 32);
 
     let _endpoint_tray = TrayIconBuilder::with_id("endpoint")
@@ -108,13 +108,13 @@ mod tests {
 
     #[test]
     fn make_icon_produces_correct_size() {
-        let icon = make_icon(255, 0, 0, 'X');
+        let icon = make_icon(255, 0, 0);
         assert_eq!(icon.len(), 32 * 32 * 4);
     }
 
     #[test]
     fn make_icon_has_nonzero_alpha() {
-        let icon = make_icon(0, 255, 0, 'T');
+        let icon = make_icon(0, 255, 0);
         // At least some pixels should have alpha > 0 (the circle)
         let has_visible = icon.chunks(4).any(|pixel| pixel[3] > 0);
         assert!(has_visible);

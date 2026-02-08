@@ -6,6 +6,12 @@ export function useWebSocket(onEvent?: (event: WsEvent) => void) {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
+  const onEventRef = useRef(onEvent);
+
+  // Keep ref in sync with latest callback without triggering reconnects
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  }, [onEvent]);
 
   const connect = useCallback(() => {
     try {
@@ -21,7 +27,7 @@ export function useWebSocket(onEvent?: (event: WsEvent) => void) {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data) as WsEvent;
-          onEvent?.(data);
+          onEventRef.current?.(data);
         } catch {
           // ignore malformed messages
         }
@@ -29,7 +35,7 @@ export function useWebSocket(onEvent?: (event: WsEvent) => void) {
     } catch {
       reconnectTimeoutRef.current = setTimeout(connect, 3000);
     }
-  }, [onEvent]);
+  }, []);
 
   useEffect(() => {
     connect();
