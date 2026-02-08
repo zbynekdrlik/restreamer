@@ -3,6 +3,8 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{App, Manager};
 
+const SERVICE_URL: &str = "http://127.0.0.1:8910/api/v1";
+
 /// Generate a 32x32 RGBA icon with the given color.
 fn make_icon(r: u8, g: u8, b: u8) -> Vec<u8> {
     let size = 32usize;
@@ -64,17 +66,35 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
             "open_dashboard" => {
                 if let Some(window) = app.get_webview_window("main") {
                     if let Err(e) = window.show() {
-                        eprintln!("Failed to show window: {e}");
+                        tracing::warn!("Failed to show window: {e}");
                     }
                     if let Err(e) = window.set_focus() {
-                        eprintln!("Failed to focus window: {e}");
+                        tracing::warn!("Failed to focus window: {e}");
                     }
                 }
+            }
+            "restart_inpoint" => {
+                tauri::async_runtime::spawn(async {
+                    let url = format!("{SERVICE_URL}/actions/restart-inpoint");
+                    if let Err(e) = reqwest::Client::new().post(&url).send().await {
+                        tracing::warn!("Failed to restart inpoint: {e}");
+                    }
+                });
+            }
+            "delete_chunks" => {
+                tauri::async_runtime::spawn(async {
+                    let url = format!("{SERVICE_URL}/chunks");
+                    if let Err(e) = reqwest::Client::new().delete(&url).send().await {
+                        tracing::warn!("Failed to delete chunks: {e}");
+                    }
+                });
             }
             "quit" => {
                 app.exit(0);
             }
-            _ => {}
+            _ => {
+                tracing::debug!("Unhandled menu event: {}", event.id().as_ref());
+            }
         })
         .build(app)?;
 
@@ -101,6 +121,19 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .icon(endpoint_icon)
         .menu(&endpoint_menu)
         .tooltip("Restreamer Endpoint")
+        .on_menu_event(move |_app, event| match event.id().as_ref() {
+            "restart_endpoint" => {
+                tauri::async_runtime::spawn(async {
+                    let url = format!("{SERVICE_URL}/actions/restart-endpoint");
+                    if let Err(e) = reqwest::Client::new().post(&url).send().await {
+                        tracing::warn!("Failed to restart endpoint: {e}");
+                    }
+                });
+            }
+            _ => {
+                tracing::debug!("Unhandled endpoint menu event: {}", event.id().as_ref());
+            }
+        })
         .build(app)?;
 
     Ok(())

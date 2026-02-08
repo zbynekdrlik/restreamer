@@ -38,6 +38,7 @@ const SCHEMA_VERSION: i32 = 1;
 /// Run database migrations.
 ///
 /// Uses a version tracking table to support incremental schema changes.
+/// Wrapped in a transaction so partial failures don't leave the DB inconsistent.
 pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     sqlx::query("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         .execute(pool)
@@ -46,20 +47,21 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     let current: i32 = sqlx::query("SELECT COALESCE(MAX(version), 0) as v FROM schema_version")
         .fetch_one(pool)
         .await
-        .map(|r| r.get("v"))
-        .unwrap_or(0);
+        .map(|r| r.get("v"))?;
 
     if current < SCHEMA_VERSION {
+        let mut tx = pool.begin().await?;
         for statement in MIGRATION_V1_SQL.split(';') {
             let trimmed = statement.trim();
             if !trimmed.is_empty() {
-                sqlx::query(trimmed).execute(pool).await?;
+                sqlx::query(trimmed).execute(&mut *tx).await?;
             }
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
             .bind(SCHEMA_VERSION)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
     }
 
     Ok(())
@@ -143,6 +145,31 @@ pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEv
     }))
 }
 
+pub async fn get_streaming_event_by_id(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<Option<StreamingEvent>> {
+    let row = sqlx::query(
+        "SELECT id, identifier, short_description, date_of_event,
+         server_ip, received_bytes, receiving_activated, delivering_activated
+         FROM streaming_events WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| StreamingEvent {
+        id: r.get("id"),
+        identifier: r.get("identifier"),
+        short_description: r.get("short_description"),
+        date_of_event: r.get("date_of_event"),
+        server_ip: r.get("server_ip"),
+        received_bytes: r.get("received_bytes"),
+        receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
+        delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
+    }))
+}
+
 pub async fn upsert_streaming_event(
     pool: &SqlitePool,
     identifier: &str,
@@ -183,6 +210,26 @@ pub async fn update_streaming_event_flags(
     .bind(id)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+pub async fn set_receiving_activated(pool: &SqlitePool, id: i64, receiving: bool) -> Result<()> {
+    let val = receiving as i32;
+    sqlx::query("UPDATE streaming_events SET receiving_activated = ?1 WHERE id = ?2")
+        .bind(val)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_delivering_activated(pool: &SqlitePool, id: i64, delivering: bool) -> Result<()> {
+    let val = delivering as i32;
+    sqlx::query("UPDATE streaming_events SET delivering_activated = ?1 WHERE id = ?2")
+        .bind(val)
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -305,7 +352,7 @@ pub async fn get_chunks_paginated(
         .collect())
 }
 
-pub async fn get_chunk_stats(pool: &SqlitePool) -> Result<ChunkStats> {
+pub async fn get_chunk_stats(pool: &SqlitePool, chunk_duration_ms: u64) -> Result<ChunkStats> {
     let row = sqlx::query(
         r#"SELECT
             COUNT(*) as total_chunks,
@@ -330,7 +377,7 @@ pub async fn get_chunk_stats(pool: &SqlitePool) -> Result<ChunkStats> {
         sent_chunks: sent_chunks as i64,
         in_process_chunks: in_process_chunks as i64,
         total_bytes,
-        buffer_duration_secs: pending_chunks as f64,
+        buffer_duration_secs: pending_chunks as f64 * (chunk_duration_ms as f64 / 1000.0),
     })
 }
 
@@ -418,7 +465,7 @@ mod tests {
         assert_eq!(unsent.len(), 0);
 
         set_chunk_sent(&pool, chunk_id).await.unwrap();
-        let stats = get_chunk_stats(&pool).await.unwrap();
+        let stats = get_chunk_stats(&pool, 1000).await.unwrap();
         assert_eq!(stats.total_chunks, 1);
         assert_eq!(stats.sent_chunks, 1);
         assert_eq!(stats.pending_chunks, 0);
@@ -443,7 +490,7 @@ mod tests {
             .unwrap();
         }
 
-        let stats = get_chunk_stats(&pool).await.unwrap();
+        let stats = get_chunk_stats(&pool, 1000).await.unwrap();
         assert_eq!(stats.total_chunks, 5);
         assert_eq!(stats.pending_chunks, 5);
         assert_eq!(stats.total_bytes, 100 + 200 + 300 + 400 + 500);
@@ -471,7 +518,7 @@ mod tests {
         let deleted = delete_all_chunks(&pool).await.unwrap();
         assert_eq!(deleted, 3);
 
-        let stats = get_chunk_stats(&pool).await.unwrap();
+        let stats = get_chunk_stats(&pool, 1000).await.unwrap();
         assert_eq!(stats.total_chunks, 0);
     }
 
@@ -486,7 +533,7 @@ mod tests {
             .unwrap();
 
         delete_streaming_event(&pool, event_id).await.unwrap();
-        let stats = get_chunk_stats(&pool).await.unwrap();
+        let stats = get_chunk_stats(&pool, 1000).await.unwrap();
         assert_eq!(stats.total_chunks, 0);
     }
 

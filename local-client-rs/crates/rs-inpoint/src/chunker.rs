@@ -116,7 +116,9 @@ impl ChunkSink {
 
         if let Some(pending) = pending {
             if let Some(chunk_info) = Self::write_chunk_to_disk(pending).await {
-                let _ = self.chunk_tx.send(chunk_info);
+                if let Err(e) = self.chunk_tx.send(chunk_info) {
+                    tracing::debug!("No chunk subscribers: {e}");
+                }
             }
         }
     }
@@ -136,7 +138,9 @@ impl ChunkSink {
 
         if let Some(pending) = pending {
             if let Some(chunk_info) = Self::write_chunk_to_disk(pending).await {
-                let _ = self.chunk_tx.send(chunk_info);
+                if let Err(e) = self.chunk_tx.send(chunk_info) {
+                    tracing::debug!("No chunk subscribers: {e}");
+                }
             }
         }
     }

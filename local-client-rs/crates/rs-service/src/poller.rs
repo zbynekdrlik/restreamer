@@ -71,16 +71,20 @@ impl Poller {
                 {
                     Ok(_) => {
                         info!("Active stream: {}", stream.identifier);
-                        let _ = self.ws_tx.send(WsEvent::StreamingEvent {
+                        if let Err(e) = self.ws_tx.send(WsEvent::StreamingEvent {
                             action: "active".to_string(),
                             identifier: Some(stream.identifier),
                             receiving: true,
                             delivering: true,
-                        });
-                        let _ = self.ws_tx.send(WsEvent::ManagerPoll {
+                        }) {
+                            debug!("No WS subscribers for StreamingEvent: {e}");
+                        }
+                        if let Err(e) = self.ws_tx.send(WsEvent::ManagerPoll {
                             status_code: 200,
                             message: "active stream found".to_string(),
-                        });
+                        }) {
+                            debug!("No WS subscribers for ManagerPoll: {e}");
+                        }
                     }
                     Err(e) => {
                         error!("Failed to upsert streaming event: {e}");
@@ -89,45 +93,63 @@ impl Poller {
             }
             Ok(None) => {
                 // 404 — no active stream, delete local event
-                if let Ok(Some(event)) = db::get_streaming_event(&self.pool).await {
-                    if let Err(e) = db::delete_streaming_event(&self.pool, event.id).await {
-                        error!("Failed to delete streaming event: {e}");
-                    } else {
-                        info!("Deleted local streaming event (manager 404)");
+                match db::get_streaming_event(&self.pool).await {
+                    Ok(Some(event)) => {
+                        if let Err(e) = db::delete_streaming_event(&self.pool, event.id).await {
+                            error!("Failed to delete streaming event: {e}");
+                        } else {
+                            info!("Deleted local streaming event (manager 404)");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        error!("Failed to query streaming event for 404 cleanup: {e}");
                     }
                 }
-                let _ = self.ws_tx.send(WsEvent::ManagerPoll {
+                if let Err(e) = self.ws_tx.send(WsEvent::ManagerPoll {
                     status_code: 404,
                     message: "no active stream".to_string(),
-                });
+                }) {
+                    debug!("No WS subscribers for ManagerPoll: {e}");
+                }
             }
             Err(rs_endpoint::EndpointError::ManagerForbidden) => {
                 // 403 — disable delivering
-                if let Ok(Some(event)) = db::get_streaming_event(&self.pool).await {
-                    if let Err(e) = db::update_streaming_event_flags(
-                        &self.pool,
-                        event.id,
-                        event.receiving_activated,
-                        false,
-                    )
-                    .await
-                    {
-                        error!("Failed to update streaming event flags: {e}");
-                    } else {
-                        warn!("Delivering disabled (manager 403)");
+                match db::get_streaming_event(&self.pool).await {
+                    Ok(Some(event)) => {
+                        if let Err(e) = db::update_streaming_event_flags(
+                            &self.pool,
+                            event.id,
+                            event.receiving_activated,
+                            false,
+                        )
+                        .await
+                        {
+                            error!("Failed to update streaming event flags: {e}");
+                        } else {
+                            warn!("Delivering disabled (manager 403)");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        error!("Failed to query streaming event for 403 update: {e}");
                     }
                 }
-                let _ = self.ws_tx.send(WsEvent::ManagerPoll {
+                if let Err(e) = self.ws_tx.send(WsEvent::ManagerPoll {
                     status_code: 403,
                     message: "delivering not authorized".to_string(),
-                });
+                }) {
+                    debug!("No WS subscribers for ManagerPoll: {e}");
+                }
             }
             Err(e) => {
                 error!("Manager poll failed: {e}");
-                let _ = self.ws_tx.send(WsEvent::Error {
+                if let Err(send_err) = self.ws_tx.send(WsEvent::Error {
                     service: "poller".to_string(),
                     message: e.to_string(),
-                });
+                }) {
+                    debug!("No WS subscribers for Error: {send_err}");
+                }
             }
         }
     }

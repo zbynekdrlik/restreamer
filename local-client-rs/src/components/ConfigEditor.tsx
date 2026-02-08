@@ -6,7 +6,10 @@ export function ConfigEditor() {
 
   useEffect(() => {
     fetch("http://127.0.0.1:8910/api/v1/config")
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+        return r.json();
+      })
       .then((data) => setConfig(JSON.stringify(data, null, 2)))
       .catch((e) => setError(`Failed to load config: ${e}`));
   }, []);

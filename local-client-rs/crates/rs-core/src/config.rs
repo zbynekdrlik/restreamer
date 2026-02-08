@@ -39,6 +39,8 @@ impl std::fmt::Debug for S3Config {
 pub struct InpointConfig {
     #[serde(default = "default_rtmp_port")]
     pub rtmp_port: u16,
+    #[serde(default = "default_rtmp_bind")]
+    pub rtmp_bind: String,
     #[serde(default = "default_chunk_duration_ms")]
     pub chunk_duration_ms: u64,
     #[serde(default = "default_read_buffer_bytes")]
@@ -55,6 +57,9 @@ pub struct ApiConfig {
 
 fn default_rtmp_port() -> u16 {
     1234
+}
+fn default_rtmp_bind() -> String {
+    "127.0.0.1".to_string()
 }
 fn default_chunk_duration_ms() -> u64 {
     1000
@@ -73,6 +78,7 @@ impl Default for InpointConfig {
     fn default() -> Self {
         Self {
             rtmp_port: default_rtmp_port(),
+            rtmp_bind: default_rtmp_bind(),
             chunk_duration_ms: default_chunk_duration_ms(),
             read_buffer_bytes: default_read_buffer_bytes(),
         }
@@ -97,13 +103,15 @@ impl Config {
         Ok(config)
     }
 
-    /// Save config to file.
+    /// Save config to file atomically (write to temp + rename).
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, &content)?;
+        std::fs::rename(&tmp_path, path)?;
         Ok(())
     }
 
@@ -143,6 +151,9 @@ impl Config {
                 Ok(port) => self.inpoint.rtmp_port = port,
                 Err(e) => tracing::warn!("Invalid RESTREAMER_RTMP_PORT '{v}': {e}"),
             }
+        }
+        if let Ok(v) = std::env::var("RESTREAMER_RTMP_BIND") {
+            self.inpoint.rtmp_bind = v;
         }
         if let Ok(v) = std::env::var("RESTREAMER_API_PORT") {
             match v.parse() {

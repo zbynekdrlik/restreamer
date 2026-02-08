@@ -84,10 +84,13 @@ pub async fn get_chunks(
 pub async fn get_chunk_stats(
     State(state): State<AppState>,
 ) -> Result<Json<ChunkStats>, StatusCode> {
-    let stats = db::get_chunk_stats(&state.pool).await.map_err(|e| {
-        error!("Failed to get chunk stats: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let chunk_duration_ms = state.config.inpoint.chunk_duration_ms;
+    let stats = db::get_chunk_stats(&state.pool, chunk_duration_ms)
+        .await
+        .map_err(|e| {
+            error!("Failed to get chunk stats: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     Ok(Json(stats))
 }
 
@@ -120,24 +123,21 @@ pub async fn action_toggle_receiving(
     let event = event.ok_or(StatusCode::NOT_FOUND)?;
 
     let new_receiving = !event.receiving_activated;
-    db::update_streaming_event_flags(
-        &state.pool,
-        event.id,
-        new_receiving,
-        event.delivering_activated,
-    )
-    .await
-    .map_err(|e| {
-        error!("Failed to update receiving flag: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    db::set_receiving_activated(&state.pool, event.id, new_receiving)
+        .await
+        .map_err(|e| {
+            error!("Failed to update receiving flag: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
-    let _ = state.ws_tx.send(WsEvent::StreamingEvent {
+    if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
         action: "toggled_receiving".to_string(),
         identifier: event.identifier,
         receiving: new_receiving,
         delivering: event.delivering_activated,
-    });
+    }) {
+        tracing::debug!("No WS subscribers for StreamingEvent: {e}");
+    }
 
     Ok(StatusCode::OK)
 }
@@ -153,24 +153,21 @@ pub async fn action_toggle_delivering(
     let event = event.ok_or(StatusCode::NOT_FOUND)?;
 
     let new_delivering = !event.delivering_activated;
-    db::update_streaming_event_flags(
-        &state.pool,
-        event.id,
-        event.receiving_activated,
-        new_delivering,
-    )
-    .await
-    .map_err(|e| {
-        error!("Failed to update delivering flag: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    db::set_delivering_activated(&state.pool, event.id, new_delivering)
+        .await
+        .map_err(|e| {
+            error!("Failed to update delivering flag: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
-    let _ = state.ws_tx.send(WsEvent::StreamingEvent {
+    if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
         action: "toggled_delivering".to_string(),
         identifier: event.identifier,
         receiving: event.receiving_activated,
         delivering: new_delivering,
-    });
+    }) {
+        tracing::debug!("No WS subscribers for StreamingEvent: {e}");
+    }
 
     Ok(StatusCode::OK)
 }

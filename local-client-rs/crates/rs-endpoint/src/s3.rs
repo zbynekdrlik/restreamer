@@ -36,33 +36,37 @@ impl S3Client {
         Ok(Self { bucket })
     }
 
-    /// Upload a file to S3.
+    /// Upload a file to S3 using streaming to avoid loading entire file into memory.
     pub async fn upload_file(&self, local_path: &Path, s3_key: &str) -> Result<(), EndpointError> {
-        let data = tokio::fs::read(local_path)
+        let mut file = tokio::fs::File::open(local_path)
             .await
             .map_err(|e| EndpointError::Io(e.to_string()))?;
 
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|e| EndpointError::Io(e.to_string()))?;
+        let file_size = metadata.len();
+
         debug!(
-            "Uploading to s3://{}/{} ({} bytes)",
-            self.bucket.name,
-            s3_key,
-            data.len()
+            "Uploading to s3://{}/{} ({file_size} bytes)",
+            self.bucket.name, s3_key,
         );
 
         let response = self
             .bucket
-            .put_object(s3_key, &data)
+            .put_object_stream(&mut file, s3_key)
             .await
             .map_err(|e| EndpointError::S3(format!("upload failed: {e}")))?;
 
         if response.status_code() >= 300 {
             return Err(EndpointError::S3(format!(
                 "upload returned status {}",
-                response.status_code()
+                response.status_code(),
             )));
         }
 
-        info!("Uploaded {s3_key} ({} bytes)", data.len());
+        info!("Uploaded {s3_key} ({file_size} bytes)");
         Ok(())
     }
 

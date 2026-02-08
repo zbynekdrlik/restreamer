@@ -78,10 +78,19 @@ pub struct ServiceStatus {
     pub streaming_event: Option<StreamingEvent>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentStatus {
     pub state: String,
     pub details: serde_json::Value,
+}
+
+impl Default for ComponentStatus {
+    fn default() -> Self {
+        Self {
+            state: String::new(),
+            details: serde_json::Value::Object(Default::default()),
+        }
+    }
 }
 
 /// Chunk statistics returned by the /chunks/stats endpoint.

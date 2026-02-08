@@ -2,11 +2,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
+use tokio::sync::{Semaphore, broadcast};
 use tracing::{error, info, warn};
 
 use crate::chunker::ChunkSink;
 use crate::session::RtmpSession;
+
+/// Maximum concurrent RTMP sessions (typically only 1 encoder in church setups).
+const MAX_RTMP_SESSIONS: usize = 4;
 
 /// RTMP server that accepts connections from OBS/vMix on a configurable port.
 ///
@@ -19,8 +22,10 @@ pub struct RtmpServer {
 }
 
 impl RtmpServer {
-    pub fn new(port: u16) -> Self {
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    pub fn new(bind: &str, port: u16) -> Self {
+        let addr: SocketAddr = format!("{bind}:{port}")
+            .parse()
+            .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port)));
         let (shutdown_tx, _) = broadcast::channel(1);
         Self { addr, shutdown_tx }
     }
@@ -36,16 +41,26 @@ impl RtmpServer {
         info!("RTMP server listening on {}", self.addr);
 
         let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let session_sem = Arc::new(Semaphore::new(MAX_RTMP_SESSIONS));
 
         loop {
             tokio::select! {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, peer)) => {
+                            let permit = match session_sem.clone().try_acquire_owned() {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    warn!("RTMP connection from {peer} rejected: max sessions ({MAX_RTMP_SESSIONS}) reached");
+                                    drop(stream);
+                                    continue;
+                                }
+                            };
                             info!("RTMP connection from {peer}");
                             let sink = Arc::clone(&chunk_sink);
                             let mut peer_shutdown = self.shutdown_tx.subscribe();
                             tokio::spawn(async move {
+                                let _permit = permit;
                                 let mut session = RtmpSession::new(stream, sink);
                                 tokio::select! {
                                     result = session.run() => {
@@ -83,7 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_binds_and_shuts_down() {
-        let server = RtmpServer::new(0); // random port
+        let server = RtmpServer::new("127.0.0.1", 0); // random port
         let shutdown = server.shutdown_handle();
         let sink = Arc::new(ChunkSink::new_null());
 

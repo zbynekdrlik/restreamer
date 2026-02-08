@@ -67,7 +67,7 @@ impl ServiceRunner {
         let api_addr: SocketAddr =
             format!("{}:{}", self.config.api.bind, self.config.api.port).parse()?;
         let api_state = AppState::new(pool.clone(), self.config.clone(), ws_tx.clone());
-        let actual_addr = rs_api::serve(api_state, api_addr).await?;
+        let (actual_addr, api_handle) = rs_api::serve(api_state, api_addr).await?;
         info!("API server running on {actual_addr}");
 
         // Chunk directory
@@ -83,55 +83,72 @@ impl ServiceRunner {
         let mut chunk_rx = chunk_sink.subscribe();
         let chunk_pool = pool.clone();
         let chunk_ws_tx = ws_tx.clone();
-        tokio::spawn(async move {
-            while let Ok(chunk_info) = chunk_rx.recv().await {
-                // Get current streaming event for the chunk
-                match db::get_streaming_event(&chunk_pool).await {
-                    Ok(Some(event)) => {
-                        let path_str = chunk_info.path.to_string_lossy().to_string();
-                        match db::insert_chunk(
-                            &chunk_pool,
-                            event.id,
-                            &path_str,
-                            chunk_info.size as i64,
-                            &chunk_info.md5,
-                        )
-                        .await
-                        {
-                            Ok(id) => {
-                                if let Err(e) = db::update_received_bytes(
+        let chunk_task = tokio::spawn(async move {
+            loop {
+                match chunk_rx.recv().await {
+                    Ok(chunk_info) => {
+                        // Get current streaming event for the chunk
+                        match db::get_streaming_event(&chunk_pool).await {
+                            Ok(Some(event)) => {
+                                let path_str = chunk_info.path.to_string_lossy().to_string();
+                                match db::insert_chunk(
                                     &chunk_pool,
                                     event.id,
+                                    &path_str,
                                     chunk_info.size as i64,
+                                    &chunk_info.md5,
                                 )
                                 .await
                                 {
-                                    tracing::error!("Failed to update received bytes: {e}");
-                                }
-                                if let Err(e) = chunk_ws_tx.send(WsEvent::ChunkReceived {
-                                    id,
-                                    data_size: chunk_info.size as i64,
-                                    md5: chunk_info.md5,
-                                }) {
-                                    tracing::debug!("No WS subscribers for ChunkReceived: {e}");
+                                    Ok(id) => {
+                                        if let Err(e) = db::update_received_bytes(
+                                            &chunk_pool,
+                                            event.id,
+                                            chunk_info.size as i64,
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!("Failed to update received bytes: {e}");
+                                        }
+                                        if let Err(e) = chunk_ws_tx.send(WsEvent::ChunkReceived {
+                                            id,
+                                            data_size: chunk_info.size as i64,
+                                            md5: chunk_info.md5,
+                                        }) {
+                                            tracing::debug!(
+                                                "No WS subscribers for ChunkReceived: {e}"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to insert chunk record: {e}");
+                                    }
                                 }
                             }
+                            Ok(None) => {
+                                warn!("Chunk received but no active streaming event");
+                            }
                             Err(e) => {
-                                tracing::error!("Failed to insert chunk record: {e}");
+                                tracing::error!("Failed to query streaming event: {e}");
                             }
                         }
                     }
-                    Ok(None) => {
-                        warn!("Chunk received but no active streaming event");
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Chunk event receiver lagged, missed {n} events");
+                        continue;
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to query streaming event: {e}");
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("Chunk event channel closed");
+                        break;
                     }
                 }
             }
         });
 
-        let rtmp_server = RtmpServer::new(self.config.inpoint.rtmp_port);
+        let rtmp_server = RtmpServer::new(
+            &self.config.inpoint.rtmp_bind,
+            self.config.inpoint.rtmp_port,
+        );
         let rtmp_shutdown = rtmp_server.shutdown_handle();
         let rtmp_sink = Arc::clone(&chunk_sink);
         let rtmp_handle = tokio::spawn(async move { rtmp_server.run(rtmp_sink).await });
@@ -185,6 +202,15 @@ impl ServiceRunner {
             Ok(()) => info!("Poller stopped cleanly"),
             Err(e) => tracing::error!("Poller task panicked: {e}"),
         }
+        // Drop the chunk channel so the chunk task can exit
+        drop(chunk_sink);
+        match chunk_task.await {
+            Ok(()) => info!("Chunk forwarder stopped cleanly"),
+            Err(e) => tracing::error!("Chunk forwarder panicked: {e}"),
+        }
+        // Abort the API server (it has no shutdown signal)
+        api_handle.abort();
+        info!("API server stopped");
 
         info!("Service stopped");
         Ok(())

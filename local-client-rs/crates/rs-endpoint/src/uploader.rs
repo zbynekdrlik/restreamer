@@ -4,13 +4,18 @@ use std::time::Duration;
 
 use sqlx::SqlitePool;
 use tokio::sync::{Semaphore, broadcast};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use rs_core::db;
 use rs_core::models::WsEvent;
 
 use crate::manager_api::{ChunkUploadNotification, ManagerClient};
 use crate::s3::S3Client;
+
+/// Maximum retry attempts for transient S3/manager failures.
+const MAX_RETRIES: u32 = 3;
+/// Base delay between retries (doubles each attempt).
+const RETRY_BASE_DELAY_MS: u64 = 200;
 
 /// Watches for unsent chunks and uploads them to S3, then notifies the manager.
 pub struct ChunkUploader {
@@ -57,19 +62,6 @@ impl ChunkUploader {
     }
 
     async fn upload_batch(&self) {
-        // Get current event identifier from DB (fresh each batch)
-        let event_identifier = match db::get_streaming_event(&self.pool).await {
-            Ok(Some(event)) => match event.identifier {
-                Some(id) => id,
-                None => return,
-            },
-            Ok(None) => return,
-            Err(e) => {
-                error!("Failed to query streaming event: {e}");
-                return;
-            }
-        };
-
         let chunks = match db::get_unsent_chunks(&self.pool, 20).await {
             Ok(c) => c,
             Err(e) => {
@@ -98,11 +90,40 @@ impl ChunkUploader {
             let pool = self.pool.clone();
             let s3 = Arc::clone(&self.s3);
             let manager = Arc::clone(&self.manager);
-            let event_id = event_identifier.clone();
             let ws_tx = self.ws_tx.clone();
 
             handles.push(tokio::spawn(async move {
                 let _permit = permit;
+
+                // Look up the event identifier from the chunk's own streaming_event_id
+                let event_id = match db::get_streaming_event_by_id(
+                    &pool,
+                    chunk.streaming_event_id,
+                )
+                .await
+                {
+                    Ok(Some(event)) => match event.identifier {
+                        Some(id) => id,
+                        None => {
+                            warn!(
+                                "Chunk {} has event {} with no identifier, skipping",
+                                chunk.id, chunk.streaming_event_id
+                            );
+                            return;
+                        }
+                    },
+                    Ok(None) => {
+                        warn!(
+                            "Chunk {} references missing event {}, skipping",
+                            chunk.id, chunk.streaming_event_id
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        error!("Failed to query event for chunk {}: {e}", chunk.id);
+                        return;
+                    }
+                };
 
                 // Mark as in-process
                 if let Err(e) = db::set_chunk_in_process(&pool, chunk.id, true).await {
@@ -114,34 +135,80 @@ impl ChunkUploader {
                 let filename = Path::new(&chunk.chunk_file_path)
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| format!("chunk_{}.bin", chunk.id));
+                    .unwrap_or_else(|| {
+                        warn!("Chunk {} has no filename in path, using fallback", chunk.id);
+                        format!("chunk_{}.bin", chunk.id)
+                    });
 
                 let s3_key = S3Client::chunk_key(&event_id, &filename);
 
-                // Upload to S3
-                match s3
-                    .upload_file(Path::new(&chunk.chunk_file_path), &s3_key)
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(e) => {
-                        warn!("S3 upload failed for chunk {}: {e}", chunk.id);
-                        if let Err(re) = db::set_chunk_in_process(&pool, chunk.id, false).await {
-                            error!("Failed to rollback in_process for chunk {}: {re}", chunk.id);
+                // Upload to S3 with retry
+                let mut uploaded = false;
+                for attempt in 0..MAX_RETRIES {
+                    match s3
+                        .upload_file(Path::new(&chunk.chunk_file_path), &s3_key)
+                        .await
+                    {
+                        Ok(()) => {
+                            uploaded = true;
+                            break;
                         }
-                        return;
+                        Err(e) => {
+                            if attempt + 1 < MAX_RETRIES {
+                                let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+                                warn!(
+                                    "S3 upload failed for chunk {} (attempt {}/{}): {e}, retrying in {delay}ms",
+                                    chunk.id, attempt + 1, MAX_RETRIES
+                                );
+                                tokio::time::sleep(Duration::from_millis(delay)).await;
+                            } else {
+                                warn!(
+                                    "S3 upload failed for chunk {} after {MAX_RETRIES} attempts: {e}",
+                                    chunk.id
+                                );
+                            }
+                        }
                     }
                 }
+                if !uploaded {
+                    if let Err(re) = db::set_chunk_in_process(&pool, chunk.id, false).await {
+                        error!("Failed to rollback in_process for chunk {}: {re}", chunk.id);
+                    }
+                    return;
+                }
 
-                // Notify manager
+                // Notify manager with retry
                 let notification = ChunkUploadNotification {
                     event_identifier: event_id.clone(),
                     chunk_filename: filename.clone(),
                     data_size: chunk.data_size,
                     md5: chunk.md5.clone(),
                 };
-                if let Err(e) = manager.notify_chunk_uploaded(&notification).await {
-                    warn!("Manager notification failed for chunk {}: {e}", chunk.id);
+                let mut notified = false;
+                for attempt in 0..MAX_RETRIES {
+                    match manager.notify_chunk_uploaded(&notification).await {
+                        Ok(()) => {
+                            notified = true;
+                            break;
+                        }
+                        Err(e) => {
+                            if attempt + 1 < MAX_RETRIES {
+                                let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+                                warn!(
+                                    "Manager notification failed for chunk {} (attempt {}/{}): {e}, retrying in {delay}ms",
+                                    chunk.id, attempt + 1, MAX_RETRIES
+                                );
+                                tokio::time::sleep(Duration::from_millis(delay)).await;
+                            } else {
+                                warn!(
+                                    "Manager notification failed for chunk {} after {MAX_RETRIES} attempts: {e}",
+                                    chunk.id
+                                );
+                            }
+                        }
+                    }
+                }
+                if !notified {
                     if let Err(re) = db::set_chunk_in_process(&pool, chunk.id, false).await {
                         error!("Failed to rollback in_process for chunk {}: {re}", chunk.id);
                     }
@@ -175,11 +242,16 @@ impl ChunkUploader {
 
                 // Delete local file
                 if let Err(e) = tokio::fs::remove_file(&chunk.chunk_file_path).await {
-                    warn!("Failed to delete chunk file {}: {e}", chunk.chunk_file_path);
+                    error!(
+                        "Failed to delete chunk file {} — disk may fill: {e}",
+                        chunk.chunk_file_path
+                    );
                 }
 
                 info!("Chunk {} uploaded and verified", chunk.id);
-                let _ = ws_tx.send(WsEvent::ChunkUploaded { chunk_id: chunk.id });
+                if let Err(e) = ws_tx.send(WsEvent::ChunkUploaded { chunk_id: chunk.id }) {
+                    debug!("No WS subscribers for ChunkUploaded: {e}");
+                }
             }));
         }
 

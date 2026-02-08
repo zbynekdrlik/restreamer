@@ -25,8 +25,9 @@ fn main() -> anyhow::Result<()> {
     let config = if config_path.exists() {
         Config::load(&config_path).context("failed to load config")?
     } else {
-        tracing::warn!(
-            "Config file not found at {}, using defaults",
+        tracing::error!(
+            "Config file not found at {}. Create a config file or set environment variables. \
+             See CLAUDE.md for config format.",
             config_path.display()
         );
         Config::default()

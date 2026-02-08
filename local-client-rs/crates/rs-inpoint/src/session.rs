@@ -38,6 +38,9 @@ impl RtmpSession {
             self.sink.write_data(&buf[..n]).await;
         }
 
+        // Flush remaining buffered data as a final chunk to prevent data loss
+        self.sink.flush().await;
+
         Ok(())
     }
 }

@@ -2,7 +2,7 @@ name: Rust CI
 
 on:
   push:
-    branches: [dev]
+    branches: [dev, main]
   pull_request:
     branches: [main]
 
@@ -125,7 +125,7 @@ jobs:
 
   build:
     name: Build (${{ matrix.os }})
-    needs: [lint, test]
+    needs: [changes, lint, test]
     if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     strategy:

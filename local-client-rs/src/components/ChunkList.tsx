@@ -11,8 +11,8 @@ export function ChunkList() {
       const [c, s] = await Promise.all([api.getChunks(), api.getChunkStats()]);
       setChunks(c);
       setStats(s);
-    } catch {
-      // service unavailable
+    } catch (e) {
+      console.error("Failed to fetch chunks:", e);
     }
   };
 

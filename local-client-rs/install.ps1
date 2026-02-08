@@ -19,8 +19,10 @@ function Write-Err($msg) { Write-Host "  [-] $msg" -ForegroundColor Red }
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     Write-Status "Requesting administrator privileges..."
-    $script = "irm https://raw.githubusercontent.com/$GithubRepo/main/local-client-rs/install.ps1 | iex"
-    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$script`"" -Verb RunAs
+    # Save current script to temp to avoid re-downloading (TOCTOU safety)
+    $tempScript = "$env:TEMP\restreamer-install.ps1"
+    $MyInvocation.MyCommand.ScriptBlock.ToString() | Set-Content -Path $tempScript -Encoding UTF8
+    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tempScript`"" -Verb RunAs
     exit
 }
 
@@ -61,11 +63,27 @@ New-Item -ItemType Directory -Path "$ConfigDir\chunks" -Force | Out-Null
 
 # --- Download service binary ---
 $serviceAsset = $latestRelease.assets | Where-Object { $_.name -like "restreamer-service-*-windows-x64.exe" } | Select-Object -First 1
+$checksumAsset = $latestRelease.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" } | Select-Object -First 1
 if ($serviceAsset) {
     Write-Status "Downloading service binary..."
     $servicePath = "$InstallDir\restreamer-service.exe"
     Invoke-WebRequest -Uri $serviceAsset.browser_download_url -OutFile $servicePath
     Write-Ok "Downloaded: $($serviceAsset.name)"
+
+    # Verify checksum if available
+    if ($checksumAsset) {
+        Write-Status "Verifying checksum..."
+        $checksums = (Invoke-WebRequest -Uri $checksumAsset.browser_download_url).Content
+        $expectedHash = ($checksums -split "`n" | Where-Object { $_ -match $serviceAsset.name } | ForEach-Object { ($_ -split '\s+')[0] })
+        if ($expectedHash) {
+            $actualHash = (Get-FileHash -Path $servicePath -Algorithm SHA256).Hash.ToLower()
+            if ($actualHash -ne $expectedHash.ToLower()) {
+                Write-Err "Checksum mismatch for $($serviceAsset.name)! Expected: $expectedHash, Got: $actualHash"
+                exit 1
+            }
+            Write-Ok "Checksum verified"
+        }
+    }
 } else {
     Write-Err "Service binary not found in release assets"
     exit 1
