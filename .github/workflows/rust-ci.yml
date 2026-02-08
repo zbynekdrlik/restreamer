@@ -188,13 +188,25 @@ jobs:
           fi
 
           # All must succeed when Rust files changed
-          for job in version-check lint test security build file-size; do
-            result="${{ needs[job].result }}"
+          FAILED=0
+          for job_result in \
+            "version-check:${{ needs.version-check.result }}" \
+            "lint:${{ needs.lint.result }}" \
+            "test:${{ needs.test.result }}" \
+            "security:${{ needs.security.result }}" \
+            "build:${{ needs.build.result }}" \
+            "file-size:${{ needs.file-size.result }}"; do
+            name="${job_result%%:*}"
+            result="${job_result##*:}"
             if [[ "$result" != "success" ]]; then
-              echo "FAIL: $job did not succeed (result: $result)"
-              exit 1
+              echo "FAIL: $name did not succeed (result: $result)"
+              FAILED=1
             fi
           done
+
+          if [[ "$FAILED" == "1" ]]; then
+            exit 1
+          fi
 
           echo "All Rust CI checks passed!"
 
