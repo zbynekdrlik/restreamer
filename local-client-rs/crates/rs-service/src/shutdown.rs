@@ -1,5 +1,5 @@
 use tokio::sync::broadcast;
-use tracing::info;
+use tracing::{debug, info};
 
 /// Centralized shutdown coordination.
 ///
@@ -23,7 +23,10 @@ impl ShutdownCoordinator {
     /// Trigger shutdown of all components.
     pub fn trigger(&self) {
         info!("Shutdown signal sent");
-        let _ = self.tx.send(());
+        match self.tx.send(()) {
+            Ok(n) => debug!("Shutdown signal delivered to {n} receivers"),
+            Err(_) => debug!("Shutdown signal sent but no active receivers"),
+        }
     }
 }
 

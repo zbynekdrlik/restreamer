@@ -18,7 +18,9 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> anyhow::Result<SocketAd
     info!("API server listening on {local_addr}");
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.ok();
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!("API server error: {e}");
+        }
     });
 
     Ok(local_addr)

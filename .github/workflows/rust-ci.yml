@@ -215,6 +215,8 @@ jobs:
     needs: [rust-ci-gate]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: local-client-rs

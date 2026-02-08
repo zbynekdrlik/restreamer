@@ -1,5 +1,5 @@
 use axum::Router;
-use axum::http::{HeaderValue, Method};
+use axum::http::{HeaderValue, Method, header};
 use axum::routing::{delete, get, post};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -44,7 +44,7 @@ pub fn build_router(state: AppState) -> Router {
             "https://tauri.localhost".parse::<HeaderValue>().unwrap(),
         ])
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::PATCH])
-        .allow_headers(tower_http::cors::Any);
+        .allow_headers([header::CONTENT_TYPE, header::ACCEPT]);
 
     Router::new()
         .nest("/api/v1", api)
@@ -304,6 +304,44 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn toggle_receiving_no_event_returns_404() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/actions/toggle-receiving")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn toggle_delivering_no_event_returns_404() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/actions/toggle-delivering")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -23,16 +23,20 @@ export function useWebSocket(onEvent?: (event: WsEvent) => void) {
         setConnected(false);
         reconnectTimeoutRef.current = setTimeout(connect, 3000);
       };
-      ws.onerror = () => ws.close();
+      ws.onerror = (err) => {
+        console.warn("WebSocket error:", err);
+        ws.close();
+      };
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data) as WsEvent;
           onEventRef.current?.(data);
-        } catch {
-          // ignore malformed messages
+        } catch (e) {
+          console.warn("Failed to parse WebSocket message:", e);
         }
       };
-    } catch {
+    } catch (e) {
+      console.warn("WebSocket connection failed:", e);
       reconnectTimeoutRef.current = setTimeout(connect, 3000);
     }
   }, []);

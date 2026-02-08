@@ -18,7 +18,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     info!("WebSocket client connected");
 
     // Forward broadcast events to the WebSocket client
-    let send_task = tokio::spawn(async move {
+    let mut send_task = tokio::spawn(async move {
         while let Ok(event) = rx.recv().await {
             match serde_json::to_string(&event) {
                 Ok(json) => {
@@ -34,7 +34,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     });
 
     // Read from client (handle pings/close, ignore other messages)
-    let recv_task = tokio::spawn(async move {
+    let mut recv_task = tokio::spawn(async move {
         while let Some(msg) = receiver.next().await {
             match msg {
                 Ok(Message::Close(_)) => {
@@ -53,10 +53,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     });
 
-    // Wait for either task to finish
+    // Wait for either task to finish, then abort the other
     tokio::select! {
-        _ = send_task => {},
-        _ = recv_task => {},
+        _ = &mut send_task => {
+            recv_task.abort();
+        },
+        _ = &mut recv_task => {
+            send_task.abort();
+        },
     }
 
     info!("WebSocket client disconnected");

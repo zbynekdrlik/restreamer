@@ -16,7 +16,8 @@ export function useStatus() {
           setStatus(data);
           setConnected(true);
         }
-      } catch {
+      } catch (e) {
+        console.error("Status poll failed:", e);
         if (active) {
           setConnected(false);
         }

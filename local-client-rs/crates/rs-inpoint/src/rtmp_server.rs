@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
@@ -19,7 +20,7 @@ pub struct RtmpServer {
 
 impl RtmpServer {
     pub fn new(port: u16) -> Self {
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let (shutdown_tx, _) = broadcast::channel(1);
         Self { addr, shutdown_tx }
     }
@@ -61,6 +62,7 @@ impl RtmpServer {
                         }
                         Err(e) => {
                             error!("Failed to accept RTMP connection: {e}");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
                 }

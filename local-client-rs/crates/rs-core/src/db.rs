@@ -322,7 +322,7 @@ pub async fn get_chunk_stats(pool: &SqlitePool) -> Result<ChunkStats> {
     let pending_chunks: i32 = row.get("pending_chunks");
     let sent_chunks: i32 = row.get("sent_chunks");
     let in_process_chunks: i32 = row.get("in_process_chunks");
-    let total_bytes: i64 = row.try_get("total_bytes").unwrap_or(0);
+    let total_bytes: i64 = row.get("total_bytes");
 
     Ok(ChunkStats {
         total_chunks: total_chunks as i64,

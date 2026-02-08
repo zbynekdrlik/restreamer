@@ -63,8 +63,12 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "open_dashboard" => {
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+                    if let Err(e) = window.show() {
+                        eprintln!("Failed to show window: {e}");
+                    }
+                    if let Err(e) = window.set_focus() {
+                        eprintln!("Failed to focus window: {e}");
+                    }
                 }
             }
             "quit" => {

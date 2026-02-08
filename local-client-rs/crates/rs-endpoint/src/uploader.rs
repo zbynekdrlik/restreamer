@@ -88,7 +88,13 @@ impl ChunkUploader {
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
         let mut handles = Vec::new();
         for chunk in chunks {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Semaphore closed: {e}");
+                    break;
+                }
+            };
             let pool = self.pool.clone();
             let s3 = Arc::clone(&self.s3);
             let manager = Arc::clone(&self.manager);
@@ -120,7 +126,9 @@ impl ChunkUploader {
                     Ok(()) => {}
                     Err(e) => {
                         warn!("S3 upload failed for chunk {}: {e}", chunk.id);
-                        let _ = db::set_chunk_in_process(&pool, chunk.id, false).await;
+                        if let Err(re) = db::set_chunk_in_process(&pool, chunk.id, false).await {
+                            error!("Failed to rollback in_process for chunk {}: {re}", chunk.id);
+                        }
                         return;
                     }
                 }
@@ -134,7 +142,9 @@ impl ChunkUploader {
                 };
                 if let Err(e) = manager.notify_chunk_uploaded(&notification).await {
                     warn!("Manager notification failed for chunk {}: {e}", chunk.id);
-                    let _ = db::set_chunk_in_process(&pool, chunk.id, false).await;
+                    if let Err(re) = db::set_chunk_in_process(&pool, chunk.id, false).await {
+                        error!("Failed to rollback in_process for chunk {}: {re}", chunk.id);
+                    }
                     return;
                 }
 
@@ -143,12 +153,16 @@ impl ChunkUploader {
                     Ok(true) => {}
                     Ok(false) => {
                         warn!("Manager did not verify chunk {}", chunk.id);
-                        let _ = db::set_chunk_in_process(&pool, chunk.id, false).await;
+                        if let Err(re) = db::set_chunk_in_process(&pool, chunk.id, false).await {
+                            error!("Failed to rollback in_process for chunk {}: {re}", chunk.id);
+                        }
                         return;
                     }
                     Err(e) => {
                         warn!("Chunk verification failed for {}: {e}", chunk.id);
-                        let _ = db::set_chunk_in_process(&pool, chunk.id, false).await;
+                        if let Err(re) = db::set_chunk_in_process(&pool, chunk.id, false).await {
+                            error!("Failed to rollback in_process for chunk {}: {re}", chunk.id);
+                        }
                         return;
                     }
                 }
@@ -170,7 +184,9 @@ impl ChunkUploader {
         }
 
         for handle in handles {
-            let _ = handle.await;
+            if let Err(e) = handle.await {
+                error!("Upload task panicked: {e}");
+            }
         }
     }
 }

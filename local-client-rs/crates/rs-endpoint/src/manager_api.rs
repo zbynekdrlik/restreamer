@@ -33,16 +33,16 @@ pub struct CheckChunkResponse {
 }
 
 impl ManagerClient {
-    pub fn new(base_url: &str) -> Self {
+    pub fn new(base_url: &str) -> Result<Self, EndpointError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
             .build()
-            .expect("failed to build HTTP client");
-        Self {
+            .map_err(|e| EndpointError::Manager(format!("failed to build HTTP client: {e}")))?;
+        Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
-        }
+        })
     }
 
     /// Poll for active streaming event.
@@ -152,10 +152,10 @@ mod tests {
 
     #[test]
     fn manager_client_builds_urls() {
-        let client = ManagerClient::new("https://restreamer.newlevel.media/");
+        let client = ManagerClient::new("https://restreamer.newlevel.media/").unwrap();
         assert_eq!(client.base_url, "https://restreamer.newlevel.media");
 
-        let client = ManagerClient::new("https://restreamer.newlevel.media");
+        let client = ManagerClient::new("https://restreamer.newlevel.media").unwrap();
         assert_eq!(client.base_url, "https://restreamer.newlevel.media");
     }
 

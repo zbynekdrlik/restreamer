@@ -14,13 +14,25 @@ pub struct Config {
     pub api: ApiConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct S3Config {
     pub bucket: String,
     pub region: String,
     pub endpoint: String,
     pub access_key_id: String,
     pub secret_access_key: String,
+}
+
+impl std::fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Config")
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("access_key_id", &"***")
+            .field("secret_access_key", &"***")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,18 +139,40 @@ impl Config {
             self.s3.secret_access_key = v;
         }
         if let Ok(v) = std::env::var("RESTREAMER_RTMP_PORT") {
-            if let Ok(port) = v.parse() {
-                self.inpoint.rtmp_port = port;
+            match v.parse() {
+                Ok(port) => self.inpoint.rtmp_port = port,
+                Err(e) => tracing::warn!("Invalid RESTREAMER_RTMP_PORT '{v}': {e}"),
             }
         }
         if let Ok(v) = std::env::var("RESTREAMER_API_PORT") {
-            if let Ok(port) = v.parse() {
-                self.api.port = port;
+            match v.parse() {
+                Ok(port) => self.api.port = port,
+                Err(e) => tracing::warn!("Invalid RESTREAMER_API_PORT '{v}': {e}"),
             }
         }
         if let Ok(v) = std::env::var("RESTREAMER_API_BIND") {
             self.api.bind = v;
         }
+    }
+
+    /// Validate that required configuration fields are present.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.client_uuid.is_empty() {
+            return Err("client_uuid is required".to_string());
+        }
+        if self.manager_url.is_empty() {
+            return Err("manager_url is required".to_string());
+        }
+        if self.s3.bucket.is_empty() {
+            return Err("s3.bucket is required".to_string());
+        }
+        if self.s3.access_key_id.is_empty() {
+            return Err("s3.access_key_id is required".to_string());
+        }
+        if self.s3.secret_access_key.is_empty() {
+            return Err("s3.secret_access_key is required".to_string());
+        }
+        Ok(())
     }
 
     /// Create a minimal config for testing.
@@ -253,5 +287,35 @@ mod tests {
             std::env::remove_var("RESTREAMER_CLIENT_UUID");
             std::env::remove_var("RESTREAMER_RTMP_PORT");
         }
+    }
+
+    #[test]
+    fn validate_rejects_empty_client_uuid() {
+        let config = Config::default();
+        assert!(config.validate().is_err());
+        assert!(config.validate().unwrap_err().contains("client_uuid"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_s3_credentials() {
+        let mut config = Config::for_testing();
+        config.s3.access_key_id = String::new();
+        assert!(config.validate().is_err());
+        assert!(config.validate().unwrap_err().contains("access_key_id"));
+    }
+
+    #[test]
+    fn validate_accepts_valid_config() {
+        let config = Config::for_testing();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn s3_config_debug_redacts_credentials() {
+        let config = Config::for_testing();
+        let debug_str = format!("{:?}", config.s3);
+        assert!(debug_str.contains("***"));
+        assert!(!debug_str.contains("test-key"));
+        assert!(!debug_str.contains("test-secret"));
     }
 }

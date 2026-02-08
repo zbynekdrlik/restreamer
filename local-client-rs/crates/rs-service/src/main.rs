@@ -32,6 +32,10 @@ fn main() -> anyhow::Result<()> {
         Config::default()
     };
 
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("Invalid config: {e}"))?;
+
     // Run the service
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

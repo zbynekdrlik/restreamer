@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use tokio::sync::broadcast;
-use tracing::info;
+use tracing::{info, warn};
 
 use rs_api::state::AppState;
 use rs_core::config::Config;
@@ -86,33 +86,46 @@ impl ServiceRunner {
         tokio::spawn(async move {
             while let Ok(chunk_info) = chunk_rx.recv().await {
                 // Get current streaming event for the chunk
-                if let Ok(Some(event)) = db::get_streaming_event(&chunk_pool).await {
-                    let path_str = chunk_info.path.to_string_lossy().to_string();
-                    match db::insert_chunk(
-                        &chunk_pool,
-                        event.id,
-                        &path_str,
-                        chunk_info.size as i64,
-                        &chunk_info.md5,
-                    )
-                    .await
-                    {
-                        Ok(id) => {
-                            let _ = db::update_received_bytes(
-                                &chunk_pool,
-                                event.id,
-                                chunk_info.size as i64,
-                            )
-                            .await;
-                            let _ = chunk_ws_tx.send(WsEvent::ChunkReceived {
-                                id,
-                                data_size: chunk_info.size as i64,
-                                md5: chunk_info.md5,
-                            });
+                match db::get_streaming_event(&chunk_pool).await {
+                    Ok(Some(event)) => {
+                        let path_str = chunk_info.path.to_string_lossy().to_string();
+                        match db::insert_chunk(
+                            &chunk_pool,
+                            event.id,
+                            &path_str,
+                            chunk_info.size as i64,
+                            &chunk_info.md5,
+                        )
+                        .await
+                        {
+                            Ok(id) => {
+                                if let Err(e) = db::update_received_bytes(
+                                    &chunk_pool,
+                                    event.id,
+                                    chunk_info.size as i64,
+                                )
+                                .await
+                                {
+                                    tracing::error!("Failed to update received bytes: {e}");
+                                }
+                                if let Err(e) = chunk_ws_tx.send(WsEvent::ChunkReceived {
+                                    id,
+                                    data_size: chunk_info.size as i64,
+                                    md5: chunk_info.md5,
+                                }) {
+                                    tracing::debug!("No WS subscribers for ChunkReceived: {e}");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to insert chunk record: {e}");
+                            }
                         }
-                        Err(e) => {
-                            tracing::error!("Failed to insert chunk record: {e}");
-                        }
+                    }
+                    Ok(None) => {
+                        warn!("Chunk received but no active streaming event");
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to query streaming event: {e}");
                     }
                 }
             }
@@ -125,14 +138,16 @@ impl ServiceRunner {
 
         // Endpoint uploader
         let s3_client = S3Client::new(&self.config.s3).context("failed to create S3 client")?;
-        let manager_client = ManagerClient::new(&self.config.manager_url);
+        let manager_client = ManagerClient::new(&self.config.manager_url)
+            .context("failed to create manager client")?;
 
         let uploader = ChunkUploader::new(pool.clone(), s3_client, manager_client, ws_tx.clone());
         let upload_shutdown = shutdown.subscribe();
         let upload_handle = tokio::spawn(async move { uploader.run(upload_shutdown).await });
 
         // Poller
-        let poller_manager = ManagerClient::new(&self.config.manager_url);
+        let poller_manager = ManagerClient::new(&self.config.manager_url)
+            .context("failed to create poller manager client")?;
         let poller = Poller::new(
             pool.clone(),
             poller_manager,
@@ -149,15 +164,27 @@ impl ServiceRunner {
 
         // Trigger shutdown
         shutdown.trigger();
-        let _ = rtmp_shutdown.send(());
+        if let Err(e) = rtmp_shutdown.send(()) {
+            warn!("RTMP shutdown signal had no receivers: {e}");
+        }
+
+        // Flush remaining chunks before uploader stops
+        chunk_sink.flush().await;
 
         // Wait for all tasks
-        let _ = rtmp_handle.await;
-        let _ = upload_handle.await;
-        let _ = poller_handle.await;
-
-        // Flush remaining chunks
-        chunk_sink.flush().await;
+        match rtmp_handle.await {
+            Ok(Ok(())) => info!("RTMP server stopped cleanly"),
+            Ok(Err(e)) => tracing::error!("RTMP server error: {e}"),
+            Err(e) => tracing::error!("RTMP task panicked: {e}"),
+        }
+        match upload_handle.await {
+            Ok(()) => info!("Uploader stopped cleanly"),
+            Err(e) => tracing::error!("Uploader task panicked: {e}"),
+        }
+        match poller_handle.await {
+            Ok(()) => info!("Poller stopped cleanly"),
+            Err(e) => tracing::error!("Poller task panicked: {e}"),
+        }
 
         info!("Service stopped");
         Ok(())
