@@ -25,7 +25,6 @@ impl ShutdownCoordinator {
         info!("Shutdown signal sent");
         let _ = self.tx.send(());
     }
-
 }
 
 impl Default for ShutdownCoordinator {
