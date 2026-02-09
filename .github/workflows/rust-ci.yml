@@ -170,6 +170,14 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
       - name: Build release (service)
         run: cargo build --release -p rs-service
+      - name: Upload service binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: restreamer-service-${{ matrix.os }}
+          path: |
+            local-client-rs/target/release/restreamer-service
+            local-client-rs/target/release/restreamer-service.exe
+          if-no-files-found: ignore
 
   file-size:
     name: File size check
