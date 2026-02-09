@@ -12,10 +12,11 @@ use rs_core::models::WsEvent;
 use crate::manager_api::{ChunkUploadNotification, ManagerClient};
 use crate::s3::S3Client;
 
-/// Maximum retry attempts for transient S3/manager failures.
-const MAX_RETRIES: u32 = 3;
-/// Base delay between retries (doubles each attempt).
-const RETRY_BASE_DELAY_MS: u64 = 200;
+/// Maximum retry attempts per batch cycle for transient S3/manager failures.
+/// Failed chunks are automatically retried in subsequent batch cycles.
+const MAX_RETRIES: u32 = 10;
+/// Delay between retries (flat 3-second interval per spec).
+const RETRY_DELAY: Duration = Duration::from_secs(3);
 
 /// Watches for unsent chunks and uploads them to S3, then notifies the manager.
 pub struct ChunkUploader {
@@ -155,12 +156,11 @@ impl ChunkUploader {
                         }
                         Err(e) => {
                             if attempt + 1 < MAX_RETRIES {
-                                let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
                                 warn!(
-                                    "S3 upload failed for chunk {} (attempt {}/{}): {e}, retrying in {delay}ms",
-                                    chunk.id, attempt + 1, MAX_RETRIES
+                                    "S3 upload failed for chunk {} (attempt {}/{}): {e}, retrying in {}s",
+                                    chunk.id, attempt + 1, MAX_RETRIES, RETRY_DELAY.as_secs()
                                 );
-                                tokio::time::sleep(Duration::from_millis(delay)).await;
+                                tokio::time::sleep(RETRY_DELAY).await;
                             } else {
                                 warn!(
                                     "S3 upload failed for chunk {} after {MAX_RETRIES} attempts: {e}",
@@ -193,12 +193,11 @@ impl ChunkUploader {
                         }
                         Err(e) => {
                             if attempt + 1 < MAX_RETRIES {
-                                let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
                                 warn!(
-                                    "Manager notification failed for chunk {} (attempt {}/{}): {e}, retrying in {delay}ms",
-                                    chunk.id, attempt + 1, MAX_RETRIES
+                                    "Manager notification failed for chunk {} (attempt {}/{}): {e}, retrying in {}s",
+                                    chunk.id, attempt + 1, MAX_RETRIES, RETRY_DELAY.as_secs()
                                 );
-                                tokio::time::sleep(Duration::from_millis(delay)).await;
+                                tokio::time::sleep(RETRY_DELAY).await;
                             } else {
                                 warn!(
                                     "Manager notification failed for chunk {} after {MAX_RETRIES} attempts: {e}",

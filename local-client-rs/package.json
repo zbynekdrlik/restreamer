@@ -13,7 +13,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-opener": "^2.0.0"
+    "@tauri-apps/plugin-opener": "^2.0.0",
+    "@tauri-apps/plugin-updater": "^2.0.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

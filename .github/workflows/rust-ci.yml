@@ -87,7 +87,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, windows-latest]
     defaults:
       run:
         working-directory: local-client-rs
@@ -106,6 +106,29 @@ jobs:
         run: cargo test --workspace --verbose
         env:
           SQLX_OFFLINE: true
+
+  coverage:
+    name: Coverage
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: local-client-rs
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+      - name: Run coverage
+        run: cargo tarpaulin --workspace --fail-under 60 --skip-clean --timeout 300
 
   security:
     name: Security audit
@@ -130,7 +153,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, windows-latest]
     defaults:
       run:
         working-directory: local-client-rs
@@ -168,7 +191,8 @@ jobs:
   rust-ci-gate:
     name: Rust CI Gate
     if: always()
-    needs: [changes, version-check, lint, test, security, build, file-size]
+    needs:
+      [changes, version-check, lint, test, coverage, security, build, file-size]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -177,6 +201,7 @@ jobs:
           echo "version-check: ${{ needs.version-check.result }}"
           echo "lint:          ${{ needs.lint.result }}"
           echo "test:          ${{ needs.test.result }}"
+          echo "coverage:      ${{ needs.coverage.result }}"
           echo "security:      ${{ needs.security.result }}"
           echo "build:         ${{ needs.build.result }}"
           echo "file-size:     ${{ needs.file-size.result }}"
@@ -193,6 +218,7 @@ jobs:
             "version-check:${{ needs.version-check.result }}" \
             "lint:${{ needs.lint.result }}" \
             "test:${{ needs.test.result }}" \
+            "coverage:${{ needs.coverage.result }}" \
             "security:${{ needs.security.result }}" \
             "build:${{ needs.build.result }}" \
             "file-size:${{ needs.file-size.result }}"; do
