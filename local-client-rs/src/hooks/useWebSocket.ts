@@ -5,7 +5,7 @@ import type { WsEvent } from "../types";
 export function useWebSocket(onEvent?: (event: WsEvent) => void) {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const onEventRef = useRef(onEvent);
 
   // Keep ref in sync with latest callback without triggering reconnects
