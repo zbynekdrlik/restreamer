@@ -230,6 +230,122 @@ jobs:
           fi
           echo "OK: All Rust files are within the 1000-line limit."
 
+  test-integrity:
+    name: Test integrity check
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: local-client-rs
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - name: Scan for #[ignore] on tests
+        run: |
+          IGNORED=$(grep -rn '#\[ignore\]' --include='*.rs' . || true)
+          if [ -n "$IGNORED" ]; then
+            echo "ERROR: Found #[ignore] attributes on tests. All tests must run."
+            echo "$IGNORED"
+            exit 1
+          fi
+          echo "OK: No #[ignore] attributes found."
+      - name: Scan for assert!(true) false positives
+        run: |
+          FALSE_POS=$(grep -rn 'assert!(true)' --include='*.rs' . || true)
+          if [ -n "$FALSE_POS" ]; then
+            echo "ERROR: Found assert!(true) — tests must verify real behavior."
+            echo "$FALSE_POS"
+            exit 1
+          fi
+          echo "OK: No assert!(true) found."
+      - name: Scan for empty test bodies
+        run: |
+          # Find test functions whose body is just {} or { } with nothing meaningful
+          EMPTY=$(grep -Pzo '#\[test\]\s*\n\s*(async\s+)?fn\s+\w+\([^)]*\)[^{]*\{\s*\}' --include='*.rs' -rn . || true)
+          if [ -n "$EMPTY" ]; then
+            echo "ERROR: Found empty test bodies — tests must contain real assertions."
+            echo "$EMPTY"
+            exit 1
+          fi
+          echo "OK: No empty test bodies found."
+      - name: Scan for assert_eq with trivial values
+        run: |
+          # Catch assert_eq!(1, 1), assert_eq!(true, true), etc.
+          TRIVIAL=$(grep -rn 'assert_eq!(1,\s*1)\|assert_eq!(true,\s*true)\|assert_eq!("",\s*"")' --include='*.rs' . || true)
+          if [ -n "$TRIVIAL" ]; then
+            echo "ERROR: Found trivial assertions — tests must verify real behavior."
+            echo "$TRIVIAL"
+            exit 1
+          fi
+          echo "OK: No trivial assertions found."
+      - name: Verify zero ignored tests in cargo test output
+        run: |
+          # Run tests and capture output
+          OUTPUT=$(cargo test --workspace 2>&1)
+          echo "$OUTPUT"
+
+          # Check for any ignored tests
+          IGNORED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ ignored' | grep -v '0 ignored' || true)
+          if [ -n "$IGNORED_COUNT" ]; then
+            echo "ERROR: Some tests were ignored:"
+            echo "$IGNORED_COUNT"
+            exit 1
+          fi
+
+          # Check for any filtered tests
+          FILTERED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ filtered out' | grep -v '0 filtered out' || true)
+          if [ -n "$FILTERED_COUNT" ]; then
+            echo "ERROR: Some tests were filtered out:"
+            echo "$FILTERED_COUNT"
+            exit 1
+          fi
+
+          # Verify at least a minimum number of tests ran
+          TOTAL_PASSED=$(echo "$OUTPUT" | grep -oP '(\d+) passed' | grep -oP '\d+' | paste -sd+ | bc)
+          echo "Total tests passed: $TOTAL_PASSED"
+          if [ "$TOTAL_PASSED" -lt 80 ]; then
+            echo "ERROR: Expected at least 80 tests, but only $TOTAL_PASSED passed."
+            echo "This may indicate tests were removed or are not being discovered."
+            exit 1
+          fi
+
+          echo "OK: All $TOTAL_PASSED tests ran with 0 ignored and 0 filtered."
+
+  frontend-e2e:
+    name: Frontend E2E (Playwright)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: Run Playwright E2E tests
+        run: npx playwright test
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: local-client-rs/playwright-report/
+          if-no-files-found: ignore
+
   rust-ci-gate:
     name: Rust CI Gate
     if: always()
@@ -244,20 +360,24 @@ jobs:
         build,
         build-tauri,
         file-size,
+        test-integrity,
+        frontend-e2e,
       ]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
-          echo "changes:       ${{ needs.changes.result }}"
-          echo "version-check: ${{ needs.version-check.result }}"
-          echo "lint:          ${{ needs.lint.result }}"
-          echo "test:          ${{ needs.test.result }}"
-          echo "coverage:      ${{ needs.coverage.result }}"
-          echo "security:      ${{ needs.security.result }}"
-          echo "build:         ${{ needs.build.result }}"
-          echo "build-tauri:   ${{ needs.build-tauri.result }}"
-          echo "file-size:     ${{ needs.file-size.result }}"
+          echo "changes:        ${{ needs.changes.result }}"
+          echo "version-check:  ${{ needs.version-check.result }}"
+          echo "lint:           ${{ needs.lint.result }}"
+          echo "test:           ${{ needs.test.result }}"
+          echo "coverage:       ${{ needs.coverage.result }}"
+          echo "security:       ${{ needs.security.result }}"
+          echo "build:          ${{ needs.build.result }}"
+          echo "build-tauri:    ${{ needs.build-tauri.result }}"
+          echo "file-size:      ${{ needs.file-size.result }}"
+          echo "test-integrity: ${{ needs.test-integrity.result }}"
+          echo "frontend-e2e:   ${{ needs.frontend-e2e.result }}"
 
           # If no Rust changes, all skipped jobs are fine
           if [[ "${{ needs.changes.outputs.rust }}" != "true" ]]; then
@@ -275,7 +395,9 @@ jobs:
             "security:${{ needs.security.result }}" \
             "build:${{ needs.build.result }}" \
             "build-tauri:${{ needs.build-tauri.result }}" \
-            "file-size:${{ needs.file-size.result }}"; do
+            "file-size:${{ needs.file-size.result }}" \
+            "test-integrity:${{ needs.test-integrity.result }}" \
+            "frontend-e2e:${{ needs.frontend-e2e.result }}"; do
             name="${job_result%%:*}"
             result="${job_result##*:}"
             if [[ "$result" != "success" ]]; then

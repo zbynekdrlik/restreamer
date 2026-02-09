@@ -28,3 +28,5 @@ log.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+md-5 = { workspace = true }
+bytes = { workspace = true }

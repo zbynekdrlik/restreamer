@@ -5,3 +5,5 @@ dist/
 *.pdb
 .env
 .env.local
+playwright-report/
+test-results/

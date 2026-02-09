@@ -23,14 +23,33 @@ You are a senior Rust + Python developer with CI/CD expertise working on the Res
 
 ### Testing — PRIMARY GOAL
 
-**The main goal is complete, full E2E tests that cover ALL flows in the app and the web frontend.** Every functionality must be covered by an E2E test flow.
+**The main goal is complete, full E2E tests that cover ALL flows in the app and the web frontend.** Every functionality must be covered by an E2E test flow. All tests MUST be part of GitHub CI workflows.
 
-- **Web/Frontend E2E**: Use Playwright (or equivalent) to test every frontend functionality — dashboard, config editor, status display, WebSocket updates, tray menu interactions. Each user-facing feature needs a Playwright test covering the full flow.
-- **Backend/Service E2E**: Write real end-to-end tests that exercise the actual code paths — RTMP ingest, chunk storage, S3 upload, API endpoints, WebSocket events. Not mocked, not hidden, not stubbed.
-- Always consider your current test implementations as not comprehensive enough and actively look for ways to improve coverage, edge cases, and failure scenarios.
-- Prefer integration and E2E tests over unit tests with heavy mocking. Mocks are only acceptable for external API calls and third-party services.
-- Every feature, bugfix, and refactor must have corresponding tests that verify the actual behavior.
-- ALL tests must pass — never skip, ignore, or disable tests. Never produce false-positive green results that hide real issues. A passing test suite must reflect genuinely working code.
+#### Zero Tolerance Rules
+
+- **NO `#[ignore]`** — Never add `#[ignore]` to any test. Every test runs, every time.
+- **NO `#[cfg(skip)]`** or conditional compilation that disables tests.
+- **NO false positives** — No `assert!(true)`, no empty test bodies, no tests that pass without exercising real code. Every assertion must verify actual behavior.
+- **NO skipped tests** — CI output must show `0 ignored; 0 filtered out` for every test binary.
+- **NO mocking real code** — Mocks are ONLY acceptable for external network services (S3, manager HTTP). Internal code paths must be tested with real implementations.
+- **CI hardening job** — The workflow includes a dedicated `test-integrity` job that scans source code for `#[ignore]`, `assert!(true)`, empty test bodies, and verifies `cargo test` output shows zero ignored/filtered tests. This job MUST pass for the CI gate to be green.
+
+#### Web/Frontend E2E (Playwright)
+
+- Use Playwright to test every frontend functionality — dashboard, config editor, status display, WebSocket updates.
+- Each user-facing feature needs a Playwright test covering the full flow.
+- Playwright tests run in CI on every push/PR, not just locally.
+
+#### Backend/Service E2E (Rust)
+
+- Write real end-to-end tests that exercise actual code paths — RTMP ingest, chunk storage, S3 upload, API endpoints, WebSocket events.
+- Not mocked, not hidden, not stubbed. Real code, real assertions.
+- Always consider current tests as not comprehensive enough and actively improve coverage, edge cases, and failure scenarios.
+
+#### General
+
+- Every feature, bugfix, and refactor must have corresponding tests that verify actual behavior.
+- ALL tests must pass — a passing test suite must reflect genuinely working code.
 
 ## Rust Development (`local-client-rs/`)
 
