@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Runtime};
 use tauri_plugin_updater::UpdaterExt;
 
 /// Check interval: every 6 hours.
