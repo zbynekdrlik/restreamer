@@ -154,3 +154,228 @@ impl Poller {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use rs_core::db;
+    use tokio::net::TcpListener;
+
+    async fn start_mock_server(app: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn setup_db() -> SqlitePool {
+        let pool = db::create_pool(std::path::Path::new(":memory:"))
+            .await
+            .unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        db::upsert_client_profile(&pool, "test-uuid").await.unwrap();
+        pool
+    }
+
+    async fn mock_200() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "identifier": "stream-001",
+            "short_description": "Test Stream",
+            "server_ip": "10.0.0.1"
+        }))
+    }
+
+    async fn mock_403() -> axum::http::StatusCode {
+        axum::http::StatusCode::FORBIDDEN
+    }
+
+    async fn mock_404() -> axum::http::StatusCode {
+        axum::http::StatusCode::NOT_FOUND
+    }
+
+    #[tokio::test]
+    async fn poll_200_creates_streaming_event() {
+        let app = Router::new().route("/api/get_active_stream/", get(mock_200));
+        let base_url = start_mock_server(app).await;
+        let pool = setup_db().await;
+        let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(16);
+        let manager = ManagerClient::new(&base_url).unwrap();
+
+        let poller = Poller {
+            pool: pool.clone(),
+            manager,
+            user_uuid: "test-uuid".to_string(),
+            ws_tx,
+            interval: Duration::from_millis(50),
+        };
+        poller.poll_once().await;
+
+        // Verify streaming event was created in DB
+        let event = db::get_streaming_event(&pool).await.unwrap();
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.identifier, Some("stream-001".to_string()));
+
+        // Verify WebSocket events were sent
+        let ws_event = ws_rx.recv().await.unwrap();
+        match ws_event {
+            WsEvent::StreamingEvent {
+                action,
+                identifier,
+                receiving,
+                delivering,
+            } => {
+                assert_eq!(action, "active");
+                assert_eq!(identifier, Some("stream-001".to_string()));
+                assert!(receiving);
+                assert!(delivering);
+            }
+            other => panic!("Expected StreamingEvent, got: {other:?}"),
+        }
+
+        let ws_event = ws_rx.recv().await.unwrap();
+        match ws_event {
+            WsEvent::ManagerPoll {
+                status_code,
+                message,
+            } => {
+                assert_eq!(status_code, 200);
+                assert!(message.contains("active"));
+            }
+            other => panic!("Expected ManagerPoll, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_404_deletes_streaming_event() {
+        let app = Router::new().route("/api/get_active_stream/", get(mock_404));
+        let base_url = start_mock_server(app).await;
+        let pool = setup_db().await;
+        let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(16);
+        let manager = ManagerClient::new(&base_url).unwrap();
+
+        // First create a streaming event
+        db::upsert_streaming_event(&pool, "old-stream", Some("Old"), "10.0.0.1")
+            .await
+            .unwrap();
+        let before = db::get_streaming_event(&pool).await.unwrap();
+        assert!(before.is_some());
+
+        let poller = Poller {
+            pool: pool.clone(),
+            manager,
+            user_uuid: "test-uuid".to_string(),
+            ws_tx,
+            interval: Duration::from_millis(50),
+        };
+        poller.poll_once().await;
+
+        // Verify streaming event was deleted
+        let after = db::get_streaming_event(&pool).await.unwrap();
+        assert!(after.is_none());
+
+        let ws_event = ws_rx.recv().await.unwrap();
+        match ws_event {
+            WsEvent::ManagerPoll { status_code, .. } => assert_eq!(status_code, 404),
+            other => panic!("Expected ManagerPoll 404, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_403_disables_delivering() {
+        let app = Router::new().route("/api/get_active_stream/", get(mock_403));
+        let base_url = start_mock_server(app).await;
+        let pool = setup_db().await;
+        let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(16);
+        let manager = ManagerClient::new(&base_url).unwrap();
+
+        // Create a streaming event with both flags active
+        db::upsert_streaming_event(&pool, "stream-x", Some("Test"), "10.0.0.1")
+            .await
+            .unwrap();
+        let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
+        // Enable both flags
+        db::update_streaming_event_flags(&pool, event.id, true, true)
+            .await
+            .unwrap();
+
+        let poller = Poller {
+            pool: pool.clone(),
+            manager,
+            user_uuid: "test-uuid".to_string(),
+            ws_tx,
+            interval: Duration::from_millis(50),
+        };
+        poller.poll_once().await;
+
+        // Verify delivering was disabled but receiving remains
+        let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
+        assert!(event.receiving_activated);
+        assert!(!event.delivering_activated);
+
+        let ws_event = ws_rx.recv().await.unwrap();
+        match ws_event {
+            WsEvent::ManagerPoll { status_code, .. } => assert_eq!(status_code, 403),
+            other => panic!("Expected ManagerPoll 403, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_connection_error_sends_error_event() {
+        // Point to a port that's not listening
+        let pool = setup_db().await;
+        let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(16);
+        let manager = ManagerClient::new("http://127.0.0.1:1").unwrap();
+
+        let poller = Poller {
+            pool: pool.clone(),
+            manager,
+            user_uuid: "test-uuid".to_string(),
+            ws_tx,
+            interval: Duration::from_millis(50),
+        };
+        poller.poll_once().await;
+
+        let ws_event = ws_rx.recv().await.unwrap();
+        match ws_event {
+            WsEvent::Error { service, message } => {
+                assert_eq!(service, "poller");
+                assert!(!message.is_empty());
+            }
+            other => panic!("Expected Error event, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn poller_runs_and_shuts_down() {
+        let app = Router::new().route("/api/get_active_stream/", get(mock_404));
+        let base_url = start_mock_server(app).await;
+        let pool = setup_db().await;
+        let (ws_tx, _ws_rx) = broadcast::channel::<WsEvent>(16);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let manager = ManagerClient::new(&base_url).unwrap();
+
+        let poller = Poller {
+            pool: pool.clone(),
+            manager,
+            user_uuid: "test-uuid".to_string(),
+            ws_tx,
+            interval: Duration::from_millis(50),
+        };
+        let handle = tokio::spawn(async move { poller.run(shutdown_rx).await });
+
+        // Let it poll at least once
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = shutdown_tx.send(());
+
+        // Should complete without panic
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}

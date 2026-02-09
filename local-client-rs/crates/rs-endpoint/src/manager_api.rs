@@ -149,6 +149,18 @@ impl ManagerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use tokio::net::TcpListener;
+
+    async fn start_mock_server(app: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
 
     #[test]
     fn manager_client_builds_urls() {
@@ -170,5 +182,137 @@ mod tests {
         let json = serde_json::to_string(&notification).unwrap();
         assert!(json.contains("evt-1"));
         assert!(json.contains("chunk_000001.bin"));
+    }
+
+    // --- Integration tests with mock HTTP server ---
+
+    async fn mock_active_stream_200() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "identifier": "test-stream-001",
+            "short_description": "Sunday Service",
+            "server_ip": "192.168.1.100"
+        }))
+    }
+
+    async fn mock_active_stream_403() -> axum::http::StatusCode {
+        axum::http::StatusCode::FORBIDDEN
+    }
+
+    async fn mock_active_stream_404() -> axum::http::StatusCode {
+        axum::http::StatusCode::NOT_FOUND
+    }
+
+    #[tokio::test]
+    async fn get_active_stream_200_returns_stream() {
+        let app = Router::new().route("/api/get_active_stream/", get(mock_active_stream_200));
+        let base_url = start_mock_server(app).await;
+        let client = ManagerClient::new(&base_url).unwrap();
+
+        let result = client.get_active_stream("test-uuid").await.unwrap();
+        assert!(result.is_some());
+        let stream = result.unwrap();
+        assert_eq!(stream.identifier, "test-stream-001");
+        assert_eq!(stream.short_description, Some("Sunday Service".to_string()));
+        assert_eq!(stream.server_ip, Some("192.168.1.100".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_active_stream_403_returns_forbidden() {
+        let app = Router::new().route("/api/get_active_stream/", get(mock_active_stream_403));
+        let base_url = start_mock_server(app).await;
+        let client = ManagerClient::new(&base_url).unwrap();
+
+        let result = client.get_active_stream("test-uuid").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EndpointError::ManagerForbidden => {} // expected
+            other => panic!("Expected ManagerForbidden, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_active_stream_404_returns_none() {
+        let app = Router::new().route("/api/get_active_stream/", get(mock_active_stream_404));
+        let base_url = start_mock_server(app).await;
+        let client = ManagerClient::new(&base_url).unwrap();
+
+        let result = client.get_active_stream("test-uuid").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    async fn mock_chunk_upload_ok() -> axum::http::StatusCode {
+        axum::http::StatusCode::OK
+    }
+
+    async fn mock_chunk_upload_error() -> axum::http::StatusCode {
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    }
+
+    #[tokio::test]
+    async fn notify_chunk_uploaded_success() {
+        let app = Router::new().route("/chunk-upload/", post(mock_chunk_upload_ok));
+        let base_url = start_mock_server(app).await;
+        let client = ManagerClient::new(&base_url).unwrap();
+
+        let notification = ChunkUploadNotification {
+            event_identifier: "evt-1".to_string(),
+            chunk_filename: "chunk_000001.bin".to_string(),
+            data_size: 1024,
+            md5: "abc123".to_string(),
+        };
+        let result = client.notify_chunk_uploaded(&notification).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn notify_chunk_uploaded_server_error() {
+        let app = Router::new().route("/chunk-upload/", post(mock_chunk_upload_error));
+        let base_url = start_mock_server(app).await;
+        let client = ManagerClient::new(&base_url).unwrap();
+
+        let notification = ChunkUploadNotification {
+            event_identifier: "evt-1".to_string(),
+            chunk_filename: "chunk_000001.bin".to_string(),
+            data_size: 1024,
+            md5: "abc123".to_string(),
+        };
+        let result = client.notify_chunk_uploaded(&notification).await;
+        assert!(result.is_err());
+    }
+
+    async fn mock_check_chunk_verified() -> Json<serde_json::Value> {
+        Json(serde_json::json!({ "verified": true }))
+    }
+
+    async fn mock_check_chunk_not_verified() -> Json<serde_json::Value> {
+        Json(serde_json::json!({ "verified": false }))
+    }
+
+    #[tokio::test]
+    async fn check_chunk_verified() {
+        let app = Router::new().route("/api/check-chunk/", post(mock_check_chunk_verified));
+        let base_url = start_mock_server(app).await;
+        let client = ManagerClient::new(&base_url).unwrap();
+
+        let result = client.check_chunk("evt-1", "chunk_000001.bin").await;
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[tokio::test]
+    async fn check_chunk_not_verified() {
+        let app = Router::new().route("/api/check-chunk/", post(mock_check_chunk_not_verified));
+        let base_url = start_mock_server(app).await;
+        let client = ManagerClient::new(&base_url).unwrap();
+
+        let result = client.check_chunk("evt-1", "chunk_000001.bin").await;
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn get_active_stream_connection_refused() {
+        // Point to a port that's not listening
+        let client = ManagerClient::new("http://127.0.0.1:1").unwrap();
+        let result = client.get_active_stream("test-uuid").await;
+        assert!(result.is_err());
     }
 }

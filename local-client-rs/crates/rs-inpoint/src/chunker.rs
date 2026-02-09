@@ -4,19 +4,17 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{Mutex, broadcast};
 use tracing::info;
 
-use crate::muxer::TsMuxer;
-
-/// Receives raw media data and produces time-based MPEG-TS chunk files.
+/// Receives pre-muxed MPEG-TS data and produces time-based chunk files.
 ///
 /// Chunks are accumulated for `chunk_duration` and then flushed to disk
-/// as `.bin` files with MD5 checksums.
+/// as `.bin` files with MD5 checksums. The MPEG-TS muxing is done upstream
+/// by the media receiver; this module only handles buffering and file I/O.
 pub struct ChunkSink {
     inner: Mutex<ChunkSinkInner>,
     chunk_tx: broadcast::Sender<ChunkInfo>,
 }
 
 struct ChunkSinkInner {
-    muxer: TsMuxer,
     buffer: Vec<u8>,
     chunk_dir: PathBuf,
     chunk_duration: Duration,
@@ -49,7 +47,6 @@ impl ChunkSink {
         let (chunk_tx, _) = broadcast::channel(256);
         Self {
             inner: Mutex::new(ChunkSinkInner {
-                muxer: TsMuxer::new(),
                 buffer: Vec::with_capacity(128 * 1024),
                 chunk_dir,
                 chunk_duration,
@@ -66,7 +63,6 @@ impl ChunkSink {
         let (chunk_tx, _) = broadcast::channel(1);
         Self {
             inner: Mutex::new(ChunkSinkInner {
-                muxer: TsMuxer::new(),
                 buffer: Vec::new(),
                 chunk_dir: PathBuf::new(),
                 chunk_duration: Duration::from_secs(1),
@@ -83,7 +79,7 @@ impl ChunkSink {
         self.chunk_tx.subscribe()
     }
 
-    /// Write raw media data into the chunker.
+    /// Write pre-muxed MPEG-TS data into the chunker.
     pub async fn write_data(&self, data: &[u8]) {
         let pending = {
             let mut inner = self.inner.lock().await;
@@ -96,15 +92,12 @@ impl ChunkSink {
                 inner.chunk_start = Some(Instant::now());
             }
 
-            // Mux data into TS packets
-            let ts_data = inner.muxer.write(data);
-            inner.buffer.extend_from_slice(&ts_data);
+            // Buffer the pre-muxed MPEG-TS data directly
+            inner.buffer.extend_from_slice(data);
 
             // Check if chunk duration has elapsed
             if let Some(start) = inner.chunk_start {
                 if start.elapsed() >= inner.chunk_duration {
-                    let remainder = inner.muxer.flush();
-                    inner.buffer.extend_from_slice(&remainder);
                     Self::extract_chunk(&mut inner)
                 } else {
                     None
@@ -130,8 +123,6 @@ impl ChunkSink {
             if inner.null_mode || inner.buffer.is_empty() {
                 None
             } else {
-                let remainder = inner.muxer.flush();
-                inner.buffer.extend_from_slice(&remainder);
                 Self::extract_chunk(&mut inner)
             }
         };
@@ -171,7 +162,6 @@ impl ChunkSink {
         let data = std::mem::replace(&mut inner.buffer, Vec::with_capacity(128 * 1024));
 
         inner.chunk_start = None;
-        inner.muxer.reset();
 
         Some(PendingChunkWrite {
             data,
@@ -213,7 +203,6 @@ impl ChunkSink {
         let mut inner = self.inner.lock().await;
         inner.buffer.clear();
         inner.chunk_start = None;
-        inner.muxer.reset();
     }
 
     /// Get the total number of chunks produced.
@@ -312,5 +301,31 @@ mod tests {
 
         // No chunk should be produced after reset + flush
         assert_eq!(sink.chunk_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn write_data_accepts_ts_packets() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = ChunkSink::new(dir.path().to_path_buf(), Duration::from_secs(60));
+        let mut rx = sink.subscribe();
+
+        // Simulate pre-muxed MPEG-TS data (188-byte packets with sync byte)
+        let mut ts_data = Vec::new();
+        for _ in 0..10 {
+            let mut packet = vec![0x47]; // TS sync byte
+            packet.extend_from_slice(&vec![0x00; 187]);
+            ts_data.extend_from_slice(&packet);
+        }
+        sink.write_data(&ts_data).await;
+        sink.flush().await;
+
+        let chunk = rx.recv().await.unwrap();
+        assert_eq!(chunk.size, 1880); // 10 * 188
+        assert!(chunk.path.exists());
+
+        // Verify the file contains valid TS-like data
+        let file_data = std::fs::read(&chunk.path).unwrap();
+        assert_eq!(file_data[0], 0x47);
+        assert_eq!(file_data[188], 0x47);
     }
 }

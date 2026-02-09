@@ -1,6 +1,6 @@
 use axum::Router;
 use axum::http::{HeaderValue, Method, header};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -35,6 +35,9 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::action_toggle_delivering),
         )
         .route("/config", get(handlers::get_config))
+        .route("/config", patch(handlers::patch_config))
+        .route("/logs/inpoint", get(handlers::get_logs_inpoint))
+        .route("/logs/endpoint", get(handlers::get_logs_endpoint))
         .route("/ws", get(websocket::ws_handler));
 
     let cors = CorsLayer::new()
@@ -60,8 +63,9 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use rs_core::config::Config;
     use rs_core::db;
+    use rs_core::log_buffer::LogBuffer;
     use rs_core::models::WsEvent;
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, mpsc};
     use tower::ServiceExt;
 
     async fn test_state() -> AppState {
@@ -250,7 +254,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_inpoint_returns_not_implemented() {
+    async fn restart_inpoint_without_channel_returns_503() {
         let state = test_state().await;
         let app = build_router(state);
 
@@ -265,11 +269,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
-    async fn restart_endpoint_returns_not_implemented() {
+    async fn restart_endpoint_without_channel_returns_503() {
         let state = test_state().await;
         let app = build_router(state);
 
@@ -284,7 +288,54 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn restart_inpoint_with_channel_returns_ok() {
+        let mut state = test_state().await;
+        let (tx, mut rx) = mpsc::channel(1);
+        state.inpoint_restart_tx = Some(tx);
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/actions/restart-inpoint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // Verify the signal was actually sent
+        let msg = rx.try_recv();
+        assert!(msg.is_ok());
+    }
+
+    #[tokio::test]
+    async fn restart_endpoint_with_channel_returns_ok() {
+        let mut state = test_state().await;
+        let (tx, mut rx) = mpsc::channel(1);
+        state.endpoint_restart_tx = Some(tx);
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/actions/restart-endpoint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let msg = rx.try_recv();
+        assert!(msg.is_ok());
     }
 
     #[tokio::test]
@@ -360,5 +411,235 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn patch_config_updates_field() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "manager_url": "https://new-manager.example.com"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let config: rs_core::config::Config = serde_json::from_slice(&body).unwrap();
+        assert_eq!(config.manager_url, "https://new-manager.example.com");
+        // Other fields should be preserved from the original config
+        assert_eq!(config.client_uuid, "test-uuid-00000000");
+        // Credentials should be redacted
+        assert_eq!(config.s3.access_key_id, "***");
+    }
+
+    #[tokio::test]
+    async fn patch_config_rejects_invalid() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        // Empty client_uuid should fail validation
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "client_uuid": "" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_config_preserves_redacted_credentials() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        // Send "***" for credentials — original values should be preserved (not saved as ***)
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "s3": {
+                                "bucket": "test-bucket",
+                                "region": "us-east-1",
+                                "endpoint": "http://localhost:9000",
+                                "access_key_id": "***",
+                                "secret_access_key": "***"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should succeed (the original creds pass validation)
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn patch_config_saves_to_disk() {
+        let mut state = test_state().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+
+        // Save initial config so the file exists
+        state.config.save(&config_path).unwrap();
+        state.config_path = Some(config_path.clone());
+
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "manager_url": "https://saved-manager.example.com"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify the file was written
+        let saved = rs_core::config::Config::load(&config_path).unwrap();
+        assert_eq!(saved.manager_url, "https://saved-manager.example.com");
+    }
+
+    #[tokio::test]
+    async fn get_logs_inpoint_returns_empty() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/logs/inpoint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let logs: handlers::LogsResponse = serde_json::from_slice(&body).unwrap();
+        assert!(logs.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_logs_endpoint_returns_empty() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/logs/endpoint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let logs: handlers::LogsResponse = serde_json::from_slice(&body).unwrap();
+        assert!(logs.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_logs_with_populated_buffer() {
+        let mut state = test_state().await;
+        let buffer = LogBuffer::new(100);
+        buffer.push(rs_core::log_buffer::LogEntry {
+            level: "INFO".into(),
+            target: "rs_inpoint::rtmp".into(),
+            message: "RTMP server started".into(),
+        });
+        buffer.push(rs_core::log_buffer::LogEntry {
+            level: "WARN".into(),
+            target: "rs_endpoint::s3".into(),
+            message: "Upload retry".into(),
+        });
+        state.log_buffer = buffer;
+
+        let app = build_router(state);
+
+        // Check inpoint logs
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/logs/inpoint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let logs: handlers::LogsResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(logs.entries.len(), 1);
+        assert!(logs.entries[0].message.contains("RTMP"));
+
+        // Check endpoint logs
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/logs/endpoint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let logs: handlers::LogsResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(logs.entries.len(), 1);
+        assert!(logs.entries[0].message.contains("Upload"));
     }
 }

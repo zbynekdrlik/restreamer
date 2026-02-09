@@ -1,33 +1,30 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::sync::{Semaphore, broadcast};
-use tracing::{error, info, warn};
+
+use streamhub::StreamsHub;
+use tokio::sync::broadcast;
+use tracing::{error, info};
 
 use crate::chunker::ChunkSink;
-use crate::session::RtmpSession;
-
-/// Maximum concurrent RTMP sessions (typically only 1 encoder in church setups).
-const MAX_RTMP_SESSIONS: usize = 4;
+use crate::media_receiver::{FrameProcessor, MediaReceiver};
 
 /// RTMP server that accepts connections from OBS/vMix on a configurable port.
 ///
-/// This is a pure-Rust RTMP server. It accepts TCP connections, performs the
-/// RTMP handshake, and receives published audio/video data which is forwarded
-/// to the chunker for MPEG-TS muxing.
+/// Uses the xiu RTMP implementation for proper protocol handling including
+/// full handshake, AMF command parsing, and H.264/AAC media extraction.
+/// Media data flows through the StreamsHub to the FrameProcessor which
+/// demuxes FLV, muxes to MPEG-TS, and feeds the ChunkSink.
 pub struct RtmpServer {
-    addr: SocketAddr,
+    address: String,
     shutdown_tx: broadcast::Sender<()>,
 }
 
 impl RtmpServer {
     pub fn new(bind: &str, port: u16) -> Self {
-        let addr: SocketAddr = format!("{bind}:{port}")
-            .parse()
-            .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port)));
         let (shutdown_tx, _) = broadcast::channel(1);
-        Self { addr, shutdown_tx }
+        Self {
+            address: format!("{bind}:{port}"),
+            shutdown_tx,
+        }
     }
 
     /// Returns a shutdown handle that can be used to stop the server.
@@ -37,56 +34,55 @@ impl RtmpServer {
 
     /// Run the RTMP server, accepting connections until shutdown.
     pub async fn run(self, chunk_sink: Arc<ChunkSink>) -> Result<(), crate::InpointError> {
-        let listener = TcpListener::bind(self.addr).await?;
-        info!("RTMP server listening on {}", self.addr);
+        // Create the StreamsHub for media data routing
+        let mut hub = StreamsHub::new(None);
+        let event_sender = hub.get_hub_event_sender();
+        let event_consumer = hub.get_client_event_consumer();
+
+        // Create the xiu RTMP server with the hub's event sender
+        let mut rtmp_server = rtmp::rtmp::RtmpServer::new(
+            self.address.clone(),
+            event_sender,
+            1, // GOP cache size
+            None,
+        );
+
+        // Create media receiver that listens for publish events
+        let media_receiver = MediaReceiver::new(event_consumer, Arc::clone(&chunk_sink));
+
+        // Create frame processor for the active stream
+        let processor_sink = Arc::clone(&chunk_sink);
+        let _frame_processor = FrameProcessor::new(processor_sink)
+            .map_err(|e| crate::InpointError::Protocol(format!("init frame processor: {e}")))?;
+
+        info!("RTMP server starting on {}", self.address);
 
         let mut shutdown_rx = self.shutdown_tx.subscribe();
-        let session_sem = Arc::new(Semaphore::new(MAX_RTMP_SESSIONS));
 
-        loop {
-            tokio::select! {
-                result = listener.accept() => {
-                    match result {
-                        Ok((stream, peer)) => {
-                            let permit = match session_sem.clone().try_acquire_owned() {
-                                Ok(p) => p,
-                                Err(_) => {
-                                    warn!("RTMP connection from {peer} rejected: max sessions ({MAX_RTMP_SESSIONS}) reached");
-                                    drop(stream);
-                                    continue;
-                                }
-                            };
-                            info!("RTMP connection from {peer}");
-                            let sink = Arc::clone(&chunk_sink);
-                            let mut peer_shutdown = self.shutdown_tx.subscribe();
-                            tokio::spawn(async move {
-                                let _permit = permit;
-                                let mut session = RtmpSession::new(stream, sink);
-                                tokio::select! {
-                                    result = session.run() => {
-                                        match result {
-                                            Ok(()) => info!("RTMP session from {peer} ended cleanly"),
-                                            Err(e) => warn!("RTMP session from {peer} error: {e}"),
-                                        }
-                                    }
-                                    _ = peer_shutdown.recv() => {
-                                        info!("RTMP session from {peer} shutting down");
-                                    }
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            error!("Failed to accept RTMP connection: {e}");
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    }
-                }
-                _ = shutdown_rx.recv() => {
-                    info!("RTMP server shutting down");
-                    break;
+        tokio::select! {
+            // Run the StreamsHub event loop
+            _ = hub.run() => {
+                info!("StreamsHub stopped");
+            }
+            // Run the xiu RTMP server
+            result = rtmp_server.run() => {
+                match result {
+                    Ok(()) => info!("RTMP server stopped"),
+                    Err(e) => error!("RTMP server error: {e}"),
                 }
             }
+            // Run the media receiver
+            _ = media_receiver.run() => {
+                info!("Media receiver stopped");
+            }
+            // Handle shutdown signal
+            _ = shutdown_rx.recv() => {
+                info!("RTMP server shutting down");
+            }
         }
+
+        // Flush remaining data
+        chunk_sink.flush().await;
 
         Ok(())
     }
@@ -98,14 +94,14 @@ mod tests {
 
     #[tokio::test]
     async fn server_binds_and_shuts_down() {
-        let server = RtmpServer::new("127.0.0.1", 0); // random port
+        let server = RtmpServer::new("127.0.0.1", 0);
         let shutdown = server.shutdown_handle();
         let sink = Arc::new(ChunkSink::new_null());
 
         let handle = tokio::spawn(async move { server.run(sink).await });
 
         // Give it a moment to bind
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let _ = shutdown.send(());
 
         let result = handle.await.unwrap();

@@ -16,6 +16,15 @@ thiserror.workspace = true
 md-5.workspace = true
 chrono.workspace = true
 sqlx.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+
+# xiu RTMP/MPEG-TS ecosystem
+rtmp.workspace = true
+streamhub.workspace = true
+xmpegts.workspace = true
+xflv.workspace = true
+log.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

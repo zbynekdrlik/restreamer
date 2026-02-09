@@ -1,15 +1,18 @@
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use tokio::sync::broadcast;
+use sqlx::SqlitePool;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
 use rs_api::state::AppState;
 use rs_core::config::Config;
 use rs_core::db;
+use rs_core::log_buffer::LogBuffer;
 use rs_core::models::WsEvent;
 use rs_endpoint::manager_api::ManagerClient;
 use rs_endpoint::s3::S3Client;
@@ -23,12 +26,14 @@ use crate::shutdown::ShutdownCoordinator;
 /// Main service orchestrator that starts all components.
 pub struct ServiceRunner {
     config: Config,
+    config_path: PathBuf,
+    log_buffer: LogBuffer,
     db_path: PathBuf,
     chunk_dir: PathBuf,
 }
 
 impl ServiceRunner {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, config_path: PathBuf, log_buffer: LogBuffer) -> Self {
         let data_dir = if cfg!(windows) {
             PathBuf::from(r"C:\ProgramData\Restreamer")
         } else {
@@ -39,11 +44,25 @@ impl ServiceRunner {
             db_path: data_dir.join("restreamer.db"),
             chunk_dir: data_dir.join("chunks"),
             config,
+            config_path,
+            log_buffer,
         }
     }
 
-    /// Start all service components and wait for shutdown.
+    /// Start all service components and wait for shutdown via Ctrl+C.
     pub async fn run(self) -> anyhow::Result<()> {
+        self.run_with_signal(async {
+            info!("Press Ctrl+C to stop.");
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+    }
+
+    /// Start all service components and wait for the given shutdown signal.
+    pub async fn run_with_signal(
+        self,
+        shutdown_signal: impl Future<Output = ()>,
+    ) -> anyhow::Result<()> {
         let shutdown = ShutdownCoordinator::new();
 
         // Database
@@ -63,10 +82,17 @@ impl ServiceRunner {
         // WebSocket broadcast channel
         let (ws_tx, _) = broadcast::channel::<WsEvent>(256);
 
+        // Restart channels for inpoint and endpoint
+        let (inpoint_restart_tx, inpoint_restart_rx) = mpsc::channel::<()>(1);
+        let (endpoint_restart_tx, endpoint_restart_rx) = mpsc::channel::<()>(1);
+
         // API server
         let api_addr: SocketAddr =
             format!("{}:{}", self.config.api.bind, self.config.api.port).parse()?;
-        let api_state = AppState::new(pool.clone(), self.config.clone(), ws_tx.clone());
+        let api_state = AppState::new(pool.clone(), self.config.clone(), ws_tx.clone())
+            .with_config_path(self.config_path)
+            .with_log_buffer(self.log_buffer)
+            .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx);
         let (actual_addr, api_handle) = rs_api::serve(api_state, api_addr).await?;
         info!("API server running on {actual_addr}");
 
@@ -145,22 +171,39 @@ impl ServiceRunner {
             }
         });
 
-        let rtmp_server = RtmpServer::new(
-            &self.config.inpoint.rtmp_bind,
-            self.config.inpoint.rtmp_port,
-        );
-        let rtmp_shutdown = rtmp_server.shutdown_handle();
-        let rtmp_sink = Arc::clone(&chunk_sink);
-        let rtmp_handle = tokio::spawn(async move { rtmp_server.run(rtmp_sink).await });
+        // Inpoint restart loop
+        let inpoint_shutdown_rx = shutdown.subscribe();
+        let inpoint_bind = self.config.inpoint.rtmp_bind.clone();
+        let inpoint_port = self.config.inpoint.rtmp_port;
+        let inpoint_sink = Arc::clone(&chunk_sink);
+        let inpoint_task = tokio::spawn(async move {
+            run_inpoint_loop(
+                inpoint_bind,
+                inpoint_port,
+                inpoint_sink,
+                inpoint_restart_rx,
+                inpoint_shutdown_rx,
+            )
+            .await;
+        });
 
-        // Endpoint uploader
-        let s3_client = S3Client::new(&self.config.s3).context("failed to create S3 client")?;
-        let manager_client = ManagerClient::new(&self.config.manager_url)
-            .context("failed to create manager client")?;
-
-        let uploader = ChunkUploader::new(pool.clone(), s3_client, manager_client, ws_tx.clone());
-        let upload_shutdown = shutdown.subscribe();
-        let upload_handle = tokio::spawn(async move { uploader.run(upload_shutdown).await });
+        // Endpoint restart loop
+        let endpoint_shutdown_rx = shutdown.subscribe();
+        let s3_config = self.config.s3.clone();
+        let manager_url = self.config.manager_url.clone();
+        let endpoint_pool = pool.clone();
+        let endpoint_ws_tx = ws_tx.clone();
+        let endpoint_task = tokio::spawn(async move {
+            run_endpoint_loop(
+                endpoint_pool,
+                s3_config,
+                manager_url,
+                endpoint_ws_tx,
+                endpoint_restart_rx,
+                endpoint_shutdown_rx,
+            )
+            .await;
+        });
 
         // Poller
         let poller_manager = ManagerClient::new(&self.config.manager_url)
@@ -174,29 +217,25 @@ impl ServiceRunner {
         let poller_shutdown = shutdown.subscribe();
         let poller_handle = tokio::spawn(async move { poller.run(poller_shutdown).await });
 
-        // Wait for Ctrl+C (or Windows service stop)
-        info!("All services started. Press Ctrl+C to stop.");
-        tokio::signal::ctrl_c().await?;
+        // Wait for shutdown signal
+        info!("All services started.");
+        shutdown_signal.await;
         info!("Shutdown signal received");
 
         // Trigger shutdown
         shutdown.trigger();
-        if let Err(e) = rtmp_shutdown.send(()) {
-            warn!("RTMP shutdown signal had no receivers: {e}");
-        }
 
         // Flush remaining chunks before uploader stops
         chunk_sink.flush().await;
 
         // Wait for all tasks
-        match rtmp_handle.await {
-            Ok(Ok(())) => info!("RTMP server stopped cleanly"),
-            Ok(Err(e)) => tracing::error!("RTMP server error: {e}"),
-            Err(e) => tracing::error!("RTMP task panicked: {e}"),
+        match inpoint_task.await {
+            Ok(()) => info!("Inpoint stopped cleanly"),
+            Err(e) => tracing::error!("Inpoint task panicked: {e}"),
         }
-        match upload_handle.await {
-            Ok(()) => info!("Uploader stopped cleanly"),
-            Err(e) => tracing::error!("Uploader task panicked: {e}"),
+        match endpoint_task.await {
+            Ok(()) => info!("Endpoint stopped cleanly"),
+            Err(e) => tracing::error!("Endpoint task panicked: {e}"),
         }
         match poller_handle.await {
             Ok(()) => info!("Poller stopped cleanly"),
@@ -214,5 +253,122 @@ impl ServiceRunner {
 
         info!("Service stopped");
         Ok(())
+    }
+}
+
+/// Run the RTMP inpoint server with restart support.
+async fn run_inpoint_loop(
+    bind: String,
+    port: u16,
+    chunk_sink: Arc<ChunkSink>,
+    mut restart_rx: mpsc::Receiver<()>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    loop {
+        let server = RtmpServer::new(&bind, port);
+        let rtmp_shutdown = server.shutdown_handle();
+        let sink = Arc::clone(&chunk_sink);
+        let mut handle = tokio::spawn(async move { server.run(sink).await });
+
+        info!("Inpoint RTMP server started on {bind}:{port}");
+
+        let restart = tokio::select! {
+            result = &mut handle => {
+                match result {
+                    Ok(Ok(())) => info!("RTMP server stopped"),
+                    Ok(Err(e)) => tracing::error!("RTMP server error: {e}"),
+                    Err(e) => tracing::error!("RTMP task panicked: {e}"),
+                }
+                false
+            }
+            msg = restart_rx.recv() => {
+                if msg.is_some() {
+                    info!("Inpoint restart requested");
+                    let _ = rtmp_shutdown.send(());
+                    let _ = handle.await;
+                    true
+                } else {
+                    false // channel closed
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                info!("Inpoint shutting down");
+                let _ = rtmp_shutdown.send(());
+                let _ = handle.await;
+                false
+            }
+        };
+
+        chunk_sink.flush().await;
+
+        if !restart {
+            break;
+        }
+
+        info!("Restarting inpoint RTMP server...");
+    }
+}
+
+/// Run the endpoint uploader with restart support.
+async fn run_endpoint_loop(
+    pool: SqlitePool,
+    s3_config: rs_core::config::S3Config,
+    manager_url: String,
+    ws_tx: broadcast::Sender<WsEvent>,
+    mut restart_rx: mpsc::Receiver<()>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    loop {
+        let s3 = match S3Client::new(&s3_config) {
+            Ok(s3) => s3,
+            Err(e) => {
+                tracing::error!("Failed to create S3 client: {e}");
+                break;
+            }
+        };
+        let manager = match ManagerClient::new(&manager_url) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!("Failed to create manager client: {e}");
+                break;
+            }
+        };
+
+        let (component_shutdown_tx, _) = broadcast::channel::<()>(1);
+        let component_rx = component_shutdown_tx.subscribe();
+
+        let uploader = ChunkUploader::new(pool.clone(), s3, manager, ws_tx.clone());
+        let mut handle = tokio::spawn(async move { uploader.run(component_rx).await });
+
+        info!("Endpoint uploader started");
+
+        let restart = tokio::select! {
+            _ = &mut handle => {
+                info!("Uploader stopped");
+                false
+            }
+            msg = restart_rx.recv() => {
+                if msg.is_some() {
+                    info!("Endpoint restart requested");
+                    let _ = component_shutdown_tx.send(());
+                    let _ = handle.await;
+                    true
+                } else {
+                    false // channel closed
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                info!("Endpoint shutting down");
+                let _ = component_shutdown_tx.send(());
+                let _ = handle.await;
+                false
+            }
+        };
+
+        if !restart {
+            break;
+        }
+
+        info!("Restarting endpoint uploader...");
     }
 }

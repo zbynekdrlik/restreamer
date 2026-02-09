@@ -36,6 +36,7 @@ pub struct ChunkRecord {
 pub enum WsEvent {
     InpointStatus {
         state: String,
+        rtmp_connected: bool,
         received_bytes: u64,
         chunk_count: u64,
     },
@@ -113,6 +114,7 @@ mod tests {
         let events = vec![
             WsEvent::InpointStatus {
                 state: "receiving".to_string(),
+                rtmp_connected: true,
                 received_bytes: 1024,
                 chunk_count: 5,
             },

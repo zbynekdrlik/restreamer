@@ -44,7 +44,12 @@ export interface ChunkStats {
 export type WsEvent =
   | {
       type: "InpointStatus";
-      data: { state: string; received_bytes: number; chunk_count: number };
+      data: {
+        state: string;
+        rtmp_connected: boolean;
+        received_bytes: number;
+        chunk_count: number;
+      };
     }
   | {
       type: "EndpointStatus";

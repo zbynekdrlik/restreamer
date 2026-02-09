@@ -55,6 +55,11 @@ md-5 = "0.10"
 # RTMP / MPEG-TS (xiu ecosystem)
 xflv = "0.4"
 streamhub = "0.2"
+rtmp = "0.6"
+xmpegts = "0.2"
+
+# Logging bridge (xiu crates use `log`, we use `tracing`)
+log = "0.4"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }

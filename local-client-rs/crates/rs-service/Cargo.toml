@@ -28,3 +28,4 @@ windows-service = "0.7"
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json"] }
 tempfile = "3"
+axum.workspace = true

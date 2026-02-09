@@ -1,10 +1,12 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::error;
 
+use rs_core::config::Config;
 use rs_core::db;
+use rs_core::log_buffer::LogEntry;
 use rs_core::models::{ChunkStats, ServiceStatus, StreamingEvent, WsEvent};
 
 use crate::state::AppState;
@@ -102,14 +104,36 @@ pub async fn delete_chunks(State(state): State<AppState>) -> Result<Json<u64>, S
     Ok(Json(deleted))
 }
 
-pub async fn action_restart_inpoint() -> StatusCode {
-    // TODO: implement actual restart logic via service handle
-    StatusCode::NOT_IMPLEMENTED
+pub async fn action_restart_inpoint(
+    State(state): State<AppState>,
+) -> Result<StatusCode, StatusCode> {
+    match &state.inpoint_restart_tx {
+        Some(tx) => {
+            tx.send(()).await.map_err(|_| {
+                error!("Inpoint restart channel closed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            tracing::info!("Inpoint restart requested via API");
+            Ok(StatusCode::OK)
+        }
+        None => Ok(StatusCode::SERVICE_UNAVAILABLE),
+    }
 }
 
-pub async fn action_restart_endpoint() -> StatusCode {
-    // TODO: implement actual restart logic via service handle
-    StatusCode::NOT_IMPLEMENTED
+pub async fn action_restart_endpoint(
+    State(state): State<AppState>,
+) -> Result<StatusCode, StatusCode> {
+    match &state.endpoint_restart_tx {
+        Some(tx) => {
+            tx.send(()).await.map_err(|_| {
+                error!("Endpoint restart channel closed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            tracing::info!("Endpoint restart requested via API");
+            Ok(StatusCode::OK)
+        }
+        None => Ok(StatusCode::SERVICE_UNAVAILABLE),
+    }
 }
 
 pub async fn action_toggle_receiving(
@@ -172,10 +196,105 @@ pub async fn action_toggle_delivering(
     Ok(StatusCode::OK)
 }
 
-pub async fn get_config(State(state): State<AppState>) -> Json<rs_core::config::Config> {
+pub async fn get_config(State(state): State<AppState>) -> Json<Config> {
     let mut config = (*state.config).clone();
     // Redact sensitive credentials before sending over the API
     config.s3.access_key_id = "***".to_string();
     config.s3.secret_access_key = "***".to_string();
     Json(config)
+}
+
+pub async fn patch_config(
+    State(state): State<AppState>,
+    Json(updates): Json<serde_json::Value>,
+) -> Result<Json<Config>, StatusCode> {
+    // Serialize current config to JSON for merging
+    let current = serde_json::to_value(&*state.config).map_err(|e| {
+        error!("Failed to serialize current config: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Merge updates into current config
+    let merged = merge_json(current, updates);
+
+    // Deserialize merged config
+    let mut new_config: Config = serde_json::from_value(merged).map_err(|e| {
+        tracing::warn!("Invalid config update: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    // Preserve redacted credentials — if the client sends "***" back, keep originals
+    if new_config.s3.access_key_id == "***" {
+        new_config.s3.access_key_id = state.config.s3.access_key_id.clone();
+    }
+    if new_config.s3.secret_access_key == "***" {
+        new_config.s3.secret_access_key = state.config.s3.secret_access_key.clone();
+    }
+
+    // Validate the merged config
+    new_config.validate().map_err(|e| {
+        tracing::warn!("Config validation failed: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    // Save to disk (atomic write via temp file + rename)
+    if let Some(path) = &state.config_path {
+        new_config.save(path).map_err(|e| {
+            error!("Failed to save config: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        tracing::info!("Config saved to {}", path.display());
+    }
+
+    // Redact credentials before returning
+    new_config.s3.access_key_id = "***".to_string();
+    new_config.s3.secret_access_key = "***".to_string();
+
+    Ok(Json(new_config))
+}
+
+/// Recursively merge a JSON patch into a base object.
+fn merge_json(base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
+    match (base, patch) {
+        (serde_json::Value::Object(mut base_map), serde_json::Value::Object(patch_map)) => {
+            for (key, value) in patch_map {
+                let existing = base_map.remove(&key).unwrap_or(serde_json::Value::Null);
+                base_map.insert(key, merge_json(existing, value));
+            }
+            serde_json::Value::Object(base_map)
+        }
+        (_, patch) => patch,
+    }
+}
+
+/// Maximum number of log entries returned per request.
+const MAX_LOG_ENTRIES: usize = 200;
+
+#[derive(Serialize, Deserialize)]
+pub struct LogsResponse {
+    pub entries: Vec<LogEntry>,
+}
+
+pub async fn get_logs_inpoint(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<LogQueryParams>,
+) -> Json<LogsResponse> {
+    let limit = params.limit.unwrap_or(100).min(MAX_LOG_ENTRIES);
+    let entries = state.log_buffer.recent("rs_inpoint", limit);
+    Json(LogsResponse { entries })
+}
+
+pub async fn get_logs_endpoint(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<LogQueryParams>,
+) -> Json<LogsResponse> {
+    let limit = params.limit.unwrap_or(100).min(MAX_LOG_ENTRIES);
+    let entries = state.log_buffer.recent("rs_endpoint", limit);
+    Json(LogsResponse { entries })
+}
+
+#[derive(Deserialize)]
+pub struct LogQueryParams {
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
