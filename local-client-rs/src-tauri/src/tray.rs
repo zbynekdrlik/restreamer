@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{App, AppHandle, Manager, Wry};
 
@@ -10,127 +10,123 @@ const SERVICE_URL: &str = "http://127.0.0.1:8910/api/v1";
 /// Status polling interval (3 seconds).
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Generate a 32x32 RGBA icon with the given color.
-fn make_icon(r: u8, g: u8, b: u8) -> Vec<u8> {
-    let size = 32usize;
-    let mut pixels = vec![0u8; size * size * 4];
-    for y in 0..size {
-        for x in 0..size {
-            let idx = (y * size + x) * 4;
-            let cx = (x as f64 - 16.0).abs();
-            let cy = (y as f64 - 16.0).abs();
-            let dist = (cx * cx + cy * cy).sqrt();
-            if dist < 14.0 {
-                pixels[idx] = r;
-                pixels[idx + 1] = g;
-                pixels[idx + 2] = b;
-                pixels[idx + 3] = 255;
-            }
-        }
-    }
-    pixels
-}
+/// Embedded tray icon (32x32 PNG from bundle).
+const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/32x32.png");
 
 pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let version = env!("CARGO_PKG_VERSION");
+    let icon = Image::from_bytes(TRAY_ICON_BYTES)?;
 
-    // Inpoint tray icon
-    let inpoint_menu = build_inpoint_menu(app, version, "Waiting", "--:--:--")?;
-    let inpoint_icon_data = make_icon(255, 165, 0); // Orange = waiting
-    let inpoint_icon = Image::new_owned(inpoint_icon_data, 32, 32);
+    let menu = build_menu(app, version, "Waiting", "--:--:--", "Waiting", 0)?;
 
-    let _inpoint_tray = TrayIconBuilder::with_id("inpoint")
-        .icon(inpoint_icon)
-        .menu(&inpoint_menu)
-        .tooltip("Restreamer Inpoint")
-        .on_menu_event(move |app, event| handle_inpoint_event(app, event.id().as_ref()))
+    let _tray = TrayIconBuilder::with_id("restreamer")
+        .icon(icon)
+        .menu(&menu)
+        .tooltip("Restreamer")
+        .on_menu_event(move |app, event| handle_menu_event(app, event.id().as_ref()))
         .build(app)?;
 
-    // Endpoint tray icon
-    let endpoint_menu = build_endpoint_menu(app, "Waiting", 0)?;
-    let endpoint_icon_data = make_icon(255, 165, 0); // Orange = waiting
-    let endpoint_icon = Image::new_owned(endpoint_icon_data, 32, 32);
-
-    let _endpoint_tray = TrayIconBuilder::with_id("endpoint")
-        .icon(endpoint_icon)
-        .menu(&endpoint_menu)
-        .tooltip("Restreamer Endpoint")
-        .on_menu_event(move |_app, event| handle_endpoint_event(_app, event.id().as_ref()))
-        .build(app)?;
-
-    // Start background status poller
     start_status_poller(app.handle().clone());
 
     Ok(())
 }
 
-fn build_inpoint_menu(
+fn build_menu(
     app: &impl Manager<Wry>,
     version: &str,
-    status: &str,
+    inpoint_status: &str,
     buffer: &str,
-) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
-    Ok(Menu::with_items(
-        app,
-        &[
-            &MenuItem::new(app, format!("Restreamer v{version}"), false, None::<&str>)?,
-            &MenuItem::new(app, format!("Status: {status}"), false, None::<&str>)?,
-            &MenuItem::new(app, format!("Buffer: {buffer}"), false, None::<&str>)?,
-            &MenuItem::with_id(app, "open_dashboard", "Open Dashboard", true, None::<&str>)?,
-            &MenuItem::with_id(app, "view_logs", "View Log", true, None::<&str>)?,
-            &MenuItem::with_id(
-                app,
-                "restart_inpoint",
-                "Restart Inpoint",
-                true,
-                None::<&str>,
-            )?,
-            &MenuItem::with_id(
-                app,
-                "delete_chunks",
-                "Delete All Chunks",
-                true,
-                None::<&str>,
-            )?,
-            &MenuItem::with_id(
-                app,
-                "check_updates",
-                "Check for Updates...",
-                true,
-                None::<&str>,
-            )?,
-            &MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?,
-        ],
-    )?)
-}
-
-fn build_endpoint_menu(
-    app: &impl Manager<Wry>,
-    status: &str,
+    endpoint_status: &str,
     pending: u64,
-) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
-    Ok(Menu::with_items(
-        app,
-        &[
-            &MenuItem::new(app, format!("Status: {status}"), false, None::<&str>)?,
-            &MenuItem::new(
-                app,
-                format!("Pending: {pending} chunks"),
-                false,
-                None::<&str>,
-            )?,
-            &MenuItem::with_id(
-                app,
-                "restart_endpoint",
-                "Restart Endpoint",
-                true,
-                None::<&str>,
-            )?,
-        ],
-    )?)
+) -> Result<tauri::menu::Menu<Wry>, Box<dyn std::error::Error>> {
+    Ok(MenuBuilder::new(app)
+        .item(&MenuItem::new(
+            app,
+            format!("Restreamer v{version}"),
+            false,
+            None::<&str>,
+        )?)
+        .separator()
+        .item(&MenuItem::new(
+            app,
+            format!("Inpoint: {inpoint_status}"),
+            false,
+            None::<&str>,
+        )?)
+        .item(&MenuItem::new(
+            app,
+            format!("Buffer: {buffer}"),
+            false,
+            None::<&str>,
+        )?)
+        .item(&MenuItem::new(
+            app,
+            format!("Endpoint: {endpoint_status}"),
+            false,
+            None::<&str>,
+        )?)
+        .item(&MenuItem::new(
+            app,
+            format!("Pending: {pending} chunks"),
+            false,
+            None::<&str>,
+        )?)
+        .separator()
+        .item(&MenuItem::with_id(
+            app,
+            "open_dashboard",
+            "Open Dashboard",
+            true,
+            None::<&str>,
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "view_logs",
+            "View Log",
+            true,
+            None::<&str>,
+        )?)
+        .separator()
+        .item(&MenuItem::with_id(
+            app,
+            "restart_inpoint",
+            "Restart Inpoint",
+            true,
+            None::<&str>,
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "restart_endpoint",
+            "Restart Endpoint",
+            true,
+            None::<&str>,
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "delete_chunks",
+            "Delete All Chunks",
+            true,
+            None::<&str>,
+        )?)
+        .separator()
+        .item(&MenuItem::with_id(
+            app,
+            "check_updates",
+            "Check for Updates...",
+            true,
+            None::<&str>,
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "quit",
+            "Quit",
+            true,
+            None::<&str>,
+        )?)
+        .build()?)
 }
 
-fn handle_inpoint_event(app: &AppHandle<Wry>, event_id: &str) {
+fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
     match event_id {
         "open_dashboard" | "view_logs" => {
             if let Some(window) = app.get_webview_window("main") {
@@ -147,6 +143,14 @@ fn handle_inpoint_event(app: &AppHandle<Wry>, event_id: &str) {
                 let url = format!("{SERVICE_URL}/actions/restart-inpoint");
                 if let Err(e) = reqwest::Client::new().post(&url).send().await {
                     tracing::warn!("Failed to restart inpoint: {e}");
+                }
+            });
+        }
+        "restart_endpoint" => {
+            tauri::async_runtime::spawn(async {
+                let url = format!("{SERVICE_URL}/actions/restart-endpoint");
+                if let Err(e) = reqwest::Client::new().post(&url).send().await {
+                    tracing::warn!("Failed to restart endpoint: {e}");
                 }
             });
         }
@@ -173,24 +177,6 @@ fn handle_inpoint_event(app: &AppHandle<Wry>, event_id: &str) {
     }
 }
 
-fn handle_endpoint_event(app: &AppHandle<Wry>, event_id: &str) {
-    match event_id {
-        "restart_endpoint" => {
-            tauri::async_runtime::spawn(async {
-                let url = format!("{SERVICE_URL}/actions/restart-endpoint");
-                if let Err(e) = reqwest::Client::new().post(&url).send().await {
-                    tracing::warn!("Failed to restart endpoint: {e}");
-                }
-            });
-        }
-        _ => {
-            tracing::debug!("Unhandled endpoint menu event: {event_id}");
-        }
-    }
-    // Suppress unused variable warning in release builds
-    let _ = app;
-}
-
 /// Format seconds as HH:MM:SS.
 fn format_duration(secs: f64) -> String {
     let total = secs as u64;
@@ -200,7 +186,7 @@ fn format_duration(secs: f64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-/// Poll the service status and update tray icons/menus dynamically.
+/// Poll the service status and update the single tray icon/menu dynamically.
 fn start_status_poller(handle: AppHandle<Wry>) {
     tauri::async_runtime::spawn(async move {
         let client = reqwest::Client::builder()
@@ -229,74 +215,60 @@ fn start_status_poller(handle: AppHandle<Wry>) {
                 .and_then(|r| tauri::async_runtime::block_on(r.json()).ok());
 
             // Determine inpoint state
-            let (inpoint_r, inpoint_g, inpoint_b, inpoint_status, buffer_text) =
-                match &status_json {
-                    Some(val) => {
-                        let has_event = val
-                            .get("streaming_event")
-                            .is_some_and(|v| !v.is_null());
+            let (inpoint_status, buffer_text) = match &status_json {
+                Some(val) => {
+                    let has_event = val
+                        .get("streaming_event")
+                        .is_some_and(|v| !v.is_null());
 
-                        let buffer = stats_json
-                            .as_ref()
-                            .and_then(|s| s.get("buffer_duration_secs"))
-                            .and_then(|v| v.as_f64())
-                            .map(format_duration)
-                            .unwrap_or_else(|| "00:00:00".to_string());
+                    let buffer = stats_json
+                        .as_ref()
+                        .and_then(|s| s.get("buffer_duration_secs"))
+                        .and_then(|v| v.as_f64())
+                        .map(format_duration)
+                        .unwrap_or_else(|| "00:00:00".to_string());
 
-                        if has_event {
-                            (0u8, 200u8, 0u8, "Streaming", buffer)
-                        } else {
-                            (255, 165, 0, "Idle", buffer)
-                        }
+                    if has_event {
+                        ("Streaming", buffer)
+                    } else {
+                        ("Idle", buffer)
                     }
-                    None => (255, 0, 0, "Disconnected", "--:--:--".to_string()),
-                };
+                }
+                None => ("Disconnected", "--:--:--".to_string()),
+            };
 
             // Determine endpoint state
-            let (endpoint_r, endpoint_g, endpoint_b, endpoint_status, pending_chunks) =
-                match &status_json {
-                    Some(_) => {
-                        let pending = stats_json
-                            .as_ref()
-                            .and_then(|s| s.get("pending_chunks"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
+            let (endpoint_status, pending_chunks) = match &status_json {
+                Some(_) => {
+                    let pending = stats_json
+                        .as_ref()
+                        .and_then(|s| s.get("pending_chunks"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
 
-                        if pending > 0 {
-                            (0u8, 200u8, 0u8, "Uploading", pending)
-                        } else {
-                            (255, 165, 0, "Idle", 0)
-                        }
+                    if pending > 0 {
+                        ("Uploading", pending)
+                    } else {
+                        ("Idle", 0)
                     }
-                    None => (255, 0, 0, "Disconnected", 0),
-                };
-
-            // Update inpoint tray
-            if let Some(tray) = handle.tray_by_id("inpoint") {
-                let icon_data = make_icon(inpoint_r, inpoint_g, inpoint_b);
-                let icon = Image::new_owned(icon_data, 32, 32);
-                let _ = tray.set_icon(Some(icon));
-                let _ = tray.set_tooltip(Some(&format!("Restreamer Inpoint — {inpoint_status}")));
-
-                if let Ok(menu) =
-                    build_inpoint_menu(&handle, version, inpoint_status, &buffer_text)
-                {
-                    let _ = tray.set_menu(Some(menu));
                 }
-            }
+                None => ("Disconnected", 0),
+            };
 
-            // Update endpoint tray
-            if let Some(tray) = handle.tray_by_id("endpoint") {
-                let icon_data = make_icon(endpoint_r, endpoint_g, endpoint_b);
-                let icon = Image::new_owned(icon_data, 32, 32);
-                let _ = tray.set_icon(Some(icon));
+            // Update the single tray icon
+            if let Some(tray) = handle.tray_by_id("restreamer") {
                 let _ = tray.set_tooltip(Some(&format!(
-                    "Restreamer Endpoint — {endpoint_status}"
+                    "Restreamer — Inpoint: {inpoint_status} | Endpoint: {endpoint_status}"
                 )));
 
-                if let Ok(menu) =
-                    build_endpoint_menu(&handle, endpoint_status, pending_chunks)
-                {
+                if let Ok(menu) = build_menu(
+                    &handle,
+                    version,
+                    inpoint_status,
+                    &buffer_text,
+                    endpoint_status,
+                    pending_chunks,
+                ) {
                     let _ = tray.set_menu(Some(menu));
                 }
             }
@@ -309,16 +281,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn make_icon_produces_correct_size() {
-        let icon = make_icon(255, 0, 0);
-        assert_eq!(icon.len(), 32 * 32 * 4);
+    fn tray_icon_bytes_not_empty() {
+        assert!(!TRAY_ICON_BYTES.is_empty());
     }
 
     #[test]
-    fn make_icon_has_nonzero_alpha() {
-        let icon = make_icon(0, 255, 0);
-        let has_visible = icon.chunks(4).any(|pixel| pixel[3] > 0);
-        assert!(has_visible);
+    fn tray_icon_bytes_valid_png() {
+        // PNG magic bytes: 0x89 P N G
+        assert_eq!(&TRAY_ICON_BYTES[..4], &[0x89, 0x50, 0x4E, 0x47]);
     }
 
     #[test]

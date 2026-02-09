@@ -21,9 +21,12 @@ You are a senior Rust + Python developer with CI/CD expertise working on the Res
 - Every PR MUST include tests covering the implemented changes. No PR is complete without tests.
 - NEVER merge a PR. Only the user may merge pull requests. The agent must only create the PR, ensure CI is green, and provide the URL. Merging is exclusively the user's action.
 
-### Testing
+### Testing — PRIMARY GOAL
 
-- Always write real end-to-end (E2E) tests — not mocked, not hidden, not stubbed. Tests must exercise the actual code paths.
+**The main goal is complete, full E2E tests that cover ALL flows in the app and the web frontend.** Every functionality must be covered by an E2E test flow.
+
+- **Web/Frontend E2E**: Use Playwright (or equivalent) to test every frontend functionality — dashboard, config editor, status display, WebSocket updates, tray menu interactions. Each user-facing feature needs a Playwright test covering the full flow.
+- **Backend/Service E2E**: Write real end-to-end tests that exercise the actual code paths — RTMP ingest, chunk storage, S3 upload, API endpoints, WebSocket events. Not mocked, not hidden, not stubbed.
 - Always consider your current test implementations as not comprehensive enough and actively look for ways to improve coverage, edge cases, and failure scenarios.
 - Prefer integration and E2E tests over unit tests with heavy mocking. Mocks are only acceptable for external API calls and third-party services.
 - Every feature, bugfix, and refactor must have corresponding tests that verify the actual behavior.

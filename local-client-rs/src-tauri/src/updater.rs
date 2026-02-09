@@ -35,9 +35,9 @@ async fn check_for_update<R: Runtime>(app: &AppHandle<R>) {
             let version = update.version.clone();
             tracing::info!("Update available: v{version}");
 
-            if let Some(tray) = app.tray_by_id("inpoint") {
+            if let Some(tray) = app.tray_by_id("restreamer") {
                 let _ = tray.set_tooltip(Some(&format!(
-                    "Restreamer Inpoint — Update v{version} available"
+                    "Restreamer — Update v{version} available"
                 )));
             }
         }
@@ -81,8 +81,8 @@ pub async fn manual_check<R: Runtime>(app: &AppHandle<R>) {
         }
         Ok(None) => {
             tracing::info!("Already on the latest version");
-            if let Some(tray) = app.tray_by_id("inpoint") {
-                let _ = tray.set_tooltip(Some("Restreamer Inpoint — Up to date"));
+            if let Some(tray) = app.tray_by_id("restreamer") {
+                let _ = tray.set_tooltip(Some("Restreamer — Up to date"));
             }
         }
         Err(e) => {
