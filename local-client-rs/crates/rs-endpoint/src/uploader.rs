@@ -261,3 +261,84 @@ impl ChunkUploader {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rs_core::config::S3Config;
+    use rs_core::db;
+
+    fn test_s3_config() -> S3Config {
+        S3Config {
+            bucket: "test-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: "http://localhost:9000".to_string(),
+            access_key_id: "test-key".to_string(),
+            secret_access_key: "test-secret".to_string(),
+        }
+    }
+
+    async fn setup_db() -> SqlitePool {
+        let pool = db::create_pool(std::path::Path::new(":memory:"))
+            .await
+            .unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        db::upsert_client_profile(&pool, "test-uuid").await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn uploader_shuts_down_cleanly() {
+        let pool = setup_db().await;
+        let s3 = S3Client::new(&test_s3_config()).unwrap();
+        let manager = crate::manager_api::ManagerClient::new("http://127.0.0.1:1").unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+
+        let uploader = ChunkUploader::new(pool, s3, manager, ws_tx);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+
+        let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
+
+        // Let it run one batch cycle (should find no chunks)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Signal shutdown
+        let _ = shutdown_tx.send(());
+
+        // Should complete without panic
+        tokio::time::timeout(Duration::from_secs(3), handle)
+            .await
+            .expect("uploader timed out")
+            .expect("uploader panicked");
+    }
+
+    #[tokio::test]
+    async fn upload_batch_with_no_chunks_returns_quickly() {
+        let pool = setup_db().await;
+        let s3 = S3Client::new(&test_s3_config()).unwrap();
+        let manager = crate::manager_api::ManagerClient::new("http://127.0.0.1:1").unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+
+        let uploader = ChunkUploader::new(pool, s3, manager, ws_tx);
+
+        // upload_batch should return immediately when no chunks exist
+        uploader.upload_batch().await;
+    }
+
+    #[tokio::test]
+    async fn uploader_constructor_sets_defaults() {
+        let pool = setup_db().await;
+        let s3 = S3Client::new(&test_s3_config()).unwrap();
+        let manager = crate::manager_api::ManagerClient::new("http://127.0.0.1:1").unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+
+        let uploader = ChunkUploader::new(pool, s3, manager, ws_tx);
+        assert_eq!(uploader.max_concurrent, 4);
+    }
+
+    #[test]
+    fn retry_constants_are_valid() {
+        assert!(MAX_RETRIES > 0);
+        assert!(RETRY_DELAY.as_secs() > 0);
+    }
+}

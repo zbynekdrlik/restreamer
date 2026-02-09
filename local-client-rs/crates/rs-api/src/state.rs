@@ -53,3 +53,62 @@ impl AppState {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rs_core::db;
+
+    #[tokio::test]
+    async fn new_defaults() {
+        let pool = db::create_memory_pool().await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+
+        assert!(state.config_path.is_none());
+        assert!(state.inpoint_restart_tx.is_none());
+        assert!(state.endpoint_restart_tx.is_none());
+    }
+
+    #[tokio::test]
+    async fn with_config_path_sets_path() {
+        let pool = db::create_memory_pool().await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, Config::for_testing(), ws_tx)
+            .with_config_path(PathBuf::from("/tmp/test.json"));
+
+        assert_eq!(state.config_path, Some(PathBuf::from("/tmp/test.json")));
+    }
+
+    #[tokio::test]
+    async fn with_log_buffer_replaces_default() {
+        let pool = db::create_memory_pool().await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let buffer = LogBuffer::new(500);
+        buffer.push(rs_core::log_buffer::LogEntry {
+            level: "INFO".into(),
+            target: "test".into(),
+            message: "hello".into(),
+        });
+
+        let state = AppState::new(pool, Config::for_testing(), ws_tx).with_log_buffer(buffer);
+
+        let entries = state.log_buffer.recent("test", 10);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "hello");
+    }
+
+    #[tokio::test]
+    async fn with_restart_channels_sets_both() {
+        let pool = db::create_memory_pool().await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let (inpoint_tx, _) = mpsc::channel(1);
+        let (endpoint_tx, _) = mpsc::channel(1);
+
+        let state = AppState::new(pool, Config::for_testing(), ws_tx)
+            .with_restart_channels(inpoint_tx, endpoint_tx);
+
+        assert!(state.inpoint_restart_tx.is_some());
+        assert!(state.endpoint_restart_tx.is_some());
+    }
+}
