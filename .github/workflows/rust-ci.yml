@@ -179,6 +179,39 @@ jobs:
             local-client-rs/target/release/restreamer-service.exe
           if-no-files-found: ignore
 
+  build-tauri:
+    name: Build Tauri app
+    needs: [changes, lint, test]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: local-client-rs
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SQLX_OFFLINE: true
+        with:
+          projectPath: local-client-rs
+      - name: Upload Tauri installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: restreamer-tauri-installer
+          path: local-client-rs/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+
   file-size:
     name: File size check
     needs: changes
@@ -200,7 +233,17 @@ jobs:
     name: Rust CI Gate
     if: always()
     needs:
-      [changes, version-check, lint, test, coverage, security, build, file-size]
+      [
+        changes,
+        version-check,
+        lint,
+        test,
+        coverage,
+        security,
+        build,
+        build-tauri,
+        file-size,
+      ]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -212,6 +255,7 @@ jobs:
           echo "coverage:      ${{ needs.coverage.result }}"
           echo "security:      ${{ needs.security.result }}"
           echo "build:         ${{ needs.build.result }}"
+          echo "build-tauri:   ${{ needs.build-tauri.result }}"
           echo "file-size:     ${{ needs.file-size.result }}"
 
           # If no Rust changes, all skipped jobs are fine
@@ -229,6 +273,7 @@ jobs:
             "coverage:${{ needs.coverage.result }}" \
             "security:${{ needs.security.result }}" \
             "build:${{ needs.build.result }}" \
+            "build-tauri:${{ needs.build-tauri.result }}" \
             "file-size:${{ needs.file-size.result }}"; do
             name="${job_result%%:*}"
             result="${job_result##*:}"
