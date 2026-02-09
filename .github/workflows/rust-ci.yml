@@ -198,13 +198,12 @@ jobs:
           node-version: 22
       - name: Install frontend dependencies
         run: npm ci
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@latest
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        run: npx tauri build
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SQLX_OFFLINE: true
-        with:
-          projectPath: local-client-rs
       - name: Upload Tauri installer
         uses: actions/upload-artifact@v4
         with:
