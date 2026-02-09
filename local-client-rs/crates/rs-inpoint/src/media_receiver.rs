@@ -1,7 +1,12 @@
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use streamhub::define::{BroadcastEvent, BroadcastEventReceiver};
+use streamhub::define::{
+    BroadcastEvent, BroadcastEventReceiver, FrameData, StreamHubEvent, StreamHubEventSender,
+    SubDataType, SubscribeType, SubscriberInfo,
+};
+use streamhub::stream::StreamIdentifier;
+use streamhub::utils::{RandomDigitCount, Uuid};
 use tracing::{debug, info, warn};
 use xflv::demuxer::{FlvAudioTagDemuxer, FlvVideoTagDemuxer};
 
@@ -10,18 +15,24 @@ use crate::muxer::TsMuxer;
 
 /// Receives media data from the xiu StreamsHub and processes it into MPEG-TS chunks.
 ///
-/// Listens for RTMP publish events, subscribes to the published stream,
+/// Listens for RTMP publish events, subscribes to the published stream's frame data,
 /// demuxes FLV audio/video data, muxes to proper MPEG-TS, and feeds the
 /// output to the ChunkSink for time-based file writing.
 pub struct MediaReceiver {
     event_rx: BroadcastEventReceiver,
+    hub_event_tx: StreamHubEventSender,
     chunk_sink: Arc<ChunkSink>,
 }
 
 impl MediaReceiver {
-    pub fn new(event_rx: BroadcastEventReceiver, chunk_sink: Arc<ChunkSink>) -> Self {
+    pub fn new(
+        event_rx: BroadcastEventReceiver,
+        hub_event_tx: StreamHubEventSender,
+        chunk_sink: Arc<ChunkSink>,
+    ) -> Self {
         Self {
             event_rx,
+            hub_event_tx,
             chunk_sink,
         }
     }
@@ -30,21 +41,29 @@ impl MediaReceiver {
     pub async fn run(mut self) {
         info!("Media receiver started, waiting for RTMP publishers");
 
+        let mut frame_processor = match FrameProcessor::new(self.chunk_sink.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Failed to create frame processor: {e}");
+                return;
+            }
+        };
+
         loop {
             match self.event_rx.recv().await {
                 Ok(event) => match event {
                     BroadcastEvent::Publish { identifier } => {
-                        info!("Stream published: {identifier:?}");
-                        // The stream data will be forwarded through the StreamsHub
-                        // to our subscriber. We process it when we receive Subscribe events.
+                        info!("Stream published: {identifier}");
+                        // Subscribe to the stream and process frames
+                        self.process_stream(&identifier, &mut frame_processor).await;
+                        info!("Stream processing ended for: {identifier}");
                     }
                     BroadcastEvent::UnPublish { identifier } => {
-                        info!("Stream unpublished: {identifier:?}");
-                        self.chunk_sink.flush().await;
-                        self.chunk_sink.reset().await;
+                        info!("Stream unpublished: {identifier}");
+                        frame_processor.reset().await.ok();
                     }
                     BroadcastEvent::Subscribe { identifier, .. } => {
-                        debug!("New subscriber for stream: {identifier:?}");
+                        debug!("New subscriber for stream: {identifier}");
                     }
                     BroadcastEvent::UnSubscribe { .. } => {
                         debug!("Subscriber disconnected");
@@ -58,6 +77,85 @@ impl MediaReceiver {
         }
 
         info!("Media receiver stopped");
+    }
+
+    /// Subscribe to a published stream and process its frames until it ends.
+    async fn process_stream(&self, identifier: &StreamIdentifier, processor: &mut FrameProcessor) {
+        // Create subscriber info for the hub
+        let sub_id = Uuid::new(RandomDigitCount::Six);
+        let sub_info = SubscriberInfo {
+            id: sub_id,
+            sub_type: SubscribeType::RtmpPull,
+            notify_info: streamhub::define::NotifyInfo {
+                request_url: String::new(),
+                remote_addr: String::from("local-chunker"),
+            },
+            sub_data_type: SubDataType::Frame,
+        };
+
+        // Send subscribe request to the hub via oneshot channel
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        if self
+            .hub_event_tx
+            .send(StreamHubEvent::Subscribe {
+                identifier: identifier.clone(),
+                info: sub_info,
+                result_sender: result_tx,
+            })
+            .is_err()
+        {
+            warn!("Failed to send subscribe request to hub");
+            return;
+        }
+
+        // Wait for subscription result
+        let (data_receiver, _stat_sender) = match result_rx.await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                warn!("Hub rejected subscription: {e}");
+                return;
+            }
+            Err(_) => {
+                warn!("Hub subscription channel dropped");
+                return;
+            }
+        };
+
+        // Get the frame receiver
+        let mut frame_rx = match data_receiver.frame_receiver {
+            Some(rx) => rx,
+            None => {
+                warn!("No frame receiver in subscription result");
+                return;
+            }
+        };
+
+        info!("Subscribed to stream, processing frames");
+
+        // Process frames until the channel closes (stream ends)
+        while let Some(frame) = frame_rx.recv().await {
+            match frame {
+                FrameData::Video { timestamp, data } => {
+                    processor.process_video(timestamp, data).await;
+                }
+                FrameData::Audio { timestamp, data } => {
+                    processor.process_audio(timestamp, data).await;
+                }
+                FrameData::MediaInfo { media_info: _ } => {
+                    debug!("Received media info");
+                }
+                FrameData::MetaData {
+                    timestamp: _,
+                    data: _,
+                } => {
+                    debug!("Received metadata");
+                }
+            }
+        }
+
+        info!("Frame channel closed, flushing remaining data");
+        processor.reset().await.ok();
     }
 }
 

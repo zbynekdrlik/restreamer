@@ -5,14 +5,15 @@ use tokio::sync::broadcast;
 use tracing::{error, info};
 
 use crate::chunker::ChunkSink;
-use crate::media_receiver::{FrameProcessor, MediaReceiver};
+use crate::media_receiver::MediaReceiver;
 
 /// RTMP server that accepts connections from OBS/vMix on a configurable port.
 ///
 /// Uses the xiu RTMP implementation for proper protocol handling including
 /// full handshake, AMF command parsing, and H.264/AAC media extraction.
-/// Media data flows through the StreamsHub to the FrameProcessor which
-/// demuxes FLV, muxes to MPEG-TS, and feeds the ChunkSink.
+/// Media data flows through the StreamsHub to the MediaReceiver which
+/// subscribes to the published stream, demuxes FLV, muxes to MPEG-TS,
+/// and feeds the ChunkSink.
 pub struct RtmpServer {
     address: String,
     shutdown_tx: broadcast::Sender<()>,
@@ -42,18 +43,15 @@ impl RtmpServer {
         // Create the xiu RTMP server with the hub's event sender
         let mut rtmp_server = rtmp::rtmp::RtmpServer::new(
             self.address.clone(),
-            event_sender,
+            event_sender.clone(),
             1, // GOP cache size
             None,
         );
 
-        // Create media receiver that listens for publish events
-        let media_receiver = MediaReceiver::new(event_consumer, Arc::clone(&chunk_sink));
-
-        // Create frame processor for the active stream
-        let processor_sink = Arc::clone(&chunk_sink);
-        let _frame_processor = FrameProcessor::new(processor_sink)
-            .map_err(|e| crate::InpointError::Protocol(format!("init frame processor: {e}")))?;
+        // Create media receiver that subscribes to published streams and
+        // processes frame data into MPEG-TS chunks
+        let media_receiver =
+            MediaReceiver::new(event_consumer, event_sender, Arc::clone(&chunk_sink));
 
         info!("RTMP server starting on {}", self.address);
 
