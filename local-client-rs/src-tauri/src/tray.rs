@@ -159,10 +159,7 @@ fn handle_inpoint_event(app: &AppHandle<Wry>, event_id: &str) {
             });
         }
         "check_updates" => {
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                crate::updater::manual_check(&handle).await;
-            });
+            tracing::info!("Update checking not yet configured (needs signing keys)");
         }
         "quit" => {
             app.exit(0);
