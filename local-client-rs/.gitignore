@@ -1,0 +1,9 @@
+/target/
+node_modules/
+dist/
+*.exe
+*.pdb
+.env
+.env.local
+playwright-report/
+test-results/

@@ -1,0 +1,24 @@
+[package]
+name = "rs-endpoint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rs-core.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+rust-s3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+sqlx.workspace = true
+md-5.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+axum.workspace = true
+tower.workspace = true

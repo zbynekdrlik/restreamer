@@ -1,0 +1,49 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/config.schema.json",
+  "productName": "Restreamer",
+  "version": "0.1.0",
+  "identifier": "media.newlevel.restreamer",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Restreamer Dashboard",
+        "width": 1024,
+        "height": 768,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8910 ws://127.0.0.1:8910; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/zbynekdrlik/restreamer/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhEMTI3M0YyQzg4OTRCOEQKUldTTlM0bkk4bk1TamJxT3lzbjNGL1hMQ25xbW9ieUJ0bG1Yck5IMG4vT09qSUM4RXp2Rzl2eE4K"
+    }
+  }
+}
