@@ -55,6 +55,8 @@ fn spawn_ffmpeg(port: u16, duration_secs: u32) -> std::process::Child {
             "-hide_banner",
             "-loglevel",
             "error",
+            // Force real-time encoding speed so time-based chunking works
+            "-re",
             "-f",
             "lavfi",
             "-i",

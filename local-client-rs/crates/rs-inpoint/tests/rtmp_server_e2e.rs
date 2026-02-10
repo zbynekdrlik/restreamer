@@ -47,12 +47,16 @@ fn ffmpeg_available() -> bool {
 }
 
 /// Spawn ffmpeg to publish a short test stream to the RTMP server.
+/// Uses `-re` to force real-time encoding speed (otherwise ffmpeg encodes
+/// synthetic sources much faster than real-time, defeating time-based chunking).
 fn spawn_ffmpeg_publisher(port: u16, duration_secs: u32) -> std::process::Child {
     std::process::Command::new("ffmpeg")
         .args([
             "-hide_banner",
             "-loglevel",
             "error",
+            // Force real-time encoding speed
+            "-re",
             // Video: synthetic test pattern
             "-f",
             "lavfi",
@@ -160,11 +164,14 @@ async fn rtmp_server_produces_multiple_chunks_from_stream() {
         panic!("ffmpeg is required for RTMP E2E tests but was not found in PATH");
     }
 
+    // Use env_logger to capture xiu's log crate output
+    let _ = env_logger::builder().is_test(true).try_init();
+
     let port = find_available_port();
     let dir = tempfile::tempdir().unwrap();
     let chunk_sink = Arc::new(ChunkSink::new(
         dir.path().to_path_buf(),
-        Duration::from_millis(500), // 500ms chunks
+        Duration::from_secs(2), // 2-second chunks (resilient to slow CI)
     ));
     let mut chunk_rx = chunk_sink.subscribe();
 
@@ -178,25 +185,37 @@ async fn rtmp_server_produces_multiple_chunks_from_stream() {
         "RTMP server failed to bind"
     );
 
-    // 8-second stream should produce at least 2 chunks at 500ms each
-    // (longer duration for reliability when tests run in parallel)
-    let mut ffmpeg = spawn_ffmpeg_publisher(port, 8);
+    // 15-second stream with 2-second chunks should produce at least 2 chunks
+    // (generous timing for CI runners with limited CPU)
+    let mut ffmpeg = spawn_ffmpeg_publisher(port, 15);
 
-    // Collect chunks
+    // Collect chunks as they arrive while ffmpeg runs
     let mut chunks = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
 
-    while chunks.len() < 3 && tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_secs(15), chunk_rx.recv()).await {
-            Ok(Ok(chunk)) => chunks.push(chunk),
-            Ok(Err(_)) => break,
-            Err(_) => break,
+    while chunks.len() < 4 && tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(20), chunk_rx.recv()).await {
+            Ok(Ok(chunk)) => {
+                eprintln!(
+                    "  [chunk {}] {} bytes, md5={}",
+                    chunk.index, chunk.size, chunk.md5
+                );
+                chunks.push(chunk);
+            }
+            Ok(Err(e)) => {
+                eprintln!("  [chunk_rx] channel error: {e}");
+                break;
+            }
+            Err(_) => {
+                eprintln!("  [chunk_rx] timeout waiting for chunk");
+                break;
+            }
         }
     }
 
     assert!(
         chunks.len() >= 2,
-        "Expected at least 2 chunks from 8-second stream, got {}",
+        "Expected at least 2 chunks from 15-second stream, got {}",
         chunks.len()
     );
 
