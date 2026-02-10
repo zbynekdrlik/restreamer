@@ -101,7 +101,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
       - name: Run tests
         run: cargo test --workspace --verbose
         env:
@@ -124,7 +127,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
       - name: Run coverage
@@ -247,7 +250,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
       - name: Scan for #[ignore] on tests
         run: |
           IGNORED=$(grep -rn '#\[ignore\]' --include='*.rs' . || true)
@@ -311,8 +314,8 @@ jobs:
           # Verify at least a minimum number of tests ran
           TOTAL_PASSED=$(echo "$OUTPUT" | grep -oP '(\d+) passed' | grep -oP '\d+' | paste -sd+ | bc)
           echo "Total tests passed: $TOTAL_PASSED"
-          if [ "$TOTAL_PASSED" -lt 80 ]; then
-            echo "ERROR: Expected at least 80 tests, but only $TOTAL_PASSED passed."
+          if [ "$TOTAL_PASSED" -lt 120 ]; then
+            echo "ERROR: Expected at least 120 tests, but only $TOTAL_PASSED passed."
             echo "This may indicate tests were removed or are not being discovered."
             exit 1
           fi

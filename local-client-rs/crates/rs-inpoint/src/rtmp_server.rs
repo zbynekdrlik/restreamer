@@ -37,6 +37,11 @@ impl RtmpServer {
     pub async fn run(self, chunk_sink: Arc<ChunkSink>) -> Result<(), crate::InpointError> {
         // Create the StreamsHub for media data routing
         let mut hub = StreamsHub::new(None);
+
+        // Enable push so that BroadcastEvent::Publish is emitted to our
+        // MediaReceiver when an RTMP publisher connects.
+        hub.set_rtmp_push_enabled(true);
+
         let event_sender = hub.get_hub_event_sender();
         let event_consumer = hub.get_client_event_consumer();
 
