@@ -455,13 +455,32 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           Write-Host "=== Stopping services ==="
-          $svc = Get-Service -Name "restreamer-service" -ErrorAction SilentlyContinue
-          if ($svc -and $svc.Status -eq "Running") {
-            Stop-Service -Name "restreamer-service" -Force
-            Start-Sleep -Seconds 2
-            Write-Host "Service stopped"
+          # Use sc.exe instead of Stop-Service for better cross-account compatibility
+          $svcQuery = sc.exe query "restreamer-service" 2>&1
+          if ($LASTEXITCODE -eq 0 -and $svcQuery -match "RUNNING") {
+            Write-Host "Stopping restreamer-service..."
+            sc.exe stop "restreamer-service"
+            Start-Sleep -Seconds 3
+            # Wait for service to fully stop
+            $timeout = 30
+            while ($timeout -gt 0) {
+              $svcQuery = sc.exe query "restreamer-service" 2>&1
+              if ($svcQuery -match "STOPPED") {
+                Write-Host "Service stopped"
+                break
+              }
+              Start-Sleep -Seconds 1
+              $timeout--
+            }
+          } else {
+            Write-Host "Service not running or not found"
           }
-          Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Stop-Process -Force
+          # Kill tray app
+          $trayProc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if ($trayProc) {
+            Stop-Process -Name "Restreamer" -Force -ErrorAction SilentlyContinue
+            Write-Host "Tray app stopped"
+          }
 
           Write-Host "=== Installing service binary ==="
           $InstallDir = "C:\Program Files\Restreamer"
@@ -477,22 +496,26 @@ jobs:
 
           Write-Host "=== Registering service ==="
           $ConfigFile = "C:\ProgramData\Restreamer\config.json"
-          $existingSvc = Get-Service -Name "restreamer-service" -ErrorAction SilentlyContinue
-          if (-not $existingSvc) {
-            sc.exe create "restreamer-service" binPath= "`"$InstallDir\restreamer-service.exe`" `"$ConfigFile`"" start= auto DisplayName= "Restreamer Service" | Out-Null
-            sc.exe description "restreamer-service" "Restreamer local client service" | Out-Null
+          $svcQuery = sc.exe query "restreamer-service" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            sc.exe create "restreamer-service" binPath= "`"$InstallDir\restreamer-service.exe`" `"$ConfigFile`"" start= auto DisplayName= "Restreamer Service"
+            sc.exe description "restreamer-service" "Restreamer local client service"
             Write-Host "Service registered"
+          } else {
+            Write-Host "Service already registered"
           }
 
           Write-Host "=== Starting service ==="
-          Start-Service -Name "restreamer-service"
+          sc.exe start "restreamer-service"
           Start-Sleep -Seconds 3
 
-          $svc = Get-Service -Name "restreamer-service"
-          if ($svc.Status -eq "Running") {
+          # Verify service started
+          $svcQuery = sc.exe query "restreamer-service" 2>&1
+          if ($svcQuery -match "RUNNING") {
             Write-Host "Service started successfully"
           } else {
-            Write-Error "Service failed to start: $($svc.Status)"
+            Write-Host "Service status: $svcQuery"
+            Write-Error "Service failed to start"
             exit 1
           }
 
