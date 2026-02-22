@@ -541,19 +541,27 @@ jobs:
           $null = schtasks /Delete /TN $taskName /F 2>&1
           $ErrorActionPreference = "Stop"
 
-          # Create the task
-          $createResult = schtasks /Create /TN $taskName /TR "powershell.exe -ExecutionPolicy Bypass -File `"$tempScript`"" /SC ONCE /ST 00:00 /RU SYSTEM /F 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "Failed to create task: $createResult"
+          # Create the task (ignore warnings about ST time)
+          $ErrorActionPreference = "Continue"
+          schtasks /Create /TN $taskName /TR "powershell.exe -ExecutionPolicy Bypass -File `"$tempScript`"" /SC ONCE /ST 00:00 /RU SYSTEM /F
+          $createExitCode = $LASTEXITCODE
+          $ErrorActionPreference = "Stop"
+          if ($createExitCode -ne 0) {
+            Write-Host "Failed to create task"
             exit 1
           }
+          Write-Host "Task created"
 
           # Run the task
-          $runResult = schtasks /Run /TN $taskName 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "Failed to run task: $runResult"
+          $ErrorActionPreference = "Continue"
+          schtasks /Run /TN $taskName
+          $runExitCode = $LASTEXITCODE
+          $ErrorActionPreference = "Stop"
+          if ($runExitCode -ne 0) {
+            Write-Host "Failed to run task"
             exit 1
           }
+          Write-Host "Task started"
 
           # Wait for task to complete
           $timeout = 120
