@@ -452,82 +452,124 @@ jobs:
       - name: Deploy
         shell: powershell
         run: |
+          # Run deployment as admin via scheduled task (workaround for runner permissions)
+          $scriptBlock = @'
           $ErrorActionPreference = "Stop"
+          $logFile = "C:\ProgramData\Restreamer\deploy.log"
+          New-Item -ItemType Directory -Path "C:\ProgramData\Restreamer" -Force | Out-Null
 
-          Write-Host "=== Stopping services ==="
-          # Use sc.exe instead of Stop-Service for better cross-account compatibility
-          $svcQuery = sc.exe query "restreamer-service" 2>&1
-          if ($LASTEXITCODE -eq 0 -and $svcQuery -match "RUNNING") {
-            Write-Host "Stopping restreamer-service..."
-            sc.exe stop "restreamer-service"
-            Start-Sleep -Seconds 3
-            # Wait for service to fully stop
-            $timeout = 30
-            while ($timeout -gt 0) {
-              $svcQuery = sc.exe query "restreamer-service" 2>&1
-              if ($svcQuery -match "STOPPED") {
-                Write-Host "Service stopped"
-                break
-              }
-              Start-Sleep -Seconds 1
-              $timeout--
-            }
-          } else {
-            Write-Host "Service not running or not found"
-          }
-          # Kill tray app
-          $trayProc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-          if ($trayProc) {
-            Stop-Process -Name "Restreamer" -Force -ErrorAction SilentlyContinue
-            Write-Host "Tray app stopped"
+          function Log($msg) {
+            $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            "$timestamp $msg" | Tee-Object -FilePath $logFile -Append
           }
 
-          Write-Host "=== Installing service binary ==="
+          Log "=== Starting deployment ==="
+
+          Log "=== Stopping services ==="
+          # Stop service via net stop (works better than sc.exe in some cases)
+          net stop "restreamer-service" 2>&1 | Out-Null
+          Start-Sleep -Seconds 2
+
+          # Kill any remaining processes
+          taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
+          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          Start-Sleep -Seconds 1
+          Log "Processes stopped"
+
+          Log "=== Installing service binary ==="
           $InstallDir = "C:\Program Files\Restreamer"
           New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-          $serviceBin = Get-ChildItem "artifacts/service/*.exe" | Select-Object -First 1
+          $artifactDir = "ARTIFACT_DIR"
+          $serviceBin = Get-ChildItem "$artifactDir\service\*.exe" | Select-Object -First 1
           Copy-Item $serviceBin.FullName "$InstallDir\restreamer-service.exe" -Force
-          Write-Host "Service binary installed: $($serviceBin.Name)"
+          Log "Service binary installed: $($serviceBin.Name)"
 
-          Write-Host "=== Running Tauri installer ==="
-          $installer = Get-ChildItem "artifacts/tauri/*.exe" | Select-Object -First 1
+          Log "=== Running Tauri installer ==="
+          $installer = Get-ChildItem "$artifactDir\tauri\*.exe" | Select-Object -First 1
           Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
-          Write-Host "Tauri app installed: $($installer.Name)"
+          Log "Tauri app installed: $($installer.Name)"
 
-          Write-Host "=== Registering service ==="
+          Log "=== Registering service ==="
           $ConfigFile = "C:\ProgramData\Restreamer\config.json"
           $svcQuery = sc.exe query "restreamer-service" 2>&1
           if ($LASTEXITCODE -ne 0) {
             sc.exe create "restreamer-service" binPath= "`"$InstallDir\restreamer-service.exe`" `"$ConfigFile`"" start= auto DisplayName= "Restreamer Service"
             sc.exe description "restreamer-service" "Restreamer local client service"
-            Write-Host "Service registered"
+            Log "Service registered"
           } else {
-            Write-Host "Service already registered"
+            Log "Service already registered"
           }
 
-          Write-Host "=== Starting service ==="
-          sc.exe start "restreamer-service"
+          Log "=== Starting service ==="
+          net start "restreamer-service"
           Start-Sleep -Seconds 3
 
-          # Verify service started
           $svcQuery = sc.exe query "restreamer-service" 2>&1
           if ($svcQuery -match "RUNNING") {
-            Write-Host "Service started successfully"
+            Log "Service started successfully"
           } else {
-            Write-Host "Service status: $svcQuery"
-            Write-Error "Service failed to start"
-            exit 1
+            Log "Service status: $svcQuery"
+            throw "Service failed to start"
           }
 
-          Write-Host "=== Launching tray app ==="
-          $trayPath = "$env:LOCALAPPDATA\Restreamer\Restreamer.exe"
+          Log "=== Launching tray app ==="
+          $trayPath = "C:\Users\newlevel\AppData\Local\Restreamer\Restreamer.exe"
           if (Test-Path $trayPath) {
             Start-Process -FilePath $trayPath
-            Write-Host "Tray app launched"
+            Log "Tray app launched"
           }
 
-          Write-Host ""
-          Write-Host "=== Deployment complete! ==="
+          Log "=== Deployment complete! ==="
+          '@
+
+          # Replace artifact path placeholder
+          $artifactPath = (Get-Location).Path + "\artifacts"
+          $scriptBlock = $scriptBlock -replace "ARTIFACT_DIR", $artifactPath
+
+          # Write script to temp file
+          $tempScript = "C:\ProgramData\Restreamer\deploy-script.ps1"
+          New-Item -ItemType Directory -Path "C:\ProgramData\Restreamer" -Force | Out-Null
+          $scriptBlock | Out-File -FilePath $tempScript -Encoding UTF8 -Force
+
+          Write-Host "=== Running deployment as SYSTEM via scheduled task ==="
+
+          # Create and run scheduled task as SYSTEM
+          $taskName = "RestreamerDeploy"
+          schtasks /Delete /TN $taskName /F 2>&1 | Out-Null
+          schtasks /Create /TN $taskName /TR "powershell.exe -ExecutionPolicy Bypass -File `"$tempScript`"" /SC ONCE /ST 00:00 /RU SYSTEM /F
+          schtasks /Run /TN $taskName
+
+          # Wait for task to complete
+          $timeout = 120
+          while ($timeout -gt 0) {
+            Start-Sleep -Seconds 2
+            $taskInfo = schtasks /Query /TN $taskName /FO CSV 2>&1 | ConvertFrom-Csv
+            if ($taskInfo.Status -eq "Ready") {
+              Write-Host "Deployment task completed"
+              break
+            }
+            $timeout -= 2
+          }
+
+          # Show log output
+          $logFile = "C:\ProgramData\Restreamer\deploy.log"
+          if (Test-Path $logFile) {
+            Write-Host "=== Deployment log ==="
+            Get-Content $logFile
+          }
+
+          # Cleanup
+          schtasks /Delete /TN $taskName /F 2>&1 | Out-Null
+
+          # Verify service is running
+          $svcQuery = sc.exe query "restreamer-service" 2>&1
+          if ($svcQuery -match "RUNNING") {
+            Write-Host "=== Service verified running ==="
+          } else {
+            Write-Host "=== Service status ==="
+            Write-Host $svcQuery
+            exit 1
+          }
 
       - name: Verify deployment
         shell: powershell
