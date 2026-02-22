@@ -678,7 +678,7 @@ jobs:
   auto-release:
     name: Auto-release tag
     needs: [rust-ci-gate]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.rust-ci-gate.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
