@@ -446,10 +446,11 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.STREAM_LAN_SSH_KEY }}" > ~/.ssh/stream_lan
           chmod 600 ~/.ssh/stream_lan
-          cat >> ~/.ssh/config << EOF
+          # Use hardcoded values - hostname/user are not sensitive
+          cat >> ~/.ssh/config << 'EOF'
           Host stream.lan
-            HostName ${{ secrets.STREAM_LAN_HOST }}
-            User ${{ secrets.STREAM_LAN_USER }}
+            HostName stream.lan
+            User newlevel
             IdentityFile ~/.ssh/stream_lan
             StrictHostKeyChecking no
             UserKnownHostsFile /dev/null
@@ -464,76 +465,76 @@ jobs:
 
       - name: Deploy to stream.lan
         run: |
-          # Copy artifacts
-          scp artifacts/service/*.exe stream.lan:/tmp/restreamer-service.exe
-          scp artifacts/tauri/*.exe stream.lan:/tmp/Restreamer-Setup.exe
+          # Copy artifacts to user's tmp directory
+          scp artifacts/service/*.exe "stream.lan:tmp/restreamer-service.exe"
+          scp artifacts/tauri/*.exe "stream.lan:tmp/Restreamer-Setup.exe"
 
           # Run deployment script
-          ssh stream.lan powershell -Command '
-            $ErrorActionPreference = "Stop"
+          ssh stream.lan 'powershell.exe -NoProfile -Command "
+            $ErrorActionPreference = \"Stop\"
 
-            Write-Host "=== Stopping services ===" -ForegroundColor Cyan
-            $svc = Get-Service -Name "restreamer-service" -ErrorAction SilentlyContinue
-            if ($svc -and $svc.Status -eq "Running") {
-              Stop-Service -Name "restreamer-service" -Force
+            Write-Host \"=== Stopping services ===\"
+            $svc = Get-Service -Name \"restreamer-service\" -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq \"Running\") {
+              Stop-Service -Name \"restreamer-service\" -Force
               Start-Sleep -Seconds 2
-              Write-Host "Service stopped" -ForegroundColor Green
+              Write-Host \"Service stopped\"
             }
-            Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Stop-Process -Force
+            Get-Process -Name \"Restreamer\" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-            Write-Host "=== Installing service binary ===" -ForegroundColor Cyan
-            $InstallDir = "C:\Program Files\Restreamer"
+            Write-Host \"=== Installing service binary ===\"
+            $InstallDir = \"C:\Program Files\Restreamer\"
             New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-            Copy-Item "C:\Users\$env:USERNAME\tmp\restreamer-service.exe" "$InstallDir\restreamer-service.exe" -Force
-            Write-Host "Service binary installed" -ForegroundColor Green
+            Copy-Item \"$env:USERPROFILE\tmp\restreamer-service.exe\" \"$InstallDir\restreamer-service.exe\" -Force
+            Write-Host \"Service binary installed\"
 
-            Write-Host "=== Running Tauri installer ===" -ForegroundColor Cyan
-            Start-Process -FilePath "C:\Users\$env:USERNAME\tmp\Restreamer-Setup.exe" -ArgumentList "/S" -Wait
-            Write-Host "Tauri app installed" -ForegroundColor Green
+            Write-Host \"=== Running Tauri installer ===\"
+            Start-Process -FilePath \"$env:USERPROFILE\tmp\Restreamer-Setup.exe\" -ArgumentList \"/S\" -Wait
+            Write-Host \"Tauri app installed\"
 
-            Write-Host "=== Registering service ===" -ForegroundColor Cyan
-            $ConfigFile = "C:\ProgramData\Restreamer\config.json"
-            $existingSvc = Get-Service -Name "restreamer-service" -ErrorAction SilentlyContinue
+            Write-Host \"=== Registering service ===\"
+            $ConfigFile = \"C:\ProgramData\Restreamer\config.json\"
+            $existingSvc = Get-Service -Name \"restreamer-service\" -ErrorAction SilentlyContinue
             if (-not $existingSvc) {
-              sc.exe create "restreamer-service" binPath= "`"$InstallDir\restreamer-service.exe`" `"$ConfigFile`"" start= auto DisplayName= "Restreamer Service" | Out-Null
-              sc.exe description "restreamer-service" "Restreamer local client service" | Out-Null
+              sc.exe create \"restreamer-service\" binPath= \"\`\"$InstallDir\restreamer-service.exe\`\" \`\"$ConfigFile\`\"\" start= auto DisplayName= \"Restreamer Service\" | Out-Null
+              sc.exe description \"restreamer-service\" \"Restreamer local client service\" | Out-Null
             }
 
-            Write-Host "=== Starting service ===" -ForegroundColor Cyan
-            Start-Service -Name "restreamer-service"
+            Write-Host \"=== Starting service ===\"
+            Start-Service -Name \"restreamer-service\"
             Start-Sleep -Seconds 3
 
-            $svc = Get-Service -Name "restreamer-service"
-            if ($svc.Status -eq "Running") {
-              Write-Host "Service started successfully" -ForegroundColor Green
+            $svc = Get-Service -Name \"restreamer-service\"
+            if ($svc.Status -eq \"Running\") {
+              Write-Host \"Service started successfully\"
             } else {
-              Write-Error "Service failed to start: $($svc.Status)"
+              Write-Error \"Service failed to start: $($svc.Status)\"
               exit 1
             }
 
-            Write-Host "=== Launching tray app ===" -ForegroundColor Cyan
-            $trayPath = "$env:LOCALAPPDATA\Restreamer\Restreamer.exe"
+            Write-Host \"=== Launching tray app ===\"
+            $trayPath = \"$env:LOCALAPPDATA\Restreamer\Restreamer.exe\"
             if (Test-Path $trayPath) {
               Start-Process -FilePath $trayPath
-              Write-Host "Tray app launched" -ForegroundColor Green
+              Write-Host \"Tray app launched\"
             }
 
-            Write-Host ""
-            Write-Host "=== Deployment complete! ===" -ForegroundColor Green
-          '
+            Write-Host \"\"
+            Write-Host \"=== Deployment complete! ===\"
+          "'
 
       - name: Verify deployment
         run: |
-          ssh stream.lan powershell -Command '
+          ssh stream.lan 'powershell.exe -NoProfile -Command "
             try {
-              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 10
-              Write-Host "API Health: OK" -ForegroundColor Green
+              $response = Invoke-RestMethod -Uri \"http://127.0.0.1:8910/api/v1/health\" -TimeoutSec 10
+              Write-Host \"API Health: OK\"
               exit 0
             } catch {
-              Write-Host "API Health: FAILED - $_" -ForegroundColor Red
+              Write-Host \"API Health: FAILED - $_\"
               exit 1
             }
-          '
+          "'
 
   auto-release:
     name: Auto-release tag
