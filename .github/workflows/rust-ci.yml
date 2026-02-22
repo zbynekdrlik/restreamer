@@ -423,6 +423,118 @@ jobs:
 
           echo "All Rust CI checks passed!"
 
+  deploy-stream-lan:
+    name: Deploy to stream.lan
+    needs: [rust-ci-gate, build, build-tauri]
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push' && needs.rust-ci-gate.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download service binary
+        uses: actions/download-artifact@v4
+        with:
+          name: restreamer-service-windows-latest
+          path: artifacts/service
+
+      - name: Download Tauri installer
+        uses: actions/download-artifact@v4
+        with:
+          name: restreamer-tauri-installer
+          path: artifacts/tauri
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STREAM_LAN_SSH_KEY }}" > ~/.ssh/stream_lan
+          chmod 600 ~/.ssh/stream_lan
+          cat >> ~/.ssh/config << EOF
+          Host stream.lan
+            HostName ${{ secrets.STREAM_LAN_HOST }}
+            User ${{ secrets.STREAM_LAN_USER }}
+            IdentityFile ~/.ssh/stream_lan
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          EOF
+
+      - name: List artifacts
+        run: |
+          echo "=== Service binary ==="
+          ls -la artifacts/service/
+          echo "=== Tauri installer ==="
+          ls -la artifacts/tauri/
+
+      - name: Deploy to stream.lan
+        run: |
+          # Copy artifacts
+          scp artifacts/service/*.exe stream.lan:/tmp/restreamer-service.exe
+          scp artifacts/tauri/*.exe stream.lan:/tmp/Restreamer-Setup.exe
+
+          # Run deployment script
+          ssh stream.lan powershell -Command '
+            $ErrorActionPreference = "Stop"
+
+            Write-Host "=== Stopping services ===" -ForegroundColor Cyan
+            $svc = Get-Service -Name "restreamer-service" -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq "Running") {
+              Stop-Service -Name "restreamer-service" -Force
+              Start-Sleep -Seconds 2
+              Write-Host "Service stopped" -ForegroundColor Green
+            }
+            Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Stop-Process -Force
+
+            Write-Host "=== Installing service binary ===" -ForegroundColor Cyan
+            $InstallDir = "C:\Program Files\Restreamer"
+            New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+            Copy-Item "C:\Users\$env:USERNAME\tmp\restreamer-service.exe" "$InstallDir\restreamer-service.exe" -Force
+            Write-Host "Service binary installed" -ForegroundColor Green
+
+            Write-Host "=== Running Tauri installer ===" -ForegroundColor Cyan
+            Start-Process -FilePath "C:\Users\$env:USERNAME\tmp\Restreamer-Setup.exe" -ArgumentList "/S" -Wait
+            Write-Host "Tauri app installed" -ForegroundColor Green
+
+            Write-Host "=== Registering service ===" -ForegroundColor Cyan
+            $ConfigFile = "C:\ProgramData\Restreamer\config.json"
+            $existingSvc = Get-Service -Name "restreamer-service" -ErrorAction SilentlyContinue
+            if (-not $existingSvc) {
+              sc.exe create "restreamer-service" binPath= "`"$InstallDir\restreamer-service.exe`" `"$ConfigFile`"" start= auto DisplayName= "Restreamer Service" | Out-Null
+              sc.exe description "restreamer-service" "Restreamer local client service" | Out-Null
+            }
+
+            Write-Host "=== Starting service ===" -ForegroundColor Cyan
+            Start-Service -Name "restreamer-service"
+            Start-Sleep -Seconds 3
+
+            $svc = Get-Service -Name "restreamer-service"
+            if ($svc.Status -eq "Running") {
+              Write-Host "Service started successfully" -ForegroundColor Green
+            } else {
+              Write-Error "Service failed to start: $($svc.Status)"
+              exit 1
+            }
+
+            Write-Host "=== Launching tray app ===" -ForegroundColor Cyan
+            $trayPath = "$env:LOCALAPPDATA\Restreamer\Restreamer.exe"
+            if (Test-Path $trayPath) {
+              Start-Process -FilePath $trayPath
+              Write-Host "Tray app launched" -ForegroundColor Green
+            }
+
+            Write-Host ""
+            Write-Host "=== Deployment complete! ===" -ForegroundColor Green
+          '
+
+      - name: Verify deployment
+        run: |
+          ssh stream.lan powershell -Command '
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 10
+              Write-Host "API Health: OK" -ForegroundColor Green
+              exit 0
+            } catch {
+              Write-Host "API Health: FAILED - $_" -ForegroundColor Red
+              exit 1
+            }
+          '
+
   auto-release:
     name: Auto-release tag
     needs: [rust-ci-gate]
