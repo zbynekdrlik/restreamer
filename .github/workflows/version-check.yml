@@ -3,6 +3,13 @@ name: Verify VERSION bump
 on:
   pull_request:
     branches: [main]
+    paths:
+      - "VERSION"
+      - "local-client/**"
+      - "manager-server/**"
+      - "delivering-service/**"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/version-check.yml"
 
 jobs:
   version-check:
