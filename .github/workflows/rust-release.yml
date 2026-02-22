@@ -149,6 +149,13 @@ jobs:
     needs: [release, build-service, build-tauri]
     runs-on: [self-hosted, windows, stream-lan]
     steps:
+      - name: Clean old artifacts
+        shell: powershell
+        run: |
+          # Remove old artifacts to prevent version mix-ups on self-hosted runner
+          Remove-Item -Path "artifacts" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleaned artifacts directory"
+
       - name: Download service binary
         uses: actions/download-artifact@v4
         with:
