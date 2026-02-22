@@ -535,9 +535,25 @@ jobs:
 
           # Create and run scheduled task as SYSTEM
           $taskName = "RestreamerDeploy"
-          schtasks /Delete /TN $taskName /F 2>&1 | Out-Null
-          schtasks /Create /TN $taskName /TR "powershell.exe -ExecutionPolicy Bypass -File `"$tempScript`"" /SC ONCE /ST 00:00 /RU SYSTEM /F
-          schtasks /Run /TN $taskName
+
+          # Delete existing task (ignore errors if it doesn't exist)
+          $ErrorActionPreference = "Continue"
+          $null = schtasks /Delete /TN $taskName /F 2>&1
+          $ErrorActionPreference = "Stop"
+
+          # Create the task
+          $createResult = schtasks /Create /TN $taskName /TR "powershell.exe -ExecutionPolicy Bypass -File `"$tempScript`"" /SC ONCE /ST 00:00 /RU SYSTEM /F 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Failed to create task: $createResult"
+            exit 1
+          }
+
+          # Run the task
+          $runResult = schtasks /Run /TN $taskName 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Failed to run task: $runResult"
+            exit 1
+          }
 
           # Wait for task to complete
           $timeout = 120
@@ -559,7 +575,9 @@ jobs:
           }
 
           # Cleanup
-          schtasks /Delete /TN $taskName /F 2>&1 | Out-Null
+          $ErrorActionPreference = "Continue"
+          $null = schtasks /Delete /TN $taskName /F 2>&1
+          $ErrorActionPreference = "Stop"
 
           # Verify service is running
           $svcQuery = sc.exe query "restreamer-service" 2>&1
