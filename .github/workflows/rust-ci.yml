@@ -112,27 +112,30 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install ffmpeg -y --no-progress
-          # Find and add ffmpeg to PATH
-          $ffmpegExe = Get-Command ffmpeg -ErrorAction SilentlyContinue
-          if (-not $ffmpegExe) {
-            # Search common install locations
-            $searchPaths = @(
-              "C:\ProgramData\chocolatey\bin",
-              "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin",
-              "C:\tools\ffmpeg\bin"
-            )
-            foreach ($path in $searchPaths) {
-              if (Test-Path "$path\ffmpeg.exe") {
-                echo "$path" >> $env:GITHUB_PATH
-                Write-Host "Added $path to PATH"
-                break
-              }
-            }
+          $ffmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          $ffmpegZip = "$env:TEMP\ffmpeg.zip"
+          $ffmpegDir = "C:\ffmpeg"
+
+          Write-Host "Downloading ffmpeg..."
+          Invoke-WebRequest -Uri $ffmpegUrl -OutFile $ffmpegZip
+
+          Write-Host "Extracting ffmpeg..."
+          Expand-Archive -Path $ffmpegZip -DestinationPath $env:TEMP -Force
+
+          # Find the extracted folder (includes version number)
+          $extractedDir = Get-ChildItem "$env:TEMP\ffmpeg-*-essentials_build" | Select-Object -First 1
+          if ($extractedDir) {
+            Move-Item "$($extractedDir.FullName)\bin" $ffmpegDir -Force
+            Write-Host "Installed ffmpeg to $ffmpegDir"
+            echo "$ffmpegDir" >> $env:GITHUB_PATH
+          } else {
+            Write-Error "Failed to find extracted ffmpeg directory"
+            exit 1
           }
       - name: Verify ffmpeg (Windows)
         if: runner.os == 'Windows'
-        run: ffmpeg -version
+        run: |
+          C:\ffmpeg\ffmpeg.exe -version
       - name: Run tests
         run: cargo test --workspace --verbose
         env:
