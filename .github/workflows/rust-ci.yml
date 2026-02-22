@@ -588,18 +588,19 @@ jobs:
           # Windows GUI apps require Task Scheduler with Interactive logon
           # to run in user's desktop session (CI runner is SYSTEM in session 0)
 
+          $ErrorActionPreference = "Continue"
           $TaskName = "RestreamerTray"
           $ExePath = "C:\Program Files\Restreamer\restreamer-tray.exe"
           $Username = "newlevel"
 
           Write-Host "=== Configuring tray app launch ==="
 
-          # Kill existing tray processes first
-          taskkill /F /IM "restreamer-tray.exe" 2>&1 | Out-Null
+          # Kill existing tray processes first (ignore errors - process may not exist)
+          $null = cmd /c "taskkill /F /IM restreamer-tray.exe 2>nul"
           Start-Sleep -Seconds 1
 
           # Remove ALL existing Restreamer-related scheduled tasks to prevent duplicates
-          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*Tray*" } | ForEach-Object {
+          Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like "*estreamer*Tray*" } | ForEach-Object {
             Write-Host "Removing duplicate task: $($_.TaskName)"
             Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
           }
