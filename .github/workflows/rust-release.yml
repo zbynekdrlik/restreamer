@@ -143,3 +143,123 @@ jobs:
             ```powershell
             irm https://raw.githubusercontent.com/zbynekdrlik/restreamer/main/local-client-rs/install.ps1 | iex
             ```
+
+  deploy-stream-lan:
+    name: Deploy to stream.lan
+    needs: [release, build-service, build-tauri]
+    runs-on: [self-hosted, windows, stream-lan]
+    steps:
+      - name: Download service binary
+        uses: actions/download-artifact@v4
+        with:
+          name: service-binary
+          path: artifacts/service
+
+      - name: Download Tauri installer
+        uses: actions/download-artifact@v4
+        with:
+          name: tauri-installer
+          path: artifacts/tauri
+
+      - name: List artifacts
+        run: |
+          Write-Host "=== Service binary ==="
+          Get-ChildItem artifacts/service/
+          Write-Host "=== Tauri installer ==="
+          Get-ChildItem artifacts/tauri/
+        shell: powershell
+
+      - name: Deploy
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          $InstallDir = "C:\Program Files\Restreamer"
+          $ConfigFile = "C:\ProgramData\Restreamer\config.json"
+
+          Write-Host "=== Stopping service and processes ==="
+          net stop "restreamer-service" 2>&1 | Out-Null
+          Start-Sleep -Seconds 2
+          $null = cmd /c "taskkill /F /IM restreamer-service.exe 2>nul"
+          $null = cmd /c "taskkill /F /IM restreamer-tray.exe 2>nul"
+          Start-Sleep -Seconds 1
+
+          Write-Host "=== Installing service binary ==="
+          New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+          $serviceBin = Get-ChildItem "artifacts/service/*.exe" -Exclude "*.sha256" | Select-Object -First 1
+          Copy-Item $serviceBin.FullName "$InstallDir\restreamer-service.exe" -Force
+          Write-Host "Installed: $($serviceBin.Name)"
+
+          Write-Host "=== Running NSIS installer ==="
+          $installer = Get-ChildItem "artifacts/tauri/*setup*.exe" | Select-Object -First 1
+          if ($installer) {
+            Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
+            Write-Host "Installed: $($installer.Name)"
+          }
+
+          Write-Host "=== Registering service ==="
+          $svcQuery = sc.exe query "restreamer-service" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            sc.exe create "restreamer-service" binPath= "`"$InstallDir\restreamer-service.exe`" `"$ConfigFile`"" start= auto DisplayName= "Restreamer Service"
+            sc.exe description "restreamer-service" "Restreamer local client service"
+          }
+
+          Write-Host "=== Starting service ==="
+          net start "restreamer-service"
+          Start-Sleep -Seconds 3
+
+          $svcQuery = sc.exe query "restreamer-service" 2>&1
+          if ($svcQuery -match "RUNNING") {
+            Write-Host "=== Service started successfully ==="
+          } else {
+            Write-Host "WARNING: Service may not be running"
+            Write-Host $svcQuery
+          }
+
+      - name: Launch tray app via Task Scheduler
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "SilentlyContinue"
+          $TaskName = "RestreamerTray"
+          $ExePath = "C:\Program Files\Restreamer\restreamer-tray.exe"
+          $Username = "newlevel"
+
+          Write-Host "=== Configuring tray app launch ==="
+
+          $null = cmd /c "taskkill /F /IM restreamer-tray.exe 2>nul"
+          Start-Sleep -Seconds 1
+
+          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*Tray*" } | ForEach-Object {
+            Write-Host "Removing duplicate task: $($_.TaskName)"
+            Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+          }
+
+          $action = New-ScheduledTaskAction -Execute $ExePath
+          $trigger = New-ScheduledTaskTrigger -AtLogon -User $Username
+          $principal = New-ScheduledTaskPrincipal -UserId $Username -LogonType Interactive -RunLevel Limited
+          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+
+          $null = Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force 2>&1
+          Write-Host "Registered task: $TaskName"
+
+          $null = Start-ScheduledTask -TaskName $TaskName 2>&1
+          Start-Sleep -Seconds 2
+
+          $tray = Get-Process -Name "restreamer-tray" -ErrorAction SilentlyContinue
+          if ($tray) {
+            Write-Host "=== Tray app launched (PID: $($tray.Id), Session: $($tray.SessionId)) ==="
+          } else {
+            Write-Host "WARNING: Tray process not found - will start on next user login"
+          }
+
+          exit 0
+
+      - name: Verify deployment
+        shell: powershell
+        run: |
+          try {
+            $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 10
+            Write-Host "API Health: OK"
+          } catch {
+            Write-Host "API Health: FAILED - $_"
+            exit 1
+          }
