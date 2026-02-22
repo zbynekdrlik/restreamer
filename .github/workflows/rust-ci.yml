@@ -455,8 +455,20 @@ jobs:
 
           # All must succeed when Rust files changed
           FAILED=0
+
+          # version-check is only required on pull_request (skipped on push is OK)
+          VERSION_RESULT="${{ needs.version-check.result }}"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ "$VERSION_RESULT" != "success" ]]; then
+              echo "FAIL: version-check did not succeed (result: $VERSION_RESULT)"
+              FAILED=1
+            fi
+          else
+            echo "version-check: $VERSION_RESULT (OK - only required on PRs)"
+          fi
+
+          # All other jobs must succeed
           for job_result in \
-            "version-check:${{ needs.version-check.result }}" \
             "lint:${{ needs.lint.result }}" \
             "test:${{ needs.test.result }}" \
             "coverage:${{ needs.coverage.result }}" \
