@@ -110,7 +110,29 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
       - name: Install ffmpeg (Windows)
         if: runner.os == 'Windows'
-        run: choco install ffmpeg -y --no-progress
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          # Find and add ffmpeg to PATH
+          $ffmpegExe = Get-Command ffmpeg -ErrorAction SilentlyContinue
+          if (-not $ffmpegExe) {
+            # Search common install locations
+            $searchPaths = @(
+              "C:\ProgramData\chocolatey\bin",
+              "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin",
+              "C:\tools\ffmpeg\bin"
+            )
+            foreach ($path in $searchPaths) {
+              if (Test-Path "$path\ffmpeg.exe") {
+                echo "$path" >> $env:GITHUB_PATH
+                Write-Host "Added $path to PATH"
+                break
+              }
+            }
+          }
+      - name: Verify ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: ffmpeg -version
       - name: Run tests
         run: cargo test --workspace --verbose
         env:
