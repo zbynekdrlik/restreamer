@@ -447,10 +447,10 @@ jobs:
           Get-ChildItem artifacts/service/
           Write-Host "=== Tauri installer ==="
           Get-ChildItem artifacts/tauri/
-        shell: pwsh
+        shell: powershell
 
       - name: Deploy
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -507,7 +507,7 @@ jobs:
           Write-Host "=== Deployment complete! ==="
 
       - name: Verify deployment
-        shell: pwsh
+        shell: powershell
         run: |
           try {
             $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 10
