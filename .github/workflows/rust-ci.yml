@@ -5,6 +5,12 @@ on:
     branches: [dev, main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_to_stream_lan:
+        description: "Deploy to stream.lan after CI passes"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -181,6 +187,7 @@ jobs:
             local-client-rs/target/release/restreamer-service
             local-client-rs/target/release/restreamer-service.exe
           if-no-files-found: ignore
+          retention-days: 7
 
   build-tauri:
     name: Build Tauri app
@@ -215,6 +222,7 @@ jobs:
           name: restreamer-tauri-installer
           path: local-client-rs/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: warn
+          retention-days: 7
 
   file-size:
     name: File size check
