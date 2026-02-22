@@ -3,8 +3,26 @@ name: CI
 on:
   push:
     branches: [dev]
+    paths:
+      - "VERSION"
+      - "local-client/**"
+      - "manager-server/**"
+      - "delivering-service/**"
+      - ".github/workflows/ci.yml"
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - "ruff.toml"
   pull_request:
     branches: [main]
+    paths:
+      - "VERSION"
+      - "local-client/**"
+      - "manager-server/**"
+      - "delivering-service/**"
+      - ".github/workflows/ci.yml"
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - "ruff.toml"
 
 concurrency:
   group: ci-${{ github.ref }}
