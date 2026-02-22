@@ -505,7 +505,7 @@ jobs:
           net stop "restreamer-service" 2>&1 | Out-Null
           Start-Sleep -Seconds 2
           taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
-          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          taskkill /F /IM "restreamer-tray.exe" 2>&1 | Out-Null
           Start-Sleep -Seconds 1
 
           # Install service binary
@@ -541,7 +541,7 @@ jobs:
 
           # Kill processes first (this usually works)
           taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
-          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          taskkill /F /IM "restreamer-tray.exe" 2>&1 | Out-Null
           Start-Sleep -Seconds 2
 
           # Try to copy service binary
@@ -580,6 +580,49 @@ jobs:
           } catch {
             Write-Host "API Health: FAILED - $_"
             exit 1
+          }
+
+      - name: Launch tray app via Task Scheduler
+        shell: powershell
+        run: |
+          # Windows GUI apps require Task Scheduler with Interactive logon
+          # to run in user's desktop session (CI runner is SYSTEM in session 0)
+
+          $TaskName = "RestreamerTray"
+          $ExePath = "C:\Program Files\Restreamer\restreamer-tray.exe"
+          $Username = "newlevel"
+
+          Write-Host "=== Configuring tray app launch ==="
+
+          # Kill existing tray processes first
+          taskkill /F /IM "restreamer-tray.exe" 2>&1 | Out-Null
+          Start-Sleep -Seconds 1
+
+          # Remove ALL existing Restreamer-related scheduled tasks to prevent duplicates
+          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*Tray*" } | ForEach-Object {
+            Write-Host "Removing duplicate task: $($_.TaskName)"
+            Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+          }
+
+          # Create fresh task with Interactive logon type
+          $action = New-ScheduledTaskAction -Execute $ExePath
+          $trigger = New-ScheduledTaskTrigger -AtLogon -User $Username
+          $principal = New-ScheduledTaskPrincipal -UserId $Username -LogonType Interactive -RunLevel Limited
+          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+
+          Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force
+          Write-Host "Registered task: $TaskName"
+
+          # Start the task to launch tray in user session
+          Start-ScheduledTask -TaskName $TaskName
+          Start-Sleep -Seconds 2
+
+          # Verify tray is running
+          $tray = Get-Process -Name "restreamer-tray" -ErrorAction SilentlyContinue
+          if ($tray) {
+            Write-Host "=== Tray app launched (PID: $($tray.Id), Session: $($tray.SessionId)) ==="
+          } else {
+            Write-Host "WARNING: Tray process not found - user may need to be logged in"
           }
 
   auto-release:

@@ -132,6 +132,29 @@ dev → PR to main → merge → auto-tag (local-client-rs-vX.Y.Z) → rust-rele
 - **Config**: `C:\ProgramData\Restreamer\config.json`
 - **Credentials**: See `~/.restreamer-secrets/stream-lan.env` (not tracked by git)
 - **Install**: `irm https://raw.githubusercontent.com/zbynekdrlik/restreamer/main/local-client-rs/install.ps1 | iex`
+- **Self-hosted runner**: GitHub Actions runner for CI deployment (runs as SYSTEM)
+- **Tray app**: Launched via Windows Task Scheduler with interactive session
+
+#### Windows GUI App via Task Scheduler (MANDATORY PATTERN)
+
+**To start GUI apps in user's desktop session from CI/service context:**
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "C:\Program Files\Restreamer\restreamer-tray.exe"
+$trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
+$principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+
+Unregister-ScheduledTask -TaskName "RestreamerTray" -Confirm:$false -ErrorAction SilentlyContinue
+Register-ScheduledTask -TaskName "RestreamerTray" -Action $action -Trigger $trigger -Principal $principal -Settings $settings
+
+Start-ScheduledTask -TaskName "RestreamerTray"
+```
+
+**Critical settings:**
+
+- `LogonType Interactive` - runs in desktop session
+- `Start-ScheduledTask` cmdlet to trigger (NOT `schtasks /Run`)
 
 ### restreamer.newlevel.media (Manager Server)
 
