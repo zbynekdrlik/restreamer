@@ -8,13 +8,13 @@ These tests verify the API contracts that the Rust local client depends on:
 - GET /api/get-next-chunk/ - GetNextChunkIdView
 """
 
-from accounts.models import RestreamerUser
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from accounts.models import RestreamerUser
 from restreamer.models import ChunkRecord, StreamingEvent
 
 
