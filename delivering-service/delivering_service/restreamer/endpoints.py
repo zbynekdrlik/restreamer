@@ -85,6 +85,29 @@ class EndPoint(multiprocessing.Process):
                 format="mpegts",
                 loglevel="info",
             ).output(output_url, f="flv", c="copy")
+
+        elif self.service_type == "TEST_FILE":
+            # Test endpoint that writes to a local file instead of streaming.
+            # Used for automated E2E testing without requiring real streaming platforms.
+            # Output path: configurable via RESTREAMER_TEST_OUTPUT_DIR env var
+            import os
+            import tempfile
+
+            # Use RESTREAMER_TEST_OUTPUT_DIR if set, otherwise use system temp
+            output_dir = os.environ.get("RESTREAMER_TEST_OUTPUT_DIR") or tempfile.gettempdir()
+            safe_alias = self.alias.replace(" ", "_").replace("/", "_")
+            if self.stream_key and self.stream_key.endswith(".ts"):
+                output_path = os.path.join(output_dir, self.stream_key)
+            else:
+                output_path = os.path.join(output_dir, f"restreamer_test_{safe_alias}.ts")
+
+            log.info(f"TEST_FILE endpoint writing to: {output_path}")
+            cmd = ffmpeg.input(
+                "pipe:",
+                format="mpegts",
+                loglevel="info",
+            ).output(output_path, f="mpegts", c="copy")
+
         else:
             log.error(f"Unsupported service type: {self.service_type}")
             raise ValueError

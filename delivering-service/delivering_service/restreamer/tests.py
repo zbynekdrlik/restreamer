@@ -127,6 +127,85 @@ class EndPointFFmpegCommandTests(TestCase):
         self.assertIn("rtmps://rtmp-global.cloud.vimeo.com", output_url)
         self.assertIn("vimeo-key-abc", output_url)
 
+    @patch("restreamer.endpoints.ffmpeg")
+    def test_test_file_ffmpeg_command(self, mock_ffmpeg):
+        """Test that TEST_FILE builds correct ffmpeg command for file output."""
+        self.endpoint.service_type = "TEST_FILE"
+        self.endpoint.stream_key = "test_output.ts"
+
+        mock_input = MagicMock()
+        mock_output = MagicMock()
+        mock_ffmpeg.input.return_value = mock_input
+        mock_input.output.return_value = mock_output
+        mock_output.compile.return_value = ["ffmpeg", "-i", "pipe:"]
+        mock_output.run_async.return_value = MagicMock(poll=MagicMock(return_value=None))
+
+        with patch("time.sleep"):
+            self.endpoint.run_ffmpeg()
+
+        # Verify input uses mpegts format
+        mock_ffmpeg.input.assert_called_once()
+        call_args = mock_ffmpeg.input.call_args
+        self.assertEqual(call_args[0][0], "pipe:")
+        self.assertEqual(call_args[1]["format"], "mpegts")
+
+        # Verify output is to a file with mpegts format
+        mock_input.output.assert_called_once()
+        output_args = mock_input.output.call_args
+        output_path = output_args[0][0]
+        self.assertTrue(output_path.endswith(".ts"))
+        self.assertEqual(output_args[1].get("f"), "mpegts")
+        self.assertEqual(output_args[1].get("c"), "copy")
+
+    @patch("restreamer.endpoints.ffmpeg")
+    def test_test_file_uses_custom_output_dir(self, mock_ffmpeg):
+        """Test that TEST_FILE respects RESTREAMER_TEST_OUTPUT_DIR env var."""
+        import os
+
+        self.endpoint.service_type = "TEST_FILE"
+        self.endpoint.stream_key = ""
+
+        mock_input = MagicMock()
+        mock_output = MagicMock()
+        mock_ffmpeg.input.return_value = mock_input
+        mock_input.output.return_value = mock_output
+        mock_output.compile.return_value = ["ffmpeg", "-i", "pipe:"]
+        mock_output.run_async.return_value = MagicMock(poll=MagicMock(return_value=None))
+
+        with (
+            patch("time.sleep"),
+            patch.dict(os.environ, {"RESTREAMER_TEST_OUTPUT_DIR": "/custom/path"}),
+        ):
+            self.endpoint.run_ffmpeg()
+
+        output_args = mock_input.output.call_args
+        output_path = output_args[0][0]
+        self.assertTrue(output_path.startswith("/custom/path/"))
+
+    @patch("restreamer.endpoints.ffmpeg")
+    def test_test_file_sanitizes_alias(self, mock_ffmpeg):
+        """Test that TEST_FILE sanitizes alias for filename."""
+        self.endpoint.service_type = "TEST_FILE"
+        self.endpoint.alias = "Test/Endpoint With Spaces"
+        self.endpoint.stream_key = ""
+
+        mock_input = MagicMock()
+        mock_output = MagicMock()
+        mock_ffmpeg.input.return_value = mock_input
+        mock_input.output.return_value = mock_output
+        mock_output.compile.return_value = ["ffmpeg", "-i", "pipe:"]
+        mock_output.run_async.return_value = MagicMock(poll=MagicMock(return_value=None))
+
+        with patch("time.sleep"):
+            self.endpoint.run_ffmpeg()
+
+        output_args = mock_input.output.call_args
+        output_path = output_args[0][0]
+        # Should not contain spaces or slashes
+        filename = output_path.split("/")[-1]
+        self.assertNotIn(" ", filename)
+        self.assertNotIn("/", filename)
+
     def test_unsupported_service_type_raises_error(self):
         """Test that unsupported service type raises ValueError."""
         self.endpoint.service_type = "INVALID_TYPE"
