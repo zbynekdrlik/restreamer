@@ -9,7 +9,6 @@ These tests verify:
 """
 
 import io
-import multiprocessing
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
@@ -132,9 +131,8 @@ class EndPointFFmpegCommandTests(TestCase):
         """Test that unsupported service type raises ValueError."""
         self.endpoint.service_type = "INVALID_TYPE"
 
-        with self.assertRaises(ValueError):
-            with patch("restreamer.endpoints.ffmpeg"):
-                self.endpoint.run_ffmpeg()
+        with self.assertRaises(ValueError), patch("restreamer.endpoints.ffmpeg"):
+            self.endpoint.run_ffmpeg()
 
 
 class EndPointS3KeyFormatTests(TestCase):
