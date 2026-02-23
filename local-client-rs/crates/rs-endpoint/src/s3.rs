@@ -71,8 +71,9 @@ impl S3Client {
     }
 
     /// Generate an S3 key for a chunk file.
-    pub fn chunk_key(event_identifier: &str, chunk_filename: &str) -> String {
-        format!("{event_identifier}/{chunk_filename}")
+    /// Format: `{event_id}/{chunk_id}_{event_id}.bin` to match Python legacy client.
+    pub fn chunk_key(event_identifier: &str, chunk_id: i64) -> String {
+        format!("{event_identifier}/{chunk_id}_{event_identifier}.bin")
     }
 }
 
@@ -82,8 +83,8 @@ mod tests {
 
     #[test]
     fn chunk_key_format() {
-        let key = S3Client::chunk_key("evt-123", "chunk_000001.bin");
-        assert_eq!(key, "evt-123/chunk_000001.bin");
+        let key = S3Client::chunk_key("evt-123", 1);
+        assert_eq!(key, "evt-123/1_evt-123.bin");
     }
 
     #[test]

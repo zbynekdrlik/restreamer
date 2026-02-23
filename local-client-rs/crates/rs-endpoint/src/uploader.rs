@@ -132,16 +132,8 @@ impl ChunkUploader {
                     return;
                 }
 
-                // Extract filename from path
-                let filename = Path::new(&chunk.chunk_file_path)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| {
-                        warn!("Chunk {} has no filename in path, using fallback", chunk.id);
-                        format!("chunk_{}.bin", chunk.id)
-                    });
-
-                let s3_key = S3Client::chunk_key(&event_id, &filename);
+                // Use chunk.id for S3 key to match Python legacy format
+                let s3_key = S3Client::chunk_key(&event_id, chunk.id);
 
                 // Upload to S3 with retry
                 let mut uploaded = false;
@@ -177,12 +169,11 @@ impl ChunkUploader {
                     return;
                 }
 
-                // Notify manager with retry
+                // Notify manager with retry (field names match Django ChunkSerializer)
                 let notification = ChunkUploadNotification {
-                    event_identifier: event_id.clone(),
-                    chunk_filename: filename.clone(),
-                    data_size: chunk.data_size,
-                    md5: chunk.md5.clone(),
+                    chunk_id: chunk.id,
+                    chunk_identifier: event_id.clone(),
+                    chunk_size: chunk.data_size,
                 };
                 let mut notified = false;
                 for attempt in 0..MAX_RETRIES {
@@ -214,8 +205,8 @@ impl ChunkUploader {
                     return;
                 }
 
-                // Verify with manager
-                match manager.check_chunk(&event_id, &filename).await {
+                // Verify with manager (using chunk_id integer)
+                match manager.check_chunk(&event_id, chunk.id).await {
                     Ok(true) => {}
                     Ok(false) => {
                         warn!("Manager did not verify chunk {}", chunk.id);

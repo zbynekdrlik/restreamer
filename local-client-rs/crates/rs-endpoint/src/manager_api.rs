@@ -12,12 +12,13 @@ pub struct ManagerClient {
     base_url: String,
 }
 
+/// Notification sent to manager server when a chunk is uploaded to S3.
+/// Field names match Django ChunkSerializer: chunk_id, chunk_identifier, chunk_size.
 #[derive(Debug, Serialize)]
 pub struct ChunkUploadNotification {
-    pub event_identifier: String,
-    pub chunk_filename: String,
-    pub data_size: i64,
-    pub md5: String,
+    pub chunk_id: i64,
+    pub chunk_identifier: String,
+    pub chunk_size: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,9 +28,11 @@ pub struct ActiveStreamResponse {
     pub server_ip: Option<String>,
 }
 
+/// Response from manager server's check-chunk endpoint.
+/// Field name matches Django ChunkExistsView: chunk_exists.
 #[derive(Debug, Deserialize)]
 pub struct CheckChunkResponse {
-    pub verified: bool,
+    pub chunk_exists: bool,
 }
 
 impl ManagerClient {
@@ -112,10 +115,11 @@ impl ManagerClient {
     }
 
     /// Verify a chunk was received by the manager.
+    /// Request fields match Django ChunkExistsView: se_identifier, chunk_id.
     pub async fn check_chunk(
         &self,
         event_identifier: &str,
-        chunk_filename: &str,
+        chunk_id: i64,
     ) -> Result<bool, EndpointError> {
         let url = format!("{}/api/check-chunk/", self.base_url);
 
@@ -123,8 +127,8 @@ impl ManagerClient {
             .client
             .post(&url)
             .json(&serde_json::json!({
-                "event_identifier": event_identifier,
-                "chunk_filename": chunk_filename,
+                "se_identifier": event_identifier,
+                "chunk_id": chunk_id,
             }))
             .send()
             .await
@@ -142,7 +146,7 @@ impl ManagerClient {
             .await
             .map_err(|e| EndpointError::Manager(format!("invalid check-chunk response: {e}")))?;
 
-        Ok(body.verified)
+        Ok(body.chunk_exists)
     }
 }
 
@@ -174,14 +178,14 @@ mod tests {
     #[test]
     fn chunk_upload_notification_serializes() {
         let notification = ChunkUploadNotification {
-            event_identifier: "evt-1".to_string(),
-            chunk_filename: "chunk_000001.bin".to_string(),
-            data_size: 1024,
-            md5: "abc123".to_string(),
+            chunk_id: 1,
+            chunk_identifier: "evt-1".to_string(),
+            chunk_size: 1024,
         };
         let json = serde_json::to_string(&notification).unwrap();
-        assert!(json.contains("evt-1"));
-        assert!(json.contains("chunk_000001.bin"));
+        assert!(json.contains("\"chunk_id\":1"));
+        assert!(json.contains("\"chunk_identifier\":\"evt-1\""));
+        assert!(json.contains("\"chunk_size\":1024"));
     }
 
     // --- Integration tests with mock HTTP server ---
@@ -255,10 +259,9 @@ mod tests {
         let client = ManagerClient::new(&base_url).unwrap();
 
         let notification = ChunkUploadNotification {
-            event_identifier: "evt-1".to_string(),
-            chunk_filename: "chunk_000001.bin".to_string(),
-            data_size: 1024,
-            md5: "abc123".to_string(),
+            chunk_id: 1,
+            chunk_identifier: "evt-1".to_string(),
+            chunk_size: 1024,
         };
         let result = client.notify_chunk_uploaded(&notification).await;
         assert!(result.is_ok());
@@ -271,40 +274,39 @@ mod tests {
         let client = ManagerClient::new(&base_url).unwrap();
 
         let notification = ChunkUploadNotification {
-            event_identifier: "evt-1".to_string(),
-            chunk_filename: "chunk_000001.bin".to_string(),
-            data_size: 1024,
-            md5: "abc123".to_string(),
+            chunk_id: 1,
+            chunk_identifier: "evt-1".to_string(),
+            chunk_size: 1024,
         };
         let result = client.notify_chunk_uploaded(&notification).await;
         assert!(result.is_err());
     }
 
-    async fn mock_check_chunk_verified() -> Json<serde_json::Value> {
-        Json(serde_json::json!({ "verified": true }))
+    async fn mock_check_chunk_exists() -> Json<serde_json::Value> {
+        Json(serde_json::json!({ "chunk_exists": true }))
     }
 
-    async fn mock_check_chunk_not_verified() -> Json<serde_json::Value> {
-        Json(serde_json::json!({ "verified": false }))
+    async fn mock_check_chunk_not_exists() -> Json<serde_json::Value> {
+        Json(serde_json::json!({ "chunk_exists": false }))
     }
 
     #[tokio::test]
-    async fn check_chunk_verified() {
-        let app = Router::new().route("/api/check-chunk/", post(mock_check_chunk_verified));
+    async fn check_chunk_exists() {
+        let app = Router::new().route("/api/check-chunk/", post(mock_check_chunk_exists));
         let base_url = start_mock_server(app).await;
         let client = ManagerClient::new(&base_url).unwrap();
 
-        let result = client.check_chunk("evt-1", "chunk_000001.bin").await;
+        let result = client.check_chunk("evt-1", 1).await;
         assert_eq!(result.unwrap(), true);
     }
 
     #[tokio::test]
-    async fn check_chunk_not_verified() {
-        let app = Router::new().route("/api/check-chunk/", post(mock_check_chunk_not_verified));
+    async fn check_chunk_not_exists() {
+        let app = Router::new().route("/api/check-chunk/", post(mock_check_chunk_not_exists));
         let base_url = start_mock_server(app).await;
         let client = ManagerClient::new(&base_url).unwrap();
 
-        let result = client.check_chunk("evt-1", "chunk_000001.bin").await;
+        let result = client.check_chunk("evt-1", 1).await;
         assert_eq!(result.unwrap(), false);
     }
 
