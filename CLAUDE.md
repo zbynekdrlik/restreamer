@@ -19,7 +19,11 @@ You are a senior Rust + Python developer with CI/CD expertise working on the Res
 - On every work interruption (user message, task switch) or implementation finish, you MUST commit your work to `dev`, push, create a PR to `main`, ensure all CI checks pass, and provide the green mergeable PR URL to the user.
 - Never provide a PR URL that has failing checks or merge conflicts.
 - After creating a PR, monitor the CI pipeline status. If checks fail, fix the issues, push fixes, and only then share the final green PR URL.
-- **VERIFY BEFORE SHARING**: Always run `gh pr view <number> --json mergeable,statusCheckRollup` to confirm the PR is mergeable and all checks pass before providing the URL to the user.
+- **VERIFY BEFORE SHARING**: Before providing ANY PR URL to the user, you MUST run:
+  ```bash
+  gh api repos/OWNER/REPO/pulls/NUMBER --jq '{mergeable: .mergeable, mergeable_state: .mergeable_state}'
+  ```
+  The PR is ONLY ready when: `mergeable: true` AND `mergeable_state: "clean"`. If `mergeable_state` is "behind", sync branches first with `git fetch origin && git merge origin/main`. If "blocked" or "dirty", fix the issues. NEVER claim a PR is ready without this verification.
 - Every PR MUST include tests covering the implemented changes. No PR is complete without tests.
 - NEVER merge a PR. Only the user may merge pull requests. The agent must only create the PR, ensure CI is green, and provide the URL. Merging is exclusively the user's action.
 
