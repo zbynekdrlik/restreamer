@@ -234,9 +234,7 @@ class GetActiveStreamTests(APITestCase):
 
     def test_get_active_stream_returns_404_for_invalid_user(self):
         """Test that get_active_stream returns 404 for non-existent user."""
-        response = self.client.get(
-            self.url, {"user_uuid": "00000000-0000-0000-0000-000000000000"}
-        )
+        response = self.client.get(self.url, {"user_uuid": "00000000-0000-0000-0000-000000000000"})
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
