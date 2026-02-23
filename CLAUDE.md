@@ -15,11 +15,36 @@ You are a senior Rust + Python developer with CI/CD expertise working on the Res
 
 ### Pull Requests
 
-- **SYNC BRANCHES FIRST**: Before starting ANY work, ALWAYS sync dev with main:
-  ```bash
-  git fetch origin && git merge origin/main
-  ```
-  This MUST be done BEFORE making changes, not after CI completes. Failing to sync first wastes CI time and delays PR delivery.
+#### PRE-WORK CHECKLIST (MANDATORY - DO THIS FIRST!)
+
+Before making ANY code changes, you MUST complete these steps in order:
+
+1. **SYNC BRANCHES**:
+
+   ```bash
+   git fetch origin && git merge origin/main
+   ```
+
+2. **CHECK VERSIONS** - Both must be higher than main:
+
+   ```bash
+   # Check Python VERSION
+   cat VERSION && git show origin/main:VERSION
+   # Check Rust version
+   grep '^version' local-client-rs/Cargo.toml | head -1
+   git show origin/main:local-client-rs/Cargo.toml | grep '^version' | head -1
+   ```
+
+   If versions are NOT higher than main, bump them BEFORE making other changes.
+
+3. **BUMP VERSIONS IF NEEDED**:
+   - Python: Edit `VERSION` file (increment patch: 0.2.4 → 0.2.5)
+   - Rust: Edit `local-client-rs/Cargo.toml`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `package.json`
+
+Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional.
+
+#### PR Delivery Rules
+
 - **AGENT RESPONSIBILITY**: You are ALWAYS responsible for verifying and delivering a mergeable, green PR with all tests passing. Never hand off broken PRs to the user.
 - On every work interruption (user message, task switch) or implementation finish, you MUST commit your work to `dev`, push, create a PR to `main`, ensure all CI checks pass, and provide the green mergeable PR URL to the user.
 - Never provide a PR URL that has failing checks or merge conflicts.
