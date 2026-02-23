@@ -35,6 +35,7 @@ You are a senior Rust + Python developer with CI/CD expertise working on the Res
 - **NO skipped tests** — CI output must show `0 ignored; 0 filtered out` for every test binary.
 - **NO mocking real code** — Mocks are ONLY acceptable for external network services (S3, manager HTTP). Internal code paths must be tested with real implementations.
 - **CI hardening job** — The workflow includes a dedicated `test-integrity` job that scans source code for `#[ignore]`, `assert!(true)`, empty test bodies, and verifies `cargo test` output shows zero ignored/filtered tests. This job MUST pass for the CI gate to be green.
+- **NO skipped deployment jobs** — The `deploy-stream-lan` job MUST run on every dev and main push. If it shows as "skipped", something is wrong with the workflow condition. Always use `always()` in complex `if` conditions to ensure proper evaluation.
 
 #### Web/Frontend E2E (Playwright)
 

@@ -386,6 +386,27 @@ jobs:
           fi
 
           echo "OK: All $TOTAL_PASSED tests ran with 0 ignored and 0 filtered."
+      - name: Verify deploy-stream-lan has always() condition
+        run: |
+          # Check that deploy-stream-lan job uses always() to prevent incorrect skipping
+          WORKFLOW_FILE="../.github/workflows/rust-ci.yml"
+          DEPLOY_CONDITION=$(grep -A3 "deploy-stream-lan:" "$WORKFLOW_FILE" | grep "if:" || true)
+
+          if [ -z "$DEPLOY_CONDITION" ]; then
+            echo "ERROR: deploy-stream-lan job missing 'if' condition"
+            exit 1
+          fi
+
+          if ! echo "$DEPLOY_CONDITION" | grep -q "always()"; then
+            echo "ERROR: deploy-stream-lan job MUST use always() to ensure condition evaluation"
+            echo "Found: $DEPLOY_CONDITION"
+            echo ""
+            echo "Without always(), the job may be incorrectly skipped when needed jobs"
+            echo "have complex conditions (like rust-ci-gate with if: always())."
+            exit 1
+          fi
+
+          echo "OK: deploy-stream-lan uses always() in condition."
 
   frontend-e2e:
     name: Frontend E2E (Playwright)
