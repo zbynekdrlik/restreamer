@@ -62,7 +62,9 @@ impl ChunkUploader {
         }
     }
 
-    async fn upload_batch(&self) {
+    /// Process one batch of unsent chunks.
+    /// Public for integration testing; normally called internally via `run()`.
+    pub async fn upload_batch(&self) {
         let chunks = match db::get_unsent_chunks(&self.pool, 20).await {
             Ok(c) => c,
             Err(e) => {
