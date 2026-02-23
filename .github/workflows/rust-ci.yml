@@ -407,6 +407,24 @@ jobs:
           fi
 
           echo "OK: deploy-stream-lan uses always() in condition."
+      - name: Verify auto-release has always() condition
+        run: |
+          # Check that auto-release job uses always() to prevent incorrect skipping
+          WORKFLOW_FILE="../.github/workflows/rust-ci.yml"
+          RELEASE_CONDITION=$(grep -A3 "auto-release:" "$WORKFLOW_FILE" | grep "if:" || true)
+
+          if [ -z "$RELEASE_CONDITION" ]; then
+            echo "ERROR: auto-release job missing 'if' condition"
+            exit 1
+          fi
+
+          if ! echo "$RELEASE_CONDITION" | grep -q "always()"; then
+            echo "ERROR: auto-release job MUST use always() to ensure condition evaluation"
+            echo "Found: $RELEASE_CONDITION"
+            exit 1
+          fi
+
+          echo "OK: auto-release uses always() in condition."
 
   frontend-e2e:
     name: Frontend E2E (Playwright)
@@ -706,7 +724,7 @@ jobs:
   auto-release:
     name: Auto-release tag
     needs: [rust-ci-gate]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.rust-ci-gate.result == 'success'
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.rust-ci-gate.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
