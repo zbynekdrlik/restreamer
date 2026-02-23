@@ -495,7 +495,7 @@ jobs:
   deploy-stream-lan:
     name: Deploy to stream.lan
     needs: [rust-ci-gate, build, build-tauri]
-    if: github.ref == 'refs/heads/dev' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.rust-ci-gate.result == 'success'
+    if: (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.rust-ci-gate.result == 'success'
     runs-on: [self-hosted, windows, stream-lan]
     steps:
       - name: Clean old artifacts
