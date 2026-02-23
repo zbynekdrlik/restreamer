@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "rs-api"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "rs-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "serde",
@@ -2265,10 +2265,11 @@ dependencies = [
 
 [[package]]
 name = "rs-endpoint"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "axum",
  "md-5",
+ "parking_lot",
  "reqwest 0.12.28",
  "rs-core",
  "rust-s3",
@@ -2284,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "rs-inpoint"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "bytes",
  "chrono",
@@ -2309,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "rs-service"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "axum",
