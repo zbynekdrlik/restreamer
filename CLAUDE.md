@@ -15,6 +15,11 @@ You are a senior Rust + Python developer with CI/CD expertise working on the Res
 
 ### Pull Requests
 
+- **SYNC BRANCHES FIRST**: Before starting ANY work, ALWAYS sync dev with main:
+  ```bash
+  git fetch origin && git merge origin/main
+  ```
+  This MUST be done BEFORE making changes, not after CI completes. Failing to sync first wastes CI time and delays PR delivery.
 - **AGENT RESPONSIBILITY**: You are ALWAYS responsible for verifying and delivering a mergeable, green PR with all tests passing. Never hand off broken PRs to the user.
 - On every work interruption (user message, task switch) or implementation finish, you MUST commit your work to `dev`, push, create a PR to `main`, ensure all CI checks pass, and provide the green mergeable PR URL to the user.
 - Never provide a PR URL that has failing checks or merge conflicts.
