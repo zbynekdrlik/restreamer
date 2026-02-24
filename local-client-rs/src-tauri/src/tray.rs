@@ -17,12 +17,12 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let version = env!("CARGO_PKG_VERSION");
     let icon = Image::from_bytes(TRAY_ICON_BYTES)?;
 
-    let menu = build_menu(app, version, "Waiting", "--:--:--", "Waiting", 0)?;
+    let menu = build_menu(app, version, &TrayStatus::default())?;
 
     let _tray = TrayIconBuilder::with_id("restreamer")
         .icon(icon)
         .menu(&menu)
-        .tooltip("Restreamer")
+        .tooltip("Restreamer - Connecting...")
         .on_menu_event(move |app, event| handle_menu_event(app, event.id().as_ref()))
         .build(app)?;
 
@@ -31,43 +31,74 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+struct TrayStatus {
+    inpoint: String,
+    buffer: String,
+    endpoint: String,
+    pending: u64,
+    total_chunks: u64,
+    event_name: String,
+}
+
+impl Default for TrayStatus {
+    fn default() -> Self {
+        Self {
+            inpoint: "Connecting...".to_string(),
+            buffer: "--:--:--".to_string(),
+            endpoint: "Connecting...".to_string(),
+            pending: 0,
+            total_chunks: 0,
+            event_name: String::new(),
+        }
+    }
+}
+
 fn build_menu(
     app: &impl Manager<Wry>,
     version: &str,
-    inpoint_status: &str,
-    buffer: &str,
-    endpoint_status: &str,
-    pending: u64,
+    status: &TrayStatus,
 ) -> Result<tauri::menu::Menu<Wry>, Box<dyn std::error::Error>> {
-    Ok(MenuBuilder::new(app)
+    let mut builder = MenuBuilder::new(app)
         .item(&MenuItem::new(
             app,
             format!("Restreamer v{version}"),
             false,
             None::<&str>,
         )?)
-        .separator()
+        .separator();
+
+    // Show streaming event name if available
+    if !status.event_name.is_empty() {
+        builder = builder.item(&MenuItem::new(
+            app,
+            format!("Event: {}", status.event_name),
+            false,
+            None::<&str>,
+        )?);
+    }
+
+    Ok(builder
         .item(&MenuItem::new(
             app,
-            format!("Inpoint: {inpoint_status}"),
+            format!("Inpoint: {}", status.inpoint),
             false,
             None::<&str>,
         )?)
         .item(&MenuItem::new(
             app,
-            format!("Buffer: {buffer}"),
+            format!("Buffer: {}", status.buffer),
             false,
             None::<&str>,
         )?)
         .item(&MenuItem::new(
             app,
-            format!("Endpoint: {endpoint_status}"),
+            format!("Uploader: {}", status.endpoint),
             false,
             None::<&str>,
         )?)
         .item(&MenuItem::new(
             app,
-            format!("Pending: {pending} chunks"),
+            format!("Chunks: {} total, {} pending", status.total_chunks, status.pending),
             false,
             None::<&str>,
         )?)
@@ -128,7 +159,7 @@ fn build_menu(
 
 fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
     match event_id {
-        "open_dashboard" | "view_logs" => {
+        "open_dashboard" => {
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(e) = window.show() {
                     tracing::warn!("Failed to show window: {e}");
@@ -136,6 +167,24 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
                 if let Err(e) = window.set_focus() {
                     tracing::warn!("Failed to focus window: {e}");
                 }
+            }
+        }
+        "view_logs" => {
+            // Open the Restreamer data directory in file explorer
+            #[cfg(target_os = "windows")]
+            {
+                let log_dir = std::path::PathBuf::from(r"C:\ProgramData\Restreamer");
+                if log_dir.exists() {
+                    let _ = std::process::Command::new("explorer")
+                        .arg(&log_dir)
+                        .spawn();
+                } else {
+                    tracing::warn!("Log directory does not exist: {:?}", log_dir);
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                tracing::warn!("View logs not implemented for this platform");
             }
         }
         "restart_inpoint" => {
@@ -214,61 +263,78 @@ fn start_status_poller(handle: AppHandle<Wry>) {
                 .ok()
                 .and_then(|r| tauri::async_runtime::block_on(r.json()).ok());
 
-            // Determine inpoint state
-            let (inpoint_status, buffer_text) = match &status_json {
-                Some(val) => {
-                    let has_event = val
-                        .get("streaming_event")
-                        .is_some_and(|v| !v.is_null());
+            let mut tray_status = TrayStatus::default();
 
-                    let buffer = stats_json
-                        .as_ref()
-                        .and_then(|s| s.get("buffer_duration_secs"))
+            // Parse status response
+            if let Some(val) = &status_json {
+                // Get streaming event info
+                if let Some(event) = val.get("streaming_event") {
+                    if !event.is_null() {
+                        tray_status.event_name = event
+                            .get("short_description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        let receiving = event
+                            .get("receiving_activated")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+
+                        tray_status.inpoint = if receiving {
+                            "Receiving".to_string()
+                        } else {
+                            "Paused".to_string()
+                        };
+                    } else {
+                        tray_status.inpoint = "No Event".to_string();
+                    }
+                } else {
+                    tray_status.inpoint = "Idle".to_string();
+                }
+
+                // Parse stats
+                if let Some(stats) = &stats_json {
+                    tray_status.buffer = stats
+                        .get("buffer_duration_secs")
                         .and_then(|v| v.as_f64())
                         .map(format_duration)
                         .unwrap_or_else(|| "00:00:00".to_string());
 
-                    if has_event {
-                        ("Streaming", buffer)
-                    } else {
-                        ("Idle", buffer)
-                    }
-                }
-                None => ("Disconnected", "--:--:--".to_string()),
-            };
-
-            // Determine endpoint state
-            let (endpoint_status, pending_chunks) = match &status_json {
-                Some(_) => {
-                    let pending = stats_json
-                        .as_ref()
-                        .and_then(|s| s.get("pending_chunks"))
+                    tray_status.pending = stats
+                        .get("pending_chunks")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
 
-                    if pending > 0 {
-                        ("Uploading", pending)
+                    tray_status.total_chunks = stats
+                        .get("total_chunks")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+
+                    tray_status.endpoint = if tray_status.pending > 0 {
+                        "Uploading".to_string()
                     } else {
-                        ("Idle", 0)
-                    }
+                        "Idle".to_string()
+                    };
                 }
-                None => ("Disconnected", 0),
-            };
+            } else {
+                tray_status.inpoint = "Disconnected".to_string();
+                tray_status.endpoint = "Disconnected".to_string();
+            }
 
             // Update the single tray icon
             if let Some(tray) = handle.tray_by_id("restreamer") {
-                let _ = tray.set_tooltip(Some(&format!(
-                    "Restreamer — Inpoint: {inpoint_status} | Endpoint: {endpoint_status}"
-                )));
+                let tooltip = if !tray_status.event_name.is_empty() {
+                    format!(
+                        "Restreamer - {} | {} chunks",
+                        tray_status.event_name, tray_status.total_chunks
+                    )
+                } else {
+                    format!("Restreamer - {}", tray_status.inpoint)
+                };
+                let _ = tray.set_tooltip(Some(&tooltip));
 
-                if let Ok(menu) = build_menu(
-                    &handle,
-                    version,
-                    inpoint_status,
-                    &buffer_text,
-                    endpoint_status,
-                    pending_chunks,
-                ) {
+                if let Ok(menu) = build_menu(&handle, version, &tray_status) {
                     let _ = tray.set_menu(Some(menu));
                 }
             }

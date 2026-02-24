@@ -51,48 +51,51 @@ Start-ScheduledTask -TaskName $TaskName
 
 ## OBS Studio
 
-OBS requires starting from its bin directory for plugins to load correctly.
+**CRITICAL:** OBS requires starting from its `bin\64bit` directory. Without `-WorkingDirectory`, OBS starts but doesn't initialize properly (0 CPU, no log file, no window).
+
+### Method 1: Script File (RECOMMENDED - avoids escaping issues)
 
 ```bash
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "
-$action = New-ScheduledTaskAction -Execute \"C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe\" -WorkingDirectory \"C:\\Program Files\\obs-studio\\bin\\64bit\"
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
-$principal = New-ScheduledTaskPrincipal -UserId \"newlevel\" -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
+# Step 1: Create script file
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'echo $action = New-ScheduledTaskAction -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit" > C:\temp\start_obs.ps1 && echo $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1) >> C:\temp\start_obs.ps1 && echo $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited >> C:\temp\start_obs.ps1 && echo $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries >> C:\temp\start_obs.ps1 && echo Unregister-ScheduledTask -TaskName "OBSCorrect" -Confirm:$false -ErrorAction SilentlyContinue >> C:\temp\start_obs.ps1 && echo Register-ScheduledTask -TaskName "OBSCorrect" -Action $action -Trigger $trigger -Principal $principal -Settings $settings >> C:\temp\start_obs.ps1 && echo Start-ScheduledTask -TaskName "OBSCorrect" >> C:\temp\start_obs.ps1'
 
-Unregister-ScheduledTask -TaskName \"StartOBSCorrect\" -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName \"StartOBSCorrect\" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-Start-ScheduledTask -TaskName \"StartOBSCorrect\"
-Start-Sleep -Seconds 5
-tasklist /FI \"IMAGENAME eq obs64.exe\"
-"'
+# Step 2: Execute script
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -ExecutionPolicy Bypass -File C:\temp\start_obs.ps1'
+
+# Step 3: Verify (should show ~1GB+ memory, CPU time > 0)
+sleep 10 && sshpass -p 'newlevel' ssh newlevel@stream.lan 'tasklist /FI "IMAGENAME eq obs64.exe" /V'
 ```
 
-### OBS with Auto-Start Streaming
+### Method 2: With Auto-Start Streaming
 
 ```bash
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "
-$action = New-ScheduledTaskAction -Execute \"C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe\" -Argument \"--startstreaming\" -WorkingDirectory \"C:\\Program Files\\obs-studio\\bin\\64bit\"
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
-$principal = New-ScheduledTaskPrincipal -UserId \"newlevel\" -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
+# Create script with --startstreaming
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'echo $action = New-ScheduledTaskAction -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" -Argument "--startstreaming" -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit" > C:\temp\start_obs_stream.ps1 && echo $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1) >> C:\temp\start_obs_stream.ps1 && echo $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited >> C:\temp\start_obs_stream.ps1 && echo $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries >> C:\temp\start_obs_stream.ps1 && echo Unregister-ScheduledTask -TaskName "OBSStream" -Confirm:$false -ErrorAction SilentlyContinue >> C:\temp\start_obs_stream.ps1 && echo Register-ScheduledTask -TaskName "OBSStream" -Action $action -Trigger $trigger -Principal $principal -Settings $settings >> C:\temp\start_obs_stream.ps1 && echo Start-ScheduledTask -TaskName "OBSStream" >> C:\temp\start_obs_stream.ps1'
 
-Unregister-ScheduledTask -TaskName \"StartOBSStreaming\" -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName \"StartOBSStreaming\" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-Start-ScheduledTask -TaskName \"StartOBSStreaming\"
-"'
+# Execute
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -ExecutionPolicy Bypass -File C:\temp\start_obs_stream.ps1'
 ```
 
-### Use Existing OBS Task (if available)
-
-stream.lan has pre-configured tasks. Check and use them:
+### Verify OBS Started Correctly
 
 ```bash
-# List existing OBS tasks
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Get-ScheduledTask | Where-Object { $_.TaskName -like \"*OBS*\" } | Select-Object TaskName, State"'
+# CORRECT: Memory ~1GB+, CPU > 0:00:00, creates log file
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'tasklist /FI "IMAGENAME eq obs64.exe" /V'
+# Image Name    PID  Session#  Mem Usage   CPU Time
+# obs64.exe     XXX  1         1,783,644 K 0:00:12    <- GOOD
 
-# Start existing task (preferred - already configured correctly)
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Start-ScheduledTask -TaskName \"Start OBS\""'
+# WRONG: Memory ~37MB, CPU 0:00:00, no new log file (missing WorkingDirectory!)
+# obs64.exe     XXX  1         37,500 K    0:00:00    <- BAD
+```
+
+### Set OBS Stream Destination
+
+```bash
+# Set to Restreamer (custom RTMP)
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'echo {"type":"rtmp_custom","settings":{"server":"rtmp://127.0.0.1:1234/live","key":"test"}}> C:\temp\service.json && copy C:\temp\service.json "C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json" /Y'
+
+# Restore to YouTube
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'copy "C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json.youtube-backup" "C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json" /Y'
 ```
 
 ## Restreamer Tray App

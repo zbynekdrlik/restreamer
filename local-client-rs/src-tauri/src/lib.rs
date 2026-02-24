@@ -2,7 +2,7 @@ mod commands;
 mod tray;
 mod updater;
 
-use tauri::Manager;
+use tauri::{Manager, WindowEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -18,8 +18,15 @@ pub fn run() {
         }))
         .setup(|app| {
             tray::setup_tray(app)?;
-            updater::start_update_checker(&app.handle());
+            updater::start_update_checker(app.handle());
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Hide window instead of closing - keeps tray app running
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_service_status,

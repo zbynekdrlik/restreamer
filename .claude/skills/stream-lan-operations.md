@@ -215,9 +215,58 @@ Start-Process 'C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe'
 \""
 ```
 
-### Step 3: Start Streaming (via OBS WebSocket or manually)
+### Step 3: Start Streaming via OBS WebSocket API
 
-User needs to click "Start Streaming" in OBS, or use WebSocket API.
+**Use Python directly from Linux machine (PREFERRED - fully automated):**
+
+```python
+python3 -c "
+import asyncio
+import websockets
+import json
+
+async def start_streaming():
+    uri = 'ws://stream.lan:4455'
+    async with websockets.connect(uri) as ws:
+        await ws.recv()  # Hello
+        await ws.send(json.dumps({'op': 1, 'd': {'rpcVersion': 1}}))
+        await ws.recv()  # Identified
+
+        # Start streaming
+        request = {
+            'op': 6,
+            'd': {
+                'requestType': 'StartStream',
+                'requestId': 'start-stream-1'
+            }
+        }
+        await ws.send(json.dumps(request))
+        response = await ws.recv()
+        print(response)
+
+asyncio.run(start_streaming())
+"
+```
+
+**Check OBS streaming status:**
+
+```python
+python3 -c "
+import asyncio
+import websockets
+import json
+
+async def get_status():
+    async with websockets.connect('ws://stream.lan:4455') as ws:
+        await ws.recv()
+        await ws.send(json.dumps({'op': 1, 'd': {'rpcVersion': 1}}))
+        await ws.recv()
+        await ws.send(json.dumps({'op': 6, 'd': {'requestType': 'GetStreamStatus', 'requestId': '1'}}))
+        print(await ws.recv())
+
+asyncio.run(get_status())
+"
+```
 
 ### Step 4: Verify Chunks Being Created
 
@@ -260,17 +309,54 @@ Start-Process 'C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe'
 
 ## Troubleshooting
 
+### CRITICAL: Old Python Client Blocking RTMP Port
+
+**Symptoms:** Chunks stop being created, old timestamps, OBS connected but no new data.
+
+**Cause:** Old Python local client at `C:\Users\newlevel\restreamer\local-client\` spawns ffmpeg that steals port 1234.
+
+**Diagnosis:**
+
+```bash
+# Check what owns port 1234
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'netstat -ano | findstr ":1234"'
+
+# Check if ffmpeg is from old client
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Get-Process ffmpeg | Select-Object Id, Path"'
+# BAD: Path = C:\Users\newlevel\restreamer\local-client\ffmpeg.exe
+# GOOD: No ffmpeg, Rust service handles RTMP directly
+```
+
+**Fix:**
+
+```bash
+# Kill old Python client and ffmpeg
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "
+Get-Process ffmpeg -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process python*, python3* -ErrorAction SilentlyContinue | Stop-Process -Force
+"'
+
+# Restart Rust service to bind port 1234
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Restart-Service -Name restreamer-service -Force"'
+
+# Verify Rust service owns port
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'netstat -ano | findstr ":1234"'
+# Should show restreamer-service.exe PID in LISTENING state
+```
+
 ### OBS Not Connecting to Restreamer RTMP
 
 1. Check Restreamer service is running
-2. Check firewall allows port 1234
-3. Check RTMP URL format: `rtmp://127.0.0.1:1234/live/test`
+2. Check NO ffmpeg is blocking port 1234 (see above)
+3. Check firewall allows port 1234
+4. Check RTMP URL format: `rtmp://127.0.0.1:1234/live/test`
 
 ### No Chunks Being Created
 
 1. Verify RTMP stream is actually being sent
-2. Check Restreamer logs: `C:\ProgramData\Restreamer\logs\`
-3. Verify config.json has correct settings
+2. **Check port 1234 is owned by Rust service, not old Python ffmpeg**
+3. Check Restreamer logs: `C:\ProgramData\Restreamer\logs\`
+4. Verify config.json has correct settings
 
 ### Chunks Not Uploading to S3
 
