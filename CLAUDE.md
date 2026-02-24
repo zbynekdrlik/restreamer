@@ -57,6 +57,22 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
 - Every PR MUST include tests covering the implemented changes. No PR is complete without tests.
 - NEVER merge a PR. Only the user may merge pull requests. The agent must only create the PR, ensure CI is green, and provide the URL. Merging is exclusively the user's action.
 
+#### CI Monitoring (MANDATORY)
+
+- **ALWAYS MONITOR CI**: After every push to `dev`, you MUST monitor CI until ALL jobs are green. Do NOT move on to other tasks or claim work is done while CI is running.
+- **CHECK CI STATUS**: Use `gh run list --branch dev --limit 3` to see recent workflow runs, then `gh run view <run-id>` to check status.
+- **FIX FAILURES IMMEDIATELY**: If any CI job fails, investigate and fix immediately. Push fixes and monitor again until green.
+- **VERIFY DEPLOYMENT**: After `deploy-stream-lan` job completes, verify deployment was successful:
+  ```bash
+  # Check service is running with new version
+  sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "(Get-Item \"C:\\Program Files\\Restreamer\\restreamer-service.exe\").VersionInfo.FileVersion"'
+  # Check tray app is running
+  sshpass -p 'newlevel' ssh newlevel@stream.lan 'tasklist | findstr restreamer'
+  # Check API responds
+  sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/status"'
+  ```
+- **NEVER CLAIM DONE** until CI is fully green AND deployment is verified working on stream.lan.
+
 ### Testing — PRIMARY GOAL
 
 **The main goal is complete, full E2E tests that cover ALL flows in the app and the web frontend.** Every functionality must be covered by an E2E test flow. All tests MUST be part of GitHub CI workflows.
