@@ -1,13 +1,17 @@
 [package]
-name = "restreamer-tray"
+name = "restreamer"
 version = "0.1.9"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/restreamer"
 rust-version = "1.85"
 
+[[bin]]
+name = "Restreamer"
+path = "src/main.rs"
+
 [lib]
-name = "restreamer_tray_lib"
+name = "restreamer_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
