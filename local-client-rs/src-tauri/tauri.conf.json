@@ -4,10 +4,10 @@
   "version": "0.1.8",
   "identifier": "media.newlevel.restreamer",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../leptos-ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "cd ../leptos-ui && trunk serve --port 5173",
-    "beforeBuildCommand": "cd ../leptos-ui && trunk build --release"
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
   },
   "app": {
     "windows": [
