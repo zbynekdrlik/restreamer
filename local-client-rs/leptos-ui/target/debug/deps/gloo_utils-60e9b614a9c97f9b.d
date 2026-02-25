@@ -1,0 +1,10 @@
+/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/debug/deps/gloo_utils-60e9b614a9c97f9b.d: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/errors.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/iter.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/format/json.rs
+
+/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/debug/deps/libgloo_utils-60e9b614a9c97f9b.rlib: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/errors.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/iter.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/format/json.rs
+
+/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/debug/deps/libgloo_utils-60e9b614a9c97f9b.rmeta: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/errors.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/iter.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/format/json.rs
+
+/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/lib.rs:
+/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/errors.rs:
+/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/iter.rs:
+/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gloo-utils-0.2.0/src/format/json.rs:

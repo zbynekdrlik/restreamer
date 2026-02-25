@@ -7,7 +7,7 @@ You are a senior Rust + Python developer with CI/CD expertise working on the Res
 | Directory             | Language        | Purpose                                           |
 | --------------------- | --------------- | ------------------------------------------------- |
 | `local-client/`       | Python (Django) | Legacy Windows RTMP client (being replaced)       |
-| `local-client-rs/`    | Rust + React    | New Rust local client (Tauri v2 + service binary) |
+| `local-client-rs/`    | Rust + Leptos   | Unified Tauri app with embedded service + WASM UI |
 | `manager-server/`     | Python (Django) | Central management server (Linode VPS)            |
 | `delivering-service/` | Python (Django) | Linux re-streaming service                        |
 
@@ -39,7 +39,7 @@ Before making ANY code changes, you MUST complete these steps in order:
 
 3. **BUMP VERSIONS IF NEEDED**:
    - Python: Edit `VERSION` file (increment patch: 0.2.4 → 0.2.5)
-   - Rust: Edit `local-client-rs/Cargo.toml`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `package.json`
+   - Rust: Edit `local-client-rs/Cargo.toml`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `leptos-ui/Cargo.toml`
 
 Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional.
 
@@ -110,13 +110,19 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
 
 ```bash
 cd local-client-rs
-cargo build                          # Debug build (all crates)
-cargo build --release -p rs-service  # Release build (service binary only)
+cargo build                          # Debug build (workspace crates)
+cargo build --release -p rs-service  # Release build (standalone service binary)
 cargo test --workspace               # Run all tests
 cargo fmt --all -- --check           # Check formatting
 cargo clippy --workspace -- -D warnings  # Lint
-npx tauri dev                        # Hot-reload Tauri app (dev mode)
-npx tauri build                      # Production Tauri build (NSIS installer)
+
+# Leptos frontend (WASM)
+cd leptos-ui && trunk build --release  # Production WASM build
+cd leptos-ui && trunk serve --port 5173  # Dev server
+
+# Tauri unified app
+cargo tauri dev                      # Hot-reload Tauri app (dev mode)
+cargo tauri build                    # Production Tauri build (NSIS installer)
 ```
 
 ### Code Quality Standards

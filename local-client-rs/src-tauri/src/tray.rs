@@ -1,3 +1,6 @@
+//! System tray with direct state access (no HTTP polling).
+
+use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::image::Image;
@@ -5,7 +8,7 @@ use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{App, AppHandle, Manager, Wry};
 
-const SERVICE_URL: &str = "http://127.0.0.1:8910/api/v1";
+use crate::state::AppState;
 
 /// Status polling interval (3 seconds).
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -22,7 +25,7 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let _tray = TrayIconBuilder::with_id("restreamer")
         .icon(icon)
         .menu(&menu)
-        .tooltip("Restreamer - Connecting...")
+        .tooltip("Restreamer - Starting...")
         .on_menu_event(move |app, event| handle_menu_event(app, event.id().as_ref()))
         .build(app)?;
 
@@ -43,9 +46,9 @@ struct TrayStatus {
 impl Default for TrayStatus {
     fn default() -> Self {
         Self {
-            inpoint: "Connecting...".to_string(),
+            inpoint: "Starting...".to_string(),
             buffer: "--:--:--".to_string(),
-            endpoint: "Connecting...".to_string(),
+            endpoint: "Starting...".to_string(),
             pending: 0,
             total_chunks: 0,
             event_name: String::new(),
@@ -120,28 +123,6 @@ fn build_menu(
         .separator()
         .item(&MenuItem::with_id(
             app,
-            "restart_inpoint",
-            "Restart Inpoint",
-            true,
-            None::<&str>,
-        )?)
-        .item(&MenuItem::with_id(
-            app,
-            "restart_endpoint",
-            "Restart Endpoint",
-            true,
-            None::<&str>,
-        )?)
-        .item(&MenuItem::with_id(
-            app,
-            "delete_chunks",
-            "Delete All Chunks",
-            true,
-            None::<&str>,
-        )?)
-        .separator()
-        .item(&MenuItem::with_id(
-            app,
             "check_updates",
             "Check for Updates...",
             true,
@@ -184,32 +165,15 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
             }
             #[cfg(not(target_os = "windows"))]
             {
-                tracing::warn!("View logs not implemented for this platform");
+                let log_dir = std::path::PathBuf::from("/var/lib/restreamer");
+                if log_dir.exists() {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&log_dir)
+                        .spawn();
+                } else {
+                    tracing::warn!("Log directory does not exist: {:?}", log_dir);
+                }
             }
-        }
-        "restart_inpoint" => {
-            tauri::async_runtime::spawn(async {
-                let url = format!("{SERVICE_URL}/actions/restart-inpoint");
-                if let Err(e) = reqwest::Client::new().post(&url).send().await {
-                    tracing::warn!("Failed to restart inpoint: {e}");
-                }
-            });
-        }
-        "restart_endpoint" => {
-            tauri::async_runtime::spawn(async {
-                let url = format!("{SERVICE_URL}/actions/restart-endpoint");
-                if let Err(e) = reqwest::Client::new().post(&url).send().await {
-                    tracing::warn!("Failed to restart endpoint: {e}");
-                }
-            });
-        }
-        "delete_chunks" => {
-            tauri::async_runtime::spawn(async {
-                let url = format!("{SERVICE_URL}/chunks");
-                if let Err(e) = reqwest::Client::new().delete(&url).send().await {
-                    tracing::warn!("Failed to delete chunks: {e}");
-                }
-            });
         }
         "check_updates" => {
             let handle = app.clone();
@@ -218,7 +182,16 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
             });
         }
         "quit" => {
-            app.exit(0);
+            // Trigger shutdown of embedded service
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(state) = handle.try_state::<Arc<AppState>>() {
+                    state.shutdown().await;
+                }
+                // Give service time to shut down
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                handle.exit(0);
+            });
         }
         _ => {
             tracing::debug!("Unhandled menu event: {event_id}");
@@ -235,94 +208,66 @@ fn format_duration(secs: f64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-/// Poll the service status and update the single tray icon/menu dynamically.
+/// Poll the service status directly from AppState (no HTTP).
 fn start_status_poller(handle: AppHandle<Wry>) {
     tauri::async_runtime::spawn(async move {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .build()
-            .unwrap_or_default();
         let version = env!("CARGO_PKG_VERSION");
+
+        // Wait for state to be initialized
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
 
-            let status_url = format!("{SERVICE_URL}/status");
-            let stats_url = format!("{SERVICE_URL}/chunks/stats");
-
-            let (status_resp, stats_resp) = tokio::join!(
-                client.get(&status_url).send(),
-                client.get(&stats_url).send(),
-            );
-
-            let status_json: Option<serde_json::Value> = status_resp
-                .ok()
-                .and_then(|r| tauri::async_runtime::block_on(r.json()).ok());
-
-            let stats_json: Option<serde_json::Value> = stats_resp
-                .ok()
-                .and_then(|r| tauri::async_runtime::block_on(r.json()).ok());
-
             let mut tray_status = TrayStatus::default();
 
-            // Parse status response
-            if let Some(val) = &status_json {
-                // Get streaming event info
-                if let Some(event) = val.get("streaming_event") {
-                    if !event.is_null() {
+            // Get state if available
+            if let Some(state) = handle.try_state::<Arc<AppState>>() {
+                // Get streaming event
+                match state.get_streaming_event().await {
+                    Ok(Some(event)) => {
                         tray_status.event_name = event
-                            .get("short_description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                            .short_description
+                            .unwrap_or_default();
 
-                        let receiving = event
-                            .get("receiving_activated")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-
-                        tray_status.inpoint = if receiving {
+                        tray_status.inpoint = if event.receiving_activated {
                             "Receiving".to_string()
                         } else {
                             "Paused".to_string()
                         };
-                    } else {
+                    }
+                    Ok(None) => {
                         tray_status.inpoint = "No Event".to_string();
                     }
-                } else {
-                    tray_status.inpoint = "Idle".to_string();
+                    Err(e) => {
+                        tracing::debug!("Failed to get streaming event: {e}");
+                        tray_status.inpoint = "Error".to_string();
+                    }
                 }
 
-                // Parse stats
-                if let Some(stats) = &stats_json {
-                    tray_status.buffer = stats
-                        .get("buffer_duration_secs")
-                        .and_then(|v| v.as_f64())
-                        .map(format_duration)
-                        .unwrap_or_else(|| "00:00:00".to_string());
+                // Get chunk stats
+                match state.get_chunk_stats().await {
+                    Ok(stats) => {
+                        tray_status.buffer = format_duration(stats.buffer_duration_secs);
+                        tray_status.pending = stats.pending_chunks as u64;
+                        tray_status.total_chunks = stats.total_chunks as u64;
 
-                    tray_status.pending = stats
-                        .get("pending_chunks")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-
-                    tray_status.total_chunks = stats
-                        .get("total_chunks")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-
-                    tray_status.endpoint = if tray_status.pending > 0 {
-                        "Uploading".to_string()
-                    } else {
-                        "Idle".to_string()
-                    };
+                        tray_status.endpoint = if stats.pending_chunks > 0 {
+                            "Uploading".to_string()
+                        } else {
+                            "Idle".to_string()
+                        };
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to get chunk stats: {e}");
+                    }
                 }
             } else {
-                tray_status.inpoint = "Disconnected".to_string();
-                tray_status.endpoint = "Disconnected".to_string();
+                tray_status.inpoint = "Initializing...".to_string();
+                tray_status.endpoint = "Initializing...".to_string();
             }
 
-            // Update the single tray icon
+            // Update the tray icon
             if let Some(tray) = handle.tray_by_id("restreamer") {
                 let tooltip = if !tray_status.event_name.is_empty() {
                     format!(

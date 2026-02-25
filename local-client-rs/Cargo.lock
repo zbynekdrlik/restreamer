@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "rs-api"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "rs-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "serde",
@@ -2265,7 +2265,7 @@ dependencies = [
 
 [[package]]
 name = "rs-endpoint"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "axum",
  "md-5",
@@ -2285,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "rs-inpoint"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "bytes",
  "chrono",
@@ -2309,8 +2309,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "rs-service"
-version = "0.1.7"
+name = "rs-runtime"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -2319,6 +2319,24 @@ dependencies = [
  "rs-core",
  "rs-endpoint",
  "rs-inpoint",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rs-service"
+version = "0.1.8"
+dependencies = [
+ "anyhow",
+ "reqwest 0.12.28",
+ "rs-api",
+ "rs-core",
+ "rs-inpoint",
+ "rs-runtime",
  "serde_json",
  "sqlx",
  "tempfile",

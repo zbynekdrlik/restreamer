@@ -1,0 +1,11 @@
+/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/wasm32-unknown-unknown/debug/deps/slotmap-3510ef35dce4c250.d: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/basic.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/dense.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/hop.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/secondary.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/sparse_secondary.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/util.rs
+
+/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/wasm32-unknown-unknown/debug/deps/libslotmap-3510ef35dce4c250.rmeta: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/basic.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/dense.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/hop.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/secondary.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/sparse_secondary.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/util.rs
+
+/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/lib.rs:
+/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/basic.rs:
+/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/dense.rs:
+/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/hop.rs:
+/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/secondary.rs:
+/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/sparse_secondary.rs:
+/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slotmap-1.1.1/src/util.rs:

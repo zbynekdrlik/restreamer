@@ -1,13 +1,13 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/config.schema.json",
   "productName": "Restreamer",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "identifier": "media.newlevel.restreamer",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "cd ../leptos-ui && trunk serve --port 5173",
+    "beforeBuildCommand": "cd ../leptos-ui && trunk build --release"
   },
   "app": {
     "windows": [

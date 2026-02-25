@@ -1,15 +1,10 @@
-mod log_capture;
-mod poller;
-mod service;
-mod shutdown;
-
 use anyhow::Context;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
 use rs_core::config::Config;
 use rs_core::log_buffer::LogBuffer;
-use service::ServiceRunner;
+use rs_runtime::{LogCaptureLayer, ServiceCore};
 
 #[cfg(windows)]
 fn main() -> anyhow::Result<()> {
@@ -99,7 +94,7 @@ fn run_windows_service() -> anyhow::Result<()> {
         .build()?;
 
     let result = rt.block_on(async {
-        ServiceRunner::new(config, config_path, log_buffer)
+        ServiceCore::new(config, config_path, log_buffer)
             .run_with_signal(async {
                 let _ = stop_rx.await;
             })
@@ -140,7 +135,7 @@ fn run_console() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(async {
-            ServiceRunner::new(config, config_path, log_buffer)
+            ServiceCore::new(config, config_path, log_buffer)
                 .run()
                 .await
         })
@@ -154,7 +149,7 @@ fn init_tracing(log_buffer: &LogBuffer) {
     tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
-        .with(log_capture::LogCaptureLayer::new(log_buffer.clone()))
+        .with(LogCaptureLayer::new(log_buffer.clone()))
         .init();
 }
 

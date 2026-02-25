@@ -257,18 +257,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: local-client-rs
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install frontend dependencies
-        run: npm ci
+      - name: Install trunk
+        run: cargo install trunk
+      - name: Build Leptos UI (WASM)
+        run: |
+          cd leptos-ui
+          trunk build --release
       - name: Install Tauri CLI
-        run: npm install -g @tauri-apps/cli@latest
+        run: cargo install tauri-cli
       - name: Build Tauri app
-        run: npx tauri build
+        run: cargo tauri build
         env:
           SQLX_OFFLINE: true
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -439,19 +442,34 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check if npm-based frontend exists
+        id: check-npm
+        run: |
+          if [ -f "package-lock.json" ] && grep -q "playwright" package.json 2>/dev/null; then
+            echo "has_playwright=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_playwright=false" >> $GITHUB_OUTPUT
+            echo "Skipping Playwright tests - Leptos/WASM frontend does not use npm"
+          fi
       - name: Install dependencies
+        if: steps.check-npm.outputs.has_playwright == 'true'
         run: npm ci
       - name: Install Playwright browsers
+        if: steps.check-npm.outputs.has_playwright == 'true'
         run: npx playwright install --with-deps chromium
       - name: Run Playwright E2E tests
+        if: steps.check-npm.outputs.has_playwright == 'true'
         run: npx playwright test
       - name: Upload test results
-        if: always()
+        if: always() && steps.check-npm.outputs.has_playwright == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
           path: local-client-rs/playwright-report/
           if-no-files-found: ignore
+      - name: Skip message for Leptos frontend
+        if: steps.check-npm.outputs.has_playwright == 'false'
+        run: echo "Frontend E2E tests skipped - using Leptos/WASM frontend"
 
   rust-ci-gate:
     name: Rust CI Gate
