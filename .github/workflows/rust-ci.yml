@@ -563,13 +563,21 @@ jobs:
           sc.exe stop "restreamer-service" 2>&1 | Out-Null
           sc.exe delete "restreamer-service" 2>&1 | Out-Null
 
-          # Remove old service binary
+          # Clean up old files from previous two-binary architecture
+          Write-Host "=== Cleaning up old files ==="
           $InstallDir = "C:\Program Files\Restreamer"
           Remove-Item "$InstallDir\restreamer-service.exe" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$InstallDir\restreamer-tray.exe" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$stagingDir\restreamer-service.exe" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$stagingDir\deploy.ps1" -Force -ErrorAction SilentlyContinue
 
           # Run NSIS installer (installs unified Tauri app)
           Write-Host "=== Installing unified Tauri app ==="
           Start-Process -FilePath "$stagingDir\Restreamer-Setup.exe" -ArgumentList "/S" -Wait
+
+          # Verify only Restreamer.exe exists (no old binaries)
+          Write-Host "=== Verifying install ==="
+          Get-ChildItem "$InstallDir\*.exe"
 
           Write-Host "=== Deployment complete ==="
 
