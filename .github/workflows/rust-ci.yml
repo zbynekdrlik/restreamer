@@ -212,40 +212,6 @@ jobs:
       - name: Run audit
         run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134
 
-  build:
-    name: Build (${{ matrix.os }})
-    needs: [changes, lint, test]
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    defaults:
-      run:
-        working-directory: local-client-rs
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: local-client-rs
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
-      - name: Build release (service)
-        run: cargo build --release -p rs-service
-      - name: Upload service binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: restreamer-service-${{ matrix.os }}
-          path: |
-            local-client-rs/target/release/restreamer-service
-            local-client-rs/target/release/restreamer-service.exe
-          if-no-files-found: ignore
-          retention-days: 7
-
   build-tauri:
     name: Build Tauri app
     needs: [changes, lint, test]
@@ -482,7 +448,6 @@ jobs:
         test,
         coverage,
         security,
-        build,
         build-tauri,
         file-size,
         test-integrity,
@@ -498,7 +463,6 @@ jobs:
           echo "test:           ${{ needs.test.result }}"
           echo "coverage:       ${{ needs.coverage.result }}"
           echo "security:       ${{ needs.security.result }}"
-          echo "build:          ${{ needs.build.result }}"
           echo "build-tauri:    ${{ needs.build-tauri.result }}"
           echo "file-size:      ${{ needs.file-size.result }}"
           echo "test-integrity: ${{ needs.test-integrity.result }}"
@@ -530,7 +494,6 @@ jobs:
             "test:${{ needs.test.result }}" \
             "coverage:${{ needs.coverage.result }}" \
             "security:${{ needs.security.result }}" \
-            "build:${{ needs.build.result }}" \
             "build-tauri:${{ needs.build-tauri.result }}" \
             "file-size:${{ needs.file-size.result }}" \
             "test-integrity:${{ needs.test-integrity.result }}" \
@@ -551,8 +514,8 @@ jobs:
 
   deploy-stream-lan:
     name: Deploy to stream.lan
-    needs: [rust-ci-gate, build, build-tauri]
-    if: always() && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.rust-ci-gate.result == 'success' && needs.build.result == 'success' && needs.build-tauri.result == 'success'
+    needs: [rust-ci-gate, build-tauri]
+    if: always() && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.rust-ci-gate.result == 'success' && needs.build-tauri.result == 'success'
     runs-on: [self-hosted, windows, stream-lan]
     steps:
       - name: Clean old artifacts
@@ -562,12 +525,6 @@ jobs:
           Remove-Item -Path "artifacts" -Recurse -Force -ErrorAction SilentlyContinue
           Write-Host "Cleaned artifacts directory"
 
-      - name: Download service binary
-        uses: actions/download-artifact@v4
-        with:
-          name: restreamer-service-windows-latest
-          path: artifacts/service
-
       - name: Download Tauri installer
         uses: actions/download-artifact@v4
         with:
@@ -576,145 +533,68 @@ jobs:
 
       - name: List artifacts
         run: |
-          Write-Host "=== Service binary ==="
-          Get-ChildItem artifacts/service/
-          Write-Host "=== Tauri installer ==="
+          Write-Host "=== Tauri installer (unified app with embedded service) ==="
           Get-ChildItem artifacts/tauri/
         shell: powershell
 
-      - name: Deploy
+      - name: Deploy unified app
         shell: powershell
         run: |
-          # Stage artifacts for manual deployment
-          # The runner doesn't have admin privileges to manage services directly
-          # Copy artifacts to a staging location and call the existing install script pattern
+          # Deploy unified Tauri app (contains embedded service - no separate service binary)
+          $ErrorActionPreference = "Continue"
 
           $stagingDir = "C:\ProgramData\Restreamer\staging"
           New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
 
-          Write-Host "=== Staging artifacts ==="
-          $serviceBin = Get-ChildItem "artifacts/service/*.exe" | Select-Object -First 1
           $installer = Get-ChildItem "artifacts/tauri/*.exe" | Select-Object -First 1
-
-          Copy-Item $serviceBin.FullName "$stagingDir\restreamer-service.exe" -Force
           Copy-Item $installer.FullName "$stagingDir\Restreamer-Setup.exe" -Force
-
-          Write-Host "Staged: $($serviceBin.Name)"
           Write-Host "Staged: $($installer.Name)"
 
-          # Create a deployment script that can be run manually or by a task
-          $deployScript = @'
-          $ErrorActionPreference = "Continue"
-          $InstallDir = "C:\Program Files\Restreamer"
-          $stagingDir = "C:\ProgramData\Restreamer\staging"
-          $ConfigFile = "C:\ProgramData\Restreamer\config.json"
-
-          # Stop service and processes
+          # Stop old processes (both old service and tray)
+          Write-Host "=== Stopping old processes ==="
           net stop "restreamer-service" 2>&1 | Out-Null
-          Start-Sleep -Seconds 2
           taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
           taskkill /F /IM "restreamer-tray.exe" 2>&1 | Out-Null
-          Start-Sleep -Seconds 1
-
-          # Install service binary
-          New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-          Copy-Item "$stagingDir\restreamer-service.exe" "$InstallDir\restreamer-service.exe" -Force
-
-          # Run NSIS installer silently
-          $installer = Get-ChildItem "$stagingDir\Restreamer-Setup.exe" | Select-Object -First 1
-          if ($installer) {
-            Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
-          }
-
-          # Register service if needed
-          $svcQuery = sc.exe query "restreamer-service" 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            sc.exe create "restreamer-service" binPath= "`"$InstallDir\restreamer-service.exe`" `"$ConfigFile`"" start= auto DisplayName= "Restreamer Service"
-            sc.exe description "restreamer-service" "Restreamer local client service"
-          }
-
-          # Start service
-          net start "restreamer-service"
-          Start-Sleep -Seconds 3
-          '@
-
-          $deployScript | Out-File -FilePath "$stagingDir\deploy.ps1" -Encoding UTF8 -Force
-          Write-Host "=== Deploy script created at $stagingDir\deploy.ps1 ==="
-
-          # Try to run with psexec if available, otherwise use direct approach
-          Write-Host "=== Attempting deployment ==="
-
-          # Direct deployment attempt (may fail without admin)
-          $ErrorActionPreference = "Continue"
-
-          # Kill processes first (this usually works)
-          taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
-          taskkill /F /IM "restreamer-tray.exe" 2>&1 | Out-Null
+          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
           Start-Sleep -Seconds 2
 
-          # Try to copy service binary
+          # Remove old service if it exists (unified app doesn't use Windows service)
+          Write-Host "=== Removing old Windows service ==="
+          sc.exe stop "restreamer-service" 2>&1 | Out-Null
+          sc.exe delete "restreamer-service" 2>&1 | Out-Null
+
+          # Remove old service binary
           $InstallDir = "C:\Program Files\Restreamer"
-          New-Item -ItemType Directory -Path $InstallDir -Force 2>&1 | Out-Null
-          Copy-Item "$stagingDir\restreamer-service.exe" "$InstallDir\restreamer-service.exe" -Force 2>&1
+          Remove-Item "$InstallDir\restreamer-service.exe" -Force -ErrorAction SilentlyContinue
 
-          # Run NSIS installer
-          Write-Host "Running NSIS installer..."
+          # Run NSIS installer (installs unified Tauri app)
+          Write-Host "=== Installing unified Tauri app ==="
           Start-Process -FilePath "$stagingDir\Restreamer-Setup.exe" -ArgumentList "/S" -Wait
 
-          # Try to start service
-          net start "restreamer-service" 2>&1
+          Write-Host "=== Deployment complete ==="
 
-          Start-Sleep -Seconds 3
-
-          # Check result
-          $svcQuery = sc.exe query "restreamer-service" 2>&1
-          if ($svcQuery -match "RUNNING") {
-            Write-Host "=== Deployment SUCCESS - Service running ==="
-          } else {
-            Write-Host "=== Service not running after deployment ==="
-            Write-Host "Service status: $svcQuery"
-            Write-Host ""
-            Write-Host "Manual deployment may be required. Run as admin:"
-            Write-Host "  powershell -ExecutionPolicy Bypass -File C:\ProgramData\Restreamer\staging\deploy.ps1"
-            # Don't fail - artifacts are staged for manual deployment
-          }
-
-      - name: Verify deployment
+      - name: Launch unified app via Task Scheduler
         shell: powershell
         run: |
-          try {
-            $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 10
-            Write-Host "API Health: OK"
-          } catch {
-            Write-Host "API Health: FAILED - $_"
-            exit 1
-          }
-
-      - name: Launch tray app via Task Scheduler
-        shell: powershell
-        run: |
-          # Windows GUI apps require Task Scheduler with Interactive logon
-          # to run in user's desktop session (CI runner is SYSTEM in session 0)
-          # Note: CI runner may not have admin privileges, so we handle errors gracefully
-
+          # The unified Tauri app runs as a tray application with embedded service
+          # No separate Windows service - just the tray app
           $ErrorActionPreference = "SilentlyContinue"
-          $TaskName = "RestreamerTray"
-          $ExePath = "C:\Program Files\Restreamer\restreamer-tray.exe"
+          $TaskName = "Restreamer"
+          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
           $Username = "newlevel"
 
-          Write-Host "=== Configuring tray app launch ==="
+          Write-Host "=== Configuring unified app launch ==="
 
-          # Kill existing tray processes first (ignore errors - process may not exist)
-          $null = cmd /c "taskkill /F /IM restreamer-tray.exe 2>nul"
-          Start-Sleep -Seconds 1
+          # Remove old tray task if it exists
+          Unregister-ScheduledTask -TaskName "RestreamerTray" -Confirm:$false -ErrorAction SilentlyContinue
 
-          # Remove ALL existing Restreamer-related scheduled tasks to prevent duplicates
-          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*Tray*" } | ForEach-Object {
-            Write-Host "Removing duplicate task: $($_.TaskName)"
+          # Remove ALL existing Restreamer-related scheduled tasks
+          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
+            Write-Host "Removing old task: $($_.TaskName)"
             Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
           }
 
-          # Create fresh task with Interactive logon type (may fail without admin - that's OK)
+          # Create task for unified app with Interactive logon
           $action = New-ScheduledTaskAction -Execute $ExePath
           $trigger = New-ScheduledTaskTrigger -AtLogon -User $Username
           $principal = New-ScheduledTaskPrincipal -UserId $Username -LogonType Interactive -RunLevel Limited
@@ -723,21 +603,34 @@ jobs:
           $null = Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force 2>&1
           Write-Host "Registered task: $TaskName"
 
-          # Start the task to launch tray in user session (may fail without admin - that's OK)
+          # Start the task
           $null = Start-ScheduledTask -TaskName $TaskName 2>&1
-          Start-Sleep -Seconds 2
+          Start-Sleep -Seconds 5
 
-          # Verify tray is running
-          $tray = Get-Process -Name "restreamer-tray" -ErrorAction SilentlyContinue
-          if ($tray) {
-            Write-Host "=== Tray app launched (PID: $($tray.Id), Session: $($tray.SessionId)) ==="
+          # Verify app is running
+          $app = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if ($app) {
+            Write-Host "=== Unified app launched (PID: $($app.Id), Session: $($app.SessionId)) ==="
           } else {
-            Write-Host "WARNING: Tray process not found - user may need to be logged in"
-            Write-Host "The tray app will start on next user login via scheduled task trigger"
+            Write-Host "WARNING: App not found - user may need to be logged in"
+            Write-Host "The app will start on next user login via scheduled task"
           }
-
-          # Always succeed - the task is registered for AtLogon even if we can't start it now
           exit 0
+
+      - name: Verify deployment
+        shell: powershell
+        run: |
+          # Wait for embedded service to start
+          Start-Sleep -Seconds 5
+          try {
+            $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
+            Write-Host "API Status: OK"
+            Write-Host "Streaming event: $($response.streaming_event.name)"
+          } catch {
+            Write-Host "API check: FAILED - $_"
+            Write-Host "The unified app may not be fully started yet"
+            # Don't fail - app starts on user session
+          }
 
   auto-release:
     name: Auto-release tag

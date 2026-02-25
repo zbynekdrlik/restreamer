@@ -148,13 +148,14 @@ cargo tauri build                    # Production Tauri build (NSIS installer)
 
 ### Architecture
 
-- **Workspace** with 6 crates: `rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-service`, `src-tauri`
-- **Two binaries**: `restreamer-service.exe` (headless Windows service) + `Restreamer.exe` (Tauri tray app)
+- **Workspace** with 7 crates: `rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `src-tauri`
+- **Single unified binary**: `Restreamer.exe` (Tauri app with embedded service + Leptos/WASM UI)
+- **rs-runtime**: Contains `ServiceCore` for reusable service orchestration
 - **Database**: SQLite via `sqlx` with compile-time checked queries
 - **RTMP server**: Pure Rust (no ffmpeg dependency)
 - **S3 uploads**: `rust-s3` crate
-- **API**: Axum on `http://127.0.0.1:8910`
-- **Tray ↔ Service**: HTTP/WS to localhost (no named pipes)
+- **API**: Axum on `http://127.0.0.1:8910` (embedded in Tauri app)
+- **Frontend**: Leptos CSR WASM (all-Rust, no React/npm)
 
 ### Tauri Development
 
