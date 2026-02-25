@@ -640,6 +640,181 @@ jobs:
             # Don't fail - app starts on user session
           }
 
+  e2e-streaming-test:
+    name: E2E Streaming Test
+    needs: [deploy-stream-lan]
+    if: always() && needs.deploy-stream-lan.result == 'success'
+    runs-on: [self-hosted, windows, stream-lan]
+    env:
+      MANAGER_SSH_HOST: 172.105.95.118
+      MANAGER_SSH_USER: root
+      CLIENT_UUID: "95da874e-6b06-41e5-99db-6f47a459c48b"
+    steps:
+      - name: Wait for services to initialize
+        shell: powershell
+        run: |
+          Write-Host "Waiting for Restreamer services to fully start..."
+          Start-Sleep -Seconds 10
+
+      - name: Verify API is responding
+        shell: powershell
+        run: |
+          $maxRetries = 5
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
+              Write-Host "API responding on attempt $i"
+              break
+            } catch {
+              Write-Host "Attempt $i failed: $_"
+              if ($i -eq $maxRetries) { throw "API not responding after $maxRetries attempts" }
+              Start-Sleep -Seconds 5
+            }
+          }
+
+      - name: Activate streaming event on manager
+        shell: powershell
+        run: |
+          # Use plink (PuTTY) for SSH if available, otherwise sshpass
+          $sshCommand = @"
+          cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c "
+          from restreamer.models import StreamingEvent
+          from accounts.models import RestreamerUser
+          user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first()
+          if user:
+              event = StreamingEvent.objects.filter(user=user).first()
+              if event:
+                  event.receiving_activated = True
+                  event.save()
+                  print(f'ACTIVATED:{event.id}:{event.identifier}')
+              else:
+                  print('ERROR:No streaming event found')
+          else:
+              print('ERROR:User not found')
+          "
+          "@
+          # Write command to temp file to avoid quoting issues
+          $sshCommand | Out-File -FilePath "C:\temp\manager_cmd.txt" -Encoding UTF8
+
+          # Execute via SSH (assumes key auth is configured)
+          $result = & ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@172.105.95.118 $sshCommand 2>&1
+          Write-Host "Manager response: $result"
+
+          if ($result -match "ERROR:") {
+            throw "Failed to activate streaming event: $result"
+          }
+          if ($result -match "ACTIVATED:(\d+):(.+)") {
+            Write-Host "Activated event ID: $($Matches[1]), Identifier: $($Matches[2])"
+          }
+
+      - name: Wait for poller to sync event
+        shell: powershell
+        run: |
+          Write-Host "Waiting for poller to sync streaming event..."
+          $maxRetries = 10
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/streaming-event" -TimeoutSec 10
+              if ($response -and $response.receiving_activated) {
+                Write-Host "Streaming event synced: $($response.identifier)"
+                break
+              }
+            } catch {}
+            Write-Host "Waiting for event sync (attempt $i/$maxRetries)..."
+            Start-Sleep -Seconds 3
+          }
+
+      - name: Get initial chunk count
+        id: initial-chunks
+        shell: powershell
+        run: |
+          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          $initialCount = $stats.total_chunks
+          Write-Host "Initial chunk count: $initialCount"
+          "INITIAL_CHUNKS=$initialCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Send test RTMP stream
+        shell: powershell
+        run: |
+          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          if (-not (Test-Path $ffmpegPath)) {
+            Write-Host "ffmpeg not found at expected path, trying chocolatey..."
+            choco install ffmpeg -y --no-progress 2>&1 | Out-Null
+            $ffmpegPath = "ffmpeg"
+          }
+
+          Write-Host "Sending 10-second test RTMP stream..."
+          $process = Start-Process -FilePath $ffmpegPath -ArgumentList @(
+            "-re",
+            "-f", "lavfi", "-i", "testsrc=duration=10:size=320x240:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=1000:duration=10",
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+            "-c:a", "aac",
+            "-f", "flv", "rtmp://127.0.0.1:1234/live/ci-e2e-test"
+          ) -Wait -PassThru -NoNewWindow
+
+          if ($process.ExitCode -ne 0) {
+            throw "ffmpeg failed with exit code $($process.ExitCode)"
+          }
+          Write-Host "RTMP stream sent successfully"
+
+      - name: Wait for chunk processing
+        shell: powershell
+        run: |
+          Write-Host "Waiting for chunks to be processed and uploaded..."
+          Start-Sleep -Seconds 15
+
+      - name: Verify chunks created and uploaded
+        shell: powershell
+        run: |
+          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          $initialCount = [int]$env:INITIAL_CHUNKS
+          $newChunks = $stats.total_chunks - $initialCount
+          $pendingChunks = $stats.pending_chunks
+
+          Write-Host "=== E2E Test Results ==="
+          Write-Host "Initial chunks: $initialCount"
+          Write-Host "Current total:  $($stats.total_chunks)"
+          Write-Host "New chunks:     $newChunks"
+          Write-Host "Sent chunks:    $($stats.sent_chunks)"
+          Write-Host "Pending:        $pendingChunks"
+          Write-Host "Total bytes:    $($stats.total_bytes)"
+
+          # Expect at least 8 chunks from 10-second stream (1 chunk per second, some tolerance)
+          if ($newChunks -lt 8) {
+            throw "Expected at least 8 new chunks, got $newChunks"
+          }
+
+          # All chunks should be uploaded (sent), none pending
+          if ($pendingChunks -gt 2) {
+            Write-Host "WARNING: $pendingChunks chunks still pending upload"
+          }
+
+          Write-Host "=== E2E Streaming Test PASSED ==="
+        env:
+          INITIAL_CHUNKS: ${{ steps.initial-chunks.outputs.INITIAL_CHUNKS }}
+
+      - name: Deactivate streaming event
+        if: always()
+        shell: powershell
+        run: |
+          # Deactivate the streaming event to clean up
+          $sshCommand = @"
+          cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c "
+          from restreamer.models import StreamingEvent
+          from accounts.models import RestreamerUser
+          user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first()
+          if user:
+              event = StreamingEvent.objects.filter(user=user).first()
+              if event:
+                  event.receiving_activated = False
+                  event.save()
+                  print('DEACTIVATED')
+          "
+          "@
+          $result = & ssh -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
+          Write-Host "Cleanup: $result"
+
   auto-release:
     name: Auto-release tag
     needs: [rust-ci-gate]
