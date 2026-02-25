@@ -1,9 +1,0 @@
-/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/wasm32-unknown-unknown/debug/deps/concurrent_queue-13b7f01f3ffd14a2.d: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/bounded.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/single.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/unbounded.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/sync.rs
-
-/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/wasm32-unknown-unknown/debug/deps/libconcurrent_queue-13b7f01f3ffd14a2.rmeta: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/bounded.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/single.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/unbounded.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/sync.rs
-
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/lib.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/bounded.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/single.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/unbounded.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/concurrent-queue-2.5.0/src/sync.rs:

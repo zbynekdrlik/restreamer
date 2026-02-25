@@ -1,9 +1,0 @@
-/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/wasm32-unknown-unknown/debug/deps/serde_wasm_bindgen-48510527d3144c5b.d: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/de.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/error.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/ser.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/../README.md
-
-/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/wasm32-unknown-unknown/debug/deps/libserde_wasm_bindgen-48510527d3144c5b.rmeta: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/de.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/error.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/ser.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/../README.md
-
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/lib.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/de.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/error.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/ser.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-wasm-bindgen-0.6.5/src/../README.md:

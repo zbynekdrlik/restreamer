@@ -106,7 +106,21 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
 
 ## Rust Development (`local-client-rs/`)
 
-### Build Commands
+### LOCAL BUILDS PROHIBITED
+
+**NEVER run Rust builds locally on this machine.** All Rust compilation (cargo build, cargo test, trunk build, tauri build) must happen on GitHub Actions runners only.
+
+- Do NOT run `cargo build`, `cargo test`, `cargo clippy`, or any compilation commands locally
+- Do NOT run `trunk build` or `trunk serve` locally
+- Do NOT run `cargo tauri dev` or `cargo tauri build` locally
+- Push changes to `dev` branch and let CI handle all builds and tests
+- Review CI output for build errors and test failures
+
+**Why:** Local builds consume excessive disk space (20GB+) and CPU. GitHub runners handle this better.
+
+### Build Commands (CI ONLY - for reference)
+
+These commands run on GitHub Actions, not locally:
 
 ```bash
 cd local-client-rs
@@ -118,10 +132,8 @@ cargo clippy --workspace -- -D warnings  # Lint
 
 # Leptos frontend (WASM)
 cd leptos-ui && trunk build --release  # Production WASM build
-cd leptos-ui && trunk serve --port 5173  # Dev server
 
 # Tauri unified app
-cargo tauri dev                      # Hot-reload Tauri app (dev mode)
 cargo tauri build                    # Production Tauri build (NSIS installer)
 ```
 

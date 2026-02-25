@@ -1,8 +1,0 @@
-/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/wasm32-unknown-unknown/debug/deps/proc_macro2_diagnostics-b6d0cf1cf8bde3ff.d: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/ext.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/diagnostic.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/line.rs
-
-/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/wasm32-unknown-unknown/debug/deps/libproc_macro2_diagnostics-b6d0cf1cf8bde3ff.rmeta: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/ext.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/diagnostic.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/line.rs
-
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/lib.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/ext.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/diagnostic.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-diagnostics-0.10.1/src/line.rs:

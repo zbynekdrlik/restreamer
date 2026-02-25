@@ -1,8 +1,0 @@
-/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/debug/deps/linear_map-72623e43e0293080.d: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linear-map-1.2.0/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linear-map-1.2.0/src/set.rs
-
-/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/debug/deps/liblinear_map-72623e43e0293080.rlib: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linear-map-1.2.0/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linear-map-1.2.0/src/set.rs
-
-/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/debug/deps/liblinear_map-72623e43e0293080.rmeta: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linear-map-1.2.0/src/lib.rs /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linear-map-1.2.0/src/set.rs
-
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linear-map-1.2.0/src/lib.rs:
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linear-map-1.2.0/src/set.rs:

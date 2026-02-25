@@ -1,5 +1,0 @@
-/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/debug/deps/syn_derive-8102c524767bf15a.d: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/syn_derive-0.2.0/src/lib.rs
-
-/home/newlevel/devel/restreamer/.worktrees/unified-tauri-leptos/local-client-rs/leptos-ui/target/debug/deps/libsyn_derive-8102c524767bf15a.so: /home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/syn_derive-0.2.0/src/lib.rs
-
-/home/newlevel/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/syn_derive-0.2.0/src/lib.rs:
