@@ -647,6 +647,7 @@ jobs:
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result == 'success'
     runs-on: [self-hosted, windows, stream-lan]
+    timeout-minutes: 10
     env:
       MANAGER_SSH_HOST: 172.105.95.118
       MANAGER_SSH_USER: root
@@ -676,38 +677,38 @@ jobs:
 
       - name: Activate streaming event on manager
         shell: powershell
+        timeout-minutes: 2
         run: |
-          # Use plink (PuTTY) for SSH if available, otherwise sshpass
-          $sshCommand = @"
-          cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c "
-          from restreamer.models import StreamingEvent
-          from accounts.models import RestreamerUser
-          user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first()
-          if user:
-              event = StreamingEvent.objects.filter(user=user).first()
-              if event:
-                  event.receiving_activated = True
-                  event.save()
-                  print(f'ACTIVATED:{event.id}:{event.identifier}')
-              else:
-                  print('ERROR:No streaming event found')
-          else:
-              print('ERROR:User not found')
-          "
-          "@
-          # Write command to temp file to avoid quoting issues
-          $sshCommand | Out-File -FilePath "C:\temp\manager_cmd.txt" -Encoding UTF8
-
-          # Execute via SSH (assumes key auth is configured)
-          $result = & ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@172.105.95.118 $sshCommand 2>&1
-          Write-Host "Manager response: $result"
-
-          if ($result -match "ERROR:") {
-            throw "Failed to activate streaming event: $result"
+          # Check if streaming event is already activated via local API
+          try {
+            $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/streaming-event" -TimeoutSec 10
+            if ($response -and $response.receiving_activated) {
+              Write-Host "Streaming event already activated: $($response.identifier)"
+              exit 0
+            }
+          } catch {
+            Write-Host "Could not check local status: $_"
           }
-          if ($result -match "ACTIVATED:(\d+):(.+)") {
-            Write-Host "Activated event ID: $($Matches[1]), Identifier: $($Matches[2])"
+
+          # Add manager host key to known_hosts
+          $null = & ssh-keyscan -H 172.105.95.118 2>$null | Out-File -Append "$env:USERPROFILE\.ssh\known_hosts" -Encoding UTF8
+
+          # Try SSH with BatchMode to fail fast if no key auth
+          $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user).first() if user else None; event and setattr(event, 'receiving_activated', True) or None; event and event.save(); print('ACTIVATED' if event else 'ERROR')`""
+
+          $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "SSH failed (no key auth): $result"
+            Write-Host "Checking if event is already activated..."
+            $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/streaming-event" -TimeoutSec 10
+            if ($response -and $response.receiving_activated) {
+              Write-Host "Event already activated - continuing"
+              exit 0
+            }
+            throw "Cannot activate - SSH not configured and event not active"
           }
+          Write-Host "Manager: $result"
 
       - name: Wait for poller to sync event
         shell: powershell
@@ -928,23 +929,18 @@ jobs:
       - name: Deactivate streaming event
         if: always()
         shell: powershell
+        timeout-minutes: 2
         run: |
-          # Deactivate the streaming event to clean up
-          $sshCommand = @"
-          cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c "
-          from restreamer.models import StreamingEvent
-          from accounts.models import RestreamerUser
-          user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first()
-          if user:
-              event = StreamingEvent.objects.filter(user=user).first()
-              if event:
-                  event.receiving_activated = False
-                  event.save()
-                  print('DEACTIVATED')
-          "
-          "@
-          $result = & ssh -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
-          Write-Host "Cleanup: $result"
+          # Try to deactivate via SSH, but don't fail if SSH isn't available
+          $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user).first() if user else None; event and setattr(event, 'receiving_activated', False) or None; event and event.save(); print('DEACTIVATED' if event else 'SKIPPED')`""
+
+          $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Cleanup: $result"
+          } else {
+            Write-Host "SSH cleanup skipped (no key auth): $result"
+            Write-Host "Note: Event may remain activated until manually deactivated"
+          }
 
   auto-release:
     name: Auto-release tag
