@@ -742,19 +742,24 @@ jobs:
         run: |
           # Send a 15-second test stream to Restreamer RTMP endpoint
           # Using ffmpeg with synthetic video/audio (reliable for CI testing)
+          $ErrorActionPreference = 'Continue'
           $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
 
           Write-Host "Starting 15-second test RTMP stream..."
-          & $ffmpegPath -y -re `
-            -f lavfi -i "testsrc=duration=15:size=320x240:rate=30" `
-            -f lavfi -i "sine=frequency=1000:duration=15" `
-            -c:v libx264 -preset ultrafast -c:a aac `
-            -f flv "rtmp://127.0.0.1:1234/live/ci-e2e-test" 2>&1 | ForEach-Object { Write-Host $_ }
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "ffmpeg failed with exit code $LASTEXITCODE"
+          # ffmpeg outputs to stderr, so use Start-Process to avoid PowerShell error handling
+          $proc = Start-Process -FilePath $ffmpegPath -ArgumentList @(
+            "-y", "-re",
+            "-f", "lavfi", "-i", "testsrc=duration=15:size=320x240:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=1000:duration=15",
+            "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+            "-f", "flv", "rtmp://127.0.0.1:1234/live/ci-e2e-test"
+          ) -NoNewWindow -Wait -PassThru
+
+          if ($proc.ExitCode -ne 0) {
+            throw "ffmpeg failed with exit code $($proc.ExitCode)"
           }
-          Write-Host "Test stream completed"
+          Write-Host "Test stream completed successfully"
 
       - name: Wait for chunk processing
         shell: powershell
@@ -798,15 +803,20 @@ jobs:
         timeout-minutes: 2
         run: |
           # Try to deactivate via SSH, but don't fail if SSH isn't available
+          # Note: This step always succeeds - cleanup failure is non-critical
+          $ErrorActionPreference = 'SilentlyContinue'
+
           $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user).first() if user else None; event and setattr(event, 'receiving_activated', False) or None; event and event.save(); print('DEACTIVATED' if event else 'SKIPPED')`""
 
           $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
           if ($LASTEXITCODE -eq 0) {
             Write-Host "Cleanup: $result"
           } else {
-            Write-Host "SSH cleanup skipped (no key auth): $result"
+            Write-Host "SSH cleanup skipped (no key auth configured)"
             Write-Host "Note: Event may remain activated until manually deactivated"
           }
+          # Always exit successfully - cleanup is best-effort
+          exit 0
 
   auto-release:
     name: Auto-release tag
