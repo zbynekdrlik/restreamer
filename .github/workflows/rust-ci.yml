@@ -736,143 +736,25 @@ jobs:
           Write-Host "Initial chunk count: $initialCount"
           "INITIAL_CHUNKS=$initialCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Configure OBS to stream to Restreamer
+      - name: Send test RTMP stream via ffmpeg
         shell: powershell
+        timeout-minutes: 2
         run: |
-          # Backup current OBS config and set to stream to local Restreamer
-          $servicePath = "C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json"
-          $backupPath = "$servicePath.ci-backup"
+          # Send a 15-second test stream to Restreamer RTMP endpoint
+          # Using ffmpeg with synthetic video/audio (reliable for CI testing)
+          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
 
-          if (Test-Path $servicePath) {
-            Copy-Item $servicePath $backupPath -Force
-            Write-Host "Backed up OBS service config"
+          Write-Host "Starting 15-second test RTMP stream..."
+          & $ffmpegPath -y -re `
+            -f lavfi -i "testsrc=duration=15:size=320x240:rate=30" `
+            -f lavfi -i "sine=frequency=1000:duration=15" `
+            -c:v libx264 -preset ultrafast -c:a aac `
+            -f flv "rtmp://127.0.0.1:1234/live/ci-e2e-test" 2>&1 | ForEach-Object { Write-Host $_ }
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "ffmpeg failed with exit code $LASTEXITCODE"
           }
-
-          # Set OBS to stream to local Restreamer RTMP
-          $config = @{
-            type = "rtmp_custom"
-            settings = @{
-              server = "rtmp://127.0.0.1:1234/live"
-              key = "ci-e2e-test"
-            }
-          }
-          $config | ConvertTo-Json -Depth 5 | Set-Content $servicePath -Encoding UTF8
-          Write-Host "Configured OBS to stream to Restreamer"
-
-      - name: Start OBS streaming via WebSocket
-        shell: powershell
-        run: |
-          # OBS WebSocket is at ws://127.0.0.1:4455 with password JhRfqdTmuifYq60y
-          # Using PowerShell System.Net.WebSockets
-
-          Add-Type -AssemblyName System.Net.WebSockets
-
-          $ws = New-Object System.Net.WebSockets.ClientWebSocket
-          $uri = [System.Uri]::new("ws://127.0.0.1:4455")
-          $ct = [System.Threading.CancellationToken]::None
-
-          try {
-            # Connect to OBS WebSocket
-            $ws.ConnectAsync($uri, $ct).Wait()
-            Write-Host "Connected to OBS WebSocket"
-
-            # Receive Hello message
-            $buffer = New-Object byte[] 4096
-            $segment = New-Object System.ArraySegment[byte] -ArgumentList @(,$buffer)
-            $result = $ws.ReceiveAsync($segment, $ct).Result
-            $hello = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $result.Count)
-            Write-Host "Received: $hello"
-
-            # Send Identify (auth not required per skill doc)
-            $identify = '{"op":1,"d":{"rpcVersion":1}}'
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($identify)
-            $segment = New-Object System.ArraySegment[byte] -ArgumentList @(,$bytes)
-            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $ct).Wait()
-
-            # Receive Identified
-            $buffer = New-Object byte[] 4096
-            $segment = New-Object System.ArraySegment[byte] -ArgumentList @(,$buffer)
-            $result = $ws.ReceiveAsync($segment, $ct).Result
-            $identified = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $result.Count)
-            Write-Host "Identified: $identified"
-
-            # Start streaming
-            $startStream = '{"op":6,"d":{"requestType":"StartStream","requestId":"start-1"}}'
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($startStream)
-            $segment = New-Object System.ArraySegment[byte] -ArgumentList @(,$bytes)
-            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $ct).Wait()
-
-            # Receive response
-            $buffer = New-Object byte[] 4096
-            $segment = New-Object System.ArraySegment[byte] -ArgumentList @(,$buffer)
-            $result = $ws.ReceiveAsync($segment, $ct).Result
-            $response = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $result.Count)
-            Write-Host "StartStream response: $response"
-
-            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", $ct).Wait()
-            Write-Host "OBS streaming started via WebSocket"
-          } catch {
-            Write-Host "WebSocket error: $_"
-            # Fallback to ffmpeg if OBS WebSocket fails
-            Write-Host "Falling back to ffmpeg test stream..."
-            $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
-            Start-Process -FilePath $ffmpegPath -ArgumentList @(
-              "-re", "-f", "lavfi", "-i", "testsrc=duration=15:size=320x240:rate=30",
-              "-f", "lavfi", "-i", "sine=frequency=1000:duration=15",
-              "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
-              "-f", "flv", "rtmp://127.0.0.1:1234/live/ci-e2e-test"
-            ) -Wait -NoNewWindow
-          }
-
-      - name: Wait for OBS to stream (15 seconds)
-        shell: powershell
-        run: |
-          Write-Host "Letting OBS stream for 15 seconds..."
-          Start-Sleep -Seconds 15
-
-      - name: Stop OBS streaming via WebSocket
-        shell: powershell
-        run: |
-          Add-Type -AssemblyName System.Net.WebSockets
-
-          $ws = New-Object System.Net.WebSockets.ClientWebSocket
-          $uri = [System.Uri]::new("ws://127.0.0.1:4455")
-          $ct = [System.Threading.CancellationToken]::None
-
-          try {
-            $ws.ConnectAsync($uri, $ct).Wait()
-
-            # Identify
-            $buffer = New-Object byte[] 4096
-            $segment = New-Object System.ArraySegment[byte] -ArgumentList @(,$buffer)
-            $ws.ReceiveAsync($segment, $ct).Wait() | Out-Null
-
-            $identify = '{"op":1,"d":{"rpcVersion":1}}'
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($identify)
-            $segment = New-Object System.ArraySegment[byte] -ArgumentList @(,$bytes)
-            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $ct).Wait()
-
-            $buffer = New-Object byte[] 4096
-            $segment = New-Object System.ArraySegment[byte] -ArgumentList @(,$buffer)
-            $ws.ReceiveAsync($segment, $ct).Wait() | Out-Null
-
-            # Stop streaming
-            $stopStream = '{"op":6,"d":{"requestType":"StopStream","requestId":"stop-1"}}'
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($stopStream)
-            $segment = New-Object System.ArraySegment[byte] -ArgumentList @(,$bytes)
-            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $ct).Wait()
-
-            $buffer = New-Object byte[] 4096
-            $segment = New-Object System.ArraySegment[byte] -ArgumentList @(,$buffer)
-            $result = $ws.ReceiveAsync($segment, $ct).Result
-            $response = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $result.Count)
-            Write-Host "StopStream response: $response"
-
-            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", $ct).Wait()
-            Write-Host "OBS streaming stopped"
-          } catch {
-            Write-Host "Stop streaming error (may already be stopped): $_"
-          }
+          Write-Host "Test stream completed"
 
       - name: Wait for chunk processing
         shell: powershell
@@ -896,7 +778,7 @@ jobs:
           Write-Host "Pending:        $pendingChunks"
           Write-Host "Total bytes:    $($stats.total_bytes)"
 
-          # Expect at least 8 chunks from 10-second stream (1 chunk per second, some tolerance)
+          # Expect at least 8 chunks from 15-second stream (1 chunk per second, some tolerance)
           if ($newChunks -lt 8) {
             throw "Expected at least 8 new chunks, got $newChunks"
           }
@@ -909,22 +791,6 @@ jobs:
           Write-Host "=== E2E Streaming Test PASSED ==="
         env:
           INITIAL_CHUNKS: ${{ steps.initial-chunks.outputs.INITIAL_CHUNKS }}
-
-      - name: Restore OBS config
-        if: always()
-        shell: powershell
-        run: |
-          # Restore OBS config to original YouTube settings
-          $servicePath = "C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json"
-          $backupPath = "$servicePath.ci-backup"
-
-          if (Test-Path $backupPath) {
-            Copy-Item $backupPath $servicePath -Force
-            Remove-Item $backupPath -Force
-            Write-Host "Restored OBS service config"
-          } else {
-            Write-Host "No backup to restore"
-          }
 
       - name: Deactivate streaming event
         if: always()
