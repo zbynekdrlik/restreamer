@@ -556,6 +556,19 @@ jobs:
           taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
           taskkill /F /IM "restreamer-tray.exe" 2>&1 | Out-Null
           taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+
+          # CRITICAL: Stop and disable old Python NSSM services that block RTMP port 1234
+          Write-Host "=== Disabling legacy Python services ==="
+          foreach ($svc in @("inpoint_service", "endpoint_service")) {
+            $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+            if ($service) {
+              Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+              Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
+              Write-Host "Disabled: $svc"
+            }
+          }
+          # Kill any ffmpeg processes spawned by old services (they hold RTMP port 1234)
+          taskkill /F /IM "ffmpeg.exe" 2>&1 | Out-Null
           Start-Sleep -Seconds 2
 
           # Remove old service if it exists (unified app doesn't use Windows service)
