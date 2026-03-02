@@ -806,9 +806,57 @@ jobs:
             Write-Host "WARNING: $pendingChunks chunks still pending upload"
           }
 
-          Write-Host "=== E2E Streaming Test PASSED ==="
+          Write-Host "=== Local E2E Test PASSED ==="
         env:
           INITIAL_CHUNKS: ${{ steps.initial-chunks.outputs.INITIAL_CHUNKS }}
+
+      - name: Verify chunks received by manager
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Verifying chunks were received by manager server..."
+
+          # Add manager host key
+          $null = & ssh-keyscan -H 172.105.95.118 2>$null | Out-File -Append "$env:USERPROFILE\.ssh\known_hosts" -Encoding UTF8
+
+          # Check chunk count on manager
+          $sshCommand = @"
+cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c "
+from restreamer.models import ChunkRecord
+from django.utils import timezone
+from datetime import timedelta
+
+recent = timezone.now() - timedelta(minutes=5)
+count = ChunkRecord.objects.filter(created_at__gte=recent).count()
+latest = ChunkRecord.objects.order_by('-created_at').first()
+print(f'CHUNKS_RECEIVED:{count}')
+print(f'LATEST_ID:{latest.id if latest else 0}')
+print(f'LATEST_TIME:{latest.created_at if latest else \"none\"}')
+"
+"@
+
+          $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "SSH to manager failed: $result"
+            Write-Host "Skipping manager verification (SSH not configured)"
+            exit 0
+          }
+
+          Write-Host "Manager response: $result"
+
+          # Parse chunk count from response
+          $chunkLine = ($result -split "`n" | Where-Object { $_ -match "CHUNKS_RECEIVED:" }) -replace "CHUNKS_RECEIVED:",""
+          $receivedCount = [int]$chunkLine.Trim()
+
+          Write-Host "Chunks received by manager in last 5 minutes: $receivedCount"
+
+          if ($receivedCount -lt 5) {
+            throw "Expected at least 5 chunks on manager, got $receivedCount"
+          }
+
+          Write-Host "=== FULL E2E INTEGRATION TEST PASSED ==="
+          Write-Host "Stream -> Restreamer -> S3 -> Manager: VERIFIED"
 
       - name: Deactivate streaming event
         if: always()
