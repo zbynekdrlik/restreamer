@@ -364,9 +364,84 @@ sshpass -p 'newlevel' ssh newlevel@stream.lan 'netstat -ano | findstr ":1234"'
 2. Check internet connectivity
 3. Check manager API is accessible
 
+## OBS Management Rules
+
+### NEVER Kill OBS Abruptly
+
+**DO NOT** use `taskkill /F /IM obs64.exe` - this causes:
+
+1. Recovery dialog on next start
+2. Duplicate OBS processes
+3. WebSocket server not starting
+4. Broken state that requires user intervention
+
+### Proper OBS Restart (if absolutely necessary)
+
+```bash
+# CORRECT: Graceful shutdown via WebSocket
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'python -c "
+import asyncio, json, websockets
+async def quit_obs():
+    async with websockets.connect(\"ws://127.0.0.1:4455\") as ws:
+        await ws.recv()
+        await ws.send(json.dumps({\"op\":1,\"d\":{\"rpcVersion\":1}}))
+        await ws.recv()
+        await ws.send(json.dumps({\"op\":6,\"d\":{\"requestType\":\"ExitOBS\",\"requestId\":\"1\"}}))
+        print(await ws.recv())
+asyncio.run(quit_obs())
+" > C:\temp\obs_quit.txt 2>&1'
+```
+
+### Prefer WebSocket Over Config Changes
+
+Instead of editing service.json and restarting OBS, use WebSocket API:
+
+- `SetStreamServiceSettings` - change stream destination
+- `StartStream` / `StopStream` - control streaming
+- Changes take effect immediately, no restart needed
+
+### Starting OBS Correctly
+
+**ALWAYS use the scheduled task** - it has the correct flags:
+
+```bash
+# CORRECT: Use scheduled task (has --disable-shutdown-check flag)
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Start-ScheduledTask -TaskName \"Start OBS Studio\""'
+```
+
+The scheduled task runs: `"C:\Program Files\obs-studio\bin\64bit\obs64.exe" --disable-shutdown-check`
+
+**NEVER start OBS directly** without the flag:
+
+```bash
+# WRONG - causes recovery dialogs on next improper shutdown
+Start-Process 'C:\Program Files\obs-studio\bin\64bit\obs64.exe'
+```
+
+### Recovery From Bad State (duplicate OBS processes)
+
+If OBS is in bad state with recovery dialog:
+
+1. **Ask the user** to manually close OBS and dismiss dialogs
+2. Then use scheduled task to start fresh: `Start-ScheduledTask -TaskName "Start OBS Studio"`
+3. **NEVER try to kill OBS processes remotely** - this makes things worse
+
+### Checking OBS Health
+
+```bash
+# Verify single OBS process
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'tasklist | findstr obs'
+# Should show exactly ONE obs64.exe process
+
+# Verify WebSocket is listening (TCP, not UDP!)
+sshpass -p 'newlevel' ssh newlevel@stream.lan 'netstat -an | findstr "4455.*LISTENING"'
+# Should show TCP listener on 4455
+```
+
 ## Important Notes
 
 - **NEVER** give manual instructions when these automated commands exist
+- **NEVER** kill OBS with taskkill - use WebSocket ExitOBS or ask user
 - **ALWAYS** verify current state before making changes
 - **ALWAYS** backup configs before modifying
 - The last chunk timestamp tells you if streaming is active
