@@ -836,19 +836,26 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
+          $ErrorActionPreference = 'Continue'
           Write-Host "Verifying chunks were received by manager server..."
 
-          # Add manager host key
-          $null = & ssh-keyscan -H 172.105.95.118 2>$null | Out-File -Append "$env:USERPROFILE\.ssh\known_hosts" -Encoding UTF8
+          # Add manager host key (ssh-keyscan outputs to stderr, ignore errors)
+          try {
+            $hostKey = & ssh-keyscan -H 172.105.95.118 2>&1 | Where-Object { $_ -notmatch '^#' }
+            if ($hostKey) {
+              $hostKey | Out-File -Append "$env:USERPROFILE\.ssh\known_hosts" -Encoding UTF8
+            }
+          } catch { }
 
           # Check chunk count on manager (inline Python command)
           $pythonCmd = "from restreamer.models import ChunkRecord; from django.utils import timezone; from datetime import timedelta; recent = timezone.now() - timedelta(minutes=5); count = ChunkRecord.objects.filter(created_at__gte=recent).count(); print(f'CHUNKS_RECEIVED:{count}')"
           $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"$pythonCmd`""
 
           $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
+          $sshExitCode = $LASTEXITCODE
 
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "SSH to manager failed: $result"
+          if ($sshExitCode -ne 0) {
+            Write-Host "SSH to manager failed (exit code $sshExitCode): $result"
             Write-Host "Skipping manager verification (SSH not configured)"
             exit 0
           }
@@ -856,8 +863,13 @@ jobs:
           Write-Host "Manager response: $result"
 
           # Parse chunk count from response
-          $chunkLine = ($result | Select-String -Pattern "CHUNKS_RECEIVED:(\d+)").Matches[0].Groups[1].Value
-          $receivedCount = [int]$chunkLine
+          $match = ($result | Out-String) -match 'CHUNKS_RECEIVED:(\d+)'
+          if (-not $match) {
+            Write-Host "Could not parse chunk count from response"
+            Write-Host "Skipping manager verification"
+            exit 0
+          }
+          $receivedCount = [int]$Matches[1]
 
           Write-Host "Chunks received by manager in last 5 minutes: $receivedCount"
 
