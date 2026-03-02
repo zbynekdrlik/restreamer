@@ -729,7 +729,8 @@ jobs:
           $null = & ssh-keyscan -H 172.105.95.118 2>$null | Out-File -Append "$env:USERPROFILE\.ssh\known_hosts" -Encoding UTF8
 
           # Try SSH with BatchMode to fail fast if no key auth
-          $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user).first() if user else None; event and setattr(event, 'receiving_activated', True) or None; event and event.save(); print('ACTIVATED' if event else 'ERROR')`""
+          # NOTE: Specifically target E2E-Test event, not SNV-stream (production)
+          $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first() if user else None; event and setattr(event, 'receiving_activated', True) or None; event and event.save(); print('ACTIVATED E2E-Test' if event else 'ERROR')`""
 
           $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
 
@@ -889,7 +890,8 @@ jobs:
           # Note: This step always succeeds - cleanup failure is non-critical
           $ErrorActionPreference = 'SilentlyContinue'
 
-          $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user).first() if user else None; event and setattr(event, 'receiving_activated', False) or None; event and event.save(); print('DEACTIVATED' if event else 'SKIPPED')`""
+          # NOTE: Specifically target E2E-Test event, not SNV-stream (production)
+          $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first() if user else None; event and setattr(event, 'receiving_activated', False) or None; event and event.save(); print('DEACTIVATED E2E-Test' if event else 'SKIPPED')`""
 
           $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
           if ($LASTEXITCODE -eq 0) {
