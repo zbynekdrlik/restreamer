@@ -888,40 +888,8 @@ jobs:
           $ErrorActionPreference = 'Continue'
           Write-Host "Activating delivering for E2E-Test event..."
 
-          # Activate delivering_activated and trigger init_stream
-          $pythonCmd = @"
-from restreamer.models import StreamingEvent, EndPointCfg, ChunkRecord
-from restreamer.tasks import init_stream
-from accounts.models import RestreamerUser
-
-user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first()
-event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first()
-
-if event:
-    # Activate delivering
-    event.delivering_activated = True
-    event.save()
-    print(f'DELIVERING_ACTIVATED:{event.id}')
-
-    # Get enabled endpoint
-    endpoint = EndPointCfg.objects.filter(streamingevent=event, enabled=True).first()
-    if endpoint:
-        print(f'ENDPOINT:{endpoint.alias}:{endpoint.service_type}')
-
-        # Get recent chunk for init
-        chunk = ChunkRecord.objects.filter(streaming_event=event).order_by('-local_id')[4:5].first()
-        if chunk:
-            print(f'INIT_CHUNK:{chunk.local_id}')
-            # Trigger init_stream task
-            init_stream.delay(user.id, event.id, endpoint_id=endpoint.id)
-            print('INIT_STREAM_QUEUED')
-        else:
-            print('NO_CHUNKS_FOR_INIT')
-    else:
-        print('NO_ENDPOINT')
-else:
-    print('NO_EVENT')
-"@
+          # Activate delivering_activated and trigger init_stream (inline Python)
+          $pythonCmd = "from restreamer.models import StreamingEvent, EndPointCfg, ChunkRecord; from restreamer.tasks import init_stream; from accounts.models import RestreamerUser; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first() if user else None; event and setattr(event, 'delivering_activated', True); event and event.save(); endpoint = EndPointCfg.objects.filter(streamingevent=event, enabled=True).first() if event else None; chunk = ChunkRecord.objects.filter(streaming_event=event).order_by('-local_id')[4:5].first() if event else None; init_stream.delay(user.id, event.id, endpoint_id=endpoint.id) if (event and endpoint and chunk) else None; print(f'DELIVERING_ACTIVATED:{event.id}' if event else 'NO_EVENT'); print(f'ENDPOINT:{endpoint.alias}' if endpoint else 'NO_ENDPOINT'); print(f'INIT_CHUNK:{chunk.local_id}' if chunk else 'NO_CHUNKS'); print('INIT_STREAM_QUEUED' if (event and endpoint and chunk) else 'INIT_SKIPPED')"
           $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"$pythonCmd`""
 
           $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
@@ -935,7 +903,6 @@ else:
           Write-Host "Delivery activation result:"
           $result | ForEach-Object { Write-Host "  $_" }
 
-          # Check if init was queued
           if ($result -match 'INIT_STREAM_QUEUED') {
             Write-Host "YouTube delivery initialized successfully"
           } else {
@@ -956,34 +923,8 @@ else:
           $ErrorActionPreference = 'Continue'
           Write-Host "Checking delivering server status..."
 
-          # Check if delivering server is ready and processing
-          $pythonCmd = @"
-from restreamer.views.instances import InstanceManager
-from restreamer.models import StreamingEvent
-from accounts.models import RestreamerUser
-import requests
-
-user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first()
-event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first()
-
-if event and event.delivering_activated:
-    im = InstanceManager(user.id)
-    ip = im.get_my_server_ip()
-    if ip:
-        print(f'DELIVERING_SERVER_IP:{ip}')
-        try:
-            response = requests.get(f'http://{ip}:8000/api/raceive_init_data/', timeout=5)
-            if response.status_code == 200:
-                print('DELIVERING_SERVER_READY')
-            else:
-                print(f'DELIVERING_SERVER_STATUS:{response.status_code}')
-        except Exception as e:
-            print(f'DELIVERING_SERVER_ERROR:{e}')
-    else:
-        print('NO_DELIVERING_SERVER_IP')
-else:
-    print('DELIVERING_NOT_ACTIVATED')
-"@
+          # Check if delivering server is ready (inline Python)
+          $pythonCmd = "from restreamer.views.instances import InstanceManager; from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; import requests; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first() if user else None; im = InstanceManager(user.id) if (event and event.delivering_activated) else None; ip = im.get_my_server_ip() if im else None; print(f'DELIVERING_SERVER_IP:{ip}' if ip else 'NO_IP'); resp = requests.get(f'http://{ip}:8000/api/raceive_init_data/', timeout=5) if ip else None; print('DELIVERING_SERVER_READY' if (resp and resp.status_code == 200) else f'DELIVERING_SERVER_STATUS:{resp.status_code if resp else \"NO_RESPONSE\"}')"
           $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"$pythonCmd`""
 
           $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
@@ -1015,35 +956,8 @@ else:
           $ErrorActionPreference = 'SilentlyContinue'
 
           # NOTE: Specifically target E2E-Test event, not SNV-stream (production)
-          # Deactivate both receiving and delivering
-          $pythonCmd = @"
-from restreamer.models import StreamingEvent
-from accounts.models import RestreamerUser
-import requests
-
-user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first()
-event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first()
-
-if event:
-    # Stop delivering server endpoint first
-    if event.delivering_activated:
-        from restreamer.views.instances import InstanceManager
-        try:
-            im = InstanceManager(user.id)
-            ip = im.get_my_server_ip()
-            if ip:
-                requests.post(f'http://{ip}:8000/api/end_stream/', json={'alias': None}, timeout=5)
-                print('STOPPED_DELIVERING')
-        except:
-            pass
-
-    event.receiving_activated = False
-    event.delivering_activated = False
-    event.save()
-    print('DEACTIVATED E2E-Test')
-else:
-    print('SKIPPED')
-"@
+          # Deactivate both receiving and delivering (inline Python)
+          $pythonCmd = "from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; import requests; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first() if user else None; exec('from restreamer.views.instances import InstanceManager; im = InstanceManager(user.id); ip = im.get_my_server_ip(); requests.post(f\"http://{ip}:8000/api/end_stream/\", json={\"alias\": None}, timeout=5) if ip else None; print(\"STOPPED_DELIVERING\")') if (event and event.delivering_activated) else None; event and setattr(event, 'receiving_activated', False); event and setattr(event, 'delivering_activated', False); event and event.save(); print('DEACTIVATED E2E-Test' if event else 'SKIPPED')"
           $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"$pythonCmd`""
 
           $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
