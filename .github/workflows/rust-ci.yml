@@ -228,8 +228,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: local-client-rs
-      - name: Install trunk
-        run: cargo install trunk
+      - name: Install trunk and wasm-bindgen-cli
+        run: |
+          cargo install trunk wasm-bindgen-cli
+      - name: Install binaryen (wasm-opt)
+        shell: pwsh
+        run: |
+          # Download and extract binaryen for wasm optimization
+          $version = "version_123"
+          $url = "https://github.com/WebAssembly/binaryen/releases/download/$version/binaryen-$version-x86_64-windows.tar.gz"
+          $outFile = "$env:TEMP\binaryen.tar.gz"
+          $retries = 3
+          for ($i = 1; $i -le $retries; $i++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $outFile -TimeoutSec 120
+              break
+            } catch {
+              Write-Host "Download attempt $i failed: $_"
+              if ($i -eq $retries) { throw "Failed to download binaryen after $retries attempts" }
+              Start-Sleep -Seconds 10
+            }
+          }
+          tar -xzf $outFile -C $env:TEMP
+          Copy-Item "$env:TEMP\binaryen-$version\bin\wasm-opt.exe" "$env:CARGO_HOME\bin\"
+          Write-Host "Installed wasm-opt to $env:CARGO_HOME\bin\"
       - name: Build Leptos UI (WASM)
         run: |
           cd leptos-ui
