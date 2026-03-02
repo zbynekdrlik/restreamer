@@ -714,37 +714,22 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
-          # Check if streaming event is already activated via local API
-          try {
-            $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/streaming-event" -TimeoutSec 10
-            if ($response -and $response.receiving_activated) {
-              Write-Host "Streaming event already activated: $($response.identifier)"
-              exit 0
-            }
-          } catch {
-            Write-Host "Could not check local status: $_"
+          # Activate receiving via E2E API (no SSH needed)
+          $body = @{
+            user_uuid = $env:CLIENT_UUID
+            event_name = "E2E-Test"
+          } | ConvertTo-Json
+
+          Write-Host "Activating E2E-Test streaming event via API..."
+          $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/activate-receiving/" `
+            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+
+          if ($response.status -ne "ok") {
+            throw "Failed to activate receiving: $($response | ConvertTo-Json)"
           }
 
-          # Add manager host key to known_hosts
-          $null = & ssh-keyscan -H 172.105.95.118 2>$null | Out-File -Append "$env:USERPROFILE\.ssh\known_hosts" -Encoding UTF8
-
-          # Try SSH with BatchMode to fail fast if no key auth
-          # NOTE: Specifically target E2E-Test event, not SNV-stream (production)
-          $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first() if user else None; event and setattr(event, 'receiving_activated', True) or None; event and event.save(); print('ACTIVATED E2E-Test' if event else 'ERROR')`""
-
-          $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "SSH failed (no key auth): $result"
-            Write-Host "Checking if event is already activated..."
-            $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/streaming-event" -TimeoutSec 10
-            if ($response -and $response.receiving_activated) {
-              Write-Host "Event already activated - continuing"
-              exit 0
-            }
-            throw "Cannot activate - SSH not configured and event not active"
-          }
-          Write-Host "Manager: $result"
+          Write-Host "Activated event $($response.event_id): $($response.event_name)"
+          Write-Host "receiving_activated: $($response.receiving_activated)"
 
       - name: Wait for poller to sync event
         shell: powershell
@@ -833,81 +818,34 @@ jobs:
         env:
           INITIAL_CHUNKS: ${{ steps.initial-chunks.outputs.INITIAL_CHUNKS }}
 
-      - name: Verify chunks received by manager
-        shell: powershell
-        timeout-minutes: 2
-        run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "Verifying chunks were received by manager server..."
-
-          # Add manager host key (ssh-keyscan outputs to stderr, ignore errors)
-          try {
-            $hostKey = & ssh-keyscan -H 172.105.95.118 2>&1 | Where-Object { $_ -notmatch '^#' }
-            if ($hostKey) {
-              $hostKey | Out-File -Append "$env:USERPROFILE\.ssh\known_hosts" -Encoding UTF8
-            }
-          } catch { }
-
-          # Check chunk count on manager (inline Python command)
-          $pythonCmd = "from restreamer.models import ChunkRecord; from django.utils import timezone; from datetime import timedelta; recent = timezone.now() - timedelta(minutes=5); count = ChunkRecord.objects.filter(created_at__gte=recent).count(); print(f'CHUNKS_RECEIVED:{count}')"
-          $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"$pythonCmd`""
-
-          $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
-          $sshExitCode = $LASTEXITCODE
-
-          if ($sshExitCode -ne 0) {
-            Write-Host "SSH to manager failed (exit code $sshExitCode): $result"
-            Write-Host "Skipping manager verification (SSH not configured)"
-            exit 0
-          }
-
-          Write-Host "Manager response: $result"
-
-          # Parse chunk count from response
-          $match = ($result | Out-String) -match 'CHUNKS_RECEIVED:(\d+)'
-          if (-not $match) {
-            Write-Host "Could not parse chunk count from response"
-            Write-Host "Skipping manager verification"
-            exit 0
-          }
-          $receivedCount = [int]$Matches[1]
-
-          Write-Host "Chunks received by manager in last 5 minutes: $receivedCount"
-
-          if ($receivedCount -lt 5) {
-            throw "Expected at least 5 chunks on manager, got $receivedCount"
-          }
-
-          Write-Host "=== Manager verification PASSED ==="
-          Write-Host "Stream -> Restreamer -> S3 -> Manager: VERIFIED"
-
       - name: Activate delivering and initialize YouTube stream
         shell: powershell
         timeout-minutes: 3
         run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "Activating delivering for E2E-Test event..."
+          # Activate delivering via E2E API (no SSH needed)
+          $body = @{
+            user_uuid = $env:CLIENT_UUID
+            event_name = "E2E-Test"
+          } | ConvertTo-Json
 
-          # Activate delivering_activated and trigger init_stream (inline Python)
-          $pythonCmd = "from restreamer.models import StreamingEvent, EndPointCfg, ChunkRecord; from restreamer.tasks import init_stream; from accounts.models import RestreamerUser; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first() if user else None; event and setattr(event, 'delivering_activated', True); event and event.save(); endpoint = EndPointCfg.objects.filter(streamingevent=event, enabled=True).first() if event else None; chunk = ChunkRecord.objects.filter(streaming_event=event).order_by('-local_id')[4:5].first() if event else None; init_stream.delay(user.id, event.id, endpoint_id=endpoint.id) if (event and endpoint and chunk) else None; print(f'DELIVERING_ACTIVATED:{event.id}' if event else 'NO_EVENT'); print(f'ENDPOINT:{endpoint.alias}' if endpoint else 'NO_ENDPOINT'); print(f'INIT_CHUNK:{chunk.local_id}' if chunk else 'NO_CHUNKS'); print('INIT_STREAM_QUEUED' if (event and endpoint and chunk) else 'INIT_SKIPPED')"
-          $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"$pythonCmd`""
+          Write-Host "Activating delivering for E2E-Test event via API..."
+          $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/activate-delivering/" `
+            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
 
-          $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "SSH failed: $result"
-            Write-Host "Skipping YouTube delivery test (SSH not configured)"
-            exit 0
+          if ($response.status -ne "ok") {
+            throw "Failed to activate delivering: $($response | ConvertTo-Json)"
           }
 
-          Write-Host "Delivery activation result:"
-          $result | ForEach-Object { Write-Host "  $_" }
+          Write-Host "Delivering activated for event $($response.event_id)"
+          Write-Host "Endpoint: $($response.endpoint)"
+          Write-Host "Chunk count: $($response.chunk_count)"
+          Write-Host "init_stream_queued: $($response.init_stream_queued)"
 
-          if ($result -match 'INIT_STREAM_QUEUED') {
-            Write-Host "YouTube delivery initialized successfully"
-          } else {
-            Write-Host "WARNING: Could not initialize delivery"
+          if (-not $response.init_stream_queued) {
+            throw "init_stream task was not queued - delivery will not start"
           }
+
+          Write-Host "YouTube delivery initialization queued successfully"
 
       - name: Wait for delivering server to start streaming
         shell: powershell
@@ -920,58 +858,57 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "Checking delivering server status..."
+          # Check delivering server status via E2E API (no SSH needed)
+          Write-Host "Checking delivering server status via API..."
 
-          # Check if delivering server is ready (inline Python - no escaped quotes)
-          $pythonCmd = "from restreamer.views.instances import InstanceManager; from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; import requests; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first() if user else None; im = InstanceManager(user.id) if (event and event.delivering_activated) else None; ip = im.get_my_server_ip() if im else None; print(f'DELIVERING_SERVER_IP:{ip}' if ip else 'NO_IP'); url = f'http://{ip}:8000/api/raceive_init_data/' if ip else None; resp = requests.get(url, timeout=5) if url else None; status = resp.status_code if resp else 'NO_RESPONSE'; print('DELIVERING_SERVER_READY' if (resp and resp.status_code == 200) else f'DELIVERING_SERVER_STATUS:{status}')"
-          $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"$pythonCmd`""
+          $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" `
+            -Method GET -TimeoutSec 30
 
-          $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
+          Write-Host "Event ID: $($response.event_id)"
+          Write-Host "Delivering activated: $($response.delivering_activated)"
+          Write-Host "Server IP: $($response.server_ip)"
+          Write-Host "Server ready: $($response.server_ready)"
 
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "SSH failed: $result"
-            Write-Host "Skipping delivering server check"
-            exit 0
+          if (-not $response.delivering_activated) {
+            throw "Delivering is not activated - YouTube stream not started"
           }
 
-          Write-Host "Delivering server status:"
-          $result | ForEach-Object { Write-Host "  $_" }
-
-          if ($result -match 'DELIVERING_SERVER_READY') {
-            Write-Host "=== FULL E2E WITH YOUTUBE DELIVERY PASSED ==="
-            Write-Host "Stream -> Restreamer -> S3 -> Manager -> Delivering -> YouTube: VERIFIED"
-          } else {
-            Write-Host "WARNING: Delivering server may not be fully operational"
-            Write-Host "Check YouTube Studio to verify stream is live"
+          if (-not $response.server_ip) {
+            throw "No delivering server IP - server may not have started"
           }
+
+          if (-not $response.server_ready) {
+            throw "Delivering server is not ready - stream may not be reaching YouTube"
+          }
+
+          Write-Host "=== FULL E2E WITH YOUTUBE DELIVERY PASSED ==="
+          Write-Host "Stream -> Restreamer -> S3 -> Manager -> Delivering -> YouTube: VERIFIED"
 
       - name: Deactivate streaming event
         if: always()
         shell: powershell
         timeout-minutes: 2
         run: |
-          # Try to deactivate via SSH, but don't fail if SSH isn't available
+          # Deactivate via E2E API (no SSH needed)
           # Note: This step always succeeds - cleanup failure is non-critical
           $ErrorActionPreference = 'SilentlyContinue'
 
-          # NOTE: Specifically target E2E-Test event, not SNV-stream (production)
-          # Deactivate both receiving and delivering (inline Python - no escaped quotes)
-          # Stop delivering server first, then deactivate event flags
-          $pythonCmd = "from restreamer.models import StreamingEvent; from accounts.models import RestreamerUser; import requests; user = RestreamerUser.objects.filter(api_key='$env:CLIENT_UUID').first(); event = StreamingEvent.objects.filter(user=user, short_description='E2E-Test').first() if user else None"
-          $pythonCmd += "; "
-          $pythonCmd += "from restreamer.views.instances import InstanceManager; im = InstanceManager(user.id) if (event and event.delivering_activated) else None; ip = im.get_my_server_ip() if im else None; url = f'http://{ip}:8000/api/end_stream/' if ip else None; resp = requests.post(url, json={'alias': None}, timeout=5) if url else None; print('STOPPED_DELIVERING') if resp else None"
-          $pythonCmd += "; "
-          $pythonCmd += "event and setattr(event, 'receiving_activated', False); event and setattr(event, 'delivering_activated', False); event and event.save(); print('DEACTIVATED E2E-Test' if event else 'SKIPPED')"
+          $body = @{
+            user_uuid = $env:CLIENT_UUID
+            event_name = "E2E-Test"
+          } | ConvertTo-Json
 
-          $sshCommand = "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c `"$pythonCmd`""
+          Write-Host "Deactivating E2E-Test streaming event via API..."
+          try {
+            $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/deactivate/" `
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
 
-          $result = & ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@172.105.95.118 $sshCommand 2>&1
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "Cleanup: $result"
-          } else {
-            Write-Host "SSH cleanup skipped (no key auth configured)"
-            Write-Host "Note: Event may remain activated until manually deactivated"
+            Write-Host "Deactivated event $($response.event_id)"
+            Write-Host "receiving_activated: $($response.receiving_activated)"
+            Write-Host "delivering_activated: $($response.delivering_activated)"
+          } catch {
+            Write-Host "Cleanup API call failed: $_"
+            Write-Host "Event may remain activated until manually deactivated"
           }
           # Always exit successfully - cleanup is best-effort
           exit 0
