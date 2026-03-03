@@ -1263,7 +1263,8 @@ jobs:
             if ($startResp.op -eq 7) { break }
           }
 
-          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          $ws.CloseOutputAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          $ws.Dispose()
           Write-Host "StartStream sent, waiting for OBS to connect to RTMP..."
 
       - name: Verify OBS is streaming
