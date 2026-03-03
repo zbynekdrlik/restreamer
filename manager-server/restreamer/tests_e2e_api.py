@@ -330,3 +330,120 @@ class E2EDeliveringStatusTests(APITestCase):
     def test_delivering_status_missing_uuid(self):
         response = self.client.get(self.url, {"event_name": "E2E-Test"})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class E2EYouTubeStreamStatusTests(APITestCase):
+    """Tests for GET /api/e2e/youtube-status/"""
+
+    def setUp(self):
+        self.user = RestreamerUser.objects.create_user(
+            username="e2e_user",
+            email="e2e@example.com",
+            password="testpass123",
+            first_name="E2E",
+            last_name="User",
+        )
+        self.event = StreamingEvent.objects.create(
+            user=self.user,
+            identifier="e2e-test-event-001",
+            short_description="E2E-Test",
+            date_of_event=timezone.now(),
+        )
+        self.url = reverse("e2e:youtube_status")
+
+    @patch("restreamer.views.e2e_api.build_youtube_client")
+    def test_youtube_status_no_oauth(self, mock_build):
+        mock_build.return_value = None
+
+        response = self.client.get(
+            self.url,
+            {"user_uuid": str(self.user.api_key), "event_name": "E2E-Test"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["has_active_broadcast"])
+        self.assertIn("not connected", response.data["error_detail"])
+
+    @patch("restreamer.views.e2e_api.build_youtube_client")
+    def test_youtube_status_no_broadcasts(self, mock_build):
+        from unittest.mock import MagicMock
+
+        mock_youtube = MagicMock()
+        mock_build.return_value = mock_youtube
+        mock_youtube.liveBroadcasts.return_value.list.return_value.execute.return_value = {
+            "items": []
+        }
+
+        response = self.client.get(
+            self.url,
+            {"user_uuid": str(self.user.api_key), "event_name": "E2E-Test"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["has_active_broadcast"])
+        self.assertEqual(response.data["broadcast_count"], 0)
+
+    @patch("restreamer.views.e2e_api.build_youtube_client")
+    def test_youtube_status_active_broadcast(self, mock_build):
+        from unittest.mock import MagicMock
+
+        mock_youtube = MagicMock()
+        mock_build.return_value = mock_youtube
+        mock_youtube.liveBroadcasts.return_value.list.return_value.execute.return_value = {
+            "items": [
+                {
+                    "id": "abc123",
+                    "snippet": {"title": "E2E Test Stream"},
+                    "status": {"lifeCycleStatus": "live"},
+                }
+            ]
+        }
+
+        response = self.client.get(
+            self.url,
+            {"user_uuid": str(self.user.api_key), "event_name": "E2E-Test"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["has_active_broadcast"])
+        self.assertEqual(response.data["broadcast_id"], "abc123")
+        self.assertEqual(response.data["life_cycle_status"], "live")
+        self.assertEqual(response.data["title"], "E2E Test Stream")
+        self.assertEqual(response.data["broadcast_count"], 1)
+
+    @patch("restreamer.views.e2e_api.build_youtube_client")
+    def test_youtube_status_api_error(self, mock_build):
+        from unittest.mock import MagicMock
+
+        mock_youtube = MagicMock()
+        mock_build.return_value = mock_youtube
+        mock_youtube.liveBroadcasts.return_value.list.return_value.execute.side_effect = Exception(
+            "API quota exceeded"
+        )
+
+        response = self.client.get(
+            self.url,
+            {"user_uuid": str(self.user.api_key), "event_name": "E2E-Test"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["has_active_broadcast"])
+        self.assertIn("API error", response.data["error_detail"])
+
+    def test_youtube_status_missing_uuid(self):
+        response = self.client.get(self.url, {"event_name": "E2E-Test"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_youtube_status_invalid_user(self):
+        response = self.client.get(
+            self.url,
+            {"user_uuid": "00000000-0000-0000-0000-000000000000", "event_name": "E2E-Test"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_youtube_status_missing_event(self):
+        response = self.client.get(
+            self.url,
+            {"user_uuid": str(self.user.api_key), "event_name": "Nonexistent"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)

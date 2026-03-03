@@ -15,6 +15,7 @@ from rest_framework.views import APIView
 from restreamer.models import ChunkRecord, EndPointCfg, StreamingEvent
 from restreamer.tasks import init_stream
 from restreamer.views.instances import InstanceManager
+from services.youtube.client import build_youtube_client
 
 log = logging.getLogger(__name__)
 
@@ -266,4 +267,85 @@ class E2EDeactivate(APIView):
             return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             log.exception("E2E deactivate failed")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class E2EYouTubeStreamStatus(APIView):
+    """Check if a YouTube broadcast is live for the user's streaming event."""
+
+    def get(self, request):
+        user_uuid = request.query_params.get("user_uuid")
+        event_name = request.query_params.get("event_name", "E2E-Test")
+
+        if not user_uuid:
+            return Response({"error": "user_uuid required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user = RestreamerUser.objects.get(api_key=user_uuid)
+            event = StreamingEvent.objects.filter(user=user, short_description=event_name).first()
+
+            if not event:
+                return Response({"error": f"Event {event_name} not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            youtube = build_youtube_client(user)
+            if not youtube:
+                return Response(
+                    {
+                        "status": "ok",
+                        "event_id": event.id,
+                        "has_active_broadcast": False,
+                        "error_detail": "YouTube not connected (no OAuth credentials)",
+                    }
+                )
+
+            # Query active broadcasts
+            try:
+                response = (
+                    youtube.liveBroadcasts()
+                    .list(part="id,snippet,status", broadcastStatus="active", broadcastType="all")
+                    .execute()
+                )
+                broadcasts = response.get("items", [])
+            except Exception as e:
+                log.exception("YouTube API query failed")
+                return Response(
+                    {
+                        "status": "ok",
+                        "event_id": event.id,
+                        "has_active_broadcast": False,
+                        "error_detail": f"YouTube API error: {e}",
+                    }
+                )
+
+            if not broadcasts:
+                return Response(
+                    {
+                        "status": "ok",
+                        "event_id": event.id,
+                        "has_active_broadcast": False,
+                        "broadcast_count": 0,
+                    }
+                )
+
+            # Return info about the first active broadcast
+            broadcast = broadcasts[0]
+            life_cycle_status = broadcast.get("status", {}).get("lifeCycleStatus", "unknown")
+            title = broadcast.get("snippet", {}).get("title", "")
+
+            return Response(
+                {
+                    "status": "ok",
+                    "event_id": event.id,
+                    "has_active_broadcast": True,
+                    "broadcast_count": len(broadcasts),
+                    "broadcast_id": broadcast["id"],
+                    "life_cycle_status": life_cycle_status,
+                    "title": title,
+                }
+            )
+
+        except RestreamerUser.DoesNotExist:
+            return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            log.exception("E2E YouTube stream status failed")
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

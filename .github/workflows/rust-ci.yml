@@ -1013,6 +1013,618 @@ jobs:
           # Always exit successfully - cleanup is best-effort
           exit 0
 
+  e2e-obs-youtube-test:
+    name: E2E OBS-to-YouTube Test
+    needs: [deploy-stream-lan]
+    if: always() && needs.deploy-stream-lan.result == 'success'
+    runs-on: [self-hosted, windows, stream-lan]
+    timeout-minutes: 15
+    env:
+      MANAGER_URL: "https://restreamer.newlevel.media"
+      CLIENT_UUID: "95da874e-6b06-41e5-99db-6f47a459c48b"
+      EVENT_NAME: "E2E-Test"
+      OBS_WS_HOST: "127.0.0.1"
+      OBS_WS_PORT: "4455"
+      OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}
+    steps:
+      - name: Ensure OBS is running
+        shell: powershell
+        run: |
+          $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+          if (-not $obs) {
+            Write-Host "OBS not running, starting via scheduled task..."
+            Start-ScheduledTask -TaskName "Start OBS Studio" -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 8
+            $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+            if (-not $obs) {
+              throw "FAILED: Could not start OBS Studio"
+            }
+          }
+          Write-Host "OBS is running (PID: $($obs.Id))"
+
+      - name: Save original OBS stream settings and switch to Restreamer
+        id: obs-setup
+        shell: powershell
+        run: |
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+
+          try {
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+            Write-Host "Connected to OBS WebSocket"
+          } catch {
+            throw "FAILED: Cannot connect to OBS WebSocket at $uri - $_"
+          }
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          # Receive Hello message
+          $hello = Receive-OBSMessage $ws
+          Write-Host "OBS WebSocket version: $($hello.d.obsWebSocketVersion)"
+
+          # Build auth string
+          $authRequired = $hello.d.authentication
+          if ($authRequired) {
+            $challenge = $authRequired.challenge
+            $salt = $authRequired.salt
+
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $salt)
+            $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+
+            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $challenge)
+            $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+
+            $identify = @{
+              op = 1
+              d = @{
+                rpcVersion = 1
+                authentication = $authHash
+              }
+            } | ConvertTo-Json -Depth 5
+          } else {
+            $identify = @{
+              op = 1
+              d = @{
+                rpcVersion = 1
+              }
+            } | ConvertTo-Json -Depth 5
+          }
+
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+          Write-Host "OBS identified: op=$($identified.op)"
+
+          # Get current stream service settings
+          $getSettings = @{
+            op = 6
+            d = @{
+              requestType = "GetStreamServiceSettings"
+              requestId = "get-settings-1"
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $getSettings
+          $settingsResp = Receive-OBSMessage $ws
+          $currentSettings = $settingsResp.d.responseData.streamServiceSettings
+          $currentType = $settingsResp.d.responseData.streamServiceType
+
+          Write-Host "Original stream type: $currentType"
+          Write-Host "Original server: $($currentSettings.server)"
+
+          # Save original settings for restoration
+          $origServer = $currentSettings.server
+          $origKey = $currentSettings.key
+          "ORIG_SERVER=$origServer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "ORIG_KEY=$origKey" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "ORIG_TYPE=$currentType" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          # Switch to local Restreamer RTMP
+          $setSettings = @{
+            op = 6
+            d = @{
+              requestType = "SetStreamServiceSettings"
+              requestId = "set-settings-1"
+              requestData = @{
+                streamServiceType = "rtmp_custom"
+                streamServiceSettings = @{
+                  server = "rtmp://127.0.0.1:1234/live"
+                  key = "obs-e2e-test"
+                }
+              }
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $setSettings
+          $setResp = Receive-OBSMessage $ws
+          Write-Host "Switched OBS to Restreamer RTMP: rtmp://127.0.0.1:1234/live/obs-e2e-test"
+
+          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+      - name: Activate receiving on manager
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          $body = @{
+            user_uuid = $env:CLIENT_UUID
+            event_name = $env:EVENT_NAME
+          } | ConvertTo-Json
+
+          Write-Host "Activating receiving for $($env:EVENT_NAME)..."
+          $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/activate-receiving/" `
+            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+
+          if ($response.status -ne "ok") {
+            throw "Failed to activate receiving: $($response | ConvertTo-Json)"
+          }
+          Write-Host "Receiving activated: event_id=$($response.event_id)"
+
+      - name: Wait for poller to sync event
+        shell: powershell
+        run: |
+          Write-Host "Waiting for poller to sync streaming event to client..."
+          $maxRetries = 12
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/streaming-event" -TimeoutSec 10
+              if ($response -and $response.receiving_activated) {
+                Write-Host "Event synced: $($response.identifier)"
+                return
+              }
+            } catch {}
+            Write-Host "Waiting for sync (attempt $i/$maxRetries)..."
+            Start-Sleep -Seconds 3
+          }
+          throw "FAILED: Poller did not sync event after $maxRetries attempts"
+
+      - name: Start OBS stream
+        shell: powershell
+        run: |
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          # Receive Hello + Identify
+          $hello = Receive-OBSMessage $ws
+          $authRequired = $hello.d.authentication
+          if ($authRequired) {
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+            $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+            $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+          } else {
+            $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+          }
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+
+          # Start streaming
+          $startStream = @{
+            op = 6
+            d = @{
+              requestType = "StartStream"
+              requestId = "start-stream-1"
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $startStream
+          $startResp = Receive-OBSMessage $ws
+          Write-Host "StartStream response: op=$($startResp.op)"
+
+          # Wait and verify stream status
+          Start-Sleep -Seconds 3
+
+          $getStatus = @{
+            op = 6
+            d = @{
+              requestType = "GetStreamStatus"
+              requestId = "get-status-1"
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $getStatus
+          $statusResp = Receive-OBSMessage $ws
+          $streamActive = $statusResp.d.responseData.outputActive
+          Write-Host "OBS streaming active: $streamActive"
+
+          if (-not $streamActive) {
+            throw "FAILED: OBS stream did not start"
+          }
+
+          Write-Host "OBS is now streaming to Restreamer RTMP"
+          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+      - name: Wait for chunks and verify upload
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          Write-Host "Waiting for chunks to be created and uploaded to S3..."
+
+          $initialStats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          $initialCount = $initialStats.total_chunks
+          Write-Host "Initial chunk count: $initialCount"
+
+          $maxRetries = 30
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+            $newChunks = $stats.total_chunks - $initialCount
+            Write-Host "Attempt $i/$maxRetries: new_chunks=$newChunks, pending=$($stats.pending_chunks)"
+
+            if ($newChunks -ge 8 -and $stats.pending_chunks -eq 0) {
+              Write-Host "=== Chunks verified: $newChunks new chunks, 0 pending ==="
+              return
+            }
+            Start-Sleep -Seconds 3
+          }
+
+          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          $newChunks = $stats.total_chunks - $initialCount
+          if ($newChunks -lt 8) {
+            throw "FAILED: Only $newChunks new chunks created (need >= 8)"
+          }
+          if ($stats.pending_chunks -gt 0) {
+            throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload"
+          }
+
+      - name: Verify chunks on manager DB
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Verifying chunks reached manager server DB..."
+          $uri = "$($env:MANAGER_URL)/api/e2e/chunk-verification/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)&min_chunks=8"
+          $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
+
+          Write-Host "Chunk count on manager: $($response.chunk_count)"
+          Write-Host "Has enough (>= 8): $($response.has_enough)"
+
+          if (-not $response.has_enough) {
+            throw "FAILED: Manager DB has only $($response.chunk_count) chunks, need >= 8"
+          }
+          Write-Host "=== Manager chunk verification PASSED ==="
+
+      - name: Activate delivering
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          $body = @{
+            user_uuid = $env:CLIENT_UUID
+            event_name = $env:EVENT_NAME
+          } | ConvertTo-Json
+
+          Write-Host "Activating delivering for $($env:EVENT_NAME)..."
+          $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/activate-delivering/" `
+            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+
+          if ($response.status -ne "ok") {
+            throw "Failed to activate delivering: $($response | ConvertTo-Json)"
+          }
+
+          Write-Host "Delivering activated: endpoint=$($response.endpoint), chunks=$($response.chunk_count)"
+          Write-Host "init_stream_queued: $($response.init_stream_queued)"
+
+          if (-not $response.init_stream_queued) {
+            throw "init_stream task was not queued"
+          }
+
+      - name: Wait for delivering server ready
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          Write-Host "Waiting for delivering server to boot and start ffmpeg..."
+          $maxRetries = 18
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
+                -Method GET -TimeoutSec 30
+
+              Write-Host "--- Attempt $i/$maxRetries ---"
+              Write-Host "  delivering_activated: $($response.delivering_activated)"
+              Write-Host "  server_ip: $($response.server_ip)"
+              Write-Host "  server_ready: $($response.server_ready)"
+              Write-Host "  endpoints_alive: $($response.endpoints_alive)"
+
+              if ($response.endpoint_details) {
+                foreach ($ep in $response.endpoint_details) {
+                  Write-Host "  Endpoint: $($ep.alias) | alive=$($ep.alive) | buffer=$($ep.buff_size_mb)MB | chunk=$($ep.current_chunk_id)"
+                }
+              }
+
+              if ($response.delivering_activated -and $response.server_ready -and $response.endpoints_alive) {
+                Write-Host "=== Delivering server fully operational ==="
+                return
+              }
+            } catch {
+              Write-Host "Request failed on attempt $i : $_"
+            }
+            Start-Sleep -Seconds 15
+          }
+          throw "FAILED: Delivering server not ready after $maxRetries attempts (~4.5 min)"
+
+      - name: Verify YouTube broadcast is live
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          Write-Host "Verifying stream is live on YouTube..."
+          $maxRetries = 18
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/youtube-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
+                -Method GET -TimeoutSec 30
+
+              Write-Host "--- Attempt $i/$maxRetries ---"
+              Write-Host "  has_active_broadcast: $($response.has_active_broadcast)"
+
+              if ($response.has_active_broadcast) {
+                Write-Host "  broadcast_id: $($response.broadcast_id)"
+                Write-Host "  life_cycle_status: $($response.life_cycle_status)"
+                Write-Host "  title: $($response.title)"
+
+                if ($response.life_cycle_status -eq "live" -or $response.life_cycle_status -eq "liveStarting") {
+                  Write-Host ""
+                  Write-Host "=========================================="
+                  Write-Host "  YOUTUBE BROADCAST IS LIVE!"
+                  Write-Host "  Status: $($response.life_cycle_status)"
+                  Write-Host "  Title: $($response.title)"
+                  Write-Host "=========================================="
+                  return
+                }
+              }
+
+              if ($response.error_detail) {
+                Write-Host "  detail: $($response.error_detail)"
+              }
+            } catch {
+              Write-Host "Request failed on attempt $i : $_"
+            }
+            Start-Sleep -Seconds 15
+          }
+          throw "FAILED: YouTube broadcast not live after $maxRetries attempts (~4.5 min)"
+
+      - name: Verify delivery progression
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Verifying delivery is progressing (two readings 15s apart)..."
+
+          $r1 = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
+            -Method GET -TimeoutSec 30
+          $chunk1 = 0
+          if ($r1.endpoint_details -and $r1.endpoint_details.Count -gt 0) {
+            $chunk1 = $r1.endpoint_details[0].current_chunk_id
+          }
+          Write-Host "Reading 1: chunk_id = $chunk1"
+
+          Start-Sleep -Seconds 15
+
+          $r2 = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
+            -Method GET -TimeoutSec 30
+          $chunk2 = 0
+          if ($r2.endpoint_details -and $r2.endpoint_details.Count -gt 0) {
+            $chunk2 = $r2.endpoint_details[0].current_chunk_id
+          }
+          Write-Host "Reading 2: chunk_id = $chunk2"
+
+          if ($chunk2 -gt $chunk1) {
+            Write-Host "=== Delivery progression CONFIRMED: $chunk1 -> $chunk2 ==="
+          } else {
+            Write-Host "WARNING: chunk_id did not advance ($chunk1 -> $chunk2)"
+          }
+
+      - name: Stop OBS stream
+        if: always()
+        shell: powershell
+        run: |
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $identified = Receive-OBSMessage $ws
+
+            $stopStream = @{
+              op = 6
+              d = @{
+                requestType = "StopStream"
+                requestId = "stop-stream-1"
+              }
+            } | ConvertTo-Json -Depth 5
+
+            Send-OBSMessage $ws $stopStream
+            $stopResp = Receive-OBSMessage $ws
+            Write-Host "OBS stream stopped"
+
+            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          } catch {
+            Write-Host "Failed to stop OBS stream (may not have been streaming): $_"
+          }
+
+      - name: Deactivate streaming event
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+          $body = @{
+            user_uuid = $env:CLIENT_UUID
+            event_name = $env:EVENT_NAME
+          } | ConvertTo-Json
+
+          Write-Host "Deactivating $($env:EVENT_NAME)..."
+          try {
+            $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/deactivate/" `
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+            Write-Host "Deactivated: receiving=$($response.receiving_activated), delivering=$($response.delivering_activated)"
+          } catch {
+            Write-Host "Deactivation failed: $_"
+          }
+          exit 0
+
+      - name: Restore OBS stream settings
+        if: always()
+        shell: powershell
+        run: |
+          $origServer = "${{ steps.obs-setup.outputs.ORIG_SERVER }}"
+          $origKey = "${{ steps.obs-setup.outputs.ORIG_KEY }}"
+          $origType = "${{ steps.obs-setup.outputs.ORIG_TYPE }}"
+
+          if (-not $origServer -or -not $origKey) {
+            Write-Host "No original settings saved - skipping restore"
+            exit 0
+          }
+
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $identified = Receive-OBSMessage $ws
+
+            # Restore original settings
+            $serviceType = if ($origType) { $origType } else { "rtmp_custom" }
+            $setSettings = @{
+              op = 6
+              d = @{
+                requestType = "SetStreamServiceSettings"
+                requestId = "restore-settings-1"
+                requestData = @{
+                  streamServiceType = $serviceType
+                  streamServiceSettings = @{
+                    server = $origServer
+                    key = $origKey
+                  }
+                }
+              }
+            } | ConvertTo-Json -Depth 5
+
+            Send-OBSMessage $ws $setSettings
+            $setResp = Receive-OBSMessage $ws
+            Write-Host "Restored OBS to original destination"
+
+            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          } catch {
+            Write-Host "WARNING: Failed to restore OBS settings: $_"
+            Write-Host "You may need to manually restore OBS stream settings"
+          }
+          exit 0
+
   auto-release:
     name: Auto-release tag
     needs: [rust-ci-gate]
