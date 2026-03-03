@@ -21,7 +21,11 @@ log = logging.getLogger(__name__)
 
 
 class E2EActivateReceiving(APIView):
-    """Activate receiving for a streaming event (by short_description)."""
+    """Activate receiving for a streaming event (by short_description).
+
+    Also creates the delivering server Linode instance, mirroring the normal
+    SetupStream flow so the instance is booting while chunks arrive.
+    """
 
     def post(self, request):
         user_uuid = request.data.get("user_uuid") or request.query_params.get("user_uuid")
@@ -40,12 +44,24 @@ class E2EActivateReceiving(APIView):
             event.receiving_activated = True
             event.save()
 
+            # Create delivering server instance (mirrors normal SetupStream flow)
+            instance_created = False
+            instance_error = None
+            try:
+                InstanceManager(user_id=user.id).create_instance()
+                instance_created = True
+            except Exception as e:
+                instance_error = str(e)
+                log.warning(f"Instance creation failed (may already exist): {e}")
+
             return Response(
                 {
                     "status": "ok",
                     "event_id": event.id,
                     "event_name": event.short_description,
                     "receiving_activated": event.receiving_activated,
+                    "instance_created": instance_created,
+                    "instance_error": instance_error,
                 }
             )
 
@@ -132,9 +148,9 @@ class E2EDeliveringStatus(APIView):
             if not event:
                 return Response({"error": f"Event {event_name} not found"}, status=status.HTTP_404_NOT_FOUND)
 
-            # Get delivering server IP
-            im = InstanceManager(user.id) if event.delivering_activated else None
-            server_ip = im.get_my_server_ip() if im else None
+            # Get delivering server IP (always check, not just when delivering_activated)
+            im = InstanceManager(user.id)
+            server_ip = im.get_my_server_ip()
 
             # Check server status
             server_ready = False

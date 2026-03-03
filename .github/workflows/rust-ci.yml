@@ -1402,6 +1402,38 @@ jobs:
           }
           Write-Host "=== Manager chunk verification PASSED ==="
 
+      - name: Wait for delivering server instance ready
+        shell: powershell
+        timeout-minutes: 6
+        run: |
+          Write-Host "Waiting for Linode delivering server to boot and Django to start..."
+          Write-Host "(Instance was created during activate-receiving step)"
+          $maxRetries = 24
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
+                -Method GET -TimeoutSec 30
+
+              Write-Host "--- Attempt ${i}/${maxRetries} ---"
+              Write-Host "  server_ip: $($response.server_ip)"
+              Write-Host "  server_ready: $($response.server_ready)"
+
+              if ($response.server_ip -and $response.server_ready) {
+                Write-Host "=== Delivering server instance is READY at $($response.server_ip) ==="
+                return
+              }
+              if ($response.server_ip) {
+                Write-Host "  Instance exists at $($response.server_ip), waiting for Django to start..."
+              } else {
+                Write-Host "  Instance not yet provisioned on Linode..."
+              }
+            } catch {
+              Write-Host "Request failed on attempt ${i}: $_"
+            }
+            Start-Sleep -Seconds 15
+          }
+          throw "FAILED: Delivering server instance not ready after $maxRetries attempts (~6 min)"
+
       - name: Activate delivering
         shell: powershell
         timeout-minutes: 3

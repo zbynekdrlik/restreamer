@@ -39,7 +39,11 @@ class E2EActivateReceivingTests(APITestCase):
         )
         self.url = reverse("e2e:activate_receiving")
 
-    def test_activate_receiving_sets_flag(self):
+    @patch("restreamer.views.e2e_api.InstanceManager")
+    def test_activate_receiving_sets_flag_and_creates_instance(self, mock_im_class):
+        mock_im = mock_im_class.return_value
+        mock_im.create_instance.return_value = None
+
         data = {"user_uuid": str(self.user.api_key), "event_name": "E2E-Test"}
         response = self.client.post(self.url, data, format="json")
 
@@ -47,7 +51,29 @@ class E2EActivateReceivingTests(APITestCase):
         self.assertEqual(response.data["status"], "ok")
         self.assertEqual(response.data["event_id"], self.event.id)
         self.assertTrue(response.data["receiving_activated"])
+        self.assertTrue(response.data["instance_created"])
+        self.assertIsNone(response.data["instance_error"])
 
+        self.event.refresh_from_db()
+        self.assertTrue(self.event.receiving_activated)
+        mock_im_class.assert_called_once_with(user_id=self.user.id)
+        mock_im.create_instance.assert_called_once()
+
+    @patch("restreamer.views.e2e_api.InstanceManager")
+    def test_activate_receiving_handles_instance_creation_failure(self, mock_im_class):
+        mock_im = mock_im_class.return_value
+        mock_im.create_instance.side_effect = Exception("Linode API error")
+
+        data = {"user_uuid": str(self.user.api_key), "event_name": "E2E-Test"}
+        response = self.client.post(self.url, data, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "ok")
+        self.assertTrue(response.data["receiving_activated"])
+        self.assertFalse(response.data["instance_created"])
+        self.assertEqual(response.data["instance_error"], "Linode API error")
+
+        # Flag should still be set even if instance creation fails
         self.event.refresh_from_db()
         self.assertTrue(self.event.receiving_activated)
 
@@ -279,7 +305,11 @@ class E2EDeliveringStatusTests(APITestCase):
         )
         self.url = reverse("e2e:delivering_status")
 
-    def test_delivering_status_not_activated(self):
+    @patch("restreamer.views.e2e_api.InstanceManager")
+    def test_delivering_status_not_activated_no_instance(self, mock_im_class):
+        mock_im = mock_im_class.return_value
+        mock_im.get_my_server_ip.return_value = None
+
         response = self.client.get(
             self.url,
             {"user_uuid": str(self.user.api_key), "event_name": "E2E-Test"},
@@ -290,6 +320,8 @@ class E2EDeliveringStatusTests(APITestCase):
         self.assertIsNone(response.data["server_ip"])
         self.assertFalse(response.data["server_ready"])
         self.assertFalse(response.data["endpoints_alive"])
+        # Always checks instance status regardless of delivering_activated
+        mock_im_class.assert_called_once_with(self.user.id)
 
     @patch("restreamer.views.e2e_api.InstanceManager")
     @patch("restreamer.views.e2e_api.http_requests.get")
