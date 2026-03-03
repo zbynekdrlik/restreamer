@@ -1466,7 +1466,7 @@ jobs:
         shell: powershell
         timeout-minutes: 5
         run: |
-          Write-Host "Waiting for delivering server to boot and start ffmpeg..."
+          Write-Host "Waiting for delivering server to start ffmpeg endpoints..."
           $maxRetries = 18
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
