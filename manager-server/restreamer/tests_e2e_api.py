@@ -370,9 +370,7 @@ class E2EYouTubeStreamStatusTests(APITestCase):
 
         mock_youtube = MagicMock()
         mock_build.return_value = mock_youtube
-        mock_youtube.liveBroadcasts.return_value.list.return_value.execute.return_value = {
-            "items": []
-        }
+        mock_youtube.liveBroadcasts.return_value.list.return_value.execute.return_value = {"items": []}
 
         response = self.client.get(
             self.url,
@@ -417,9 +415,7 @@ class E2EYouTubeStreamStatusTests(APITestCase):
 
         mock_youtube = MagicMock()
         mock_build.return_value = mock_youtube
-        mock_youtube.liveBroadcasts.return_value.list.return_value.execute.side_effect = Exception(
-            "API quota exceeded"
-        )
+        mock_youtube.liveBroadcasts.return_value.list.return_value.execute.side_effect = Exception("API quota exceeded")
 
         response = self.client.get(
             self.url,
