@@ -1026,6 +1026,8 @@ jobs:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
       OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}
+      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      YOUTUBE_VIDEO_ID: "vSqq31SNF4s"
     steps:
       - name: Ensure OBS is running
         shell: powershell
@@ -1466,34 +1468,33 @@ jobs:
         shell: powershell
         timeout-minutes: 5
         run: |
-          Write-Host "Verifying stream is live on YouTube..."
+          Write-Host "Verifying stream is live on YouTube via Data API..."
           $maxRetries = 18
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
-              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/youtube-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
-                -Method GET -TimeoutSec 30
+              $uri = "https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails&id=$($env:YOUTUBE_VIDEO_ID)&key=$($env:YOUTUBE_API_KEY)"
+              $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
+
+              $video = $response.items[0]
+              $status = $video.snippet.liveBroadcastContent
+              $title = $video.snippet.title
 
               Write-Host "--- Attempt ${i}/${maxRetries} ---"
-              Write-Host "  has_active_broadcast: $($response.has_active_broadcast)"
+              Write-Host "  title: $title"
+              Write-Host "  liveBroadcastContent: $status"
 
-              if ($response.has_active_broadcast) {
-                Write-Host "  broadcast_id: $($response.broadcast_id)"
-                Write-Host "  life_cycle_status: $($response.life_cycle_status)"
-                Write-Host "  title: $($response.title)"
-
-                if ($response.life_cycle_status -eq "live" -or $response.life_cycle_status -eq "liveStarting") {
-                  Write-Host ""
-                  Write-Host "=========================================="
-                  Write-Host "  YOUTUBE BROADCAST IS LIVE!"
-                  Write-Host "  Status: $($response.life_cycle_status)"
-                  Write-Host "  Title: $($response.title)"
-                  Write-Host "=========================================="
-                  return
-                }
+              if ($video.liveStreamingDetails.actualStartTime) {
+                Write-Host "  actualStartTime: $($video.liveStreamingDetails.actualStartTime)"
               }
 
-              if ($response.error_detail) {
-                Write-Host "  detail: $($response.error_detail)"
+              if ($status -eq "live") {
+                Write-Host ""
+                Write-Host "=========================================="
+                Write-Host "  YOUTUBE BROADCAST IS LIVE!"
+                Write-Host "  Title: $title"
+                Write-Host "  Video: https://youtube.com/watch?v=$($env:YOUTUBE_VIDEO_ID)"
+                Write-Host "=========================================="
+                return
               }
             } catch {
               Write-Host "Request failed on attempt ${i}: $_"
