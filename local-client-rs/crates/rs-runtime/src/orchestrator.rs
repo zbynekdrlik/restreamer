@@ -24,7 +24,11 @@ use crate::poller::Poller;
 use crate::shutdown::ShutdownCoordinator;
 
 /// Main service orchestrator that starts all components.
-pub struct ServiceRunner {
+///
+/// This is the core runtime that can be embedded in both:
+/// - The standalone `restreamer-service` binary (Windows Service / console mode)
+/// - The unified Tauri application with embedded service
+pub struct ServiceCore {
     config: Config,
     config_path: PathBuf,
     log_buffer: LogBuffer,
@@ -32,7 +36,8 @@ pub struct ServiceRunner {
     chunk_dir: PathBuf,
 }
 
-impl ServiceRunner {
+impl ServiceCore {
+    /// Create a new ServiceCore with the given configuration.
     pub fn new(config: Config, config_path: PathBuf, log_buffer: LogBuffer) -> Self {
         let data_dir = if cfg!(windows) {
             PathBuf::from(r"C:\ProgramData\Restreamer")

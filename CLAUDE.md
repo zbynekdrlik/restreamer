@@ -7,7 +7,7 @@ You are a senior Rust + Python developer with CI/CD expertise working on the Res
 | Directory             | Language        | Purpose                                           |
 | --------------------- | --------------- | ------------------------------------------------- |
 | `local-client/`       | Python (Django) | Legacy Windows RTMP client (being replaced)       |
-| `local-client-rs/`    | Rust + React    | New Rust local client (Tauri v2 + service binary) |
+| `local-client-rs/`    | Rust + Leptos   | Unified Tauri app with embedded service + WASM UI |
 | `manager-server/`     | Python (Django) | Central management server (Linode VPS)            |
 | `delivering-service/` | Python (Django) | Linux re-streaming service                        |
 
@@ -39,7 +39,7 @@ Before making ANY code changes, you MUST complete these steps in order:
 
 3. **BUMP VERSIONS IF NEEDED**:
    - Python: Edit `VERSION` file (increment patch: 0.2.4 → 0.2.5)
-   - Rust: Edit `local-client-rs/Cargo.toml`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `package.json`
+   - Rust: Edit `local-client-rs/Cargo.toml`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `leptos-ui/Cargo.toml`
 
 Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional.
 
@@ -56,6 +56,22 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
   The PR is ONLY ready when: `mergeable: true` AND `mergeable_state: "clean"`. If `mergeable_state` is "behind", sync branches first with `git fetch origin && git merge origin/main`. If "blocked" or "dirty", fix the issues. NEVER claim a PR is ready without this verification.
 - Every PR MUST include tests covering the implemented changes. No PR is complete without tests.
 - NEVER merge a PR. Only the user may merge pull requests. The agent must only create the PR, ensure CI is green, and provide the URL. Merging is exclusively the user's action.
+
+#### CI Monitoring (MANDATORY)
+
+- **ALWAYS MONITOR CI**: After every push to `dev`, you MUST monitor CI until ALL jobs are green. Do NOT move on to other tasks or claim work is done while CI is running.
+- **CHECK CI STATUS**: Use `gh run list --branch dev --limit 3` to see recent workflow runs, then `gh run view <run-id>` to check status.
+- **FIX FAILURES IMMEDIATELY**: If any CI job fails, investigate and fix immediately. Push fixes and monitor again until green.
+- **VERIFY DEPLOYMENT**: After `deploy-stream-lan` job completes, verify deployment was successful:
+  ```bash
+  # Check service is running with new version
+  sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "(Get-Item \"C:\\Program Files\\Restreamer\\restreamer-service.exe\").VersionInfo.FileVersion"'
+  # Check tray app is running
+  sshpass -p 'newlevel' ssh newlevel@stream.lan 'tasklist | findstr restreamer'
+  # Check API responds
+  sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/status"'
+  ```
+- **NEVER CLAIM DONE** until CI is fully green AND deployment is verified working on stream.lan.
 
 ### Testing — PRIMARY GOAL
 
@@ -90,17 +106,35 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
 
 ## Rust Development (`local-client-rs/`)
 
-### Build Commands
+### LOCAL BUILDS PROHIBITED
+
+**NEVER run Rust builds locally on this machine.** All Rust compilation (cargo build, cargo test, trunk build, tauri build) must happen on GitHub Actions runners only.
+
+- Do NOT run `cargo build`, `cargo test`, `cargo clippy`, or any compilation commands locally
+- Do NOT run `trunk build` or `trunk serve` locally
+- Do NOT run `cargo tauri dev` or `cargo tauri build` locally
+- Push changes to `dev` branch and let CI handle all builds and tests
+- Review CI output for build errors and test failures
+
+**Why:** Local builds consume excessive disk space (20GB+) and CPU. GitHub runners handle this better.
+
+### Build Commands (CI ONLY - for reference)
+
+These commands run on GitHub Actions, not locally:
 
 ```bash
 cd local-client-rs
-cargo build                          # Debug build (all crates)
-cargo build --release -p rs-service  # Release build (service binary only)
+cargo build                          # Debug build (workspace crates)
+cargo build --release -p rs-service  # Release build (standalone service binary)
 cargo test --workspace               # Run all tests
 cargo fmt --all -- --check           # Check formatting
 cargo clippy --workspace -- -D warnings  # Lint
-npx tauri dev                        # Hot-reload Tauri app (dev mode)
-npx tauri build                      # Production Tauri build (NSIS installer)
+
+# Leptos frontend (WASM)
+cd leptos-ui && trunk build --release  # Production WASM build
+
+# Tauri unified app
+cargo tauri build                    # Production Tauri build (NSIS installer)
 ```
 
 ### Code Quality Standards
@@ -114,13 +148,14 @@ npx tauri build                      # Production Tauri build (NSIS installer)
 
 ### Architecture
 
-- **Workspace** with 6 crates: `rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-service`, `src-tauri`
-- **Two binaries**: `restreamer-service.exe` (headless Windows service) + `Restreamer.exe` (Tauri tray app)
+- **Workspace** with 7 crates: `rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `src-tauri`
+- **Single unified binary**: `Restreamer.exe` (Tauri app with embedded service + Leptos/WASM UI)
+- **rs-runtime**: Contains `ServiceCore` for reusable service orchestration
 - **Database**: SQLite via `sqlx` with compile-time checked queries
 - **RTMP server**: Pure Rust (no ffmpeg dependency)
 - **S3 uploads**: `rust-s3` crate
-- **API**: Axum on `http://127.0.0.1:8910`
-- **Tray ↔ Service**: HTTP/WS to localhost (no named pipes)
+- **API**: Axum on `http://127.0.0.1:8910` (embedded in Tauri app)
+- **Frontend**: Leptos CSR WASM (all-Rust, no React/npm)
 
 ### Tauri Development
 

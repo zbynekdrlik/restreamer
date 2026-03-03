@@ -1,3 +1,6 @@
+//! System tray with direct state access (no HTTP polling).
+
+use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::image::Image;
@@ -5,7 +8,7 @@ use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{App, AppHandle, Manager, Wry};
 
-const SERVICE_URL: &str = "http://127.0.0.1:8910/api/v1";
+use crate::state::AppState;
 
 /// Status polling interval (3 seconds).
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -17,12 +20,12 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let version = env!("CARGO_PKG_VERSION");
     let icon = Image::from_bytes(TRAY_ICON_BYTES)?;
 
-    let menu = build_menu(app, version, "Waiting", "--:--:--", "Waiting", 0)?;
+    let menu = build_menu(app, version, &TrayStatus::default())?;
 
     let _tray = TrayIconBuilder::with_id("restreamer")
         .icon(icon)
         .menu(&menu)
-        .tooltip("Restreamer")
+        .tooltip("Restreamer - Starting...")
         .on_menu_event(move |app, event| handle_menu_event(app, event.id().as_ref()))
         .build(app)?;
 
@@ -31,43 +34,74 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+struct TrayStatus {
+    inpoint: String,
+    buffer: String,
+    endpoint: String,
+    pending: u64,
+    total_chunks: u64,
+    event_name: String,
+}
+
+impl Default for TrayStatus {
+    fn default() -> Self {
+        Self {
+            inpoint: "Starting...".to_string(),
+            buffer: "--:--:--".to_string(),
+            endpoint: "Starting...".to_string(),
+            pending: 0,
+            total_chunks: 0,
+            event_name: String::new(),
+        }
+    }
+}
+
 fn build_menu(
     app: &impl Manager<Wry>,
     version: &str,
-    inpoint_status: &str,
-    buffer: &str,
-    endpoint_status: &str,
-    pending: u64,
+    status: &TrayStatus,
 ) -> Result<tauri::menu::Menu<Wry>, Box<dyn std::error::Error>> {
-    Ok(MenuBuilder::new(app)
+    let mut builder = MenuBuilder::new(app)
         .item(&MenuItem::new(
             app,
             format!("Restreamer v{version}"),
             false,
             None::<&str>,
         )?)
-        .separator()
+        .separator();
+
+    // Show streaming event name if available
+    if !status.event_name.is_empty() {
+        builder = builder.item(&MenuItem::new(
+            app,
+            format!("Event: {}", status.event_name),
+            false,
+            None::<&str>,
+        )?);
+    }
+
+    Ok(builder
         .item(&MenuItem::new(
             app,
-            format!("Inpoint: {inpoint_status}"),
+            format!("Inpoint: {}", status.inpoint),
             false,
             None::<&str>,
         )?)
         .item(&MenuItem::new(
             app,
-            format!("Buffer: {buffer}"),
+            format!("Buffer: {}", status.buffer),
             false,
             None::<&str>,
         )?)
         .item(&MenuItem::new(
             app,
-            format!("Endpoint: {endpoint_status}"),
+            format!("Uploader: {}", status.endpoint),
             false,
             None::<&str>,
         )?)
         .item(&MenuItem::new(
             app,
-            format!("Pending: {pending} chunks"),
+            format!("Chunks: {} total, {} pending", status.total_chunks, status.pending),
             false,
             None::<&str>,
         )?)
@@ -83,28 +117,6 @@ fn build_menu(
             app,
             "view_logs",
             "View Log",
-            true,
-            None::<&str>,
-        )?)
-        .separator()
-        .item(&MenuItem::with_id(
-            app,
-            "restart_inpoint",
-            "Restart Inpoint",
-            true,
-            None::<&str>,
-        )?)
-        .item(&MenuItem::with_id(
-            app,
-            "restart_endpoint",
-            "Restart Endpoint",
-            true,
-            None::<&str>,
-        )?)
-        .item(&MenuItem::with_id(
-            app,
-            "delete_chunks",
-            "Delete All Chunks",
             true,
             None::<&str>,
         )?)
@@ -128,7 +140,7 @@ fn build_menu(
 
 fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
     match event_id {
-        "open_dashboard" | "view_logs" => {
+        "open_dashboard" => {
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(e) = window.show() {
                     tracing::warn!("Failed to show window: {e}");
@@ -138,29 +150,30 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
                 }
             }
         }
-        "restart_inpoint" => {
-            tauri::async_runtime::spawn(async {
-                let url = format!("{SERVICE_URL}/actions/restart-inpoint");
-                if let Err(e) = reqwest::Client::new().post(&url).send().await {
-                    tracing::warn!("Failed to restart inpoint: {e}");
+        "view_logs" => {
+            // Open the Restreamer data directory in file explorer
+            #[cfg(target_os = "windows")]
+            {
+                let log_dir = std::path::PathBuf::from(r"C:\ProgramData\Restreamer");
+                if log_dir.exists() {
+                    let _ = std::process::Command::new("explorer")
+                        .arg(&log_dir)
+                        .spawn();
+                } else {
+                    tracing::warn!("Log directory does not exist: {:?}", log_dir);
                 }
-            });
-        }
-        "restart_endpoint" => {
-            tauri::async_runtime::spawn(async {
-                let url = format!("{SERVICE_URL}/actions/restart-endpoint");
-                if let Err(e) = reqwest::Client::new().post(&url).send().await {
-                    tracing::warn!("Failed to restart endpoint: {e}");
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let log_dir = std::path::PathBuf::from("/var/lib/restreamer");
+                if log_dir.exists() {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&log_dir)
+                        .spawn();
+                } else {
+                    tracing::warn!("Log directory does not exist: {:?}", log_dir);
                 }
-            });
-        }
-        "delete_chunks" => {
-            tauri::async_runtime::spawn(async {
-                let url = format!("{SERVICE_URL}/chunks");
-                if let Err(e) = reqwest::Client::new().delete(&url).send().await {
-                    tracing::warn!("Failed to delete chunks: {e}");
-                }
-            });
+            }
         }
         "check_updates" => {
             let handle = app.clone();
@@ -169,7 +182,16 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
             });
         }
         "quit" => {
-            app.exit(0);
+            // Trigger shutdown of embedded service
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(state) = handle.try_state::<Arc<AppState>>() {
+                    state.shutdown().await;
+                }
+                // Give service time to shut down
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                handle.exit(0);
+            });
         }
         _ => {
             tracing::debug!("Unhandled menu event: {event_id}");
@@ -186,89 +208,78 @@ fn format_duration(secs: f64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-/// Poll the service status and update the single tray icon/menu dynamically.
+/// Poll the service status directly from AppState (no HTTP).
 fn start_status_poller(handle: AppHandle<Wry>) {
     tauri::async_runtime::spawn(async move {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .build()
-            .unwrap_or_default();
         let version = env!("CARGO_PKG_VERSION");
+
+        // Wait for state to be initialized
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
 
-            let status_url = format!("{SERVICE_URL}/status");
-            let stats_url = format!("{SERVICE_URL}/chunks/stats");
+            let mut tray_status = TrayStatus::default();
 
-            let (status_resp, stats_resp) = tokio::join!(
-                client.get(&status_url).send(),
-                client.get(&stats_url).send(),
-            );
+            // Get state if available
+            if let Some(state) = handle.try_state::<Arc<AppState>>() {
+                // Get streaming event
+                match state.get_streaming_event().await {
+                    Ok(Some(event)) => {
+                        tray_status.event_name = event
+                            .short_description
+                            .unwrap_or_default();
 
-            let status_json: Option<serde_json::Value> = status_resp
-                .ok()
-                .and_then(|r| tauri::async_runtime::block_on(r.json()).ok());
-
-            let stats_json: Option<serde_json::Value> = stats_resp
-                .ok()
-                .and_then(|r| tauri::async_runtime::block_on(r.json()).ok());
-
-            // Determine inpoint state
-            let (inpoint_status, buffer_text) = match &status_json {
-                Some(val) => {
-                    let has_event = val
-                        .get("streaming_event")
-                        .is_some_and(|v| !v.is_null());
-
-                    let buffer = stats_json
-                        .as_ref()
-                        .and_then(|s| s.get("buffer_duration_secs"))
-                        .and_then(|v| v.as_f64())
-                        .map(format_duration)
-                        .unwrap_or_else(|| "00:00:00".to_string());
-
-                    if has_event {
-                        ("Streaming", buffer)
-                    } else {
-                        ("Idle", buffer)
+                        tray_status.inpoint = if event.receiving_activated {
+                            "Receiving".to_string()
+                        } else {
+                            "Paused".to_string()
+                        };
+                    }
+                    Ok(None) => {
+                        tray_status.inpoint = "No Event".to_string();
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to get streaming event: {e}");
+                        tray_status.inpoint = "Error".to_string();
                     }
                 }
-                None => ("Disconnected", "--:--:--".to_string()),
-            };
 
-            // Determine endpoint state
-            let (endpoint_status, pending_chunks) = match &status_json {
-                Some(_) => {
-                    let pending = stats_json
-                        .as_ref()
-                        .and_then(|s| s.get("pending_chunks"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
+                // Get chunk stats
+                match state.get_chunk_stats().await {
+                    Ok(stats) => {
+                        tray_status.buffer = format_duration(stats.buffer_duration_secs);
+                        tray_status.pending = stats.pending_chunks as u64;
+                        tray_status.total_chunks = stats.total_chunks as u64;
 
-                    if pending > 0 {
-                        ("Uploading", pending)
-                    } else {
-                        ("Idle", 0)
+                        tray_status.endpoint = if stats.pending_chunks > 0 {
+                            "Uploading".to_string()
+                        } else {
+                            "Idle".to_string()
+                        };
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to get chunk stats: {e}");
                     }
                 }
-                None => ("Disconnected", 0),
-            };
+            } else {
+                tray_status.inpoint = "Initializing...".to_string();
+                tray_status.endpoint = "Initializing...".to_string();
+            }
 
-            // Update the single tray icon
+            // Update the tray icon
             if let Some(tray) = handle.tray_by_id("restreamer") {
-                let _ = tray.set_tooltip(Some(&format!(
-                    "Restreamer — Inpoint: {inpoint_status} | Endpoint: {endpoint_status}"
-                )));
+                let tooltip = if !tray_status.event_name.is_empty() {
+                    format!(
+                        "Restreamer - {} | {} chunks",
+                        tray_status.event_name, tray_status.total_chunks
+                    )
+                } else {
+                    format!("Restreamer - {}", tray_status.inpoint)
+                };
+                let _ = tray.set_tooltip(Some(&tooltip));
 
-                if let Ok(menu) = build_menu(
-                    &handle,
-                    version,
-                    inpoint_status,
-                    &buffer_text,
-                    endpoint_status,
-                    pending_chunks,
-                ) {
+                if let Ok(menu) = build_menu(&handle, version, &tray_status) {
                     let _ = tray.set_menu(Some(menu));
                 }
             }

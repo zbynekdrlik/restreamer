@@ -1,33 +1,29 @@
 [package]
-name = "rs-service"
+name = "rs-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-
-[[bin]]
-name = "restreamer-service"
-path = "src/main.rs"
+description = "Restreamer service runtime - embeddable service core for Tauri and standalone use"
 
 [dependencies]
 rs-core.workspace = true
-rs-runtime.workspace = true
+rs-inpoint.workspace = true
+rs-endpoint.workspace = true
+rs-api.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-windows-service = "0.7"
+sqlx.workspace = true
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json"] }
 tempfile = "3"
+axum.workspace = true
 serde_json = { workspace = true }
 tokio = { workspace = true }
-sqlx = { workspace = true }
 rs-core = { workspace = true }
 rs-inpoint = { workspace = true }
 rs-api = { workspace = true }
-rs-runtime = { workspace = true }

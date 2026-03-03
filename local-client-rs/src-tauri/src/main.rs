@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    restreamer_tray_lib::run();
+    restreamer_lib::run();
 }

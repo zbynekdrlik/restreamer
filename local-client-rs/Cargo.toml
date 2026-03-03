@@ -5,15 +5,19 @@ members = [
     "crates/rs-inpoint",
     "crates/rs-endpoint",
     "crates/rs-api",
+    "crates/rs-runtime",
     "crates/rs-service",
 ]
 # src-tauri is excluded from default workspace builds because it requires
-# Node.js + `npm run build` first (Tauri generate_context! needs dist/).
+# the frontend to be built first (Tauri generate_context! needs dist/).
 # Build it via `npx tauri build` which handles the frontend build automatically.
-exclude = ["src-tauri"]
+#
+# leptos-ui is excluded because it targets wasm32-unknown-unknown and has
+# different dependencies. Build it via `trunk build` from the leptos-ui directory.
+exclude = ["src-tauri", "leptos-ui"]
 
 [workspace.package]
-version = "0.1.7"
+version = "0.1.9"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/restreamer"
@@ -73,6 +77,7 @@ rs-core = { path = "crates/rs-core" }
 rs-inpoint = { path = "crates/rs-inpoint" }
 rs-endpoint = { path = "crates/rs-endpoint" }
 rs-api = { path = "crates/rs-api" }
+rs-runtime = { path = "crates/rs-runtime" }
 rs-service = { path = "crates/rs-service" }
 
 [profile.release]
