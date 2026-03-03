@@ -1193,7 +1193,7 @@ jobs:
                 return
               }
             } catch {}
-            Write-Host "Waiting for sync (attempt $i/$maxRetries)..."
+            Write-Host "Waiting for sync (attempt ${i}/${maxRetries})..."
             Start-Sleep -Seconds 3
           }
           throw "FAILED: Poller did not sync event after $maxRetries attempts"
@@ -1341,12 +1341,12 @@ jobs:
             $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
 
             if ($statusResp -and $statusResp.d.responseData.outputActive) {
-              Write-Host "OBS is streaming (attempt $attempt/$maxRetries)"
+              Write-Host "OBS is streaming (attempt ${attempt}/${maxRetries})"
               Write-Host "OBS is now streaming to Restreamer RTMP"
               return
             }
 
-            Write-Host "OBS not streaming yet (attempt $attempt/$maxRetries), waiting..."
+            Write-Host "OBS not streaming yet (attempt ${attempt}/${maxRetries}), waiting..."
             Start-Sleep -Seconds 5
           }
 
@@ -1366,7 +1366,7 @@ jobs:
           for ($i = 1; $i -le $maxRetries; $i++) {
             $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
             $newChunks = $stats.total_chunks - $initialCount
-            Write-Host "Attempt $i/$maxRetries: new_chunks=$newChunks, pending=$($stats.pending_chunks)"
+            Write-Host "Attempt ${i}/${maxRetries}: new_chunks=$newChunks, pending=$($stats.pending_chunks)"
 
             if ($newChunks -ge 8 -and $stats.pending_chunks -eq 0) {
               Write-Host "=== Chunks verified: $newChunks new chunks, 0 pending ==="
@@ -1435,7 +1435,7 @@ jobs:
               $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
                 -Method GET -TimeoutSec 30
 
-              Write-Host "--- Attempt $i/$maxRetries ---"
+              Write-Host "--- Attempt ${i}/${maxRetries} ---"
               Write-Host "  delivering_activated: $($response.delivering_activated)"
               Write-Host "  server_ip: $($response.server_ip)"
               Write-Host "  server_ready: $($response.server_ready)"
@@ -1452,7 +1452,7 @@ jobs:
                 return
               }
             } catch {
-              Write-Host "Request failed on attempt $i : $_"
+              Write-Host "Request failed on attempt ${i}: $_"
             }
             Start-Sleep -Seconds 15
           }
@@ -1469,7 +1469,7 @@ jobs:
               $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/youtube-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
                 -Method GET -TimeoutSec 30
 
-              Write-Host "--- Attempt $i/$maxRetries ---"
+              Write-Host "--- Attempt ${i}/${maxRetries} ---"
               Write-Host "  has_active_broadcast: $($response.has_active_broadcast)"
 
               if ($response.has_active_broadcast) {
@@ -1492,7 +1492,7 @@ jobs:
                 Write-Host "  detail: $($response.error_detail)"
               }
             } catch {
-              Write-Host "Request failed on attempt $i : $_"
+              Write-Host "Request failed on attempt ${i}: $_"
             }
             Start-Sleep -Seconds 15
           }
