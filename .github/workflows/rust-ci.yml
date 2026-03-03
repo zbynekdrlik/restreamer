@@ -1181,6 +1181,10 @@ jobs:
             throw "Failed to activate receiving: $($response | ConvertTo-Json)"
           }
           Write-Host "Receiving activated: event_id=$($response.event_id)"
+          Write-Host "Instance created: $($response.instance_created)"
+          if ($response.instance_error) {
+            Write-Host "Instance creation note: $($response.instance_error)"
+          }
 
       - name: Wait for poller to sync event
         shell: powershell
