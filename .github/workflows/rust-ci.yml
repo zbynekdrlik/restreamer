@@ -1201,6 +1201,8 @@ jobs:
       - name: Start OBS stream
         shell: powershell
         run: |
+          # Send StartStream via OBS WebSocket, then disconnect.
+          # We verify stream status separately to avoid event message noise.
           $ws = New-Object System.Net.WebSockets.ClientWebSocket
           $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
           $cts = New-Object System.Threading.CancellationTokenSource
@@ -1244,7 +1246,7 @@ jobs:
           Send-OBSMessage $ws $identify
           $identified = Receive-OBSMessage $ws
 
-          # Start streaming
+          # Send StartStream request
           $startStream = @{
             op = 6
             d = @{
@@ -1254,31 +1256,100 @@ jobs:
           } | ConvertTo-Json -Depth 5
 
           Send-OBSMessage $ws $startStream
-          $startResp = Receive-OBSMessage $ws
-          Write-Host "StartStream response: op=$($startResp.op)"
-
-          # Wait and verify stream status
-          Start-Sleep -Seconds 3
-
-          $getStatus = @{
-            op = 6
-            d = @{
-              requestType = "GetStreamStatus"
-              requestId = "get-status-1"
-            }
-          } | ConvertTo-Json -Depth 5
-
-          Send-OBSMessage $ws $getStatus
-          $statusResp = Receive-OBSMessage $ws
-          $streamActive = $statusResp.d.responseData.outputActive
-          Write-Host "OBS streaming active: $streamActive"
-
-          if (-not $streamActive) {
-            throw "FAILED: OBS stream did not start"
+          # Read response - skip any event messages (op=5) that arrive before the response (op=7)
+          for ($r = 0; $r -lt 5; $r++) {
+            $startResp = Receive-OBSMessage $ws
+            Write-Host "Received message: op=$($startResp.op)"
+            if ($startResp.op -eq 7) { break }
           }
 
-          Write-Host "OBS is now streaming to Restreamer RTMP"
           $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          Write-Host "StartStream sent, waiting for OBS to connect to RTMP..."
+
+      - name: Verify OBS is streaming
+        shell: powershell
+        run: |
+          # Reconnect to check stream status (avoids event noise from StartStream)
+          Start-Sleep -Seconds 5
+
+          $maxRetries = 6
+          for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $identified = Receive-OBSMessage $ws
+
+            $getStatus = @{
+              op = 6
+              d = @{
+                requestType = "GetStreamStatus"
+                requestId = "get-status-$attempt"
+              }
+            } | ConvertTo-Json -Depth 5
+
+            Send-OBSMessage $ws $getStatus
+
+            # Read responses, skip events (op=5)
+            $statusResp = $null
+            for ($r = 0; $r -lt 5; $r++) {
+              $msg = Receive-OBSMessage $ws
+              if ($msg.op -eq 7) {
+                $statusResp = $msg
+                break
+              }
+              Write-Host "Skipping event: op=$($msg.op)"
+            }
+
+            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+            if ($statusResp -and $statusResp.d.responseData.outputActive) {
+              Write-Host "OBS is streaming (attempt $attempt/$maxRetries)"
+              Write-Host "OBS is now streaming to Restreamer RTMP"
+              return
+            }
+
+            Write-Host "OBS not streaming yet (attempt $attempt/$maxRetries), waiting..."
+            Start-Sleep -Seconds 5
+          }
+
+          throw "FAILED: OBS stream did not start after $maxRetries attempts"
 
       - name: Wait for chunks and verify upload
         shell: powershell
