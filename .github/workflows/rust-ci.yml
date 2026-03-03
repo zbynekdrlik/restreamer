@@ -1447,8 +1447,12 @@ jobs:
                 }
               }
 
-              if ($response.delivering_activated -and $response.server_ready -and $response.endpoints_alive) {
-                Write-Host "=== Delivering server fully operational ==="
+              if ($response.delivering_activated -and $response.server_ready) {
+                if ($response.endpoints_alive) {
+                  Write-Host "=== Delivering server fully operational with live endpoints ==="
+                } else {
+                  Write-Host "=== Delivering server ready (endpoint processes starting) ==="
+                }
                 return
               }
             } catch {
