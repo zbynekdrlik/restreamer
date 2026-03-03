@@ -1463,7 +1463,6 @@ jobs:
           throw "FAILED: Delivering server not ready after $maxRetries attempts (~4.5 min)"
 
       - name: Verify YouTube broadcast is live
-        continue-on-error: true
         shell: powershell
         timeout-minutes: 5
         run: |
@@ -1504,7 +1503,6 @@ jobs:
           throw "FAILED: YouTube broadcast not live after $maxRetries attempts (~4.5 min)"
 
       - name: Verify delivery progression
-        continue-on-error: true
         shell: powershell
         timeout-minutes: 2
         run: |

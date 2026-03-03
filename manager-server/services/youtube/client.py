@@ -17,6 +17,11 @@ def build_youtube_client(user):
     if not youtube_oauth:
         return None
 
+    # Strip timezone info for google-auth compatibility (uses naive UTC internally)
+    expiry = youtube_oauth.expiry
+    if expiry and expiry.tzinfo:
+        expiry = expiry.replace(tzinfo=None)
+
     creds = Credentials(
         token=youtube_oauth.access_token,
         refresh_token=youtube_oauth.refresh_token,
@@ -24,6 +29,7 @@ def build_youtube_client(user):
         client_id=youtube_oauth.client_id,
         client_secret=youtube_oauth.client_secret,
         scopes=youtube_oauth.scopes.split(),
+        expiry=expiry,
     )
 
     # Refresh if needed
