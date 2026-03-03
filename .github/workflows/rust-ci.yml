@@ -1449,13 +1449,12 @@ jobs:
                 }
               }
 
-              if ($response.delivering_activated -and $response.server_ready) {
-                if ($response.endpoints_alive) {
-                  Write-Host "=== Delivering server fully operational with live endpoints ==="
-                } else {
-                  Write-Host "=== Delivering server ready (endpoint processes starting) ==="
-                }
+              if ($response.delivering_activated -and $response.server_ready -and $response.endpoints_alive) {
+                Write-Host "=== Delivering server fully operational with live endpoints ==="
                 return
+              }
+              if ($response.server_ready) {
+                Write-Host "  Server ready, waiting for ffmpeg endpoints to start..."
               }
             } catch {
               Write-Host "Request failed on attempt ${i}: $_"
