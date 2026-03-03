@@ -22,6 +22,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("", include("restreamer.urls.urls")),
     path("control/", include("restreamer.urls.control_urls")),
+    path("api/e2e/", include("restreamer.urls.e2e_urls")),
     path("accounts/", include("accounts.urls")),
     path("services/", include("services.urls")),
     path("youtube/auth/callback", youtube_auth_callback, name="youtube_auth_callback"),

@@ -92,6 +92,32 @@ class ReceiveInitDataView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+class EndpointProcessStatusView(APIView):
+    """Returns status of running ffmpeg endpoint processes."""
+
+    def get(self, request, *args, **kwargs):
+        endpoints = []
+        for alias, process in endpoing_manger.endpoint_processes.items():
+            endpoints.append(
+                {
+                    "alias": alias,
+                    "alive": process.is_alive(),
+                    "pid": process.pid,
+                    "buff_size_mb": round(process.buff_size.value / 1024 / 1024, 2),
+                    "current_chunk_id": process.chunk_id.value,
+                }
+            )
+
+        return Response(
+            {
+                "status": "ok",
+                "endpoint_count": len(endpoints),
+                "endpoints": endpoints,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class EndStreamView(APIView):
     def post(self, request, *args, **kwargs):
         alias = request.data.get("alias")

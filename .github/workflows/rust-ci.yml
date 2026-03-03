@@ -736,16 +736,21 @@ jobs:
         run: |
           Write-Host "Waiting for poller to sync streaming event..."
           $maxRetries = 10
+          $synced = $false
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
               $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/streaming-event" -TimeoutSec 10
               if ($response -and $response.receiving_activated) {
                 Write-Host "Streaming event synced: $($response.identifier)"
+                $synced = $true
                 break
               }
             } catch {}
             Write-Host "Waiting for event sync (attempt $i/$maxRetries)..."
             Start-Sleep -Seconds 3
+          }
+          if (-not $synced) {
+            throw "FAILED: Poller did not sync streaming event after $maxRetries attempts (30s timeout)"
           }
 
       - name: Get initial chunk count
@@ -791,8 +796,21 @@ jobs:
       - name: Verify chunks created and uploaded
         shell: powershell
         run: |
-          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
           $initialCount = [int]$env:INITIAL_CHUNKS
+
+          # Wait up to 30s for all chunks to be uploaded (pending -> 0)
+          $maxWait = 6
+          $stats = $null
+          for ($w = 1; $w -le $maxWait; $w++) {
+            $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+            if ($stats.pending_chunks -eq 0) {
+              Write-Host "All chunks uploaded (attempt $w/$maxWait)"
+              break
+            }
+            Write-Host "Pending chunks: $($stats.pending_chunks) - waiting for S3 upload (attempt $w/$maxWait)..."
+            Start-Sleep -Seconds 5
+          }
+
           $newChunks = $stats.total_chunks - $initialCount
           $pendingChunks = $stats.pending_chunks
 
@@ -809,14 +827,36 @@ jobs:
             throw "Expected at least 8 new chunks, got $newChunks"
           }
 
-          # All chunks should be uploaded (sent), none pending
-          if ($pendingChunks -gt 2) {
-            Write-Host "WARNING: $pendingChunks chunks still pending upload"
+          # HARD FAIL: All chunks must be uploaded to S3
+          if ($pendingChunks -gt 0) {
+            throw "FAILED: $pendingChunks chunks still pending S3 upload after 30s wait"
           }
 
           Write-Host "=== Local E2E Test PASSED ==="
         env:
           INITIAL_CHUNKS: ${{ steps.initial-chunks.outputs.INITIAL_CHUNKS }}
+
+      - name: Verify chunks on manager DB
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # Verify chunks reached manager server database (proves: client -> S3 -> manager notification -> DB)
+          Write-Host "Verifying chunks exist on manager server DB..."
+
+          $uri = "https://restreamer.newlevel.media/api/e2e/chunk-verification/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test&min_chunks=8"
+          $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
+
+          Write-Host "Event ID: $($response.event_id)"
+          Write-Host "Chunk count on manager: $($response.chunk_count)"
+          Write-Host "Min required: $($response.min_chunks_required)"
+          Write-Host "Has enough: $($response.has_enough)"
+          Write-Host "Identifier: $($response.identifier)"
+
+          if (-not $response.has_enough) {
+            throw "FAILED: Manager DB has only $($response.chunk_count) chunks, need at least $($response.min_chunks_required)"
+          }
+
+          Write-Host "=== Manager chunk verification PASSED ==="
 
       - name: Activate delivering and initialize YouTube stream
         shell: powershell
@@ -856,33 +896,93 @@ jobs:
 
       - name: Verify delivering server is streaming
         shell: powershell
-        timeout-minutes: 2
+        timeout-minutes: 3
         run: |
-          # Check delivering server status via E2E API (no SSH needed)
+          # Check delivering server status via E2E API with retry loop
           Write-Host "Checking delivering server status via API..."
 
-          $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" `
+          $maxRetries = 6
+          $verified = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" `
+                -Method GET -TimeoutSec 30
+
+              Write-Host "--- Attempt $i/$maxRetries ---"
+              Write-Host "Event ID: $($response.event_id)"
+              Write-Host "Delivering activated: $($response.delivering_activated)"
+              Write-Host "Server IP: $($response.server_ip)"
+              Write-Host "Server ready: $($response.server_ready)"
+              Write-Host "Endpoints alive: $($response.endpoints_alive)"
+
+              # Show per-endpoint details
+              if ($response.endpoint_details) {
+                foreach ($ep in $response.endpoint_details) {
+                  Write-Host "  Endpoint: $($ep.alias) | alive=$($ep.alive) | pid=$($ep.pid) | buffer=$($ep.buff_size_mb)MB | chunk_id=$($ep.current_chunk_id)"
+                }
+              }
+
+              if ($response.delivering_activated -and $response.server_ready) {
+                $verified = $true
+                if ($response.endpoints_alive) {
+                  Write-Host "Endpoint processes confirmed alive!"
+                  break
+                }
+                # Server ready but endpoint-status not available yet - still valid
+                Write-Host "Server ready (endpoint process details not available)"
+                break
+              }
+
+              Write-Host "Not fully ready yet, retrying in 10s..."
+            } catch {
+              Write-Host "Request failed on attempt $i : $_"
+            }
+            Start-Sleep -Seconds 10
+          }
+
+          if (-not $verified) {
+            throw "FAILED: Delivering server not fully operational after $maxRetries attempts. delivering_activated=$($response.delivering_activated), server_ready=$($response.server_ready)"
+          }
+
+          if ($response.endpoints_alive) {
+            Write-Host "=== FULL E2E WITH YOUTUBE DELIVERY PASSED (with endpoint verification) ==="
+          } else {
+            Write-Host "=== FULL E2E WITH YOUTUBE DELIVERY PASSED ==="
+          }
+          Write-Host "Stream -> Restreamer -> S3 -> Manager -> Delivering -> YouTube: VERIFIED"
+
+      - name: Verify delivery progression
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # Take two readings 15s apart to verify chunk_id is advancing
+          Write-Host "Verifying delivery progression (two readings 15s apart)..."
+
+          $response1 = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" `
             -Method GET -TimeoutSec 30
 
-          Write-Host "Event ID: $($response.event_id)"
-          Write-Host "Delivering activated: $($response.delivering_activated)"
-          Write-Host "Server IP: $($response.server_ip)"
-          Write-Host "Server ready: $($response.server_ready)"
-
-          if (-not $response.delivering_activated) {
-            throw "Delivering is not activated - YouTube stream not started"
+          $chunk1 = 0
+          if ($response1.endpoint_details -and $response1.endpoint_details.Count -gt 0) {
+            $chunk1 = $response1.endpoint_details[0].current_chunk_id
           }
+          Write-Host "Reading 1: chunk_id = $chunk1"
 
-          if (-not $response.server_ip) {
-            throw "No delivering server IP - server may not have started"
+          Start-Sleep -Seconds 15
+
+          $response2 = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" `
+            -Method GET -TimeoutSec 30
+
+          $chunk2 = 0
+          if ($response2.endpoint_details -and $response2.endpoint_details.Count -gt 0) {
+            $chunk2 = $response2.endpoint_details[0].current_chunk_id
           }
+          Write-Host "Reading 2: chunk_id = $chunk2"
 
-          if (-not $response.server_ready) {
-            throw "Delivering server is not ready - stream may not be reaching YouTube"
+          if ($chunk2 -gt $chunk1) {
+            Write-Host "=== Delivery progression CONFIRMED: chunk_id advanced from $chunk1 to $chunk2 ==="
+          } else {
+            Write-Host "WARNING: chunk_id did not advance ($chunk1 -> $chunk2). Delivery may be stalled but not failing test."
           }
-
-          Write-Host "=== FULL E2E WITH YOUTUBE DELIVERY PASSED ==="
-          Write-Host "Stream -> Restreamer -> S3 -> Manager -> Delivering -> YouTube: VERIFIED"
 
       - name: Deactivate streaming event
         if: always()
