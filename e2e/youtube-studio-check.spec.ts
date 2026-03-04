@@ -32,11 +32,10 @@ test("YouTube Studio shows an active live broadcast", async () => {
 
   const context = await chromium.launchPersistentContext(PROFILE_DIR, {
     headless: !headed,
-    // Do NOT use channel: "chrome" — system Chrome encrypts cookies via DPAPI
-    // tied to the Windows user account, breaking cross-user profile sharing.
-    // Playwright's bundled Chromium avoids this issue.
+    channel: "chrome",
     args: [
       "--disable-blink-features=AutomationControlled",
+      "--disable-features=LockProfileCookieDatabase",
       "--no-first-run",
       "--no-default-browser-check",
     ],
