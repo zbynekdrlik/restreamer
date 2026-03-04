@@ -1032,9 +1032,10 @@ jobs:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
       OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}
-      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-      YOUTUBE_CHANNEL_ID: "UCW2_u0wDN4Z1NY5A7o5meZg"
+      YT_PROFILE_DIR: 'C:\Users\newlevel\.playwright-yt-profile'
     steps:
+      - uses: actions/checkout@v4
+
       - name: Ensure OBS is running
         shell: powershell
         run: |
@@ -1509,7 +1510,8 @@ jobs:
         shell: powershell
         timeout-minutes: 3
         run: |
-          Write-Host "Verifying delivering server is actively sending to YouTube..."
+          # Delivering server sends to YouTube via YT_HLS (HTTPS PUT), not RTMP
+          Write-Host "Verifying delivering server is actively sending to YouTube (YT_HLS)..."
           Write-Host "Taking two readings 20s apart to confirm chunk progression..."
 
           $r1 = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
@@ -1538,52 +1540,40 @@ jobs:
             Write-Host ""
             Write-Host "=========================================="
             Write-Host "  DELIVERY CONFIRMED: chunks advancing $chunk1 -> $chunk2"
-            Write-Host "  ffmpeg is alive and sending to YouTube"
+            Write-Host "  ffmpeg is alive and sending to YouTube via YT_HLS"
             Write-Host "=========================================="
           } else {
             throw "FAILED: chunk_id did not advance ($chunk1 -> $chunk2) - ffmpeg may not be sending"
           }
 
-      - name: Check YouTube channel for live broadcast
+      - name: Install E2E test dependencies
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          $repoRoot = $env:GITHUB_WORKSPACE
+          if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
+          $e2eDir = Join-Path $repoRoot "e2e"
+          Write-Host "Installing Playwright in $e2eDir..."
+          Push-Location $e2eDir
+          npm install
+          npx playwright install chromium
+          Pop-Location
+          Write-Host "Playwright installed"
+
+      - name: Verify YouTube broadcast is live via Studio
         shell: powershell
         timeout-minutes: 5
         run: |
-          Write-Host "Checking YouTube channel for live broadcast via Search API..."
-          $channelId = "$($env:YOUTUBE_CHANNEL_ID)"
-          $maxRetries = 12
-          $found = $false
-          for ($i = 1; $i -le $maxRetries; $i++) {
-            try {
-              $uri = "https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=$channelId&eventType=live&type=video&key=$($env:YOUTUBE_API_KEY)"
-              $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
-              $count = $response.pageInfo.totalResults
-
-              Write-Host "--- Attempt ${i}/${maxRetries}: $count live broadcast(s) found ---"
-
-              if ($count -gt 0) {
-                $video = $response.items[0]
-                Write-Host ""
-                Write-Host "=========================================="
-                Write-Host "  YOUTUBE BROADCAST IS LIVE!"
-                Write-Host "  Title: $($video.snippet.title)"
-                Write-Host "  Video: https://youtube.com/watch?v=$($video.id.videoId)"
-                Write-Host "=========================================="
-                $found = $true
-                break
-              }
-            } catch {
-              Write-Host "Request failed on attempt ${i}: $_"
-            }
-            Start-Sleep -Seconds 15
-          }
-
-          if (-not $found) {
-            Write-Host ""
-            Write-Host "NOTE: No live broadcast detected on YouTube channel."
-            Write-Host "This may be because auto-start is not enabled on the YouTube stream."
-            Write-Host "The delivering server IS confirmed sending data (previous step passed)."
-            Write-Host "Consider enabling auto-start in YouTube Studio for full verification."
-          }
+          # Hard-fail check: Playwright opens YouTube Studio with a persistent
+          # Chrome profile (saved Google OAuth session) and verifies an active
+          # live broadcast exists.  No informational-only steps — this THROWS
+          # on failure.
+          $repoRoot = $env:GITHUB_WORKSPACE
+          if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
+          $e2eDir = Join-Path $repoRoot "e2e"
+          Push-Location $e2eDir
+          npx playwright test youtube-studio-check
+          Pop-Location
 
       - name: Stop OBS stream
         if: always()
