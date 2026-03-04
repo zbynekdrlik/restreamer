@@ -1560,14 +1560,19 @@ jobs:
           Pop-Location
           Write-Host "Playwright installed"
 
-      - name: Verify YouTube broadcast is live via Studio
+      - name: Verify YouTube is receiving stream via Studio
         shell: powershell
         timeout-minutes: 5
         run: |
-          # Hard-fail check: Playwright opens YouTube Studio with a persistent
-          # Chrome profile (saved Google OAuth session) and verifies an active
-          # live broadcast exists.  No informational-only steps — this THROWS
-          # on failure.
+          # Hard-fail check: Playwright opens YouTube Studio Live Control Room
+          # with a persistent Chrome profile (saved Google OAuth session) and
+          # verifies the stream is being received (testing state).
+          #
+          # Auto-start is BANNED (YouTube destroys the stream afterward), so
+          # the broadcast stays in "testing" state.  We check for:
+          #   - "Go live" button (enabled = stream data is arriving)
+          #   - Stream health indicators ("Excellent", "Good")
+          #   - Stream preview / video elements
           #
           # IMPORTANT: Run as "newlevel" user via Task Scheduler because:
           # - CI runner runs as SYSTEM, but Chrome cookies are encrypted with
@@ -1578,6 +1583,7 @@ jobs:
           if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
           $e2eDir = Join-Path $repoRoot "e2e"
           $resultFile = Join-Path $repoRoot "e2e-yt-result.txt"
+          $screenshotDir = "C:\Users\newlevel\.playwright-yt-screenshots"
 
           # Write a script that runs the Playwright test and saves the exit code
           $scriptPath = Join-Path $repoRoot "run-yt-check.bat"
@@ -1585,6 +1591,7 @@ jobs:
           @echo off
           cd /d $e2eDir
           set YT_PROFILE_DIR=$($env:YT_PROFILE_DIR)
+          set SCREENSHOT_DIR=$screenshotDir
           set PLAYWRIGHT_BROWSERS_PATH=C:\Users\newlevel\AppData\Local\ms-playwright
           npx playwright test youtube-studio-check 2>&1 > "$resultFile"
           echo EXIT_CODE:%ERRORLEVEL% >> "$resultFile"
@@ -1600,6 +1607,7 @@ jobs:
           Start-ScheduledTask -TaskName "PlaywrightYTCheck"
 
           Write-Host "Playwright test started as newlevel user via Task Scheduler"
+          Write-Host "Screenshots will be saved to $screenshotDir"
 
           # Wait for the task to complete (poll every 5s, max 4 min)
           $maxWait = 48
@@ -1624,6 +1632,11 @@ jobs:
             if ($output -match "EXIT_CODE:(\d+)") {
               $exitCode = [int]$Matches[1]
               if ($exitCode -ne 0) {
+                # Display screenshots listing for debugging
+                if (Test-Path $screenshotDir) {
+                  Write-Host "Screenshots captured:"
+                  Get-ChildItem $screenshotDir | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
+                }
                 throw "Playwright YouTube Studio check FAILED (exit code $exitCode)"
               }
               Write-Host "YouTube Studio verification PASSED"
