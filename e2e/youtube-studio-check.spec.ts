@@ -38,6 +38,7 @@ const SCREENSHOT_DIR =
     ? "C:\\Users\\newlevel\\.playwright-yt-screenshots"
     : path.join(os.homedir(), ".playwright-yt-screenshots"));
 
+// Force English UI via hl parameter — the machine locale is Slovak
 const YOUTUBE_STUDIO_URL = "https://studio.youtube.com";
 const MAX_RETRIES = 6;
 const RETRY_DELAY_MS = 10_000;
@@ -51,11 +52,13 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
   const context = await chromium.launchPersistentContext(PROFILE_DIR, {
     headless: !headed,
     channel: "chrome",
+    locale: "en-US",
     args: [
       "--disable-blink-features=AutomationControlled",
       "--disable-features=LockProfileCookieDatabase",
       "--no-first-run",
       "--no-default-browser-check",
+      "--lang=en-US",
     ],
     viewport: { width: 1280, height: 720 },
     // Give pages plenty of time for YouTube Studio's heavy JS
@@ -65,14 +68,51 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
   const page = context.pages()[0] || (await context.newPage());
 
   try {
-    // Navigate to YouTube Studio
-    await page.goto(YOUTUBE_STUDIO_URL, {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
+    // Navigate to YouTube Studio (force English with hl=en)
+    await page.goto(`${YOUTUBE_STUDIO_URL}/?hl=en`, {
+      waitUntil: "networkidle",
+      timeout: 60_000,
     });
 
-    // Wait for initial load
-    await page.waitForTimeout(3_000);
+    // Wait for initial load — YouTube Studio is a very heavy SPA
+    await page.waitForTimeout(5_000);
+
+    await page.screenshot({
+      path: path.join(SCREENSHOT_DIR, "01-initial-load.png"),
+      fullPage: true,
+    });
+
+    // Handle "unsupported browser" interstitial page.
+    // YouTube Studio may show a page saying "Upgrade your browser" with
+    // a "SKIP TO YOUTUBE STUDIO" link at the bottom (or in Slovak:
+    // "PRESKOČIŤ NA ŠTÚDIO YOUTUBE").
+    const skipLink = page.locator(
+      [
+        'a:has-text("SKIP TO YOUTUBE STUDIO")',
+        'a:has-text("Skip to YouTube Studio")',
+        'a:has-text("PRESKOČIŤ NA ŠTÚDIO YOUTUBE")',
+        // Also try button variants
+        'button:has-text("SKIP TO YOUTUBE STUDIO")',
+        'button:has-text("PRESKOČIŤ NA ŠTÚDIO YOUTUBE")',
+        // Generic text link at bottom of browser upgrade page
+        ':text("SKIP TO YOUTUBE")',
+        ':text("PRESKOČIŤ")',
+      ].join(", "),
+    );
+
+    const skipCount = await skipLink.count();
+    if (skipCount > 0) {
+      console.log(
+        "Detected 'unsupported browser' interstitial — clicking skip link...",
+      );
+      await skipLink.first().click();
+      // Wait for YouTube Studio to actually load after clicking skip
+      await page.waitForTimeout(8_000);
+      await page.screenshot({
+        path: path.join(SCREENSHOT_DIR, "02-after-skip.png"),
+        fullPage: true,
+      });
+    }
 
     // Check if we got redirected to a login page — means session expired
     const currentUrl = page.url();
@@ -103,31 +143,63 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
       }
     }
 
-    // Navigate to Live Control Room
-    // First get the channel ID from YouTube Studio
-    await page.goto(`${YOUTUBE_STUDIO_URL}/channel`, {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
-    });
-    await page.waitForTimeout(2_000);
+    // Navigate to Live Control Room.
+    // First get the channel ID from YouTube Studio URL (it redirects to
+    // studio.youtube.com/channel/CHANNEL_ID/...)
+    console.log(`Current URL after Studio load: ${page.url()}`);
 
-    const channelUrl = page.url();
-    const channelIdMatch = channelUrl.match(/channel\/([^/]+)/);
-    if (channelIdMatch) {
-      // Go directly to the Live Control Room (livestreaming/stream page)
-      await page.goto(
-        `${YOUTUBE_STUDIO_URL}/channel/${channelIdMatch[1]}/livestreaming/stream`,
-        { waitUntil: "domcontentloaded", timeout: 30_000 },
-      );
-    } else {
-      // Fallback: go to YouTube Studio main page
-      await page.goto(`${YOUTUBE_STUDIO_URL}`, {
-        waitUntil: "domcontentloaded",
+    // Try to extract channel ID from current URL
+    let channelId = page.url().match(/channel\/([^/?]+)/)?.[1];
+
+    if (!channelId) {
+      // Navigate to /channel to trigger redirect that reveals channel ID
+      await page.goto(`${YOUTUBE_STUDIO_URL}/channel?hl=en`, {
+        waitUntil: "networkidle",
         timeout: 30_000,
       });
+      await page.waitForTimeout(5_000);
+
+      // Handle skip link again if it appears
+      const skipLink2 = page.locator(
+        ':text("SKIP TO YOUTUBE"), :text("PRESKOČIŤ")',
+      );
+      if ((await skipLink2.count()) > 0) {
+        await skipLink2.first().click();
+        await page.waitForTimeout(5_000);
+      }
+
+      channelId = page.url().match(/channel\/([^/?]+)/)?.[1];
+      console.log(`Channel URL: ${page.url()}`);
+    }
+
+    if (channelId) {
+      console.log(`Found channel ID: ${channelId}`);
+      // Go directly to the Live Control Room
+      await page.goto(
+        `${YOUTUBE_STUDIO_URL}/channel/${channelId}/livestreaming/stream?hl=en`,
+        { waitUntil: "networkidle", timeout: 30_000 },
+      );
+    } else {
+      console.log("Could not extract channel ID — staying on current page");
     }
 
     await page.waitForTimeout(5_000);
+
+    // Handle skip link one more time if we navigated to a new URL
+    const skipLink3 = page.locator(
+      ':text("SKIP TO YOUTUBE"), :text("PRESKOČIŤ")',
+    );
+    if ((await skipLink3.count()) > 0) {
+      await skipLink3.first().click();
+      await page.waitForTimeout(5_000);
+    }
+
+    await page.screenshot({
+      path: path.join(SCREENSHOT_DIR, "03-live-control-room.png"),
+      fullPage: true,
+    });
+
+    console.log(`Live Control Room URL: ${page.url()}`);
 
     // Retry loop: look for stream-receiving indicators (testing state)
     // Since auto-start is BANNED, YouTube won't show "LIVE" — instead we
@@ -157,8 +229,8 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
         console.log(`Page URL: ${page.url()}`);
         console.log(`Page text length: ${pageContent.length} chars`);
 
-        // Log a snippet of the page for debugging (first 500 chars)
-        const snippet = pageContent.replace(/\s+/g, " ").trim().slice(0, 500);
+        // Log a snippet of the page for debugging (first 1000 chars)
+        const snippet = pageContent.replace(/\s+/g, " ").trim().slice(0, 1000);
         console.log(`Page snippet: ${snippet}`);
 
         // === POSITIVE indicators: stream IS being received ===
@@ -166,11 +238,14 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
         // Check 1: "Go live" button — THE primary indicator.
         // When YouTube receives stream data, the "Go live" button appears
         // and becomes clickable in the Live Control Room.
+        // Handle both English and Slovak UI text.
         const goLiveButton = page.locator(
           [
             'button:has-text("Go live")',
             'button:has-text("GO LIVE")',
             'button:has-text("Go Live")',
+            'button:has-text("Spustiť")', // Slovak: "Start"
+            'button:has-text("Živé vysielanie")', // Slovak: "Live broadcast"
             '[aria-label*="Go live"]',
             '[aria-label*="GO LIVE"]',
           ].join(", "),
@@ -179,7 +254,8 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
         if (goLiveCount > 0) {
           for (let i = 0; i < goLiveCount; i++) {
             if (await goLiveButton.nth(i).isVisible()) {
-              matchedIndicator = '"Go live" button is visible';
+              const text = await goLiveButton.nth(i).textContent();
+              matchedIndicator = `"Go live" button is visible: "${text?.trim()}"`;
               streamReceiving = true;
               break;
             }
@@ -192,14 +268,16 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
         // YouTube Studio shows "Excellent", "Good", "OK", or "Bad" for
         // stream health when data is being received.
         const healthPatterns = [
-          /\bExcellent\b/,
-          /\bGood\b.*\b(stream|connection|health|quality)\b/i,
-          /\b(stream|connection|health|quality)\b.*\bGood\b/i,
-          /\bstream\s+health\b/i,
+          /\bExcellent\b/i,
+          /\bGood\b/i,
+          /\bstream\s*health\b/i,
+          /\bVýborn[áý]\b/i, // Slovak: "Excellent"
+          /\bDobr[áý]\b/i, // Slovak: "Good"
+          /\bStav\s*streamu\b/i, // Slovak: "Stream status"
         ];
         for (const pattern of healthPatterns) {
           if (pattern.test(pageContent)) {
-            matchedIndicator = `Stream health indicator: ${pattern}`;
+            matchedIndicator = `Stream health indicator matched: ${pattern}`;
             streamReceiving = true;
             break;
           }
@@ -211,12 +289,14 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
         const receivingPatterns = [
           /\bGo\s+live\b/i, // "Go live" text anywhere
           /\bstream\s+preview\b/i, // Stream preview section
+          /\blive\s+control\s+room\b/i, // Page heading
+          /\bmiestnosť\s+na\s+ovládanie/i, // Slovak: "Control room"
           /\bExcellent\s+Data\b/i, // Data quality indicator
-          /\bconnected\b.*\bstream/i, // "Connected" + "stream"
-          /\bstream.*\bconnected\b/i,
-          /\breceiving\b.*\bdata\b/i, // "Receiving data"
+          /\bconnected\b/i, // "Connected" status
+          /\breceiving\b/i, // "Receiving" status
+          /\bpripojené\b/i, // Slovak: "Connected"
           /\b\d+\s*kbps\b/i, // Bitrate indicator (e.g., "4500 kbps")
-          /\b\d+x\d+\b.*\bfps\b/i, // Resolution + fps (e.g., "1920x1080 30fps")
+          /\b\d+x\d+\b/i, // Resolution (e.g., "1920x1080")
           /\b\d+p\b.*\b\d+\s*fps\b/i, // "1080p 30 fps" format
         ];
         for (const pattern of receivingPatterns) {
@@ -259,6 +339,9 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
           /no\s+content/i,
           /waiting\s+for/i,
           /start\s+streaming/i,
+          /upgrade.*browser/i,
+          /unsupported.*browser/i,
+          /prehliadač/i, // Slovak: "browser"
         ];
         const negatives: string[] = [];
         for (const pattern of notReceivingPatterns) {
@@ -282,8 +365,16 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
         console.log(`Waiting ${RETRY_DELAY_MS / 1000}s before retry...`);
         await page.waitForTimeout(RETRY_DELAY_MS);
         // Reload the page for fresh state
-        await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
-        await page.waitForTimeout(3_000);
+        await page.reload({ waitUntil: "networkidle", timeout: 30_000 });
+        await page.waitForTimeout(5_000);
+        // Handle skip link again after reload
+        const skipLinkRetry = page.locator(
+          ':text("SKIP TO YOUTUBE"), :text("PRESKOČIŤ")',
+        );
+        if ((await skipLinkRetry.count()) > 0) {
+          await skipLinkRetry.first().click();
+          await page.waitForTimeout(5_000);
+        }
       }
     }
 

@@ -1593,7 +1593,7 @@ jobs:
           set YT_PROFILE_DIR=$($env:YT_PROFILE_DIR)
           set SCREENSHOT_DIR=$screenshotDir
           set PLAYWRIGHT_BROWSERS_PATH=C:\Users\newlevel\AppData\Local\ms-playwright
-          npx playwright test youtube-studio-check 2>&1 > "$resultFile"
+          npx playwright test youtube-studio-check > "$resultFile" 2>&1
           echo EXIT_CODE:%ERRORLEVEL% >> "$resultFile"
           "@ | Set-Content -Path $scriptPath -Encoding ascii
 
