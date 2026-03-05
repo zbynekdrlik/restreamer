@@ -1413,6 +1413,90 @@ jobs:
           }
           Write-Host "=== Manager chunk verification PASSED ==="
 
+      - name: Install E2E test dependencies
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          $repoRoot = $env:GITHUB_WORKSPACE
+          if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
+          $e2eDir = Join-Path $repoRoot "e2e"
+          Write-Host "Installing Playwright in $e2eDir..."
+          Push-Location $e2eDir
+          npm install
+          npx playwright install chromium
+          Pop-Location
+          Write-Host "Playwright installed"
+
+      - name: Verify YouTube is NOT receiving stream (baseline)
+        shell: powershell
+        timeout-minutes: 4
+        run: |
+          # BASELINE CHECK: Before delivery starts, verify YouTube Studio
+          # does NOT show stream-receiving indicators.  This proves the
+          # post-delivery check is detecting a real state change, not
+          # stale data from a previous run.
+          $repoRoot = $env:GITHUB_WORKSPACE
+          if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
+          $e2eDir = Join-Path $repoRoot "e2e"
+          $resultFile = Join-Path $repoRoot "e2e-yt-baseline.txt"
+          $screenshotDir = "C:\Users\newlevel\.playwright-yt-screenshots-baseline"
+
+          $scriptPath = Join-Path $repoRoot "run-yt-baseline.bat"
+          $lines = @(
+            "@echo off",
+            "cd /d `"$e2eDir`"",
+            "set YT_PROFILE_DIR=$($env:YT_PROFILE_DIR)",
+            "set SCREENSHOT_DIR=$screenshotDir",
+            "set EXPECT_NO_STREAM=1",
+            "set PLAYWRIGHT_BROWSERS_PATH=C:\Users\newlevel\AppData\Local\ms-playwright",
+            "npx playwright test youtube-studio-check > `"$resultFile`" 2>&1"
+          )
+          $lines -join "`r`n" | Set-Content -Path $scriptPath -Encoding ascii
+
+          $action = New-ScheduledTaskAction -Execute $scriptPath
+          $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
+
+          Unregister-ScheduledTask -TaskName "PlaywrightYTBaseline" -Confirm:$false -ErrorAction SilentlyContinue
+          Register-ScheduledTask -TaskName "PlaywrightYTBaseline" -Action $action -Principal $principal -Settings $settings
+          Start-ScheduledTask -TaskName "PlaywrightYTBaseline"
+
+          Write-Host "Baseline check started as newlevel user via Task Scheduler"
+
+          $maxWait = 36
+          for ($i = 1; $i -le $maxWait; $i++) {
+            Start-Sleep -Seconds 5
+            $task = Get-ScheduledTask -TaskName "PlaywrightYTBaseline"
+            if ($task.State -ne "Running") {
+              Write-Host "Task completed after $($i * 5)s"
+              break
+            }
+            if ($i % 6 -eq 0) {
+              Write-Host "Still running... ($($i * 5)s elapsed)"
+            }
+          }
+
+          if (Test-Path $resultFile) {
+            $output = Get-Content $resultFile -Raw
+            Write-Host $output
+
+            if ($output -match "\d+ passed") {
+              Write-Host "Baseline verification PASSED: YouTube is NOT receiving stream"
+            } elseif ($output -match "\d+ failed") {
+              if (Test-Path $screenshotDir) {
+                Write-Host "Screenshots captured:"
+                Get-ChildItem $screenshotDir | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
+              }
+              throw "BASELINE FAILED: YouTube is already receiving stream before delivery started"
+            } else {
+              throw "Could not determine Playwright baseline test result from output"
+            }
+          } else {
+            throw "Playwright baseline test did not produce output"
+          }
+
+          Unregister-ScheduledTask -TaskName "PlaywrightYTBaseline" -Confirm:$false -ErrorAction SilentlyContinue
+
       - name: Wait for delivering server instance ready
         shell: powershell
         timeout-minutes: 6
@@ -1545,20 +1629,6 @@ jobs:
           } else {
             throw "FAILED: chunk_id did not advance ($chunk1 -> $chunk2) - ffmpeg may not be sending"
           }
-
-      - name: Install E2E test dependencies
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          $repoRoot = $env:GITHUB_WORKSPACE
-          if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
-          $e2eDir = Join-Path $repoRoot "e2e"
-          Write-Host "Installing Playwright in $e2eDir..."
-          Push-Location $e2eDir
-          npm install
-          npx playwright install chromium
-          Pop-Location
-          Write-Host "Playwright installed"
 
       - name: Verify YouTube is receiving stream via Studio
         shell: powershell

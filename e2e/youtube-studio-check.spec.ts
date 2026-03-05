@@ -18,6 +18,11 @@ import * as fs from "fs";
  *   - Stream preview content
  *   - Absence of "waiting for stream" placeholder messages
  *
+ * Modes:
+ *   - Default: Verify stream IS being received (used after delivery starts)
+ *   - EXPECT_NO_STREAM=1: Verify stream is NOT being received (baseline
+ *     check before delivery starts, to prove state transition)
+ *
  * Setup (one-time, on stream.lan):
  *   HEADED=1 npx playwright test youtube-studio-check
  *   → Log into Google/YouTube in the opened browser window
@@ -40,10 +45,17 @@ const SCREENSHOT_DIR =
 
 // Force English UI via hl parameter — the machine locale is Slovak
 const YOUTUBE_STUDIO_URL = "https://studio.youtube.com";
-const MAX_RETRIES = 6;
+// EXPECT_NO_STREAM=1 inverts the assertion: verifies YouTube is NOT receiving.
+// Used as a baseline check before delivery starts to prove state transition.
+const EXPECT_NO_STREAM = !!process.env.EXPECT_NO_STREAM;
+const MAX_RETRIES = EXPECT_NO_STREAM ? 2 : 6;
 const RETRY_DELAY_MS = 10_000;
 
-test("YouTube Studio shows stream is being received (testing state)", async () => {
+const testName = EXPECT_NO_STREAM
+  ? "YouTube Studio shows stream is NOT being received (baseline)"
+  : "YouTube Studio shows stream is being received (testing state)";
+
+test(testName, async () => {
   const headed = !!process.env.HEADED;
 
   // Ensure screenshot directory exists
@@ -393,23 +405,42 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
       fullPage: true,
     });
 
-    if (streamReceiving) {
-      console.log("==========================================");
-      console.log("  YOUTUBE IS RECEIVING THE STREAM!");
-      console.log(`  Indicator: ${matchedIndicator}`);
-      console.log("  (Broadcast in testing state — auto-start is banned)");
-      console.log("==========================================");
-    }
+    if (EXPECT_NO_STREAM) {
+      // BASELINE mode: verify YouTube is NOT receiving
+      if (!streamReceiving) {
+        console.log("==========================================");
+        console.log("  BASELINE OK: YouTube is NOT receiving stream");
+        console.log("  (Expected — delivery has not started yet)");
+        console.log("==========================================");
+      }
 
-    // HARD FAIL if YouTube is not receiving the stream
-    expect(
-      streamReceiving,
-      `FAILED: YouTube Studio does not show stream is being received after ${MAX_RETRIES} attempts. ` +
-        `Last error: ${lastError}. ` +
-        `The delivering server confirmed chunk progression (previous CI step), ` +
-        `but YouTube Studio Live Control Room does not show stream-receiving indicators. ` +
-        `Screenshots saved to ${SCREENSHOT_DIR} for debugging.`,
-    ).toBe(true);
+      expect(
+        streamReceiving,
+        `BASELINE FAILED: YouTube Studio shows stream-receiving indicators ` +
+          `BEFORE delivery started. Matched: ${matchedIndicator}. ` +
+          `This means a stale stream from a previous run is still active, ` +
+          `which would make the post-delivery check meaningless. ` +
+          `Screenshots saved to ${SCREENSHOT_DIR} for debugging.`,
+      ).toBe(false);
+    } else {
+      // NORMAL mode: verify YouTube IS receiving
+      if (streamReceiving) {
+        console.log("==========================================");
+        console.log("  YOUTUBE IS RECEIVING THE STREAM!");
+        console.log(`  Indicator: ${matchedIndicator}`);
+        console.log("  (Broadcast in testing state — auto-start is banned)");
+        console.log("==========================================");
+      }
+
+      expect(
+        streamReceiving,
+        `FAILED: YouTube Studio does not show stream is being received after ${MAX_RETRIES} attempts. ` +
+          `Last error: ${lastError}. ` +
+          `The delivering server confirmed chunk progression (previous CI step), ` +
+          `but YouTube Studio Live Control Room does not show stream-receiving indicators. ` +
+          `Screenshots saved to ${SCREENSHOT_DIR} for debugging.`,
+      ).toBe(true);
+    }
   } finally {
     await context.close();
   }
