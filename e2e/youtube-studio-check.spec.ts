@@ -236,61 +236,104 @@ test(testName, async () => {
           fullPage: true,
         });
 
-        // Get the full page text content for text-based matching
-        const pageContent = (await page.textContent("body")) || "";
         console.log(`Page URL: ${page.url()}`);
-        console.log(`Page text length: ${pageContent.length} chars`);
 
-        // Log a snippet of the page for debugging (first 1000 chars)
-        const snippet = pageContent.replace(/\s+/g, " ").trim().slice(0, 1000);
-        console.log(`Page snippet: ${snippet}`);
+        // YouTube Studio is a heavy SPA that uses custom web components
+        // and Shadow DOM.  page.textContent("body") returns stale/JS-mixed
+        // content.  Use JavaScript evaluation to deeply inspect the DOM.
+        const domInfo = await page.evaluate(() => {
+          // Collect ALL visible text from the page (including shadow roots)
+          function getDeepText(node: Node): string {
+            let text = "";
+            if (node.nodeType === Node.TEXT_NODE) {
+              const t = (node.textContent || "").trim();
+              if (t) text += t + " ";
+            }
+            if (node instanceof HTMLElement && node.shadowRoot) {
+              text += getDeepText(node.shadowRoot);
+            }
+            for (const child of node.childNodes) {
+              text += getDeepText(child);
+            }
+            return text;
+          }
+
+          const allText = getDeepText(document.body);
+
+          // Find all buttons and their states
+          const buttons = Array.from(document.querySelectorAll("button")).map(
+            (b) => ({
+              text: (b.textContent || "").trim().substring(0, 80),
+              disabled: b.disabled,
+              ariaDisabled: b.getAttribute("aria-disabled"),
+              visible:
+                b.offsetParent !== null &&
+                getComputedStyle(b).display !== "none",
+            }),
+          );
+
+          // Find video elements
+          const videos = Array.from(document.querySelectorAll("video")).map(
+            (v) => ({
+              src: v.src || v.getAttribute("src") || "",
+              hasSrcObject: !!v.srcObject,
+              visible:
+                v.offsetParent !== null &&
+                getComputedStyle(v).display !== "none",
+            }),
+          );
+
+          // Check for iframes (YouTube might use iframe for preview)
+          const iframes = Array.from(document.querySelectorAll("iframe")).map(
+            (f) => ({
+              src: (f.src || "").substring(0, 200),
+              visible:
+                f.offsetParent !== null &&
+                getComputedStyle(f).display !== "none",
+            }),
+          );
+
+          return {
+            textLength: allText.length,
+            textSnippet: allText.replace(/\s+/g, " ").substring(0, 3000),
+            buttonCount: buttons.length,
+            buttons: buttons.filter(
+              (b) =>
+                b.visible &&
+                (b.text.toLowerCase().includes("live") ||
+                  b.text.toLowerCase().includes("naživo") ||
+                  b.text.toLowerCase().includes("vysielať")),
+            ),
+            videos,
+            iframes: iframes.filter((f) => f.visible),
+          };
+        });
+
+        console.log(`Deep text length: ${domInfo.textLength} chars`);
+        console.log(
+          `Text snippet (3000 chars): ${domInfo.textSnippet.substring(0, 3000)}`,
+        );
+        console.log(
+          `Buttons with live/naživo: ${JSON.stringify(domInfo.buttons)}`,
+        );
+        console.log(`Video elements: ${JSON.stringify(domInfo.videos)}`);
+        console.log(`Visible iframes: ${JSON.stringify(domInfo.iframes)}`);
+
+        const deepText = domInfo.textSnippet;
 
         // === POSITIVE indicators: stream IS being received ===
 
-        // Check 1: "Go live" button — must be ENABLED (not just visible).
-        // The button is always visible on the Live Control Room page, but
-        // it's disabled/greyed when no stream data is arriving.  Only when
-        // YouTube actually receives stream data does the button become enabled.
-        const goLiveButton = page.locator(
-          [
-            'button:has-text("Go live")',
-            'button:has-text("GO LIVE")',
-            'button:has-text("Go Live")',
-            'button:has-text("naživo")', // Slovak: "Vysielať naživo" = "Go live"
-            'button:has-text("Vysielať")', // Slovak: "Broadcast"
-            '[aria-label*="Go live"]',
-            '[aria-label*="GO LIVE"]',
-            '[aria-label*="naživo"]',
-          ].join(", "),
-        );
-        const goLiveCount = await goLiveButton.count();
-        if (goLiveCount > 0) {
-          for (let i = 0; i < goLiveCount; i++) {
-            const btn = goLiveButton.nth(i);
-            if ((await btn.isVisible()) && (await btn.isEnabled())) {
-              const text = await btn.textContent();
-              matchedIndicator = `"Go live" button is visible AND enabled: "${text?.trim()}"`;
-              streamReceiving = true;
-              break;
-            }
-          }
-        }
-
-        if (streamReceiving) break;
-
-        // Check 2: Stream health indicators — only with specific context.
-        // YouTube Studio shows "Excellent", "Good", etc. for stream health,
-        // but "Good" alone is too generic.  Use patterns that combine the
-        // health word with nearby stream-related context.
-        const healthPatterns = [
-          /Výborn/i, // Slovak: "Excellent" (Výborný/Výborná) — specific enough
-          /stream\s*health.*(?:excellent|good|ok|bad)/i,
-          /(?:excellent|good|ok|bad).*stream\s*health/i,
-          /Stav\s*streamu.*(?:Výborn|Dobr|OK)/i, // Slovak: "Stream status: ..."
-        ];
-        for (const pattern of healthPatterns) {
-          if (pattern.test(pageContent)) {
-            matchedIndicator = `Stream health indicator matched: ${pattern}`;
+        // Check 1: "Go live" / "Vysielať naživo" button that is NOT disabled.
+        // The button exists on the page always, but is disabled when no
+        // stream data arrives.  aria-disabled="false" or disabled=false
+        // means YouTube received stream data.
+        for (const btn of domInfo.buttons) {
+          const isEnabled = !btn.disabled && btn.ariaDisabled !== "true";
+          console.log(
+            `  Button "${btn.text}": disabled=${btn.disabled}, aria-disabled=${btn.ariaDisabled}, enabled=${isEnabled}`,
+          );
+          if (isEnabled && btn.visible) {
+            matchedIndicator = `"Go live" button is enabled: "${btn.text}"`;
             streamReceiving = true;
             break;
           }
@@ -298,18 +341,18 @@ test(testName, async () => {
 
         if (streamReceiving) break;
 
-        // Check 3: Text patterns that ONLY appear when stream data arrives.
-        // IMPORTANT: Do NOT include static UI text like "naživo", "Vysielať",
-        // "priamy prenos", "Go live", "stream preview", "live control room" —
-        // these are always present on the Live Control Room page even without
-        // an active stream and would cause false positives.
+        // Check 2: Stream health / bitrate / resolution in deep text.
+        // These only appear when YouTube is actually processing stream data.
         const receivingPatterns = [
-          /\d+\s*kbps/i, // Bitrate (e.g., "4500 kbps") — only when stream active
-          /\d+p\s+\d+\s*fps/i, // "1080p 30 fps" — only when stream active
+          /\d+\s*kbps/i, // Bitrate (e.g., "4500 kbps")
+          /\d+p\s+\d+\s*fps/i, // "1080p 30 fps"
+          /Výborn/i, // Slovak: "Excellent" stream health
+          /stream\s*health/i, // English: "Stream health"
+          /Stav\s*streamu/i, // Slovak: "Stream status"
         ];
         for (const pattern of receivingPatterns) {
-          if (pattern.test(pageContent)) {
-            matchedIndicator = `Text pattern matched: ${pattern}`;
+          if (pattern.test(deepText)) {
+            matchedIndicator = `Text pattern matched in deep DOM: ${pattern}`;
             streamReceiving = true;
             break;
           }
@@ -317,51 +360,32 @@ test(testName, async () => {
 
         if (streamReceiving) break;
 
-        // Check 4: Look for video/stream preview elements that indicate
-        // YouTube is showing the incoming stream.
-        const previewElements = page.locator(
-          [
-            "video[src]", // Video element with a source
-            '[class*="stream-preview"]',
-            '[class*="video-preview"]',
-            '[class*="preview-player"]',
-          ].join(", "),
-        );
-        const previewCount = await previewElements.count();
-        if (previewCount > 0) {
-          for (let i = 0; i < previewCount; i++) {
-            if (await previewElements.nth(i).isVisible()) {
-              matchedIndicator = "Video/preview element is visible";
-              streamReceiving = true;
-              break;
-            }
+        // Check 3: Video element with actual source (stream preview).
+        for (const vid of domInfo.videos) {
+          if (vid.visible && (vid.src || vid.hasSrcObject)) {
+            matchedIndicator = `Video element with source: src=${vid.src}, srcObject=${vid.hasSrcObject}`;
+            streamReceiving = true;
+            break;
           }
         }
 
         if (streamReceiving) break;
 
-        // === NEGATIVE indicators (for logging): stream NOT receiving ===
-        const notReceivingPatterns = [
-          /connect\s+streaming\s+software/i,
-          /no\s+content/i,
-          /waiting\s+for/i,
-          /start\s+streaming/i,
-          /upgrade.*browser/i,
-          /unsupported.*browser/i,
-          /prehliadač/i, // Slovak: "browser"
-        ];
-        const negatives: string[] = [];
-        for (const pattern of notReceivingPatterns) {
-          if (pattern.test(pageContent)) {
-            negatives.push(pattern.toString());
+        // Check 4: Visible iframe (YouTube may embed stream preview in iframe).
+        for (const iframe of domInfo.iframes) {
+          if (
+            iframe.src.includes("youtube") ||
+            iframe.src.includes("googlevideo")
+          ) {
+            matchedIndicator = `Stream preview iframe: ${iframe.src}`;
+            streamReceiving = true;
+            break;
           }
         }
 
-        lastError =
-          `No stream-receiving indicators found (attempt ${attempt})` +
-          (negatives.length > 0
-            ? `. Negative indicators present: ${negatives.join(", ")}`
-            : "");
+        if (streamReceiving) break;
+
+        lastError = `No stream-receiving indicators found (attempt ${attempt})`;
         console.log(lastError);
       } catch (err) {
         lastError = `Check failed on attempt ${attempt}: ${err}`;
