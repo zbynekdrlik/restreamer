@@ -239,15 +239,17 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
         // When YouTube receives stream data, the "Go live" button appears
         // and becomes clickable in the Live Control Room.
         // Handle both English and Slovak UI text.
+        // Actual Slovak text observed: "Vysielať naživo"
         const goLiveButton = page.locator(
           [
             'button:has-text("Go live")',
             'button:has-text("GO LIVE")',
             'button:has-text("Go Live")',
-            'button:has-text("Spustiť")', // Slovak: "Start"
-            'button:has-text("Živé vysielanie")', // Slovak: "Live broadcast"
+            'button:has-text("naživo")', // Slovak: "Vysielať naživo" = "Go live"
+            'button:has-text("Vysielať")', // Slovak: "Broadcast"
             '[aria-label*="Go live"]',
             '[aria-label*="GO LIVE"]',
+            '[aria-label*="naživo"]',
           ].join(", "),
         );
         const goLiveCount = await goLiveButton.count();
@@ -271,9 +273,9 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
           /\bExcellent\b/i,
           /\bGood\b/i,
           /\bstream\s*health\b/i,
-          /\bVýborn[áý]\b/i, // Slovak: "Excellent"
-          /\bDobr[áý]\b/i, // Slovak: "Good"
-          /\bStav\s*streamu\b/i, // Slovak: "Stream status"
+          /Výborn/i, // Slovak: "Excellent" (Výborný/Výborná)
+          /Dobr[áýé]/i, // Slovak: "Good" (Dobrý/Dobrá/Dobré)
+          /Stav\s*streamu/i, // Slovak: "Stream status"
         ];
         for (const pattern of healthPatterns) {
           if (pattern.test(pageContent)) {
@@ -286,18 +288,25 @@ test("YouTube Studio shows stream is being received (testing state)", async () =
         if (streamReceiving) break;
 
         // Check 3: Text patterns indicating stream is connected/receiving.
+        // Observed Slovak text: "Vysielať naživo", "Zdá sa, všetko je
+        // pripravené. Kliknite tu a začnite streamovať.",
+        // "Ukončiť priamy prenos", "Priamy prenos"
         const receivingPatterns = [
-          /\bGo\s+live\b/i, // "Go live" text anywhere
-          /\bstream\s+preview\b/i, // Stream preview section
-          /\blive\s+control\s+room\b/i, // Page heading
-          /\bmiestnosť\s+na\s+ovládanie/i, // Slovak: "Control room"
-          /\bExcellent\s+Data\b/i, // Data quality indicator
-          /\bconnected\b/i, // "Connected" status
-          /\breceiving\b/i, // "Receiving" status
-          /\bpripojené\b/i, // Slovak: "Connected"
-          /\b\d+\s*kbps\b/i, // Bitrate indicator (e.g., "4500 kbps")
-          /\b\d+x\d+\b/i, // Resolution (e.g., "1920x1080")
-          /\b\d+p\b.*\b\d+\s*fps\b/i, // "1080p 30 fps" format
+          /Go\s+live/i, // English: "Go live"
+          /stream\s+preview/i, // English: "Stream preview"
+          /live\s+control\s+room/i, // English: page heading
+          /naživo/i, // Slovak: "live" (from "Vysielať naživo")
+          /pripraven/i, // Slovak: "ready" (from "pripravené")
+          /streamova/i, // Slovak: "stream" verb (from "streamovať")
+          /Vysielať/i, // Slovak: "Broadcast"
+          /priamy\s+prenos/i, // Slovak: "Live broadcast"
+          /Excellent\s+Data/i, // Data quality indicator
+          /connected/i, // English: "Connected"
+          /receiving/i, // English: "Receiving"
+          /pripojené/i, // Slovak: "Connected"
+          /\d+\s*kbps/i, // Bitrate (e.g., "4500 kbps")
+          /\d+x\d+/, // Resolution (e.g., "1920x1080")
+          /\d+p\b.*\d+\s*fps/i, // "1080p 30 fps"
         ];
         for (const pattern of receivingPatterns) {
           if (pattern.test(pageContent)) {
