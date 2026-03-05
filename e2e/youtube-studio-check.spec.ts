@@ -12,11 +12,18 @@ import * as fs from "fs";
  * Auto-start is BANNED (YouTube destroys the stream afterward), so the
  * broadcast stays in "testing" state — YouTube receives data but is NOT
  * publicly live.  This test verifies that YouTube IS receiving the stream
- * by checking for:
- *   - "Go live" button (enabled when stream data is being received)
- *   - Stream health indicators ("Excellent", "Good", "OK")
+ * by checking the "Stream" tab of the Live Control Room for:
+ *   - Stream health indicators ("Excellent", "Good", "OK", bitrate, fps)
+ *   - "Go live" button state (enabled when stream data is received)
  *   - Stream preview content
- *   - Absence of "waiting for stream" placeholder messages
+ *
+ * IMPORTANT: YouTube Studio is a heavy SPA with custom web components
+ * (ytcp-button, etc.) and Shadow DOM.  It has three tabs:
+ *   - "Stream" / "Prenos" — live preview + health (what we need)
+ *   - "Webcam" / "Webkamera"
+ *   - "Manage" / "Správa" — list of streams (NOT useful for detection)
+ * YouTube may redirect /livestreaming/stream to /livestreaming/manage,
+ * so we explicitly click the "Stream" tab after navigation.
  *
  * Modes:
  *   - Default: Verify stream IS being received (used after delivery starts)
@@ -95,18 +102,13 @@ test(testName, async () => {
     });
 
     // Handle "unsupported browser" interstitial page.
-    // YouTube Studio may show a page saying "Upgrade your browser" with
-    // a "SKIP TO YOUTUBE STUDIO" link at the bottom (or in Slovak:
-    // "PRESKOČIŤ NA ŠTÚDIO YOUTUBE").
     const skipLink = page.locator(
       [
         'a:has-text("SKIP TO YOUTUBE STUDIO")',
         'a:has-text("Skip to YouTube Studio")',
         'a:has-text("PRESKOČIŤ NA ŠTÚDIO YOUTUBE")',
-        // Also try button variants
         'button:has-text("SKIP TO YOUTUBE STUDIO")',
         'button:has-text("PRESKOČIŤ NA ŠTÚDIO YOUTUBE")',
-        // Generic text link at bottom of browser upgrade page
         ':text("SKIP TO YOUTUBE")',
         ':text("PRESKOČIŤ")',
       ].join(", "),
@@ -118,7 +120,6 @@ test(testName, async () => {
         "Detected 'unsupported browser' interstitial — clicking skip link...",
       );
       await skipLink.first().click();
-      // Wait for YouTube Studio to actually load after clicking skip
       await page.waitForTimeout(8_000);
       await page.screenshot({
         path: path.join(SCREENSHOT_DIR, "02-after-skip.png"),
@@ -139,7 +140,6 @@ test(testName, async () => {
         console.log("  Log into YouTube Studio in the browser window.");
         console.log("  After login, close the browser or press Ctrl+C.");
         console.log("========================================");
-        // Wait a long time for manual login
         await page.waitForURL("**/studio.youtube.com/**", {
           timeout: 300_000,
         });
@@ -156,22 +156,18 @@ test(testName, async () => {
     }
 
     // Navigate to Live Control Room.
-    // First get the channel ID from YouTube Studio URL (it redirects to
-    // studio.youtube.com/channel/CHANNEL_ID/...)
     console.log(`Current URL after Studio load: ${page.url()}`);
 
     // Try to extract channel ID from current URL
     let channelId = page.url().match(/channel\/([^/?]+)/)?.[1];
 
     if (!channelId) {
-      // Navigate to /channel to trigger redirect that reveals channel ID
       await page.goto(`${YOUTUBE_STUDIO_URL}/channel?hl=en`, {
         waitUntil: "networkidle",
         timeout: 30_000,
       });
       await page.waitForTimeout(5_000);
 
-      // Handle skip link again if it appears
       const skipLink2 = page.locator(
         ':text("SKIP TO YOUTUBE"), :text("PRESKOČIŤ")',
       );
@@ -186,7 +182,7 @@ test(testName, async () => {
 
     if (channelId) {
       console.log(`Found channel ID: ${channelId}`);
-      // Go directly to the Live Control Room
+      // Go to the livestreaming section
       await page.goto(
         `${YOUTUBE_STUDIO_URL}/channel/${channelId}/livestreaming/stream?hl=en`,
         { waitUntil: "networkidle", timeout: 30_000 },
@@ -206,6 +202,33 @@ test(testName, async () => {
       await page.waitForTimeout(5_000);
     }
 
+    // YouTube Studio may redirect /stream to /manage.  The "Manage" tab shows
+    // a list of streams with no health data.  We need the "Stream" tab which
+    // shows the live preview and health indicators.  Explicitly click it.
+    console.log(`URL after navigation: ${page.url()}`);
+    const streamTab = page.locator(
+      [
+        // English
+        'a:has-text("Stream")',
+        'div[role="tab"]:has-text("Stream")',
+        // Slovak
+        'a:has-text("Prenos")',
+        'div[role="tab"]:has-text("Prenos")',
+        // Try paper-tab / ytcp-tab (YouTube custom elements)
+        'paper-tab:has-text("Stream")',
+        'paper-tab:has-text("Prenos")',
+      ].join(", "),
+    );
+
+    const streamTabCount = await streamTab.count();
+    console.log(`Found ${streamTabCount} 'Stream/Prenos' tab elements`);
+    if (streamTabCount > 0) {
+      console.log("Clicking 'Stream/Prenos' tab to switch to stream view...");
+      await streamTab.first().click();
+      await page.waitForTimeout(5_000);
+      console.log(`URL after tab click: ${page.url()}`);
+    }
+
     await page.screenshot({
       path: path.join(SCREENSHOT_DIR, "03-live-control-room.png"),
       fullPage: true,
@@ -213,13 +236,10 @@ test(testName, async () => {
 
     console.log(`Live Control Room URL: ${page.url()}`);
 
-    // Retry loop: look for stream-receiving indicators (testing state)
+    // Retry loop: look for stream-receiving indicators (testing state).
     // Since auto-start is BANNED, YouTube won't show "LIVE" — instead we
-    // look for evidence that the stream data is being received:
-    //   1. "Go live" button (present and enabled = stream is connected)
-    //   2. Stream health text ("Excellent", "Good", "OK", "Bad")
-    //   3. Stream preview showing video content
-    //   4. Absence of "waiting for data" messages
+    // look for evidence that the stream data is being received on the
+    // "Stream" tab of the Live Control Room.
     let streamReceiving = false;
     let lastError = "";
     let matchedIndicator = "";
@@ -230,7 +250,6 @@ test(testName, async () => {
       );
 
       try {
-        // Take screenshot for debugging
         await page.screenshot({
           path: path.join(SCREENSHOT_DIR, `attempt-${attempt}.png`),
           fullPage: true,
@@ -238,11 +257,55 @@ test(testName, async () => {
 
         console.log(`Page URL: ${page.url()}`);
 
-        // YouTube Studio is a heavy SPA that uses custom web components
-        // and Shadow DOM.  page.textContent("body") returns stale/JS-mixed
-        // content.  Use JavaScript evaluation to deeply inspect the DOM.
+        // Use Playwright's built-in locators which handle Shadow DOM and
+        // custom web components better than raw querySelectorAll.
+
+        // Check 1: Look for "Go live" / "Vysielať naživo" button using
+        // Playwright locator (handles ytcp-button, paper-button, etc.)
+        const goLiveBtn = page.locator(
+          [
+            'button:has-text("Go live")',
+            'button:has-text("Vysielať naživo")',
+            // YouTube custom button elements
+            ':has-text("Go live"):visible',
+          ].join(", "),
+        );
+
+        const goLiveBtnCount = await goLiveBtn.count();
+        console.log(`"Go live" buttons found: ${goLiveBtnCount}`);
+
+        for (let i = 0; i < goLiveBtnCount; i++) {
+          const btn = goLiveBtn.nth(i);
+          const btnText = await btn.textContent();
+          const isDisabled = await btn.evaluate((el) => {
+            // Check multiple ways an element can be disabled
+            const htmlEl = el as HTMLElement;
+            return (
+              (htmlEl as HTMLButtonElement).disabled ||
+              htmlEl.getAttribute("aria-disabled") === "true" ||
+              htmlEl.classList.contains("disabled") ||
+              htmlEl.hasAttribute("disabled")
+            );
+          });
+          const isVisible = await btn.isVisible();
+          console.log(
+            `  GoLive button ${i}: text="${btnText?.trim()}", disabled=${isDisabled}, visible=${isVisible}`,
+          );
+
+          // The button being enabled (not disabled) means YouTube is
+          // receiving stream data and is ready for "Go live"
+          if (isVisible && !isDisabled) {
+            matchedIndicator = `"Go live" button is enabled: "${btnText?.trim()}"`;
+            streamReceiving = true;
+            break;
+          }
+        }
+
+        if (streamReceiving) break;
+
+        // Check 2: Deep DOM text inspection for stream health indicators.
+        // These only appear when YouTube is actually processing stream data.
         const domInfo = await page.evaluate(() => {
-          // Collect ALL visible text (skip script/style tags, traverse shadows)
           const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG"]);
           function getDeepText(node: Node): string {
             let text = "";
@@ -264,121 +327,79 @@ test(testName, async () => {
 
           const allText = getDeepText(document.body);
 
-          // Find ALL buttons (not just live-related) for debugging
-          const allButtons = Array.from(
-            document.querySelectorAll("button"),
-          ).map((b) => ({
-            text: (b.textContent || "").trim().substring(0, 100),
-            disabled: b.disabled,
-            ariaDisabled: b.getAttribute("aria-disabled"),
+          // Also get innerHTML of specific YouTube Studio elements
+          // that might contain stream health data
+          const streamPreview =
+            document.querySelector("ytcp-live-streaming-stream-preview")
+              ?.textContent || "";
+          const healthInfo =
+            document.querySelector("ytcp-live-streaming-stream-health")
+              ?.textContent || "";
+          const streamStatus =
+            document.querySelector("ytcp-live-streaming-stream-status")
+              ?.textContent || "";
+
+          // Get all clickable/button-like elements
+          const allClickable = Array.from(
+            document.querySelectorAll(
+              'button, [role="button"], ytcp-button, paper-button, [aria-role="button"]',
+            ),
+          ).map((el) => ({
+            tag: el.tagName.toLowerCase(),
+            text: (el.textContent || "").trim().substring(0, 100),
+            disabled:
+              (el as HTMLButtonElement).disabled ||
+              el.getAttribute("aria-disabled") === "true" ||
+              el.hasAttribute("disabled"),
             visible:
-              b.offsetParent !== null && getComputedStyle(b).display !== "none",
-            classes: b.className.substring(0, 100),
+              (el as HTMLElement).offsetParent !== null &&
+              getComputedStyle(el as HTMLElement).display !== "none",
           }));
-
-          // Find video elements
-          const videos = Array.from(document.querySelectorAll("video")).map(
-            (v) => ({
-              src: v.src || v.getAttribute("src") || "",
-              hasSrcObject: !!v.srcObject,
-              visible:
-                v.offsetParent !== null &&
-                getComputedStyle(v).display !== "none",
-              w: v.videoWidth,
-              h: v.videoHeight,
-            }),
-          );
-
-          // Check iframes
-          const iframes = Array.from(document.querySelectorAll("iframe")).map(
-            (f) => ({
-              src: (f.src || "").substring(0, 200),
-              visible:
-                f.offsetParent !== null &&
-                getComputedStyle(f).display !== "none",
-            }),
-          );
-
-          // Dump the full HTML of the main content area for investigation
-          const mainContent =
-            document
-              .querySelector("#contents")
-              ?.innerHTML?.substring(0, 2000) ||
-            document
-              .querySelector("[role=main]")
-              ?.innerHTML?.substring(0, 2000) ||
-            document.querySelector("ytcp-app")?.innerHTML?.substring(0, 2000) ||
-            "no-main-content-found";
 
           return {
             textLength: allText.length,
             textSnippet: allText.replace(/\s+/g, " ").substring(0, 5000),
-            allButtonCount: allButtons.length,
-            visibleButtons: allButtons.filter((b) => b.visible),
-            liveButtons: allButtons.filter(
-              (b) =>
-                b.visible &&
-                (b.text.toLowerCase().includes("live") ||
-                  b.text.toLowerCase().includes("naživo") ||
-                  b.text.toLowerCase().includes("vysielať")),
-            ),
-            videos,
-            iframes: iframes.filter((f) => f.visible),
-            mainContentSnippet: mainContent.substring(0, 2000),
+            streamPreview: streamPreview.trim().substring(0, 500),
+            healthInfo: healthInfo.trim().substring(0, 500),
+            streamStatus: streamStatus.trim().substring(0, 500),
+            clickableElements: allClickable.filter((e) => e.visible),
           };
         });
 
         console.log(`Deep text length: ${domInfo.textLength} chars`);
         console.log(
-          `Visible text (5000 chars): ${domInfo.textSnippet.substring(0, 5000)}`,
+          `Visible text (first 3000): ${domInfo.textSnippet.substring(0, 3000)}`,
         );
+        console.log(`Stream preview element: "${domInfo.streamPreview}"`);
+        console.log(`Health info element: "${domInfo.healthInfo}"`);
+        console.log(`Stream status element: "${domInfo.streamStatus}"`);
         console.log(
-          `All buttons (${domInfo.allButtonCount} total, ${domInfo.visibleButtons.length} visible):`,
+          `Clickable elements (${domInfo.clickableElements.length}):`,
         );
-        for (const btn of domInfo.visibleButtons) {
-          console.log(
-            `  [${btn.disabled ? "DISABLED" : "ENABLED"}] aria-disabled=${btn.ariaDisabled} "${btn.text}" class=${btn.classes}`,
-          );
-        }
-        console.log(
-          `Live/naživo buttons: ${JSON.stringify(domInfo.liveButtons)}`,
-        );
-        console.log(`Video elements: ${JSON.stringify(domInfo.videos)}`);
-        console.log(`Visible iframes: ${JSON.stringify(domInfo.iframes)}`);
-        console.log(
-          `Main content HTML: ${domInfo.mainContentSnippet.substring(0, 1000)}`,
-        );
-
-        const deepText = domInfo.textSnippet;
-
-        // === POSITIVE indicators: stream IS being received ===
-
-        // Check 1: "Go live" / "Vysielať naživo" button that is NOT disabled.
-        // The button exists on the page always, but is disabled when no
-        // stream data arrives.  aria-disabled="false" or disabled=false
-        // means YouTube received stream data.
-        for (const btn of domInfo.liveButtons) {
-          const isEnabled = !btn.disabled && btn.ariaDisabled !== "true";
-          console.log(
-            `  Button "${btn.text}": disabled=${btn.disabled}, aria-disabled=${btn.ariaDisabled}, enabled=${isEnabled}`,
-          );
-          if (isEnabled && btn.visible) {
-            matchedIndicator = `"Go live" button is enabled: "${btn.text}"`;
-            streamReceiving = true;
-            break;
+        for (const el of domInfo.clickableElements) {
+          if (
+            el.text.toLowerCase().includes("live") ||
+            el.text.toLowerCase().includes("naživo") ||
+            el.text.toLowerCase().includes("vysielať") ||
+            el.text.toLowerCase().includes("stream") ||
+            el.text.toLowerCase().includes("prenos")
+          ) {
+            console.log(
+              `  [${el.disabled ? "DISABLED" : "ENABLED"}] <${el.tag}> "${el.text}"`,
+            );
           }
         }
 
-        if (streamReceiving) break;
+        const deepText = domInfo.textSnippet;
 
-        // Check 2: Stream health / bitrate / resolution in deep text.
-        // These only appear when YouTube is actually processing stream data.
+        // Check health patterns in deep text
         const receivingPatterns = [
           /\d+\s*kbps/i, // Bitrate (e.g., "4500 kbps")
           /\d+p\s+\d+\s*fps/i, // "1080p 30 fps"
+          /stream\s*health.*(?:excellent|good|ok|bad)/i, // English health
           /Výborn/i, // Slovak: "Excellent" stream health
-          /stream\s*health/i, // English: "Stream health"
           /Stav\s*streamu/i, // Slovak: "Stream status"
+          /Kvalita\s*streamu/i, // Slovak: "Stream quality"
         ];
         for (const pattern of receivingPatterns) {
           if (pattern.test(deepText)) {
@@ -390,24 +411,35 @@ test(testName, async () => {
 
         if (streamReceiving) break;
 
-        // Check 3: Video element with actual source (stream preview).
-        for (const vid of domInfo.videos) {
-          if (vid.visible && (vid.src || vid.hasSrcObject)) {
-            matchedIndicator = `Video element with source: src=${vid.src}, srcObject=${vid.hasSrcObject}`;
-            streamReceiving = true;
-            break;
-          }
+        // Check 3: YouTube custom web component content
+        if (
+          domInfo.streamPreview &&
+          domInfo.streamPreview !== "" &&
+          !domInfo.streamPreview.match(/^[\s]*$/)
+        ) {
+          matchedIndicator = `Stream preview element has content: "${domInfo.streamPreview.substring(0, 100)}"`;
+          streamReceiving = true;
         }
-
         if (streamReceiving) break;
 
-        // Check 4: Visible iframe (YouTube may embed stream preview in iframe).
-        for (const iframe of domInfo.iframes) {
+        if (
+          domInfo.healthInfo &&
+          domInfo.healthInfo !== "" &&
+          !domInfo.healthInfo.match(/^[\s]*$/)
+        ) {
+          matchedIndicator = `Health info element has content: "${domInfo.healthInfo.substring(0, 100)}"`;
+          streamReceiving = true;
+        }
+        if (streamReceiving) break;
+
+        // Check 4: Enabled "Go live" style clickable elements (custom components)
+        for (const el of domInfo.clickableElements) {
+          const text = el.text.toLowerCase();
           if (
-            iframe.src.includes("youtube") ||
-            iframe.src.includes("googlevideo")
+            (text.includes("go live") || text.includes("vysielať naživo")) &&
+            !el.disabled
           ) {
-            matchedIndicator = `Stream preview iframe: ${iframe.src}`;
+            matchedIndicator = `Enabled clickable <${el.tag}>: "${el.text}"`;
             streamReceiving = true;
             break;
           }
@@ -434,6 +466,21 @@ test(testName, async () => {
         );
         if ((await skipLinkRetry.count()) > 0) {
           await skipLinkRetry.first().click();
+          await page.waitForTimeout(5_000);
+        }
+        // Re-click Stream tab after reload
+        const streamTabRetry = page.locator(
+          [
+            'a:has-text("Stream")',
+            'div[role="tab"]:has-text("Stream")',
+            'a:has-text("Prenos")',
+            'div[role="tab"]:has-text("Prenos")',
+            'paper-tab:has-text("Stream")',
+            'paper-tab:has-text("Prenos")',
+          ].join(", "),
+        );
+        if ((await streamTabRetry.count()) > 0) {
+          await streamTabRetry.first().click();
           await page.waitForTimeout(5_000);
         }
       }

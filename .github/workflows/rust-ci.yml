@@ -1487,7 +1487,15 @@ jobs:
                 Write-Host "Screenshots captured:"
                 Get-ChildItem $screenshotDir | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
               }
-              throw "BASELINE FAILED: YouTube is already receiving stream before delivery started"
+              # Extract actual Playwright error to propagate the real failure reason
+              if ($output -match "OAuth session expired") {
+                throw "BASELINE FAILED: Google OAuth session expired. Re-run setup: HEADED=1 npx playwright test youtube-studio-check"
+              } elseif ($output -match "BASELINE FAILED:") {
+                $matched = [regex]::Match($output, "BASELINE FAILED:[^\r\n]+").Value
+                throw $matched
+              } else {
+                throw "BASELINE FAILED: YouTube is already receiving stream before delivery started"
+              }
             } else {
               throw "Could not determine Playwright baseline test result from output"
             }
@@ -1708,7 +1716,17 @@ jobs:
                 Write-Host "Screenshots captured:"
                 Get-ChildItem $screenshotDir | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
               }
-              throw "Playwright YouTube Studio check FAILED"
+              # Extract actual Playwright error to propagate the real failure reason
+              if ($output -match "OAuth session expired") {
+                throw "YouTube Studio check FAILED: Google OAuth session expired. Re-run setup: HEADED=1 npx playwright test youtube-studio-check"
+              } else {
+                # Extract the first Error: line from Playwright output
+                $errMatch = [regex]::Match($output, "Error: [^\r\n]+")
+                if ($errMatch.Success) {
+                  throw "YouTube Studio check FAILED: $($errMatch.Value)"
+                }
+                throw "Playwright YouTube Studio check FAILED (see output above)"
+              }
             } else {
               throw "Could not determine Playwright test result from output"
             }
