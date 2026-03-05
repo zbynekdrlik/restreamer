@@ -393,15 +393,31 @@ class E2EYouTubeStreamStatusTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertFalse(response.data["has_active_broadcast"])
+        self.assertFalse(response.data["stream_receiving"])
         self.assertIn("not connected", response.data["error_detail"])
 
     @patch("restreamer.views.e2e_api.build_youtube_client")
-    def test_youtube_status_no_broadcasts(self, mock_build):
+    def test_youtube_status_auth_error(self, mock_build):
+        from services.youtube.client import YouTubeAuthError
+
+        mock_build.side_effect = YouTubeAuthError("OAuth refresh failed: invalid_grant")
+
+        response = self.client.get(
+            self.url,
+            {"user_uuid": str(self.user.api_key), "event_name": "E2E-Test"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["stream_receiving"])
+        self.assertIn("OAuth refresh failed", response.data["error_detail"])
+
+    @patch("restreamer.views.e2e_api.build_youtube_client")
+    def test_youtube_status_no_streams(self, mock_build):
         from unittest.mock import MagicMock
 
         mock_youtube = MagicMock()
         mock_build.return_value = mock_youtube
+        mock_youtube.liveStreams.return_value.list.return_value.execute.return_value = {"items": []}
         mock_youtube.liveBroadcasts.return_value.list.return_value.execute.return_value = {"items": []}
 
         response = self.client.get(
@@ -410,21 +426,30 @@ class E2EYouTubeStreamStatusTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertFalse(response.data["has_active_broadcast"])
-        self.assertEqual(response.data["broadcast_count"], 0)
+        self.assertFalse(response.data["stream_receiving"])
+        self.assertEqual(response.data["stream_count"], 0)
 
     @patch("restreamer.views.e2e_api.build_youtube_client")
-    def test_youtube_status_active_broadcast(self, mock_build):
+    def test_youtube_status_stream_active(self, mock_build):
         from unittest.mock import MagicMock
 
         mock_youtube = MagicMock()
         mock_build.return_value = mock_youtube
+        mock_youtube.liveStreams.return_value.list.return_value.execute.return_value = {
+            "items": [
+                {
+                    "id": "stream123",
+                    "snippet": {"title": "E2E Test Stream"},
+                    "status": {"streamStatus": "active", "healthStatus": {"status": "good"}},
+                }
+            ]
+        }
         mock_youtube.liveBroadcasts.return_value.list.return_value.execute.return_value = {
             "items": [
                 {
-                    "id": "abc123",
-                    "snippet": {"title": "E2E Test Stream"},
-                    "status": {"lifeCycleStatus": "live"},
+                    "id": "bc123",
+                    "snippet": {"title": "E2E Test Broadcast"},
+                    "status": {"lifeCycleStatus": "testing"},
                 }
             ]
         }
@@ -435,19 +460,29 @@ class E2EYouTubeStreamStatusTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertTrue(response.data["has_active_broadcast"])
-        self.assertEqual(response.data["broadcast_id"], "abc123")
-        self.assertEqual(response.data["life_cycle_status"], "live")
-        self.assertEqual(response.data["title"], "E2E Test Stream")
+        self.assertTrue(response.data["stream_receiving"])
+        self.assertEqual(response.data["stream_count"], 1)
+        self.assertEqual(response.data["streams"][0]["stream_id"], "stream123")
+        self.assertEqual(response.data["streams"][0]["stream_status"], "active")
         self.assertEqual(response.data["broadcast_count"], 1)
+        self.assertEqual(response.data["broadcasts"][0]["life_cycle_status"], "testing")
 
     @patch("restreamer.views.e2e_api.build_youtube_client")
-    def test_youtube_status_api_error(self, mock_build):
+    def test_youtube_status_stream_inactive(self, mock_build):
         from unittest.mock import MagicMock
 
         mock_youtube = MagicMock()
         mock_build.return_value = mock_youtube
-        mock_youtube.liveBroadcasts.return_value.list.return_value.execute.side_effect = Exception("API quota exceeded")
+        mock_youtube.liveStreams.return_value.list.return_value.execute.return_value = {
+            "items": [
+                {
+                    "id": "stream123",
+                    "snippet": {"title": "E2E Test Stream"},
+                    "status": {"streamStatus": "inactive", "healthStatus": {}},
+                }
+            ]
+        }
+        mock_youtube.liveBroadcasts.return_value.list.return_value.execute.return_value = {"items": []}
 
         response = self.client.get(
             self.url,
@@ -455,7 +490,24 @@ class E2EYouTubeStreamStatusTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertFalse(response.data["has_active_broadcast"])
+        self.assertFalse(response.data["stream_receiving"])
+        self.assertEqual(response.data["streams"][0]["stream_status"], "inactive")
+
+    @patch("restreamer.views.e2e_api.build_youtube_client")
+    def test_youtube_status_api_error(self, mock_build):
+        from unittest.mock import MagicMock
+
+        mock_youtube = MagicMock()
+        mock_build.return_value = mock_youtube
+        mock_youtube.liveStreams.return_value.list.return_value.execute.side_effect = Exception("API quota exceeded")
+
+        response = self.client.get(
+            self.url,
+            {"user_uuid": str(self.user.api_key), "event_name": "E2E-Test"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["stream_receiving"])
         self.assertIn("API error", response.data["error_detail"])
 
     def test_youtube_status_missing_uuid(self):

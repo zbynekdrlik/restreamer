@@ -1032,7 +1032,6 @@ jobs:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
       OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}
-      YT_PROFILE_DIR: 'C:\Users\newlevel\.playwright-yt-profile'
     steps:
       - uses: actions/checkout@v4
 
@@ -1413,104 +1412,42 @@ jobs:
           }
           Write-Host "=== Manager chunk verification PASSED ==="
 
-      - name: Install E2E test dependencies
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          $repoRoot = $env:GITHUB_WORKSPACE
-          if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
-          $e2eDir = Join-Path $repoRoot "e2e"
-          Write-Host "Installing Playwright in $e2eDir..."
-          Push-Location $e2eDir
-          npm install
-          npx playwright install chromium
-          Pop-Location
-          Write-Host "Playwright installed"
-
       - name: Verify YouTube is NOT receiving stream (baseline)
         shell: powershell
-        timeout-minutes: 4
+        timeout-minutes: 2
         run: |
-          # BASELINE CHECK: Before delivery starts, verify YouTube Studio
-          # does NOT show stream-receiving indicators.  This proves the
-          # post-delivery check is detecting a real state change, not
-          # stale data from a previous run.
-          $repoRoot = $env:GITHUB_WORKSPACE
-          if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
-          $e2eDir = Join-Path $repoRoot "e2e"
-          $resultFile = Join-Path $repoRoot "e2e-yt-baseline.txt"
-          $screenshotDir = "C:\Users\newlevel\.playwright-yt-screenshots-baseline"
+          # BASELINE CHECK: Before delivery starts, verify YouTube is NOT
+          # receiving stream data.  Uses the manager's YouTube Data API
+          # endpoint (server-side OAuth with auto-refresh, no browser needed).
+          # This proves the post-delivery check detects a real state change.
+          $uri = "$($env:MANAGER_URL)/api/e2e/youtube-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)"
+          Write-Host "Checking YouTube stream status via manager API..."
+          $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
 
-          $scriptPath = Join-Path $repoRoot "run-yt-baseline.bat"
-          # Remove Chrome profile lock to prevent stale lock from previous crash
-          $lockFile = Join-Path $env:YT_PROFILE_DIR "SingletonLock"
-          if (Test-Path $lockFile) { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue }
-          $lockFile2 = Join-Path $env:YT_PROFILE_DIR "lockfile"
-          if (Test-Path $lockFile2) { Remove-Item $lockFile2 -Force -ErrorAction SilentlyContinue }
+          Write-Host "stream_receiving: $($response.stream_receiving)"
+          Write-Host "stream_count: $($response.stream_count)"
+          Write-Host "broadcast_count: $($response.broadcast_count)"
 
-          $lines = @(
-            "@echo off",
-            "cd /d `"$e2eDir`"",
-            "set YT_PROFILE_DIR=$($env:YT_PROFILE_DIR)",
-            "set SCREENSHOT_DIR=$screenshotDir",
-            "set EXPECT_NO_STREAM=1",
-            "set HEADED=1",
-            "set PLAYWRIGHT_BROWSERS_PATH=C:\Users\newlevel\AppData\Local\ms-playwright",
-            "npx playwright test youtube-studio-check > `"$resultFile`" 2>&1"
-          )
-          $lines -join "`r`n" | Set-Content -Path $scriptPath -Encoding ascii
+          if ($response.error_detail) {
+            throw "BASELINE FAILED: YouTube API error: $($response.error_detail)"
+          }
 
-          $action = New-ScheduledTaskAction -Execute $scriptPath
-          $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
-          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
-
-          Unregister-ScheduledTask -TaskName "PlaywrightYTBaseline" -Confirm:$false -ErrorAction SilentlyContinue
-          Register-ScheduledTask -TaskName "PlaywrightYTBaseline" -Action $action -Principal $principal -Settings $settings
-          Start-ScheduledTask -TaskName "PlaywrightYTBaseline"
-
-          Write-Host "Baseline check started as newlevel user via Task Scheduler"
-
-          $maxWait = 36
-          for ($i = 1; $i -le $maxWait; $i++) {
-            Start-Sleep -Seconds 5
-            $task = Get-ScheduledTask -TaskName "PlaywrightYTBaseline"
-            if ($task.State -ne "Running") {
-              Write-Host "Task completed after $($i * 5)s"
-              break
+          if ($response.streams) {
+            foreach ($s in $response.streams) {
+              Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
             }
-            if ($i % 6 -eq 0) {
-              Write-Host "Still running... ($($i * 5)s elapsed)"
+          }
+          if ($response.broadcasts) {
+            foreach ($bc in $response.broadcasts) {
+              Write-Host "  Broadcast '$($bc.title)': lifecycle=$($bc.life_cycle_status)"
             }
           }
 
-          if (Test-Path $resultFile) {
-            $output = Get-Content $resultFile -Raw
-            Write-Host $output
-
-            if ($output -match "\d+ passed") {
-              Write-Host "Baseline verification PASSED: YouTube is NOT receiving stream"
-            } elseif ($output -match "\d+ failed") {
-              if (Test-Path $screenshotDir) {
-                Write-Host "Screenshots captured:"
-                Get-ChildItem $screenshotDir | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
-              }
-              # Extract actual Playwright error to propagate the real failure reason
-              if ($output -match "OAuth session expired") {
-                throw "BASELINE FAILED: Google OAuth session expired. Re-run setup: HEADED=1 npx playwright test youtube-studio-check"
-              } elseif ($output -match "BASELINE FAILED:") {
-                $matched = [regex]::Match($output, "BASELINE FAILED:[^\r\n]+").Value
-                throw $matched
-              } else {
-                throw "BASELINE FAILED: YouTube is already receiving stream before delivery started"
-              }
-            } else {
-              throw "Could not determine Playwright baseline test result from output"
-            }
-          } else {
-            throw "Playwright baseline test did not produce output"
+          if ($response.stream_receiving) {
+            throw "BASELINE FAILED: YouTube is already receiving stream data before delivery started. A stale stream from a previous run may still be active."
           }
 
-          Unregister-ScheduledTask -TaskName "PlaywrightYTBaseline" -Confirm:$false -ErrorAction SilentlyContinue
+          Write-Host "=== Baseline PASSED: YouTube is NOT receiving stream data ==="
 
       - name: Wait for delivering server instance ready
         shell: powershell
@@ -1645,111 +1582,65 @@ jobs:
             throw "FAILED: chunk_id did not advance ($chunk1 -> $chunk2) - ffmpeg may not be sending"
           }
 
-      - name: Verify YouTube is receiving stream via Studio
+      - name: Verify YouTube is receiving stream data
         shell: powershell
-        timeout-minutes: 5
+        timeout-minutes: 4
         run: |
-          # Hard-fail check: Playwright opens YouTube Studio Live Control Room
-          # with a persistent Chrome profile (saved Google OAuth session) and
-          # verifies the stream is being received (testing state).
+          # Hard-fail check: Query the manager's YouTube Data API endpoint to
+          # verify YouTube's ingest server IS receiving stream data.
+          # Uses server-side OAuth with auto-refresh (no browser/Chrome needed).
           #
           # Auto-start is BANNED (YouTube destroys the stream afterward), so
-          # the broadcast stays in "testing" state.  We check for:
-          #   - "Go live" button (enabled = stream data is arriving)
-          #   - Stream health indicators ("Excellent", "Good")
-          #   - Stream preview / video elements
-          #
-          # IMPORTANT: Run as "newlevel" user via Task Scheduler because:
-          # - CI runner runs as SYSTEM, but Chrome cookies are encrypted with
-          #   DPAPI tied to the Windows user who created the profile
-          # - The Chrome profile was created by "newlevel", so the test must
-          #   run as "newlevel" to decrypt the cookies
-          $repoRoot = $env:GITHUB_WORKSPACE
-          if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
-          $e2eDir = Join-Path $repoRoot "e2e"
-          $resultFile = Join-Path $repoRoot "e2e-yt-result.txt"
-          $screenshotDir = "C:\Users\newlevel\.playwright-yt-screenshots"
+          # the broadcast stays in "testing" state — we check liveStreams.list
+          # for streamStatus == "active" which means data IS arriving.
+          $uri = "$($env:MANAGER_URL)/api/e2e/youtube-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)"
+          $maxRetries = 12
+          $retryDelay = 15
 
-          # Write a batch script that runs the Playwright test
-          $scriptPath = Join-Path $repoRoot "run-yt-check.bat"
-          # Remove Chrome profile lock to prevent stale lock from previous crash
-          $lockFile = Join-Path $env:YT_PROFILE_DIR "SingletonLock"
-          if (Test-Path $lockFile) { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue }
-          $lockFile2 = Join-Path $env:YT_PROFILE_DIR "lockfile"
-          if (Test-Path $lockFile2) { Remove-Item $lockFile2 -Force -ErrorAction SilentlyContinue }
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            Write-Host "--- Attempt ${i}/${maxRetries}: checking YouTube stream status ---"
+            try {
+              $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
 
-          $lines = @(
-            "@echo off",
-            "cd /d `"$e2eDir`"",
-            "set YT_PROFILE_DIR=$($env:YT_PROFILE_DIR)",
-            "set SCREENSHOT_DIR=$screenshotDir",
-            "set HEADED=1",
-            "set PLAYWRIGHT_BROWSERS_PATH=C:\Users\newlevel\AppData\Local\ms-playwright",
-            "npx playwright test youtube-studio-check > `"$resultFile`" 2>&1"
-          )
-          $lines -join "`r`n" | Set-Content -Path $scriptPath -Encoding ascii
+              Write-Host "  stream_receiving: $($response.stream_receiving)"
+              Write-Host "  stream_count: $($response.stream_count)"
 
-          # Create and run scheduled task as newlevel (interactive session)
-          $action = New-ScheduledTaskAction -Execute $scriptPath
-          $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
-          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 4)
-
-          Unregister-ScheduledTask -TaskName "PlaywrightYTCheck" -Confirm:$false -ErrorAction SilentlyContinue
-          Register-ScheduledTask -TaskName "PlaywrightYTCheck" -Action $action -Principal $principal -Settings $settings
-          Start-ScheduledTask -TaskName "PlaywrightYTCheck"
-
-          Write-Host "Playwright test started as newlevel user via Task Scheduler"
-          Write-Host "Screenshots will be saved to $screenshotDir"
-
-          # Wait for the task to complete (poll every 5s, max 4 min)
-          $maxWait = 48
-          for ($i = 1; $i -le $maxWait; $i++) {
-            Start-Sleep -Seconds 5
-            $task = Get-ScheduledTask -TaskName "PlaywrightYTCheck"
-            if ($task.State -ne "Running") {
-              Write-Host "Task completed after $($i * 5)s"
-              break
-            }
-            if ($i % 6 -eq 0) {
-              Write-Host "Still running... ($($i * 5)s elapsed)"
-            }
-          }
-
-          # Read and display results
-          if (Test-Path $resultFile) {
-            $output = Get-Content $resultFile -Raw
-            Write-Host $output
-
-            # Check Playwright output for pass/fail — simpler and more
-            # reliable than trying to capture exit codes across batch
-            # files and scheduled tasks.
-            if ($output -match "\d+ passed") {
-              Write-Host "YouTube Studio verification PASSED"
-            } elseif ($output -match "\d+ failed") {
-              if (Test-Path $screenshotDir) {
-                Write-Host "Screenshots captured:"
-                Get-ChildItem $screenshotDir | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
+              if ($response.error_detail) {
+                Write-Host "  API error: $($response.error_detail)"
+                throw "YouTube API error: $($response.error_detail)"
               }
-              # Extract actual Playwright error to propagate the real failure reason
-              if ($output -match "OAuth session expired") {
-                throw "YouTube Studio check FAILED: Google OAuth session expired. Re-run setup: HEADED=1 npx playwright test youtube-studio-check"
-              } else {
-                # Extract the first Error: line from Playwright output
-                $errMatch = [regex]::Match($output, "Error: [^\r\n]+")
-                if ($errMatch.Success) {
-                  throw "YouTube Studio check FAILED: $($errMatch.Value)"
+
+              if ($response.streams) {
+                foreach ($s in $response.streams) {
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
                 }
-                throw "Playwright YouTube Studio check FAILED (see output above)"
               }
-            } else {
-              throw "Could not determine Playwright test result from output"
+              if ($response.broadcasts) {
+                foreach ($bc in $response.broadcasts) {
+                  Write-Host "  Broadcast '$($bc.title)': lifecycle=$($bc.life_cycle_status)"
+                }
+              }
+
+              if ($response.stream_receiving) {
+                Write-Host "=========================================="
+                Write-Host "  YOUTUBE IS RECEIVING STREAM DATA"
+                Write-Host "  (Broadcast in testing state - auto-start banned)"
+                Write-Host "=========================================="
+                return
+              }
+
+              Write-Host "  YouTube not yet receiving stream data"
+            } catch {
+              Write-Host "  Request failed: $_"
             }
-          } else {
-            throw "Playwright test did not produce output - task may have failed to start"
+
+            if ($i -lt $maxRetries) {
+              Write-Host "  Waiting ${retryDelay}s before retry..."
+              Start-Sleep -Seconds $retryDelay
+            }
           }
 
-          # Cleanup
-          Unregister-ScheduledTask -TaskName "PlaywrightYTCheck" -Confirm:$false -ErrorAction SilentlyContinue
+          throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts (~$($maxRetries * $retryDelay)s). The delivering server confirmed chunk progression, but YouTube's ingest server does not show streamStatus=active."
 
       - name: Stop OBS stream
         if: always()

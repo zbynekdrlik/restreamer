@@ -8,10 +8,17 @@ from googleapiclient.discovery import build
 log = logging.getLogger(__name__)
 
 
+class YouTubeAuthError(Exception):
+    """Raised when YouTube OAuth credentials cannot be refreshed."""
+
+    pass
+
+
 def build_youtube_client(user):
     """
     Build the youtube client from the user's stored OAuth tokens in DB.
-    Returns the youtube API client or None if the user is not connected.
+    Returns the youtube API client or None if the user has no OAuth connected.
+    Raises YouTubeAuthError if credentials exist but cannot be refreshed.
     """
     youtube_oauth = getattr(user, "youtube_oauth", None)
     if not youtube_oauth:
@@ -38,7 +45,12 @@ def build_youtube_client(user):
             creds.refresh(Request())
         except Exception as e:
             log.error("Failed to refresh user YouTube creds: %s", e)
-            return None
+            raise YouTubeAuthError(
+                f"YouTube OAuth refresh failed: {e}. "
+                "The refresh token may have expired (7-day limit in Testing mode). "
+                "Re-authorize YouTube in Django admin or publish the Google Cloud "
+                "project to Production to get permanent refresh tokens."
+            ) from e
 
         # Save updated tokens
         youtube_oauth.access_token = creds.token

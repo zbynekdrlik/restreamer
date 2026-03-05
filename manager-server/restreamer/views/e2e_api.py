@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 from restreamer.models import ChunkRecord, EndPointCfg, StreamingEvent
 from restreamer.tasks import init_stream
 from restreamer.views.instances import InstanceManager
-from services.youtube.client import build_youtube_client
+from services.youtube.client import YouTubeAuthError, build_youtube_client
 
 log = logging.getLogger(__name__)
 
@@ -287,7 +287,23 @@ class E2EDeactivate(APIView):
 
 
 class E2EYouTubeStreamStatus(APIView):
-    """Check if a YouTube broadcast is live for the user's streaming event."""
+    """Check if YouTube is receiving stream data via the YouTube Data API.
+
+    Uses liveStreams.list to check actual stream reception status (streamStatus).
+    This is more reliable than checking broadcasts because the stream stays in
+    "testing" state (auto-start is banned) — the key signal is whether YouTube's
+    ingest server is actually receiving data.
+
+    Stream status values:
+      - "active"   → YouTube IS receiving stream data
+      - "ready"    → Stream was receiving but stopped
+      - "inactive" → No data being received
+      - "created"  → Stream created but never received data
+      - "error"    → Error state
+
+    Uses server-side OAuth tokens stored in the DB with auto-refresh,
+    so no browser sessions or Chrome profiles are needed.
+    """
 
     def get(self, request):
         user_uuid = request.query_params.get("user_uuid")
@@ -303,60 +319,94 @@ class E2EYouTubeStreamStatus(APIView):
             if not event:
                 return Response({"error": f"Event {event_name} not found"}, status=status.HTTP_404_NOT_FOUND)
 
-            youtube = build_youtube_client(user)
+            try:
+                youtube = build_youtube_client(user)
+            except YouTubeAuthError as e:
+                return Response(
+                    {
+                        "status": "ok",
+                        "event_id": event.id,
+                        "stream_receiving": False,
+                        "error_detail": str(e),
+                    }
+                )
+
             if not youtube:
                 return Response(
                     {
                         "status": "ok",
                         "event_id": event.id,
-                        "has_active_broadcast": False,
+                        "stream_receiving": False,
                         "error_detail": "YouTube not connected (no OAuth credentials)",
                     }
                 )
 
-            # Query active broadcasts
+            # Check liveStreams for actual stream reception status.
+            # This tells us whether YouTube's ingest server is receiving data.
+            stream_receiving = False
+            stream_details = []
             try:
-                response = (
-                    youtube.liveBroadcasts()
-                    .list(part="id,snippet,status", broadcastStatus="active", broadcastType="all")
+                streams_response = (
+                    youtube.liveStreams()
+                    .list(part="id,snippet,status", mine=True)
                     .execute()
                 )
-                broadcasts = response.get("items", [])
+                for stream in streams_response.get("items", []):
+                    stream_status = stream.get("status", {}).get("streamStatus", "unknown")
+                    health_status = stream.get("status", {}).get("healthStatus", {})
+                    title = stream.get("snippet", {}).get("title", "")
+                    stream_details.append(
+                        {
+                            "stream_id": stream["id"],
+                            "title": title,
+                            "stream_status": stream_status,
+                            "health_status": health_status,
+                        }
+                    )
+                    if stream_status == "active":
+                        stream_receiving = True
             except Exception as e:
-                log.exception("YouTube API query failed")
+                log.exception("YouTube liveStreams API query failed")
                 return Response(
                     {
                         "status": "ok",
                         "event_id": event.id,
-                        "has_active_broadcast": False,
-                        "error_detail": f"YouTube API error: {e}",
+                        "stream_receiving": False,
+                        "error_detail": f"YouTube liveStreams API error: {e}",
                     }
                 )
 
-            if not broadcasts:
-                return Response(
-                    {
-                        "status": "ok",
-                        "event_id": event.id,
-                        "has_active_broadcast": False,
-                        "broadcast_count": 0,
-                    }
+            # Also check broadcasts for lifecycle context
+            broadcast_info = []
+            try:
+                broadcasts_response = (
+                    youtube.liveBroadcasts()
+                    .list(part="id,snippet,status", broadcastStatus="all", broadcastType="all")
+                    .execute()
                 )
-
-            # Return info about the first active broadcast
-            broadcast = broadcasts[0]
-            life_cycle_status = broadcast.get("status", {}).get("lifeCycleStatus", "unknown")
-            title = broadcast.get("snippet", {}).get("title", "")
+                for bc in broadcasts_response.get("items", []):
+                    lcs = bc.get("status", {}).get("lifeCycleStatus", "unknown")
+                    # Only include testing/live/ready broadcasts (skip completed)
+                    if lcs in ("testing", "live", "ready", "liveStarting"):
+                        broadcast_info.append(
+                            {
+                                "broadcast_id": bc["id"],
+                                "title": bc.get("snippet", {}).get("title", ""),
+                                "life_cycle_status": lcs,
+                            }
+                        )
+            except Exception as e:
+                log.warning(f"YouTube liveBroadcasts query failed (non-critical): {e}")
 
             return Response(
                 {
                     "status": "ok",
                     "event_id": event.id,
-                    "has_active_broadcast": True,
-                    "broadcast_count": len(broadcasts),
-                    "broadcast_id": broadcast["id"],
-                    "life_cycle_status": life_cycle_status,
-                    "title": title,
+                    "stream_receiving": stream_receiving,
+                    "stream_count": len(stream_details),
+                    "streams": stream_details,
+                    "broadcast_count": len(broadcast_info),
+                    "broadcasts": broadcast_info,
                 }
             )
 
