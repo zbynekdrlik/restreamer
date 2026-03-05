@@ -1583,12 +1583,9 @@ jobs:
           if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
           $e2eDir = Join-Path $repoRoot "e2e"
           $resultFile = Join-Path $repoRoot "e2e-yt-result.txt"
-          $exitCodeFile = Join-Path $repoRoot "e2e-yt-exitcode.txt"
           $screenshotDir = "C:\Users\newlevel\.playwright-yt-screenshots"
 
-          # Write a batch script that runs the Playwright test.
-          # Exit code is written to a SEPARATE file to avoid append/encoding
-          # issues with the main output file.
+          # Write a batch script that runs the Playwright test
           $scriptPath = Join-Path $repoRoot "run-yt-check.bat"
           $lines = @(
             "@echo off",
@@ -1596,8 +1593,7 @@ jobs:
             "set YT_PROFILE_DIR=$($env:YT_PROFILE_DIR)",
             "set SCREENSHOT_DIR=$screenshotDir",
             "set PLAYWRIGHT_BROWSERS_PATH=C:\Users\newlevel\AppData\Local\ms-playwright",
-            "npx playwright test youtube-studio-check > `"$resultFile`" 2>&1",
-            "echo %ERRORLEVEL% > `"$exitCodeFile`""
+            "npx playwright test youtube-studio-check > `"$resultFile`" 2>&1"
           )
           $lines -join "`r`n" | Set-Content -Path $scriptPath -Encoding ascii
 
@@ -1631,25 +1627,23 @@ jobs:
           if (Test-Path $resultFile) {
             $output = Get-Content $resultFile -Raw
             Write-Host $output
-          } else {
-            Write-Host "WARNING: No Playwright output file found"
-          }
 
-          # Check exit code from separate file
-          if (Test-Path $exitCodeFile) {
-            $exitCode = [int](Get-Content $exitCodeFile -Raw).Trim()
-            Write-Host "Playwright exit code: $exitCode"
-            if ($exitCode -ne 0) {
-              # Display screenshots listing for debugging
+            # Check Playwright output for pass/fail — simpler and more
+            # reliable than trying to capture exit codes across batch
+            # files and scheduled tasks.
+            if ($output -match "\d+ passed") {
+              Write-Host "YouTube Studio verification PASSED"
+            } elseif ($output -match "\d+ failed") {
               if (Test-Path $screenshotDir) {
                 Write-Host "Screenshots captured:"
                 Get-ChildItem $screenshotDir | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
               }
-              throw "Playwright YouTube Studio check FAILED (exit code $exitCode)"
+              throw "Playwright YouTube Studio check FAILED"
+            } else {
+              throw "Could not determine Playwright test result from output"
             }
-            Write-Host "YouTube Studio verification PASSED"
           } else {
-            throw "Playwright test did not produce exit code file - task may have failed to start"
+            throw "Playwright test did not produce output - task may have failed to start"
           }
 
           # Cleanup
