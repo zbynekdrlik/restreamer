@@ -1442,12 +1442,19 @@ jobs:
           $screenshotDir = "C:\Users\newlevel\.playwright-yt-screenshots-baseline"
 
           $scriptPath = Join-Path $repoRoot "run-yt-baseline.bat"
+          # Remove Chrome profile lock to prevent stale lock from previous crash
+          $lockFile = Join-Path $env:YT_PROFILE_DIR "SingletonLock"
+          if (Test-Path $lockFile) { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue }
+          $lockFile2 = Join-Path $env:YT_PROFILE_DIR "lockfile"
+          if (Test-Path $lockFile2) { Remove-Item $lockFile2 -Force -ErrorAction SilentlyContinue }
+
           $lines = @(
             "@echo off",
             "cd /d `"$e2eDir`"",
             "set YT_PROFILE_DIR=$($env:YT_PROFILE_DIR)",
             "set SCREENSHOT_DIR=$screenshotDir",
             "set EXPECT_NO_STREAM=1",
+            "set HEADED=1",
             "set PLAYWRIGHT_BROWSERS_PATH=C:\Users\newlevel\AppData\Local\ms-playwright",
             "npx playwright test youtube-studio-check > `"$resultFile`" 2>&1"
           )
@@ -1665,11 +1672,18 @@ jobs:
 
           # Write a batch script that runs the Playwright test
           $scriptPath = Join-Path $repoRoot "run-yt-check.bat"
+          # Remove Chrome profile lock to prevent stale lock from previous crash
+          $lockFile = Join-Path $env:YT_PROFILE_DIR "SingletonLock"
+          if (Test-Path $lockFile) { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue }
+          $lockFile2 = Join-Path $env:YT_PROFILE_DIR "lockfile"
+          if (Test-Path $lockFile2) { Remove-Item $lockFile2 -Force -ErrorAction SilentlyContinue }
+
           $lines = @(
             "@echo off",
             "cd /d `"$e2eDir`"",
             "set YT_PROFILE_DIR=$($env:YT_PROFILE_DIR)",
             "set SCREENSHOT_DIR=$screenshotDir",
+            "set HEADED=1",
             "set PLAYWRIGHT_BROWSERS_PATH=C:\Users\newlevel\AppData\Local\ms-playwright",
             "npx playwright test youtube-studio-check > `"$resultFile`" 2>&1"
           )

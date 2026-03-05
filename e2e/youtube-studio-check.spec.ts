@@ -78,10 +78,17 @@ test(testName, async () => {
       "--no-first-run",
       "--no-default-browser-check",
       "--lang=en-US",
+      // Prevent Google bot detection that kills sessions
+      "--disable-infobars",
+      "--disable-dev-shm-usage",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
     ],
     viewport: { width: 1280, height: 720 },
     // Give pages plenty of time for YouTube Studio's heavy JS
     timeout: 60_000,
+    // Prevent navigator.webdriver detection
+    ignoreDefaultArgs: ["--enable-automation"],
   });
 
   const page = context.pages()[0] || (await context.newPage());
