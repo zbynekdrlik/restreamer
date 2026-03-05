@@ -247,11 +247,10 @@ test(testName, async () => {
 
         // === POSITIVE indicators: stream IS being received ===
 
-        // Check 1: "Go live" button — THE primary indicator.
-        // When YouTube receives stream data, the "Go live" button appears
-        // and becomes clickable in the Live Control Room.
-        // Handle both English and Slovak UI text.
-        // Actual Slovak text observed: "Vysielať naživo"
+        // Check 1: "Go live" button — must be ENABLED (not just visible).
+        // The button is always visible on the Live Control Room page, but
+        // it's disabled/greyed when no stream data is arriving.  Only when
+        // YouTube actually receives stream data does the button become enabled.
         const goLiveButton = page.locator(
           [
             'button:has-text("Go live")',
@@ -267,9 +266,10 @@ test(testName, async () => {
         const goLiveCount = await goLiveButton.count();
         if (goLiveCount > 0) {
           for (let i = 0; i < goLiveCount; i++) {
-            if (await goLiveButton.nth(i).isVisible()) {
-              const text = await goLiveButton.nth(i).textContent();
-              matchedIndicator = `"Go live" button is visible: "${text?.trim()}"`;
+            const btn = goLiveButton.nth(i);
+            if ((await btn.isVisible()) && (await btn.isEnabled())) {
+              const text = await btn.textContent();
+              matchedIndicator = `"Go live" button is visible AND enabled: "${text?.trim()}"`;
               streamReceiving = true;
               break;
             }
@@ -278,16 +278,15 @@ test(testName, async () => {
 
         if (streamReceiving) break;
 
-        // Check 2: Stream health indicators.
-        // YouTube Studio shows "Excellent", "Good", "OK", or "Bad" for
-        // stream health when data is being received.
+        // Check 2: Stream health indicators — only with specific context.
+        // YouTube Studio shows "Excellent", "Good", etc. for stream health,
+        // but "Good" alone is too generic.  Use patterns that combine the
+        // health word with nearby stream-related context.
         const healthPatterns = [
-          /\bExcellent\b/i,
-          /\bGood\b/i,
-          /\bstream\s*health\b/i,
-          /Výborn/i, // Slovak: "Excellent" (Výborný/Výborná)
-          /Dobr[áýé]/i, // Slovak: "Good" (Dobrý/Dobrá/Dobré)
-          /Stav\s*streamu/i, // Slovak: "Stream status"
+          /Výborn/i, // Slovak: "Excellent" (Výborný/Výborná) — specific enough
+          /stream\s*health.*(?:excellent|good|ok|bad)/i,
+          /(?:excellent|good|ok|bad).*stream\s*health/i,
+          /Stav\s*streamu.*(?:Výborn|Dobr|OK)/i, // Slovak: "Stream status: ..."
         ];
         for (const pattern of healthPatterns) {
           if (pattern.test(pageContent)) {
@@ -299,26 +298,14 @@ test(testName, async () => {
 
         if (streamReceiving) break;
 
-        // Check 3: Text patterns indicating stream is connected/receiving.
-        // Observed Slovak text: "Vysielať naživo", "Zdá sa, všetko je
-        // pripravené. Kliknite tu a začnite streamovať.",
-        // "Ukončiť priamy prenos", "Priamy prenos"
+        // Check 3: Text patterns that ONLY appear when stream data arrives.
+        // IMPORTANT: Do NOT include static UI text like "naživo", "Vysielať",
+        // "priamy prenos", "Go live", "stream preview", "live control room" —
+        // these are always present on the Live Control Room page even without
+        // an active stream and would cause false positives.
         const receivingPatterns = [
-          /Go\s+live/i, // English: "Go live"
-          /stream\s+preview/i, // English: "Stream preview"
-          /live\s+control\s+room/i, // English: page heading
-          /naživo/i, // Slovak: "live" (from "Vysielať naživo")
-          /pripraven/i, // Slovak: "ready" (from "pripravené")
-          /streamova/i, // Slovak: "stream" verb (from "streamovať")
-          /Vysielať/i, // Slovak: "Broadcast"
-          /priamy\s+prenos/i, // Slovak: "Live broadcast"
-          /Excellent\s+Data/i, // Data quality indicator
-          /connected/i, // English: "Connected"
-          /receiving/i, // English: "Receiving"
-          /pripojené/i, // Slovak: "Connected"
-          /\d+\s*kbps/i, // Bitrate (e.g., "4500 kbps")
-          /\d+x\d+/, // Resolution (e.g., "1920x1080")
-          /\d+p\b.*\d+\s*fps/i, // "1080p 30 fps"
+          /\d+\s*kbps/i, // Bitrate (e.g., "4500 kbps") — only when stream active
+          /\d+p\s+\d+\s*fps/i, // "1080p 30 fps" — only when stream active
         ];
         for (const pattern of receivingPatterns) {
           if (pattern.test(pageContent)) {
@@ -338,7 +325,6 @@ test(testName, async () => {
             '[class*="stream-preview"]',
             '[class*="video-preview"]',
             '[class*="preview-player"]',
-            "canvas", // Canvas element (could be video rendering)
           ].join(", "),
         );
         const previewCount = await previewElements.count();
