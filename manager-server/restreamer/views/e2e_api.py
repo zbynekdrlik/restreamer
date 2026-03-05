@@ -346,11 +346,7 @@ class E2EYouTubeStreamStatus(APIView):
             stream_receiving = False
             stream_details = []
             try:
-                streams_response = (
-                    youtube.liveStreams()
-                    .list(part="id,snippet,status", mine=True)
-                    .execute()
-                )
+                streams_response = youtube.liveStreams().list(part="id,snippet,status", mine=True).execute()
                 for stream in streams_response.get("items", []):
                     stream_status = stream.get("status", {}).get("streamStatus", "unknown")
                     health_status = stream.get("status", {}).get("healthStatus", {})
