@@ -1,5 +1,5 @@
 import logging
-from datetime import timezone
+from datetime import UTC
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -55,7 +55,7 @@ def build_youtube_client(user):
         # Save updated tokens
         youtube_oauth.access_token = creds.token
         if creds.expiry:
-            youtube_oauth.expiry = creds.expiry if creds.expiry.tzinfo else creds.expiry.replace(tzinfo=timezone.utc)
+            youtube_oauth.expiry = creds.expiry if creds.expiry.tzinfo else creds.expiry.replace(tzinfo=UTC)
         youtube_oauth.save()
 
     return build("youtube", "v3", credentials=creds)
