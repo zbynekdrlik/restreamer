@@ -242,12 +242,16 @@ test(testName, async () => {
         // and Shadow DOM.  page.textContent("body") returns stale/JS-mixed
         // content.  Use JavaScript evaluation to deeply inspect the DOM.
         const domInfo = await page.evaluate(() => {
-          // Collect ALL visible text from the page (including shadow roots)
+          // Collect ALL visible text (skip script/style tags, traverse shadows)
+          const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG"]);
           function getDeepText(node: Node): string {
             let text = "";
             if (node.nodeType === Node.TEXT_NODE) {
               const t = (node.textContent || "").trim();
               if (t) text += t + " ";
+            }
+            if (node instanceof HTMLElement && SKIP_TAGS.has(node.tagName)) {
+              return text;
             }
             if (node instanceof HTMLElement && node.shadowRoot) {
               text += getDeepText(node.shadowRoot);
@@ -260,17 +264,17 @@ test(testName, async () => {
 
           const allText = getDeepText(document.body);
 
-          // Find all buttons and their states
-          const buttons = Array.from(document.querySelectorAll("button")).map(
-            (b) => ({
-              text: (b.textContent || "").trim().substring(0, 80),
-              disabled: b.disabled,
-              ariaDisabled: b.getAttribute("aria-disabled"),
-              visible:
-                b.offsetParent !== null &&
-                getComputedStyle(b).display !== "none",
-            }),
-          );
+          // Find ALL buttons (not just live-related) for debugging
+          const allButtons = Array.from(
+            document.querySelectorAll("button"),
+          ).map((b) => ({
+            text: (b.textContent || "").trim().substring(0, 100),
+            disabled: b.disabled,
+            ariaDisabled: b.getAttribute("aria-disabled"),
+            visible:
+              b.offsetParent !== null && getComputedStyle(b).display !== "none",
+            classes: b.className.substring(0, 100),
+          }));
 
           // Find video elements
           const videos = Array.from(document.querySelectorAll("video")).map(
@@ -280,10 +284,12 @@ test(testName, async () => {
               visible:
                 v.offsetParent !== null &&
                 getComputedStyle(v).display !== "none",
+              w: v.videoWidth,
+              h: v.videoHeight,
             }),
           );
 
-          // Check for iframes (YouTube might use iframe for preview)
+          // Check iframes
           const iframes = Array.from(document.querySelectorAll("iframe")).map(
             (f) => ({
               src: (f.src || "").substring(0, 200),
@@ -293,11 +299,23 @@ test(testName, async () => {
             }),
           );
 
+          // Dump the full HTML of the main content area for investigation
+          const mainContent =
+            document
+              .querySelector("#contents")
+              ?.innerHTML?.substring(0, 2000) ||
+            document
+              .querySelector("[role=main]")
+              ?.innerHTML?.substring(0, 2000) ||
+            document.querySelector("ytcp-app")?.innerHTML?.substring(0, 2000) ||
+            "no-main-content-found";
+
           return {
             textLength: allText.length,
-            textSnippet: allText.replace(/\s+/g, " ").substring(0, 3000),
-            buttonCount: buttons.length,
-            buttons: buttons.filter(
+            textSnippet: allText.replace(/\s+/g, " ").substring(0, 5000),
+            allButtonCount: allButtons.length,
+            visibleButtons: allButtons.filter((b) => b.visible),
+            liveButtons: allButtons.filter(
               (b) =>
                 b.visible &&
                 (b.text.toLowerCase().includes("live") ||
@@ -306,18 +324,30 @@ test(testName, async () => {
             ),
             videos,
             iframes: iframes.filter((f) => f.visible),
+            mainContentSnippet: mainContent.substring(0, 2000),
           };
         });
 
         console.log(`Deep text length: ${domInfo.textLength} chars`);
         console.log(
-          `Text snippet (3000 chars): ${domInfo.textSnippet.substring(0, 3000)}`,
+          `Visible text (5000 chars): ${domInfo.textSnippet.substring(0, 5000)}`,
         );
         console.log(
-          `Buttons with live/naživo: ${JSON.stringify(domInfo.buttons)}`,
+          `All buttons (${domInfo.allButtonCount} total, ${domInfo.visibleButtons.length} visible):`,
+        );
+        for (const btn of domInfo.visibleButtons) {
+          console.log(
+            `  [${btn.disabled ? "DISABLED" : "ENABLED"}] aria-disabled=${btn.ariaDisabled} "${btn.text}" class=${btn.classes}`,
+          );
+        }
+        console.log(
+          `Live/naživo buttons: ${JSON.stringify(domInfo.liveButtons)}`,
         );
         console.log(`Video elements: ${JSON.stringify(domInfo.videos)}`);
         console.log(`Visible iframes: ${JSON.stringify(domInfo.iframes)}`);
+        console.log(
+          `Main content HTML: ${domInfo.mainContentSnippet.substring(0, 1000)}`,
+        );
 
         const deepText = domInfo.textSnippet;
 
@@ -327,7 +357,7 @@ test(testName, async () => {
         // The button exists on the page always, but is disabled when no
         // stream data arrives.  aria-disabled="false" or disabled=false
         // means YouTube received stream data.
-        for (const btn of domInfo.buttons) {
+        for (const btn of domInfo.liveButtons) {
           const isEnabled = !btn.disabled && btn.ariaDisabled !== "true";
           console.log(
             `  Button "${btn.text}": disabled=${btn.disabled}, aria-disabled=${btn.ariaDisabled}, enabled=${isEnabled}`,
