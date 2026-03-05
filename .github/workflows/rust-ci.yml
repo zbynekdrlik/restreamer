@@ -1590,16 +1590,16 @@ jobs:
           # Exit code is written to a SEPARATE file to avoid append/encoding
           # issues with the main output file.
           $scriptPath = Join-Path $repoRoot "run-yt-check.bat"
-          $scriptContent = @"
-@echo off
-cd /d "$e2eDir"
-set YT_PROFILE_DIR=$($env:YT_PROFILE_DIR)
-set SCREENSHOT_DIR=$screenshotDir
-set PLAYWRIGHT_BROWSERS_PATH=C:\Users\newlevel\AppData\Local\ms-playwright
-npx playwright test youtube-studio-check > "$resultFile" 2>&1
-echo %ERRORLEVEL% > "$exitCodeFile"
-"@
-          Set-Content -Path $scriptPath -Value $scriptContent -Encoding ascii
+          $lines = @(
+            "@echo off",
+            "cd /d `"$e2eDir`"",
+            "set YT_PROFILE_DIR=$($env:YT_PROFILE_DIR)",
+            "set SCREENSHOT_DIR=$screenshotDir",
+            "set PLAYWRIGHT_BROWSERS_PATH=C:\Users\newlevel\AppData\Local\ms-playwright",
+            "npx playwright test youtube-studio-check > `"$resultFile`" 2>&1",
+            "echo %ERRORLEVEL% > `"$exitCodeFile`""
+          )
+          $lines -join "`r`n" | Set-Content -Path $scriptPath -Encoding ascii
 
           # Create and run scheduled task as newlevel (interactive session)
           $action = New-ScheduledTaskAction -Execute $scriptPath
