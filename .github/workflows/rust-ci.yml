@@ -422,6 +422,39 @@ jobs:
           fi
 
           echo "OK: auto-release uses always() in condition."
+      - name: Verify E2E tests use != failure (not == success)
+        run: |
+          WORKFLOW_FILE="../.github/workflows/rust-ci.yml"
+
+          # e2e-streaming-test must use != 'failure' so it runs when deploy is skipped
+          STREAMING_CONDITION=$(grep -A3 "e2e-streaming-test:" "$WORKFLOW_FILE" | grep "if:" || true)
+          if echo "$STREAMING_CONDITION" | grep -q "== 'success'"; then
+            echo "ERROR: e2e-streaming-test uses '== success' which skips tests when deploy is skipped."
+            echo "Must use '!= failure' so E2E tests run on every dev/main push."
+            echo "Found: $STREAMING_CONDITION"
+            exit 1
+          fi
+          if ! echo "$STREAMING_CONDITION" | grep -q "!= 'failure'"; then
+            echo "ERROR: e2e-streaming-test must use '!= failure' condition for deploy-stream-lan."
+            echo "Found: $STREAMING_CONDITION"
+            exit 1
+          fi
+          echo "OK: e2e-streaming-test uses != failure condition."
+
+          # e2e-obs-youtube-test must use != 'failure' so it runs when deploy is skipped
+          YOUTUBE_CONDITION=$(grep -A3 "e2e-obs-youtube-test:" "$WORKFLOW_FILE" | grep "if:" || true)
+          if echo "$YOUTUBE_CONDITION" | grep -q "== 'success'"; then
+            echo "ERROR: e2e-obs-youtube-test uses '== success' which skips tests when deploy is skipped."
+            echo "Must use '!= failure' so E2E tests run on every dev/main push."
+            echo "Found: $YOUTUBE_CONDITION"
+            exit 1
+          fi
+          if ! echo "$YOUTUBE_CONDITION" | grep -q "!= 'failure'"; then
+            echo "ERROR: e2e-obs-youtube-test must use '!= failure' condition for deploy-stream-lan."
+            echo "Found: $YOUTUBE_CONDITION"
+            exit 1
+          fi
+          echo "OK: e2e-obs-youtube-test uses != failure condition."
 
   frontend-e2e:
     name: Frontend E2E (Playwright)
@@ -686,7 +719,7 @@ jobs:
   e2e-streaming-test:
     name: E2E Streaming Test
     needs: [deploy-stream-lan]
-    if: always() && needs.deploy-stream-lan.result == 'success'
+    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && github.event_name == 'push'
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 10
     env:
@@ -1022,7 +1055,7 @@ jobs:
   e2e-obs-youtube-test:
     name: E2E OBS-to-YouTube Test
     needs: [deploy-stream-lan]
-    if: always() && needs.deploy-stream-lan.result == 'success'
+    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && github.event_name == 'push'
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 15
     env:
