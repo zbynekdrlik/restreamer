@@ -430,3 +430,55 @@ class ManagerEndPointControlTests(TestCase):
         self.assertFalse(self.manager.stop_event.is_set())
         self.manager.stop()
         self.assertTrue(self.manager.stop_event.is_set())
+
+
+class EndpointProcessStatusViewTests(TestCase):
+    """Tests for the EndpointProcessStatusView API endpoint."""
+
+    def test_endpoint_status_returns_empty_when_no_endpoints(self):
+        """Test that endpoint-status returns empty list when no endpoints are running."""
+        from django.test import RequestFactory
+
+        from restreamer.views import EndpointProcessStatusView
+
+        factory = RequestFactory()
+        request = factory.get("/api/endpoint-status/")
+        view = EndpointProcessStatusView.as_view()
+        response = view(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "ok")
+        self.assertEqual(response.data["endpoint_count"], 0)
+        self.assertEqual(response.data["endpoints"], [])
+
+    @patch.object(EndPoint, "start")
+    def test_endpoint_status_returns_running_endpoints(self, mock_start):
+        """Test that endpoint-status returns info about running endpoints."""
+        from django.test import RequestFactory
+
+        from restreamer.endpoints import endpoing_manger
+        from restreamer.views import EndpointProcessStatusView
+
+        # Start a mock endpoint
+        endpoing_manger.start_endpoint("Test EP", "YT_HLS", "key123", "event-001", 42)
+
+        factory = RequestFactory()
+        request = factory.get("/api/endpoint-status/")
+        view = EndpointProcessStatusView.as_view()
+        response = view(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["endpoint_count"], 1)
+        self.assertEqual(len(response.data["endpoints"]), 1)
+
+        ep = response.data["endpoints"][0]
+        self.assertEqual(ep["alias"], "Test EP")
+        self.assertIn("alive", ep)
+        self.assertIn("pid", ep)
+        self.assertIn("buff_size_mb", ep)
+        self.assertIn("current_chunk_id", ep)
+
+        # Clean up
+        endpoing_manger.endpoint_processes["Test EP"].terminate()
+        endpoing_manger.endpoint_processes["Test EP"].join()
+        del endpoing_manger.endpoint_processes["Test EP"]
