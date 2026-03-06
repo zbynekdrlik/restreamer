@@ -1583,6 +1583,7 @@ jobs:
           }
 
       - name: Verify YouTube is receiving stream data
+        id: verify_yt_receiving
         shell: powershell
         timeout-minutes: 4
         run: |
@@ -1726,6 +1727,58 @@ jobs:
             Write-Host "Deactivation failed: $_"
           }
           exit 0
+
+      - name: Verify YouTube stopped receiving after deactivation
+        if: always() && steps.verify_yt_receiving.outcome == 'success'
+        shell: powershell
+        timeout-minutes: 4
+        run: |
+          # Post-deactivation check: verify YouTube's ingest server is no longer
+          # receiving stream data after the event was deactivated.
+          # Completes the 3-phase lifecycle: not-receiving → receiving → not-receiving.
+          $uri = "$($env:MANAGER_URL)/api/e2e/youtube-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)"
+          $maxRetries = 12
+          $retryDelay = 15
+
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            Write-Host "--- Attempt ${i}/${maxRetries}: checking YouTube stopped receiving ---"
+            try {
+              $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
+
+              Write-Host "  stream_receiving: $($response.stream_receiving)"
+              Write-Host "  stream_count: $($response.stream_count)"
+
+              if ($response.error_detail) {
+                Write-Host "  API error: $($response.error_detail)"
+                throw "YouTube API error: $($response.error_detail)"
+              }
+
+              if ($response.streams) {
+                foreach ($s in $response.streams) {
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+                }
+              }
+
+              if (-not $response.stream_receiving) {
+                Write-Host "=========================================="
+                Write-Host "  YOUTUBE CONFIRMED NOT RECEIVING (post-deactivation)"
+                Write-Host "  3-phase lifecycle verified: inactive -> active -> inactive"
+                Write-Host "=========================================="
+                return
+              }
+
+              Write-Host "  YouTube still receiving stream data"
+            } catch {
+              Write-Host "  Request failed: $_"
+            }
+
+            if ($i -lt $maxRetries) {
+              Write-Host "  Waiting ${retryDelay}s before retry..."
+              Start-Sleep -Seconds $retryDelay
+            }
+          }
+
+          throw "FAILED: YouTube is still receiving stream data after deactivation ($maxRetries attempts, ~$($maxRetries * $retryDelay)s). Deactivation did not stop delivery to YouTube."
 
       - name: Restore OBS stream settings
         if: always()
