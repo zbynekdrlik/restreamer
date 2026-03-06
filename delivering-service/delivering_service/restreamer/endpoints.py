@@ -87,7 +87,7 @@ class TSTimestampNormalizer:
                 pos += TS_PACKET_SIZE
                 continue
 
-            if (data[payload_start] != 0 or data[payload_start + 1] != 0 or data[payload_start + 2] != 1):
+            if data[payload_start] != 0 or data[payload_start + 1] != 0 or data[payload_start + 2] != 1:
                 pos += TS_PACKET_SIZE
                 continue
 
