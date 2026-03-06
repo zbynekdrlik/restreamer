@@ -10,6 +10,161 @@ from django.conf import settings
 
 log = logging.getLogger(__name__)
 
+TS_PACKET_SIZE = 188
+SYNC_BYTE = 0x47
+
+
+def _parse_ts_timestamp(data, offset):
+    """Parse a 33-bit MPEG-TS PES timestamp from 5 bytes."""
+    b0, b1, b2, b3, b4 = data[offset], data[offset + 1], data[offset + 2], data[offset + 3], data[offset + 4]
+    ts = ((b0 >> 1) & 0x07) << 30
+    ts |= b1 << 22
+    ts |= ((b2 >> 1) & 0x7F) << 15
+    ts |= b3 << 7
+    ts |= (b4 >> 1) & 0x7F
+    return ts
+
+
+def _write_ts_timestamp(data, offset, value, marker_nibble):
+    """Write a 33-bit timestamp to 5 bytes in MPEG-TS PES format."""
+    value = value & 0x1FFFFFFFF  # 33-bit mask
+    data[offset] = (marker_nibble << 4) | (((value >> 30) & 0x07) << 1) | 0x01
+    data[offset + 1] = (value >> 22) & 0xFF
+    data[offset + 2] = (((value >> 15) & 0x7F) << 1) | 0x01
+    data[offset + 3] = (value >> 7) & 0xFF
+    data[offset + 4] = ((value & 0x7F) << 1) | 0x01
+
+
+class TSTimestampNormalizer:
+    """Rewrites DTS/PTS in MPEG-TS data to produce continuous timestamps.
+
+    Uses actual DTS deltas from the original stream to preserve natural timing
+    within chunks, while ensuring continuity across chunk boundaries.
+    """
+
+    # Default durations at 90kHz timebase (used only for first PES or fallback)
+    VIDEO_DEFAULT_DURATION = 3000  # 30fps
+    AUDIO_DEFAULT_DURATION = 1920  # AAC 48kHz 1024 samples
+    # Max reasonable delta: 1 second at 90kHz (caps large jumps at chunk boundaries)
+    MAX_DELTA = 90000
+
+    def __init__(self):
+        self._video = {
+            "out_dts": 0,
+            "out_pts": 0,
+            "prev_orig_dts": None,
+            "prev_orig_pts": None,
+            "default_duration": self.VIDEO_DEFAULT_DURATION,
+        }
+        self._audio = {
+            "out_dts": 0,
+            "out_pts": 0,
+            "prev_orig_dts": None,
+            "prev_orig_pts": None,
+            "default_duration": self.AUDIO_DEFAULT_DURATION,
+        }
+
+    def normalize(self, chunk_data):
+        """Rewrite all DTS/PTS in MPEG-TS chunk data using original deltas.
+
+        Returns the modified data with continuous timestamps.
+        """
+        data = bytearray(chunk_data)
+        pos = 0
+
+        while pos + TS_PACKET_SIZE <= len(data):
+            if data[pos] != SYNC_BYTE:
+                pos += 1
+                continue
+
+            pusi = (data[pos + 1] >> 6) & 1
+            if not pusi:
+                pos += TS_PACKET_SIZE
+                continue
+
+            afc = (data[pos + 3] >> 4) & 0x03
+            if afc in (2, 3):
+                af_length = data[pos + 4]
+                payload_start = pos + 5 + af_length
+            else:
+                payload_start = pos + 4
+
+            if payload_start + 9 > pos + TS_PACKET_SIZE:
+                pos += TS_PACKET_SIZE
+                continue
+
+            if data[payload_start] != 0 or data[payload_start + 1] != 0 or data[payload_start + 2] != 1:
+                pos += TS_PACKET_SIZE
+                continue
+
+            stream_id = data[payload_start + 3]
+            is_video = 0xE0 <= stream_id <= 0xEF
+            is_audio = 0xC0 <= stream_id <= 0xDF
+
+            if not (is_video or is_audio):
+                pos += TS_PACKET_SIZE
+                continue
+
+            pts_dts_flags = (data[payload_start + 7] >> 6) & 0x03
+
+            state = self._video if is_video else self._audio
+            self._rewrite_stream(data, payload_start, pts_dts_flags, pos + TS_PACKET_SIZE, state)
+
+            pos += TS_PACKET_SIZE
+
+        return bytes(data)
+
+    def _compute_delta(self, orig_ts, prev_orig_ts, default_dur):
+        """Compute a safe delta from original timestamps."""
+        if prev_orig_ts is None:
+            return default_dur
+        delta = orig_ts - prev_orig_ts
+        if delta <= 0 or delta > self.MAX_DELTA:
+            return default_dur
+        return delta
+
+    def _rewrite_stream(self, data, payload_start, pts_dts_flags, packet_end, state):
+        """Rewrite DTS/PTS for a single stream (video or audio)."""
+        orig_dts = None
+        orig_pts = None
+        default_dur = state["default_duration"]
+
+        if pts_dts_flags >= 2:
+            pts_pos = payload_start + 9
+            if pts_pos + 5 <= packet_end:
+                orig_pts = _parse_ts_timestamp(data, pts_pos)
+
+        if pts_dts_flags == 3:
+            dts_pos = payload_start + 14
+            if dts_pos + 5 <= packet_end:
+                orig_dts = _parse_ts_timestamp(data, dts_pos)
+
+        if orig_dts is not None:
+            dts_delta = self._compute_delta(orig_dts, state["prev_orig_dts"], default_dur)
+            state["prev_orig_dts"] = orig_dts
+        else:
+            dts_delta = default_dur
+
+        if orig_pts is not None:
+            pts_delta = self._compute_delta(orig_pts, state["prev_orig_pts"], default_dur)
+            state["prev_orig_pts"] = orig_pts
+        else:
+            pts_delta = default_dur
+
+        state["out_dts"] += dts_delta
+        state["out_pts"] += pts_delta
+
+        if pts_dts_flags >= 2:
+            pts_pos = payload_start + 9
+            if pts_pos + 5 <= packet_end:
+                marker = 3 if pts_dts_flags == 3 else 2
+                _write_ts_timestamp(data, pts_pos, state["out_pts"], marker)
+
+        if pts_dts_flags == 3:
+            dts_pos = payload_start + 14
+            if dts_pos + 5 <= packet_end:
+                _write_ts_timestamp(data, dts_pos, state["out_dts"], 1)
+
 
 class EndPoint(multiprocessing.Process):
     def __init__(self, alias, service_type, stream_key, stream_identifier, chunk_id):
@@ -27,28 +182,36 @@ class EndPoint(multiprocessing.Process):
         self.stream_identifier = stream_identifier
         self.s3 = settings.S3_CLIENT
         self.bucket = settings.AWS_STORAGE_BUCKET_NAME
+        self.ts_normalizer = TSTimestampNormalizer() if service_type == "YT_HLS" else None
 
     def run_ffmpeg(self):
         if self.service_type == "YT_HLS":
             output_url = f"https://a.upload.youtube.com/http_upload_hls?cid={self.stream_key}&copy=0&file=out1248.ts"
-            cmd = ffmpeg.input(
-                "pipe:",
-                readrate=1.00,
-                format="mpegts",
-                loglevel="info",
-            ).output(
-                output_url,
-                f="hls",
-                hls_segment_type="mpegts",
-                hls_segment_options="mpegts_flags=+pat_pmt_at_frames+resend_headers",
-                hls_list_size=5,
-                hls_time=2,
-                hls_flags="delete_segments",
-                start_number=0,
-                hls_playlist_type="event",
-                method="PUT",
-                c="copy",
-                flags="+cgop",
+            cmd = (
+                ffmpeg.input(
+                    "pipe:",
+                    readrate=1.00,
+                    format="mpegts",
+                    loglevel="info",
+                    fflags="+genpts+discardcorrupt",
+                )
+                .output(
+                    output_url,
+                    f="hls",
+                    hls_segment_type="mpegts",
+                    hls_segment_options="mpegts_flags=+pat_pmt_at_frames+resend_headers",
+                    hls_list_size=5,
+                    hls_time=2,
+                    hls_flags="delete_segments",
+                    start_number=0,
+                    method="PUT",
+                    c="copy",
+                    flags="+cgop",
+                    muxdelay="0",
+                    muxpreload="0",
+                    reset_timestamps=1,
+                )
+                .global_args("-avoid_negative_ts", "make_zero")
             )
             """   threads=2 b='4000k, audio_codec='aac' ,c='libx264',s='1280x720''"""
         elif self.service_type == "FB":
@@ -58,12 +221,13 @@ class EndPoint(multiprocessing.Process):
                 readrate=1.00,
                 format="mpegts",
                 loglevel="info",
+                fflags="+genpts+discardcorrupt",
             ).output(output_url, f="flv", c="copy")
 
         elif self.service_type == "YT_RTMP":
             output_url = f"rtmp://a.rtmp.youtube.com/live2/{self.stream_key}"
             cmd = (
-                ffmpeg.input("pipe:", format="mpegts", readrate=1.00, loglevel="info")
+                ffmpeg.input("pipe:", format="mpegts", readrate=1.00, loglevel="info", fflags="+genpts+discardcorrupt")
                 .output(
                     output_url,
                     f="flv",
@@ -84,6 +248,7 @@ class EndPoint(multiprocessing.Process):
                 readrate=1.00,
                 format="mpegts",
                 loglevel="info",
+                fflags="+genpts+discardcorrupt",
             ).output(output_url, f="flv", c="copy")
 
         elif self.service_type == "TEST_FILE":
@@ -158,10 +323,12 @@ class EndPoint(multiprocessing.Process):
 
     def process_chunk(self, ffmpeg_process, response):
 
-        if not ffmpeg_process.poll():
+        if ffmpeg_process.poll() is None:
             try:
                 if response:
                     chunk_data = response["Body"].read()
+                    if self.ts_normalizer:
+                        chunk_data = self.ts_normalizer.normalize(chunk_data)
                     ffmpeg_process.stdin.write(chunk_data)
                     ffmpeg_process.stdin.flush()
                     self.buff_size.value += len(chunk_data)
@@ -259,6 +426,8 @@ class EndPoint(multiprocessing.Process):
                 if ret is not None:
                     log.warning(f"Ffmpeg process has exited with code:{ret}!!!")
                     time.sleep(3)
+                    if self.ts_normalizer:
+                        self.ts_normalizer = TSTimestampNormalizer()
                     ffmpeg_process = self.run_ffmpeg()
                     continue
 
