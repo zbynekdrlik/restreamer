@@ -49,14 +49,20 @@ class TSTimestampNormalizer:
     MAX_DELTA = 90000
 
     def __init__(self):
-        self.video_out_dts = 0
-        self.video_out_pts = 0
-        self.video_prev_orig_dts = None
-        self.video_prev_orig_pts = None
-        self.audio_out_dts = 0
-        self.audio_out_pts = 0
-        self.audio_prev_orig_dts = None
-        self.audio_prev_orig_pts = None
+        self._video = {
+            "out_dts": 0,
+            "out_pts": 0,
+            "prev_orig_dts": None,
+            "prev_orig_pts": None,
+            "default_duration": self.VIDEO_DEFAULT_DURATION,
+        }
+        self._audio = {
+            "out_dts": 0,
+            "out_pts": 0,
+            "prev_orig_dts": None,
+            "prev_orig_pts": None,
+            "default_duration": self.AUDIO_DEFAULT_DURATION,
+        }
 
     def normalize(self, chunk_data):
         """Rewrite all DTS/PTS in MPEG-TS chunk data using original deltas.
@@ -101,10 +107,8 @@ class TSTimestampNormalizer:
 
             pts_dts_flags = (data[payload_start + 7] >> 6) & 0x03
 
-            if is_video:
-                self._rewrite_video(data, payload_start, pts_dts_flags, pos + TS_PACKET_SIZE)
-            else:
-                self._rewrite_audio(data, payload_start, pts_dts_flags, pos + TS_PACKET_SIZE)
+            state = self._video if is_video else self._audio
+            self._rewrite_stream(data, payload_start, pts_dts_flags, pos + TS_PACKET_SIZE, state)
 
             pos += TS_PACKET_SIZE
 
@@ -119,52 +123,11 @@ class TSTimestampNormalizer:
             return default_dur
         return delta
 
-    def _rewrite_video(self, data, payload_start, pts_dts_flags, packet_end):
+    def _rewrite_stream(self, data, payload_start, pts_dts_flags, packet_end, state):
+        """Rewrite DTS/PTS for a single stream (video or audio)."""
         orig_dts = None
         orig_pts = None
-
-        if pts_dts_flags >= 2:
-            pts_pos = payload_start + 9
-            if pts_pos + 5 <= packet_end:
-                orig_pts = _parse_ts_timestamp(data, pts_pos)
-
-        if pts_dts_flags == 3:
-            dts_pos = payload_start + 14
-            if dts_pos + 5 <= packet_end:
-                orig_dts = _parse_ts_timestamp(data, dts_pos)
-
-        # Compute deltas from original timestamps
-        if orig_dts is not None:
-            dts_delta = self._compute_delta(orig_dts, self.video_prev_orig_dts, self.VIDEO_DEFAULT_DURATION)
-            self.video_prev_orig_dts = orig_dts
-        else:
-            dts_delta = self.VIDEO_DEFAULT_DURATION
-
-        if orig_pts is not None:
-            pts_delta = self._compute_delta(orig_pts, self.video_prev_orig_pts, self.VIDEO_DEFAULT_DURATION)
-            self.video_prev_orig_pts = orig_pts
-        else:
-            pts_delta = self.VIDEO_DEFAULT_DURATION
-
-        # Advance output timestamps by the computed delta
-        self.video_out_dts += dts_delta
-        self.video_out_pts += pts_delta
-
-        # Write new timestamps
-        if pts_dts_flags >= 2:
-            pts_pos = payload_start + 9
-            if pts_pos + 5 <= packet_end:
-                marker = 3 if pts_dts_flags == 3 else 2
-                _write_ts_timestamp(data, pts_pos, self.video_out_pts, marker)
-
-        if pts_dts_flags == 3:
-            dts_pos = payload_start + 14
-            if dts_pos + 5 <= packet_end:
-                _write_ts_timestamp(data, dts_pos, self.video_out_dts, 1)
-
-    def _rewrite_audio(self, data, payload_start, pts_dts_flags, packet_end):
-        orig_dts = None
-        orig_pts = None
+        default_dur = state["default_duration"]
 
         if pts_dts_flags >= 2:
             pts_pos = payload_start + 9
@@ -177,30 +140,30 @@ class TSTimestampNormalizer:
                 orig_dts = _parse_ts_timestamp(data, dts_pos)
 
         if orig_dts is not None:
-            dts_delta = self._compute_delta(orig_dts, self.audio_prev_orig_dts, self.AUDIO_DEFAULT_DURATION)
-            self.audio_prev_orig_dts = orig_dts
+            dts_delta = self._compute_delta(orig_dts, state["prev_orig_dts"], default_dur)
+            state["prev_orig_dts"] = orig_dts
         else:
-            dts_delta = self.AUDIO_DEFAULT_DURATION
+            dts_delta = default_dur
 
         if orig_pts is not None:
-            pts_delta = self._compute_delta(orig_pts, self.audio_prev_orig_pts, self.AUDIO_DEFAULT_DURATION)
-            self.audio_prev_orig_pts = orig_pts
+            pts_delta = self._compute_delta(orig_pts, state["prev_orig_pts"], default_dur)
+            state["prev_orig_pts"] = orig_pts
         else:
-            pts_delta = self.AUDIO_DEFAULT_DURATION
+            pts_delta = default_dur
 
-        self.audio_out_dts += dts_delta
-        self.audio_out_pts += pts_delta
+        state["out_dts"] += dts_delta
+        state["out_pts"] += pts_delta
 
         if pts_dts_flags >= 2:
             pts_pos = payload_start + 9
             if pts_pos + 5 <= packet_end:
                 marker = 3 if pts_dts_flags == 3 else 2
-                _write_ts_timestamp(data, pts_pos, self.audio_out_pts, marker)
+                _write_ts_timestamp(data, pts_pos, state["out_pts"], marker)
 
         if pts_dts_flags == 3:
             dts_pos = payload_start + 14
             if dts_pos + 5 <= packet_end:
-                _write_ts_timestamp(data, dts_pos, self.audio_out_dts, 1)
+                _write_ts_timestamp(data, dts_pos, state["out_dts"], 1)
 
 
 class EndPoint(multiprocessing.Process):
@@ -360,7 +323,7 @@ class EndPoint(multiprocessing.Process):
 
     def process_chunk(self, ffmpeg_process, response):
 
-        if not ffmpeg_process.poll():
+        if ffmpeg_process.poll() is None:
             try:
                 if response:
                     chunk_data = response["Body"].read()
