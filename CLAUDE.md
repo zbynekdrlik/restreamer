@@ -88,7 +88,7 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
 - **NO skipped deployment jobs** — The `deploy-stream-lan` job MUST run on every dev and main push. If it shows as "skipped", something is wrong with the workflow condition. Always use `always()` in complex `if` conditions to ensure proper evaluation.
 - **NO informational-only CI steps** — Every CI step must be binary: succeed and continue, or fail and stop. No steps that "check" something but always pass regardless of the result. If a check cannot be made reliable, remove the step entirely rather than hiding the gap behind a fake green checkmark.
 - **NO dismissing CI failures** — Never label a CI failure as "flaky", "pre-existing", or "known issue" to justify ignoring it. Every failure must be investigated and fixed. If a test fails, fix the test or the code — do not hand the user a red PR and suggest merging anyway. A red CI means the work is not done.
-- **E2E tests run on EVERY push to dev/main** — E2E tests must never be skipped on dev/main pushes, even when no Rust source files changed. The E2E job condition uses `!= 'failure'` (not `== 'success'`) so tests run whether deploy was fresh or skipped. The `test-integrity` job enforces this.
+- **E2E tests run on EVERY push to dev/main** — E2E tests must never be skipped on dev/main pushes, even when no Rust source files changed. The E2E job condition uses `!= 'failure'` (not `== 'success'`) so tests run whether deploy was fresh or skipped. The `e2e-gate` job requires both E2E tests to succeed on every push — deploy failure or E2E skip means red CI. The `test-integrity` job enforces these conditions.
 
 #### Web/Frontend E2E (Playwright)
 
