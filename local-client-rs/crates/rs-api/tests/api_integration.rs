@@ -398,10 +398,9 @@ async fn clear_chunks_resets_stats_to_zero() {
     let (base, _) = start_server(state).await;
 
     // Simulate old session: create event + chunks, mark some as sent
-    let event_id =
-        db::upsert_streaming_event(&pool, "old-session", None, "127.0.0.1")
-            .await
-            .unwrap();
+    let event_id = db::upsert_streaming_event(&pool, "old-session", None, "127.0.0.1")
+        .await
+        .unwrap();
     db::insert_chunk(&pool, event_id, "/tmp/old1.bin", 1024, "md5a")
         .await
         .unwrap();
