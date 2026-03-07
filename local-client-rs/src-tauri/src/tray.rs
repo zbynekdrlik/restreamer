@@ -45,6 +45,10 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     // Action items
     let open_dashboard =
         MenuItem::with_id(app, "open_dashboard", "Open Dashboard", true, None::<&str>)?;
+    let copy_rtmp =
+        MenuItem::with_id(app, "copy_rtmp_url", "Copy RTMP URL", true, None::<&str>)?;
+    let copy_manager =
+        MenuItem::with_id(app, "copy_manager_url", "Copy Manager URL", true, None::<&str>)?;
     let view_logs = MenuItem::with_id(app, "view_logs", "View Live Log", true, None::<&str>)?;
     let check_updates =
         MenuItem::with_id(app, "check_updates", "Check for Updates...", true, None::<&str>)?;
@@ -60,6 +64,8 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .item(&chunks_item)
         .separator()
         .item(&open_dashboard)
+        .item(&copy_rtmp)
+        .item(&copy_manager)
         .item(&view_logs)
         .separator()
         .item(&check_updates)
@@ -132,6 +138,24 @@ impl Default for TrayStatus {
     }
 }
 
+/// Copy text to the system clipboard using OS commands.
+fn copy_to_clipboard(text: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("powershell.exe")
+            .args(["-Command", &format!("Set-Clipboard '{text}'")])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("sh")
+            .args(["-c", &format!("echo -n '{text}' | xclip -selection clipboard")])
+            .spawn();
+    }
+}
+
 fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
     match event_id {
         "open_dashboard" => {
@@ -143,6 +167,16 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
                     tracing::warn!("Failed to focus window: {e}");
                 }
             }
+        }
+        "copy_rtmp_url" => {
+            let url = "rtmp://localhost:1234/live";
+            copy_to_clipboard(url);
+            tracing::info!("Copied RTMP URL to clipboard: {url}");
+        }
+        "copy_manager_url" => {
+            let url = "https://restreamer.newlevel.media/control/home/";
+            copy_to_clipboard(url);
+            tracing::info!("Copied Manager URL to clipboard: {url}");
         }
         "view_logs" => {
             // Open a live-tailing log window

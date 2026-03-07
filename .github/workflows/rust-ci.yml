@@ -684,7 +684,19 @@ jobs:
           }
           # Kill any ffmpeg processes spawned by old services (they hold RTMP port 1234)
           taskkill /F /IM "ffmpeg.exe" 2>&1 | Out-Null
-          Start-Sleep -Seconds 2
+          # Wait for ports 1234 (RTMP) and 8910 (API) to be free (up to 30 seconds)
+          $timeout = 30
+          $elapsed = 0
+          while ($elapsed -lt $timeout) {
+            $portInUse = netstat -an | Select-String ":1234 |:8910 " | Select-String "LISTENING|TIME_WAIT"
+            if (-not $portInUse) { break }
+            Start-Sleep -Seconds 2
+            $elapsed += 2
+            Write-Host "Waiting for ports to be released... ($elapsed s)"
+          }
+          if ($elapsed -ge $timeout) {
+            Write-Host "WARNING: Ports still in use after ${timeout}s"
+          }
 
           # Remove old service if it exists (unified app doesn't use Windows service)
           Write-Host "=== Removing old Windows service ==="
