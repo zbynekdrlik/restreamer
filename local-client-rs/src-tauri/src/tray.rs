@@ -1,4 +1,7 @@
 //! System tray with direct state access (no HTTP polling).
+//!
+//! Menu is built once at startup. Status items update in-place via
+//! `MenuItem::set_text()` — this never closes an open popup menu.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,11 +19,52 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Embedded tray icon (32x32 PNG from bundle).
 const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/32x32.png");
 
+/// Holds references to menu items whose text changes at runtime.
+struct DynamicMenuItems {
+    event: MenuItem<Wry>,
+    inpoint: MenuItem<Wry>,
+    buffer: MenuItem<Wry>,
+    uploader: MenuItem<Wry>,
+    chunks: MenuItem<Wry>,
+}
+
 pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let version = env!("CARGO_PKG_VERSION");
     let icon = Image::from_bytes(TRAY_ICON_BYTES)?;
 
-    let menu = build_menu(app, version, &TrayStatus::default())?;
+    // Static header
+    let header = MenuItem::new(app, format!("Restreamer v{version}"), false, None::<&str>)?;
+
+    // Dynamic status items (disabled — display only)
+    let event_item = MenuItem::new(app, "No active event", false, None::<&str>)?;
+    let inpoint_item = MenuItem::new(app, "Inpoint: Starting...", false, None::<&str>)?;
+    let buffer_item = MenuItem::new(app, "Buffer: --:--:--", false, None::<&str>)?;
+    let uploader_item = MenuItem::new(app, "Uploader: Starting...", false, None::<&str>)?;
+    let chunks_item = MenuItem::new(app, "Chunks: 0 sent, 0 pending", false, None::<&str>)?;
+
+    // Action items
+    let open_dashboard =
+        MenuItem::with_id(app, "open_dashboard", "Open Dashboard", true, None::<&str>)?;
+    let view_logs = MenuItem::with_id(app, "view_logs", "View Logs", true, None::<&str>)?;
+    let check_updates =
+        MenuItem::with_id(app, "check_updates", "Check for Updates...", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+
+    let menu = MenuBuilder::new(app)
+        .item(&header)
+        .separator()
+        .item(&event_item)
+        .item(&inpoint_item)
+        .item(&buffer_item)
+        .item(&uploader_item)
+        .item(&chunks_item)
+        .separator()
+        .item(&open_dashboard)
+        .item(&view_logs)
+        .separator()
+        .item(&check_updates)
+        .item(&quit)
+        .build()?;
 
     let _tray = TrayIconBuilder::with_id("restreamer")
         .icon(icon)
@@ -29,55 +73,17 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(move |app, event| handle_menu_event(app, event.id().as_ref()))
         .build(app)?;
 
-    start_status_poller(app.handle().clone());
+    let items = DynamicMenuItems {
+        event: event_item,
+        inpoint: inpoint_item,
+        buffer: buffer_item,
+        uploader: uploader_item,
+        chunks: chunks_item,
+    };
+
+    start_status_poller(app.handle().clone(), items);
 
     Ok(())
-}
-
-#[derive(PartialEq)]
-struct TrayStatus {
-    inpoint: String,
-    buffer: String,
-    endpoint: String,
-    pending: u64,
-    total_chunks: u64,
-    event_name: String,
-}
-
-impl Default for TrayStatus {
-    fn default() -> Self {
-        Self {
-            inpoint: "Starting...".to_string(),
-            buffer: "--:--:--".to_string(),
-            endpoint: "Starting...".to_string(),
-            pending: 0,
-            total_chunks: 0,
-            event_name: String::new(),
-        }
-    }
-}
-
-/// Build the single status summary line for the menu.
-fn status_line(status: &TrayStatus) -> String {
-    match status.inpoint.as_str() {
-        "Receiving" => {
-            if !status.event_name.is_empty() {
-                format!("\u{25CF} Streaming \u{2014} {}", status.event_name)
-            } else {
-                "\u{25CF} Streaming".to_string()
-            }
-        }
-        "Paused" => {
-            if !status.event_name.is_empty() {
-                format!("\u{25CB} Idle \u{2014} {}", status.event_name)
-            } else {
-                "\u{25CB} Idle".to_string()
-            }
-        }
-        "No Event" => "\u{25CB} No active event".to_string(),
-        "Error" => "\u{26A0} Error".to_string(),
-        _ => "\u{25CC} Starting...".to_string(),
-    }
 }
 
 /// Build a rich multi-line tooltip with detailed stats.
@@ -89,71 +95,41 @@ fn build_tooltip(status: &TrayStatus) -> String {
     };
 
     let state = match status.inpoint.as_str() {
-        "Receiving" => format!("\u{25CF} Receiving | Buffer: {}", status.buffer),
-        "Paused" => "\u{25CB} Idle".to_string(),
-        "No Event" => "\u{25CB} No active event".to_string(),
-        "Error" => "\u{26A0} Error".to_string(),
-        _ => "\u{25CC} Starting...".to_string(),
+        "Receiving" => format!("Receiving | Buffer: {}", status.buffer),
+        "Paused" => "Idle".to_string(),
+        "No Event" => "No active event".to_string(),
+        "Error" => "Error".to_string(),
+        _ => "Starting...".to_string(),
     };
 
     let chunks = format!(
-        "Chunks: {} total, {} pending",
-        status.total_chunks, status.pending
+        "Chunks: {} sent, {} pending",
+        status.sent_chunks, status.pending
     );
 
     format!("{title}\n{state}\n{chunks}")
 }
 
-fn build_menu(
-    app: &impl Manager<Wry>,
-    version: &str,
-    status: &TrayStatus,
-) -> Result<tauri::menu::Menu<Wry>, Box<dyn std::error::Error>> {
-    Ok(MenuBuilder::new(app)
-        .item(&MenuItem::new(
-            app,
-            format!("Restreamer v{version}"),
-            false,
-            None::<&str>,
-        )?)
-        .separator()
-        .item(&MenuItem::new(
-            app,
-            status_line(status),
-            false,
-            None::<&str>,
-        )?)
-        .separator()
-        .item(&MenuItem::with_id(
-            app,
-            "open_dashboard",
-            "Open Dashboard",
-            true,
-            None::<&str>,
-        )?)
-        .item(&MenuItem::with_id(
-            app,
-            "view_logs",
-            "View Logs",
-            true,
-            None::<&str>,
-        )?)
-        .separator()
-        .item(&MenuItem::with_id(
-            app,
-            "check_updates",
-            "Check for Updates...",
-            true,
-            None::<&str>,
-        )?)
-        .item(&MenuItem::with_id(
-            app,
-            "quit",
-            "Quit",
-            true,
-            None::<&str>,
-        )?)
-        .build()?)
+struct TrayStatus {
+    inpoint: String,
+    buffer: String,
+    endpoint: String,
+    pending: u64,
+    sent_chunks: u64,
+    event_name: String,
+}
+
+impl Default for TrayStatus {
+    fn default() -> Self {
+        Self {
+            inpoint: "Starting...".to_string(),
+            buffer: "--:--:--".to_string(),
+            endpoint: "Starting...".to_string(),
+            pending: 0,
+            sent_chunks: 0,
+            event_name: String::new(),
+        }
+    }
 }
 
 fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
@@ -227,52 +203,48 @@ fn format_duration(secs: f64) -> String {
 }
 
 /// Poll the service status directly from AppState (no HTTP).
-fn start_status_poller(handle: AppHandle<Wry>) {
+/// Updates menu item text in-place — never calls `set_menu()`.
+fn start_status_poller(handle: AppHandle<Wry>, items: DynamicMenuItems) {
     tauri::async_runtime::spawn(async move {
-        let version = env!("CARGO_PKG_VERSION");
-
         // Wait for state to be initialized
         tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let mut prev_status: Option<TrayStatus> = None;
 
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
 
-            let mut tray_status = TrayStatus::default();
+            let mut status = TrayStatus::default();
 
             // Get state if available
             if let Some(state) = handle.try_state::<Arc<AppState>>() {
                 // Get streaming event
                 match state.get_streaming_event().await {
                     Ok(Some(event)) => {
-                        tray_status.event_name = event
-                            .short_description
-                            .unwrap_or_default();
+                        status.event_name =
+                            event.short_description.unwrap_or_default();
 
-                        tray_status.inpoint = if event.receiving_activated {
+                        status.inpoint = if event.receiving_activated {
                             "Receiving".to_string()
                         } else {
                             "Paused".to_string()
                         };
                     }
                     Ok(None) => {
-                        tray_status.inpoint = "No Event".to_string();
+                        status.inpoint = "No Event".to_string();
                     }
                     Err(e) => {
                         tracing::debug!("Failed to get streaming event: {e}");
-                        tray_status.inpoint = "Error".to_string();
+                        status.inpoint = "Error".to_string();
                     }
                 }
 
                 // Get chunk stats
                 match state.get_chunk_stats().await {
                     Ok(stats) => {
-                        tray_status.buffer = format_duration(stats.buffer_duration_secs);
-                        tray_status.pending = stats.pending_chunks as u64;
-                        tray_status.total_chunks = stats.total_chunks as u64;
+                        status.buffer = format_duration(stats.buffer_duration_secs);
+                        status.pending = stats.pending_chunks as u64;
+                        status.sent_chunks = stats.sent_chunks as u64;
 
-                        tray_status.endpoint = if stats.pending_chunks > 0 {
+                        status.endpoint = if stats.pending_chunks > 0 {
                             "Uploading".to_string()
                         } else {
                             "Idle".to_string()
@@ -283,29 +255,28 @@ fn start_status_poller(handle: AppHandle<Wry>) {
                     }
                 }
             } else {
-                tray_status.inpoint = "Initializing...".to_string();
-                tray_status.endpoint = "Initializing...".to_string();
+                status.inpoint = "Initializing...".to_string();
+                status.endpoint = "Initializing...".to_string();
             }
 
-            // Update the tray icon
+            // Update menu items in-place (menu stays open!)
+            let event_text = if status.event_name.is_empty() {
+                "No active event".to_string()
+            } else {
+                format!("Event: {}", status.event_name)
+            };
+            let _ = items.event.set_text(&event_text);
+            let _ = items.inpoint.set_text(format!("Inpoint: {}", status.inpoint));
+            let _ = items.buffer.set_text(format!("Buffer: {}", status.buffer));
+            let _ = items.uploader.set_text(format!("Uploader: {}", status.endpoint));
+            let _ = items
+                .chunks
+                .set_text(format!("Chunks: {} sent, {} pending", status.sent_chunks, status.pending));
+
+            // Tooltip always safe to update
             if let Some(tray) = handle.tray_by_id("restreamer") {
-                // Always update tooltip (doesn't close the menu)
-                let tooltip = build_tooltip(&tray_status);
+                let tooltip = build_tooltip(&status);
                 let _ = tray.set_tooltip(Some(&tooltip));
-
-                // Only rebuild menu when status changes (avoids closing open menu)
-                let should_rebuild = match &prev_status {
-                    Some(prev) => *prev != tray_status,
-                    None => true,
-                };
-
-                if should_rebuild {
-                    if let Ok(menu) = build_menu(&handle, version, &tray_status) {
-                        let _ = tray.set_menu(Some(menu));
-                    }
-                }
-
-                prev_status = Some(tray_status);
             }
         }
     });
@@ -346,75 +317,6 @@ mod tests {
         assert_eq!(format_duration(3661.0), "01:01:01");
     }
 
-    // --- Status line tests ---
-
-    #[test]
-    fn status_line_streaming_with_event() {
-        let s = TrayStatus {
-            inpoint: "Receiving".to_string(),
-            event_name: "Sunday Service".to_string(),
-            ..TrayStatus::default()
-        };
-        assert_eq!(status_line(&s), "\u{25CF} Streaming \u{2014} Sunday Service");
-    }
-
-    #[test]
-    fn status_line_streaming_no_event() {
-        let s = TrayStatus {
-            inpoint: "Receiving".to_string(),
-            event_name: String::new(),
-            ..TrayStatus::default()
-        };
-        assert_eq!(status_line(&s), "\u{25CF} Streaming");
-    }
-
-    #[test]
-    fn status_line_idle_with_event() {
-        let s = TrayStatus {
-            inpoint: "Paused".to_string(),
-            event_name: "Wednesday Prayer".to_string(),
-            ..TrayStatus::default()
-        };
-        assert_eq!(
-            status_line(&s),
-            "\u{25CB} Idle \u{2014} Wednesday Prayer"
-        );
-    }
-
-    #[test]
-    fn status_line_idle_no_event() {
-        let s = TrayStatus {
-            inpoint: "Paused".to_string(),
-            event_name: String::new(),
-            ..TrayStatus::default()
-        };
-        assert_eq!(status_line(&s), "\u{25CB} Idle");
-    }
-
-    #[test]
-    fn status_line_no_event() {
-        let s = TrayStatus {
-            inpoint: "No Event".to_string(),
-            ..TrayStatus::default()
-        };
-        assert_eq!(status_line(&s), "\u{25CB} No active event");
-    }
-
-    #[test]
-    fn status_line_error() {
-        let s = TrayStatus {
-            inpoint: "Error".to_string(),
-            ..TrayStatus::default()
-        };
-        assert_eq!(status_line(&s), "\u{26A0} Error");
-    }
-
-    #[test]
-    fn status_line_initializing() {
-        let s = TrayStatus::default();
-        assert_eq!(status_line(&s), "\u{25CC} Starting...");
-    }
-
     // --- Tooltip tests ---
 
     #[test]
@@ -424,13 +326,13 @@ mod tests {
             buffer: "00:05:23".to_string(),
             endpoint: "Uploading".to_string(),
             pending: 3,
-            total_chunks: 42,
+            sent_chunks: 42,
             event_name: "Sunday Service".to_string(),
         };
         let tip = build_tooltip(&s);
         assert!(tip.contains("Restreamer \u{2014} Sunday Service"));
-        assert!(tip.contains("\u{25CF} Receiving | Buffer: 00:05:23"));
-        assert!(tip.contains("Chunks: 42 total, 3 pending"));
+        assert!(tip.contains("Receiving | Buffer: 00:05:23"));
+        assert!(tip.contains("Chunks: 42 sent, 3 pending"));
     }
 
     #[test]
@@ -441,35 +343,42 @@ mod tests {
         };
         let tip = build_tooltip(&s);
         assert!(tip.starts_with("Restreamer\n"));
-        assert!(tip.contains("\u{25CB} No active event"));
+        assert!(tip.contains("No active event"));
     }
 
-    // --- PartialEq tests ---
+    // --- Chunk display format tests ---
 
     #[test]
-    fn tray_status_eq_same() {
-        let a = TrayStatus::default();
-        let b = TrayStatus::default();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn tray_status_ne_different_inpoint() {
-        let a = TrayStatus::default();
-        let b = TrayStatus {
-            inpoint: "Receiving".to_string(),
+    fn chunk_display_format() {
+        let s = TrayStatus {
+            sent_chunks: 42,
+            pending: 3,
             ..TrayStatus::default()
         };
-        assert_ne!(a, b);
+        let tip = build_tooltip(&s);
+        assert!(tip.contains("Chunks: 42 sent, 3 pending"));
     }
 
     #[test]
-    fn tray_status_ne_different_chunks() {
-        let a = TrayStatus::default();
-        let b = TrayStatus {
-            total_chunks: 10,
+    fn chunk_display_zero() {
+        let s = TrayStatus::default();
+        let tip = build_tooltip(&s);
+        assert!(tip.contains("Chunks: 0 sent, 0 pending"));
+    }
+
+    #[test]
+    fn tooltip_no_event_name() {
+        let tip = build_tooltip(&TrayStatus::default());
+        assert!(tip.starts_with("Restreamer\n"));
+    }
+
+    #[test]
+    fn tooltip_with_event_name() {
+        let s = TrayStatus {
+            event_name: "Wednesday Prayer".to_string(),
             ..TrayStatus::default()
         };
-        assert_ne!(a, b);
+        let tip = build_tooltip(&s);
+        assert!(tip.starts_with("Restreamer \u{2014} Wednesday Prayer\n"));
     }
 }
