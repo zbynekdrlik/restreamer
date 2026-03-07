@@ -45,7 +45,7 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     // Action items
     let open_dashboard =
         MenuItem::with_id(app, "open_dashboard", "Open Dashboard", true, None::<&str>)?;
-    let view_logs = MenuItem::with_id(app, "view_logs", "View Logs", true, None::<&str>)?;
+    let view_logs = MenuItem::with_id(app, "view_logs", "View Live Log", true, None::<&str>)?;
     let check_updates =
         MenuItem::with_id(app, "check_updates", "Check for Updates...", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -145,28 +145,25 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
             }
         }
         "view_logs" => {
-            // Open the Restreamer data directory in file explorer
+            // Open a live-tailing log window
             #[cfg(target_os = "windows")]
             {
-                let log_dir = std::path::PathBuf::from(r"C:\ProgramData\Restreamer");
-                if log_dir.exists() {
-                    let _ = std::process::Command::new("explorer")
-                        .arg(&log_dir)
-                        .spawn();
-                } else {
-                    tracing::warn!("Log directory does not exist: {:?}", log_dir);
-                }
+                let _ = std::process::Command::new("powershell.exe")
+                    .args([
+                        "-NoExit",
+                        "-Command",
+                        "Get-Content 'C:\\ProgramData\\Restreamer\\restreamer.log' -Tail 50 -Wait",
+                    ])
+                    .spawn();
             }
             #[cfg(not(target_os = "windows"))]
             {
-                let log_dir = std::path::PathBuf::from("/var/lib/restreamer");
-                if log_dir.exists() {
-                    let _ = std::process::Command::new("xdg-open")
-                        .arg(&log_dir)
-                        .spawn();
-                } else {
-                    tracing::warn!("Log directory does not exist: {:?}", log_dir);
-                }
+                let _ = std::process::Command::new("x-terminal-emulator")
+                    .args([
+                        "-e", "tail", "-n", "50", "-f",
+                        "/var/lib/restreamer/restreamer.log",
+                    ])
+                    .spawn();
             }
         }
         "check_updates" => {
