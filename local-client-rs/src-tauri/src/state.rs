@@ -1,6 +1,6 @@
 //! Application state management for the embedded service.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
@@ -84,11 +84,72 @@ impl AppState {
         }
     }
 
+    /// Delete all chunk records from the database and remove orphaned `.bin` files.
+    pub async fn clear_all_chunks(&self) -> Result<u64, String> {
+        let count = db::delete_all_chunks(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let chunk_dir = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\ProgramData\Restreamer\chunks")
+        } else {
+            std::path::PathBuf::from("/var/lib/restreamer/chunks")
+        };
+
+        cleanup_chunk_files(&chunk_dir).await;
+
+        Ok(count)
+    }
+
     /// Trigger graceful shutdown of the embedded service.
     pub async fn shutdown(&self) {
         let mut guard = self.shutdown_tx.write().await;
         if let Some(tx) = guard.take() {
             let _ = tx.send(());
         }
+    }
+}
+
+/// Remove all `.bin` files from the given directory.
+///
+/// Non-`.bin` files are left intact. Errors on individual file deletions
+/// are logged but do not stop processing remaining files.
+pub async fn cleanup_chunk_files(dir: &Path) {
+    if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.path().extension().is_some_and(|ext| ext == "bin") {
+                if let Err(e) = tokio::fs::remove_file(entry.path()).await {
+                    tracing::warn!("Failed to remove chunk file {}: {e}", entry.path().display());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cleanup_chunk_files_removes_bin_preserves_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin1 = tmp.path().join("chunk1.bin");
+        let bin2 = tmp.path().join("chunk2.bin");
+        let keep = tmp.path().join("config.json");
+        tokio::fs::write(&bin1, b"data").await.unwrap();
+        tokio::fs::write(&bin2, b"data").await.unwrap();
+        tokio::fs::write(&keep, b"data").await.unwrap();
+
+        cleanup_chunk_files(tmp.path()).await;
+
+        assert!(!bin1.exists(), "chunk1.bin should be deleted");
+        assert!(!bin2.exists(), "chunk2.bin should be deleted");
+        assert!(keep.exists(), "config.json should be preserved");
+    }
+
+    #[tokio::test]
+    async fn cleanup_chunk_files_handles_missing_dir() {
+        // Should not panic on a non-existent directory
+        cleanup_chunk_files(Path::new("/tmp/nonexistent-restreamer-test-dir")).await;
     }
 }

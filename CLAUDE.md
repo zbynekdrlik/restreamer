@@ -236,7 +236,7 @@ Start-ScheduledTask -TaskName "RestreamerTray"
 - **Host**: `restreamer.newlevel.media` (Linode VPS, IP `172.105.95.118`)
 - **Install Path**: `/root/kristian/manager-server/restreamer-manager/`
 - **Virtualenv**: `/root/.virtualenvs/venv/`
-- **Django Admin**: `https://restreamer.newlevel.media/admin/`
+- **Control Panel**: `https://restreamer.newlevel.media/control/home/`
 - **Process Manager**: tmux session `restreamer`, gunicorn + nginx
 - **Celery**: worker on `init_stream_queue`
 - **DB**: PostgreSQL 16

@@ -858,6 +858,16 @@ jobs:
             throw "FAILED: Poller did not sync streaming event after $maxRetries attempts (30s timeout)"
           }
 
+      - name: Clear chunks from previous test runs
+        shell: powershell
+        run: |
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks" -Method Delete
+          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          if ($stats.total_chunks -ne 0) {
+            throw "FAILED: Chunks not cleared (total: $($stats.total_chunks))"
+          }
+          Write-Host "Chunks cleared, starting fresh"
+
       - name: Get initial chunk count
         id: initial-chunks
         shell: powershell
