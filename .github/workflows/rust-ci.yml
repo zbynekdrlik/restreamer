@@ -1980,6 +1980,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Verify all checks passed
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo "rust-ci-gate:          ${{ needs.rust-ci-gate.result }}"
           echo "e2e-streaming-test:    ${{ needs.e2e-streaming-test.result }}"
@@ -2005,7 +2007,50 @@ jobs:
             fi
             echo "All E2E tests passed!"
           else
-            echo "E2E tests only required on push/workflow_dispatch (not PRs)."
+            # On PR events, E2E tests don't run here — but a push-triggered run
+            # for the same commit DOES run E2E tests. We must check that run's
+            # E2E Gate result to prevent a green PR when push E2E tests fail.
+            echo "PR event: checking push-triggered E2E Gate for commit ${{ github.event.pull_request.head.sha }}..."
+            SHA="${{ github.event.pull_request.head.sha }}"
+            MAX_WAIT=20
+            WAIT_INTERVAL=30
+            for i in $(seq 1 $MAX_WAIT); do
+              # Find E2E Gate check run from the push-triggered workflow on this commit
+              PUSH_GATE=$(gh api "repos/${{ github.repository }}/commits/${SHA}/check-runs?check_name=E2E+Gate&per_page=100" \
+                --jq "[.check_runs[] | select(.id != ${{ github.run_id }})] | sort_by(.started_at) | last")
+
+              if [[ -z "$PUSH_GATE" || "$PUSH_GATE" == "null" ]]; then
+                echo "Attempt $i/$MAX_WAIT: Push-triggered E2E Gate not found yet, waiting ${WAIT_INTERVAL}s..."
+                sleep $WAIT_INTERVAL
+                continue
+              fi
+
+              STATUS=$(echo "$PUSH_GATE" | jq -r '.status')
+              CONCLUSION=$(echo "$PUSH_GATE" | jq -r '.conclusion')
+              RUN_URL=$(echo "$PUSH_GATE" | jq -r '.html_url')
+
+              echo "Push E2E Gate: status=$STATUS conclusion=$CONCLUSION"
+              echo "Run: $RUN_URL"
+
+              if [[ "$STATUS" == "completed" ]]; then
+                if [[ "$CONCLUSION" == "success" ]]; then
+                  echo "Push-triggered E2E Gate passed!"
+                  break
+                else
+                  echo "FAIL: Push-triggered E2E Gate did not succeed (conclusion: $CONCLUSION)"
+                  echo "PR cannot be green when push E2E tests fail."
+                  exit 1
+                fi
+              fi
+
+              echo "Attempt $i/$MAX_WAIT: Push E2E Gate still running ($STATUS), waiting ${WAIT_INTERVAL}s..."
+              sleep $WAIT_INTERVAL
+            done
+
+            if [[ "$STATUS" != "completed" ]]; then
+              echo "FAIL: Push-triggered E2E Gate did not complete after $((MAX_WAIT * WAIT_INTERVAL))s"
+              exit 1
+            fi
           fi
 
           echo "All CI checks passed!"
