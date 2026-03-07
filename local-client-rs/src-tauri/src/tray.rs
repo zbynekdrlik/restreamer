@@ -12,7 +12,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{App, AppHandle, Manager, Wry};
 
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 use crate::state::AppState;
 
@@ -199,8 +199,10 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
                     .dialog()
                     .message(msg)
                     .title("Clear Pending Chunks")
-                    .ok_button_label("Clear")
-                    .cancel_button_label("Cancel")
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "Clear".to_string(),
+                        "Cancel".to_string(),
+                    ))
                     .blocking_show();
 
                 if confirmed {
