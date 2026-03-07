@@ -19,14 +19,50 @@ use rs_runtime::{LogCaptureLayer, ServiceCore};
 
 use crate::state::AppState;
 
-/// Initialize tracing with log capture.
+/// Data directory path (platform-specific).
+fn data_dir() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(r"C:\ProgramData\Restreamer")
+    } else {
+        PathBuf::from("/var/lib/restreamer")
+    }
+}
+
+/// Initialize tracing with log capture and file logging.
 fn init_tracing(log_buffer: &LogBuffer) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    // Log file path
+    let log_path = data_dir().join("restreamer.log");
+
+    // Ensure directory exists
+    let _ = std::fs::create_dir_all(data_dir());
+
+    // Simple rotation: rename to .old if > 1MB
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > 1_000_000 {
+            let _ = std::fs::rename(&log_path, log_path.with_extension("log.old"));
+        }
+    }
+
+    // File layer (best-effort — don't crash if file can't be opened)
+    let file_layer = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok()
+        .map(|file| {
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::sync::Mutex::new(file))
+                .with_ansi(false)
+                .with_target(false)
+        });
 
     tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
         .with(LogCaptureLayer::new(log_buffer.clone()))
+        .with(file_layer)
         .init();
 }
 
