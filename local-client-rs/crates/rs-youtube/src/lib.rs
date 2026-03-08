@@ -2,8 +2,6 @@
 ///
 /// Handles OAuth2 authorization flow, token refresh with SQLite persistence,
 /// and YouTube Live Streaming API queries.
-use chrono::{DateTime, Utc};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -29,19 +27,10 @@ pub enum YouTubeError {
 pub type Result<T> = std::result::Result<T, YouTubeError>;
 
 /// YouTube OAuth configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct YouTubeConfig {
     pub client_id: String,
     pub client_secret: String,
-}
-
-impl Default for YouTubeConfig {
-    fn default() -> Self {
-        Self {
-            client_id: String::new(),
-            client_secret: String::new(),
-        }
-    }
 }
 
 /// Stored OAuth tokens.
