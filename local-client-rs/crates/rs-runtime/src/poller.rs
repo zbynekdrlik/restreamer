@@ -345,7 +345,12 @@ mod tests {
             .await
             .unwrap();
         // Verify stale event exists
-        assert!(db::get_streaming_event_by_id(&pool, stale_id).await.unwrap().is_some());
+        assert!(
+            db::get_streaming_event_by_id(&pool, stale_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         let poller = Poller {
             pool: pool.clone(),
@@ -361,15 +366,19 @@ mod tests {
         assert_eq!(event.identifier, Some("stream-001".to_string()));
 
         // Stale event should be gone
-        assert!(db::get_streaming_event_by_id(&pool, stale_id).await.unwrap().is_none());
-
-        // Count all events — should be exactly 1
-        let count: i32 =
-            sqlx::query("SELECT COUNT(*) as c FROM streaming_events")
-                .fetch_one(&pool)
+        assert!(
+            db::get_streaming_event_by_id(&pool, stale_id)
                 .await
                 .unwrap()
-                .get("c");
+                .is_none()
+        );
+
+        // Count all events — should be exactly 1
+        let count: i32 = sqlx::query("SELECT COUNT(*) as c FROM streaming_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("c");
         assert_eq!(count, 1);
     }
 

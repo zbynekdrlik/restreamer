@@ -576,8 +576,18 @@ mod tests {
         assert_eq!(remaining.identifier.as_deref(), Some("evt-2"));
 
         // id1 and id3 should be gone
-        assert!(get_streaming_event_by_id(&pool, id1).await.unwrap().is_none());
-        assert!(get_streaming_event_by_id(&pool, id3).await.unwrap().is_none());
+        assert!(
+            get_streaming_event_by_id(&pool, id1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_streaming_event_by_id(&pool, id3)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
