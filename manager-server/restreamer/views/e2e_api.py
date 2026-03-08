@@ -294,16 +294,12 @@ class E2EDeactivate(APIView):
                             if endpoint_count_after == 0:
                                 endpoints_stopped = True
                                 break
-                            log.info(
-                                f"Endpoints still running (attempt {attempt + 1}/6): "
-                                f"count={endpoint_count_after}"
-                            )
+                            log.info(f"Endpoints still running (attempt {attempt + 1}/6): count={endpoint_count_after}")
                     except Exception as e:
                         log.debug(f"Endpoint status check failed (attempt {attempt + 1}/6): {e}")
                 if not endpoints_stopped:
                     log.error(
-                        "Delivering server endpoints NOT stopped after deactivation "
-                        f"(count={endpoint_count_after})"
+                        f"Delivering server endpoints NOT stopped after deactivation (count={endpoint_count_after})"
                     )
 
             # Deactivate flags
