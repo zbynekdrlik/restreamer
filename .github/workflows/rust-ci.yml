@@ -2195,9 +2195,12 @@ jobs:
             MAX_WAIT=20
             WAIT_INTERVAL=30
             for i in $(seq 1 $MAX_WAIT); do
-              # Find E2E Gate check run from the push-triggered workflow on this commit
+              # Find E2E Gate check run from the push-triggered workflow on this commit.
+              # Filter out check runs from the current workflow run by matching the run ID
+              # in the details_url (check_run.id != github.run_id doesn't work because
+              # they're different ID namespaces).
               PUSH_GATE=$(gh api "repos/${{ github.repository }}/commits/${SHA}/check-runs?check_name=E2E+Gate&per_page=100" \
-                --jq "[.check_runs[] | select(.id != ${{ github.run_id }})] | sort_by(.started_at) | last")
+                --jq "[.check_runs[] | select(.details_url | test(\"/${{ github.run_id }}/\") | not)] | sort_by(.started_at) | last")
 
               if [[ -z "$PUSH_GATE" || "$PUSH_GATE" == "null" ]]; then
                 echo "Attempt $i/$MAX_WAIT: Push-triggered E2E Gate not found yet, waiting ${WAIT_INTERVAL}s..."
