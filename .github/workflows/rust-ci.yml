@@ -1199,15 +1199,60 @@ jobs:
         run: |
           $obs = Get-Process obs64 -ErrorAction SilentlyContinue
           if (-not $obs) {
-            Write-Host "OBS not running, starting via scheduled task..."
-            Start-ScheduledTask -TaskName "Start OBS Studio" -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 8
+            Write-Host "OBS not running, registering scheduled task with correct WorkingDirectory..."
+
+            $action = New-ScheduledTaskAction `
+              -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
+              -Argument "--disable-shutdown-check" `
+              -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"
+            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
+            $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
+
+            Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
+            Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+            Start-ScheduledTask -TaskName "Start OBS Studio"
+            Start-Sleep -Seconds 10
+
             $obs = Get-Process obs64 -ErrorAction SilentlyContinue
             if (-not $obs) {
               throw "FAILED: Could not start OBS Studio"
             }
           }
-          Write-Host "OBS is running (PID: $($obs.Id))"
+
+          # Verify OBS is healthy (not in broken state)
+          $mem = $obs.WorkingSet64 / 1MB
+          Write-Host "OBS PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
+          if ($mem -lt 100) {
+            Write-Host "WARNING: OBS memory too low ($([math]::Round($mem))MB) - broken start detected"
+            Write-Host "Killing broken OBS and restarting with correct WorkingDirectory..."
+            Stop-Process -Id $obs.Id -Force
+            Start-Sleep -Seconds 5
+
+            $action = New-ScheduledTaskAction `
+              -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
+              -Argument "--disable-shutdown-check" `
+              -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"
+            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
+            $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
+
+            Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
+            Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+            Start-ScheduledTask -TaskName "Start OBS Studio"
+            Start-Sleep -Seconds 10
+
+            $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+            if (-not $obs) {
+              throw "FAILED: Could not restart OBS Studio"
+            }
+            $mem = $obs.WorkingSet64 / 1MB
+            Write-Host "OBS restarted - PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
+            if ($mem -lt 100) {
+              throw "FAILED: OBS still in broken state after restart ($([math]::Round($mem))MB)"
+            }
+          }
+          Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
 
       - name: Save original OBS stream settings and switch to Restreamer
         id: obs-setup
