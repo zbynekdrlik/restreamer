@@ -3,7 +3,7 @@
 /// Provides a minimal Axum API on :8000 for health, init, status, and stop.
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 mod api;
 mod endpoint_task;
@@ -18,8 +18,8 @@ pub struct AppState {
     pub ready: RwLock<bool>,
 }
 
-impl AppState {
-    pub fn new() -> Self {
+impl Default for AppState {
+    fn default() -> Self {
         Self {
             endpoints: RwLock::new(HashMap::new()),
             version: env!("CARGO_PKG_VERSION"),
@@ -37,7 +37,7 @@ async fn main() {
         )
         .init();
 
-    let state = Arc::new(AppState::new());
+    let state = Arc::new(AppState::default());
     let app = api::router(state);
 
     let addr = "0.0.0.0:8000";

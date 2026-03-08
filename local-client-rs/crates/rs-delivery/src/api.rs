@@ -176,7 +176,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     fn test_state() -> Arc<AppState> {
-        Arc::new(AppState::new())
+        Arc::new(AppState::default())
     }
 
     #[tokio::test]

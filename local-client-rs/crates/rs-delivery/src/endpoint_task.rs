@@ -99,7 +99,7 @@ async fn endpoint_loop(
         }
 
         // Ensure ffmpeg is running
-        if ffmpeg.as_mut().map_or(true, |f| !f.is_alive()) {
+        if !ffmpeg.as_mut().is_some_and(|f| f.is_alive()) {
             if ffmpeg.is_some() {
                 tracing::warn!(alias = %alias, "ffmpeg died, restarting in 3s");
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
