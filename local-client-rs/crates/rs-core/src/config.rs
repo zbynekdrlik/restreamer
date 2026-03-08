@@ -56,21 +56,12 @@ impl Default for HetznerConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct YouTubeOAuthConfig {
     #[serde(default)]
     pub client_id: String,
     #[serde(default)]
     pub client_secret: String,
-}
-
-impl Default for YouTubeOAuthConfig {
-    fn default() -> Self {
-        Self {
-            client_id: String::new(),
-            client_secret: String::new(),
-        }
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

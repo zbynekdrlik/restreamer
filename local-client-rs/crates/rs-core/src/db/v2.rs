@@ -78,6 +78,7 @@ pub async fn create_endpoint_config(
     Ok(row.get("id"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_endpoint_config(
     pool: &SqlitePool,
     id: i64,
@@ -289,6 +290,7 @@ pub async fn get_youtube_oauth(pool: &SqlitePool) -> Result<Option<YouTubeOAuth>
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_youtube_oauth(
     pool: &SqlitePool,
     access_token: &str,

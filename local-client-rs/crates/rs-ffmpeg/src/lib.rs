@@ -10,7 +10,6 @@ use std::process::Stdio;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
-use tracing;
 
 #[derive(Debug, Error)]
 pub enum FfmpegError {
@@ -189,7 +188,7 @@ fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
 fn build_test_file_args(alias: &str) -> Vec<String> {
     let output_dir = std::env::var("RESTREAMER_TEST_OUTPUT_DIR")
         .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
-    let safe_alias = alias.replace(' ', "_").replace('/', "_");
+    let safe_alias = alias.replace([' ', '/'], "_");
     let output_path = PathBuf::from(&output_dir)
         .join(format!("restreamer_test_{safe_alias}.ts"))
         .to_string_lossy()

@@ -5,7 +5,6 @@
 /// spacing while capping jumps at chunk boundaries.
 ///
 /// Ported from Python delivering-service endpoints.py TSTimestampNormalizer.
-
 const TS_PACKET_SIZE: usize = 188;
 const SYNC_BYTE: u8 = 0x47;
 

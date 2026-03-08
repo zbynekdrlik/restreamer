@@ -2,8 +2,6 @@
 ///
 /// Handles full lifecycle: create from image/snapshot, health monitoring,
 /// binary version checks, snapshot management, and teardown.
-use chrono::{DateTime, Utc};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -98,7 +96,7 @@ pub struct DeliveryInstance {
 }
 
 /// Select server type based on endpoint count.
-pub fn select_server_type(endpoint_count: usize, default_type: &str) -> &'static str {
+pub fn select_server_type(endpoint_count: usize, _default_type: &str) -> &'static str {
     match endpoint_count {
         0..=2 => "cx22",
         3..=7 => "cx32",

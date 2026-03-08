@@ -1,7 +1,7 @@
 /// Hetzner Cloud REST API client implementation.
 ///
 /// Wraps the Hetzner API v1 for server, snapshot, and SSH key management.
-use crate::{CloudError, HetznerConfig, Result};
+use crate::{CloudError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +105,7 @@ struct ErrorResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ApiError {
     code: String,
     message: String,
@@ -176,6 +177,7 @@ impl HetznerClient {
 
     // --- Servers ---
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_server(
         &self,
         name: &str,
