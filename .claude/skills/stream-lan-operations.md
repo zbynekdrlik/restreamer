@@ -402,16 +402,31 @@ Instead of editing service.json and restarting OBS, use WebSocket API:
 
 ### Starting OBS Correctly
 
-**ALWAYS use the scheduled task** - it has the correct flags:
+**ALWAYS use the scheduled task** with the correct configuration:
+
+**CRITICAL**: The scheduled task MUST have `-WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"`. Without this, OBS starts in a broken state (~37MB memory, no WebSocket server, error dialogs). A healthy OBS uses ~1GB+ memory.
+
+```powershell
+# Register the task with correct settings (idempotent - safe to run every time)
+$action = New-ScheduledTaskAction `
+  -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
+  -Argument "--disable-shutdown-check" `
+  -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
+$principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
+
+Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
+Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+Start-ScheduledTask -TaskName "Start OBS Studio"
+```
 
 ```bash
-# CORRECT: Use scheduled task (has --disable-shutdown-check flag)
+# From Linux via SSH:
 sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Start-ScheduledTask -TaskName \"Start OBS Studio\""'
 ```
 
-The scheduled task runs: `"C:\Program Files\obs-studio\bin\64bit\obs64.exe" --disable-shutdown-check`
-
-**NEVER start OBS directly** without the flag:
+**NEVER start OBS directly** without the flag or working directory:
 
 ```bash
 # WRONG - causes recovery dialogs on next improper shutdown

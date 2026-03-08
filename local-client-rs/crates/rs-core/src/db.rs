@@ -254,6 +254,18 @@ pub async fn delete_streaming_event(pool: &SqlitePool, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Delete all streaming events except the one with the given ID.
+///
+/// Returns the number of deleted rows. This prevents stale events from
+/// winning the `ORDER BY id DESC` query in `get_streaming_event()`.
+pub async fn delete_other_streaming_events(pool: &SqlitePool, keep_id: i64) -> Result<u64> {
+    let result = sqlx::query("DELETE FROM streaming_events WHERE id != ?1")
+        .bind(keep_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 // --- Chunk Records ---
 
 pub async fn insert_chunk(
@@ -535,6 +547,92 @@ mod tests {
         delete_streaming_event(&pool, event_id).await.unwrap();
         let stats = get_chunk_stats(&pool, 1000).await.unwrap();
         assert_eq!(stats.total_chunks, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_other_streaming_events_keeps_only_target() {
+        let pool = setup_db().await;
+
+        // Insert 3 events
+        let id1 = upsert_streaming_event(&pool, "evt-1", Some("Event 1"), "10.0.0.1")
+            .await
+            .unwrap();
+        let id2 = upsert_streaming_event(&pool, "evt-2", Some("Event 2"), "10.0.0.2")
+            .await
+            .unwrap();
+        let id3 = upsert_streaming_event(&pool, "evt-3", Some("Event 3"), "10.0.0.3")
+            .await
+            .unwrap();
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+
+        // Delete all except id2
+        let deleted = delete_other_streaming_events(&pool, id2).await.unwrap();
+        assert_eq!(deleted, 2);
+
+        // Only id2 should remain
+        let remaining = get_streaming_event(&pool).await.unwrap().unwrap();
+        assert_eq!(remaining.id, id2);
+        assert_eq!(remaining.identifier.as_deref(), Some("evt-2"));
+
+        // id1 and id3 should be gone
+        assert!(
+            get_streaming_event_by_id(&pool, id1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_streaming_event_by_id(&pool, id3)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_other_streaming_events_noop_when_only_one() {
+        let pool = setup_db().await;
+
+        let id = upsert_streaming_event(&pool, "evt-1", Some("Only Event"), "10.0.0.1")
+            .await
+            .unwrap();
+
+        let deleted = delete_other_streaming_events(&pool, id).await.unwrap();
+        assert_eq!(deleted, 0);
+
+        // Event should still exist
+        let event = get_streaming_event(&pool).await.unwrap().unwrap();
+        assert_eq!(event.id, id);
+    }
+
+    #[tokio::test]
+    async fn delete_other_streaming_events_cascades_chunks() {
+        let pool = setup_db().await;
+
+        let id1 = upsert_streaming_event(&pool, "stale", Some("Stale"), "10.0.0.1")
+            .await
+            .unwrap();
+        let id2 = upsert_streaming_event(&pool, "active", Some("Active"), "10.0.0.2")
+            .await
+            .unwrap();
+
+        // Add chunks to both events
+        insert_chunk(&pool, id1, "/tmp/stale.bin", 100, "md5_stale")
+            .await
+            .unwrap();
+        insert_chunk(&pool, id2, "/tmp/active.bin", 200, "md5_active")
+            .await
+            .unwrap();
+
+        // Delete stale event
+        let deleted = delete_other_streaming_events(&pool, id2).await.unwrap();
+        assert_eq!(deleted, 1);
+
+        // Only active event's chunk should remain (cascade delete)
+        let stats = get_chunk_stats(&pool, 1000).await.unwrap();
+        assert_eq!(stats.total_chunks, 1);
+        assert_eq!(stats.total_bytes, 200);
     }
 
     #[tokio::test]

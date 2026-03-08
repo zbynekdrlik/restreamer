@@ -11,6 +11,9 @@ use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{App, AppHandle, Manager, Wry};
 
+use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+
 use crate::state::AppState;
 
 /// Status polling interval (3 seconds).
@@ -50,6 +53,13 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let copy_manager =
         MenuItem::with_id(app, "copy_manager_url", "Copy Manager URL", true, None::<&str>)?;
     let view_logs = MenuItem::with_id(app, "view_logs", "View Live Log", true, None::<&str>)?;
+    let clear_chunks = MenuItem::with_id(
+        app,
+        "clear_pending_chunks",
+        "Clear Pending Chunks...",
+        true,
+        None::<&str>,
+    )?;
     let check_updates =
         MenuItem::with_id(app, "check_updates", "Check for Updates...", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -67,6 +77,7 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .item(&copy_rtmp)
         .item(&copy_manager)
         .item(&view_logs)
+        .item(&clear_chunks)
         .separator()
         .item(&check_updates)
         .item(&quit)
@@ -138,24 +149,6 @@ impl Default for TrayStatus {
     }
 }
 
-/// Copy text to the system clipboard using OS commands.
-fn copy_to_clipboard(text: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("powershell.exe")
-            .args(["-Command", &format!("Set-Clipboard '{text}'")])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .spawn();
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = std::process::Command::new("sh")
-            .args(["-c", &format!("echo -n '{text}' | xclip -selection clipboard")])
-            .spawn();
-    }
-}
-
 fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
     match event_id {
         "open_dashboard" => {
@@ -170,13 +163,57 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
         }
         "copy_rtmp_url" => {
             let url = "rtmp://localhost:1234/live";
-            copy_to_clipboard(url);
-            tracing::info!("Copied RTMP URL to clipboard: {url}");
+            match app.clipboard().write_text(url) {
+                Ok(()) => tracing::info!("Copied RTMP URL to clipboard: {url}"),
+                Err(e) => tracing::error!("Failed to copy to clipboard: {e}"),
+            }
         }
         "copy_manager_url" => {
             let url = "https://restreamer.newlevel.media/control/home/";
-            copy_to_clipboard(url);
-            tracing::info!("Copied Manager URL to clipboard: {url}");
+            match app.clipboard().write_text(url) {
+                Ok(()) => tracing::info!("Copied Manager URL to clipboard: {url}"),
+                Err(e) => tracing::error!("Failed to copy to clipboard: {e}"),
+            }
+        }
+        "clear_pending_chunks" => {
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let stats = if let Some(state) = handle.try_state::<Arc<AppState>>() {
+                    state.get_chunk_stats().await.ok()
+                } else {
+                    None
+                };
+
+                let (total, pending) = stats
+                    .map(|s| (s.total_chunks, s.pending_chunks))
+                    .unwrap_or((0, 0));
+
+                let msg = format!(
+                    "Delete all chunk records ({} total, {} unsent)?\n\n\
+                     This resets stats to zero and cannot be undone.\n\
+                     Use before starting a new live stream.",
+                    total, pending
+                );
+
+                let confirmed = handle
+                    .dialog()
+                    .message(msg)
+                    .title("Clear Pending Chunks")
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "Clear".to_string(),
+                        "Cancel".to_string(),
+                    ))
+                    .blocking_show();
+
+                if confirmed {
+                    if let Some(state) = handle.try_state::<Arc<AppState>>() {
+                        match state.clear_all_chunks().await {
+                            Ok(count) => tracing::info!("Cleared {count} chunk records"),
+                            Err(e) => tracing::error!("Failed to clear chunks: {e}"),
+                        }
+                    }
+                }
+            });
         }
         "view_logs" => {
             // Open a live-tailing log window

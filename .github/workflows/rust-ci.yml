@@ -815,6 +815,34 @@ jobs:
             }
           }
 
+      - name: "Pre-flight: verify no stale delivering endpoints"
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Checking for stale delivering server endpoints..."
+          try {
+            $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" -TimeoutSec 30
+
+            if ($response.endpoints_alive) {
+              Write-Host "WARNING: Stale endpoints found, force-stopping..."
+              $body = @{
+                user_uuid = $env:CLIENT_UUID
+                event_name = "E2E-Test"
+              } | ConvertTo-Json
+              Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/deactivate/" -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+              Start-Sleep -Seconds 10
+
+              # Re-check
+              $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" -TimeoutSec 30
+              if ($response.endpoints_alive) {
+                throw "FAIL: Cannot clean delivering server before E2E test - stale endpoints still running"
+              }
+            }
+            Write-Host "Delivering server is clean, proceeding with E2E test"
+          } catch [System.Net.WebException] {
+            Write-Host "Delivering server not reachable (may not be provisioned yet) - OK to proceed"
+          }
+
       - name: Activate streaming event on manager
         shell: powershell
         timeout-minutes: 2
@@ -857,6 +885,16 @@ jobs:
           if (-not $synced) {
             throw "FAILED: Poller did not sync streaming event after $maxRetries attempts (30s timeout)"
           }
+
+      - name: Clear chunks from previous test runs
+        shell: powershell
+        run: |
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks" -Method Delete
+          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          if ($stats.total_chunks -ne 0) {
+            throw "FAILED: Chunks not cleared (total: $($stats.total_chunks))"
+          }
+          Write-Host "Chunks cleared, starting fresh"
 
       - name: Get initial chunk count
         id: initial-chunks
@@ -1094,10 +1132,6 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
-          # Deactivate via E2E API (no SSH needed)
-          # Note: This step always succeeds - cleanup failure is non-critical
-          $ErrorActionPreference = 'SilentlyContinue'
-
           $body = @{
             user_uuid = $env:CLIENT_UUID
             event_name = "E2E-Test"
@@ -1106,17 +1140,58 @@ jobs:
           Write-Host "Deactivating E2E-Test streaming event via API..."
           try {
             $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/deactivate/" `
-              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
 
             Write-Host "Deactivated event $($response.event_id)"
             Write-Host "receiving_activated: $($response.receiving_activated)"
             Write-Host "delivering_activated: $($response.delivering_activated)"
+            Write-Host "endpoints_stopped: $($response.endpoints_stopped)"
+            Write-Host "endpoint_count_after: $($response.endpoint_count_after)"
           } catch {
             Write-Host "Cleanup API call failed: $_"
             Write-Host "Event may remain activated until manually deactivated"
           }
-          # Always exit successfully - cleanup is best-effort
+          # Always exit successfully - deactivation is best-effort cleanup
           exit 0
+
+      - name: Verify delivering server clean state
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Verifying delivering server has no running endpoints..."
+          $maxRetries = 6
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" -TimeoutSec 30
+
+              Write-Host "--- Attempt ${i}/${maxRetries} ---"
+              Write-Host "  Server IP: $($response.server_ip)"
+              Write-Host "  Endpoints alive: $($response.endpoints_alive)"
+
+              if (-not $response.endpoints_alive) {
+                Write-Host "Delivering server is clean (0 running endpoints)"
+                exit 0
+              }
+
+              Write-Host "  Endpoint details:"
+              foreach ($ep in $response.endpoint_details) {
+                Write-Host "    $($ep.alias): alive=$($ep.alive), pid=$($ep.pid)"
+              }
+
+              if ($i -lt $maxRetries) {
+                Write-Host "  Waiting 10s for endpoints to stop..."
+                Start-Sleep -Seconds 10
+              }
+            } catch [System.Net.WebException] {
+              Write-Host "Delivering server not reachable - assuming clean"
+              exit 0
+            } catch {
+              Write-Host "Request failed: $_"
+              if ($i -lt $maxRetries) { Start-Sleep -Seconds 10 }
+            }
+          }
+          throw "FAIL: Delivering server still has running endpoints after $maxRetries attempts"
 
   e2e-obs-youtube-test:
     name: E2E OBS-to-YouTube Test
@@ -1139,15 +1214,60 @@ jobs:
         run: |
           $obs = Get-Process obs64 -ErrorAction SilentlyContinue
           if (-not $obs) {
-            Write-Host "OBS not running, starting via scheduled task..."
-            Start-ScheduledTask -TaskName "Start OBS Studio" -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 8
+            Write-Host "OBS not running, registering scheduled task with correct WorkingDirectory..."
+
+            $action = New-ScheduledTaskAction `
+              -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
+              -Argument "--disable-shutdown-check" `
+              -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"
+            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
+            $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
+
+            Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
+            Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+            Start-ScheduledTask -TaskName "Start OBS Studio"
+            Start-Sleep -Seconds 10
+
             $obs = Get-Process obs64 -ErrorAction SilentlyContinue
             if (-not $obs) {
               throw "FAILED: Could not start OBS Studio"
             }
           }
-          Write-Host "OBS is running (PID: $($obs.Id))"
+
+          # Verify OBS is healthy (not in broken state)
+          $mem = $obs.WorkingSet64 / 1MB
+          Write-Host "OBS PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
+          if ($mem -lt 100) {
+            Write-Host "WARNING: OBS memory too low ($([math]::Round($mem))MB) - broken start detected"
+            Write-Host "Killing broken OBS and restarting with correct WorkingDirectory..."
+            Stop-Process -Id $obs.Id -Force
+            Start-Sleep -Seconds 5
+
+            $action = New-ScheduledTaskAction `
+              -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
+              -Argument "--disable-shutdown-check" `
+              -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"
+            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
+            $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
+
+            Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
+            Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+            Start-ScheduledTask -TaskName "Start OBS Studio"
+            Start-Sleep -Seconds 10
+
+            $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+            if (-not $obs) {
+              throw "FAILED: Could not restart OBS Studio"
+            }
+            $mem = $obs.WorkingSet64 / 1MB
+            Write-Host "OBS restarted - PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
+            if ($mem -lt 100) {
+              throw "FAILED: OBS still in broken state after restart ($([math]::Round($mem))MB)"
+            }
+          }
+          Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
 
       - name: Save original OBS stream settings and switch to Restreamer
         id: obs-setup
@@ -1268,6 +1388,34 @@ jobs:
           Write-Host "Switched OBS to Restreamer RTMP: rtmp://127.0.0.1:1234/live/obs-e2e-test"
 
           $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+      - name: "Pre-flight: verify no stale delivering endpoints"
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Checking for stale delivering server endpoints..."
+          try {
+            $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=$env:EVENT_NAME" -TimeoutSec 30
+
+            if ($response.endpoints_alive) {
+              Write-Host "WARNING: Stale endpoints found, force-stopping..."
+              $body = @{
+                user_uuid = $env:CLIENT_UUID
+                event_name = $env:EVENT_NAME
+              } | ConvertTo-Json
+              Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/deactivate/" -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+              Start-Sleep -Seconds 10
+
+              # Re-check
+              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=$env:EVENT_NAME" -TimeoutSec 30
+              if ($response.endpoints_alive) {
+                throw "FAIL: Cannot clean delivering server before E2E test - stale endpoints still running"
+              }
+            }
+            Write-Host "Delivering server is clean, proceeding with E2E test"
+          } catch [System.Net.WebException] {
+            Write-Host "Delivering server not reachable (may not be provisioned yet) - OK to proceed"
+          }
 
       - name: Activate receiving on manager
         shell: powershell
@@ -1598,10 +1746,10 @@ jobs:
           }
 
           Write-Host "Delivering activated: endpoint=$($response.endpoint), chunks=$($response.chunk_count)"
-          Write-Host "init_stream_queued: $($response.init_stream_queued)"
+          Write-Host "init_stream executed synchronously: $($response.init_stream_sync)"
 
-          if (-not $response.init_stream_queued) {
-            throw "init_stream task was not queued"
+          if ($response.init_error) {
+            throw "init_stream failed: $($response.init_error)"
           }
 
       - name: Wait for delivering server ready
@@ -1811,7 +1959,6 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
-          $ErrorActionPreference = 'SilentlyContinue'
           $body = @{
             user_uuid = $env:CLIENT_UUID
             event_name = $env:EVENT_NAME
@@ -1820,12 +1967,55 @@ jobs:
           Write-Host "Deactivating $($env:EVENT_NAME)..."
           try {
             $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/deactivate/" `
-              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
+
             Write-Host "Deactivated: receiving=$($response.receiving_activated), delivering=$($response.delivering_activated)"
+            Write-Host "endpoints_stopped: $($response.endpoints_stopped)"
+            Write-Host "endpoint_count_after: $($response.endpoint_count_after)"
           } catch {
             Write-Host "Deactivation failed: $_"
           }
+          # Always exit successfully - deactivation is best-effort cleanup
           exit 0
+
+      - name: Verify delivering server clean state
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Verifying delivering server has no running endpoints..."
+          $maxRetries = 6
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=$env:EVENT_NAME" -TimeoutSec 30
+
+              Write-Host "--- Attempt ${i}/${maxRetries} ---"
+              Write-Host "  Server IP: $($response.server_ip)"
+              Write-Host "  Endpoints alive: $($response.endpoints_alive)"
+
+              if (-not $response.endpoints_alive) {
+                Write-Host "Delivering server is clean (0 running endpoints)"
+                exit 0
+              }
+
+              Write-Host "  Endpoint details:"
+              foreach ($ep in $response.endpoint_details) {
+                Write-Host "    $($ep.alias): alive=$($ep.alive), pid=$($ep.pid)"
+              }
+
+              if ($i -lt $maxRetries) {
+                Write-Host "  Waiting 10s for endpoints to stop..."
+                Start-Sleep -Seconds 10
+              }
+            } catch [System.Net.WebException] {
+              Write-Host "Delivering server not reachable - assuming clean"
+              exit 0
+            } catch {
+              Write-Host "Request failed: $_"
+              if ($i -lt $maxRetries) { Start-Sleep -Seconds 10 }
+            }
+          }
+          throw "FAIL: Delivering server still has running endpoints after $maxRetries attempts"
 
       - name: Verify YouTube stopped receiving after deactivation
         if: always() && steps.verify_yt_receiving.outcome == 'success'
@@ -1970,6 +2160,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Verify all checks passed
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo "rust-ci-gate:          ${{ needs.rust-ci-gate.result }}"
           echo "e2e-streaming-test:    ${{ needs.e2e-streaming-test.result }}"
@@ -1995,7 +2187,53 @@ jobs:
             fi
             echo "All E2E tests passed!"
           else
-            echo "E2E tests only required on push/workflow_dispatch (not PRs)."
+            # On PR events, E2E tests don't run here — but a push-triggered run
+            # for the same commit DOES run E2E tests. We must check that run's
+            # E2E Gate result to prevent a green PR when push E2E tests fail.
+            echo "PR event: checking push-triggered E2E Gate for commit ${{ github.event.pull_request.head.sha }}..."
+            SHA="${{ github.event.pull_request.head.sha }}"
+            MAX_WAIT=20
+            WAIT_INTERVAL=30
+            for i in $(seq 1 $MAX_WAIT); do
+              # Find E2E Gate check run from the push-triggered workflow on this commit.
+              # Filter out check runs from the current workflow run by matching the run ID
+              # in the details_url (check_run.id != github.run_id doesn't work because
+              # they're different ID namespaces).
+              PUSH_GATE=$(gh api "repos/${{ github.repository }}/commits/${SHA}/check-runs?check_name=E2E+Gate&per_page=100" \
+                --jq "[.check_runs[] | select(.details_url | test(\"/${{ github.run_id }}/\") | not)] | sort_by(.started_at) | last")
+
+              if [[ -z "$PUSH_GATE" || "$PUSH_GATE" == "null" ]]; then
+                echo "Attempt $i/$MAX_WAIT: Push-triggered E2E Gate not found yet, waiting ${WAIT_INTERVAL}s..."
+                sleep $WAIT_INTERVAL
+                continue
+              fi
+
+              STATUS=$(echo "$PUSH_GATE" | jq -r '.status')
+              CONCLUSION=$(echo "$PUSH_GATE" | jq -r '.conclusion')
+              RUN_URL=$(echo "$PUSH_GATE" | jq -r '.html_url')
+
+              echo "Push E2E Gate: status=$STATUS conclusion=$CONCLUSION"
+              echo "Run: $RUN_URL"
+
+              if [[ "$STATUS" == "completed" ]]; then
+                if [[ "$CONCLUSION" == "success" ]]; then
+                  echo "Push-triggered E2E Gate passed!"
+                  break
+                else
+                  echo "FAIL: Push-triggered E2E Gate did not succeed (conclusion: $CONCLUSION)"
+                  echo "PR cannot be green when push E2E tests fail."
+                  exit 1
+                fi
+              fi
+
+              echo "Attempt $i/$MAX_WAIT: Push E2E Gate still running ($STATUS), waiting ${WAIT_INTERVAL}s..."
+              sleep $WAIT_INTERVAL
+            done
+
+            if [[ "$STATUS" != "completed" ]]; then
+              echo "FAIL: Push-triggered E2E Gate did not complete after $((MAX_WAIT * WAIT_INTERVAL))s"
+              exit 1
+            fi
           fi
 
           echo "All CI checks passed!"

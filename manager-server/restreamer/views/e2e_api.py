@@ -6,6 +6,7 @@ Authentication is via user_uuid (api_key) parameter, same as GetActiveStream.
 """
 
 import logging
+import time
 
 import requests as http_requests
 from accounts.models import RestreamerUser
@@ -13,7 +14,8 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from restreamer.models import ChunkRecord, EndPointCfg, StreamingEvent
-from restreamer.tasks import init_stream
+from restreamer.video_data import VideoDataManager
+from restreamer.views.delivering import DeliveringManger
 from restreamer.views.instances import InstanceManager
 from services.youtube.client import YouTubeAuthError, build_youtube_client
 
@@ -109,8 +111,17 @@ class E2EActivateDelivering(APIView):
             event.delivering_activated = True
             event.save()
 
-            # Trigger init_stream task
-            init_stream.delay(user.id, event.id, endpoint_id=endpoint.id)
+            # Call init_stream synchronously (not via Celery) to avoid
+            # dependency on worker availability — the single-threaded worker
+            # is often blocked by long-running init_fast_stream tasks.
+            init_error = None
+            try:
+                video_manager = VideoDataManager(event.id)
+                init_chunk = video_manager.get_init_chunk_id()
+                DeliveringManger(user.id, event.id).send_init_data(init_chunk, endpoint.id)
+            except Exception as e:
+                init_error = str(e)
+                log.exception("E2E init_stream failed")
 
             return Response(
                 {
@@ -121,6 +132,8 @@ class E2EActivateDelivering(APIView):
                     "endpoint": endpoint.alias,
                     "chunk_count": chunk_count,
                     "init_stream_queued": True,
+                    "init_stream_sync": True,
+                    "init_error": init_error,
                 }
             )
 
@@ -238,7 +251,12 @@ class E2EChunkVerification(APIView):
 
 
 class E2EDeactivate(APIView):
-    """Deactivate both receiving and delivering for a streaming event."""
+    """Deactivate both receiving and delivering for a streaming event.
+
+    After sending the stop signal to the delivering server, verifies that
+    endpoints actually stopped (retry loop, max 30s). Returns cleanup status
+    in response so CI can assert on it.
+    """
 
     def post(self, request):
         user_uuid = request.data.get("user_uuid") or request.query_params.get("user_uuid")
@@ -254,15 +272,48 @@ class E2EDeactivate(APIView):
             if not event:
                 return Response({"error": f"Event {event_name} not found"}, status=status.HTTP_404_NOT_FOUND)
 
-            # Stop delivering server if active
-            if event.delivering_activated:
-                try:
-                    im = InstanceManager(user.id)
-                    server_ip = im.get_my_server_ip()
-                    if server_ip:
-                        http_requests.post(f"http://{server_ip}:8000/api/end_stream/", json={"alias": None}, timeout=5)
-                except Exception as e:
-                    log.warning(f"Failed to stop delivering server: {e}")
+            server_ip = None
+            endpoints_stopped = None
+            endpoint_count_after = None
+
+            # Always get server IP and attempt to stop endpoints,
+            # regardless of delivering_activated flag (may have been
+            # toggled by another process or a previous failed deactivation).
+            try:
+                im = InstanceManager(user.id)
+                server_ip = im.get_my_server_ip()
+                if server_ip:
+                    http_requests.post(
+                        f"http://{server_ip}:8000/api/end_stream/",
+                        json={"alias": None},
+                        timeout=10,
+                    )
+            except Exception as e:
+                log.warning(f"Failed to stop delivering server: {e}")
+
+            # Verify endpoints actually stopped (max 30s)
+            if server_ip:
+                endpoints_stopped = False
+                for attempt in range(6):  # 6 × 5s = 30s max
+                    time.sleep(5)
+                    try:
+                        resp = http_requests.get(
+                            f"http://{server_ip}:8000/api/endpoint-status/",
+                            timeout=5,
+                        )
+                        if resp.status_code == 200:
+                            ep_data = resp.json()
+                            endpoint_count_after = ep_data.get("endpoint_count", 0)
+                            if endpoint_count_after == 0:
+                                endpoints_stopped = True
+                                break
+                            log.info(f"Endpoints still running (attempt {attempt + 1}/6): count={endpoint_count_after}")
+                    except Exception as e:
+                        log.debug(f"Endpoint status check failed (attempt {attempt + 1}/6): {e}")
+                if not endpoints_stopped:
+                    log.error(
+                        f"Delivering server endpoints NOT stopped after deactivation (count={endpoint_count_after})"
+                    )
 
             # Deactivate flags
             event.receiving_activated = False
@@ -276,6 +327,8 @@ class E2EDeactivate(APIView):
                     "event_name": event.short_description,
                     "receiving_activated": event.receiving_activated,
                     "delivering_activated": event.delivering_activated,
+                    "endpoints_stopped": endpoints_stopped,
+                    "endpoint_count_after": endpoint_count_after,
                 }
             )
 

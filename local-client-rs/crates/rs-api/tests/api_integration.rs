@@ -392,6 +392,48 @@ async fn unknown_route_returns_404() {
 }
 
 #[tokio::test]
+async fn clear_chunks_resets_stats_to_zero() {
+    let state = test_state().await;
+    let pool = state.pool.clone();
+    let (base, _) = start_server(state).await;
+
+    // Simulate old session: create event + chunks, mark some as sent
+    let event_id = db::upsert_streaming_event(&pool, "old-session", None, "127.0.0.1")
+        .await
+        .unwrap();
+    db::insert_chunk(&pool, event_id, "/tmp/old1.bin", 1024, "md5a")
+        .await
+        .unwrap();
+    let chunk2 = db::insert_chunk(&pool, event_id, "/tmp/old2.bin", 2048, "md5b")
+        .await
+        .unwrap();
+    db::set_chunk_sent(&pool, chunk2).await.unwrap();
+
+    // Verify pre-state: 2 total (1 sent, 1 pending)
+    let resp = reqwest::get(format!("{base}/chunks/stats")).await.unwrap();
+    let stats: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(stats["total_chunks"], 2);
+    assert_eq!(stats["sent_chunks"], 1);
+    assert_eq!(stats["pending_chunks"], 1);
+
+    // Clear all chunks
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(format!("{base}/chunks"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Verify clean state: 0/0/0
+    let resp = reqwest::get(format!("{base}/chunks/stats")).await.unwrap();
+    let stats: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(stats["total_chunks"], 0);
+    assert_eq!(stats["sent_chunks"], 0);
+    assert_eq!(stats["pending_chunks"], 0);
+}
+
+#[tokio::test]
 async fn cors_allows_localhost_origin() {
     let state = test_state().await;
     let (base, _) = start_server(state).await;
