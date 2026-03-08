@@ -30,6 +30,79 @@ pub struct ChunkRecord {
     pub sent: bool,
 }
 
+/// Endpoint configuration (e.g., YouTube HLS, Facebook RTMP).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointConfig {
+    pub id: i64,
+    pub alias: String,
+    pub service_type: String,
+    pub stream_key: String,
+    pub enabled: bool,
+    pub position_last: i64,
+    pub delivered_bytes: i64,
+    pub is_fast: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Event-endpoint many-to-many link.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventEndpoint {
+    pub event_id: i64,
+    pub endpoint_id: i64,
+}
+
+/// Hetzner delivery VPS instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryInstance {
+    pub id: i64,
+    pub hetzner_id: i64,
+    pub name: String,
+    pub ipv4: String,
+    pub status: String,
+    pub server_type: String,
+    pub event_id: Option<i64>,
+    pub created_at: String,
+    pub last_health_at: Option<String>,
+}
+
+/// Per-endpoint status on delivery VPS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryEndpointStatus {
+    pub id: i64,
+    pub instance_id: i64,
+    pub alias: String,
+    pub alive: bool,
+    pub buff_size_bytes: i64,
+    pub current_chunk_id: i64,
+    pub last_check_at: String,
+}
+
+/// YouTube OAuth tokens (single row, id=1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YouTubeOAuth {
+    pub id: i64,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub token_uri: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub scopes: String,
+    pub expires_at: Option<String>,
+}
+
+/// Scheduled/recurring stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledStream {
+    pub id: i64,
+    pub event_id: i64,
+    pub start_time: String,
+    pub repeat_interval: Option<String>,
+    pub last_run_at: Option<String>,
+    pub next_run_at: Option<String>,
+    pub enabled: bool,
+}
+
 /// Real-time event broadcast over WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -60,9 +133,14 @@ pub enum WsEvent {
         receiving: bool,
         delivering: bool,
     },
-    ManagerPoll {
-        status_code: u16,
-        message: String,
+    DeliveryStatus {
+        instance_name: String,
+        status: String,
+        endpoint_count: u32,
+    },
+    ScheduleTriggered {
+        schedule_id: i64,
+        event_id: i64,
     },
     Error {
         service: String,
@@ -75,7 +153,7 @@ pub enum WsEvent {
 pub struct ServiceStatus {
     pub inpoint: ComponentStatus,
     pub endpoint: ComponentStatus,
-    pub poller: ComponentStatus,
+    pub delivery: ComponentStatus,
     pub streaming_event: Option<StreamingEvent>,
 }
 
@@ -136,9 +214,14 @@ mod tests {
                 receiving: true,
                 delivering: false,
             },
-            WsEvent::ManagerPoll {
-                status_code: 200,
-                message: "ok".to_string(),
+            WsEvent::DeliveryStatus {
+                instance_name: "rs-delivery-1".to_string(),
+                status: "running".to_string(),
+                endpoint_count: 2,
+            },
+            WsEvent::ScheduleTriggered {
+                schedule_id: 1,
+                event_id: 1,
             },
             WsEvent::Error {
                 service: "inpoint".to_string(),

@@ -194,7 +194,7 @@ async fn full_pipeline_rtmp_to_db_chunks() {
         "RTMP server failed to bind within 5 seconds"
     );
 
-    // Create a streaming event directly in DB (the poller normally does this)
+    // Create a streaming event directly in DB
     let event_id =
         db::upsert_streaming_event(&pool, "e2e-test-stream", Some("E2E test"), "127.0.0.1")
             .await

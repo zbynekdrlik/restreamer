@@ -6,12 +6,71 @@ use crate::error::Result;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub client_uuid: String,
-    pub manager_url: String,
     pub s3: S3Config,
+    #[serde(default)]
+    pub hetzner: HetznerConfig,
+    #[serde(default)]
+    pub youtube: YouTubeOAuthConfig,
     #[serde(default)]
     pub inpoint: InpointConfig,
     #[serde(default)]
     pub api: ApiConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HetznerConfig {
+    #[serde(default)]
+    pub api_token: String,
+    #[serde(default = "default_hetzner_location")]
+    pub location: String,
+    #[serde(default = "default_hetzner_server_type")]
+    pub default_server_type: String,
+    #[serde(default = "default_hetzner_snapshot_label")]
+    pub snapshot_label: String,
+    #[serde(default = "default_hetzner_ssh_key_name")]
+    pub ssh_key_name: String,
+}
+
+fn default_hetzner_location() -> String {
+    "fsn1".to_string()
+}
+fn default_hetzner_server_type() -> String {
+    "cx22".to_string()
+}
+fn default_hetzner_snapshot_label() -> String {
+    "rs-delivery".to_string()
+}
+fn default_hetzner_ssh_key_name() -> String {
+    "restreamer".to_string()
+}
+
+impl Default for HetznerConfig {
+    fn default() -> Self {
+        Self {
+            api_token: String::new(),
+            location: default_hetzner_location(),
+            default_server_type: default_hetzner_server_type(),
+            snapshot_label: default_hetzner_snapshot_label(),
+            ssh_key_name: default_hetzner_ssh_key_name(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YouTubeOAuthConfig {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+}
+
+impl Default for YouTubeOAuthConfig {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            client_secret: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -128,9 +187,6 @@ impl Config {
         if let Ok(v) = std::env::var("RESTREAMER_CLIENT_UUID") {
             self.client_uuid = v;
         }
-        if let Ok(v) = std::env::var("RESTREAMER_MANAGER_URL") {
-            self.manager_url = v;
-        }
         if let Ok(v) = std::env::var("RESTREAMER_S3_BUCKET") {
             self.s3.bucket = v;
         }
@@ -145,6 +201,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("RESTREAMER_S3_SECRET_ACCESS_KEY") {
             self.s3.secret_access_key = v;
+        }
+        if let Ok(v) = std::env::var("RESTREAMER_HETZNER_API_TOKEN") {
+            self.hetzner.api_token = v;
         }
         if let Ok(v) = std::env::var("RESTREAMER_RTMP_PORT") {
             match v.parse() {
@@ -171,9 +230,6 @@ impl Config {
         if self.client_uuid.is_empty() {
             return Err("client_uuid is required".to_string());
         }
-        if self.manager_url.is_empty() {
-            return Err("manager_url is required".to_string());
-        }
         if self.s3.bucket.is_empty() {
             return Err("s3.bucket is required".to_string());
         }
@@ -190,7 +246,6 @@ impl Config {
     pub fn for_testing() -> Self {
         Self {
             client_uuid: "test-uuid-00000000".to_string(),
-            manager_url: "http://localhost:9999".to_string(),
             s3: S3Config {
                 bucket: "test-bucket".to_string(),
                 region: "us-east-1".to_string(),
@@ -198,6 +253,8 @@ impl Config {
                 access_key_id: "test-key".to_string(),
                 secret_access_key: "test-secret".to_string(),
             },
+            hetzner: HetznerConfig::default(),
+            youtube: YouTubeOAuthConfig::default(),
             inpoint: InpointConfig::default(),
             api: ApiConfig {
                 port: 0, // random port for tests
@@ -211,14 +268,15 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             client_uuid: String::new(),
-            manager_url: "https://restreamer.newlevel.media".to_string(),
             s3: S3Config {
                 bucket: "restreamer-chunks".to_string(),
                 region: "eu-central-1".to_string(),
-                endpoint: "https://eu-central-1.linodeobjects.com".to_string(),
+                endpoint: "https://fsn1.your-objectstorage.com".to_string(),
                 access_key_id: String::new(),
                 secret_access_key: String::new(),
             },
+            hetzner: HetznerConfig::default(),
+            youtube: YouTubeOAuthConfig::default(),
             inpoint: InpointConfig::default(),
             api: ApiConfig::default(),
         }
@@ -236,17 +294,16 @@ mod tests {
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.client_uuid, config.client_uuid);
-        assert_eq!(parsed.manager_url, config.manager_url);
         assert_eq!(parsed.s3.bucket, config.s3.bucket);
         assert_eq!(parsed.inpoint.rtmp_port, config.inpoint.rtmp_port);
         assert_eq!(parsed.api.port, config.api.port);
+        assert_eq!(parsed.hetzner.location, "fsn1");
     }
 
     #[test]
     fn config_defaults() {
         let json = r#"{
             "client_uuid": "abc",
-            "manager_url": "http://test",
             "s3": {
                 "bucket": "b",
                 "region": "r",
@@ -260,6 +317,7 @@ mod tests {
         assert_eq!(config.inpoint.chunk_duration_ms, 1000);
         assert_eq!(config.api.port, 8910);
         assert_eq!(config.api.bind, "127.0.0.1");
+        assert_eq!(config.hetzner.default_server_type, "cx22");
     }
 
     #[test]
@@ -269,9 +327,8 @@ mod tests {
         let config = Config::for_testing();
         config.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
-        // Check fields that aren't affected by env var overrides
         assert_eq!(loaded.s3.bucket, config.s3.bucket);
-        assert_eq!(loaded.manager_url, config.manager_url);
+        assert_eq!(loaded.hetzner.location, config.hetzner.location);
         assert_eq!(
             loaded.inpoint.chunk_duration_ms,
             config.inpoint.chunk_duration_ms

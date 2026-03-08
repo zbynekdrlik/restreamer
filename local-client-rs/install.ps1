@@ -110,13 +110,23 @@ if (-not (Test-Path $ConfigFile)) {
     Write-Status "Creating default config..."
     $defaultConfig = @{
         client_uuid  = [guid]::NewGuid().ToString()
-        manager_url  = "https://restreamer.newlevel.media"
         s3           = @{
             bucket            = "restreamer-chunks"
             region            = "eu-central-1"
-            endpoint          = "https://eu-central-1.linodeobjects.com"
+            endpoint          = "https://fsn1.your-objectstorage.com"
             access_key_id     = ""
             secret_access_key = ""
+        }
+        hetzner      = @{
+            api_token          = ""
+            location           = "fsn1"
+            default_server_type = "cx22"
+            snapshot_label     = "rs-delivery"
+            ssh_key_name       = "restreamer"
+        }
+        youtube      = @{
+            client_id     = ""
+            client_secret = ""
         }
         inpoint      = @{
             rtmp_port         = 1234

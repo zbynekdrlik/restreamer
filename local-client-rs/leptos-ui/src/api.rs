@@ -152,3 +152,156 @@ pub fn format_duration(secs: f64) -> String {
     let s = total % 60;
     format!("{:02}:{:02}:{:02}", h, m, s)
 }
+
+// --- HTTP-based API calls to local Axum server ---
+
+const API_BASE: &str = "http://127.0.0.1:8910/api/v1";
+
+/// Endpoint configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EndpointConfig {
+    pub id: i64,
+    pub alias: String,
+    pub service_type: String,
+    pub stream_key: String,
+    pub enabled: bool,
+    pub position_last: i64,
+    pub delivered_bytes: i64,
+    pub is_fast: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Scheduled stream.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScheduledStream {
+    pub id: i64,
+    pub event_id: i64,
+    pub start_time: String,
+    pub repeat_interval: Option<String>,
+    pub last_run_at: Option<String>,
+    pub next_run_at: Option<String>,
+    pub enabled: bool,
+}
+
+async fn http_get<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String> {
+    let url = format!("{API_BASE}{path}");
+    let resp = gloo_net::http::Request::get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {e}"))?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Parse error: {e}"))
+}
+
+async fn http_post(path: &str) -> Result<(), String> {
+    let url = format!("{API_BASE}{path}");
+    let resp = gloo_net::http::Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {e}"))?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+async fn http_post_json<T: Serialize>(path: &str, body: &T) -> Result<serde_json::Value, String> {
+    let url = format!("{API_BASE}{path}");
+    let resp = gloo_net::http::Request::post(&url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(body).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Request error: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {e}"))?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Parse error: {e}"))
+}
+
+async fn http_delete(path: &str) -> Result<(), String> {
+    let url = format!("{API_BASE}{path}");
+    let resp = gloo_net::http::Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {e}"))?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+// Events API
+pub async fn list_events() -> Result<Vec<StreamingEvent>, String> {
+    http_get("/events").await
+}
+
+pub async fn create_event(identifier: &str) -> Result<serde_json::Value, String> {
+    #[derive(Serialize)]
+    struct Body {
+        identifier: String,
+    }
+    http_post_json(
+        "/events",
+        &Body {
+            identifier: identifier.to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn activate_event(id: i64) -> Result<(), String> {
+    http_post(&format!("/events/{id}/activate")).await
+}
+
+pub async fn start_delivering(id: i64) -> Result<(), String> {
+    http_post(&format!("/events/{id}/start-delivering")).await
+}
+
+pub async fn deactivate_event(id: i64) -> Result<(), String> {
+    http_post(&format!("/events/{id}/deactivate")).await
+}
+
+// Endpoints API
+pub async fn list_endpoints() -> Result<Vec<EndpointConfig>, String> {
+    http_get("/endpoints").await
+}
+
+pub async fn create_endpoint(
+    alias: &str,
+    service_type: &str,
+    stream_key: &str,
+) -> Result<serde_json::Value, String> {
+    #[derive(Serialize)]
+    struct Body {
+        alias: String,
+        service_type: String,
+        stream_key: String,
+    }
+    http_post_json(
+        "/endpoints",
+        &Body {
+            alias: alias.to_string(),
+            service_type: service_type.to_string(),
+            stream_key: stream_key.to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn delete_endpoint(id: i64) -> Result<(), String> {
+    http_delete(&format!("/endpoints/{id}")).await
+}
+
+// Schedules API
+pub async fn list_schedules() -> Result<Vec<ScheduledStream>, String> {
+    http_get("/schedules").await
+}
+
+pub async fn delete_schedule(id: i64) -> Result<(), String> {
+    http_delete(&format!("/schedules/{id}")).await
+}

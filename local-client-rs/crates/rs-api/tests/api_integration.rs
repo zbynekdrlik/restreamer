@@ -47,7 +47,7 @@ async fn status_endpoint_returns_valid_json() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body.get("inpoint").is_some());
     assert!(body.get("endpoint").is_some());
-    assert!(body.get("poller").is_some());
+    assert!(body.get("delivery").is_some());
     assert!(body.get("streaming_event").is_some());
 }
 
@@ -218,14 +218,14 @@ async fn config_patch_updates_and_validates() {
     let resp = client
         .patch(format!("{base}/config"))
         .json(&serde_json::json!({
-            "manager_url": "https://updated.example.com"
+            "client_uuid": "updated-uuid-12345678"
         }))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     let config: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(config["manager_url"], "https://updated.example.com");
+    assert_eq!(config["client_uuid"], "updated-uuid-12345678");
 
     // Invalid patch (empty client_uuid)
     let resp = client

@@ -9,20 +9,19 @@ use tracing::{debug, error, info, warn};
 use rs_core::db;
 use rs_core::models::WsEvent;
 
-use crate::manager_api::{ChunkUploadNotification, ManagerClient};
 use crate::s3::S3Client;
 
-/// Maximum retry attempts per batch cycle for transient S3/manager failures.
+/// Maximum retry attempts per batch cycle for transient S3 failures.
 /// Failed chunks are automatically retried in subsequent batch cycles.
 const MAX_RETRIES: u32 = 10;
 /// Delay between retries (flat 3-second interval per spec).
 const RETRY_DELAY: Duration = Duration::from_secs(3);
 
-/// Watches for unsent chunks and uploads them to S3, then notifies the manager.
+/// Watches for unsent chunks and uploads them to S3.
+/// No manager notification needed — delivery VPS probes S3 directly.
 pub struct ChunkUploader {
     pool: SqlitePool,
     s3: Arc<S3Client>,
-    manager: Arc<ManagerClient>,
     max_concurrent: usize,
     ws_tx: broadcast::Sender<WsEvent>,
 }
@@ -31,13 +30,11 @@ impl ChunkUploader {
     pub fn new(
         pool: SqlitePool,
         s3: S3Client,
-        manager: ManagerClient,
         ws_tx: broadcast::Sender<WsEvent>,
     ) -> Self {
         Self {
             pool,
             s3: Arc::new(s3),
-            manager: Arc::new(manager),
             max_concurrent: 4,
             ws_tx,
         }
@@ -92,13 +89,12 @@ impl ChunkUploader {
             };
             let pool = self.pool.clone();
             let s3 = Arc::clone(&self.s3);
-            let manager = Arc::clone(&self.manager);
             let ws_tx = self.ws_tx.clone();
 
             handles.push(tokio::spawn(async move {
                 let _permit = permit;
 
-                // Look up the event identifier from the chunk's own streaming_event_id
+                // Look up the event identifier from the chunk's streaming_event_id
                 let event_id = match db::get_streaming_event_by_id(
                     &pool,
                     chunk.streaming_event_id,
@@ -134,7 +130,7 @@ impl ChunkUploader {
                     return;
                 }
 
-                // Use chunk.id for S3 key to match Python legacy format
+                // Use chunk.id for S3 key to match legacy format
                 let s3_key = S3Client::chunk_key(&event_id, chunk.id);
 
                 // Upload to S3 with retry
@@ -171,62 +167,8 @@ impl ChunkUploader {
                     return;
                 }
 
-                // Notify manager with retry (field names match Django ChunkSerializer)
-                let notification = ChunkUploadNotification {
-                    chunk_id: chunk.id,
-                    chunk_identifier: event_id.clone(),
-                    chunk_size: chunk.data_size,
-                };
-                let mut notified = false;
-                for attempt in 0..MAX_RETRIES {
-                    match manager.notify_chunk_uploaded(&notification).await {
-                        Ok(()) => {
-                            notified = true;
-                            break;
-                        }
-                        Err(e) => {
-                            if attempt + 1 < MAX_RETRIES {
-                                warn!(
-                                    "Manager notification failed for chunk {} (attempt {}/{}): {e}, retrying in {}s",
-                                    chunk.id, attempt + 1, MAX_RETRIES, RETRY_DELAY.as_secs()
-                                );
-                                tokio::time::sleep(RETRY_DELAY).await;
-                            } else {
-                                warn!(
-                                    "Manager notification failed for chunk {} after {MAX_RETRIES} attempts: {e}",
-                                    chunk.id
-                                );
-                            }
-                        }
-                    }
-                }
-                if !notified {
-                    if let Err(re) = db::set_chunk_in_process(&pool, chunk.id, false).await {
-                        error!("Failed to rollback in_process for chunk {}: {re}", chunk.id);
-                    }
-                    return;
-                }
-
-                // Verify with manager (using chunk_id integer)
-                match manager.check_chunk(&event_id, chunk.id).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        warn!("Manager did not verify chunk {}", chunk.id);
-                        if let Err(re) = db::set_chunk_in_process(&pool, chunk.id, false).await {
-                            error!("Failed to rollback in_process for chunk {}: {re}", chunk.id);
-                        }
-                        return;
-                    }
-                    Err(e) => {
-                        warn!("Chunk verification failed for {}: {e}", chunk.id);
-                        if let Err(re) = db::set_chunk_in_process(&pool, chunk.id, false).await {
-                            error!("Failed to rollback in_process for chunk {}: {re}", chunk.id);
-                        }
-                        return;
-                    }
-                }
-
-                // Mark as sent
+                // Mark as sent — no manager notification needed,
+                // delivery VPS probes S3 directly by sequential chunk ID
                 if let Err(e) = db::set_chunk_sent(&pool, chunk.id).await {
                     error!("Failed to mark chunk {} as sent: {e}", chunk.id);
                     return;
@@ -240,7 +182,7 @@ impl ChunkUploader {
                     );
                 }
 
-                info!("Chunk {} uploaded and verified", chunk.id);
+                info!("Chunk {} uploaded to S3", chunk.id);
                 if let Err(e) = ws_tx.send(WsEvent::ChunkUploaded { chunk_id: chunk.id }) {
                     debug!("No WS subscribers for ChunkUploaded: {e}");
                 }
@@ -284,10 +226,9 @@ mod tests {
     async fn uploader_shuts_down_cleanly() {
         let pool = setup_db().await;
         let s3 = S3Client::new(&test_s3_config()).unwrap();
-        let manager = crate::manager_api::ManagerClient::new("http://127.0.0.1:1").unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
 
-        let uploader = ChunkUploader::new(pool, s3, manager, ws_tx);
+        let uploader = ChunkUploader::new(pool, s3, ws_tx);
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
         let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
@@ -309,10 +250,9 @@ mod tests {
     async fn upload_batch_with_no_chunks_returns_quickly() {
         let pool = setup_db().await;
         let s3 = S3Client::new(&test_s3_config()).unwrap();
-        let manager = crate::manager_api::ManagerClient::new("http://127.0.0.1:1").unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
 
-        let uploader = ChunkUploader::new(pool, s3, manager, ws_tx);
+        let uploader = ChunkUploader::new(pool, s3, ws_tx);
 
         // upload_batch should return immediately when no chunks exist
         uploader.upload_batch().await;
@@ -322,10 +262,9 @@ mod tests {
     async fn uploader_constructor_sets_defaults() {
         let pool = setup_db().await;
         let s3 = S3Client::new(&test_s3_config()).unwrap();
-        let manager = crate::manager_api::ManagerClient::new("http://127.0.0.1:1").unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
 
-        let uploader = ChunkUploader::new(pool, s3, manager, ws_tx);
+        let uploader = ChunkUploader::new(pool, s3, ws_tx);
         assert_eq!(uploader.max_concurrent, 4);
     }
 

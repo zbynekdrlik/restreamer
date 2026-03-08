@@ -1,6 +1,6 @@
 use axum::Router;
 use axum::http::{HeaderValue, Method, header};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -11,6 +11,7 @@ use crate::websocket;
 /// Build the Axum router with all API routes.
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
+        // Core status/health
         .route("/health", get(handlers::health))
         .route("/status", get(handlers::get_status))
         .route("/streaming-event", get(handlers::get_streaming_event))
@@ -18,6 +19,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/chunks", get(handlers::get_chunks))
         .route("/chunks/stats", get(handlers::get_chunk_stats))
         .route("/chunks", delete(handlers::delete_chunks))
+        // Actions
         .route(
             "/actions/restart-inpoint",
             post(handlers::action_restart_inpoint),
@@ -34,11 +36,54 @@ pub fn build_router(state: AppState) -> Router {
             "/actions/toggle-delivering",
             post(handlers::action_toggle_delivering),
         )
+        // Config
         .route("/config", get(handlers::get_config))
         .route("/config", patch(handlers::patch_config))
+        // Logs
         .route("/logs/inpoint", get(handlers::get_logs_inpoint))
         .route("/logs/endpoint", get(handlers::get_logs_endpoint))
-        .route("/ws", get(websocket::ws_handler));
+        // WebSocket
+        .route("/ws", get(websocket::ws_handler))
+        // Events CRUD
+        .route("/events", get(handlers::list_events))
+        .route("/events", post(handlers::create_event))
+        .route("/events/{id}", get(handlers::get_event_by_id))
+        .route("/events/{id}", delete(handlers::delete_event_by_id))
+        .route(
+            "/events/{id}/activate",
+            post(handlers::activate_event),
+        )
+        .route(
+            "/events/{id}/start-delivering",
+            post(handlers::start_delivering),
+        )
+        .route(
+            "/events/{id}/deactivate",
+            post(handlers::deactivate_event),
+        )
+        .route(
+            "/events/{id}/endpoints",
+            get(handlers::get_event_endpoints),
+        )
+        .route(
+            "/events/{event_id}/endpoints/{endpoint_id}",
+            post(handlers::attach_endpoint_to_event),
+        )
+        .route(
+            "/events/{event_id}/endpoints/{endpoint_id}",
+            delete(handlers::detach_endpoint_from_event),
+        )
+        // Endpoint Configs CRUD
+        .route("/endpoints", get(handlers::list_endpoints))
+        .route("/endpoints", post(handlers::create_endpoint))
+        .route("/endpoints/{id}", get(handlers::get_endpoint_by_id))
+        .route("/endpoints/{id}", put(handlers::update_endpoint))
+        .route("/endpoints/{id}", delete(handlers::delete_endpoint))
+        // Schedules CRUD
+        .route("/schedules", get(handlers::list_schedules))
+        .route("/schedules", post(handlers::create_schedule))
+        .route("/schedules/{id}", put(handlers::update_schedule))
+        .route("/schedules/{id}", delete(handlers::delete_schedule));
 
     let cors = CorsLayer::new()
         .allow_origin([
@@ -46,7 +91,7 @@ pub fn build_router(state: AppState) -> Router {
             "tauri://localhost".parse::<HeaderValue>().unwrap(),
             "https://tauri.localhost".parse::<HeaderValue>().unwrap(),
         ])
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::PATCH])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::PATCH, Method::PUT])
         .allow_headers([header::CONTENT_TYPE, header::ACCEPT]);
 
     Router::new()
@@ -426,7 +471,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "manager_url": "https://new-manager.example.com"
+                            "client_uuid": "updated-uuid-12345678"
                         })
                         .to_string(),
                     ))
@@ -440,9 +485,7 @@ mod tests {
             .await
             .unwrap();
         let config: rs_core::config::Config = serde_json::from_slice(&body).unwrap();
-        assert_eq!(config.manager_url, "https://new-manager.example.com");
-        // Other fields should be preserved from the original config
-        assert_eq!(config.client_uuid, "test-uuid-00000000");
+        assert_eq!(config.client_uuid, "updated-uuid-12345678");
         // Credentials should be redacted
         assert_eq!(config.s3.access_key_id, "***");
     }
@@ -523,7 +566,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "manager_url": "https://saved-manager.example.com"
+                            "client_uuid": "saved-uuid-12345678"
                         })
                         .to_string(),
                     ))
@@ -536,7 +579,7 @@ mod tests {
 
         // Verify the file was written
         let saved = rs_core::config::Config::load(&config_path).unwrap();
-        assert_eq!(saved.manager_url, "https://saved-manager.example.com");
+        assert_eq!(saved.client_uuid, "saved-uuid-12345678");
     }
 
     #[tokio::test]

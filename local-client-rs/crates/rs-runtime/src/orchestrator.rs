@@ -14,13 +14,12 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
 use rs_core::models::WsEvent;
-use rs_endpoint::manager_api::ManagerClient;
 use rs_endpoint::s3::S3Client;
 use rs_endpoint::uploader::ChunkUploader;
 use rs_inpoint::chunker::ChunkSink;
 use rs_inpoint::rtmp_server::RtmpServer;
 
-use crate::poller::Poller;
+use crate::scheduler::Scheduler;
 use crate::shutdown::ShutdownCoordinator;
 
 /// Main service orchestrator that starts all components.
@@ -192,17 +191,15 @@ impl ServiceCore {
             .await;
         });
 
-        // Endpoint restart loop
+        // Endpoint restart loop (S3 upload only — no manager notification)
         let endpoint_shutdown_rx = shutdown.subscribe();
         let s3_config = self.config.s3.clone();
-        let manager_url = self.config.manager_url.clone();
         let endpoint_pool = pool.clone();
         let endpoint_ws_tx = ws_tx.clone();
         let endpoint_task = tokio::spawn(async move {
             run_endpoint_loop(
                 endpoint_pool,
                 s3_config,
-                manager_url,
                 endpoint_ws_tx,
                 endpoint_restart_rx,
                 endpoint_shutdown_rx,
@@ -210,17 +207,11 @@ impl ServiceCore {
             .await;
         });
 
-        // Poller
-        let poller_manager = ManagerClient::new(&self.config.manager_url)
-            .context("failed to create poller manager client")?;
-        let poller = Poller::new(
-            pool.clone(),
-            poller_manager,
-            self.config.client_uuid.clone(),
-            ws_tx.clone(),
-        );
-        let poller_shutdown = shutdown.subscribe();
-        let poller_handle = tokio::spawn(async move { poller.run(poller_shutdown).await });
+        // Scheduler (checks scheduled_streams table periodically)
+        let scheduler = Scheduler::new(pool.clone(), ws_tx.clone());
+        let scheduler_shutdown = shutdown.subscribe();
+        let scheduler_handle =
+            tokio::spawn(async move { scheduler.run(scheduler_shutdown).await });
 
         // Wait for shutdown signal
         info!("All services started.");
@@ -242,9 +233,9 @@ impl ServiceCore {
             Ok(()) => info!("Endpoint stopped cleanly"),
             Err(e) => tracing::error!("Endpoint task panicked: {e}"),
         }
-        match poller_handle.await {
-            Ok(()) => info!("Poller stopped cleanly"),
-            Err(e) => tracing::error!("Poller task panicked: {e}"),
+        match scheduler_handle.await {
+            Ok(()) => info!("Scheduler stopped cleanly"),
+            Err(e) => tracing::error!("Scheduler task panicked: {e}"),
         }
         // Drop the chunk channel so the chunk task can exit
         drop(chunk_sink);
@@ -318,7 +309,6 @@ async fn run_inpoint_loop(
 async fn run_endpoint_loop(
     pool: SqlitePool,
     s3_config: rs_core::config::S3Config,
-    manager_url: String,
     ws_tx: broadcast::Sender<WsEvent>,
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
@@ -331,18 +321,11 @@ async fn run_endpoint_loop(
                 break;
             }
         };
-        let manager = match ManagerClient::new(&manager_url) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!("Failed to create manager client: {e}");
-                break;
-            }
-        };
 
         let (component_shutdown_tx, _) = broadcast::channel::<()>(1);
         let component_rx = component_shutdown_tx.subscribe();
 
-        let uploader = ChunkUploader::new(pool.clone(), s3, manager, ws_tx.clone());
+        let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx.clone());
         let mut handle = tokio::spawn(async move { uploader.run(component_rx).await });
 
         info!("Endpoint uploader started");

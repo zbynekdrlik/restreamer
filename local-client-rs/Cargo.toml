@@ -7,6 +7,11 @@ members = [
     "crates/rs-api",
     "crates/rs-runtime",
     "crates/rs-service",
+    "crates/rs-ts-normalize",
+    "crates/rs-ffmpeg",
+    "crates/rs-cloud",
+    "crates/rs-delivery",
+    "crates/rs-youtube",
 ]
 # src-tauri is excluded from default workspace builds because it requires
 # the frontend to be built first (Tauri generate_context! needs dist/).
@@ -17,7 +22,7 @@ members = [
 exclude = ["src-tauri", "leptos-ui"]
 
 [workspace.package]
-version = "0.1.14"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/restreamer"
@@ -79,6 +84,11 @@ rs-endpoint = { path = "crates/rs-endpoint" }
 rs-api = { path = "crates/rs-api" }
 rs-runtime = { path = "crates/rs-runtime" }
 rs-service = { path = "crates/rs-service" }
+rs-ts-normalize = { path = "crates/rs-ts-normalize" }
+rs-ffmpeg = { path = "crates/rs-ffmpeg" }
+rs-cloud = { path = "crates/rs-cloud" }
+rs-delivery = { path = "crates/rs-delivery" }
+rs-youtube = { path = "crates/rs-youtube" }
 
 [profile.release]
 lto = true
