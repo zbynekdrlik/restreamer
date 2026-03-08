@@ -815,6 +815,34 @@ jobs:
             }
           }
 
+      - name: "Pre-flight: verify no stale delivering endpoints"
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Checking for stale delivering server endpoints..."
+          try {
+            $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" -TimeoutSec 30
+
+            if ($response.endpoints_alive) {
+              Write-Host "WARNING: Stale endpoints found, force-stopping..."
+              $body = @{
+                user_uuid = $env:CLIENT_UUID
+                event_name = "E2E-Test"
+              } | ConvertTo-Json
+              Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/deactivate/" -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+              Start-Sleep -Seconds 10
+
+              # Re-check
+              $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" -TimeoutSec 30
+              if ($response.endpoints_alive) {
+                throw "FAIL: Cannot clean delivering server before E2E test - stale endpoints still running"
+              }
+            }
+            Write-Host "Delivering server is clean, proceeding with E2E test"
+          } catch [System.Net.WebException] {
+            Write-Host "Delivering server not reachable (may not be provisioned yet) - OK to proceed"
+          }
+
       - name: Activate streaming event on manager
         shell: powershell
         timeout-minutes: 2
@@ -1104,10 +1132,6 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
-          # Deactivate via E2E API (no SSH needed)
-          # Note: This step always succeeds - cleanup failure is non-critical
-          $ErrorActionPreference = 'SilentlyContinue'
-
           $body = @{
             user_uuid = $env:CLIENT_UUID
             event_name = "E2E-Test"
@@ -1116,17 +1140,43 @@ jobs:
           Write-Host "Deactivating E2E-Test streaming event via API..."
           try {
             $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/deactivate/" `
-              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
 
             Write-Host "Deactivated event $($response.event_id)"
             Write-Host "receiving_activated: $($response.receiving_activated)"
             Write-Host "delivering_activated: $($response.delivering_activated)"
+            Write-Host "endpoints_stopped: $($response.endpoints_stopped)"
+            Write-Host "endpoint_count_after: $($response.endpoint_count_after)"
           } catch {
             Write-Host "Cleanup API call failed: $_"
             Write-Host "Event may remain activated until manually deactivated"
           }
-          # Always exit successfully - cleanup is best-effort
+          # Always exit successfully - deactivation is best-effort cleanup
           exit 0
+
+      - name: Verify delivering server clean state
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Verifying delivering server has no running endpoints..."
+          try {
+            $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" -TimeoutSec 30
+
+            Write-Host "Server IP: $($response.server_ip)"
+            Write-Host "Endpoints alive: $($response.endpoints_alive)"
+
+            if ($response.endpoints_alive) {
+              Write-Host "Endpoint details:"
+              foreach ($ep in $response.endpoint_details) {
+                Write-Host "  $($ep.alias): alive=$($ep.alive), pid=$($ep.pid)"
+              }
+              throw "FAIL: Delivering server still has running endpoints after deactivation!"
+            }
+            Write-Host "Delivering server is clean (0 running endpoints)"
+          } catch [System.Net.WebException] {
+            Write-Host "Delivering server not reachable - assuming clean"
+          }
 
   e2e-obs-youtube-test:
     name: E2E OBS-to-YouTube Test
@@ -1278,6 +1328,34 @@ jobs:
           Write-Host "Switched OBS to Restreamer RTMP: rtmp://127.0.0.1:1234/live/obs-e2e-test"
 
           $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+      - name: "Pre-flight: verify no stale delivering endpoints"
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Checking for stale delivering server endpoints..."
+          try {
+            $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=$env:EVENT_NAME" -TimeoutSec 30
+
+            if ($response.endpoints_alive) {
+              Write-Host "WARNING: Stale endpoints found, force-stopping..."
+              $body = @{
+                user_uuid = $env:CLIENT_UUID
+                event_name = $env:EVENT_NAME
+              } | ConvertTo-Json
+              Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/deactivate/" -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+              Start-Sleep -Seconds 10
+
+              # Re-check
+              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=$env:EVENT_NAME" -TimeoutSec 30
+              if ($response.endpoints_alive) {
+                throw "FAIL: Cannot clean delivering server before E2E test - stale endpoints still running"
+              }
+            }
+            Write-Host "Delivering server is clean, proceeding with E2E test"
+          } catch [System.Net.WebException] {
+            Write-Host "Delivering server not reachable (may not be provisioned yet) - OK to proceed"
+          }
 
       - name: Activate receiving on manager
         shell: powershell
@@ -1821,7 +1899,6 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
-          $ErrorActionPreference = 'SilentlyContinue'
           $body = @{
             user_uuid = $env:CLIENT_UUID
             event_name = $env:EVENT_NAME
@@ -1830,12 +1907,40 @@ jobs:
           Write-Host "Deactivating $($env:EVENT_NAME)..."
           try {
             $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/deactivate/" `
-              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
+
             Write-Host "Deactivated: receiving=$($response.receiving_activated), delivering=$($response.delivering_activated)"
+            Write-Host "endpoints_stopped: $($response.endpoints_stopped)"
+            Write-Host "endpoint_count_after: $($response.endpoint_count_after)"
           } catch {
             Write-Host "Deactivation failed: $_"
           }
+          # Always exit successfully - deactivation is best-effort cleanup
           exit 0
+
+      - name: Verify delivering server clean state
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Verifying delivering server has no running endpoints..."
+          try {
+            $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=$env:EVENT_NAME" -TimeoutSec 30
+
+            Write-Host "Server IP: $($response.server_ip)"
+            Write-Host "Endpoints alive: $($response.endpoints_alive)"
+
+            if ($response.endpoints_alive) {
+              Write-Host "Endpoint details:"
+              foreach ($ep in $response.endpoint_details) {
+                Write-Host "  $($ep.alias): alive=$($ep.alive), pid=$($ep.pid)"
+              }
+              throw "FAIL: Delivering server still has running endpoints after deactivation!"
+            }
+            Write-Host "Delivering server is clean (0 running endpoints)"
+          } catch [System.Net.WebException] {
+            Write-Host "Delivering server not reachable - assuming clean"
+          }
 
       - name: Verify YouTube stopped receiving after deactivation
         if: always() && steps.verify_yt_receiving.outcome == 'success'

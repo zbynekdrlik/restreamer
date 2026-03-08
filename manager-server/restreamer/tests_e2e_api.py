@@ -265,10 +265,73 @@ class E2EDeactivateTests(APITestCase):
         self.assertEqual(response.data["status"], "ok")
         self.assertFalse(response.data["receiving_activated"])
         self.assertFalse(response.data["delivering_activated"])
+        # No server IP means no endpoint verification
+        self.assertIsNone(response.data["endpoints_stopped"])
+        self.assertIsNone(response.data["endpoint_count_after"])
 
         self.event.refresh_from_db()
         self.assertFalse(self.event.receiving_activated)
         self.assertFalse(self.event.delivering_activated)
+
+    @patch("restreamer.views.e2e_api.time")
+    @patch("restreamer.views.e2e_api.http_requests")
+    @patch("restreamer.views.e2e_api.InstanceManager")
+    def test_deactivate_verifies_endpoint_cleanup(self, mock_im_class, mock_http, mock_time):
+        """After sending stop signal, E2EDeactivate verifies endpoints actually stopped."""
+        mock_im = mock_im_class.return_value
+        mock_im.get_my_server_ip.return_value = "10.0.0.1"
+
+        # Mock end_stream POST (succeeds)
+        from unittest.mock import MagicMock
+
+        mock_http.post.return_value = MagicMock(status_code=200)
+
+        # Mock endpoint-status GET: first call has 1 endpoint, second call has 0
+        ep_running = MagicMock()
+        ep_running.status_code = 200
+        ep_running.json.return_value = {"endpoint_count": 1, "endpoints": [{"alias": "YouTube", "alive": True}]}
+
+        ep_stopped = MagicMock()
+        ep_stopped.status_code = 200
+        ep_stopped.json.return_value = {"endpoint_count": 0, "endpoints": []}
+
+        mock_http.get.side_effect = [ep_running, ep_stopped]
+        mock_time.sleep = MagicMock()  # Don't actually sleep in tests
+
+        data = {"user_uuid": str(self.user.api_key), "event_name": "E2E-Test"}
+        response = self.client.post(self.url, data, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["endpoints_stopped"])
+        self.assertEqual(response.data["endpoint_count_after"], 0)
+        self.assertFalse(response.data["receiving_activated"])
+        self.assertFalse(response.data["delivering_activated"])
+
+    @patch("restreamer.views.e2e_api.time")
+    @patch("restreamer.views.e2e_api.http_requests")
+    @patch("restreamer.views.e2e_api.InstanceManager")
+    def test_deactivate_reports_endpoints_not_stopped(self, mock_im_class, mock_http, mock_time):
+        """When endpoints fail to stop within 30s, response reports endpoints_stopped=False."""
+        mock_im = mock_im_class.return_value
+        mock_im.get_my_server_ip.return_value = "10.0.0.1"
+
+        from unittest.mock import MagicMock
+
+        mock_http.post.return_value = MagicMock(status_code=200)
+
+        # All endpoint-status checks return 1 running endpoint
+        ep_running = MagicMock()
+        ep_running.status_code = 200
+        ep_running.json.return_value = {"endpoint_count": 1, "endpoints": [{"alias": "YouTube", "alive": True}]}
+        mock_http.get.return_value = ep_running
+        mock_time.sleep = MagicMock()
+
+        data = {"user_uuid": str(self.user.api_key), "event_name": "E2E-Test"}
+        response = self.client.post(self.url, data, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["endpoints_stopped"])
+        self.assertEqual(response.data["endpoint_count_after"], 1)
 
     def test_deactivate_missing_uuid(self):
         response = self.client.post(self.url, {"event_name": "E2E-Test"}, format="json")

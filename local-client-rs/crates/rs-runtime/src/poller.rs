@@ -69,7 +69,14 @@ impl Poller {
                 )
                 .await
                 {
-                    Ok(_) => {
+                    Ok(event_id) => {
+                        // Clean up stale streaming events (Issue #23)
+                        match db::delete_other_streaming_events(&self.pool, event_id).await {
+                            Ok(0) => {}
+                            Ok(n) => info!("Cleaned up {n} stale streaming event(s)"),
+                            Err(e) => error!("Failed to clean up stale events: {e}"),
+                        }
+
                         info!("Active stream: {}", stream.identifier);
                         if let Err(e) = self.ws_tx.send(WsEvent::StreamingEvent {
                             action: "active".to_string(),
@@ -161,6 +168,7 @@ mod tests {
     use axum::routing::get;
     use axum::{Json, Router};
     use rs_core::db;
+    use sqlx::Row;
     use tokio::net::TcpListener;
 
     async fn start_mock_server(app: Router) -> String {
@@ -322,6 +330,47 @@ mod tests {
             WsEvent::ManagerPoll { status_code, .. } => assert_eq!(status_code, 403),
             other => panic!("Expected ManagerPoll 403, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn poll_200_cleans_up_stale_events() {
+        let app = Router::new().route("/api/get_active_stream/", get(mock_200));
+        let base_url = start_mock_server(app).await;
+        let pool = setup_db().await;
+        let (ws_tx, _ws_rx) = broadcast::channel::<WsEvent>(16);
+        let manager = ManagerClient::new(&base_url).unwrap();
+
+        // Pre-populate a stale event that should be cleaned up
+        let stale_id = db::upsert_streaming_event(&pool, "stale-event", Some("Stale"), "10.0.0.99")
+            .await
+            .unwrap();
+        // Verify stale event exists
+        assert!(db::get_streaming_event_by_id(&pool, stale_id).await.unwrap().is_some());
+
+        let poller = Poller {
+            pool: pool.clone(),
+            manager,
+            user_uuid: "test-uuid".to_string(),
+            ws_tx,
+            interval: Duration::from_millis(50),
+        };
+        poller.poll_once().await;
+
+        // After poll, only the new event (stream-001) should exist
+        let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
+        assert_eq!(event.identifier, Some("stream-001".to_string()));
+
+        // Stale event should be gone
+        assert!(db::get_streaming_event_by_id(&pool, stale_id).await.unwrap().is_none());
+
+        // Count all events — should be exactly 1
+        let count: i32 =
+            sqlx::query("SELECT COUNT(*) as c FROM streaming_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("c");
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]
