@@ -59,9 +59,7 @@ impl Scheduler {
             );
 
             // Activate receiving on the event
-            if let Err(e) =
-                db::set_receiving_activated(&self.pool, schedule.event_id, true).await
-            {
+            if let Err(e) = db::set_receiving_activated(&self.pool, schedule.event_id, true).await {
                 error!(
                     "Failed to activate event {} for schedule {}: {e}",
                     schedule.event_id, schedule.id

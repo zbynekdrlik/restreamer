@@ -337,10 +337,7 @@ pub async fn create_event(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "id": id })),
-    ))
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
 }
 
 pub async fn get_event_by_id(
@@ -375,12 +372,10 @@ pub async fn delete_event_by_id(
 pub async fn list_endpoints(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<EndpointConfig>>, StatusCode> {
-    let endpoints = db::list_endpoint_configs(&state.pool)
-        .await
-        .map_err(|e| {
-            error!("Failed to list endpoints: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let endpoints = db::list_endpoint_configs(&state.pool).await.map_err(|e| {
+        error!("Failed to list endpoints: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok(Json(endpoints))
 }
 
@@ -409,10 +404,7 @@ pub async fn create_endpoint(
         error!("Failed to create endpoint: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "id": id })),
-    ))
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
 }
 
 pub async fn get_endpoint_by_id(
@@ -515,7 +507,7 @@ pub async fn detach_endpoint_from_event(
 pub async fn get_event_endpoints(
     State(state): State<AppState>,
     axum::extract::Path(event_id): axum::extract::Path<i64>,
-) -> Result<Json<Vec<rs_core::models::EventEndpoint>>, StatusCode> {
+) -> Result<Json<Vec<rs_core::models::EndpointConfig>>, StatusCode> {
     let links = db::get_event_endpoints(&state.pool, event_id)
         .await
         .map_err(|e| {
@@ -530,12 +522,10 @@ pub async fn get_event_endpoints(
 pub async fn list_schedules(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ScheduledStream>>, StatusCode> {
-    let schedules = db::list_scheduled_streams(&state.pool)
-        .await
-        .map_err(|e| {
-            error!("Failed to list schedules: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let schedules = db::list_scheduled_streams(&state.pool).await.map_err(|e| {
+        error!("Failed to list schedules: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok(Json(schedules))
 }
 
@@ -561,10 +551,7 @@ pub async fn create_schedule(
         error!("Failed to create schedule: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "id": id })),
-    ))
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
 }
 
 #[derive(Deserialize)]
@@ -580,21 +567,16 @@ pub async fn update_schedule(
     Json(req): Json<UpdateScheduleRequest>,
 ) -> Result<StatusCode, StatusCode> {
     // Get existing to fill in defaults
-    let schedules = db::list_scheduled_streams(&state.pool)
-        .await
-        .map_err(|e| {
-            error!("Failed to list schedules: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let schedules = db::list_scheduled_streams(&state.pool).await.map_err(|e| {
+        error!("Failed to list schedules: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let existing = schedules
         .into_iter()
         .find(|s| s.id == id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let start_time = req
-        .start_time
-        .as_deref()
-        .unwrap_or(&existing.start_time);
+    let start_time = req.start_time.as_deref().unwrap_or(&existing.start_time);
     let repeat_interval = match &req.repeat_interval {
         Some(ri) => Some(ri.as_str()),
         None => existing.repeat_interval.as_deref(),

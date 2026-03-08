@@ -5,7 +5,6 @@
 /// command configuration.
 ///
 /// Ported from Python delivering-service endpoints.py ffmpeg construction.
-
 use std::path::PathBuf;
 use std::process::Stdio;
 use thiserror::Error;
@@ -74,16 +73,16 @@ impl std::str::FromStr for ServiceType {
 pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &str) -> Vec<String> {
     match service_type {
         ServiceType::YtHls => build_yt_hls_args(stream_key),
-        ServiceType::Facebook => build_rtmps_args(
-            &format!("rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}"),
-        ),
+        ServiceType::Facebook => build_rtmps_args(&format!(
+            "rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}"
+        )),
         ServiceType::YtRtmp => build_yt_rtmp_args(stream_key),
-        ServiceType::Vimeo => build_rtmps_args(
-            &format!("rtmps://rtmp-global.cloud.vimeo.com:443/live/{stream_key}"),
-        ),
-        ServiceType::Instagram => build_rtmps_args(
-            &format!("rtmps://live-upload.instagram.com:443/rtmp/{stream_key}"),
-        ),
+        ServiceType::Vimeo => build_rtmps_args(&format!(
+            "rtmps://rtmp-global.cloud.vimeo.com:443/live/{stream_key}"
+        )),
+        ServiceType::Instagram => build_rtmps_args(&format!(
+            "rtmps://live-upload.instagram.com:443/rtmp/{stream_key}"
+        )),
         ServiceType::TestFile => build_test_file_args(alias),
     }
 }
@@ -93,39 +92,64 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
         "https://a.upload.youtube.com/http_upload_hls?cid={stream_key}&copy=0&file=out1248.ts"
     );
     vec![
-        "-readrate".into(), "1.00".into(),
-        "-f".into(), "mpegts".into(),
-        "-loglevel".into(), "info".into(),
-        "-fflags".into(), "+genpts+discardcorrupt".into(),
-        "-i".into(), "pipe:".into(),
-        "-avoid_negative_ts".into(), "make_zero".into(),
-        "-f".into(), "hls".into(),
-        "-hls_segment_type".into(), "mpegts".into(),
+        "-readrate".into(),
+        "1.00".into(),
+        "-f".into(),
+        "mpegts".into(),
+        "-loglevel".into(),
+        "info".into(),
+        "-fflags".into(),
+        "+genpts+discardcorrupt".into(),
+        "-i".into(),
+        "pipe:".into(),
+        "-avoid_negative_ts".into(),
+        "make_zero".into(),
+        "-f".into(),
+        "hls".into(),
+        "-hls_segment_type".into(),
+        "mpegts".into(),
         "-hls_segment_options".into(),
         "mpegts_flags=+pat_pmt_at_frames+resend_headers".into(),
-        "-hls_list_size".into(), "5".into(),
-        "-hls_time".into(), "2".into(),
-        "-hls_flags".into(), "delete_segments".into(),
-        "-start_number".into(), "0".into(),
-        "-method".into(), "PUT".into(),
-        "-c".into(), "copy".into(),
-        "-flags".into(), "+cgop".into(),
-        "-muxdelay".into(), "0".into(),
-        "-muxpreload".into(), "0".into(),
-        "-reset_timestamps".into(), "1".into(),
+        "-hls_list_size".into(),
+        "5".into(),
+        "-hls_time".into(),
+        "2".into(),
+        "-hls_flags".into(),
+        "delete_segments".into(),
+        "-start_number".into(),
+        "0".into(),
+        "-method".into(),
+        "PUT".into(),
+        "-c".into(),
+        "copy".into(),
+        "-flags".into(),
+        "+cgop".into(),
+        "-muxdelay".into(),
+        "0".into(),
+        "-muxpreload".into(),
+        "0".into(),
+        "-reset_timestamps".into(),
+        "1".into(),
         output_url,
     ]
 }
 
 fn build_rtmps_args(url: &str) -> Vec<String> {
     vec![
-        "-readrate".into(), "1.00".into(),
-        "-f".into(), "mpegts".into(),
-        "-loglevel".into(), "info".into(),
-        "-fflags".into(), "+genpts+discardcorrupt".into(),
-        "-i".into(), "pipe:".into(),
-        "-f".into(), "flv".into(),
-        "-c".into(), "copy".into(),
+        "-readrate".into(),
+        "1.00".into(),
+        "-f".into(),
+        "mpegts".into(),
+        "-loglevel".into(),
+        "info".into(),
+        "-fflags".into(),
+        "+genpts+discardcorrupt".into(),
+        "-i".into(),
+        "pipe:".into(),
+        "-f".into(),
+        "flv".into(),
+        "-c".into(),
+        "copy".into(),
         url.to_string(),
     ]
 }
@@ -133,19 +157,31 @@ fn build_rtmps_args(url: &str) -> Vec<String> {
 fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
     let url = format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}");
     vec![
-        "-readrate".into(), "1.00".into(),
-        "-f".into(), "mpegts".into(),
-        "-loglevel".into(), "info".into(),
-        "-fflags".into(), "+genpts+discardcorrupt".into(),
-        "-i".into(), "pipe:".into(),
-        "-vf".into(), "yadif".into(),
+        "-readrate".into(),
+        "1.00".into(),
+        "-f".into(),
+        "mpegts".into(),
+        "-loglevel".into(),
+        "info".into(),
+        "-fflags".into(),
+        "+genpts+discardcorrupt".into(),
+        "-i".into(),
+        "pipe:".into(),
+        "-vf".into(),
+        "yadif".into(),
         "-re".into(),
-        "-f".into(), "flv".into(),
-        "-vcodec".into(), "copy".into(),
-        "-acodec".into(), "aac".into(),
-        "-ab".into(), "160k".into(),
-        "-ac".into(), "2".into(),
-        "-ar".into(), "48000".into(),
+        "-f".into(),
+        "flv".into(),
+        "-vcodec".into(),
+        "copy".into(),
+        "-acodec".into(),
+        "aac".into(),
+        "-ab".into(),
+        "160k".into(),
+        "-ac".into(),
+        "2".into(),
+        "-ar".into(),
+        "48000".into(),
         url,
     ]
 }
@@ -159,11 +195,16 @@ fn build_test_file_args(alias: &str) -> Vec<String> {
         .to_string_lossy()
         .to_string();
     vec![
-        "-f".into(), "mpegts".into(),
-        "-loglevel".into(), "info".into(),
-        "-i".into(), "pipe:".into(),
-        "-f".into(), "mpegts".into(),
-        "-c".into(), "copy".into(),
+        "-f".into(),
+        "mpegts".into(),
+        "-loglevel".into(),
+        "info".into(),
+        "-i".into(),
+        "pipe:".into(),
+        "-f".into(),
+        "mpegts".into(),
+        "-c".into(),
+        "copy".into(),
         output_path,
     ]
 }
@@ -207,7 +248,10 @@ impl FfmpegProcess {
     /// Write data to ffmpeg's stdin.
     pub async fn write(&mut self, data: &[u8]) -> Result<(), FfmpegError> {
         let stdin = self.child.stdin.as_mut().ok_or(FfmpegError::StdinClosed)?;
-        stdin.write_all(data).await.map_err(|_| FfmpegError::StdinClosed)?;
+        stdin
+            .write_all(data)
+            .await
+            .map_err(|_| FfmpegError::StdinClosed)?;
         stdin.flush().await.map_err(|_| FfmpegError::StdinClosed)?;
         Ok(())
     }
@@ -311,7 +355,10 @@ mod tests {
     #[test]
     fn build_vimeo_args_correct() {
         let args = build_ffmpeg_args(ServiceType::Vimeo, "vimeo-key", "Vimeo");
-        assert!(args.iter().any(|a| a.contains("rtmp-global.cloud.vimeo.com")));
+        assert!(
+            args.iter()
+                .any(|a| a.contains("rtmp-global.cloud.vimeo.com"))
+        );
         assert!(args.contains(&"flv".to_string()));
     }
 
@@ -325,7 +372,10 @@ mod tests {
     #[test]
     fn build_test_file_args_correct() {
         let args = build_ffmpeg_args(ServiceType::TestFile, "", "Test Stream");
-        assert!(args.iter().any(|a| a.contains("restreamer_test_Test_Stream.ts")));
+        assert!(
+            args.iter()
+                .any(|a| a.contains("restreamer_test_Test_Stream.ts"))
+        );
         assert!(args.contains(&"mpegts".to_string()));
         assert!(args.contains(&"copy".to_string()));
     }
@@ -369,7 +419,11 @@ mod tests {
             let args = build_ffmpeg_args(st, "key", "alias");
             // Check -f mpegts appears as input format
             let f_idx = args.iter().position(|a| a == "-f").unwrap();
-            assert_eq!(args[f_idx + 1], "mpegts", "{st} missing mpegts input format");
+            assert_eq!(
+                args[f_idx + 1],
+                "mpegts",
+                "{st} missing mpegts input format"
+            );
         }
     }
 }

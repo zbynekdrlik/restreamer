@@ -12,11 +12,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::put;
-use axum::Router;
 use rs_core::config::S3Config;
 use rs_core::db;
 use rs_core::models::WsEvent;
@@ -111,15 +111,9 @@ async fn uploader_full_flow_success() {
     let temp_dir = TempDir::new().unwrap();
     let chunk_path = create_test_chunk_file(&temp_dir, "chunk_1.bin", b"test chunk data");
 
-    db::insert_chunk(
-        &pool,
-        event.id,
-        chunk_path.to_str().unwrap(),
-        17,
-        "abc123",
-    )
-    .await
-    .unwrap();
+    db::insert_chunk(&pool, event.id, chunk_path.to_str().unwrap(), 17, "abc123")
+        .await
+        .unwrap();
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);

@@ -1,5 +1,4 @@
 /// YouTube OAuth2 flow implementation.
-
 use crate::{OAuthTokens, Result, YouTubeConfig, YouTubeError};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

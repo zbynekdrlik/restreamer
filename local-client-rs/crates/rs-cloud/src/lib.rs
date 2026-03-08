@@ -2,7 +2,6 @@
 ///
 /// Handles full lifecycle: create from image/snapshot, health monitoring,
 /// binary version checks, snapshot management, and teardown.
-
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

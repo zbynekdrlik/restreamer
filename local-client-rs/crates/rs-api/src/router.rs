@@ -49,22 +49,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/events", post(handlers::create_event))
         .route("/events/{id}", get(handlers::get_event_by_id))
         .route("/events/{id}", delete(handlers::delete_event_by_id))
-        .route(
-            "/events/{id}/activate",
-            post(handlers::activate_event),
-        )
+        .route("/events/{id}/activate", post(handlers::activate_event))
         .route(
             "/events/{id}/start-delivering",
             post(handlers::start_delivering),
         )
-        .route(
-            "/events/{id}/deactivate",
-            post(handlers::deactivate_event),
-        )
-        .route(
-            "/events/{id}/endpoints",
-            get(handlers::get_event_endpoints),
-        )
+        .route("/events/{id}/deactivate", post(handlers::deactivate_event))
+        .route("/events/{id}/endpoints", get(handlers::get_event_endpoints))
         .route(
             "/events/{event_id}/endpoints/{endpoint_id}",
             post(handlers::attach_endpoint_to_event),
@@ -91,7 +82,13 @@ pub fn build_router(state: AppState) -> Router {
             "tauri://localhost".parse::<HeaderValue>().unwrap(),
             "https://tauri.localhost".parse::<HeaderValue>().unwrap(),
         ])
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::PATCH, Method::PUT])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::DELETE,
+            Method::PATCH,
+            Method::PUT,
+        ])
         .allow_headers([header::CONTENT_TYPE, header::ACCEPT]);
 
     Router::new()

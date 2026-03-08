@@ -1,9 +1,8 @@
 /// S3 chunk fetcher for sequential chunk retrieval.
-
 use crate::api::S3Config;
-use s3::creds::Credentials;
-use s3::Region;
 use s3::Bucket;
+use s3::Region;
+use s3::creds::Credentials;
 
 pub struct S3Fetcher {
     bucket: Box<Bucket>,
@@ -49,10 +48,7 @@ impl S3Fetcher {
                 } else if response.status_code() == 404 {
                     Ok(None)
                 } else {
-                    Err(format!(
-                        "S3 error: status {}",
-                        response.status_code()
-                    ))
+                    Err(format!("S3 error: status {}", response.status_code()))
                 }
             }
             Err(e) => {

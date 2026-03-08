@@ -27,11 +27,7 @@ pub struct ChunkUploader {
 }
 
 impl ChunkUploader {
-    pub fn new(
-        pool: SqlitePool,
-        s3: S3Client,
-        ws_tx: broadcast::Sender<WsEvent>,
-    ) -> Self {
+    pub fn new(pool: SqlitePool, s3: S3Client, ws_tx: broadcast::Sender<WsEvent>) -> Self {
         Self {
             pool,
             s3: Arc::new(s3),

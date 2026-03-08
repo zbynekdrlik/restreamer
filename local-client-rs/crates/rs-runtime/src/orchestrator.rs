@@ -210,8 +210,7 @@ impl ServiceCore {
         // Scheduler (checks scheduled_streams table periodically)
         let scheduler = Scheduler::new(pool.clone(), ws_tx.clone());
         let scheduler_shutdown = shutdown.subscribe();
-        let scheduler_handle =
-            tokio::spawn(async move { scheduler.run(scheduler_shutdown).await });
+        let scheduler_handle = tokio::spawn(async move { scheduler.run(scheduler_shutdown).await });
 
         // Wait for shutdown signal
         info!("All services started.");

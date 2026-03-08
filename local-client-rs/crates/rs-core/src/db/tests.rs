@@ -286,13 +286,19 @@ async fn event_endpoint_attachment() {
         .await
         .unwrap();
 
-    attach_endpoint_to_event(&pool, event_id, ep1).await.unwrap();
-    attach_endpoint_to_event(&pool, event_id, ep2).await.unwrap();
+    attach_endpoint_to_event(&pool, event_id, ep1)
+        .await
+        .unwrap();
+    attach_endpoint_to_event(&pool, event_id, ep2)
+        .await
+        .unwrap();
 
     let eps = get_event_endpoints(&pool, event_id).await.unwrap();
     assert_eq!(eps.len(), 2);
 
-    detach_endpoint_from_event(&pool, event_id, ep1).await.unwrap();
+    detach_endpoint_from_event(&pool, event_id, ep1)
+        .await
+        .unwrap();
     let eps = get_event_endpoints(&pool, event_id).await.unwrap();
     assert_eq!(eps.len(), 1);
     assert_eq!(eps[0].alias, "FB");
@@ -308,7 +314,9 @@ async fn event_endpoint_cascade_on_event_delete() {
     let ep_id = create_endpoint_config(&pool, "YT", "YT_HLS", "key1", false)
         .await
         .unwrap();
-    attach_endpoint_to_event(&pool, event_id, ep_id).await.unwrap();
+    attach_endpoint_to_event(&pool, event_id, ep_id)
+        .await
+        .unwrap();
 
     delete_streaming_event(&pool, event_id).await.unwrap();
     // Endpoint config should still exist (only the link is deleted)
@@ -329,7 +337,9 @@ async fn delivery_instance_crud() {
     assert_eq!(inst.name, "rs-delivery-1");
     assert_eq!(inst.status, "creating");
 
-    update_delivery_instance_status(&pool, id, "running").await.unwrap();
+    update_delivery_instance_status(&pool, id, "running")
+        .await
+        .unwrap();
     let inst = get_delivery_instance(&pool, id).await.unwrap().unwrap();
     assert_eq!(inst.status, "running");
 
@@ -432,10 +442,7 @@ async fn scheduled_stream_crud() {
 
     let list = list_scheduled_streams(&pool).await.unwrap();
     assert_eq!(list[0].last_run_at.as_deref(), Some("2026-03-15T10:00:00"));
-    assert_eq!(
-        list[0].next_run_at.as_deref(),
-        Some("2026-03-22T10:00:00")
-    );
+    assert_eq!(list[0].next_run_at.as_deref(), Some("2026-03-22T10:00:00"));
 
     delete_scheduled_stream(&pool, id).await.unwrap();
     assert!(list_scheduled_streams(&pool).await.unwrap().is_empty());

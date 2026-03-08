@@ -5,13 +5,12 @@
 /// 2. Normalizes timestamps (YT_HLS only)
 /// 3. Pipes data to ffmpeg stdin
 /// 4. Auto-restarts ffmpeg on crash
-
 use crate::api::{EndpointConfig, S3Config};
 use crate::s3_fetch::S3Fetcher;
 use rs_ffmpeg::{FfmpegProcess, ServiceType};
 use rs_ts_normalize::TSTimestampNormalizer;
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 
 /// Stats tracked per endpoint: (bytes_processed, current_chunk_id)
@@ -72,10 +71,7 @@ async fn endpoint_loop(
     stats: Stats,
 ) {
     let alias = ep_cfg.alias.clone();
-    let service_type: ServiceType = ep_cfg
-        .service_type
-        .parse()
-        .unwrap_or(ServiceType::TestFile);
+    let service_type: ServiceType = ep_cfg.service_type.parse().unwrap_or(ServiceType::TestFile);
 
     let fetcher = match S3Fetcher::new(&s3_cfg, &event_identifier) {
         Ok(f) => f,

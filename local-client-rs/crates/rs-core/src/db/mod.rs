@@ -52,10 +52,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         .await
         .map(|r| r.get("v"))?;
 
-    let migrations: &[(i32, &str)] = &[
-        (1, MIGRATION_V1_SQL),
-        (2, MIGRATION_V2_SQL),
-    ];
+    let migrations: &[(i32, &str)] = &[(1, MIGRATION_V1_SQL), (2, MIGRATION_V2_SQL)];
 
     for &(version, sql) in migrations {
         if current < version {

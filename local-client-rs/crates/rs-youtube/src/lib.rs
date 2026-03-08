@@ -2,7 +2,6 @@
 ///
 /// Handles OAuth2 authorization flow, token refresh with SQLite persistence,
 /// and YouTube Live Streaming API queries.
-
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

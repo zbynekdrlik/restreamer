@@ -1,7 +1,6 @@
 /// Hetzner Cloud REST API client implementation.
 ///
 /// Wraps the Hetzner API v1 for server, snapshot, and SSH key management.
-
 use crate::{CloudError, HetznerConfig, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -257,7 +256,10 @@ impl HetznerClient {
         };
         let resp = self
             .client
-            .post(format!("{}/servers/{server_id}/actions/create_image", self.base_url))
+            .post(format!(
+                "{}/servers/{server_id}/actions/create_image",
+                self.base_url
+            ))
             .bearer_auth(&self.api_token)
             .json(&req)
             .send()

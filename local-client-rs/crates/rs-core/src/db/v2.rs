@@ -117,13 +117,11 @@ pub async fn attach_endpoint_to_event(
     event_id: i64,
     endpoint_id: i64,
 ) -> Result<()> {
-    sqlx::query(
-        "INSERT OR IGNORE INTO event_endpoints (event_id, endpoint_id) VALUES (?1, ?2)",
-    )
-    .bind(event_id)
-    .bind(endpoint_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("INSERT OR IGNORE INTO event_endpoints (event_id, endpoint_id) VALUES (?1, ?2)")
+        .bind(event_id)
+        .bind(endpoint_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -140,10 +138,7 @@ pub async fn detach_endpoint_from_event(
     Ok(())
 }
 
-pub async fn get_event_endpoints(
-    pool: &SqlitePool,
-    event_id: i64,
-) -> Result<Vec<EndpointConfig>> {
+pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec<EndpointConfig>> {
     let rows = sqlx::query(
         "SELECT e.id, e.alias, e.service_type, e.stream_key, e.enabled, e.position_last,
          e.delivered_bytes, e.is_fast, e.created_at, e.updated_at
@@ -197,10 +192,7 @@ pub async fn create_delivery_instance(
     Ok(row.get("id"))
 }
 
-pub async fn get_delivery_instance(
-    pool: &SqlitePool,
-    id: i64,
-) -> Result<Option<DeliveryInstance>> {
+pub async fn get_delivery_instance(pool: &SqlitePool, id: i64) -> Result<Option<DeliveryInstance>> {
     let row = sqlx::query(
         "SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at
          FROM delivery_instances WHERE id = ?1",
@@ -395,7 +387,10 @@ pub async fn delete_scheduled_stream(pool: &SqlitePool, id: i64) -> Result<()> {
     Ok(())
 }
 
-pub async fn get_due_scheduled_streams(pool: &SqlitePool, now: &str) -> Result<Vec<ScheduledStream>> {
+pub async fn get_due_scheduled_streams(
+    pool: &SqlitePool,
+    now: &str,
+) -> Result<Vec<ScheduledStream>> {
     let rows = sqlx::query(
         "SELECT id, event_id, start_time, repeat_interval, last_run_at, next_run_at, enabled
          FROM scheduled_streams

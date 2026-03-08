@@ -1,5 +1,4 @@
 /// YouTube Live Streaming API queries.
-
 use crate::{Result, YouTubeError};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -80,9 +79,7 @@ pub async fn list_live_streams(access_token: &str) -> Result<Vec<LiveStream>> {
 /// Check if any live stream is actively receiving data.
 pub async fn is_stream_receiving(access_token: &str) -> Result<bool> {
     let streams = list_live_streams(access_token).await?;
-    Ok(streams
-        .iter()
-        .any(|s| s.status.stream_status == "active"))
+    Ok(streams.iter().any(|s| s.status.stream_status == "active"))
 }
 
 /// List active live broadcasts.
@@ -129,10 +126,7 @@ mod tests {
         let stream: LiveStream = serde_json::from_value(json).unwrap();
         assert_eq!(stream.id, "stream-123");
         assert_eq!(stream.status.stream_status, "active");
-        assert_eq!(
-            stream.status.health_status.unwrap().status,
-            "good"
-        );
+        assert_eq!(stream.status.health_status.unwrap().status, "good");
     }
 
     #[test]

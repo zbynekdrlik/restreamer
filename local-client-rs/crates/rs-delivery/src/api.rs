@@ -1,5 +1,4 @@
 /// Delivery API routes: /api/health, /api/init, /api/status, /api/stop
-
 use crate::{AppState, EndpointHandle};
 use axum::{
     Json, Router,
