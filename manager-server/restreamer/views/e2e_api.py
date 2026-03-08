@@ -14,7 +14,8 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from restreamer.models import ChunkRecord, EndPointCfg, StreamingEvent
-from restreamer.tasks import init_stream
+from restreamer.video_data import VideoDataManager
+from restreamer.views.delivering import DeliveringManger
 from restreamer.views.instances import InstanceManager
 from services.youtube.client import YouTubeAuthError, build_youtube_client
 
@@ -110,8 +111,17 @@ class E2EActivateDelivering(APIView):
             event.delivering_activated = True
             event.save()
 
-            # Trigger init_stream task
-            init_stream.delay(user.id, event.id, endpoint_id=endpoint.id)
+            # Call init_stream synchronously (not via Celery) to avoid
+            # dependency on worker availability — the single-threaded worker
+            # is often blocked by long-running init_fast_stream tasks.
+            init_error = None
+            try:
+                video_manager = VideoDataManager(event.id)
+                init_chunk = video_manager.get_init_chunk_id()
+                DeliveringManger(user.id, event.id).send_init_data(init_chunk, endpoint.id)
+            except Exception as e:
+                init_error = str(e)
+                log.exception("E2E init_stream failed")
 
             return Response(
                 {
@@ -122,6 +132,8 @@ class E2EActivateDelivering(APIView):
                     "endpoint": endpoint.alias,
                     "chunk_count": chunk_count,
                     "init_stream_queued": True,
+                    "init_stream_sync": True,
+                    "init_error": init_error,
                 }
             )
 

@@ -1731,10 +1731,10 @@ jobs:
           }
 
           Write-Host "Delivering activated: endpoint=$($response.endpoint), chunks=$($response.chunk_count)"
-          Write-Host "init_stream_queued: $($response.init_stream_queued)"
+          Write-Host "init_stream executed synchronously: $($response.init_stream_sync)"
 
-          if (-not $response.init_stream_queued) {
-            throw "init_stream task was not queued"
+          if ($response.init_error) {
+            throw "init_stream failed: $($response.init_error)"
           }
 
       - name: Wait for delivering server ready
