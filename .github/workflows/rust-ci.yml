@@ -1160,23 +1160,38 @@ jobs:
         timeout-minutes: 2
         run: |
           Write-Host "Verifying delivering server has no running endpoints..."
-          try {
-            $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" -TimeoutSec 30
+          $maxRetries = 6
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" -TimeoutSec 30
 
-            Write-Host "Server IP: $($response.server_ip)"
-            Write-Host "Endpoints alive: $($response.endpoints_alive)"
+              Write-Host "--- Attempt ${i}/${maxRetries} ---"
+              Write-Host "  Server IP: $($response.server_ip)"
+              Write-Host "  Endpoints alive: $($response.endpoints_alive)"
 
-            if ($response.endpoints_alive) {
-              Write-Host "Endpoint details:"
-              foreach ($ep in $response.endpoint_details) {
-                Write-Host "  $($ep.alias): alive=$($ep.alive), pid=$($ep.pid)"
+              if (-not $response.endpoints_alive) {
+                Write-Host "Delivering server is clean (0 running endpoints)"
+                exit 0
               }
-              throw "FAIL: Delivering server still has running endpoints after deactivation!"
+
+              Write-Host "  Endpoint details:"
+              foreach ($ep in $response.endpoint_details) {
+                Write-Host "    $($ep.alias): alive=$($ep.alive), pid=$($ep.pid)"
+              }
+
+              if ($i -lt $maxRetries) {
+                Write-Host "  Waiting 10s for endpoints to stop..."
+                Start-Sleep -Seconds 10
+              }
+            } catch [System.Net.WebException] {
+              Write-Host "Delivering server not reachable - assuming clean"
+              exit 0
+            } catch {
+              Write-Host "Request failed: $_"
+              if ($i -lt $maxRetries) { Start-Sleep -Seconds 10 }
             }
-            Write-Host "Delivering server is clean (0 running endpoints)"
-          } catch [System.Net.WebException] {
-            Write-Host "Delivering server not reachable - assuming clean"
           }
+          throw "FAIL: Delivering server still has running endpoints after $maxRetries attempts"
 
   e2e-obs-youtube-test:
     name: E2E OBS-to-YouTube Test
@@ -1969,23 +1984,38 @@ jobs:
         timeout-minutes: 2
         run: |
           Write-Host "Verifying delivering server has no running endpoints..."
-          try {
-            $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=$env:EVENT_NAME" -TimeoutSec 30
+          $maxRetries = 6
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=$env:EVENT_NAME" -TimeoutSec 30
 
-            Write-Host "Server IP: $($response.server_ip)"
-            Write-Host "Endpoints alive: $($response.endpoints_alive)"
+              Write-Host "--- Attempt ${i}/${maxRetries} ---"
+              Write-Host "  Server IP: $($response.server_ip)"
+              Write-Host "  Endpoints alive: $($response.endpoints_alive)"
 
-            if ($response.endpoints_alive) {
-              Write-Host "Endpoint details:"
-              foreach ($ep in $response.endpoint_details) {
-                Write-Host "  $($ep.alias): alive=$($ep.alive), pid=$($ep.pid)"
+              if (-not $response.endpoints_alive) {
+                Write-Host "Delivering server is clean (0 running endpoints)"
+                exit 0
               }
-              throw "FAIL: Delivering server still has running endpoints after deactivation!"
+
+              Write-Host "  Endpoint details:"
+              foreach ($ep in $response.endpoint_details) {
+                Write-Host "    $($ep.alias): alive=$($ep.alive), pid=$($ep.pid)"
+              }
+
+              if ($i -lt $maxRetries) {
+                Write-Host "  Waiting 10s for endpoints to stop..."
+                Start-Sleep -Seconds 10
+              }
+            } catch [System.Net.WebException] {
+              Write-Host "Delivering server not reachable - assuming clean"
+              exit 0
+            } catch {
+              Write-Host "Request failed: $_"
+              if ($i -lt $maxRetries) { Start-Sleep -Seconds 10 }
             }
-            Write-Host "Delivering server is clean (0 running endpoints)"
-          } catch [System.Net.WebException] {
-            Write-Host "Delivering server not reachable - assuming clean"
           }
+          throw "FAIL: Delivering server still has running endpoints after $maxRetries attempts"
 
       - name: Verify YouTube stopped receiving after deactivation
         if: always() && steps.verify_yt_receiving.outcome == 'success'

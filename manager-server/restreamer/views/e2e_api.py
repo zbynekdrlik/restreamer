@@ -276,19 +276,20 @@ class E2EDeactivate(APIView):
             endpoints_stopped = None
             endpoint_count_after = None
 
-            # Stop delivering server if active
-            if event.delivering_activated:
-                try:
-                    im = InstanceManager(user.id)
-                    server_ip = im.get_my_server_ip()
-                    if server_ip:
-                        http_requests.post(
-                            f"http://{server_ip}:8000/api/end_stream/",
-                            json={"alias": None},
-                            timeout=5,
-                        )
-                except Exception as e:
-                    log.warning(f"Failed to stop delivering server: {e}")
+            # Always get server IP and attempt to stop endpoints,
+            # regardless of delivering_activated flag (may have been
+            # toggled by another process or a previous failed deactivation).
+            try:
+                im = InstanceManager(user.id)
+                server_ip = im.get_my_server_ip()
+                if server_ip:
+                    http_requests.post(
+                        f"http://{server_ip}:8000/api/end_stream/",
+                        json={"alias": None},
+                        timeout=10,
+                    )
+            except Exception as e:
+                log.warning(f"Failed to stop delivering server: {e}")
 
             # Verify endpoints actually stopped (max 30s)
             if server_ip:
