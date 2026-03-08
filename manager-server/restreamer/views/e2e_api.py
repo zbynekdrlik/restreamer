@@ -298,8 +298,8 @@ class E2EDeactivate(APIView):
                                 f"Endpoints still running (attempt {attempt + 1}/6): "
                                 f"count={endpoint_count_after}"
                             )
-                    except Exception:
-                        pass  # Server may be slow to respond
+                    except Exception as e:
+                        log.debug(f"Endpoint status check failed (attempt {attempt + 1}/6): {e}")
                 if not endpoints_stopped:
                     log.error(
                         "Delivering server endpoints NOT stopped after deactivation "
