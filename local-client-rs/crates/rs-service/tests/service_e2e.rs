@@ -170,8 +170,9 @@ async fn start_test_service(
     let server = RtmpServer::new("127.0.0.1", rtmp_port);
     let shutdown = server.shutdown_handle();
     let sink = Arc::clone(&chunk_sink);
+    let inpoint_state = rs_core::models::InpointState::new();
     let rtmp_task = tokio::spawn(async move {
-        let _ = server.run(sink).await;
+        let _ = server.run(sink, inpoint_state).await;
     });
 
     (api_base, pool, shutdown, vec![rtmp_task, chunk_fwd_task])

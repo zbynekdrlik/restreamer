@@ -61,8 +61,12 @@ impl RtmpServer {
 
         // Create media receiver that subscribes to published streams and
         // processes frame data into MPEG-TS chunks
-        let media_receiver =
-            MediaReceiver::new(event_consumer, event_sender, Arc::clone(&chunk_sink), inpoint_state);
+        let media_receiver = MediaReceiver::new(
+            event_consumer,
+            event_sender,
+            Arc::clone(&chunk_sink),
+            inpoint_state,
+        );
 
         info!("RTMP server starting on {}", self.address);
 
