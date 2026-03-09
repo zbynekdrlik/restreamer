@@ -686,7 +686,7 @@ jobs:
           if ($wv2) {
             Write-Host "WebView2 already installed: version $($wv2.pv)"
           } else {
-            Write-Host "WebView2 not found — installing Evergreen Runtime..."
+            Write-Host "WebView2 not found - installing Evergreen Runtime..."
             $bootstrapper = "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
             Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
             Start-Process -FilePath $bootstrapper -ArgumentList "/silent /install" -Wait
@@ -695,7 +695,7 @@ jobs:
             # Verify installation succeeded
             $wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
             if (-not $wv2) {
-              Write-Error "WebView2 runtime installation FAILED — dashboard will be blank"
+              Write-Error "WebView2 runtime installation FAILED - dashboard will be blank"
               exit 1
             }
             Write-Host "WebView2 installed: version $($wv2.pv)"
@@ -852,7 +852,7 @@ jobs:
         run: |
           $wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
           if (-not $wv2) {
-            Write-Error "WebView2 runtime is NOT installed — dashboard will be empty"
+            Write-Error "WebView2 runtime is NOT installed - dashboard will be empty"
             exit 1
           }
           Write-Host "WebView2 version: $($wv2.pv)"
@@ -867,7 +867,7 @@ jobs:
             try {
               $response = Invoke-WebRequest -Uri "http://127.0.0.1:8910/" -TimeoutSec 10 -UseBasicParsing
               if ($response.StatusCode -eq 200 -and $response.Content -match "restreamer|Restreamer|wasm") {
-                Write-Host "Dashboard accessible — contains expected frontend content"
+                Write-Host "Dashboard accessible - contains expected frontend content"
                 $success = $true
                 break
               } else {
@@ -888,7 +888,7 @@ jobs:
         run: |
           $app = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
           if (-not $app) {
-            Write-Host "WARNING: Restreamer process not running — user session may not be active"
+            Write-Host "WARNING: Restreamer process not running - user session may not be active"
             exit 0
           }
           $memMB = [math]::Round($app.WorkingSet64 / 1MB, 1)
@@ -899,7 +899,7 @@ jobs:
           if ($wv2Procs) {
             Write-Host "WebView2 renderer active: $($wv2Procs.Count) process(es)"
           } else {
-            Write-Host "WARNING: No msedgewebview2 processes — webview may not have opened yet"
+            Write-Host "WARNING: No msedgewebview2 processes - webview may not have opened yet"
           }
 
           if ($memMB -lt 30) {
