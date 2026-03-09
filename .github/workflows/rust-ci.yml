@@ -678,6 +678,29 @@ jobs:
           Get-ChildItem artifacts/www/
         shell: powershell
 
+      - name: Install WebView2 runtime
+        shell: powershell
+        run: |
+          # Check if WebView2 is already installed
+          $wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
+          if ($wv2) {
+            Write-Host "WebView2 already installed: version $($wv2.pv)"
+          } else {
+            Write-Host "WebView2 not found — installing Evergreen Runtime..."
+            $bootstrapper = "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
+            Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
+            Start-Process -FilePath $bootstrapper -ArgumentList "/silent /install" -Wait
+            Remove-Item $bootstrapper -ErrorAction SilentlyContinue
+
+            # Verify installation succeeded
+            $wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
+            if (-not $wv2) {
+              Write-Error "WebView2 runtime installation FAILED — dashboard will be blank"
+              exit 1
+            }
+            Write-Host "WebView2 installed: version $($wv2.pv)"
+          }
+
       - name: Deploy unified app
         shell: powershell
         run: |
@@ -822,6 +845,67 @@ jobs:
             Write-Host "API check: FAILED - $_"
             Write-Host "The unified app may not be fully started yet"
             # Don't fail - app starts on user session
+          }
+
+      - name: Verify WebView2 runtime installed
+        shell: powershell
+        run: |
+          $wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
+          if (-not $wv2) {
+            Write-Error "WebView2 runtime is NOT installed — dashboard will be empty"
+            exit 1
+          }
+          Write-Host "WebView2 version: $($wv2.pv)"
+
+      - name: Verify dashboard renders via HTTP
+        shell: powershell
+        run: |
+          # The WASM frontend is served by Axum on the same port
+          $maxRetries = 3
+          $success = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://127.0.0.1:8910/" -TimeoutSec 10 -UseBasicParsing
+              if ($response.StatusCode -eq 200 -and $response.Content -match "restreamer|Restreamer|wasm") {
+                Write-Host "Dashboard accessible — contains expected frontend content"
+                $success = $true
+                break
+              } else {
+                Write-Host "Attempt $i : HTTP $($response.StatusCode) but no expected content"
+              }
+            } catch {
+              Write-Host "Attempt $i : $_"
+            }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $success) {
+            Write-Error "Dashboard HTTP endpoint not serving expected WASM frontend content"
+            exit 1
+          }
+
+      - name: Verify Tauri webview is active
+        shell: powershell
+        run: |
+          $app = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if (-not $app) {
+            Write-Host "WARNING: Restreamer process not running — user session may not be active"
+            exit 0
+          }
+          $memMB = [math]::Round($app.WorkingSet64 / 1MB, 1)
+          Write-Host "Restreamer.exe memory: ${memMB} MB"
+
+          # Check for msedgewebview2 processes (indicates WebView2 is rendering)
+          $wv2Procs = Get-Process -Name "msedgewebview2" -ErrorAction SilentlyContinue
+          if ($wv2Procs) {
+            Write-Host "WebView2 renderer active: $($wv2Procs.Count) process(es)"
+          } else {
+            Write-Host "WARNING: No msedgewebview2 processes — webview may not have opened yet"
+          }
+
+          if ($memMB -lt 30) {
+            Write-Host "WARNING: Low memory ($memMB MB) suggests WebView2 may not be rendering"
+          } else {
+            Write-Host "Memory usage looks healthy for a Tauri app with WebView2"
           }
 
   e2e-streaming-test:

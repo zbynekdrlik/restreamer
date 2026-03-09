@@ -89,6 +89,25 @@ if ($serviceAsset) {
     exit 1
 }
 
+# --- Ensure WebView2 runtime is installed ---
+Write-Status "Checking WebView2 runtime..."
+$wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
+if ($wv2) {
+    Write-Ok "WebView2 already installed: version $($wv2.pv)"
+} else {
+    Write-Status "Installing WebView2 Evergreen Runtime..."
+    $bootstrapper = "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
+    Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
+    Start-Process -FilePath $bootstrapper -ArgumentList "/silent /install" -Wait
+    Remove-Item $bootstrapper -ErrorAction SilentlyContinue
+    $wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
+    if ($wv2) {
+        Write-Ok "WebView2 installed: version $($wv2.pv)"
+    } else {
+        Write-Err "WebView2 installation failed — dashboard may not render"
+    }
+}
+
 # --- Download and run Tauri NSIS installer ---
 $tauriAsset = $latestRelease.assets | Where-Object { $_.name -like "*setup*.exe" -or $_.name -like "*Setup*.exe" } | Select-Object -First 1
 if ($tauriAsset) {
