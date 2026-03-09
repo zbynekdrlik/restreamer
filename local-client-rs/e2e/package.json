@@ -1,0 +1,14 @@
+{
+  "name": "restreamer-frontend-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "mock-api": "node mock-api.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "express": "^4.21.0",
+    "cors": "^2.8.5"
+  }
+}

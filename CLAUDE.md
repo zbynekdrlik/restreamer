@@ -90,6 +90,13 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
 - **NO dismissing CI failures** — Never label a CI failure as "flaky", "pre-existing", or "known issue" to justify ignoring it. Every failure must be investigated and fixed. If a test fails, fix the test or the code — do not hand the user a red PR and suggest merging anyway. A red CI means the work is not done.
 - **E2E tests run on EVERY push to dev/main** — E2E tests must never be skipped on dev/main pushes, even when no Rust source files changed. The E2E job condition uses `!= 'failure'` (not `== 'success'`) so tests run whether deploy was fresh or skipped. The `e2e-gate` job requires both E2E tests to succeed on every push — deploy failure or E2E skip means red CI. The `test-integrity` job enforces these conditions.
 
+#### E2E Coverage Gate (MANDATORY)
+
+- **NO feature ships without E2E tests** — Every implemented UI feature, API endpoint, and user-facing functionality MUST have corresponding E2E tests before a PR can be considered green. A PR with new features but no E2E tests covering them is NOT mergeable, regardless of CI status.
+- **NO no-op test jobs** — If a CI test job cannot execute real tests (missing infrastructure, wrong platform, etc.), it MUST fail, not silently pass. A green CI means every test actually ran and verified real behavior.
+- **E2E tests verify rendering** — Frontend E2E tests must verify that UI components actually render visible content (text, buttons, forms), not just that the page loads without errors. Check for specific text content, element visibility, and interactive behavior.
+- **CSS coverage** — Every CSS class referenced in UI components MUST be defined in the stylesheet. Missing CSS = invisible UI = broken feature = red CI.
+
 #### Web/Frontend E2E (Playwright)
 
 - Use Playwright to test every frontend functionality — dashboard, config editor, status display, WebSocket updates.
@@ -148,10 +155,16 @@ cargo tauri build                    # Production Tauri build (NSIS installer)
 - Max 1000 lines per `.rs` file
 - 60% minimum test coverage target
 - TDD approach: write tests alongside features
+- `SQLX_OFFLINE=true` — CI uses offline mode (no live DB during build)
+- ffmpeg required for E2E tests — CI installs it; tests panic if missing
+- `log` crate (not `tracing`) — xiu RTMP stack uses `log`; use `env_logger` in tests
 
 ### Architecture
 
-- **Workspace** with 7 crates: `rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `src-tauri`
+- **Workspace** with 6 crates (under `crates/`): `rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`
+- **Excluded from workspace**: `src-tauri` (needs built frontend), `leptos-ui` (WASM target)
+- **Rust edition**: 2024 — requires `unsafe` for `std::env::set_var`/`remove_var`
+- **Minimum Rust**: 1.85
 - **Single unified binary**: `Restreamer.exe` (Tauri app with embedded service + Leptos/WASM UI)
 - **rs-runtime**: Contains `ServiceCore` for reusable service orchestration
 - **Database**: SQLite via `sqlx` with compile-time checked queries
@@ -164,10 +177,44 @@ cargo tauri build                    # Production Tauri build (NSIS installer)
 
 ```bash
 cd local-client-rs
-npm install                          # Install frontend dependencies
-npx tauri dev                        # Start dev server + Tauri app
-npx tauri build                      # Production build with NSIS installer
+# No npm/package.json — Tauri builds Leptos frontend via trunk internally
+cargo tauri build                    # Production build with NSIS installer
+# Note: src-tauri and leptos-ui are excluded from workspace and built separately
 ```
+
+## Python Development
+
+### Prerequisites
+
+- Python 3.11
+- Each service has its own `requirements.txt`
+
+### Running Tests (CI reference)
+
+```bash
+# Manager server
+cd manager-server
+DJANGO_SETTINGS_MODULE=nl_restreamer.settings_ci python manage.py test --verbosity=2
+
+# Delivering service
+cd delivering-service/delivering_service
+DJANGO_SETTINGS_MODULE=delivering_service.settings_ci python manage.py test --verbosity=2
+
+# Local client (legacy)
+cd local-client
+DJANGO_SETTINGS_MODULE=nl_restreamer.settings_ci python manage.py test --verbosity=2
+```
+
+### Linting
+
+```bash
+ruff check .          # Lint (line length: 120)
+ruff format --check . # Format check
+```
+
+### CI Settings Pattern
+
+Each service has `settings_ci.py` that uses SQLite `:memory:`, eager Celery (`CELERY_TASK_ALWAYS_EAGER=True`), and dummy AWS credentials.
 
 ## Versioning
 
@@ -242,3 +289,29 @@ Start-ScheduledTask -TaskName "RestreamerTray"
 - **DB**: PostgreSQL 16
 - **Credentials**: See `~/.restreamer-secrets/manager-server.env` (not tracked by git)
 - **SNV-stream client** is our church streaming client
+
+#### E2E Testing API (`/api/e2e/`)
+
+CI uses these endpoints to orchestrate streaming tests without SSH:
+
+| Endpoint                        | Method | Purpose                                          |
+| ------------------------------- | ------ | ------------------------------------------------ |
+| `/api/e2e/activate-receiving/`  | POST   | Enable event receiving + create Linode instance  |
+| `/api/e2e/activate-delivering/` | POST   | Activate delivering + synchronous init_stream    |
+| `/api/e2e/delivering-status/`   | GET    | Check delivering server health + endpoint status |
+| `/api/e2e/chunk-verification/`  | GET    | Verify chunk count in manager DB                 |
+| `/api/e2e/youtube-status/`      | GET    | Query YouTube Data API for stream reception      |
+| `/api/e2e/deactivate/`          | POST   | Stop receiving + delivering, verify cleanup      |
+
+All require `user_uuid` param. Optional `event_name` defaults to `"E2E-Test"`.
+
+## Developer Tools
+
+### Skills (`.claude/skills/`)
+
+Operational guides for common tasks:
+
+- `stream-lan-operations.md` — SSH, OBS WebSocket, client config
+- `manager-server-operations.md` — Manager SSH, Linode API, Celery
+- `windows-desktop-app-ssh.md` — Windows GUI automation
+- `windows-gui-deployment.md` — Task Scheduler patterns

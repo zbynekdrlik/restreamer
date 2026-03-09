@@ -515,42 +515,53 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: local-client-rs
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Check if npm-based frontend exists
-        id: check-npm
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Cache trunk and wasm-bindgen-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: trunk-wasm-bindgen-${{ runner.os }}
+      - name: Install trunk and wasm-bindgen-cli
         run: |
-          if [ -f "package-lock.json" ] && grep -q "playwright" package.json 2>/dev/null; then
-            echo "has_playwright=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_playwright=false" >> $GITHUB_OUTPUT
-            echo "Skipping Playwright tests - Leptos/WASM frontend does not use npm"
-          fi
-      - name: Install dependencies
-        if: steps.check-npm.outputs.has_playwright == 'true'
-        run: npm ci
-      - name: Install Playwright browsers
-        if: steps.check-npm.outputs.has_playwright == 'true'
-        run: npx playwright install --with-deps chromium
-      - name: Run Playwright E2E tests
-        if: steps.check-npm.outputs.has_playwright == 'true'
+          command -v trunk || cargo install trunk
+          command -v wasm-bindgen || cargo install wasm-bindgen-cli
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: local-client-rs/leptos-ui
+      - name: Build WASM frontend
+        working-directory: local-client-rs/leptos-ui
+        run: trunk build --release
+      - name: Install Playwright dependencies
+        working-directory: local-client-rs/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Start mock API server
+        working-directory: local-client-rs/e2e
+        run: node mock-api.js &
+      - name: Serve frontend
+        run: npx serve local-client-rs/dist -l 5173 &
+      - name: Wait for servers
+        run: |
+          npx wait-on http://127.0.0.1:5173 http://127.0.0.1:8910/api/v1/status --timeout 30000
+      - name: Run Playwright tests
+        working-directory: local-client-rs/e2e
         run: npx playwright test
       - name: Upload test results
-        if: always() && steps.check-npm.outputs.has_playwright == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
-          path: local-client-rs/playwright-report/
+          path: local-client-rs/e2e/playwright-report/
           if-no-files-found: ignore
-      - name: Skip message for Leptos frontend
-        if: steps.check-npm.outputs.has_playwright == 'false'
-        run: echo "Frontend E2E tests skipped - using Leptos/WASM frontend"
 
   rust-ci-gate:
     name: Rust CI Gate
