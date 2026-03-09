@@ -141,7 +141,10 @@ pub async fn get_logs(component: &str, _limit: usize) -> Result<Vec<LogEntry>, S
         return Err(result.error.unwrap_or_else(|| "Unknown error".to_string()));
     }
     // Browser mode: use HTTP logs endpoint (returns {entries: [...]})
-    let resp: LogsResponse = http_get(&format!("/logs/{component}")).await?;
+    // The API routes are /logs/inpoint and /logs/endpoint, but the component
+    // filter values are "rs_inpoint", "rs_endpoint", "rs_runtime". Strip "rs_".
+    let route = component.strip_prefix("rs_").unwrap_or(component);
+    let resp: LogsResponse = http_get(&format!("/logs/{route}")).await?;
     Ok(resp.entries)
 }
 
