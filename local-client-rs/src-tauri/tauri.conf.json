@@ -13,14 +13,12 @@
     "windows": [
       {
         "title": "Restreamer Dashboard",
+        "url": "http://127.0.0.1:8910",
         "width": 1024,
         "height": 768,
         "visible": false
       }
-    ],
-    "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8910 ws://127.0.0.1:8910 http://0.0.0.0:8910 ws://0.0.0.0:8910; style-src 'self' 'unsafe-inline'"
-    }
+    ]
   },
   "bundle": {
     "active": true,
