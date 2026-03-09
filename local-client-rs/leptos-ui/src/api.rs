@@ -71,60 +71,78 @@ async fn invoke<T: for<'de> Deserialize<'de>>(
 }
 
 /// Get the current service status.
+/// In Tauri mode, uses IPC invoke. In browser mode, fetches from HTTP API.
 pub async fn get_status() -> Result<StatusResponse, String> {
-    let result: CommandResult<StatusResponse> = invoke("get_status", JsValue::NULL).await?;
-
-    if result.success {
-        result.data.ok_or_else(|| "No data returned".to_string())
-    } else {
-        Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
+    if is_tauri() {
+        let result: CommandResult<StatusResponse> = invoke("get_status", JsValue::NULL).await?;
+        if result.success {
+            return result.data.ok_or_else(|| "No data returned".to_string());
+        }
+        return Err(result.error.unwrap_or_else(|| "Unknown error".to_string()));
     }
+    // Browser mode: combine streaming-event + chunks/stats into StatusResponse
+    let event: Option<StreamingEvent> = http_get("/streaming-event").await.ok();
+    let chunk_stats: ChunkStats = http_get("/chunks/stats").await.unwrap_or_default();
+    Ok(StatusResponse {
+        streaming_event: event,
+        chunk_stats,
+    })
 }
 
 /// Get chunk statistics.
 pub async fn get_chunk_stats() -> Result<ChunkStats, String> {
-    let result: CommandResult<ChunkStats> = invoke("get_chunk_stats", JsValue::NULL).await?;
-
-    if result.success {
-        result.data.ok_or_else(|| "No data returned".to_string())
-    } else {
-        Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
+    if is_tauri() {
+        let result: CommandResult<ChunkStats> = invoke("get_chunk_stats", JsValue::NULL).await?;
+        if result.success {
+            return result.data.ok_or_else(|| "No data returned".to_string());
+        }
+        return Err(result.error.unwrap_or_else(|| "Unknown error".to_string()));
     }
+    http_get("/chunks/stats").await
 }
 
 /// Get the current streaming event.
 pub async fn get_streaming_event() -> Result<Option<StreamingEvent>, String> {
-    let result: CommandResult<Option<StreamingEvent>> =
-        invoke("get_streaming_event", JsValue::NULL).await?;
-
-    if result.success {
-        Ok(result.data.flatten())
-    } else {
-        Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
+    if is_tauri() {
+        let result: CommandResult<Option<StreamingEvent>> =
+            invoke("get_streaming_event", JsValue::NULL).await?;
+        if result.success {
+            return Ok(result.data.flatten());
+        }
+        return Err(result.error.unwrap_or_else(|| "Unknown error".to_string()));
     }
+    // HTTP endpoint returns null when no event, which deserializes as None
+    Ok(http_get("/streaming-event").await.ok())
+}
+
+/// Logs response from the HTTP API.
+#[derive(Debug, Clone, Deserialize)]
+struct LogsResponse {
+    entries: Vec<LogEntry>,
 }
 
 /// Get recent log entries for a component.
-pub async fn get_logs(component: &str, limit: usize) -> Result<Vec<LogEntry>, String> {
-    #[derive(Serialize)]
-    struct Args {
-        component: String,
-        limit: Option<usize>,
+pub async fn get_logs(component: &str, _limit: usize) -> Result<Vec<LogEntry>, String> {
+    if is_tauri() {
+        #[derive(Serialize)]
+        struct Args {
+            component: String,
+            limit: Option<usize>,
+        }
+        let args = serde_wasm_bindgen::to_value(&Args {
+            component: component.to_string(),
+            limit: Some(_limit),
+        })
+        .map_err(|e| e.to_string())?;
+        let result: CommandResult<Vec<LogEntry>> = invoke("get_logs", args).await?;
+        if result.success {
+            return result.data.ok_or_else(|| "No data returned".to_string());
+        }
+        return Err(result.error.unwrap_or_else(|| "Unknown error".to_string()));
     }
-
-    let args = serde_wasm_bindgen::to_value(&Args {
-        component: component.to_string(),
-        limit: Some(limit),
-    })
-    .map_err(|e| e.to_string())?;
-
-    let result: CommandResult<Vec<LogEntry>> = invoke("get_logs", args).await?;
-
-    if result.success {
-        result.data.ok_or_else(|| "No data returned".to_string())
-    } else {
-        Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
-    }
+    // Browser mode: use HTTP logs endpoint (returns {entries: [...]})
+    let resp: LogsResponse = http_get(&format!("/logs/{component}")).await?;
+    Ok(resp.entries)
 }
 
 /// Format bytes as human-readable string.
@@ -166,14 +184,23 @@ export function compute_api_base() {
     }
     return window.location.origin + '/api/v1';
 }
+export function js_is_tauri() {
+    return !!(window.__TAURI__);
+}
 ")]
 extern "C" {
     #[wasm_bindgen(js_name = compute_api_base)]
     fn compute_api_base() -> String;
+    #[wasm_bindgen(js_name = js_is_tauri)]
+    fn js_is_tauri() -> bool;
 }
 
 fn api_base() -> String {
     compute_api_base()
+}
+
+fn is_tauri() -> bool {
+    js_is_tauri()
 }
 
 /// Endpoint configuration.
