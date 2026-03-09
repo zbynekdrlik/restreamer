@@ -69,10 +69,13 @@ test.describe("Dashboard tab", () => {
   test("shows chunk statistics", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    // Total chunks value
-    await expect(page.locator("text=42")).toBeVisible();
+    // Total chunks card value
+    const chunksCard = page.locator(".card:has(.card-title:text('Chunks'))");
+    await expect(chunksCard.locator(".card-value")).toHaveText("42");
     // Chunk stats labels
-    await expect(page.locator("text=3 pending, 39 sent")).toBeVisible();
+    await expect(chunksCard.locator(".card-label")).toContainText(
+      "3 pending, 39 sent",
+    );
   });
 });
 
@@ -135,15 +138,11 @@ test.describe("Events tab", () => {
     await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
     await page.click('.tab:has-text("Events")');
     const firstEvent = page.locator(".events-tab .event-card").first();
-    await expect(
-      firstEvent.locator('.event-actions button:has-text("Activate")'),
-    ).toBeVisible();
-    await expect(
-      firstEvent.locator('.event-actions button:has-text("Start Delivering")'),
-    ).toBeVisible();
-    await expect(
-      firstEvent.locator('.event-actions button:has-text("Deactivate")'),
-    ).toBeVisible();
+    const actions = firstEvent.locator(".event-actions button");
+    await expect(actions).toHaveCount(3);
+    await expect(actions.nth(0)).toHaveText("Activate");
+    await expect(actions.nth(1)).toHaveText("Start Delivering");
+    await expect(actions.nth(2)).toHaveText("Deactivate");
   });
 });
 
