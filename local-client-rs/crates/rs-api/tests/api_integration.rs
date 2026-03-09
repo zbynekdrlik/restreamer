@@ -434,14 +434,15 @@ async fn clear_chunks_resets_stats_to_zero() {
 }
 
 #[tokio::test]
-async fn cors_allows_localhost_origin() {
+async fn cors_allows_any_origin() {
     let state = test_state().await;
     let (base, _) = start_server(state).await;
     let client = reqwest::Client::new();
 
+    // Any origin should be accepted (LAN access)
     let resp = client
         .get(format!("{base}/health"))
-        .header("Origin", "http://localhost:5173")
+        .header("Origin", "http://192.168.1.100:8910")
         .send()
         .await
         .unwrap();
@@ -449,5 +450,5 @@ async fn cors_allows_localhost_origin() {
     assert_eq!(resp.status(), 200);
     let cors_header = resp.headers().get("access-control-allow-origin");
     assert!(cors_header.is_some());
-    assert_eq!(cors_header.unwrap(), "http://localhost:5173");
+    assert_eq!(cors_header.unwrap(), "*");
 }
