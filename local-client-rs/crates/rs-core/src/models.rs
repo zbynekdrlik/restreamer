@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -172,6 +175,37 @@ impl Default for ComponentStatus {
     }
 }
 
+/// Shared state tracking whether an RTMP publisher (e.g. OBS) is connected.
+///
+/// Uses `Arc<AtomicBool>` so clones share the same underlying state.
+/// Written by `MediaReceiver` on Publish/UnPublish, read by the API `/status` handler.
+#[derive(Debug, Clone)]
+pub struct InpointState {
+    rtmp_connected: Arc<AtomicBool>,
+}
+
+impl InpointState {
+    pub fn new() -> Self {
+        Self {
+            rtmp_connected: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn set_connected(&self, connected: bool) {
+        self.rtmp_connected.store(connected, Ordering::Relaxed);
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.rtmp_connected.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for InpointState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Chunk statistics returned by the /chunks/stats endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChunkStats {
@@ -261,5 +295,35 @@ mod tests {
         assert_eq!(stats.total_chunks, 0);
         assert_eq!(stats.pending_chunks, 0);
         assert_eq!(stats.buffer_duration_secs, 0.0);
+    }
+
+    #[test]
+    fn inpoint_state_defaults_to_disconnected() {
+        let state = InpointState::new();
+        assert!(!state.is_connected());
+    }
+
+    #[test]
+    fn inpoint_state_set_connected() {
+        let state = InpointState::new();
+        state.set_connected(true);
+        assert!(state.is_connected());
+    }
+
+    #[test]
+    fn inpoint_state_clone_shares_state() {
+        let state = InpointState::new();
+        let clone = state.clone();
+        state.set_connected(true);
+        assert!(clone.is_connected());
+    }
+
+    #[test]
+    fn inpoint_state_toggle() {
+        let state = InpointState::new();
+        state.set_connected(true);
+        assert!(state.is_connected());
+        state.set_connected(false);
+        assert!(!state.is_connected());
     }
 }

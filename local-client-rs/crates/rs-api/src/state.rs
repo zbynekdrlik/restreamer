@@ -6,7 +6,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use rs_core::config::Config;
 use rs_core::log_buffer::LogBuffer;
-use rs_core::models::WsEvent;
+use rs_core::models::{InpointState, WsEvent};
 
 /// Shared application state for all Axum handlers.
 #[derive(Clone)]
@@ -21,6 +21,8 @@ pub struct AppState {
     /// Directory containing the WASM frontend (index.html + assets).
     /// When set, Axum serves these files so LAN browsers can access the dashboard.
     pub www_dir: Option<PathBuf>,
+    /// Shared RTMP connection state, set by MediaReceiver, read by API handlers.
+    pub inpoint_state: InpointState,
 }
 
 impl AppState {
@@ -34,6 +36,7 @@ impl AppState {
             inpoint_restart_tx: None,
             endpoint_restart_tx: None,
             www_dir: None,
+            inpoint_state: InpointState::new(),
         }
     }
 
@@ -49,6 +52,11 @@ impl AppState {
 
     pub fn with_www_dir(mut self, dir: PathBuf) -> Self {
         self.www_dir = Some(dir);
+        self
+    }
+
+    pub fn with_inpoint_state(mut self, state: InpointState) -> Self {
+        self.inpoint_state = state;
         self
     }
 

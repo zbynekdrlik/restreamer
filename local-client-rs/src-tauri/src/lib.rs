@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
-use rs_core::models::WsEvent;
+use rs_core::models::{InpointState, WsEvent};
 use rs_runtime::{LogCaptureLayer, ServiceCore};
 
 use crate::state::AppState;
@@ -126,11 +126,15 @@ pub fn run() {
             // WebSocket broadcast channel
             let (ws_tx, _) = broadcast::channel::<WsEvent>(256);
 
+            // Shared RTMP connection state
+            let inpoint_state = InpointState::new();
+
             // Clone values for the async block
             let config_clone = config.clone();
             let config_path_clone = config_path.clone();
             let log_buffer_clone = log_buffer.clone();
             let ws_tx_clone = ws_tx.clone();
+            let inpoint_state_clone = inpoint_state.clone();
 
             // Start the embedded service in a background task
             tauri::async_runtime::spawn(async move {
@@ -171,6 +175,7 @@ pub fn run() {
                     log_buffer_clone,
                     ws_tx_clone,
                     shutdown_tx,
+                    inpoint_state_clone,
                 );
 
                 // Store state in Tauri
@@ -178,8 +183,13 @@ pub fn run() {
 
                 tracing::info!("Embedded service state initialized");
 
-                // Start the service core
-                let core = ServiceCore::new(config_clone, config_path_clone, LogBuffer::new(1000));
+                // Start the service core with shared inpoint state
+                let core = ServiceCore::with_inpoint_state(
+                    config_clone,
+                    config_path_clone,
+                    LogBuffer::new(1000),
+                    inpoint_state,
+                );
 
                 if let Err(e) = core
                     .run_with_signal(async {

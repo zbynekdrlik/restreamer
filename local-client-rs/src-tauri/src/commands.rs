@@ -42,6 +42,7 @@ impl<T> CommandResult<T> {
 pub struct StatusResponse {
     pub streaming_event: Option<StreamingEvent>,
     pub chunk_stats: ChunkStats,
+    pub inpoint_connected: bool,
 }
 
 /// Get the current service status including streaming event and chunk stats.
@@ -59,9 +60,12 @@ pub async fn get_status(
         Err(e) => return Ok(CommandResult::err(e)),
     };
 
+    let inpoint_connected = state.is_inpoint_connected();
+
     Ok(CommandResult::ok(StatusResponse {
         streaming_event,
         chunk_stats,
+        inpoint_connected,
     }))
 }
 

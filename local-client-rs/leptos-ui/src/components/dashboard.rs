@@ -10,11 +10,15 @@ pub fn Dashboard(status: StatusResponse) -> impl IntoView {
     let event = status.streaming_event.clone();
     let stats = status.chunk_stats;
 
-    // Determine inpoint status
-    let (inpoint_status, inpoint_class) = match &event {
-        Some(e) if e.receiving_activated => ("Receiving", "active"),
-        Some(_) => ("Paused", "idle"),
-        None => ("No Event", "disconnected"),
+    // Determine inpoint status based on actual RTMP connection state
+    let (inpoint_status, inpoint_class) = if status.inpoint_connected {
+        ("Receiving", "active")
+    } else {
+        match &event {
+            Some(e) if e.receiving_activated => ("Waiting for OBS", "idle"),
+            Some(_) => ("Paused", "idle"),
+            None => ("No Event", "disconnected"),
+        }
     };
 
     // Determine endpoint status

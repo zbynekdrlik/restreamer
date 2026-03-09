@@ -10,6 +10,8 @@ use streamhub::utils::{RandomDigitCount, Uuid};
 use tracing::{debug, info, warn};
 use xflv::demuxer::{FlvAudioTagDemuxer, FlvVideoTagDemuxer};
 
+use rs_core::models::InpointState;
+
 use crate::chunker::ChunkSink;
 use crate::muxer::TsMuxer;
 
@@ -22,6 +24,7 @@ pub struct MediaReceiver {
     event_rx: BroadcastEventReceiver,
     hub_event_tx: StreamHubEventSender,
     chunk_sink: Arc<ChunkSink>,
+    inpoint_state: InpointState,
 }
 
 impl MediaReceiver {
@@ -29,11 +32,13 @@ impl MediaReceiver {
         event_rx: BroadcastEventReceiver,
         hub_event_tx: StreamHubEventSender,
         chunk_sink: Arc<ChunkSink>,
+        inpoint_state: InpointState,
     ) -> Self {
         Self {
             event_rx,
             hub_event_tx,
             chunk_sink,
+            inpoint_state,
         }
     }
 
@@ -54,12 +59,14 @@ impl MediaReceiver {
                 Ok(event) => match event {
                     BroadcastEvent::Publish { identifier } => {
                         info!("Stream published: {identifier}");
+                        self.inpoint_state.set_connected(true);
                         // Subscribe to the stream and process frames
                         self.process_stream(&identifier, &mut frame_processor).await;
                         info!("Stream processing ended for: {identifier}");
                     }
                     BroadcastEvent::UnPublish { identifier } => {
                         info!("Stream unpublished: {identifier}");
+                        self.inpoint_state.set_connected(false);
                         frame_processor.reset().await.ok();
                     }
                     BroadcastEvent::Subscribe { identifier, .. } => {

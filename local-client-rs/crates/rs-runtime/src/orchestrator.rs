@@ -13,7 +13,7 @@ use rs_api::state::AppState;
 use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
-use rs_core::models::WsEvent;
+use rs_core::models::{InpointState, WsEvent};
 use rs_endpoint::s3::S3Client;
 use rs_endpoint::uploader::ChunkUploader;
 use rs_inpoint::chunker::ChunkSink;
@@ -33,11 +33,21 @@ pub struct ServiceCore {
     log_buffer: LogBuffer,
     db_path: PathBuf,
     chunk_dir: PathBuf,
+    inpoint_state: InpointState,
 }
 
 impl ServiceCore {
     /// Create a new ServiceCore with the given configuration.
     pub fn new(config: Config, config_path: PathBuf, log_buffer: LogBuffer) -> Self {
+        Self::with_inpoint_state(config, config_path, log_buffer, InpointState::new())
+    }
+
+    pub fn with_inpoint_state(
+        config: Config,
+        config_path: PathBuf,
+        log_buffer: LogBuffer,
+        inpoint_state: InpointState,
+    ) -> Self {
         let data_dir = if cfg!(windows) {
             PathBuf::from(r"C:\ProgramData\Restreamer")
         } else {
@@ -50,6 +60,7 @@ impl ServiceCore {
             config,
             config_path,
             log_buffer,
+            inpoint_state,
         }
     }
 
@@ -90,12 +101,16 @@ impl ServiceCore {
         let (inpoint_restart_tx, inpoint_restart_rx) = mpsc::channel::<()>(1);
         let (endpoint_restart_tx, endpoint_restart_rx) = mpsc::channel::<()>(1);
 
+        // Shared RTMP connection state
+        let inpoint_state = self.inpoint_state.clone();
+
         // API server
         let api_addr: SocketAddr =
             format!("{}:{}", self.config.api.bind, self.config.api.port).parse()?;
         let mut api_state = AppState::new(pool.clone(), self.config.clone(), ws_tx.clone())
             .with_config_path(self.config_path)
             .with_log_buffer(self.log_buffer)
+            .with_inpoint_state(inpoint_state.clone())
             .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx);
 
         // Serve the WASM frontend from a "www" directory next to the binary,
@@ -192,11 +207,13 @@ impl ServiceCore {
         let inpoint_bind = self.config.inpoint.rtmp_bind.clone();
         let inpoint_port = self.config.inpoint.rtmp_port;
         let inpoint_sink = Arc::clone(&chunk_sink);
+        let inpoint_state_clone = inpoint_state.clone();
         let inpoint_task = tokio::spawn(async move {
             run_inpoint_loop(
                 inpoint_bind,
                 inpoint_port,
                 inpoint_sink,
+                inpoint_state_clone,
                 inpoint_restart_rx,
                 inpoint_shutdown_rx,
             )
@@ -268,6 +285,7 @@ async fn run_inpoint_loop(
     bind: String,
     port: u16,
     chunk_sink: Arc<ChunkSink>,
+    inpoint_state: InpointState,
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
@@ -275,7 +293,8 @@ async fn run_inpoint_loop(
         let server = RtmpServer::new(&bind, port);
         let rtmp_shutdown = server.shutdown_handle();
         let sink = Arc::clone(&chunk_sink);
-        let mut handle = tokio::spawn(async move { server.run(sink).await });
+        let state = inpoint_state.clone();
+        let mut handle = tokio::spawn(async move { server.run(sink, state).await });
 
         info!("Inpoint RTMP server started on {bind}:{port}");
 

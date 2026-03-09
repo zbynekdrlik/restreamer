@@ -47,6 +47,7 @@ pub struct ChunkStats {
 pub struct StatusResponse {
     pub streaming_event: Option<StreamingEvent>,
     pub chunk_stats: ChunkStats,
+    pub inpoint_connected: bool,
 }
 
 /// Log entry from the backend.
@@ -80,12 +81,20 @@ pub async fn get_status() -> Result<StatusResponse, String> {
         }
         return Err(result.error.unwrap_or_else(|| "Unknown error".to_string()));
     }
-    // Browser mode: combine streaming-event + chunks/stats into StatusResponse
-    let event: Option<StreamingEvent> = http_get("/streaming-event").await.ok();
+    // Browser mode: fetch full /status for inpoint state, plus chunk stats
+    let status: serde_json::Value = http_get("/status").await.unwrap_or_default();
+    let event: Option<StreamingEvent> =
+        serde_json::from_value(status["streaming_event"].clone())
+            .ok()
+            .flatten();
     let chunk_stats: ChunkStats = http_get("/chunks/stats").await.unwrap_or_default();
+    let inpoint_connected = status["inpoint"]["details"]["rtmp_connected"]
+        .as_bool()
+        .unwrap_or(false);
     Ok(StatusResponse {
         streaming_event: event,
         chunk_stats,
+        inpoint_connected,
     })
 }
 

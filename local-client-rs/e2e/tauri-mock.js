@@ -6,8 +6,18 @@ const MOCK_API = "http://127.0.0.1:8910";
 
 const mockResponses = {
   get_status: async () => {
-    const resp = await fetch(`${MOCK_API}/api/v1/status`);
-    const data = await resp.json();
+    const [statusResp, chunkResp] = await Promise.all([
+      fetch(`${MOCK_API}/api/v1/status`),
+      fetch(`${MOCK_API}/api/v1/chunks/stats`),
+    ]);
+    const status = await statusResp.json();
+    const chunk_stats = await chunkResp.json();
+    const inpoint_connected = status.inpoint?.details?.rtmp_connected || false;
+    const data = {
+      streaming_event: status.streaming_event || null,
+      chunk_stats,
+      inpoint_connected,
+    };
     return { success: true, data, error: null };
   },
   get_chunk_stats: async () => {

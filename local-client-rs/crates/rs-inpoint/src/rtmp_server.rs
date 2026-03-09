@@ -4,6 +4,8 @@ use streamhub::StreamsHub;
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
+use rs_core::models::InpointState;
+
 use crate::chunker::ChunkSink;
 use crate::media_receiver::MediaReceiver;
 
@@ -34,7 +36,11 @@ impl RtmpServer {
     }
 
     /// Run the RTMP server, accepting connections until shutdown.
-    pub async fn run(self, chunk_sink: Arc<ChunkSink>) -> Result<(), crate::InpointError> {
+    pub async fn run(
+        self,
+        chunk_sink: Arc<ChunkSink>,
+        inpoint_state: InpointState,
+    ) -> Result<(), crate::InpointError> {
         // Create the StreamsHub for media data routing
         let mut hub = StreamsHub::new(None);
 
@@ -56,7 +62,7 @@ impl RtmpServer {
         // Create media receiver that subscribes to published streams and
         // processes frame data into MPEG-TS chunks
         let media_receiver =
-            MediaReceiver::new(event_consumer, event_sender, Arc::clone(&chunk_sink));
+            MediaReceiver::new(event_consumer, event_sender, Arc::clone(&chunk_sink), inpoint_state);
 
         info!("RTMP server starting on {}", self.address);
 
@@ -100,8 +106,9 @@ mod tests {
         let server = RtmpServer::new("127.0.0.1", 0);
         let shutdown = server.shutdown_handle();
         let sink = Arc::new(ChunkSink::new_null());
+        let inpoint_state = InpointState::new();
 
-        let handle = tokio::spawn(async move { server.run(sink).await });
+        let handle = tokio::spawn(async move { server.run(sink, inpoint_state).await });
 
         // Give it a moment to bind
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

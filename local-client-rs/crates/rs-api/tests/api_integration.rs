@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use rs_api::state::AppState;
 use rs_core::config::Config;
 use rs_core::db;
-use rs_core::models::WsEvent;
+use rs_core::models::{InpointState, WsEvent};
 use tokio::sync::broadcast;
 
 /// Create a test AppState with in-memory SQLite.
@@ -451,4 +451,33 @@ async fn cors_allows_any_origin() {
     let cors_header = resp.headers().get("access-control-allow-origin");
     assert!(cors_header.is_some());
     assert_eq!(cors_header.unwrap(), "*");
+}
+
+#[tokio::test]
+async fn status_shows_inpoint_disconnected_by_default() {
+    let state = test_state().await;
+    let (base, _) = start_server(state).await;
+
+    let resp = reqwest::get(format!("{base}/status")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["inpoint"]["state"], "disconnected");
+    assert_eq!(body["inpoint"]["details"]["rtmp_connected"], false);
+}
+
+#[tokio::test]
+async fn status_shows_inpoint_connected_when_set() {
+    let mut state = test_state().await;
+    let inpoint_state = InpointState::new();
+    inpoint_state.set_connected(true);
+    state.inpoint_state = inpoint_state;
+    let (base, _) = start_server(state).await;
+
+    let resp = reqwest::get(format!("{base}/status")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["inpoint"]["state"], "connected");
+    assert_eq!(body["inpoint"]["details"]["rtmp_connected"], true);
 }

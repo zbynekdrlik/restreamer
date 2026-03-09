@@ -9,7 +9,7 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
-use rs_core::models::{ChunkStats, StreamingEvent, WsEvent};
+use rs_core::models::{ChunkStats, InpointState, StreamingEvent, WsEvent};
 
 /// Shared application state that holds the embedded service resources.
 ///
@@ -25,6 +25,8 @@ pub struct AppState {
     ws_tx: broadcast::Sender<WsEvent>,
     /// Shutdown signal sender (used when app exits)
     shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
+    /// Shared RTMP connection state
+    inpoint_state: InpointState,
 }
 
 impl AppState {
@@ -35,6 +37,7 @@ impl AppState {
         log_buffer: LogBuffer,
         ws_tx: broadcast::Sender<WsEvent>,
         shutdown_tx: oneshot::Sender<()>,
+        inpoint_state: InpointState,
     ) -> Self {
         Self {
             pool,
@@ -42,7 +45,13 @@ impl AppState {
             log_buffer,
             ws_tx,
             shutdown_tx: Arc::new(RwLock::new(Some(shutdown_tx))),
+            inpoint_state,
         }
+    }
+
+    /// Check if RTMP publisher is connected.
+    pub fn is_inpoint_connected(&self) -> bool {
+        self.inpoint_state.is_connected()
     }
 
     /// Get chunk statistics directly from the database.

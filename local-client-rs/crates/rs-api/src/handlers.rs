@@ -8,7 +8,8 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogEntry;
 use rs_core::models::{
-    ChunkStats, EndpointConfig, ScheduledStream, ServiceStatus, StreamingEvent, WsEvent,
+    ChunkStats, ComponentStatus, EndpointConfig, ScheduledStream, ServiceStatus, StreamingEvent,
+    WsEvent,
 };
 
 use crate::state::AppState;
@@ -23,7 +24,18 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    let rtmp_connected = state.inpoint_state.is_connected();
+    let inpoint = ComponentStatus {
+        state: if rtmp_connected {
+            "connected".into()
+        } else {
+            "disconnected".into()
+        },
+        details: serde_json::json!({ "rtmp_connected": rtmp_connected }),
+    };
+
     Ok(Json(ServiceStatus {
+        inpoint,
         streaming_event: event,
         ..Default::default()
     }))
