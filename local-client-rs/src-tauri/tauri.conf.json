@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8910 ws://127.0.0.1:8910; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8910 ws://127.0.0.1:8910 http://0.0.0.0:8910 ws://0.0.0.0:8910; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {

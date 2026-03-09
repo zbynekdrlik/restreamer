@@ -93,10 +93,22 @@ impl ServiceCore {
         // API server
         let api_addr: SocketAddr =
             format!("{}:{}", self.config.api.bind, self.config.api.port).parse()?;
-        let api_state = AppState::new(pool.clone(), self.config.clone(), ws_tx.clone())
+        let mut api_state = AppState::new(pool.clone(), self.config.clone(), ws_tx.clone())
             .with_config_path(self.config_path)
             .with_log_buffer(self.log_buffer)
             .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx);
+
+        // Serve the WASM frontend from a "www" directory next to the binary,
+        // so LAN browsers can access the dashboard at http://<host>:8910/
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                let www = exe_dir.join("www");
+                if www.is_dir() {
+                    info!("Serving frontend from {}", www.display());
+                    api_state = api_state.with_www_dir(www);
+                }
+            }
+        }
         let (actual_addr, api_handle) = rs_api::serve(api_state, api_addr).await?;
         info!("API server running on {actual_addr}");
 

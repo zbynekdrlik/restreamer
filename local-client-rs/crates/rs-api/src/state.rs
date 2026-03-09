@@ -18,6 +18,9 @@ pub struct AppState {
     pub log_buffer: LogBuffer,
     pub inpoint_restart_tx: Option<mpsc::Sender<()>>,
     pub endpoint_restart_tx: Option<mpsc::Sender<()>>,
+    /// Directory containing the WASM frontend (index.html + assets).
+    /// When set, Axum serves these files so LAN browsers can access the dashboard.
+    pub www_dir: Option<PathBuf>,
 }
 
 impl AppState {
@@ -30,6 +33,7 @@ impl AppState {
             log_buffer: LogBuffer::new(100),
             inpoint_restart_tx: None,
             endpoint_restart_tx: None,
+            www_dir: None,
         }
     }
 
@@ -40,6 +44,11 @@ impl AppState {
 
     pub fn with_log_buffer(mut self, buffer: LogBuffer) -> Self {
         self.log_buffer = buffer;
+        self
+    }
+
+    pub fn with_www_dir(mut self, dir: PathBuf) -> Self {
+        self.www_dir = Some(dir);
         self
     }
 

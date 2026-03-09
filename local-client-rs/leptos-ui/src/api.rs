@@ -155,7 +155,26 @@ pub fn format_duration(secs: f64) -> String {
 
 // --- HTTP-based API calls to local Axum server ---
 
-const API_BASE: &str = "http://127.0.0.1:8910/api/v1";
+// Detect whether we're running inside Tauri or a regular browser and return
+// the appropriate API base URL. Inside Tauri the origin is tauri://localhost,
+// so we must use an absolute URL. In a LAN browser the origin already points
+// at the Axum server, so a relative path works.
+#[wasm_bindgen(inline_js = "
+export function compute_api_base() {
+    if (window.__TAURI__) {
+        return 'http://127.0.0.1:8910/api/v1';
+    }
+    return window.location.origin + '/api/v1';
+}
+")]
+extern "C" {
+    #[wasm_bindgen(js_name = compute_api_base)]
+    fn compute_api_base() -> String;
+}
+
+fn api_base() -> String {
+    compute_api_base()
+}
 
 /// Endpoint configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -185,7 +204,7 @@ pub struct ScheduledStream {
 }
 
 async fn http_get<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String> {
-    let url = format!("{API_BASE}{path}");
+    let url = format!("{}{path}", api_base());
     let resp = gloo_net::http::Request::get(&url)
         .send()
         .await
@@ -197,7 +216,7 @@ async fn http_get<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String>
 }
 
 async fn http_post(path: &str) -> Result<(), String> {
-    let url = format!("{API_BASE}{path}");
+    let url = format!("{}{path}", api_base());
     let resp = gloo_net::http::Request::post(&url)
         .send()
         .await
@@ -209,7 +228,7 @@ async fn http_post(path: &str) -> Result<(), String> {
 }
 
 async fn http_post_json<T: Serialize>(path: &str, body: &T) -> Result<serde_json::Value, String> {
-    let url = format!("{API_BASE}{path}");
+    let url = format!("{}{path}", api_base());
     let resp = gloo_net::http::Request::post(&url)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(body).map_err(|e| e.to_string())?)
@@ -224,7 +243,7 @@ async fn http_post_json<T: Serialize>(path: &str, body: &T) -> Result<serde_json
 }
 
 async fn http_delete(path: &str) -> Result<(), String> {
-    let url = format!("{API_BASE}{path}");
+    let url = format!("{}{path}", api_base());
     let resp = gloo_net::http::Request::delete(&url)
         .send()
         .await

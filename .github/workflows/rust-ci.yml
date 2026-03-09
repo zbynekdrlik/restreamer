@@ -277,6 +277,13 @@ jobs:
           path: local-client-rs/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: warn
           retention-days: 7
+      - name: Upload WASM frontend for LAN serving
+        uses: actions/upload-artifact@v4
+        with:
+          name: restreamer-www
+          path: local-client-rs/dist/
+          if-no-files-found: warn
+          retention-days: 7
 
   file-size:
     name: File size check
@@ -657,10 +664,18 @@ jobs:
           name: restreamer-tauri-installer
           path: artifacts/tauri
 
+      - name: Download WASM frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: restreamer-www
+          path: artifacts/www
+
       - name: List artifacts
         run: |
           Write-Host "=== Tauri installer (unified app with embedded service) ==="
           Get-ChildItem artifacts/tauri/
+          Write-Host "=== WASM frontend (for LAN serving) ==="
+          Get-ChildItem artifacts/www/
         shell: powershell
 
       - name: Deploy unified app
@@ -733,6 +748,22 @@ jobs:
           Write-Host "=== Deployment complete ==="
           # Ensure success exit code (net stop/taskkill/sc.exe may have set non-zero)
           exit 0
+
+      - name: Deploy WASM frontend for LAN access
+        shell: powershell
+        run: |
+          $wwwDir = "C:\Program Files\Restreamer\www"
+          # Remove old www directory
+          Remove-Item -Path $wwwDir -Recurse -Force -ErrorAction SilentlyContinue
+          # Copy new WASM frontend files
+          Copy-Item -Path "artifacts\www" -Destination $wwwDir -Recurse -Force
+          Write-Host "=== WASM frontend deployed to $wwwDir ==="
+          Get-ChildItem $wwwDir
+
+          # Allow LAN access through Windows Firewall
+          Remove-NetFirewallRule -DisplayName "Restreamer API" -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "Restreamer API" -Direction Inbound -Protocol TCP -LocalPort 8910 -Action Allow | Out-Null
+          Write-Host "=== Firewall rule created for port 8910 ==="
 
       - name: Launch unified app via Task Scheduler
         shell: powershell

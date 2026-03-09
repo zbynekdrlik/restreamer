@@ -121,7 +121,7 @@ fn default_api_port() -> u16 {
     8910
 }
 fn default_api_bind() -> String {
-    "127.0.0.1".to_string()
+    "0.0.0.0".to_string()
 }
 
 impl Default for InpointConfig {
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(config.inpoint.rtmp_port, 1234);
         assert_eq!(config.inpoint.chunk_duration_ms, 1000);
         assert_eq!(config.api.port, 8910);
-        assert_eq!(config.api.bind, "127.0.0.1");
+        assert_eq!(config.api.bind, "0.0.0.0");
         assert_eq!(config.hetzner.default_server_type, "cx22");
     }
 

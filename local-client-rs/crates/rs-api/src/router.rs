@@ -1,7 +1,7 @@
 use axum::Router;
-use axum::http::{HeaderValue, Method, header};
+use axum::http::{Method, header};
 use axum::routing::{delete, get, patch, post, put};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::handlers;
@@ -76,12 +76,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/schedules/{id}", put(handlers::update_schedule))
         .route("/schedules/{id}", delete(handlers::delete_schedule));
 
+    // Allow any origin so the dashboard is accessible from LAN devices
     let cors = CorsLayer::new()
-        .allow_origin([
-            "http://localhost:5173".parse::<HeaderValue>().unwrap(),
-            "tauri://localhost".parse::<HeaderValue>().unwrap(),
-            "https://tauri.localhost".parse::<HeaderValue>().unwrap(),
-        ])
+        .allow_origin(Any)
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -91,11 +88,22 @@ pub fn build_router(state: AppState) -> Router {
         ])
         .allow_headers([header::CONTENT_TYPE, header::ACCEPT]);
 
-    Router::new()
+    let mut router = Router::new()
         .nest("/api/v1", api)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state.clone());
+
+    // Serve the WASM frontend from the www_dir if configured,
+    // so LAN browsers can access the dashboard at http://<host>:8910/
+    if let Some(www_dir) = &state.www_dir {
+        use tower_http::services::{ServeDir, ServeFile};
+        let index = www_dir.join("index.html");
+        let serve = ServeDir::new(www_dir).fallback(ServeFile::new(index));
+        router = router.fallback_service(serve);
+    }
+
+    router
 }
 
 #[cfg(test)]
