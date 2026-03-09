@@ -681,10 +681,21 @@ jobs:
       - name: Install WebView2 runtime
         shell: powershell
         run: |
-          # Check if WebView2 is already installed
-          $wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
-          if ($wv2) {
-            Write-Host "WebView2 already installed: version $($wv2.pv)"
+          # Check if WebView2 is already installed (check both known GUIDs and file path)
+          function Get-WebView2Version {
+            foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
+              $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
+              if ($reg -and $reg.pv) { return $reg.pv }
+            }
+            # Fallback: check if the runtime directory exists
+            $dir = "C:\Program Files (x86)\Microsoft\EdgeWebView\Application"
+            if (Test-Path $dir) { return "installed (detected from filesystem)" }
+            return $null
+          }
+
+          $version = Get-WebView2Version
+          if ($version) {
+            Write-Host "WebView2 already installed: $version"
           } else {
             Write-Host "WebView2 not found - installing Evergreen Runtime..."
             $bootstrapper = "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
@@ -692,13 +703,12 @@ jobs:
             Start-Process -FilePath $bootstrapper -ArgumentList "/silent /install" -Wait
             Remove-Item $bootstrapper -ErrorAction SilentlyContinue
 
-            # Verify installation succeeded
-            $wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
-            if (-not $wv2) {
+            $version = Get-WebView2Version
+            if (-not $version) {
               Write-Error "WebView2 runtime installation FAILED - dashboard will be blank"
               exit 1
             }
-            Write-Host "WebView2 installed: version $($wv2.pv)"
+            Write-Host "WebView2 installed: $version"
           }
 
       - name: Deploy unified app
@@ -850,12 +860,25 @@ jobs:
       - name: Verify WebView2 runtime installed
         shell: powershell
         run: |
-          $wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
-          if (-not $wv2) {
+          $found = $false
+          foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
+            $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
+            if ($reg -and $reg.pv) {
+              Write-Host "WebView2 version: $($reg.pv)"
+              $found = $true
+              break
+            }
+          }
+          if (-not $found) {
+            if (Test-Path "C:\Program Files (x86)\Microsoft\EdgeWebView\Application") {
+              Write-Host "WebView2 detected from filesystem"
+              $found = $true
+            }
+          }
+          if (-not $found) {
             Write-Error "WebView2 runtime is NOT installed - dashboard will be empty"
             exit 1
           }
-          Write-Host "WebView2 version: $($wv2.pv)"
 
       - name: Verify dashboard renders via HTTP
         shell: powershell

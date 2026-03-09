@@ -91,20 +91,24 @@ if ($serviceAsset) {
 
 # --- Ensure WebView2 runtime is installed ---
 Write-Status "Checking WebView2 runtime..."
-$wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
-if ($wv2) {
-    Write-Ok "WebView2 already installed: version $($wv2.pv)"
-} else {
+$wv2Found = $false
+foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
+    $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
+    if ($reg -and $reg.pv) { $wv2Found = $true; Write-Ok "WebView2 already installed: version $($reg.pv)"; break }
+}
+if (-not $wv2Found -and (Test-Path "C:\Program Files (x86)\Microsoft\EdgeWebView\Application")) {
+    $wv2Found = $true; Write-Ok "WebView2 already installed (detected from filesystem)"
+}
+if (-not $wv2Found) {
     Write-Status "Installing WebView2 Evergreen Runtime..."
     $bootstrapper = "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
     Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
     Start-Process -FilePath $bootstrapper -ArgumentList "/silent /install" -Wait
     Remove-Item $bootstrapper -ErrorAction SilentlyContinue
-    $wv2 = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}" -ErrorAction SilentlyContinue
-    if ($wv2) {
-        Write-Ok "WebView2 installed: version $($wv2.pv)"
+    if (Test-Path "C:\Program Files (x86)\Microsoft\EdgeWebView\Application") {
+        Write-Ok "WebView2 installed successfully"
     } else {
-        Write-Err "WebView2 installation failed — dashboard may not render"
+        Write-Err "WebView2 installation failed - dashboard may not render"
     }
 }
 
