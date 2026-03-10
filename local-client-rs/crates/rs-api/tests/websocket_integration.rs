@@ -193,7 +193,7 @@ async fn websocket_streaming_event_broadcast() {
     ws_tx
         .send(WsEvent::StreamingEvent {
             action: "created".to_string(),
-            identifier: Some("evt-ws-test".to_string()),
+            name: Some("evt-ws-test".to_string()),
             receiving: true,
             delivering: false,
         })
@@ -208,7 +208,7 @@ async fn websocket_streaming_event_broadcast() {
     let event: serde_json::Value = serde_json::from_str(&msg.into_text().unwrap()).unwrap();
     assert_eq!(event["type"], "StreamingEvent");
     assert_eq!(event["data"]["action"], "created");
-    assert_eq!(event["data"]["identifier"], "evt-ws-test");
+    assert_eq!(event["data"]["name"], "evt-ws-test");
     assert_eq!(event["data"]["receiving"], true);
     assert_eq!(event["data"]["delivering"], false);
 }

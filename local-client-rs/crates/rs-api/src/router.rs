@@ -69,8 +69,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/endpoints", post(handlers::create_endpoint))
         .route("/endpoints/{id}", get(handlers::get_endpoint_by_id))
         .route("/endpoints/{id}", put(handlers::update_endpoint))
-        .route("/endpoints/{id}", delete(handlers::delete_endpoint))
-;
+        .route("/endpoints/{id}", delete(handlers::delete_endpoint));
 
     // Allow any origin so the dashboard is accessible from LAN devices
     let cors = CorsLayer::new()

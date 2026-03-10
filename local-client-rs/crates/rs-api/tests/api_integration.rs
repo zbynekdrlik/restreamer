@@ -159,9 +159,7 @@ async fn chunks_pagination() {
     let pool = state.pool.clone();
     let (base, _) = start_server(state).await;
 
-    db::upsert_streaming_event(&pool, "evt-pag")
-        .await
-        .unwrap();
+    db::upsert_streaming_event(&pool, "evt-pag").await.unwrap();
     let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
 
     // Insert 5 chunks

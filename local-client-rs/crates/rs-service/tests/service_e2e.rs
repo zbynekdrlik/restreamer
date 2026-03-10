@@ -196,10 +196,9 @@ async fn full_pipeline_rtmp_to_db_chunks() {
     );
 
     // Create a streaming event directly in DB
-    let event_id =
-        db::upsert_streaming_event(&pool, "e2e-test-stream")
-            .await
-            .unwrap();
+    let event_id = db::upsert_streaming_event(&pool, "e2e-test-stream")
+        .await
+        .unwrap();
     assert!(event_id > 0);
 
     // Publish a 4-second stream via ffmpeg

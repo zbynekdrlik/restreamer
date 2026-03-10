@@ -341,11 +341,9 @@ pub async fn list_streaming_events(pool: &SqlitePool) -> Result<Vec<StreamingEve
 }
 
 pub async fn create_streaming_event(pool: &SqlitePool, name: &str) -> Result<i64> {
-    let row = sqlx::query(
-        "INSERT INTO streaming_events (name) VALUES (?1) RETURNING id",
-    )
-    .bind(name)
-    .fetch_one(pool)
-    .await?;
+    let row = sqlx::query("INSERT INTO streaming_events (name) VALUES (?1) RETURNING id")
+        .bind(name)
+        .fetch_one(pool)
+        .await?;
     Ok(row.get("id"))
 }
