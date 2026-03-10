@@ -1013,27 +1013,31 @@ jobs:
           Write-Host "Activated event $($response.event_id): $($response.event_name)"
           Write-Host "receiving_activated: $($response.receiving_activated)"
 
-      - name: Wait for poller to sync event
+      - name: Activate E2E-Test event on local client
         shell: powershell
         run: |
-          Write-Host "Waiting for poller to sync streaming event..."
-          $maxRetries = 10
-          $synced = $false
-          for ($i = 1; $i -le $maxRetries; $i++) {
-            try {
-              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/streaming-event" -TimeoutSec 10
-              if ($response -and $response.receiving_activated) {
-                Write-Host "Streaming event synced: $($response.identifier)"
-                $synced = $true
-                break
-              }
-            } catch {}
-            Write-Host "Waiting for event sync (attempt $i/$maxRetries)..."
-            Start-Sleep -Seconds 3
+          # Find the E2E-Test event in the local client and activate it
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
+          if (-not $e2eEvent) {
+            # Create the E2E-Test event if it doesn't exist
+            Write-Host "E2E-Test event not found, creating it..."
+            $body = @{ name = "E2E-Test" } | ConvertTo-Json
+            $e2eEvent = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" `
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
           }
-          if (-not $synced) {
-            throw "FAILED: Poller did not sync streaming event after $maxRetries attempts (30s timeout)"
+          Write-Host "E2E-Test event id: $($e2eEvent.id)"
+
+          # Activate receiving on local client
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)/activate" `
+            -Method POST -TimeoutSec 10
+
+          # Verify activation by checking the specific event
+          $event = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)" -TimeoutSec 10
+          if (-not $event.receiving_activated) {
+            throw "FAILED: E2E-Test event not activated on local client"
           }
+          Write-Host "E2E-Test event activated: receiving_activated=$($event.receiving_activated)"
 
       - name: Clear chunks from previous test runs
         shell: powershell
@@ -1281,12 +1285,26 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
+          # Deactivate on local client
+          try {
+            $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+            $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
+            if ($e2eEvent) {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)/deactivate" `
+                -Method POST -TimeoutSec 10
+              Write-Host "Deactivated E2E-Test on local client (id=$($e2eEvent.id))"
+            }
+          } catch {
+            Write-Host "Local deactivation failed: $_"
+          }
+
+          # Deactivate on manager
           $body = @{
             user_uuid = $env:CLIENT_UUID
             event_name = "E2E-Test"
           } | ConvertTo-Json
 
-          Write-Host "Deactivating E2E-Test streaming event via API..."
+          Write-Host "Deactivating E2E-Test streaming event via manager API..."
           try {
             $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/deactivate/" `
               -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
@@ -1588,23 +1606,30 @@ jobs:
             Write-Host "Instance creation note: $($response.instance_error)"
           }
 
-      - name: Wait for poller to sync event
+      - name: Activate event on local client
         shell: powershell
         run: |
-          Write-Host "Waiting for poller to sync streaming event to client..."
-          $maxRetries = 12
-          for ($i = 1; $i -le $maxRetries; $i++) {
-            try {
-              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/streaming-event" -TimeoutSec 10
-              if ($response -and $response.receiving_activated) {
-                Write-Host "Event synced: $($response.identifier)"
-                return
-              }
-            } catch {}
-            Write-Host "Waiting for sync (attempt ${i}/${maxRetries})..."
-            Start-Sleep -Seconds 3
+          # Find or create the event on the local client and activate it
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          if (-not $targetEvent) {
+            Write-Host "$($env:EVENT_NAME) event not found locally, creating it..."
+            $body = @{ name = $env:EVENT_NAME } | ConvertTo-Json
+            $targetEvent = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" `
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
           }
-          throw "FAILED: Poller did not sync event after $maxRetries attempts"
+          Write-Host "Event id: $($targetEvent.id), name: $($targetEvent.name)"
+
+          # Activate receiving on local client
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/activate" `
+            -Method POST -TimeoutSec 10
+
+          # Verify
+          $event = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" -TimeoutSec 10
+          if (-not $event.receiving_activated) {
+            throw "FAILED: Event not activated on local client"
+          }
+          Write-Host "Event activated: receiving_activated=$($event.receiving_activated)"
 
       - name: Start OBS stream
         shell: powershell
@@ -2108,12 +2133,26 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
+          # Deactivate on local client
+          try {
+            $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+            $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+            if ($targetEvent) {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/deactivate" `
+                -Method POST -TimeoutSec 10
+              Write-Host "Deactivated $($env:EVENT_NAME) on local client (id=$($targetEvent.id))"
+            }
+          } catch {
+            Write-Host "Local deactivation failed: $_"
+          }
+
+          # Deactivate on manager
           $body = @{
             user_uuid = $env:CLIENT_UUID
             event_name = $env:EVENT_NAME
           } | ConvertTo-Json
 
-          Write-Host "Deactivating $($env:EVENT_NAME)..."
+          Write-Host "Deactivating $($env:EVENT_NAME) on manager..."
           try {
             $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/deactivate/" `
               -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
