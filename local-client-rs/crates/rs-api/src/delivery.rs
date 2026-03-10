@@ -117,7 +117,7 @@ impl DeliveryOrchestrator {
                 server_type,
                 &self.config.hetzner.location,
                 &image,
-                &[self.config.hetzner.ssh_key_name.clone()],
+                std::slice::from_ref(&self.config.hetzner.ssh_key_name),
                 cloud_init,
                 labels,
             )
