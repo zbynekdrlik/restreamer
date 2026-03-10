@@ -40,7 +40,7 @@ echo "Local API is healthy."
 echo ""
 echo "--- Extracting endpoint data from legacy manager ---"
 
-ENDPOINTS_JSON=$(ssh "$MANAGER_HOST" "$VENV $MANAGER_DIR/manage.py shell -c \"
+ENDPOINTS_JSON=$(ssh "$MANAGER_HOST" "cd $MANAGER_DIR && DJANGO_SETTINGS_MODULE=nl_restreamer.settings $VENV manage.py shell -c \"
 import json
 from restreamer.models import EndPointCfg
 from accounts.models import RestreamerUser
@@ -57,7 +57,7 @@ else:
             'alias': ep.alias,
             'service_type': ep.service_type,
             'stream_key': ep.stream_key or '',
-            'rtmp_url': ep.rtmp_url or '',
+            'is_fast': ep.is_fast,
         })
     print(json.dumps(data))
 \"")
@@ -68,7 +68,7 @@ echo "Found $EP_COUNT endpoints on legacy manager."
 echo ""
 echo "--- Extracting event data from legacy manager ---"
 
-EVENTS_JSON=$(ssh "$MANAGER_HOST" "$VENV $MANAGER_DIR/manage.py shell -c \"
+EVENTS_JSON=$(ssh "$MANAGER_HOST" "cd $MANAGER_DIR && DJANGO_SETTINGS_MODULE=nl_restreamer.settings $VENV manage.py shell -c \"
 import json
 from restreamer.models import StreamingEvent
 from accounts.models import RestreamerUser
@@ -80,10 +80,10 @@ else:
     events = StreamingEvent.objects.filter(user=user)
     data = []
     for ev in events:
-        ep_ids = list(ev.endpoints.values_list('id', flat=True))
+        ep_ids = list(ev.end_points.values_list('id', flat=True))
         data.append({
             'legacy_id': ev.id,
-            'name': ev.identifier,
+            'name': ev.short_description or ev.identifier,
             'endpoint_ids': ep_ids,
         })
     print(json.dumps(data))
@@ -103,7 +103,7 @@ for i in $(seq 0 $((EP_COUNT - 1))); do
     ALIAS=$(echo "$ENDPOINTS_JSON" | jq -r ".[$i].alias")
     SERVICE=$(echo "$ENDPOINTS_JSON" | jq -r ".[$i].service_type")
     STREAM_KEY=$(echo "$ENDPOINTS_JSON" | jq -r ".[$i].stream_key")
-    RTMP_URL=$(echo "$ENDPOINTS_JSON" | jq -r ".[$i].rtmp_url")
+    IS_FAST=$(echo "$ENDPOINTS_JSON" | jq -r ".[$i].is_fast")
     LEGACY_ID=$(echo "$ENDPOINTS_JSON" | jq -r ".[$i].legacy_id")
 
     RESP=$(curl -sf -X POST "$API_BASE/endpoints" \
@@ -112,8 +112,8 @@ for i in $(seq 0 $((EP_COUNT - 1))); do
             --arg alias "$ALIAS" \
             --arg service "$SERVICE" \
             --arg key "$STREAM_KEY" \
-            --arg url "$RTMP_URL" \
-            '{alias: $alias, service_type: $service, stream_key: $key, rtmp_url: $url}')" \
+            --argjson fast "$IS_FAST" \
+            '{alias: $alias, service_type: $service, stream_key: $key, is_fast: $fast}')" \
         2>&1) || {
         echo "  WARN: Failed to import endpoint '$ALIAS' (may already exist)"
         continue
