@@ -1124,15 +1124,39 @@ jobs:
           if (-not $env:HETZNER_API_TOKEN) {
             throw "HETZNER_API_TOKEN secret not set"
           }
-          # PATCH the config to set Hetzner API token
-          $body = @{
-            hetzner = @{
-              api_token = $env:HETZNER_API_TOKEN
+          # Write Hetzner token directly into config file and restart service
+          $configPath = "C:\ProgramData\Restreamer\config.json"
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.hetzner) {
+            $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue @{}
+          }
+          $config.hetzner = @{
+            api_token = $env:HETZNER_API_TOKEN
+            location = "fsn1"
+            default_server_type = "cx22"
+            snapshot_label = "rs-delivery"
+            ssh_key_name = "restreamer-ci"
+          }
+          $config | ConvertTo-Json -Depth 5 | Set-Content $configPath -Encoding UTF8
+          Write-Host "Config file updated with Hetzner settings"
+
+          # Restart service to pick up new config
+          Restart-Service -Name "RestreamerService" -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+
+          # Verify service is back up
+          $maxRetries = 10
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+              Write-Host "Service restarted, Hetzner API token configured"
+              return
+            } catch {
+              Write-Host "Waiting for service restart (attempt $i/$maxRetries)..."
+              Start-Sleep -Seconds 2
             }
-          } | ConvertTo-Json -Depth 3
-          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/config" `
-            -Method PATCH -Body $body -ContentType "application/json" -TimeoutSec 10
-          Write-Host "Hetzner API token configured"
+          }
+          throw "FAILED: Service did not restart after config update"
 
       - name: Seed YouTube OAuth tokens
         shell: powershell
