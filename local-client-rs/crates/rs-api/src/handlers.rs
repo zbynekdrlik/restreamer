@@ -8,7 +8,8 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogEntry;
 use rs_core::models::{
-    ChunkStats, ComponentStatus, EndpointConfig, ServiceStatus, StreamingEvent, WsEvent,
+    ChunkStats, ComponentStatus, DeliveryInstance, EndpointConfig, ServiceStatus, StreamingEvent,
+    WsEvent,
 };
 
 use crate::state::AppState;
@@ -620,4 +621,191 @@ pub async fn start_delivering(
     }
 
     Ok(StatusCode::OK)
+}
+
+// --- Delivery Orchestration ---
+
+#[derive(Deserialize)]
+pub struct DeliveryStartRequest {
+    pub event_id: i64,
+}
+
+#[derive(Serialize)]
+pub struct DeliveryStartResponse {
+    pub instance_id: i64,
+    pub hetzner_id: i64,
+    pub name: String,
+    pub server_type: String,
+    pub status: String,
+}
+
+pub async fn delivery_start(
+    State(state): State<AppState>,
+    Json(req): Json<DeliveryStartRequest>,
+) -> Result<Json<DeliveryStartResponse>, StatusCode> {
+    let orch = state.delivery_orchestrator.as_ref().ok_or_else(|| {
+        error!("Delivery orchestrator not configured (missing Hetzner API token)");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    let result = orch.start_delivery(req.event_id).await.map_err(|e| {
+        error!("Failed to start delivery: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(DeliveryStartResponse {
+        instance_id: result.instance_id,
+        hetzner_id: result.hetzner_id,
+        name: result.name,
+        server_type: result.server_type,
+        status: result.status,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct DeliveryStatusQuery {
+    pub event_id: i64,
+}
+
+#[derive(Serialize)]
+pub struct DeliveryStatusResponse {
+    pub instance: Option<DeliveryInstance>,
+    pub server_ready: bool,
+    pub endpoints: Vec<DeliveryEndpointEntry>,
+}
+
+#[derive(Serialize)]
+pub struct DeliveryEndpointEntry {
+    pub alias: String,
+    pub alive: bool,
+    pub buff_size_bytes: i64,
+    pub current_chunk_id: i64,
+}
+
+pub async fn delivery_status(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<DeliveryStatusQuery>,
+) -> Result<Json<DeliveryStatusResponse>, StatusCode> {
+    let orch = state.delivery_orchestrator.as_ref().ok_or_else(|| {
+        error!("Delivery orchestrator not configured");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    let status = orch
+        .get_delivery_status(query.event_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get delivery status: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(DeliveryStatusResponse {
+        instance: status.instance,
+        server_ready: status.server_ready,
+        endpoints: status
+            .endpoints
+            .into_iter()
+            .map(|ep| DeliveryEndpointEntry {
+                alias: ep.alias,
+                alive: ep.alive,
+                buff_size_bytes: ep.buff_size_bytes,
+                current_chunk_id: ep.current_chunk_id,
+            })
+            .collect(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct DeliveryStopRequest {
+    pub event_id: i64,
+}
+
+pub async fn delivery_stop(
+    State(state): State<AppState>,
+    Json(req): Json<DeliveryStopRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let orch = state.delivery_orchestrator.as_ref().ok_or_else(|| {
+        error!("Delivery orchestrator not configured");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    orch.stop_delivery(req.event_id).await.map_err(|e| {
+        error!("Failed to stop delivery: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(StatusCode::OK)
+}
+
+// --- YouTube Status ---
+
+#[derive(Serialize)]
+pub struct YouTubeStatusResponse {
+    pub authenticated: bool,
+    pub stream_receiving: Option<bool>,
+    pub error: Option<String>,
+}
+
+pub async fn youtube_status(
+    State(state): State<AppState>,
+) -> Result<Json<YouTubeStatusResponse>, StatusCode> {
+    let orch = state.delivery_orchestrator.as_ref().ok_or_else(|| {
+        error!("Delivery orchestrator not configured");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    let status = orch.check_youtube_status().await;
+
+    Ok(Json(YouTubeStatusResponse {
+        authenticated: status.authenticated,
+        stream_receiving: status.stream_receiving,
+        error: status.error,
+    }))
+}
+
+// --- YouTube OAuth Seed ---
+
+#[derive(Deserialize)]
+pub struct YouTubeOAuthSeedRequest {
+    pub refresh_token: String,
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+pub async fn youtube_oauth_seed(
+    State(state): State<AppState>,
+    Json(req): Json<YouTubeOAuthSeedRequest>,
+) -> Result<StatusCode, StatusCode> {
+    db::upsert_youtube_oauth(
+        &state.pool,
+        "",
+        &req.refresh_token,
+        "https://oauth2.googleapis.com/token",
+        &req.client_id,
+        &req.client_secret,
+        "https://www.googleapis.com/auth/youtube.readonly",
+        None,
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to seed YouTube OAuth: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!("YouTube OAuth tokens seeded");
+    Ok(StatusCode::OK)
+}
+
+// --- Delivery Instances List ---
+
+pub async fn list_delivery_instances(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<DeliveryInstance>>, StatusCode> {
+    let instances = db::list_delivery_instances(&state.pool)
+        .await
+        .map_err(|e| {
+            error!("Failed to list delivery instances: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(Json(instances))
 }

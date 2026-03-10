@@ -285,6 +285,34 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  build-delivery:
+    name: Build rs-delivery (Linux)
+    needs: [changes, lint, test]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: local-client-rs
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - name: Build rs-delivery
+        run: cargo build --release -p rs-delivery
+      - name: Upload rs-delivery binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rs-delivery-binary
+          path: local-client-rs/target/release/rs-delivery
+          if-no-files-found: error
+          retention-days: 7
+
   file-size:
     name: File size check
     needs: changes
@@ -383,8 +411,8 @@ jobs:
           # Verify at least a minimum number of tests ran
           TOTAL_PASSED=$(echo "$OUTPUT" | grep -oP '(\d+) passed' | grep -oP '\d+' | paste -sd+ | bc)
           echo "Total tests passed: $TOTAL_PASSED"
-          if [ "$TOTAL_PASSED" -lt 120 ]; then
-            echo "ERROR: Expected at least 120 tests, but only $TOTAL_PASSED passed."
+          if [ "$TOTAL_PASSED" -lt 130 ]; then
+            echo "ERROR: Expected at least 130 tests, but only $TOTAL_PASSED passed."
             echo "This may indicate tests were removed or are not being discovered."
             exit 1
           fi
@@ -582,6 +610,7 @@ jobs:
         coverage,
         security,
         build-tauri,
+        build-delivery,
         file-size,
         test-integrity,
         frontend-e2e,
@@ -597,6 +626,7 @@ jobs:
           echo "coverage:       ${{ needs.coverage.result }}"
           echo "security:       ${{ needs.security.result }}"
           echo "build-tauri:    ${{ needs.build-tauri.result }}"
+          echo "build-delivery: ${{ needs.build-delivery.result }}"
           echo "file-size:      ${{ needs.file-size.result }}"
           echo "test-integrity: ${{ needs.test-integrity.result }}"
           echo "frontend-e2e:   ${{ needs.frontend-e2e.result }}"
@@ -628,6 +658,7 @@ jobs:
             "coverage:${{ needs.coverage.result }}" \
             "security:${{ needs.security.result }}" \
             "build-tauri:${{ needs.build-tauri.result }}" \
+            "build-delivery:${{ needs.build-delivery.result }}" \
             "file-size:${{ needs.file-size.result }}" \
             "test-integrity:${{ needs.test-integrity.result }}" \
             "frontend-e2e:${{ needs.frontend-e2e.result }}"; do
@@ -937,10 +968,6 @@ jobs:
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 10
-    env:
-      MANAGER_SSH_HOST: 172.105.95.118
-      MANAGER_SSH_USER: root
-      CLIENT_UUID: "95da874e-6b06-41e5-99db-6f47a459c48b"
     steps:
       - name: Wait for services to initialize
         shell: powershell
@@ -964,63 +991,12 @@ jobs:
             }
           }
 
-      - name: "Pre-flight: verify no stale delivering endpoints"
-        shell: powershell
-        timeout-minutes: 2
-        run: |
-          Write-Host "Checking for stale delivering server endpoints..."
-          try {
-            $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" -TimeoutSec 30
-
-            if ($response.endpoints_alive) {
-              Write-Host "WARNING: Stale endpoints found, force-stopping..."
-              $body = @{
-                user_uuid = $env:CLIENT_UUID
-                event_name = "E2E-Test"
-              } | ConvertTo-Json
-              Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/deactivate/" -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
-              Start-Sleep -Seconds 10
-
-              # Re-check
-              $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" -TimeoutSec 30
-              if ($response.endpoints_alive) {
-                throw "FAIL: Cannot clean delivering server before E2E test - stale endpoints still running"
-              }
-            }
-            Write-Host "Delivering server is clean, proceeding with E2E test"
-          } catch [System.Net.WebException] {
-            Write-Host "Delivering server not reachable (may not be provisioned yet) - OK to proceed"
-          }
-
-      - name: Activate streaming event on manager
-        shell: powershell
-        timeout-minutes: 2
-        run: |
-          # Activate receiving via E2E API (no SSH needed)
-          $body = @{
-            user_uuid = $env:CLIENT_UUID
-            event_name = "E2E-Test"
-          } | ConvertTo-Json
-
-          Write-Host "Activating E2E-Test streaming event via API..."
-          $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/activate-receiving/" `
-            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
-
-          if ($response.status -ne "ok") {
-            throw "Failed to activate receiving: $($response | ConvertTo-Json)"
-          }
-
-          Write-Host "Activated event $($response.event_id): $($response.event_name)"
-          Write-Host "receiving_activated: $($response.receiving_activated)"
-
-      - name: Activate E2E-Test event on local client
+      - name: Create and activate E2E-Test event
         shell: powershell
         run: |
-          # Find the E2E-Test event in the local client and activate it
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
           if (-not $e2eEvent) {
-            # Create the E2E-Test event if it doesn't exist
             Write-Host "E2E-Test event not found, creating it..."
             $body = @{ name = "E2E-Test" } | ConvertTo-Json
             $e2eEvent = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" `
@@ -1028,14 +1004,12 @@ jobs:
           }
           Write-Host "E2E-Test event id: $($e2eEvent.id)"
 
-          # Activate receiving on local client
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)/activate" `
             -Method POST -TimeoutSec 10
 
-          # Verify activation by checking the specific event
           $event = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)" -TimeoutSec 10
           if (-not $event.receiving_activated) {
-            throw "FAILED: E2E-Test event not activated on local client"
+            throw "FAILED: E2E-Test event not activated"
           }
           Write-Host "E2E-Test event activated: receiving_activated=$($event.receiving_activated)"
 
@@ -1049,27 +1023,14 @@ jobs:
           }
           Write-Host "Chunks cleared, starting fresh"
 
-      - name: Get initial chunk count
-        id: initial-chunks
-        shell: powershell
-        run: |
-          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
-          $initialCount = $stats.total_chunks
-          Write-Host "Initial chunk count: $initialCount"
-          "INITIAL_CHUNKS=$initialCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
       - name: Send test RTMP stream via ffmpeg
         shell: powershell
         timeout-minutes: 2
         run: |
-          # Send a 15-second test stream to Restreamer RTMP endpoint
-          # Using ffmpeg with synthetic video/audio (reliable for CI testing)
           $ErrorActionPreference = 'Continue'
           $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
 
           Write-Host "Starting 15-second test RTMP stream..."
-
-          # ffmpeg outputs to stderr, so use Start-Process to avoid PowerShell error handling
           $proc = Start-Process -FilePath $ffmpegPath -ArgumentList @(
             "-y", "-re",
             "-f", "lavfi", "-i", "testsrc=duration=15:size=320x240:rate=30",
@@ -1089,11 +1050,9 @@ jobs:
           Write-Host "Waiting for chunks to be processed and uploaded..."
           Start-Sleep -Seconds 10
 
-      - name: Verify chunks created and uploaded
+      - name: Verify chunks created and uploaded to S3
         shell: powershell
         run: |
-          $initialCount = [int]$env:INITIAL_CHUNKS
-
           # Wait up to 30s for all chunks to be uploaded (pending -> 0)
           $maxWait = 6
           $stats = $null
@@ -1107,185 +1066,27 @@ jobs:
             Start-Sleep -Seconds 5
           }
 
-          $newChunks = $stats.total_chunks - $initialCount
-          $pendingChunks = $stats.pending_chunks
-
           Write-Host "=== E2E Test Results ==="
-          Write-Host "Initial chunks: $initialCount"
-          Write-Host "Current total:  $($stats.total_chunks)"
-          Write-Host "New chunks:     $newChunks"
+          Write-Host "Total chunks:   $($stats.total_chunks)"
           Write-Host "Sent chunks:    $($stats.sent_chunks)"
-          Write-Host "Pending:        $pendingChunks"
+          Write-Host "Pending:        $($stats.pending_chunks)"
           Write-Host "Total bytes:    $($stats.total_bytes)"
 
-          # Expect at least 8 chunks from 15-second stream (1 chunk per second, some tolerance)
-          if ($newChunks -lt 8) {
-            throw "Expected at least 8 new chunks, got $newChunks"
+          if ($stats.total_chunks -lt 8) {
+            throw "Expected at least 8 chunks from 15s stream, got $($stats.total_chunks)"
           }
 
-          # HARD FAIL: All chunks must be uploaded to S3
-          if ($pendingChunks -gt 0) {
-            throw "FAILED: $pendingChunks chunks still pending S3 upload after 30s wait"
+          if ($stats.pending_chunks -gt 0) {
+            throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload after 30s wait"
           }
 
-          Write-Host "=== Local E2E Test PASSED ==="
-        env:
-          INITIAL_CHUNKS: ${{ steps.initial-chunks.outputs.INITIAL_CHUNKS }}
-
-      - name: Verify chunks on manager DB
-        shell: powershell
-        timeout-minutes: 2
-        run: |
-          # Verify chunks reached manager server database (proves: client -> S3 -> manager notification -> DB)
-          Write-Host "Verifying chunks exist on manager server DB..."
-
-          $uri = "https://restreamer.newlevel.media/api/e2e/chunk-verification/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test&min_chunks=8"
-          $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
-
-          Write-Host "Event ID: $($response.event_id)"
-          Write-Host "Chunk count on manager: $($response.chunk_count)"
-          Write-Host "Min required: $($response.min_chunks_required)"
-          Write-Host "Has enough: $($response.has_enough)"
-          Write-Host "Identifier: $($response.identifier)"
-
-          if (-not $response.has_enough) {
-            throw "FAILED: Manager DB has only $($response.chunk_count) chunks, need at least $($response.min_chunks_required)"
-          }
-
-          Write-Host "=== Manager chunk verification PASSED ==="
-
-      - name: Activate delivering and initialize YouTube stream
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          # Activate delivering via E2E API (no SSH needed)
-          $body = @{
-            user_uuid = $env:CLIENT_UUID
-            event_name = "E2E-Test"
-          } | ConvertTo-Json
-
-          Write-Host "Activating delivering for E2E-Test event via API..."
-          $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/activate-delivering/" `
-            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
-
-          if ($response.status -ne "ok") {
-            throw "Failed to activate delivering: $($response | ConvertTo-Json)"
-          }
-
-          Write-Host "Delivering activated for event $($response.event_id)"
-          Write-Host "Endpoint: $($response.endpoint)"
-          Write-Host "Chunk count: $($response.chunk_count)"
-          Write-Host "init_stream_queued: $($response.init_stream_queued)"
-
-          if (-not $response.init_stream_queued) {
-            throw "init_stream task was not queued - delivery will not start"
-          }
-
-          Write-Host "YouTube delivery initialization queued successfully"
-
-      - name: Wait for delivering server to start streaming
-        shell: powershell
-        timeout-minutes: 2
-        run: |
-          Write-Host "Waiting for delivering server to process chunks..."
-          Start-Sleep -Seconds 30
-
-      - name: Verify delivering server is streaming
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          # Check delivering server status via E2E API with retry loop
-          Write-Host "Checking delivering server status via API..."
-
-          $maxRetries = 6
-          $verified = $false
-          for ($i = 1; $i -le $maxRetries; $i++) {
-            try {
-              $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" `
-                -Method GET -TimeoutSec 30
-
-              Write-Host "--- Attempt $i/$maxRetries ---"
-              Write-Host "Event ID: $($response.event_id)"
-              Write-Host "Delivering activated: $($response.delivering_activated)"
-              Write-Host "Server IP: $($response.server_ip)"
-              Write-Host "Server ready: $($response.server_ready)"
-              Write-Host "Endpoints alive: $($response.endpoints_alive)"
-
-              # Show per-endpoint details
-              if ($response.endpoint_details) {
-                foreach ($ep in $response.endpoint_details) {
-                  Write-Host "  Endpoint: $($ep.alias) | alive=$($ep.alive) | pid=$($ep.pid) | buffer=$($ep.buff_size_mb)MB | chunk_id=$($ep.current_chunk_id)"
-                }
-              }
-
-              if ($response.delivering_activated -and $response.server_ready) {
-                $verified = $true
-                if ($response.endpoints_alive) {
-                  Write-Host "Endpoint processes confirmed alive!"
-                  break
-                }
-                # Server ready but endpoint-status not available yet - still valid
-                Write-Host "Server ready (endpoint process details not available)"
-                break
-              }
-
-              Write-Host "Not fully ready yet, retrying in 10s..."
-            } catch {
-              Write-Host "Request failed on attempt $i : $_"
-            }
-            Start-Sleep -Seconds 10
-          }
-
-          if (-not $verified) {
-            throw "FAILED: Delivering server not fully operational after $maxRetries attempts. delivering_activated=$($response.delivering_activated), server_ready=$($response.server_ready)"
-          }
-
-          if ($response.endpoints_alive) {
-            Write-Host "=== FULL E2E WITH YOUTUBE DELIVERY PASSED (with endpoint verification) ==="
-          } else {
-            Write-Host "=== FULL E2E WITH YOUTUBE DELIVERY PASSED ==="
-          }
-          Write-Host "Stream -> Restreamer -> S3 -> Manager -> Delivering -> YouTube: VERIFIED"
-
-      - name: Verify delivery progression
-        shell: powershell
-        timeout-minutes: 2
-        run: |
-          # Take two readings 15s apart to verify chunk_id is advancing
-          Write-Host "Verifying delivery progression (two readings 15s apart)..."
-
-          $response1 = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" `
-            -Method GET -TimeoutSec 30
-
-          $chunk1 = 0
-          if ($response1.endpoint_details -and $response1.endpoint_details.Count -gt 0) {
-            $chunk1 = $response1.endpoint_details[0].current_chunk_id
-          }
-          Write-Host "Reading 1: chunk_id = $chunk1"
-
-          Start-Sleep -Seconds 15
-
-          $response2 = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" `
-            -Method GET -TimeoutSec 30
-
-          $chunk2 = 0
-          if ($response2.endpoint_details -and $response2.endpoint_details.Count -gt 0) {
-            $chunk2 = $response2.endpoint_details[0].current_chunk_id
-          }
-          Write-Host "Reading 2: chunk_id = $chunk2"
-
-          if ($chunk2 -gt $chunk1) {
-            Write-Host "=== Delivery progression CONFIRMED: chunk_id advanced from $chunk1 to $chunk2 ==="
-          } else {
-            Write-Host "WARNING: chunk_id did not advance ($chunk1 -> $chunk2). Delivery may be stalled but not failing test."
-          }
+          Write-Host "=== E2E Streaming Test PASSED ==="
+          Write-Host "RTMP -> Restreamer -> Chunks -> S3: VERIFIED (all via local Rust APIs)"
 
       - name: Deactivate streaming event
         if: always()
         shell: powershell
-        timeout-minutes: 2
         run: |
-          # Deactivate on local client
           try {
             $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
             $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
@@ -1297,68 +1098,7 @@ jobs:
           } catch {
             Write-Host "Local deactivation failed: $_"
           }
-
-          # Deactivate on manager
-          $body = @{
-            user_uuid = $env:CLIENT_UUID
-            event_name = "E2E-Test"
-          } | ConvertTo-Json
-
-          Write-Host "Deactivating E2E-Test streaming event via manager API..."
-          try {
-            $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/deactivate/" `
-              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
-
-            Write-Host "Deactivated event $($response.event_id)"
-            Write-Host "receiving_activated: $($response.receiving_activated)"
-            Write-Host "delivering_activated: $($response.delivering_activated)"
-            Write-Host "endpoints_stopped: $($response.endpoints_stopped)"
-            Write-Host "endpoint_count_after: $($response.endpoint_count_after)"
-          } catch {
-            Write-Host "Cleanup API call failed: $_"
-            Write-Host "Event may remain activated until manually deactivated"
-          }
-          # Always exit successfully - deactivation is best-effort cleanup
           exit 0
-
-      - name: Verify delivering server clean state
-        if: always()
-        shell: powershell
-        timeout-minutes: 2
-        run: |
-          Write-Host "Verifying delivering server has no running endpoints..."
-          $maxRetries = 6
-          for ($i = 1; $i -le $maxRetries; $i++) {
-            try {
-              $response = Invoke-RestMethod -Uri "https://restreamer.newlevel.media/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=E2E-Test" -TimeoutSec 30
-
-              Write-Host "--- Attempt ${i}/${maxRetries} ---"
-              Write-Host "  Server IP: $($response.server_ip)"
-              Write-Host "  Endpoints alive: $($response.endpoints_alive)"
-
-              if (-not $response.endpoints_alive) {
-                Write-Host "Delivering server is clean (0 running endpoints)"
-                exit 0
-              }
-
-              Write-Host "  Endpoint details:"
-              foreach ($ep in $response.endpoint_details) {
-                Write-Host "    $($ep.alias): alive=$($ep.alive), pid=$($ep.pid)"
-              }
-
-              if ($i -lt $maxRetries) {
-                Write-Host "  Waiting 10s for endpoints to stop..."
-                Start-Sleep -Seconds 10
-              }
-            } catch [System.Net.WebException] {
-              Write-Host "Delivering server not reachable - assuming clean"
-              exit 0
-            } catch {
-              Write-Host "Request failed: $_"
-              if ($i -lt $maxRetries) { Start-Sleep -Seconds 10 }
-            }
-          }
-          throw "FAIL: Delivering server still has running endpoints after $maxRetries attempts"
 
   e2e-obs-youtube-test:
     name: E2E OBS-to-YouTube Test
@@ -1367,14 +1107,47 @@ jobs:
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 15
     env:
-      MANAGER_URL: "https://restreamer.newlevel.media"
-      CLIENT_UUID: "95da874e-6b06-41e5-99db-6f47a459c48b"
-      EVENT_NAME: "E2E-Test"
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
       OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}
+      EVENT_NAME: "E2E-Test"
+      HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+      YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+      YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+      YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Configure Hetzner API token
+        shell: powershell
+        run: |
+          if (-not $env:HETZNER_API_TOKEN) {
+            throw "HETZNER_API_TOKEN secret not set"
+          }
+          # PATCH the config to set Hetzner API token
+          $body = @{
+            hetzner = @{
+              api_token = $env:HETZNER_API_TOKEN
+            }
+          } | ConvertTo-Json -Depth 3
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/config" `
+            -Method PATCH -Body $body -ContentType "application/json" -TimeoutSec 10
+          Write-Host "Hetzner API token configured"
+
+      - name: Seed YouTube OAuth tokens
+        shell: powershell
+        run: |
+          if (-not $env:YOUTUBE_REFRESH_TOKEN) {
+            throw "YOUTUBE_REFRESH_TOKEN secret not set"
+          }
+          $body = @{
+            refresh_token = $env:YOUTUBE_REFRESH_TOKEN
+            client_id = $env:YOUTUBE_CLIENT_ID
+            client_secret = $env:YOUTUBE_CLIENT_SECRET
+          } | ConvertTo-Json
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/oauth/seed" `
+            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
+          Write-Host "YouTube OAuth tokens seeded"
 
       - name: Ensure OBS is running
         shell: powershell
@@ -1556,54 +1329,30 @@ jobs:
 
           $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
 
-      - name: "Pre-flight: verify no stale delivering endpoints"
+      - name: "Pre-flight: verify no stale delivery instances"
         shell: powershell
         timeout-minutes: 2
         run: |
-          Write-Host "Checking for stale delivering server endpoints..."
+          Write-Host "Checking for stale delivery instances..."
           try {
-            $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=$env:EVENT_NAME" -TimeoutSec 30
-
-            if ($response.endpoints_alive) {
-              Write-Host "WARNING: Stale endpoints found, force-stopping..."
-              $body = @{
-                user_uuid = $env:CLIENT_UUID
-                event_name = $env:EVENT_NAME
-              } | ConvertTo-Json
-              Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/deactivate/" -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
-              Start-Sleep -Seconds 10
-
-              # Re-check
-              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=$env:EVENT_NAME" -TimeoutSec 30
-              if ($response.endpoints_alive) {
-                throw "FAIL: Cannot clean delivering server before E2E test - stale endpoints still running"
+            $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+            if ($instances -and $instances.Count -gt 0) {
+              Write-Host "WARNING: Found $($instances.Count) stale delivery instance(s), stopping..."
+              foreach ($inst in $instances) {
+                Write-Host "  Stopping instance: id=$($inst.id), event_id=$($inst.event_id), status=$($inst.status)"
+                $body = @{ event_id = $inst.event_id } | ConvertTo-Json
+                try {
+                  Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/stop" `
+                    -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+                } catch {
+                  Write-Host "  Stop failed for event_id=$($inst.event_id): $_"
+                }
               }
+              Start-Sleep -Seconds 5
             }
-            Write-Host "Delivering server is clean, proceeding with E2E test"
-          } catch [System.Net.WebException] {
-            Write-Host "Delivering server not reachable (may not be provisioned yet) - OK to proceed"
-          }
-
-      - name: Activate receiving on manager
-        shell: powershell
-        timeout-minutes: 2
-        run: |
-          $body = @{
-            user_uuid = $env:CLIENT_UUID
-            event_name = $env:EVENT_NAME
-          } | ConvertTo-Json
-
-          Write-Host "Activating receiving for $($env:EVENT_NAME)..."
-          $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/activate-receiving/" `
-            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
-
-          if ($response.status -ne "ok") {
-            throw "Failed to activate receiving: $($response | ConvertTo-Json)"
-          }
-          Write-Host "Receiving activated: event_id=$($response.event_id)"
-          Write-Host "Instance created: $($response.instance_created)"
-          if ($response.instance_error) {
-            Write-Host "Instance creation note: $($response.instance_error)"
+            Write-Host "No stale delivery instances, proceeding with E2E test"
+          } catch {
+            Write-Host "Could not check delivery instances: $_ - proceeding anyway"
           }
 
       - name: Activate event on local client
@@ -1817,50 +1566,27 @@ jobs:
             throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload"
           }
 
-      - name: Verify chunks on manager DB
-        shell: powershell
-        timeout-minutes: 2
-        run: |
-          Write-Host "Verifying chunks reached manager server DB..."
-          $uri = "$($env:MANAGER_URL)/api/e2e/chunk-verification/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)&min_chunks=8"
-          $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
-
-          Write-Host "Chunk count on manager: $($response.chunk_count)"
-          Write-Host "Has enough (>= 8): $($response.has_enough)"
-
-          if (-not $response.has_enough) {
-            throw "FAILED: Manager DB has only $($response.chunk_count) chunks, need >= 8"
-          }
-          Write-Host "=== Manager chunk verification PASSED ==="
-
       - name: Verify YouTube is NOT receiving stream (baseline)
         shell: powershell
         timeout-minutes: 2
         run: |
           # BASELINE CHECK: Before delivery starts, verify YouTube is NOT
-          # receiving stream data.  Uses the manager's YouTube Data API
-          # endpoint (server-side OAuth with auto-refresh, no browser needed).
+          # receiving stream data. Uses local Rust YouTube API (rs-youtube
+          # with server-side OAuth, auto-refresh, no browser needed).
           # This proves the post-delivery check detects a real state change.
-          $uri = "$($env:MANAGER_URL)/api/e2e/youtube-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)"
-          Write-Host "Checking YouTube stream status via manager API..."
-          $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
+          Write-Host "Checking YouTube stream status via local API..."
+          $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
 
           Write-Host "stream_receiving: $($response.stream_receiving)"
           Write-Host "stream_count: $($response.stream_count)"
-          Write-Host "broadcast_count: $($response.broadcast_count)"
 
-          if ($response.error_detail) {
-            throw "BASELINE FAILED: YouTube API error: $($response.error_detail)"
+          if ($response.error) {
+            throw "BASELINE FAILED: YouTube API error: $($response.error)"
           }
 
           if ($response.streams) {
             foreach ($s in $response.streams) {
               Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
-            }
-          }
-          if ($response.broadcasts) {
-            foreach ($bc in $response.broadcasts) {
-              Write-Host "  Broadcast '$($bc.title)': lifecycle=$($bc.life_cycle_status)"
             }
           }
 
@@ -1870,109 +1596,78 @@ jobs:
 
           Write-Host "=== Baseline PASSED: YouTube is NOT receiving stream data ==="
 
-      - name: Wait for delivering server instance ready
+      - name: Start delivery (Hetzner VPS)
         shell: powershell
-        timeout-minutes: 6
+        timeout-minutes: 8
         run: |
-          Write-Host "Waiting for Linode delivering server to boot and Django to start..."
-          Write-Host "(Instance was created during activate-receiving step)"
-          $maxRetries = 24
-          for ($i = 1; $i -le $maxRetries; $i++) {
-            try {
-              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
-                -Method GET -TimeoutSec 30
-
-              Write-Host "--- Attempt ${i}/${maxRetries} ---"
-              Write-Host "  server_ip: $($response.server_ip)"
-              Write-Host "  server_ready: $($response.server_ready)"
-
-              if ($response.server_ip -and $response.server_ready) {
-                Write-Host "=== Delivering server instance is READY at $($response.server_ip) ==="
-                return
-              }
-              if ($response.server_ip) {
-                Write-Host "  Instance exists at $($response.server_ip), waiting for Django to start..."
-              } else {
-                Write-Host "  Instance not yet provisioned on Linode..."
-              }
-            } catch {
-              Write-Host "Request failed on attempt ${i}: $_"
-            }
-            Start-Sleep -Seconds 15
+          # Find the active event to get event_id
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          if (-not $targetEvent) {
+            throw "FAILED: Event '$($env:EVENT_NAME)' not found"
           }
-          throw "FAILED: Delivering server instance not ready after $maxRetries attempts (~6 min)"
+          $eventId = $targetEvent.id
+          Write-Host "Starting delivery for event_id=$eventId..."
 
-      - name: Activate delivering
-        shell: powershell
-        timeout-minutes: 3
-        run: |
-          $body = @{
-            user_uuid = $env:CLIENT_UUID
-            event_name = $env:EVENT_NAME
-          } | ConvertTo-Json
+          $body = @{ event_id = $eventId } | ConvertTo-Json
+          $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/start" `
+            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 300
 
-          Write-Host "Activating delivering for $($env:EVENT_NAME)..."
-          $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/activate-delivering/" `
-            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
-
-          if ($response.status -ne "ok") {
-            throw "Failed to activate delivering: $($response | ConvertTo-Json)"
+          Write-Host "Delivery start response: $($response | ConvertTo-Json -Depth 3)"
+          if ($response.error) {
+            throw "FAILED: Delivery start error: $($response.error)"
           }
+          Write-Host "=== Delivery started: server=$($response.server_ip), hetzner_id=$($response.hetzner_id) ==="
 
-          Write-Host "Delivering activated: endpoint=$($response.endpoint), chunks=$($response.chunk_count)"
-          Write-Host "init_stream executed synchronously: $($response.init_stream_sync)"
-
-          if ($response.init_error) {
-            throw "init_stream failed: $($response.init_error)"
-          }
-
-      - name: Wait for delivering server ready
+      - name: Wait for delivery server ready
         shell: powershell
         timeout-minutes: 5
         run: |
-          Write-Host "Waiting for delivering server to start ffmpeg endpoints..."
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          $eventId = $targetEvent.id
+
+          Write-Host "Waiting for delivery server to start ffmpeg endpoints..."
           $maxRetries = 18
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
-              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
-                -Method GET -TimeoutSec 30
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
 
               Write-Host "--- Attempt ${i}/${maxRetries} ---"
-              Write-Host "  delivering_activated: $($response.delivering_activated)"
               Write-Host "  server_ip: $($response.server_ip)"
               Write-Host "  server_ready: $($response.server_ready)"
               Write-Host "  endpoints_alive: $($response.endpoints_alive)"
 
               if ($response.endpoint_details) {
                 foreach ($ep in $response.endpoint_details) {
-                  Write-Host "  Endpoint: $($ep.alias) | alive=$($ep.alive) | buffer=$($ep.buff_size_mb)MB | chunk=$($ep.current_chunk_id)"
+                  Write-Host "  Endpoint: $($ep.alias) | alive=$($ep.alive) | buffer=$($ep.buff_size_bytes)B | chunk=$($ep.current_chunk_id)"
                 }
               }
 
-              if ($response.delivering_activated -and $response.server_ready -and $response.endpoints_alive) {
-                Write-Host "=== Delivering server fully operational with live endpoints ==="
+              if ($response.server_ready -and $response.endpoints_alive) {
+                Write-Host "=== Delivery server fully operational with live endpoints ==="
                 return
-              }
-              if ($response.server_ready) {
-                Write-Host "  Server ready, waiting for ffmpeg endpoints to start..."
               }
             } catch {
               Write-Host "Request failed on attempt ${i}: $_"
             }
             Start-Sleep -Seconds 15
           }
-          throw "FAILED: Delivering server not ready after $maxRetries attempts (~4.5 min)"
+          throw "FAILED: Delivery server not ready after $maxRetries attempts (~4.5 min)"
 
       - name: Verify delivery progression
         shell: powershell
         timeout-minutes: 3
         run: |
           # Delivering server sends to YouTube via YT_HLS (HTTPS PUT), not RTMP
-          Write-Host "Verifying delivering server is actively sending to YouTube (YT_HLS)..."
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          $eventId = $targetEvent.id
+
+          Write-Host "Verifying delivery server is actively sending to YouTube (YT_HLS)..."
           Write-Host "Taking two readings 20s apart to confirm chunk progression..."
 
-          $r1 = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
-            -Method GET -TimeoutSec 30
+          $r1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
           $chunk1 = 0
           $alive1 = $false
           if ($r1.endpoint_details -and $r1.endpoint_details.Count -gt 0) {
@@ -1983,8 +1678,7 @@ jobs:
 
           Start-Sleep -Seconds 20
 
-          $r2 = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)" `
-            -Method GET -TimeoutSec 30
+          $r2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
           $chunk2 = 0
           $alive2 = $false
           if ($r2.endpoint_details -and $r2.endpoint_details.Count -gt 0) {
@@ -2008,38 +1702,32 @@ jobs:
         shell: powershell
         timeout-minutes: 4
         run: |
-          # Hard-fail check: Query the manager's YouTube Data API endpoint to
-          # verify YouTube's ingest server IS receiving stream data.
-          # Uses server-side OAuth with auto-refresh (no browser/Chrome needed).
+          # Hard-fail check: Query the local Rust YouTube API to verify
+          # YouTube's ingest server IS receiving stream data.
+          # Uses rs-youtube with server-side OAuth (auto-refresh, no browser needed).
           #
           # Auto-start is BANNED (YouTube destroys the stream afterward), so
           # the broadcast stays in "testing" state — we check liveStreams.list
           # for streamStatus == "active" which means data IS arriving.
-          $uri = "$($env:MANAGER_URL)/api/e2e/youtube-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)"
           $maxRetries = 12
           $retryDelay = 15
 
           for ($i = 1; $i -le $maxRetries; $i++) {
             Write-Host "--- Attempt ${i}/${maxRetries}: checking YouTube stream status ---"
             try {
-              $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
 
               Write-Host "  stream_receiving: $($response.stream_receiving)"
               Write-Host "  stream_count: $($response.stream_count)"
 
-              if ($response.error_detail) {
-                Write-Host "  API error: $($response.error_detail)"
-                throw "YouTube API error: $($response.error_detail)"
+              if ($response.error) {
+                Write-Host "  API error: $($response.error)"
+                throw "YouTube API error: $($response.error)"
               }
 
               if ($response.streams) {
                 foreach ($s in $response.streams) {
                   Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
-                }
-              }
-              if ($response.broadcasts) {
-                foreach ($bc in $response.broadcasts) {
-                  Write-Host "  Broadcast '$($bc.title)': lifecycle=$($bc.life_cycle_status)"
                 }
               }
 
@@ -2062,7 +1750,7 @@ jobs:
             }
           }
 
-          throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts (~$($maxRetries * $retryDelay)s). The delivering server confirmed chunk progression, but YouTube's ingest server does not show streamStatus=active."
+          throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts (~$($maxRetries * $retryDelay)s). The delivery server confirmed chunk progression, but YouTube's ingest server does not show streamStatus=active."
 
       - name: Stop OBS stream
         if: always()
@@ -2133,7 +1821,21 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
-          # Deactivate on local client
+          # Stop delivery (Hetzner VPS)
+          try {
+            $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+            $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+            if ($targetEvent) {
+              $body = @{ event_id = $targetEvent.id } | ConvertTo-Json
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/stop" `
+                -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
+              Write-Host "Delivery stopped for event_id=$($targetEvent.id)"
+            }
+          } catch {
+            Write-Host "Delivery stop failed: $_"
+          }
+
+          # Deactivate event on local client
           try {
             $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
             $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
@@ -2145,65 +1847,40 @@ jobs:
           } catch {
             Write-Host "Local deactivation failed: $_"
           }
-
-          # Deactivate on manager
-          $body = @{
-            user_uuid = $env:CLIENT_UUID
-            event_name = $env:EVENT_NAME
-          } | ConvertTo-Json
-
-          Write-Host "Deactivating $($env:EVENT_NAME) on manager..."
-          try {
-            $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/deactivate/" `
-              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
-
-            Write-Host "Deactivated: receiving=$($response.receiving_activated), delivering=$($response.delivering_activated)"
-            Write-Host "endpoints_stopped: $($response.endpoints_stopped)"
-            Write-Host "endpoint_count_after: $($response.endpoint_count_after)"
-          } catch {
-            Write-Host "Deactivation failed: $_"
-          }
           # Always exit successfully - deactivation is best-effort cleanup
           exit 0
 
-      - name: Verify delivering server clean state
+      - name: Verify delivery instances cleaned up
         if: always()
         shell: powershell
         timeout-minutes: 2
         run: |
-          Write-Host "Verifying delivering server has no running endpoints..."
+          Write-Host "Verifying all delivery instances have been cleaned up..."
           $maxRetries = 6
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
-              $response = Invoke-RestMethod -Uri "$($env:MANAGER_URL)/api/e2e/delivering-status/?user_uuid=$env:CLIENT_UUID&event_name=$env:EVENT_NAME" -TimeoutSec 30
+              $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
 
-              Write-Host "--- Attempt ${i}/${maxRetries} ---"
-              Write-Host "  Server IP: $($response.server_ip)"
-              Write-Host "  Endpoints alive: $($response.endpoints_alive)"
-
-              if (-not $response.endpoints_alive) {
-                Write-Host "Delivering server is clean (0 running endpoints)"
+              if (-not $instances -or $instances.Count -eq 0) {
+                Write-Host "All delivery instances cleaned up"
                 exit 0
               }
 
-              Write-Host "  Endpoint details:"
-              foreach ($ep in $response.endpoint_details) {
-                Write-Host "    $($ep.alias): alive=$($ep.alive), pid=$($ep.pid)"
+              Write-Host "--- Attempt ${i}/${maxRetries} ---"
+              foreach ($inst in $instances) {
+                Write-Host "  Instance: id=$($inst.id), status=$($inst.status), event_id=$($inst.event_id)"
               }
 
               if ($i -lt $maxRetries) {
-                Write-Host "  Waiting 10s for endpoints to stop..."
+                Write-Host "  Waiting 10s for cleanup..."
                 Start-Sleep -Seconds 10
               }
-            } catch [System.Net.WebException] {
-              Write-Host "Delivering server not reachable - assuming clean"
-              exit 0
             } catch {
               Write-Host "Request failed: $_"
               if ($i -lt $maxRetries) { Start-Sleep -Seconds 10 }
             }
           }
-          throw "FAIL: Delivering server still has running endpoints after $maxRetries attempts"
+          throw "FAIL: Delivery instances still exist after $maxRetries attempts"
 
       - name: Verify YouTube stopped receiving after deactivation
         if: always() && steps.verify_yt_receiving.outcome == 'success'
@@ -2213,21 +1890,20 @@ jobs:
           # Post-deactivation check: verify YouTube's ingest server is no longer
           # receiving stream data after the event was deactivated.
           # Completes the 3-phase lifecycle: not-receiving → receiving → not-receiving.
-          $uri = "$($env:MANAGER_URL)/api/e2e/youtube-status/?user_uuid=$($env:CLIENT_UUID)&event_name=$($env:EVENT_NAME)"
           $maxRetries = 12
           $retryDelay = 15
 
           for ($i = 1; $i -le $maxRetries; $i++) {
             Write-Host "--- Attempt ${i}/${maxRetries}: checking YouTube stopped receiving ---"
             try {
-              $response = Invoke-RestMethod -Uri $uri -Method GET -TimeoutSec 30
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
 
               Write-Host "  stream_receiving: $($response.stream_receiving)"
               Write-Host "  stream_count: $($response.stream_count)"
 
-              if ($response.error_detail) {
-                Write-Host "  API error: $($response.error_detail)"
-                throw "YouTube API error: $($response.error_detail)"
+              if ($response.error) {
+                Write-Host "  API error: $($response.error)"
+                throw "YouTube API error: $($response.error)"
               }
 
               if ($response.streams) {

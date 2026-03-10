@@ -2,7 +2,9 @@ use sqlx::Row;
 use sqlx::sqlite::SqlitePool;
 
 use crate::error::Result;
-use crate::models::{DeliveryInstance, EndpointConfig, StreamingEvent, YouTubeOAuth};
+use crate::models::{
+    DeliveryEndpointStatus, DeliveryInstance, EndpointConfig, StreamingEvent, YouTubeOAuth,
+};
 
 // --- Endpoint Configs ---
 
@@ -262,6 +264,87 @@ pub async fn list_delivery_instances(pool: &SqlitePool) -> Result<Vec<DeliveryIn
             event_id: r.get("event_id"),
             created_at: r.get("created_at"),
             last_health_at: r.get("last_health_at"),
+        })
+        .collect())
+}
+
+pub async fn get_delivery_instance_by_event(
+    pool: &SqlitePool,
+    event_id: i64,
+) -> Result<Option<DeliveryInstance>> {
+    let row = sqlx::query(
+        "SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at
+         FROM delivery_instances WHERE event_id = ?1 AND status != 'deleted' LIMIT 1",
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| DeliveryInstance {
+        id: r.get("id"),
+        hetzner_id: r.get("hetzner_id"),
+        name: r.get("name"),
+        ipv4: r.get("ipv4"),
+        status: r.get("status"),
+        server_type: r.get("server_type"),
+        event_id: r.get("event_id"),
+        created_at: r.get("created_at"),
+        last_health_at: r.get("last_health_at"),
+    }))
+}
+
+// --- Delivery Endpoint Status ---
+
+pub async fn upsert_delivery_endpoint_status(
+    pool: &SqlitePool,
+    instance_id: i64,
+    alias: &str,
+    alive: bool,
+    buff_size_bytes: i64,
+    current_chunk_id: i64,
+) -> Result<()> {
+    // Delete existing row for this instance+alias, then insert fresh
+    sqlx::query("DELETE FROM delivery_endpoint_status WHERE instance_id = ?1 AND alias = ?2")
+        .bind(instance_id)
+        .bind(alias)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO delivery_endpoint_status (instance_id, alias, alive, buff_size_bytes, current_chunk_id, last_check_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+    )
+    .bind(instance_id)
+    .bind(alias)
+    .bind(alive as i32)
+    .bind(buff_size_bytes)
+    .bind(current_chunk_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_delivery_endpoint_statuses(
+    pool: &SqlitePool,
+    instance_id: i64,
+) -> Result<Vec<DeliveryEndpointStatus>> {
+    let rows = sqlx::query(
+        "SELECT id, instance_id, alias, alive, buff_size_bytes, current_chunk_id, last_check_at
+         FROM delivery_endpoint_status WHERE instance_id = ?1 ORDER BY alias",
+    )
+    .bind(instance_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| DeliveryEndpointStatus {
+            id: r.get("id"),
+            instance_id: r.get("instance_id"),
+            alias: r.get("alias"),
+            alive: r.get::<i32, _>("alive") != 0,
+            buff_size_bytes: r.get("buff_size_bytes"),
+            current_chunk_id: r.get("current_chunk_id"),
+            last_check_at: r.get("last_check_at"),
         })
         .collect())
 }

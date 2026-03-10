@@ -382,3 +382,106 @@ async fn endpoint_unique_alias_constraint() {
     let result = create_endpoint_config(&pool, "YouTube", "FB", "key2", false).await;
     assert!(result.is_err());
 }
+
+#[tokio::test]
+async fn delivery_instance_by_event() {
+    let pool = setup_db().await;
+
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
+
+    // No instance yet
+    assert!(
+        get_delivery_instance_by_event(&pool, event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let id = create_delivery_instance(&pool, 99999, "rs-del-1", "5.6.7.8", "cx22", Some(event_id))
+        .await
+        .unwrap();
+
+    let inst = get_delivery_instance_by_event(&pool, event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(inst.id, id);
+    assert_eq!(inst.hetzner_id, 99999);
+    assert_eq!(inst.event_id, Some(event_id));
+
+    // Deleted instances should not be returned
+    update_delivery_instance_status(&pool, id, "deleted")
+        .await
+        .unwrap();
+    assert!(
+        get_delivery_instance_by_event(&pool, event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn delivery_endpoint_status_crud() {
+    let pool = setup_db().await;
+
+    let inst_id = create_delivery_instance(&pool, 11111, "rs-del-1", "1.2.3.4", "cx22", None)
+        .await
+        .unwrap();
+
+    // Initially empty
+    let statuses = get_delivery_endpoint_statuses(&pool, inst_id)
+        .await
+        .unwrap();
+    assert!(statuses.is_empty());
+
+    // Insert status for two endpoints
+    upsert_delivery_endpoint_status(&pool, inst_id, "YouTube", true, 4096, 42)
+        .await
+        .unwrap();
+    upsert_delivery_endpoint_status(&pool, inst_id, "Facebook", false, 0, 10)
+        .await
+        .unwrap();
+
+    let statuses = get_delivery_endpoint_statuses(&pool, inst_id)
+        .await
+        .unwrap();
+    assert_eq!(statuses.len(), 2);
+    // Ordered by alias
+    assert_eq!(statuses[0].alias, "Facebook");
+    assert!(!statuses[0].alive);
+    assert_eq!(statuses[1].alias, "YouTube");
+    assert!(statuses[1].alive);
+    assert_eq!(statuses[1].buff_size_bytes, 4096);
+    assert_eq!(statuses[1].current_chunk_id, 42);
+
+    // Upsert updates existing
+    upsert_delivery_endpoint_status(&pool, inst_id, "YouTube", true, 8192, 99)
+        .await
+        .unwrap();
+    let statuses = get_delivery_endpoint_statuses(&pool, inst_id)
+        .await
+        .unwrap();
+    assert_eq!(statuses.len(), 2);
+    let yt = statuses.iter().find(|s| s.alias == "YouTube").unwrap();
+    assert_eq!(yt.buff_size_bytes, 8192);
+    assert_eq!(yt.current_chunk_id, 99);
+}
+
+#[tokio::test]
+async fn delivery_endpoint_status_cascade_on_instance_delete() {
+    let pool = setup_db().await;
+
+    let inst_id = create_delivery_instance(&pool, 22222, "rs-del-2", "2.3.4.5", "cx22", None)
+        .await
+        .unwrap();
+    upsert_delivery_endpoint_status(&pool, inst_id, "YT", true, 100, 5)
+        .await
+        .unwrap();
+
+    delete_delivery_instance(&pool, inst_id).await.unwrap();
+    let statuses = get_delivery_endpoint_statuses(&pool, inst_id)
+        .await
+        .unwrap();
+    assert!(statuses.is_empty());
+}

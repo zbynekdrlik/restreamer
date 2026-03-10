@@ -29,12 +29,12 @@ When you create, modify, or debug ANY Windows application, script, agent, GUI, a
 
 ## Project Structure
 
-| Directory             | Language        | Purpose                                           |
-| --------------------- | --------------- | ------------------------------------------------- |
-| `local-client/`       | Python (Django) | Legacy Windows RTMP client (being replaced)       |
-| `local-client-rs/`    | Rust + Leptos   | Unified Tauri app with embedded service + WASM UI |
-| `manager-server/`     | Python (Django) | Central management server (Linode VPS)            |
-| `delivering-service/` | Python (Django) | Linux re-streaming service                        |
+| Directory             | Language        | Purpose                                               |
+| --------------------- | --------------- | ----------------------------------------------------- |
+| `local-client/`       | Python (Django) | Legacy Windows RTMP client (being replaced)           |
+| `local-client-rs/`    | Rust + Leptos   | Unified Tauri app with embedded service + WASM UI     |
+| `manager-server/`     | Python (Django) | Central management server (legacy, being retired)     |
+| `delivering-service/` | Python (Django) | Legacy re-streaming service (replaced by rs-delivery) |
 
 ## Strict Rules
 
@@ -186,7 +186,7 @@ cargo tauri build                    # Production Tauri build (NSIS installer)
 
 ### Architecture
 
-- **Workspace** with 6 crates (under `crates/`): `rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`
+- **Workspace** with 11 crates (under `crates/`): `rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `rs-cloud`, `rs-delivery`, `rs-ffmpeg`, `rs-youtube`, `rs-ts-normalize`
 - **Excluded from workspace**: `src-tauri` (needs built frontend), `leptos-ui` (WASM target)
 - **Rust edition**: 2024 — requires `unsafe` for `std::env::set_var`/`remove_var`
 - **Minimum Rust**: 1.85
@@ -239,7 +239,7 @@ ruff format --check . # Format check
 
 ### CI Settings Pattern
 
-Each service has `settings_ci.py` that uses SQLite `:memory:`, eager Celery (`CELERY_TASK_ALWAYS_EAGER=True`), and dummy AWS credentials.
+Each service has `settings_ci.py` that uses SQLite `:memory:` and dummy AWS credentials.
 
 ## Versioning
 
@@ -303,32 +303,27 @@ Start-ScheduledTask -TaskName "RestreamerTray"
 - `LogonType Interactive` - runs in desktop session
 - `Start-ScheduledTask` cmdlet to trigger (NOT `schtasks /Run`)
 
-### restreamer.newlevel.media (Manager Server)
+### Delivery (Hetzner VPS)
 
-- **Host**: `restreamer.newlevel.media` (Linode VPS, IP `172.105.95.118`)
-- **Install Path**: `/root/kristian/manager-server/restreamer-manager/`
-- **Virtualenv**: `/root/.virtualenvs/venv/`
-- **Control Panel**: `https://restreamer.newlevel.media/control/home/`
-- **Process Manager**: tmux session `restreamer`, gunicorn + nginx
-- **Celery**: worker on `init_stream_queue`
-- **DB**: PostgreSQL 16
-- **Credentials**: See `~/.restreamer-secrets/manager-server.env` (not tracked by git)
-- **SNV-stream client** is our church streaming client
+- **Provider**: Hetzner Cloud (replaces legacy Linode infrastructure)
+- **Binary**: `rs-delivery` — standalone Rust binary deployed to ad-hoc VPS instances
+- **Orchestration**: `DeliveryOrchestrator` in `rs-api` manages Hetzner server lifecycle
+- **Flow**: Create Hetzner server with cloud-init → download rs-delivery from S3 → POST `/api/init` → stream via ffmpeg
 
-#### E2E Testing API (`/api/e2e/`)
+#### E2E Testing API (Local Rust)
 
-CI uses these endpoints to orchestrate streaming tests without SSH:
+CI uses these local Rust API endpoints at `http://127.0.0.1:8910`:
 
-| Endpoint                        | Method | Purpose                                          |
-| ------------------------------- | ------ | ------------------------------------------------ |
-| `/api/e2e/activate-receiving/`  | POST   | Enable event receiving + create Linode instance  |
-| `/api/e2e/activate-delivering/` | POST   | Activate delivering + synchronous init_stream    |
-| `/api/e2e/delivering-status/`   | GET    | Check delivering server health + endpoint status |
-| `/api/e2e/chunk-verification/`  | GET    | Verify chunk count in manager DB                 |
-| `/api/e2e/youtube-status/`      | GET    | Query YouTube Data API for stream reception      |
-| `/api/e2e/deactivate/`          | POST   | Stop receiving + delivering, verify cleanup      |
+| Endpoint                     | Method | Purpose                                        |
+| ---------------------------- | ------ | ---------------------------------------------- |
+| `/api/v1/delivery/start`     | POST   | Create Hetzner VPS, deploy rs-delivery, init   |
+| `/api/v1/delivery/status`    | GET    | Check delivery server health + endpoint status |
+| `/api/v1/delivery/stop`      | POST   | Stop delivery, delete Hetzner server           |
+| `/api/v1/delivery/instances` | GET    | List active delivery instances                 |
+| `/api/v1/youtube/status`     | GET    | Query YouTube Data API for stream reception    |
+| `/api/v1/youtube/oauth/seed` | POST   | Seed YouTube OAuth tokens from CI secrets      |
 
-All require `user_uuid` param. Optional `event_name` defaults to `"E2E-Test"`.
+No external manager server or SSH needed. All E2E orchestration is local.
 
 ## Developer Tools
 
@@ -337,6 +332,5 @@ All require `user_uuid` param. Optional `event_name` defaults to `"E2E-Test"`.
 Operational guides for common tasks:
 
 - `stream-lan-operations.md` — SSH, OBS WebSocket, client config
-- `manager-server-operations.md` — Manager SSH, Linode API, Celery
 - `windows-desktop-app-ssh.md` — Windows GUI automation
 - `windows-gui-deployment.md` — Task Scheduler patterns

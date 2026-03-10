@@ -69,7 +69,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/endpoints", post(handlers::create_endpoint))
         .route("/endpoints/{id}", get(handlers::get_endpoint_by_id))
         .route("/endpoints/{id}", put(handlers::update_endpoint))
-        .route("/endpoints/{id}", delete(handlers::delete_endpoint));
+        .route("/endpoints/{id}", delete(handlers::delete_endpoint))
+        // Delivery orchestration
+        .route("/delivery/start", post(handlers::delivery_start))
+        .route("/delivery/status", get(handlers::delivery_status))
+        .route("/delivery/stop", post(handlers::delivery_stop))
+        .route("/delivery/instances", get(handlers::list_delivery_instances))
+        // YouTube
+        .route("/youtube/status", get(handlers::youtube_status))
+        .route("/youtube/oauth/seed", post(handlers::youtube_oauth_seed));
 
     // Allow any origin so the dashboard is accessible from LAN devices
     let cors = CorsLayer::new()
@@ -684,5 +692,139 @@ mod tests {
         let logs: handlers::LogsResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(logs.entries.len(), 1);
         assert!(logs.entries[0].message.contains("Upload"));
+    }
+
+    #[tokio::test]
+    async fn delivery_start_returns_503_without_hetzner_token() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/delivery/start")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"event_id": 1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn delivery_status_returns_503_without_hetzner_token() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/status?event_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn delivery_stop_returns_503_without_hetzner_token() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/delivery/stop")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"event_id": 1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn youtube_status_returns_503_without_hetzner_token() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/youtube/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn youtube_oauth_seed_stores_tokens() {
+        let state = test_state().await;
+        let app = build_router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/youtube/oauth/seed")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "refresh_token": "test-refresh",
+                            "client_id": "test-client",
+                            "client_secret": "test-secret"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify tokens stored
+        let oauth = rs_core::db::get_youtube_oauth(&state.pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(oauth.refresh_token, "test-refresh");
+        assert_eq!(oauth.client_id, "test-client");
+    }
+
+    #[tokio::test]
+    async fn delivery_instances_list_returns_empty() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/instances")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let instances: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(instances.is_empty());
     }
 }
