@@ -89,10 +89,10 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
 - **FIX FAILURES IMMEDIATELY**: If any CI job fails, investigate and fix immediately. Push fixes and monitor again until green.
 - **VERIFY DEPLOYMENT**: After `deploy-stream-lan` job completes, verify deployment was successful:
   ```bash
-  # Check service is running with new version
+  # Check Windows Service is running
+  sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Get-Service RestreamerService | Format-List Name,Status"'
+  # Check service binary version
   sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "(Get-Item \"C:\\Program Files\\Restreamer\\restreamer-service.exe\").VersionInfo.FileVersion"'
-  # Check tray app is running
-  sshpass -p 'newlevel' ssh newlevel@stream.lan 'tasklist | findstr restreamer'
   # Check API responds
   sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/status"'
   ```
@@ -280,28 +280,8 @@ dev → PR to main → merge → auto-tag (local-client-rs-vX.Y.Z) → rust-rele
 - **Credentials**: See `~/.restreamer-secrets/stream-lan.env` (not tracked by git)
 - **Install**: `irm https://raw.githubusercontent.com/zbynekdrlik/restreamer/main/local-client-rs/install.ps1 | iex`
 - **Self-hosted runner**: GitHub Actions runner for CI deployment (runs as SYSTEM)
-- **Tray app**: Launched via Windows Task Scheduler with interactive session
-
-#### Windows GUI App via Task Scheduler (MANDATORY PATTERN)
-
-**To start GUI apps in user's desktop session from CI/service context:**
-
-```powershell
-$action = New-ScheduledTaskAction -Execute "C:\Program Files\Restreamer\restreamer-tray.exe"
-$trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
-$principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
-
-Unregister-ScheduledTask -TaskName "RestreamerTray" -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName "RestreamerTray" -Action $action -Trigger $trigger -Principal $principal -Settings $settings
-
-Start-ScheduledTask -TaskName "RestreamerTray"
-```
-
-**Critical settings:**
-
-- `LogonType Interactive` - runs in desktop session
-- `Start-ScheduledTask` cmdlet to trigger (NOT `schtasks /Run`)
+- **Service**: `RestreamerService` Windows Service (headless, no desktop session required)
+- **Binaries**: `restreamer-service.exe` (headless service) + `Restreamer.exe` (Tauri GUI, optional)
 
 ### Delivery (Hetzner VPS)
 
@@ -333,4 +313,3 @@ Operational guides for common tasks:
 
 - `stream-lan-operations.md` — SSH, OBS WebSocket, client config
 - `windows-desktop-app-ssh.md` — Windows GUI automation
-- `windows-gui-deployment.md` — Task Scheduler patterns
