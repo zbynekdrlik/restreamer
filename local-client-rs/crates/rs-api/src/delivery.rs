@@ -81,10 +81,7 @@ impl DeliveryOrchestrator {
     ///
     /// Creates a Hetzner VPS, records it in the DB, polls until running,
     /// then POSTs /api/init to the rs-delivery binary on the VPS.
-    pub async fn start_delivery(
-        &self,
-        event_id: i64,
-    ) -> anyhow::Result<StartDeliveryResult> {
+    pub async fn start_delivery(&self, event_id: i64) -> anyhow::Result<StartDeliveryResult> {
         // Check for existing active instance
         if let Some(existing) = db::get_delivery_instance_by_event(&self.pool, event_id).await? {
             if existing.status != "deleted" {
@@ -279,10 +276,7 @@ impl DeliveryOrchestrator {
                 {
                     Ok(resp) if resp.status().is_success() => {
                         let body: serde_json::Value = resp.json().await.unwrap_or_default();
-                        let ep_entries = body["endpoints"]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default();
+                        let ep_entries = body["endpoints"].as_array().cloned().unwrap_or_default();
 
                         let mut statuses = Vec::new();
                         for entry in ep_entries {
@@ -293,12 +287,7 @@ impl DeliveryOrchestrator {
 
                             // Update DB with latest status
                             if let Err(e) = db::upsert_delivery_endpoint_status(
-                                &self.pool,
-                                inst.id,
-                                &alias,
-                                alive,
-                                buff,
-                                chunk_id,
+                                &self.pool, inst.id, &alias, alive, buff, chunk_id,
                             )
                             .await
                             {
@@ -356,7 +345,10 @@ impl DeliveryOrchestrator {
 
         // Delete Hetzner server
         if let Err(e) = self.hetzner.delete_server(instance.hetzner_id).await {
-            error!(hetzner_id = instance.hetzner_id, "Failed to delete Hetzner server: {e}");
+            error!(
+                hetzner_id = instance.hetzner_id,
+                "Failed to delete Hetzner server: {e}"
+            );
         }
 
         db::update_delivery_instance_status(&self.pool, instance.id, "deleted").await?;
@@ -402,17 +394,16 @@ impl DeliveryOrchestrator {
 
             match oauth::refresh_access_token(&oauth_tokens).await {
                 Ok(resp) => {
-                    let new_expires = resp
-                        .expires_in
-                        .map(|secs| {
-                            (chrono::Utc::now() + chrono::Duration::seconds(secs as i64))
-                                .to_rfc3339()
-                        });
+                    let new_expires = resp.expires_in.map(|secs| {
+                        (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339()
+                    });
 
                     if let Err(e) = db::upsert_youtube_oauth(
                         &self.pool,
                         &resp.access_token,
-                        resp.refresh_token.as_deref().unwrap_or(&tokens.refresh_token),
+                        resp.refresh_token
+                            .as_deref()
+                            .unwrap_or(&tokens.refresh_token),
                         &tokens.token_uri,
                         &tokens.client_id,
                         &tokens.client_secret,
@@ -455,7 +446,11 @@ impl DeliveryOrchestrator {
     async fn find_delivery_image(&self) -> anyhow::Result<String> {
         // Try to find a snapshot with the configured label
         let label = &self.config.hetzner.snapshot_label;
-        match self.hetzner.list_snapshots(Some(&format!("app={label}"))).await {
+        match self
+            .hetzner
+            .list_snapshots(Some(&format!("app={label}")))
+            .await
+        {
             Ok(snapshots) if !snapshots.is_empty() => {
                 // Use latest snapshot
                 let latest = snapshots.last().unwrap();

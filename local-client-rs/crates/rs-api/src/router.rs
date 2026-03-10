@@ -74,7 +74,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/delivery/start", post(handlers::delivery_start))
         .route("/delivery/status", get(handlers::delivery_status))
         .route("/delivery/stop", post(handlers::delivery_stop))
-        .route("/delivery/instances", get(handlers::list_delivery_instances))
+        .route(
+            "/delivery/instances",
+            get(handlers::list_delivery_instances),
+        )
         // YouTube
         .route("/youtube/status", get(handlers::youtube_status))
         .route("/youtube/oauth/seed", post(handlers::youtube_oauth_seed));
