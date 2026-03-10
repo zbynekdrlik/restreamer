@@ -879,16 +879,24 @@ jobs:
           # Start the service
           Write-Host "=== Starting service ==="
           sc.exe start $ServiceName
-          Start-Sleep -Seconds 5
 
-          # Verify service is running
-          $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-          if ($svc -and $svc.Status -eq "Running") {
-            Write-Host "=== Service running (Status: $($svc.Status)) ==="
-          } else {
-            Write-Host "Service status: $($svc.Status)"
-            # Check Windows Event Log for service errors
-            Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=(Get-Date).AddMinutes(-2)} -MaxEvents 10 -ErrorAction SilentlyContinue | Format-Table TimeCreated,Message -Wrap
+          # Wait for service to reach Running state (may take time for DB migration + server init)
+          $maxWait = 30
+          $elapsed = 0
+          while ($elapsed -lt $maxWait) {
+            Start-Sleep -Seconds 3
+            $elapsed += 3
+            $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if ($svc.Status -eq "Running") {
+              Write-Host "=== Service running after ${elapsed}s ==="
+              break
+            }
+            Write-Host "Service status: $($svc.Status) (${elapsed}s / ${maxWait}s)"
+          }
+
+          if ($svc.Status -ne "Running") {
+            Write-Host "Service failed to start after ${maxWait}s (status: $($svc.Status))"
+            Get-WinEvent -FilterHashtable @{LogName="System"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Where-Object { $_.Message -like "*Restreamer*" -or $_.Message -like "*service*" } | Format-Table TimeCreated,Message -Wrap
             Write-Error "Service failed to start"
             exit 1
           }
