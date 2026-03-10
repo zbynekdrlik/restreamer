@@ -25,7 +25,14 @@ pub fn App() -> impl IntoView {
         let interval = Interval::new(3000, move || {
             leptos::task::spawn_local(async move {
                 let result = api::get_status().await;
-                set_status.set(Some(result));
+                // Only update if data changed to avoid unnecessary re-renders
+                let should_update = match (&result, &status.get_untracked()) {
+                    (Ok(new), Some(Ok(old))) => new != old,
+                    _ => true,
+                };
+                if should_update {
+                    set_status.set(Some(result));
+                }
             });
         });
         // Keep the interval alive

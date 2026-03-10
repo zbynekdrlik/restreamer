@@ -19,7 +19,7 @@ pub struct CommandResult<T> {
 }
 
 /// Streaming event from the backend.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct StreamingEvent {
     pub id: i64,
     pub name: String,
@@ -29,7 +29,7 @@ pub struct StreamingEvent {
 }
 
 /// Chunk statistics from the backend.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ChunkStats {
     pub total_chunks: i64,
     pub pending_chunks: i64,
@@ -40,7 +40,7 @@ pub struct ChunkStats {
 }
 
 /// Combined status response.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct StatusResponse {
     pub streaming_event: Option<StreamingEvent>,
     pub chunk_stats: ChunkStats,
