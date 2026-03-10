@@ -70,11 +70,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/endpoints/{id}", get(handlers::get_endpoint_by_id))
         .route("/endpoints/{id}", put(handlers::update_endpoint))
         .route("/endpoints/{id}", delete(handlers::delete_endpoint))
-        // Schedules CRUD
-        .route("/schedules", get(handlers::list_schedules))
-        .route("/schedules", post(handlers::create_schedule))
-        .route("/schedules/{id}", put(handlers::update_schedule))
-        .route("/schedules/{id}", delete(handlers::delete_schedule));
+;
 
     // Allow any origin so the dashboard is accessible from LAN devices
     let cors = CorsLayer::new()
@@ -283,7 +279,7 @@ mod tests {
         let state = test_state().await;
 
         // Create a streaming event first
-        db::upsert_streaming_event(&state.pool, "evt-1", Some("Test"), "127.0.0.1")
+        db::upsert_streaming_event(&state.pool, "evt-1")
             .await
             .unwrap();
 

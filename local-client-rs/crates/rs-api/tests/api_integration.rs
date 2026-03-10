@@ -66,7 +66,7 @@ async fn streaming_event_lifecycle() {
     assert!(body.is_null());
 
     // Create a streaming event directly in DB
-    db::upsert_streaming_event(&pool, "evt-integration-1", Some("Test Event"), "127.0.0.1")
+    db::upsert_streaming_event(&pool, "evt-integration-1")
         .await
         .unwrap();
 
@@ -76,8 +76,7 @@ async fn streaming_event_lifecycle() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["identifier"], "evt-integration-1");
-    assert_eq!(body["short_description"], "Test Event");
+    assert_eq!(body["name"], "evt-integration-1");
 
     // Delete it via API
     let client = reqwest::Client::new();
@@ -103,7 +102,7 @@ async fn chunks_crud_via_http() {
     let (base, _) = start_server(state).await;
 
     // Create a streaming event (chunks require one)
-    db::upsert_streaming_event(&pool, "evt-chunk-test", Some("Chunk Test"), "127.0.0.1")
+    db::upsert_streaming_event(&pool, "evt-chunk-test")
         .await
         .unwrap();
     let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
@@ -160,7 +159,7 @@ async fn chunks_pagination() {
     let pool = state.pool.clone();
     let (base, _) = start_server(state).await;
 
-    db::upsert_streaming_event(&pool, "evt-pag", None, "127.0.0.1")
+    db::upsert_streaming_event(&pool, "evt-pag")
         .await
         .unwrap();
     let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
@@ -253,7 +252,7 @@ async fn toggle_receiving_and_delivering() {
     assert_eq!(resp.status(), 404);
 
     // Create event
-    db::upsert_streaming_event(&pool, "evt-toggle", None, "127.0.0.1")
+    db::upsert_streaming_event(&pool, "evt-toggle")
         .await
         .unwrap();
 
@@ -398,7 +397,7 @@ async fn clear_chunks_resets_stats_to_zero() {
     let (base, _) = start_server(state).await;
 
     // Simulate old session: create event + chunks, mark some as sent
-    let event_id = db::upsert_streaming_event(&pool, "old-session", None, "127.0.0.1")
+    let event_id = db::upsert_streaming_event(&pool, "old-session")
         .await
         .unwrap();
     db::insert_chunk(&pool, event_id, "/tmp/old1.bin", 1024, "md5a")

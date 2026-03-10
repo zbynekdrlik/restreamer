@@ -19,7 +19,6 @@ use rs_endpoint::uploader::ChunkUploader;
 use rs_inpoint::chunker::ChunkSink;
 use rs_inpoint::rtmp_server::RtmpServer;
 
-use crate::scheduler::Scheduler;
 use crate::shutdown::ShutdownCoordinator;
 
 /// Main service orchestrator that starts all components.
@@ -236,11 +235,6 @@ impl ServiceCore {
             .await;
         });
 
-        // Scheduler (checks scheduled_streams table periodically)
-        let scheduler = Scheduler::new(pool.clone(), ws_tx.clone());
-        let scheduler_shutdown = shutdown.subscribe();
-        let scheduler_handle = tokio::spawn(async move { scheduler.run(scheduler_shutdown).await });
-
         // Wait for shutdown signal
         info!("All services started.");
         shutdown_signal.await;
@@ -260,10 +254,6 @@ impl ServiceCore {
         match endpoint_task.await {
             Ok(()) => info!("Endpoint stopped cleanly"),
             Err(e) => tracing::error!("Endpoint task panicked: {e}"),
-        }
-        match scheduler_handle.await {
-            Ok(()) => info!("Scheduler stopped cleanly"),
-            Err(e) => tracing::error!("Scheduler task panicked: {e}"),
         }
         // Drop the chunk channel so the chunk task can exit
         drop(chunk_sink);

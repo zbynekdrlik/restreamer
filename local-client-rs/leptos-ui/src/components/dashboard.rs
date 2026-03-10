@@ -43,19 +43,7 @@ pub fn Dashboard(status: StatusResponse) -> impl IntoView {
                         <div class="event-info">
                             <div class="event-field">
                                 <div class="event-field-label">"Event Name"</div>
-                                <div class="event-field-value">
-                                    {e.short_description.unwrap_or_else(|| "Unnamed".to_string())}
-                                </div>
-                            </div>
-                            <div class="event-field">
-                                <div class="event-field-label">"Identifier"</div>
-                                <div class="event-field-value">
-                                    {e.identifier.unwrap_or_else(|| "-".to_string())}
-                                </div>
-                            </div>
-                            <div class="event-field">
-                                <div class="event-field-label">"Server IP"</div>
-                                <div class="event-field-value">{e.server_ip}</div>
+                                <div class="event-field-value">{e.name}</div>
                             </div>
                             <div class="event-field">
                                 <div class="event-field-label">"Received"</div>

@@ -6,7 +6,6 @@
 
 mod log_capture;
 mod orchestrator;
-mod scheduler;
 mod shutdown;
 
 pub use log_capture::LogCaptureLayer;

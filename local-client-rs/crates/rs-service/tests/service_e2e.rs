@@ -197,7 +197,7 @@ async fn full_pipeline_rtmp_to_db_chunks() {
 
     // Create a streaming event directly in DB
     let event_id =
-        db::upsert_streaming_event(&pool, "e2e-test-stream", Some("E2E test"), "127.0.0.1")
+        db::upsert_streaming_event(&pool, "e2e-test-stream")
             .await
             .unwrap();
     assert!(event_id > 0);
@@ -333,14 +333,9 @@ async fn api_shows_correct_status_during_stream() {
     );
 
     // Create streaming event directly in DB
-    db::upsert_streaming_event(
-        &pool,
-        "status-test-stream",
-        Some("Status test"),
-        "127.0.0.1",
-    )
-    .await
-    .unwrap();
+    db::upsert_streaming_event(&pool, "status-test-stream")
+        .await
+        .unwrap();
 
     // Health endpoint should work
     let client = reqwest::Client::new();

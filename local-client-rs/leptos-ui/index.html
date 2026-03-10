@@ -330,23 +330,20 @@
 
         /* Events tab */
         .events-tab h2,
-        .endpoints-tab h2,
-        .schedules-tab h2 {
+        .endpoints-tab h2 {
             margin-bottom: 20px;
             font-size: 1.3rem;
         }
 
         .event-list,
-        .endpoint-list,
-        .schedule-list {
+        .endpoint-list {
             display: flex;
             flex-direction: column;
             gap: 12px;
         }
 
         .events-tab .event-card,
-        .endpoint-card,
-        .schedule-card {
+        .endpoint-card {
             background-color: var(--bg-card);
             border-radius: 12px;
             padding: 16px;
@@ -362,11 +359,6 @@
             flex-wrap: wrap;
         }
 
-        .event-desc {
-            color: var(--text-secondary);
-            font-size: 0.9rem;
-        }
-
         .event-status {
             display: flex;
             gap: 8px;
@@ -374,8 +366,7 @@
         }
 
         .event-actions,
-        .endpoint-actions,
-        .schedule-actions {
+        .endpoint-actions {
             display: flex;
             gap: 8px;
             margin-top: 10px;
@@ -388,18 +379,72 @@
             text-transform: uppercase;
         }
 
-        /* Schedules tab */
-        .schedule-info {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-            flex-wrap: wrap;
+        /* Endpoint assignment within events */
+        .assigned-endpoints {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: var(--bg-secondary);
+            border-radius: 8px;
         }
 
-        .next-run {
-            color: var(--text-secondary);
+        .assigned-label {
             font-size: 0.85rem;
-            margin-top: 8px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .assigned-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .assigned-ep {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            background-color: var(--bg-card);
+            border-radius: 8px;
+            font-size: 0.85rem;
+        }
+
+        .service-badge {
+            color: var(--accent);
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .remove-ep {
+            padding: 2px 6px;
+            font-size: 0.75rem;
+            border-radius: 4px;
+            background-color: var(--error);
+            color: #fff;
+            cursor: pointer;
+            border: none;
+        }
+
+        .remove-ep:hover {
+            background-color: #a71d2a;
+        }
+
+        .empty-inline {
+            color: var(--text-secondary);
+            font-style: italic;
+            font-size: 0.85rem;
+        }
+
+        .assign-form {
+            display: flex;
+            gap: 8px;
+        }
+
+        .assign-form select {
+            flex: 1;
+            min-width: 150px;
         }
     </style>
 </head>

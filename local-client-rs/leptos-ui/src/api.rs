@@ -22,10 +22,7 @@ pub struct CommandResult<T> {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StreamingEvent {
     pub id: i64,
-    pub identifier: Option<String>,
-    pub short_description: Option<String>,
-    pub date_of_event: String,
-    pub server_ip: String,
+    pub name: String,
     pub received_bytes: i64,
     pub receiving_activated: bool,
     pub delivering_activated: bool,
@@ -230,18 +227,6 @@ pub struct EndpointConfig {
     pub updated_at: String,
 }
 
-/// Scheduled stream.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ScheduledStream {
-    pub id: i64,
-    pub event_id: i64,
-    pub start_time: String,
-    pub repeat_interval: Option<String>,
-    pub last_run_at: Option<String>,
-    pub next_run_at: Option<String>,
-    pub enabled: bool,
-}
-
 async fn http_get<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String> {
     let url = format!("{}{path}", api_base());
     let resp = gloo_net::http::Request::get(&url)
@@ -298,15 +283,15 @@ pub async fn list_events() -> Result<Vec<StreamingEvent>, String> {
     http_get("/events").await
 }
 
-pub async fn create_event(identifier: &str) -> Result<serde_json::Value, String> {
+pub async fn create_event(name: &str) -> Result<serde_json::Value, String> {
     #[derive(Serialize)]
     struct Body {
-        identifier: String,
+        name: String,
     }
     http_post_json(
         "/events",
         &Body {
-            identifier: identifier.to_string(),
+            name: name.to_string(),
         },
     )
     .await
@@ -322,6 +307,10 @@ pub async fn start_delivering(id: i64) -> Result<(), String> {
 
 pub async fn deactivate_event(id: i64) -> Result<(), String> {
     http_post(&format!("/events/{id}/deactivate")).await
+}
+
+pub async fn delete_event(id: i64) -> Result<(), String> {
+    http_delete(&format!("/events/{id}")).await
 }
 
 // Endpoints API
@@ -355,11 +344,15 @@ pub async fn delete_endpoint(id: i64) -> Result<(), String> {
     http_delete(&format!("/endpoints/{id}")).await
 }
 
-// Schedules API
-pub async fn list_schedules() -> Result<Vec<ScheduledStream>, String> {
-    http_get("/schedules").await
+// Event-Endpoint Assignment API
+pub async fn get_event_endpoints(event_id: i64) -> Result<Vec<EndpointConfig>, String> {
+    http_get(&format!("/events/{event_id}/endpoints")).await
 }
 
-pub async fn delete_schedule(id: i64) -> Result<(), String> {
-    http_delete(&format!("/schedules/{id}")).await
+pub async fn attach_endpoint(event_id: i64, endpoint_id: i64) -> Result<(), String> {
+    http_post(&format!("/events/{event_id}/endpoints/{endpoint_id}")).await
+}
+
+pub async fn detach_endpoint(event_id: i64, endpoint_id: i64) -> Result<(), String> {
+    http_delete(&format!("/events/{event_id}/endpoints/{endpoint_id}")).await
 }

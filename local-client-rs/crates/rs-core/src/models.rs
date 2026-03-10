@@ -12,10 +12,7 @@ pub struct ClientProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamingEvent {
     pub id: i64,
-    pub identifier: Option<String>,
-    pub short_description: Option<String>,
-    pub date_of_event: String,
-    pub server_ip: String,
+    pub name: String,
     pub received_bytes: i64,
     pub receiving_activated: bool,
     pub delivering_activated: bool,
@@ -94,18 +91,6 @@ pub struct YouTubeOAuth {
     pub expires_at: Option<String>,
 }
 
-/// Scheduled/recurring stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduledStream {
-    pub id: i64,
-    pub event_id: i64,
-    pub start_time: String,
-    pub repeat_interval: Option<String>,
-    pub last_run_at: Option<String>,
-    pub next_run_at: Option<String>,
-    pub enabled: bool,
-}
-
 /// Real-time event broadcast over WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -132,7 +117,7 @@ pub enum WsEvent {
     },
     StreamingEvent {
         action: String,
-        identifier: Option<String>,
+        name: Option<String>,
         receiving: bool,
         delivering: bool,
     },
@@ -140,10 +125,6 @@ pub enum WsEvent {
         instance_name: String,
         status: String,
         endpoint_count: u32,
-    },
-    ScheduleTriggered {
-        schedule_id: i64,
-        event_id: i64,
     },
     Error {
         service: String,
@@ -244,7 +225,7 @@ mod tests {
             WsEvent::ChunkUploaded { chunk_id: 1 },
             WsEvent::StreamingEvent {
                 action: "created".to_string(),
-                identifier: Some("evt-1".to_string()),
+                name: Some("evt-1".to_string()),
                 receiving: true,
                 delivering: false,
             },
@@ -252,10 +233,6 @@ mod tests {
                 instance_name: "rs-delivery-1".to_string(),
                 status: "running".to_string(),
                 endpoint_count: 2,
-            },
-            WsEvent::ScheduleTriggered {
-                schedule_id: 1,
-                event_id: 1,
             },
             WsEvent::Error {
                 service: "inpoint".to_string(),
@@ -275,17 +252,14 @@ mod tests {
     fn streaming_event_serde() {
         let event = StreamingEvent {
             id: 1,
-            identifier: Some("test-event".to_string()),
-            short_description: Some("Test".to_string()),
-            date_of_event: "2026-01-01 00:00:00".to_string(),
-            server_ip: "127.0.0.1".to_string(),
+            name: "test-event".to_string(),
             received_bytes: 0,
             receiving_activated: true,
             delivering_activated: false,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: StreamingEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.identifier, event.identifier);
+        assert_eq!(parsed.name, event.name);
         assert_eq!(parsed.receiving_activated, true);
     }
 

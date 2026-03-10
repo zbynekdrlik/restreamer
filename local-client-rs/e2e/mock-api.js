@@ -13,10 +13,7 @@ app.use(express.json());
 const statusResponse = {
   streaming_event: {
     id: 1,
-    identifier: "Sunday Service",
-    short_description: "Weekly Sunday Service Stream",
-    date_of_event: "2026-03-09",
-    server_ip: "172.105.95.118",
+    name: "Sunday Service",
     received_bytes: 52428800,
     receiving_activated: true,
     delivering_activated: false,
@@ -34,20 +31,14 @@ const statusResponse = {
 let events = [
   {
     id: 1,
-    identifier: "Sunday Service",
-    short_description: "Weekly Sunday Service Stream",
-    date_of_event: "2026-03-09",
-    server_ip: "172.105.95.118",
+    name: "Sunday Service",
     received_bytes: 52428800,
     receiving_activated: true,
     delivering_activated: false,
   },
   {
     id: 2,
-    identifier: "Wednesday Bible Study",
-    short_description: "Midweek study",
-    date_of_event: "2026-03-12",
-    server_ip: "172.105.95.118",
+    name: "Wednesday Bible Study",
     received_bytes: 0,
     receiving_activated: false,
     delivering_activated: false,
@@ -81,26 +72,11 @@ let endpoints = [
   },
 ];
 
-let schedules = [
-  {
-    id: 1,
-    event_id: 1,
-    start_time: "2026-03-16T09:00:00Z",
-    repeat_interval: "weekly",
-    last_run_at: "2026-03-09T09:00:00Z",
-    next_run_at: "2026-03-16T09:00:00Z",
-    enabled: true,
-  },
-  {
-    id: 2,
-    event_id: 2,
-    start_time: "2026-03-12T19:00:00Z",
-    repeat_interval: null,
-    last_run_at: null,
-    next_run_at: "2026-03-12T19:00:00Z",
-    enabled: false,
-  },
-];
+// Event-endpoint assignments (M2M)
+let eventEndpoints = {
+  1: [1], // Event 1 has YouTube Main assigned
+  2: [],
+};
 
 // --- Status endpoint (Tauri invoke mock handled client-side) ---
 app.get("/api/v1/status", (_req, res) => {
@@ -115,16 +91,30 @@ app.get("/api/v1/events", (_req, res) => {
 app.post("/api/v1/events", (req, res) => {
   const newEvent = {
     id: events.length + 1,
-    identifier: req.body.identifier || "New Event",
-    short_description: null,
-    date_of_event: new Date().toISOString().split("T")[0],
-    server_ip: "",
+    name: req.body.name || "New Event",
     received_bytes: 0,
     receiving_activated: false,
     delivering_activated: false,
   };
   events.push(newEvent);
+  eventEndpoints[newEvent.id] = [];
   res.json(newEvent);
+});
+
+app.get("/api/v1/events/:id", (req, res) => {
+  const evt = events.find((e) => e.id === parseInt(req.params.id));
+  if (evt) {
+    res.json(evt);
+  } else {
+    res.status(404).json({ error: "not found" });
+  }
+});
+
+app.delete("/api/v1/events/:id", (req, res) => {
+  const id = parseInt(req.params.id);
+  events = events.filter((e) => e.id !== id);
+  delete eventEndpoints[id];
+  res.status(204).send();
 });
 
 app.post("/api/v1/events/:id/activate", (req, res) => {
@@ -158,6 +148,37 @@ app.post("/api/v1/events/:id/deactivate", (req, res) => {
   }
 });
 
+// --- Event-Endpoint M2M ---
+app.get("/api/v1/events/:id/endpoints", (req, res) => {
+  const id = parseInt(req.params.id);
+  const epIds = eventEndpoints[id] || [];
+  const eps = endpoints.filter((e) => epIds.includes(e.id));
+  res.json(eps);
+});
+
+app.post("/api/v1/events/:eventId/endpoints/:endpointId", (req, res) => {
+  const eventId = parseInt(req.params.eventId);
+  const endpointId = parseInt(req.params.endpointId);
+  if (!eventEndpoints[eventId]) {
+    eventEndpoints[eventId] = [];
+  }
+  if (!eventEndpoints[eventId].includes(endpointId)) {
+    eventEndpoints[eventId].push(endpointId);
+  }
+  res.status(201).json({ status: "ok" });
+});
+
+app.delete("/api/v1/events/:eventId/endpoints/:endpointId", (req, res) => {
+  const eventId = parseInt(req.params.eventId);
+  const endpointId = parseInt(req.params.endpointId);
+  if (eventEndpoints[eventId]) {
+    eventEndpoints[eventId] = eventEndpoints[eventId].filter(
+      (id) => id !== endpointId,
+    );
+  }
+  res.status(204).send();
+});
+
 // --- Endpoints API ---
 app.get("/api/v1/endpoints", (_req, res) => {
   res.json(endpoints);
@@ -182,16 +203,6 @@ app.post("/api/v1/endpoints", (req, res) => {
 
 app.delete("/api/v1/endpoints/:id", (req, res) => {
   endpoints = endpoints.filter((e) => e.id !== parseInt(req.params.id));
-  res.json({ status: "ok" });
-});
-
-// --- Schedules API ---
-app.get("/api/v1/schedules", (_req, res) => {
-  res.json(schedules);
-});
-
-app.delete("/api/v1/schedules/:id", (req, res) => {
-  schedules = schedules.filter((s) => s.id !== parseInt(req.params.id));
   res.json({ status: "ok" });
 });
 

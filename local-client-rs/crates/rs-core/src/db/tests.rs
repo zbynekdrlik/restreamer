@@ -25,13 +25,11 @@ async fn streaming_event_crud() {
     let pool = setup_db().await;
     assert!(get_streaming_event(&pool).await.unwrap().is_none());
 
-    let id = upsert_streaming_event(&pool, "evt-1", Some("Test Event"), "192.168.1.1")
-        .await
-        .unwrap();
+    let id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
     assert!(id > 0);
 
     let event = get_streaming_event(&pool).await.unwrap().unwrap();
-    assert_eq!(event.identifier.as_deref(), Some("evt-1"));
+    assert_eq!(event.name, "evt-1");
     assert!(event.receiving_activated);
     assert!(event.delivering_activated);
 
@@ -53,9 +51,7 @@ async fn streaming_event_crud() {
 #[tokio::test]
 async fn chunk_record_crud() {
     let pool = setup_db().await;
-    let event_id = upsert_streaming_event(&pool, "evt-1", None, "127.0.0.1")
-        .await
-        .unwrap();
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
 
     let chunk_id = insert_chunk(&pool, event_id, "/tmp/chunk1.bin", 512, "abc123")
         .await
@@ -82,9 +78,7 @@ async fn chunk_record_crud() {
 #[tokio::test]
 async fn chunk_stats_and_pagination() {
     let pool = setup_db().await;
-    let event_id = upsert_streaming_event(&pool, "evt-1", None, "127.0.0.1")
-        .await
-        .unwrap();
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
 
     for i in 0..5 {
         insert_chunk(
@@ -113,9 +107,7 @@ async fn chunk_stats_and_pagination() {
 #[tokio::test]
 async fn delete_all_chunks_works() {
     let pool = setup_db().await;
-    let event_id = upsert_streaming_event(&pool, "evt-1", None, "127.0.0.1")
-        .await
-        .unwrap();
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
 
     for i in 0..3 {
         insert_chunk(&pool, event_id, &format!("/tmp/c{i}.bin"), 100, "md5")
@@ -133,9 +125,7 @@ async fn delete_all_chunks_works() {
 #[tokio::test]
 async fn cascade_delete() {
     let pool = setup_db().await;
-    let event_id = upsert_streaming_event(&pool, "evt-1", None, "127.0.0.1")
-        .await
-        .unwrap();
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
     insert_chunk(&pool, event_id, "/tmp/c.bin", 100, "md5")
         .await
         .unwrap();
@@ -149,29 +139,19 @@ async fn cascade_delete() {
 async fn delete_other_streaming_events_keeps_only_target() {
     let pool = setup_db().await;
 
-    // Insert 3 events
-    let id1 = upsert_streaming_event(&pool, "evt-1", Some("Event 1"), "10.0.0.1")
-        .await
-        .unwrap();
-    let id2 = upsert_streaming_event(&pool, "evt-2", Some("Event 2"), "10.0.0.2")
-        .await
-        .unwrap();
-    let id3 = upsert_streaming_event(&pool, "evt-3", Some("Event 3"), "10.0.0.3")
-        .await
-        .unwrap();
+    let id1 = upsert_streaming_event(&pool, "evt-1").await.unwrap();
+    let id2 = upsert_streaming_event(&pool, "evt-2").await.unwrap();
+    let id3 = upsert_streaming_event(&pool, "evt-3").await.unwrap();
     assert_ne!(id1, id2);
     assert_ne!(id2, id3);
 
-    // Delete all except id2
     let deleted = delete_other_streaming_events(&pool, id2).await.unwrap();
     assert_eq!(deleted, 2);
 
-    // Only id2 should remain
     let remaining = get_streaming_event(&pool).await.unwrap().unwrap();
     assert_eq!(remaining.id, id2);
-    assert_eq!(remaining.identifier.as_deref(), Some("evt-2"));
+    assert_eq!(remaining.name, "evt-2");
 
-    // id1 and id3 should be gone
     assert!(
         get_streaming_event_by_id(&pool, id1)
             .await
@@ -190,14 +170,11 @@ async fn delete_other_streaming_events_keeps_only_target() {
 async fn delete_other_streaming_events_noop_when_only_one() {
     let pool = setup_db().await;
 
-    let id = upsert_streaming_event(&pool, "evt-1", Some("Only Event"), "10.0.0.1")
-        .await
-        .unwrap();
+    let id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
 
     let deleted = delete_other_streaming_events(&pool, id).await.unwrap();
     assert_eq!(deleted, 0);
 
-    // Event should still exist
     let event = get_streaming_event(&pool).await.unwrap().unwrap();
     assert_eq!(event.id, id);
 }
@@ -206,14 +183,9 @@ async fn delete_other_streaming_events_noop_when_only_one() {
 async fn delete_other_streaming_events_cascades_chunks() {
     let pool = setup_db().await;
 
-    let id1 = upsert_streaming_event(&pool, "stale", Some("Stale"), "10.0.0.1")
-        .await
-        .unwrap();
-    let id2 = upsert_streaming_event(&pool, "active", Some("Active"), "10.0.0.2")
-        .await
-        .unwrap();
+    let id1 = upsert_streaming_event(&pool, "stale").await.unwrap();
+    let id2 = upsert_streaming_event(&pool, "active").await.unwrap();
 
-    // Add chunks to both events
     insert_chunk(&pool, id1, "/tmp/stale.bin", 100, "md5_stale")
         .await
         .unwrap();
@@ -221,11 +193,9 @@ async fn delete_other_streaming_events_cascades_chunks() {
         .await
         .unwrap();
 
-    // Delete stale event
     let deleted = delete_other_streaming_events(&pool, id2).await.unwrap();
     assert_eq!(deleted, 1);
 
-    // Only active event's chunk should remain (cascade delete)
     let stats = get_chunk_stats(&pool, 1000).await.unwrap();
     assert_eq!(stats.total_chunks, 1);
     assert_eq!(stats.total_bytes, 200);
@@ -234,9 +204,7 @@ async fn delete_other_streaming_events_cascades_chunks() {
 #[tokio::test]
 async fn migration_is_idempotent() {
     let pool = setup_db().await;
-    // Running migrations again should not fail
     run_migrations(&pool).await.unwrap();
-    // Tables should still work
     upsert_client_profile(&pool, "test").await.unwrap();
     let profile = get_client_profile(&pool).await.unwrap().unwrap();
     assert_eq!(profile.user_uuid, "test");
@@ -276,9 +244,7 @@ async fn endpoint_config_crud() {
 async fn event_endpoint_attachment() {
     let pool = setup_db().await;
 
-    let event_id = upsert_streaming_event(&pool, "evt-1", Some("Test"), "127.0.0.1")
-        .await
-        .unwrap();
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
     let ep1 = create_endpoint_config(&pool, "YT", "YT_HLS", "key1", false)
         .await
         .unwrap();
@@ -308,9 +274,7 @@ async fn event_endpoint_attachment() {
 async fn event_endpoint_cascade_on_event_delete() {
     let pool = setup_db().await;
 
-    let event_id = upsert_streaming_event(&pool, "evt-1", Some("Test"), "127.0.0.1")
-        .await
-        .unwrap();
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
     let ep_id = create_endpoint_config(&pool, "YT", "YT_HLS", "key1", false)
         .await
         .unwrap();
@@ -319,7 +283,6 @@ async fn event_endpoint_cascade_on_event_delete() {
         .unwrap();
 
     delete_streaming_event(&pool, event_id).await.unwrap();
-    // Endpoint config should still exist (only the link is deleted)
     assert!(get_endpoint_config(&pool, ep_id).await.unwrap().is_some());
 }
 
@@ -378,7 +341,6 @@ async fn youtube_oauth_crud() {
     assert_eq!(oauth.refresh_token, "refresh-tok");
     assert_eq!(oauth.scopes, "youtube.readonly");
 
-    // Upsert should update
     upsert_youtube_oauth(
         &pool,
         "new-access",
@@ -398,83 +360,16 @@ async fn youtube_oauth_crud() {
 }
 
 #[tokio::test]
-async fn scheduled_stream_crud() {
-    let pool = setup_db().await;
-
-    let event_id = upsert_streaming_event(&pool, "evt-1", Some("Sunday"), "127.0.0.1")
-        .await
-        .unwrap();
-
-    let id = create_scheduled_stream(&pool, event_id, "2026-03-15T09:00:00", Some("weekly"))
-        .await
-        .unwrap();
-    assert!(id > 0);
-
-    let list = list_scheduled_streams(&pool).await.unwrap();
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].repeat_interval.as_deref(), Some("weekly"));
-    assert!(list[0].enabled);
-
-    update_scheduled_stream(&pool, id, "2026-03-15T10:00:00", Some("weekly"), true)
-        .await
-        .unwrap();
-
-    // Due schedules
-    let due = get_due_scheduled_streams(&pool, "2026-03-15T10:00:00")
-        .await
-        .unwrap();
-    assert_eq!(due.len(), 1);
-
-    let not_due = get_due_scheduled_streams(&pool, "2026-03-15T09:00:00")
-        .await
-        .unwrap();
-    assert!(not_due.is_empty());
-
-    mark_scheduled_stream_run(
-        &pool,
-        id,
-        "2026-03-15T10:00:00",
-        Some("2026-03-22T10:00:00"),
-        true,
-    )
-    .await
-    .unwrap();
-
-    let list = list_scheduled_streams(&pool).await.unwrap();
-    assert_eq!(list[0].last_run_at.as_deref(), Some("2026-03-15T10:00:00"));
-    assert_eq!(list[0].next_run_at.as_deref(), Some("2026-03-22T10:00:00"));
-
-    delete_scheduled_stream(&pool, id).await.unwrap();
-    assert!(list_scheduled_streams(&pool).await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn scheduled_stream_cascade_on_event_delete() {
-    let pool = setup_db().await;
-    let event_id = upsert_streaming_event(&pool, "evt-1", Some("Test"), "127.0.0.1")
-        .await
-        .unwrap();
-    create_scheduled_stream(&pool, event_id, "2026-03-15T09:00:00", None)
-        .await
-        .unwrap();
-
-    delete_streaming_event(&pool, event_id).await.unwrap();
-    assert!(list_scheduled_streams(&pool).await.unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn list_streaming_events_and_create() {
     let pool = setup_db().await;
     assert!(list_streaming_events(&pool).await.unwrap().is_empty());
 
-    let id = create_streaming_event(&pool, "new-evt", "Test Event", "2026-03-15")
-        .await
-        .unwrap();
+    let id = create_streaming_event(&pool, "Test Event").await.unwrap();
     assert!(id > 0);
 
     let events = list_streaming_events(&pool).await.unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].short_description.as_deref(), Some("Test Event"));
+    assert_eq!(events[0].name, "Test Event");
     assert!(!events[0].receiving_activated);
 }
 
@@ -484,7 +379,6 @@ async fn endpoint_unique_alias_constraint() {
     create_endpoint_config(&pool, "YouTube", "YT_HLS", "key1", false)
         .await
         .unwrap();
-    // Duplicate alias should fail
     let result = create_endpoint_config(&pool, "YouTube", "FB", "key2", false).await;
     assert!(result.is_err());
 }

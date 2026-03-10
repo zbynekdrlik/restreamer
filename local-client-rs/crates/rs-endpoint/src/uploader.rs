@@ -97,16 +97,7 @@ impl ChunkUploader {
                 )
                 .await
                 {
-                    Ok(Some(event)) => match event.identifier {
-                        Some(id) => id,
-                        None => {
-                            warn!(
-                                "Chunk {} has event {} with no identifier, skipping",
-                                chunk.id, chunk.streaming_event_id
-                            );
-                            return;
-                        }
-                    },
+                    Ok(Some(event)) => event.name,
                     Ok(None) => {
                         warn!(
                             "Chunk {} references missing event {}, skipping",

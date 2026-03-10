@@ -98,14 +98,9 @@ async fn uploader_full_flow_success() {
     let s3_url = start_mock_s3_server(s3_state.clone()).await;
 
     let pool = setup_test_db().await;
-    db::upsert_streaming_event(
-        &pool,
-        "evt-integration-test",
-        Some("Test Event"),
-        "127.0.0.1",
-    )
-    .await
-    .unwrap();
+    db::upsert_streaming_event(&pool, "evt-integration-test")
+        .await
+        .unwrap();
     let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
 
     let temp_dir = TempDir::new().unwrap();
@@ -149,7 +144,7 @@ async fn uploader_s3_failure_keeps_chunk_unsent() {
     let s3_url = start_mock_s3_server(s3_state.clone()).await;
 
     let pool = setup_test_db().await;
-    db::upsert_streaming_event(&pool, "evt-s3-fail", Some("S3 Fail Test"), "127.0.0.1")
+    db::upsert_streaming_event(&pool, "evt-s3-fail")
         .await
         .unwrap();
     let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
@@ -188,7 +183,7 @@ async fn uploader_multiple_chunks_uploads_concurrently() {
     let s3_url = start_mock_s3_server(s3_state.clone()).await;
 
     let pool = setup_test_db().await;
-    db::upsert_streaming_event(&pool, "evt-multi", Some("Multi Chunk"), "127.0.0.1")
+    db::upsert_streaming_event(&pool, "evt-multi")
         .await
         .unwrap();
     let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
@@ -227,25 +222,30 @@ async fn uploader_multiple_chunks_uploads_concurrently() {
 }
 
 #[tokio::test]
-async fn uploader_chunk_without_event_identifier_skipped() {
+async fn uploader_chunk_without_event_skipped() {
     let s3_state = Arc::new(MockS3State::default());
     let s3_url = start_mock_s3_server(s3_state.clone()).await;
 
     let pool = setup_test_db().await;
+
+    // Insert a chunk with a non-existent event_id (orphan chunk)
     sqlx::query(
-        "INSERT INTO streaming_events (id, server_ip, receiving_activated, delivering_activated)
-         VALUES (1, '127.0.0.1', true, false)",
+        "INSERT INTO streaming_events (id, name, receiving_activated, delivering_activated)
+         VALUES (99, 'temp-event', 1, 0)",
     )
     .execute(&pool)
     .await
     .unwrap();
 
     let temp_dir = TempDir::new().unwrap();
-    let chunk_path = create_test_chunk_file(&temp_dir, "chunk_no_ident.bin", b"data");
+    let chunk_path = create_test_chunk_file(&temp_dir, "chunk_orphan.bin", b"data");
 
-    db::insert_chunk(&pool, 1, chunk_path.to_str().unwrap(), 4, "md5hash")
+    db::insert_chunk(&pool, 99, chunk_path.to_str().unwrap(), 4, "md5hash")
         .await
         .unwrap();
+
+    // Delete the event so the chunk becomes orphaned
+    db::delete_streaming_event(&pool, 99).await.unwrap();
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
@@ -253,10 +253,12 @@ async fn uploader_chunk_without_event_identifier_skipped() {
 
     uploader.upload_batch().await;
 
+    // Orphaned chunks (deleted event) should not cause panics
+    // The chunks were cascade-deleted with the event, so no uploads happen
     assert_eq!(
         s3_state.upload_count.load(Ordering::SeqCst),
         0,
-        "No S3 uploads should happen for chunks without event identifier"
+        "No S3 uploads should happen for chunks from deleted events"
     );
 }
 
@@ -266,7 +268,7 @@ async fn uploader_ws_event_sent_on_upload() {
     let s3_url = start_mock_s3_server(s3_state).await;
 
     let pool = setup_test_db().await;
-    db::upsert_streaming_event(&pool, "evt-ws-test", Some("WS Test"), "127.0.0.1")
+    db::upsert_streaming_event(&pool, "evt-ws-test")
         .await
         .unwrap();
     let event = db::get_streaming_event(&pool).await.unwrap().unwrap();

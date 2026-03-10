@@ -3,7 +3,7 @@
 use leptos::prelude::*;
 
 use crate::api::{self, StatusResponse};
-use crate::components::{ChunkList, Dashboard, Endpoints, Events, LogViewer, Schedules};
+use crate::components::{ChunkList, Dashboard, Endpoints, Events, LogViewer};
 
 /// Main application component.
 #[component]
@@ -39,7 +39,6 @@ pub fn App() -> impl IntoView {
         ("dashboard", "Dashboard"),
         ("events", "Events"),
         ("endpoints", "Endpoints"),
-        ("schedules", "Schedules"),
         ("logs", "Logs"),
     ];
 
@@ -79,9 +78,6 @@ pub fn App() -> impl IntoView {
                                 </Show>
                                 <Show when=move || active_tab.get() == "endpoints">
                                     <Endpoints />
-                                </Show>
-                                <Show when=move || active_tab.get() == "schedules">
-                                    <Schedules />
                                 </Show>
                                 <Show when=move || active_tab.get() == "logs">
                                     <LogViewer />

@@ -2,9 +2,7 @@ use sqlx::Row;
 use sqlx::sqlite::SqlitePool;
 
 use crate::error::Result;
-use crate::models::{
-    DeliveryInstance, EndpointConfig, ScheduledStream, StreamingEvent, YouTubeOAuth,
-};
+use crate::models::{DeliveryInstance, EndpointConfig, StreamingEvent, YouTubeOAuth};
 
 // --- Endpoint Configs ---
 
@@ -320,128 +318,11 @@ pub async fn upsert_youtube_oauth(
     Ok(())
 }
 
-// --- Scheduled Streams ---
-
-pub async fn list_scheduled_streams(pool: &SqlitePool) -> Result<Vec<ScheduledStream>> {
-    let rows = sqlx::query(
-        "SELECT id, event_id, start_time, repeat_interval, last_run_at, next_run_at, enabled
-         FROM scheduled_streams ORDER BY id",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|r| ScheduledStream {
-            id: r.get("id"),
-            event_id: r.get("event_id"),
-            start_time: r.get("start_time"),
-            repeat_interval: r.get("repeat_interval"),
-            last_run_at: r.get("last_run_at"),
-            next_run_at: r.get("next_run_at"),
-            enabled: r.get::<i32, _>("enabled") != 0,
-        })
-        .collect())
-}
-
-pub async fn create_scheduled_stream(
-    pool: &SqlitePool,
-    event_id: i64,
-    start_time: &str,
-    repeat_interval: Option<&str>,
-) -> Result<i64> {
-    let row = sqlx::query(
-        "INSERT INTO scheduled_streams (event_id, start_time, repeat_interval, next_run_at)
-         VALUES (?1, ?2, ?3, ?2) RETURNING id",
-    )
-    .bind(event_id)
-    .bind(start_time)
-    .bind(repeat_interval)
-    .fetch_one(pool)
-    .await?;
-    Ok(row.get("id"))
-}
-
-pub async fn update_scheduled_stream(
-    pool: &SqlitePool,
-    id: i64,
-    start_time: &str,
-    repeat_interval: Option<&str>,
-    enabled: bool,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE scheduled_streams SET start_time = ?1, repeat_interval = ?2, enabled = ?3, next_run_at = ?1 WHERE id = ?4",
-    )
-    .bind(start_time)
-    .bind(repeat_interval)
-    .bind(enabled as i32)
-    .bind(id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn delete_scheduled_stream(pool: &SqlitePool, id: i64) -> Result<()> {
-    sqlx::query("DELETE FROM scheduled_streams WHERE id = ?1")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-pub async fn get_due_scheduled_streams(
-    pool: &SqlitePool,
-    now: &str,
-) -> Result<Vec<ScheduledStream>> {
-    let rows = sqlx::query(
-        "SELECT id, event_id, start_time, repeat_interval, last_run_at, next_run_at, enabled
-         FROM scheduled_streams
-         WHERE enabled = 1 AND next_run_at <= ?1
-         ORDER BY next_run_at",
-    )
-    .bind(now)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|r| ScheduledStream {
-            id: r.get("id"),
-            event_id: r.get("event_id"),
-            start_time: r.get("start_time"),
-            repeat_interval: r.get("repeat_interval"),
-            last_run_at: r.get("last_run_at"),
-            next_run_at: r.get("next_run_at"),
-            enabled: r.get::<i32, _>("enabled") != 0,
-        })
-        .collect())
-}
-
-pub async fn mark_scheduled_stream_run(
-    pool: &SqlitePool,
-    id: i64,
-    last_run_at: &str,
-    next_run_at: Option<&str>,
-    enabled: bool,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE scheduled_streams SET last_run_at = ?1, next_run_at = ?2, enabled = ?3 WHERE id = ?4",
-    )
-    .bind(last_run_at)
-    .bind(next_run_at)
-    .bind(enabled as i32)
-    .bind(id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 // --- Streaming Events (extended) ---
 
 pub async fn list_streaming_events(pool: &SqlitePool) -> Result<Vec<StreamingEvent>> {
     let rows = sqlx::query(
-        "SELECT id, identifier, short_description, date_of_event,
-         server_ip, received_bytes, receiving_activated, delivering_activated
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated
          FROM streaming_events ORDER BY id DESC",
     )
     .fetch_all(pool)
@@ -451,10 +332,7 @@ pub async fn list_streaming_events(pool: &SqlitePool) -> Result<Vec<StreamingEve
         .into_iter()
         .map(|r| StreamingEvent {
             id: r.get("id"),
-            identifier: r.get("identifier"),
-            short_description: r.get("short_description"),
-            date_of_event: r.get("date_of_event"),
-            server_ip: r.get("server_ip"),
+            name: r.get("name"),
             received_bytes: r.get("received_bytes"),
             receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
             delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
@@ -462,19 +340,11 @@ pub async fn list_streaming_events(pool: &SqlitePool) -> Result<Vec<StreamingEve
         .collect())
 }
 
-pub async fn create_streaming_event(
-    pool: &SqlitePool,
-    identifier: &str,
-    short_description: &str,
-    date_of_event: &str,
-) -> Result<i64> {
+pub async fn create_streaming_event(pool: &SqlitePool, name: &str) -> Result<i64> {
     let row = sqlx::query(
-        "INSERT INTO streaming_events (identifier, short_description, date_of_event)
-         VALUES (?1, ?2, ?3) RETURNING id",
+        "INSERT INTO streaming_events (name) VALUES (?1) RETURNING id",
     )
-    .bind(identifier)
-    .bind(short_description)
-    .bind(date_of_event)
+    .bind(name)
     .fetch_one(pool)
     .await?;
     Ok(row.get("id"))

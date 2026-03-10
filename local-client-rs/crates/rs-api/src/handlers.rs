@@ -8,8 +8,7 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogEntry;
 use rs_core::models::{
-    ChunkStats, ComponentStatus, EndpointConfig, ScheduledStream, ServiceStatus, StreamingEvent,
-    WsEvent,
+    ChunkStats, ComponentStatus, EndpointConfig, ServiceStatus, StreamingEvent, WsEvent,
 };
 
 use crate::state::AppState;
@@ -170,7 +169,7 @@ pub async fn action_toggle_receiving(
 
     if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
         action: "toggled_receiving".to_string(),
-        identifier: event.identifier,
+        name: Some(event.name),
         receiving: new_receiving,
         delivering: event.delivering_activated,
     }) {
@@ -200,7 +199,7 @@ pub async fn action_toggle_delivering(
 
     if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
         action: "toggled_delivering".to_string(),
-        identifier: event.identifier,
+        name: Some(event.name),
         receiving: event.receiving_activated,
         delivering: new_delivering,
     }) {
@@ -327,27 +326,19 @@ pub async fn list_events(
 
 #[derive(Deserialize)]
 pub struct CreateEventRequest {
-    pub identifier: String,
-    pub short_description: Option<String>,
-    pub server_ip: Option<String>,
+    pub name: String,
 }
 
 pub async fn create_event(
     State(state): State<AppState>,
     Json(req): Json<CreateEventRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
-    let server_ip = req.server_ip.as_deref().unwrap_or("127.0.0.1");
-    let id = db::upsert_streaming_event(
-        &state.pool,
-        &req.identifier,
-        req.short_description.as_deref(),
-        server_ip,
-    )
-    .await
-    .map_err(|e| {
-        error!("Failed to create event: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let id = db::create_streaming_event(&state.pool, &req.name)
+        .await
+        .map_err(|e| {
+            error!("Failed to create event: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
 }
@@ -529,94 +520,6 @@ pub async fn get_event_endpoints(
     Ok(Json(links))
 }
 
-// --- Scheduled Streams CRUD ---
-
-pub async fn list_schedules(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<ScheduledStream>>, StatusCode> {
-    let schedules = db::list_scheduled_streams(&state.pool).await.map_err(|e| {
-        error!("Failed to list schedules: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    Ok(Json(schedules))
-}
-
-#[derive(Deserialize)]
-pub struct CreateScheduleRequest {
-    pub event_id: i64,
-    pub start_time: String,
-    pub repeat_interval: Option<String>,
-}
-
-pub async fn create_schedule(
-    State(state): State<AppState>,
-    Json(req): Json<CreateScheduleRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
-    let id = db::create_scheduled_stream(
-        &state.pool,
-        req.event_id,
-        &req.start_time,
-        req.repeat_interval.as_deref(),
-    )
-    .await
-    .map_err(|e| {
-        error!("Failed to create schedule: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
-}
-
-#[derive(Deserialize)]
-pub struct UpdateScheduleRequest {
-    pub start_time: Option<String>,
-    pub repeat_interval: Option<String>,
-    pub enabled: Option<bool>,
-}
-
-pub async fn update_schedule(
-    State(state): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<i64>,
-    Json(req): Json<UpdateScheduleRequest>,
-) -> Result<StatusCode, StatusCode> {
-    // Get existing to fill in defaults
-    let schedules = db::list_scheduled_streams(&state.pool).await.map_err(|e| {
-        error!("Failed to list schedules: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let existing = schedules
-        .into_iter()
-        .find(|s| s.id == id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    let start_time = req.start_time.as_deref().unwrap_or(&existing.start_time);
-    let repeat_interval = match &req.repeat_interval {
-        Some(ri) => Some(ri.as_str()),
-        None => existing.repeat_interval.as_deref(),
-    };
-    let enabled = req.enabled.unwrap_or(existing.enabled);
-
-    db::update_scheduled_stream(&state.pool, id, start_time, repeat_interval, enabled)
-        .await
-        .map_err(|e| {
-            error!("Failed to update schedule {id}: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    Ok(StatusCode::OK)
-}
-
-pub async fn delete_schedule(
-    State(state): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<i64>,
-) -> Result<StatusCode, StatusCode> {
-    db::delete_scheduled_stream(&state.pool, id)
-        .await
-        .map_err(|e| {
-            error!("Failed to delete schedule {id}: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 // --- Event Lifecycle ---
 
 pub async fn activate_event(
@@ -641,7 +544,7 @@ pub async fn activate_event(
 
     if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
         action: "activated".to_string(),
-        identifier: None,
+        name: None,
         receiving: true,
         delivering: false,
     }) {
@@ -678,7 +581,7 @@ pub async fn deactivate_event(
 
     if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
         action: "deactivated".to_string(),
-        identifier: None,
+        name: None,
         receiving: false,
         delivering: false,
     }) {
@@ -709,7 +612,7 @@ pub async fn start_delivering(
 
     if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
         action: "delivering_started".to_string(),
-        identifier: None,
+        name: None,
         receiving: true,
         delivering: true,
     }) {

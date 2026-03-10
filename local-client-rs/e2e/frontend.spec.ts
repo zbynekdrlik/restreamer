@@ -22,15 +22,14 @@ test.describe("Dashboard tab", () => {
     await expect(page.locator(".version")).toContainText("v");
   });
 
-  test("shows 5 tab buttons", async ({ page }) => {
+  test("shows 4 tab buttons", async ({ page }) => {
     await page.goto("/");
     const tabs = page.locator(".tabs button.tab");
-    await expect(tabs).toHaveCount(5);
+    await expect(tabs).toHaveCount(4);
     await expect(tabs.nth(0)).toHaveText("Dashboard");
     await expect(tabs.nth(1)).toHaveText("Events");
     await expect(tabs.nth(2)).toHaveText("Endpoints");
-    await expect(tabs.nth(3)).toHaveText("Schedules");
-    await expect(tabs.nth(4)).toHaveText("Logs");
+    await expect(tabs.nth(3)).toHaveText("Logs");
   });
 
   test("Dashboard tab is active by default", async ({ page }) => {
@@ -55,10 +54,7 @@ test.describe("Dashboard tab", () => {
     await expect(page.locator(".event-card")).toBeVisible();
     await expect(page.locator(".event-card")).toContainText("Streaming Event");
 
-    // Event details
-    await expect(page.locator(".event-card")).toContainText(
-      "Weekly Sunday Service Stream",
-    );
+    // Event name shown
     await expect(page.locator(".event-card")).toContainText("Sunday Service");
 
     // Status cards
@@ -143,6 +139,51 @@ test.describe("Events tab", () => {
     await expect(actions.nth(0)).toHaveText("Activate");
     await expect(actions.nth(1)).toHaveText("Start Delivering");
     await expect(actions.nth(2)).toHaveText("Deactivate");
+  });
+
+  test("shows assigned endpoints section", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
+    await page.click('.tab:has-text("Events")');
+    const firstEvent = page.locator(".events-tab .event-card").first();
+    await expect(firstEvent.locator(".assigned-endpoints")).toBeVisible();
+    await expect(firstEvent.locator(".assigned-label")).toHaveText(
+      "Assigned Endpoints:",
+    );
+  });
+
+  test("shows assigned endpoint with service badge", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
+    await page.click('.tab:has-text("Events")');
+    const firstEvent = page.locator(".events-tab .event-card").first();
+    // First event has YouTube Main assigned in mock data
+    await expect(firstEvent.locator(".assigned-ep")).toBeVisible({
+      timeout: 5000,
+    });
+    await expect(firstEvent.locator(".assigned-ep")).toContainText(
+      "YouTube Main",
+    );
+    await expect(firstEvent.locator(".service-badge")).toContainText("YT_HLS");
+  });
+
+  test("shows assign endpoint dropdown", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
+    await page.click('.tab:has-text("Events")');
+    const firstEvent = page.locator(".events-tab .event-card").first();
+    await expect(firstEvent.locator(".assign-form select")).toBeVisible();
+    await expect(
+      firstEvent.locator('.assign-form button:has-text("Assign")'),
+    ).toBeVisible();
+  });
+
+  test("second event shows None for assigned endpoints", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
+    await page.click('.tab:has-text("Events")');
+    const secondEvent = page.locator(".events-tab .event-card").nth(1);
+    await expect(secondEvent.locator(".empty-inline")).toHaveText("None");
   });
 });
 
@@ -240,58 +281,6 @@ test.describe("Endpoints tab", () => {
   });
 });
 
-// --- Schedules tab ---
-
-test.describe("Schedules tab", () => {
-  test("clicking Schedules tab switches view", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Schedules")');
-    await expect(page.locator(".schedules-tab")).toBeVisible();
-    await expect(page.locator(".schedules-tab h2")).toHaveText(
-      "Scheduled Streams",
-    );
-  });
-
-  test("displays schedule list with details", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Schedules")');
-    await expect(page.locator(".schedule-card")).toHaveCount(2);
-    // First schedule: event_id=1, has repeat
-    const first = page.locator(".schedule-card").first();
-    await expect(first).toContainText("Event #1");
-    await expect(first).toContainText("weekly");
-  });
-
-  test("shows enabled/disabled badges", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Schedules")');
-    const first = page.locator(".schedule-card").first();
-    await expect(first.locator(".badge.active")).toContainText("Enabled");
-    const second = page.locator(".schedule-card").nth(1);
-    await expect(second.locator(".badge").last()).toContainText("Disabled");
-  });
-
-  test("shows next run time", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Schedules")');
-    await expect(page.locator(".next-run").first()).toContainText("Next:");
-  });
-
-  test("shows delete button per schedule", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Schedules")');
-    const deleteButtons = page.locator(
-      '.schedule-actions button:has-text("Delete")',
-    );
-    await expect(deleteButtons).toHaveCount(2);
-  });
-});
-
 // --- Logs tab ---
 
 test.describe("Logs tab", () => {
@@ -351,9 +340,6 @@ test.describe("Tab navigation", () => {
 
     await page.click('.tab:has-text("Endpoints")');
     await expect(page.locator(".endpoints-tab")).toBeVisible();
-
-    await page.click('.tab:has-text("Schedules")');
-    await expect(page.locator(".schedules-tab")).toBeVisible();
 
     await page.click('.tab:has-text("Logs")');
     await expect(page.locator(".log-viewer")).toBeVisible({ timeout: 10000 });

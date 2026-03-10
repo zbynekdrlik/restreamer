@@ -52,7 +52,11 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         .await
         .map(|r| r.get("v"))?;
 
-    let migrations: &[(i32, &str)] = &[(1, MIGRATION_V1_SQL), (2, MIGRATION_V2_SQL)];
+    let migrations: &[(i32, &str)] = &[
+        (1, MIGRATION_V1_SQL),
+        (2, MIGRATION_V2_SQL),
+        (3, MIGRATION_V3_SQL),
+    ];
 
     for &(version, sql) in migrations {
         if current < version {
@@ -159,17 +163,26 @@ CREATE TABLE IF NOT EXISTS youtube_oauth (
     expires_at     TEXT
 );
 
-CREATE TABLE IF NOT EXISTS scheduled_streams (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id        INTEGER NOT NULL REFERENCES streaming_events(id) ON DELETE CASCADE,
-    start_time      TEXT NOT NULL,
-    repeat_interval TEXT CHECK(repeat_interval IS NULL OR repeat_interval IN ('weekly','daily')),
-    last_run_at     TEXT,
-    next_run_at     TEXT,
-    enabled         INTEGER NOT NULL DEFAULT 1
+"#;
+
+const MIGRATION_V3_SQL: &str = r#"
+DROP TABLE IF EXISTS scheduled_streams;
+
+CREATE TABLE IF NOT EXISTS streaming_events_new (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                 TEXT NOT NULL UNIQUE,
+    received_bytes       INTEGER NOT NULL DEFAULT 0,
+    receiving_activated  INTEGER NOT NULL DEFAULT 0,
+    delivering_activated INTEGER NOT NULL DEFAULT 0
 );
 
-ALTER TABLE streaming_events ADD COLUMN buffer INTEGER NOT NULL DEFAULT 1
+INSERT INTO streaming_events_new (id, name, received_bytes, receiving_activated, delivering_activated)
+    SELECT id, COALESCE(identifier, 'Event-' || id), received_bytes, receiving_activated, delivering_activated
+    FROM streaming_events;
+
+DROP TABLE streaming_events;
+
+ALTER TABLE streaming_events_new RENAME TO streaming_events
 "#;
 
 // --- Client Profile ---
@@ -199,8 +212,7 @@ pub async fn upsert_client_profile(pool: &SqlitePool, user_uuid: &str) -> Result
 
 pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEvent>> {
     let row = sqlx::query(
-        "SELECT id, identifier, short_description, date_of_event,
-         server_ip, received_bytes, receiving_activated, delivering_activated
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated
          FROM streaming_events ORDER BY id DESC LIMIT 1",
     )
     .fetch_optional(pool)
@@ -208,10 +220,7 @@ pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEv
 
     Ok(row.map(|r| StreamingEvent {
         id: r.get("id"),
-        identifier: r.get("identifier"),
-        short_description: r.get("short_description"),
-        date_of_event: r.get("date_of_event"),
-        server_ip: r.get("server_ip"),
+        name: r.get("name"),
         received_bytes: r.get("received_bytes"),
         receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
@@ -223,8 +232,7 @@ pub async fn get_streaming_event_by_id(
     id: i64,
 ) -> Result<Option<StreamingEvent>> {
     let row = sqlx::query(
-        "SELECT id, identifier, short_description, date_of_event,
-         server_ip, received_bytes, receiving_activated, delivering_activated
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated
          FROM streaming_events WHERE id = ?1",
     )
     .bind(id)
@@ -233,35 +241,23 @@ pub async fn get_streaming_event_by_id(
 
     Ok(row.map(|r| StreamingEvent {
         id: r.get("id"),
-        identifier: r.get("identifier"),
-        short_description: r.get("short_description"),
-        date_of_event: r.get("date_of_event"),
-        server_ip: r.get("server_ip"),
+        name: r.get("name"),
         received_bytes: r.get("received_bytes"),
         receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
     }))
 }
 
-pub async fn upsert_streaming_event(
-    pool: &SqlitePool,
-    identifier: &str,
-    short_description: Option<&str>,
-    server_ip: &str,
-) -> Result<i64> {
+pub async fn upsert_streaming_event(pool: &SqlitePool, name: &str) -> Result<i64> {
     let row = sqlx::query(
-        "INSERT INTO streaming_events (identifier, short_description, server_ip, receiving_activated, delivering_activated)
-         VALUES (?1, ?2, ?3, 1, 1)
-         ON CONFLICT(identifier) DO UPDATE SET
-             short_description = COALESCE(?2, streaming_events.short_description),
-             server_ip = ?3,
+        "INSERT INTO streaming_events (name, receiving_activated, delivering_activated)
+         VALUES (?1, 1, 1)
+         ON CONFLICT(name) DO UPDATE SET
              receiving_activated = 1,
              delivering_activated = 1
          RETURNING id",
     )
-    .bind(identifier)
-    .bind(short_description)
-    .bind(server_ip)
+    .bind(name)
     .fetch_one(pool)
     .await?;
     Ok(row.get("id"))

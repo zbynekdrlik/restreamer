@@ -287,8 +287,7 @@ fn start_status_updater(handle: AppHandle<Wry>, items: DynamicMenuItems) {
                 // Get streaming event
                 match state.get_streaming_event().await {
                     Ok(Some(event)) => {
-                        status.event_name =
-                            event.short_description.unwrap_or_default();
+                        status.event_name = event.name;
 
                         status.inpoint = if event.receiving_activated {
                             "Receiving".to_string()
