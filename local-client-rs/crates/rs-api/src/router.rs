@@ -864,11 +864,19 @@ mod youtube_oauth_tests {
         let app = build_router(state);
 
         let resp = app
-            .oneshot(Request::builder().uri("/api/v1/youtube/oauth/start").body(Body::empty()).unwrap())
-            .await.unwrap();
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/youtube/oauth/start")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let url = val["url"].as_str().unwrap();
         assert!(url.contains("yt-cid-for-test"));
@@ -883,9 +891,17 @@ mod youtube_oauth_tests {
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
         let state = AppState::new(pool, Config::for_testing(), ws_tx);
         let app = build_router(state);
+
         let resp = app
-            .oneshot(Request::builder().uri("/api/v1/youtube/oauth/start").body(Body::empty()).unwrap())
-            .await.unwrap();
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/youtube/oauth/start")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -896,9 +912,17 @@ mod youtube_oauth_tests {
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
         let state = AppState::new(pool, yt_config(), ws_tx);
         let app = build_router(state);
+
         let resp = app
-            .oneshot(Request::builder().uri("/api/v1/youtube/oauth/callback").body(Body::empty()).unwrap())
-            .await.unwrap();
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/youtube/oauth/callback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -909,11 +933,21 @@ mod youtube_oauth_tests {
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
         let state = AppState::new(pool, yt_config(), ws_tx);
         let app = build_router(state);
+
         let resp = app
-            .oneshot(Request::builder().uri("/api/v1/youtube/oauth/callback?error=access_denied").body(Body::empty()).unwrap())
-            .await.unwrap();
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/youtube/oauth/callback?error=access_denied")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("Authorization Failed"));
     }
