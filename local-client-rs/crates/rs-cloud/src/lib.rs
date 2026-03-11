@@ -121,7 +121,7 @@ write_files:
       mkdir -p /opt/restreamer
       curl -fsSL -o /opt/restreamer/rs-delivery "{delivery_binary_url}"
       chmod +x /opt/restreamer/rs-delivery
-      /opt/restreamer/rs-delivery &
+      nohup /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &
 
 runcmd:
   - /opt/restreamer/setup.sh
@@ -133,6 +133,6 @@ runcmd:
 pub fn snapshot_cloud_init() -> &'static str {
     r#"#cloud-config
 runcmd:
-  - /opt/restreamer/rs-delivery &
+  - nohup /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &
 "#
 }

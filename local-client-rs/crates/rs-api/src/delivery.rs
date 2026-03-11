@@ -121,7 +121,7 @@ impl DeliveryOrchestrator {
                     binary_url
                 );
                 (
-                    "ubuntu-22.04".to_string(),
+                    "ubuntu-24.04".to_string(),
                     rs_cloud::bootstrap_cloud_init(&binary_url),
                 )
             }
