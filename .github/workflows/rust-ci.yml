@@ -1678,6 +1678,45 @@ jobs:
 
           Write-Host "=== Baseline PASSED: YouTube is NOT receiving stream data ==="
 
+      - name: Attach YouTube endpoint to E2E event
+        shell: powershell
+        run: |
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          $eventId = $targetEvent.id
+
+          # Check if endpoint already exists
+          $endpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -TimeoutSec 10
+          $ytEndpoint = $endpoints | Where-Object { $_.alias -eq "E2E-YouTube" }
+
+          if (-not $ytEndpoint) {
+            # Create a YT_HLS endpoint for e2e testing
+            $body = @{
+              alias = "E2E-YouTube"
+              service_type = "YT_HLS"
+              stream_key = "jadq-ytsq-f5px-60wk-3ref"
+              is_fast = $false
+            } | ConvertTo-Json
+            $ytEndpoint = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" `
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
+            Write-Host "Created endpoint: id=$($ytEndpoint.id) alias=$($ytEndpoint.alias)"
+          } else {
+            Write-Host "Endpoint already exists: id=$($ytEndpoint.id)"
+          }
+
+          # Attach endpoint to event
+          try {
+            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$eventId/endpoints/$($ytEndpoint.id)" `
+              -Method POST -TimeoutSec 10
+            Write-Host "Attached endpoint $($ytEndpoint.id) to event $eventId"
+          } catch {
+            Write-Host "Endpoint may already be attached: $_"
+          }
+
+          # Verify
+          $eventEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$eventId/endpoints" -TimeoutSec 10
+          Write-Host "Event $eventId has $($eventEndpoints.Count) endpoint(s)"
+
       - name: Start delivery (Hetzner VPS)
         shell: powershell
         timeout-minutes: 8
