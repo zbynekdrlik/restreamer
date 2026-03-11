@@ -114,8 +114,7 @@ impl DeliveryOrchestrator {
                 // No snapshot available — bootstrap from bare Ubuntu
                 let binary_url = format!(
                     "{}/{}/rs-delivery",
-                    self.config.s3.endpoint,
-                    self.config.s3.bucket,
+                    self.config.s3.endpoint, self.config.s3.bucket,
                 );
                 info!(
                     "No delivery snapshot found, bootstrapping from {}",
@@ -470,9 +469,7 @@ impl DeliveryOrchestrator {
             .map_err(|e| anyhow::anyhow!("Failed to list snapshots: {e}"))?;
 
         if snapshots.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No snapshot with label app={label} found"
-            ));
+            return Err(anyhow::anyhow!("No snapshot with label app={label} found"));
         }
 
         let latest = snapshots.last().unwrap();
