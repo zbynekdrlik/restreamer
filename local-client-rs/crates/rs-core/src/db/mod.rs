@@ -211,9 +211,10 @@ pub async fn upsert_client_profile(pool: &SqlitePool, user_uuid: &str) -> Result
 // --- Streaming Events ---
 
 pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEvent>> {
+    // Prefer the event with receiving_activated=1, fall back to highest ID
     let row = sqlx::query(
         "SELECT id, name, received_bytes, receiving_activated, delivering_activated
-         FROM streaming_events ORDER BY id DESC LIMIT 1",
+         FROM streaming_events ORDER BY receiving_activated DESC, id DESC LIMIT 1",
     )
     .fetch_optional(pool)
     .await?;
@@ -326,7 +327,7 @@ pub async fn delete_streaming_event(pool: &SqlitePool, id: i64) -> Result<()> {
 /// Delete all streaming events except the one with the given ID.
 ///
 /// Returns the number of deleted rows. This prevents stale events from
-/// winning the `ORDER BY id DESC` query in `get_streaming_event()`.
+/// interfering with `get_streaming_event()`.
 pub async fn delete_other_streaming_events(pool: &SqlitePool, keep_id: i64) -> Result<u64> {
     let result = sqlx::query("DELETE FROM streaming_events WHERE id != ?1")
         .bind(keep_id)
