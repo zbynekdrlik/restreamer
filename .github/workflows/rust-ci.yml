@@ -323,6 +323,16 @@ jobs:
           path: local-client-rs/target/release/rs-delivery
           if-no-files-found: error
           retention-days: 7
+      - name: Upload rs-delivery to S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+        run: |
+          pip install awscli
+          aws s3 cp target/release/rs-delivery \
+            s3://restreamer-chunks/rs-delivery \
+            --endpoint-url https://eu-central-1.linodeobjects.com \
+            --acl public-read
 
   file-size:
     name: File size check

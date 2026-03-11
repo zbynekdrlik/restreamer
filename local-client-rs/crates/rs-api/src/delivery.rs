@@ -107,8 +107,26 @@ impl DeliveryOrchestrator {
         labels.insert("app".to_string(), "restreamer".to_string());
         labels.insert("event_id".to_string(), event_id.to_string());
 
-        // Find the snapshot to use
-        let image = self.find_delivery_image().await?;
+        // Find the snapshot or fall back to bootstrap cloud-init
+        let (image, user_data) = match self.find_delivery_image().await {
+            Ok(snapshot_id) => (snapshot_id, cloud_init.to_string()),
+            Err(_) => {
+                // No snapshot available — bootstrap from bare Ubuntu
+                let binary_url = format!(
+                    "{}/{}/rs-delivery",
+                    self.config.s3.endpoint,
+                    self.config.s3.bucket,
+                );
+                info!(
+                    "No delivery snapshot found, bootstrapping from {}",
+                    binary_url
+                );
+                (
+                    "ubuntu-22.04".to_string(),
+                    rs_cloud::bootstrap_cloud_init(&binary_url),
+                )
+            }
+        };
 
         let server = self
             .hetzner
@@ -118,7 +136,7 @@ impl DeliveryOrchestrator {
                 &self.config.hetzner.location,
                 &image,
                 std::slice::from_ref(&self.config.hetzner.ssh_key_name),
-                cloud_init,
+                &user_data,
                 labels,
             )
             .await
@@ -444,23 +462,21 @@ impl DeliveryOrchestrator {
     }
 
     async fn find_delivery_image(&self) -> anyhow::Result<String> {
-        // Try to find a snapshot with the configured label
         let label = &self.config.hetzner.snapshot_label;
-        match self
+        let snapshots = self
             .hetzner
             .list_snapshots(Some(&format!("app={label}")))
             .await
-        {
-            Ok(snapshots) if !snapshots.is_empty() => {
-                // Use latest snapshot
-                let latest = snapshots.last().unwrap();
-                Ok(latest.id.to_string())
-            }
-            _ => {
-                // Fall back to ubuntu base image
-                Ok("ubuntu-22.04".to_string())
-            }
+            .map_err(|e| anyhow::anyhow!("Failed to list snapshots: {e}"))?;
+
+        if snapshots.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No snapshot with label app={label} found"
+            ));
         }
+
+        let latest = snapshots.last().unwrap();
+        Ok(latest.id.to_string())
     }
 }
 
