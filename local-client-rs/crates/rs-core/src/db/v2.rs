@@ -247,7 +247,7 @@ pub async fn delete_delivery_instance(pool: &SqlitePool, id: i64) -> Result<()> 
 pub async fn list_delivery_instances(pool: &SqlitePool) -> Result<Vec<DeliveryInstance>> {
     let rows = sqlx::query(
         "SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at
-         FROM delivery_instances ORDER BY id",
+         FROM delivery_instances WHERE status != 'deleted' ORDER BY id",
     )
     .fetch_all(pool)
     .await?;

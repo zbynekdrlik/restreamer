@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -648,10 +650,38 @@ pub async fn delivery_start(
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
-    let result = orch.start_delivery(req.event_id).await.map_err(|e| {
+    let event_id = req.event_id;
+    let result = orch.start_delivery(event_id).await.map_err(|e| {
         error!("Failed to start delivery: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Look up event details for poll_and_init
+    let event = db::get_streaming_event_by_id(&state.pool, event_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get event {event_id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            error!("Event {event_id} not found");
+            StatusCode::NOT_FOUND
+        })?;
+
+    // Spawn background task to poll Hetzner and init rs-delivery
+    let instance_id = result.instance_id;
+    let event_name = event.name.clone();
+    let orch = Arc::clone(orch);
+    tokio::spawn(async move {
+        if let Err(e) = orch
+            .poll_and_init(instance_id, event_id, &event_name, 0)
+            .await
+        {
+            tracing::error!(
+                "Background poll_and_init failed for instance {instance_id}: {e}"
+            );
+        }
+    });
 
     Ok(Json(DeliveryStartResponse {
         instance_id: result.instance_id,
@@ -671,7 +701,9 @@ pub struct DeliveryStatusQuery {
 pub struct DeliveryStatusResponse {
     pub instance: Option<DeliveryInstance>,
     pub server_ready: bool,
-    pub endpoints: Vec<DeliveryEndpointEntry>,
+    pub server_ip: Option<String>,
+    pub endpoints_alive: bool,
+    pub endpoint_details: Vec<DeliveryEndpointEntry>,
 }
 
 #[derive(Serialize)]
@@ -699,19 +731,26 @@ pub async fn delivery_status(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    let server_ip = status.instance.as_ref().map(|i| i.ipv4.clone());
+    let endpoint_details: Vec<DeliveryEndpointEntry> = status
+        .endpoints
+        .into_iter()
+        .map(|ep| DeliveryEndpointEntry {
+            alias: ep.alias,
+            alive: ep.alive,
+            buff_size_bytes: ep.buff_size_bytes,
+            current_chunk_id: ep.current_chunk_id,
+        })
+        .collect();
+    let endpoints_alive =
+        !endpoint_details.is_empty() && endpoint_details.iter().all(|ep| ep.alive);
+
     Ok(Json(DeliveryStatusResponse {
         instance: status.instance,
         server_ready: status.server_ready,
-        endpoints: status
-            .endpoints
-            .into_iter()
-            .map(|ep| DeliveryEndpointEntry {
-                alias: ep.alias,
-                alive: ep.alive,
-                buff_size_bytes: ep.buff_size_bytes,
-                current_chunk_id: ep.current_chunk_id,
-            })
-            .collect(),
+        server_ip,
+        endpoints_alive,
+        endpoint_details,
     }))
 }
 
