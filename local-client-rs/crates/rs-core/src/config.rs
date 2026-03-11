@@ -148,7 +148,9 @@ impl Config {
     /// Load config from file, with env var overrides.
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut config: Config = serde_json::from_str(&content)?;
+        // Strip UTF-8 BOM if present (PowerShell writes BOM with -Encoding UTF8)
+        let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
+        let mut config: Config = serde_json::from_str(content)?;
         config.apply_env_overrides();
         Ok(config)
     }

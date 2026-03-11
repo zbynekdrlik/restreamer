@@ -1184,7 +1184,8 @@ jobs:
             snapshot_label = "rs-delivery"
             ssh_key_name = "restreamer-ci"
           }
-          $config | ConvertTo-Json -Depth 5 | Set-Content $configPath -Encoding UTF8
+          $json = $config | ConvertTo-Json -Depth 5
+          [System.IO.File]::WriteAllText($configPath, $json)
           Write-Host "Config file updated with Hetzner settings"
 
           # Restart the Windows Service to pick up new config
