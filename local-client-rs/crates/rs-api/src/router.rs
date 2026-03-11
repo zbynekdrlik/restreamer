@@ -80,7 +80,12 @@ pub fn build_router(state: AppState) -> Router {
         )
         // YouTube
         .route("/youtube/status", get(handlers::youtube_status))
-        .route("/youtube/oauth/seed", post(handlers::youtube_oauth_seed));
+        .route("/youtube/oauth/seed", post(handlers::youtube_oauth_seed))
+        .route("/youtube/oauth/start", get(handlers::youtube_oauth_start))
+        .route(
+            "/youtube/oauth/callback",
+            get(handlers::youtube_oauth_callback),
+        );
 
     // Allow any origin so the dashboard is accessible from LAN devices
     let cors = CorsLayer::new()
@@ -829,5 +834,87 @@ mod tests {
             .unwrap();
         let instances: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
         assert!(instances.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod youtube_oauth_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::db;
+    use rs_core::models::WsEvent;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    fn yt_config() -> Config {
+        let mut c = Config::for_testing();
+        c.youtube.client_id = "yt-cid-for-test".into();
+        c.youtube.client_secret = "yt-cs-for-test".into();
+        c
+    }
+
+    #[tokio::test]
+    async fn oauth_start_returns_url() {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, yt_config(), ws_tx);
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(Request::builder().uri("/api/v1/youtube/oauth/start").body(Body::empty()).unwrap())
+            .await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let url = val["url"].as_str().unwrap();
+        assert!(url.contains("yt-cid-for-test"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("access_type=offline"));
+    }
+
+    #[tokio::test]
+    async fn oauth_start_no_creds_returns_400() {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/v1/youtube/oauth/start").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_no_code_returns_400() {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, yt_config(), ws_tx);
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/v1/youtube/oauth/callback").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_error_param_returns_html() {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, yt_config(), ws_tx);
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/v1/youtube/oauth/callback?error=access_denied").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("Authorization Failed"));
     }
 }
