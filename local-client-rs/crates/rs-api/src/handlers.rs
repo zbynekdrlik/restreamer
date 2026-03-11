@@ -833,7 +833,10 @@ pub async fn youtube_oauth_callback(
     axum::extract::Query(params): axum::extract::Query<YouTubeOAuthCallbackParams>,
 ) -> Result<axum::response::Html<String>, StatusCode> {
     if let Some(err) = params.error {
-        let escaped = err.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let escaped = err
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
         return Ok(axum::response::Html(format!(
             "<html><body><h1>YouTube Authorization Failed</h1><p>{escaped}</p></body></html>"
         )));
@@ -858,10 +861,9 @@ pub async fn youtube_oauth_callback(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let expires_at = tokens.expires_in.map(|secs| {
-        (chrono::Utc::now() + chrono::Duration::seconds(secs as i64))
-            .to_rfc3339()
-    });
+    let expires_at = tokens
+        .expires_in
+        .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339());
 
     db::upsert_youtube_oauth(
         &state.pool,
