@@ -462,6 +462,20 @@ pub async fn get_chunk_stats(pool: &SqlitePool, chunk_duration_ms: u64) -> Resul
     })
 }
 
+/// Get the first (minimum) chunk ID for a specific streaming event.
+/// Returns None if no chunks exist for the event.
+pub async fn get_first_chunk_id_for_event(
+    pool: &SqlitePool,
+    streaming_event_id: i64,
+) -> Result<Option<i64>> {
+    let row =
+        sqlx::query("SELECT MIN(id) as min_id FROM chunk_records WHERE streaming_event_id = ?1")
+            .bind(streaming_event_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(row.get::<Option<i64>, _>("min_id"))
+}
+
 pub async fn delete_all_chunks(pool: &SqlitePool) -> Result<u64> {
     let result = sqlx::query("DELETE FROM chunk_records")
         .execute(pool)

@@ -668,13 +668,19 @@ pub async fn delivery_start(
             StatusCode::NOT_FOUND
         })?;
 
+    // Get the first available chunk ID for this event so rs-delivery starts from the right place
+    let start_chunk_id = db::get_first_chunk_id_for_event(&state.pool, event_id)
+        .await
+        .unwrap_or(None)
+        .unwrap_or(0);
+
     // Spawn background task to poll Hetzner and init rs-delivery
     let instance_id = result.instance_id;
     let event_name = event.name.clone();
     let orch = Arc::clone(orch);
     tokio::spawn(async move {
         if let Err(e) = orch
-            .poll_and_init(instance_id, event_id, &event_name, 0)
+            .poll_and_init(instance_id, event_id, &event_name, start_chunk_id)
             .await
         {
             tracing::error!("Background poll_and_init failed for instance {instance_id}: {e}");

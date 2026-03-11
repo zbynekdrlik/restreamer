@@ -105,6 +105,40 @@ async fn chunk_stats_and_pagination() {
 }
 
 #[tokio::test]
+async fn get_first_chunk_id_for_event_works() {
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
+    let event_id2 = upsert_streaming_event(&pool, "evt-2").await.unwrap();
+
+    // No chunks yet — returns None
+    let first = get_first_chunk_id_for_event(&pool, event_id).await.unwrap();
+    assert_eq!(first, None);
+
+    // Insert chunks for event 1
+    let c1 = insert_chunk(&pool, event_id, "/tmp/c1.bin", 100, "md5a")
+        .await
+        .unwrap();
+    let _c2 = insert_chunk(&pool, event_id, "/tmp/c2.bin", 100, "md5b")
+        .await
+        .unwrap();
+
+    // Insert chunk for event 2 (should not affect event 1)
+    let _c3 = insert_chunk(&pool, event_id2, "/tmp/c3.bin", 100, "md5c")
+        .await
+        .unwrap();
+
+    let first = get_first_chunk_id_for_event(&pool, event_id).await.unwrap();
+    assert_eq!(first, Some(c1));
+
+    // Event 2 should return its own first chunk
+    let first2 = get_first_chunk_id_for_event(&pool, event_id2)
+        .await
+        .unwrap();
+    assert!(first2.is_some());
+    assert_ne!(first2.unwrap(), c1);
+}
+
+#[tokio::test]
 async fn delete_all_chunks_works() {
     let pool = setup_db().await;
     let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
