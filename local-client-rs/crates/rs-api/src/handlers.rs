@@ -677,9 +677,7 @@ pub async fn delivery_start(
             .poll_and_init(instance_id, event_id, &event_name, 0)
             .await
         {
-            tracing::error!(
-                "Background poll_and_init failed for instance {instance_id}: {e}"
-            );
+            tracing::error!("Background poll_and_init failed for instance {instance_id}: {e}");
         }
     });
 
