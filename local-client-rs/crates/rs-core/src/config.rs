@@ -35,7 +35,7 @@ fn default_hetzner_location() -> String {
     "fsn1".to_string()
 }
 fn default_hetzner_server_type() -> String {
-    "cx22".to_string()
+    "cx23".to_string()
 }
 fn default_hetzner_snapshot_label() -> String {
     "rs-delivery".to_string()
@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(config.inpoint.chunk_duration_ms, 1000);
         assert_eq!(config.api.port, 8910);
         assert_eq!(config.api.bind, "0.0.0.0");
-        assert_eq!(config.hetzner.default_server_type, "cx22");
+        assert_eq!(config.hetzner.default_server_type, "cx23");
     }
 
     #[test]

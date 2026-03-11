@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS delivery_instances (
     name           TEXT NOT NULL,
     ipv4           TEXT NOT NULL DEFAULT '',
     status         TEXT NOT NULL DEFAULT 'creating' CHECK(status IN ('creating','running','stopping','deleted')),
-    server_type    TEXT NOT NULL DEFAULT 'cx22',
+    server_type    TEXT NOT NULL DEFAULT 'cx23',
     event_id       INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
     created_at     TEXT NOT NULL DEFAULT (datetime('now')),
     last_health_at TEXT

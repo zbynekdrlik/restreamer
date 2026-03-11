@@ -143,7 +143,7 @@ if (-not (Test-Path $ConfigFile)) {
         hetzner      = @{
             api_token          = ""
             location           = "fsn1"
-            default_server_type = "cx22"
+            default_server_type = "cx23"
             snapshot_label     = "rs-delivery"
             ssh_key_name       = "restreamer"
         }

@@ -352,7 +352,7 @@ mod tests {
         // Test that the request body is properly constructed
         let req = CreateServerRequest {
             name: "test-server".to_string(),
-            server_type: "cx22".to_string(),
+            server_type: "cx23".to_string(),
             location: "fsn1".to_string(),
             image: "ubuntu-22.04".to_string(),
             ssh_keys: vec!["restreamer".to_string()],
@@ -363,7 +363,7 @@ mod tests {
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["name"], "test-server");
-        assert_eq!(json["server_type"], "cx22");
+        assert_eq!(json["server_type"], "cx23");
         assert_eq!(json["location"], "fsn1");
         assert_eq!(json["ssh_keys"][0], "restreamer");
     }
@@ -376,7 +376,7 @@ mod tests {
                 "name": "rs-delivery-1",
                 "status": "running",
                 "public_net": {"ipv4": {"ip": "1.2.3.4"}, "ipv6": {"ip": "::1"}},
-                "server_type": {"name": "cx22", "description": "CX22"},
+                "server_type": {"name": "cx23", "description": "CX23"},
                 "created": "2026-01-01T00:00:00+00:00"
             }
         }"#;
