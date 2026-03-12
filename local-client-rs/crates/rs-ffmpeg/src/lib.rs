@@ -166,21 +166,10 @@ fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
         "+genpts+discardcorrupt".into(),
         "-i".into(),
         "pipe:".into(),
-        "-vf".into(),
-        "yadif".into(),
-        "-re".into(),
         "-f".into(),
         "flv".into(),
-        "-vcodec".into(),
+        "-c".into(),
         "copy".into(),
-        "-acodec".into(),
-        "aac".into(),
-        "-ab".into(),
-        "160k".into(),
-        "-ac".into(),
-        "2".into(),
-        "-ar".into(),
-        "48000".into(),
         url,
     ]
 }
@@ -345,10 +334,9 @@ mod tests {
     fn build_yt_rtmp_args_correct() {
         let args = build_ffmpeg_args(ServiceType::YtRtmp, "yt-key", "YT RTMP");
         assert!(args.iter().any(|a| a.contains("a.rtmp.youtube.com")));
-        assert!(args.contains(&"yadif".to_string()));
-        assert!(args.contains(&"aac".to_string()));
-        assert!(args.contains(&"160k".to_string()));
-        assert!(args.contains(&"48000".to_string()));
+        assert!(args.iter().any(|a| a.contains("yt-key")));
+        assert!(args.contains(&"flv".to_string()));
+        assert!(args.contains(&"copy".to_string()));
     }
 
     #[test]

@@ -80,10 +80,9 @@ pub async fn get_status() -> Result<StatusResponse, String> {
     }
     // Browser mode: fetch full /status for inpoint state, plus chunk stats
     let status: serde_json::Value = http_get("/status").await.unwrap_or_default();
-    let event: Option<StreamingEvent> =
-        serde_json::from_value(status["streaming_event"].clone())
-            .ok()
-            .flatten();
+    let event: Option<StreamingEvent> = serde_json::from_value(status["streaming_event"].clone())
+        .ok()
+        .flatten();
     let chunk_stats: ChunkStats = http_get("/chunks/stats").await.unwrap_or_default();
     let inpoint_connected = status["inpoint"]["details"]["rtmp_connected"]
         .as_bool()
@@ -302,7 +301,11 @@ pub async fn activate_event(id: i64) -> Result<(), String> {
 }
 
 pub async fn start_delivering(id: i64) -> Result<(), String> {
-    http_post(&format!("/events/{id}/start-delivering")).await
+    http_post(&format!("/events/{id}/start-delivering")).await?;
+    // Also start the Hetzner delivery VPS
+    let body = serde_json::json!({ "event_id": id });
+    let _ = http_post_json("/delivery/start", &body).await;
+    Ok(())
 }
 
 pub async fn deactivate_event(id: i64) -> Result<(), String> {
