@@ -16,6 +16,12 @@ use rs_core::models::{
 
 use crate::state::AppState;
 
+/// Redaction placeholder for sensitive config values sent over the API.
+const REDACTED: &str = "***";
+
+/// Known valid service types for endpoint configs.
+const VALID_SERVICE_TYPES: &[&str] = &["YT_HLS", "FB", "YT_RTMP", "VIMEO", "INSTAGRAM", "TEST_FILE"];
+
 pub async fn health() -> StatusCode {
     StatusCode::OK
 }
@@ -215,8 +221,10 @@ pub async fn action_toggle_delivering(
 pub async fn get_config(State(state): State<AppState>) -> Json<Config> {
     let mut config = (*state.config).clone();
     // Redact sensitive credentials before sending over the API
-    config.s3.access_key_id = "***".to_string();
-    config.s3.secret_access_key = "***".to_string();
+    config.s3.access_key_id = REDACTED.to_string();
+    config.s3.secret_access_key = REDACTED.to_string();
+    config.hetzner.api_token = REDACTED.to_string();
+    config.youtube.client_secret = REDACTED.to_string();
     Json(config)
 }
 
@@ -239,12 +247,18 @@ pub async fn patch_config(
         StatusCode::BAD_REQUEST
     })?;
 
-    // Preserve redacted credentials — if the client sends "***" back, keep originals
-    if new_config.s3.access_key_id == "***" {
+    // Preserve redacted credentials — if the client sends back the redaction placeholder, keep originals
+    if new_config.s3.access_key_id == REDACTED {
         new_config.s3.access_key_id = state.config.s3.access_key_id.clone();
     }
-    if new_config.s3.secret_access_key == "***" {
+    if new_config.s3.secret_access_key == REDACTED {
         new_config.s3.secret_access_key = state.config.s3.secret_access_key.clone();
+    }
+    if new_config.hetzner.api_token == REDACTED {
+        new_config.hetzner.api_token = state.config.hetzner.api_token.clone();
+    }
+    if new_config.youtube.client_secret == REDACTED {
+        new_config.youtube.client_secret = state.config.youtube.client_secret.clone();
     }
 
     // Validate the merged config
@@ -263,8 +277,10 @@ pub async fn patch_config(
     }
 
     // Redact credentials before returning
-    new_config.s3.access_key_id = "***".to_string();
-    new_config.s3.secret_access_key = "***".to_string();
+    new_config.s3.access_key_id = REDACTED.to_string();
+    new_config.s3.secret_access_key = REDACTED.to_string();
+    new_config.hetzner.api_token = REDACTED.to_string();
+    new_config.youtube.client_secret = REDACTED.to_string();
 
     Ok(Json(new_config))
 }
@@ -336,6 +352,10 @@ pub async fn create_event(
     State(state): State<AppState>,
     Json(req): Json<CreateEventRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    if req.name.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let id = db::create_streaming_event(&state.pool, &req.name)
         .await
         .map_err(|e| {
@@ -398,6 +418,11 @@ pub async fn create_endpoint(
     State(state): State<AppState>,
     Json(req): Json<CreateEndpointRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    if !VALID_SERVICE_TYPES.contains(&req.service_type.as_str()) {
+        tracing::warn!("Invalid service_type: {}", req.service_type);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let id = db::create_endpoint_config(
         &state.pool,
         &req.alias,
@@ -675,6 +700,11 @@ pub async fn delivery_start(
     tokio::spawn(async move {
         if let Err(e) = orch.poll_and_init(instance_id, event_id, &event_name).await {
             tracing::error!("Background poll_and_init failed for instance {instance_id}: {e}");
+            if let Err(db_err) =
+                db::update_delivery_instance_status(&orch.pool(), instance_id, "failed").await
+            {
+                tracing::error!("Failed to mark instance {instance_id} as failed: {db_err}");
+            }
         }
     });
 

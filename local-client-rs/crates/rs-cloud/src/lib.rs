@@ -55,6 +55,7 @@ pub enum ServerStatus {
     Running,
     Stopping,
     Deleted,
+    Failed,
 }
 
 impl std::fmt::Display for ServerStatus {
@@ -64,6 +65,7 @@ impl std::fmt::Display for ServerStatus {
             Self::Running => write!(f, "running"),
             Self::Stopping => write!(f, "stopping"),
             Self::Deleted => write!(f, "deleted"),
+            Self::Failed => write!(f, "failed"),
         }
     }
 }
@@ -76,6 +78,7 @@ impl std::str::FromStr for ServerStatus {
             "running" => Ok(Self::Running),
             "stopping" => Ok(Self::Stopping),
             "deleted" => Ok(Self::Deleted),
+            "failed" => Ok(Self::Failed),
             other => Err(format!("unknown server status: {other}")),
         }
     }
@@ -96,7 +99,7 @@ pub struct DeliveryInstance {
 }
 
 /// Select server type based on endpoint count.
-pub fn select_server_type(endpoint_count: usize, _default_type: &str) -> &'static str {
+pub fn select_server_type(endpoint_count: usize) -> &'static str {
     match endpoint_count {
         0..=2 => "cx23",
         3..=7 => "cx33",

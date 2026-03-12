@@ -56,6 +56,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (1, MIGRATION_V1_SQL),
         (2, MIGRATION_V2_SQL),
         (3, MIGRATION_V3_SQL),
+        (4, MIGRATION_V4_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -183,6 +184,35 @@ INSERT INTO streaming_events_new (id, name, received_bytes, receiving_activated,
 DROP TABLE streaming_events;
 
 ALTER TABLE streaming_events_new RENAME TO streaming_events
+"#;
+
+const MIGRATION_V4_SQL: &str = r#"
+CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_endpoint_status_instance_alias
+    ON delivery_endpoint_status(instance_id, alias);
+
+PRAGMA foreign_keys = OFF;
+
+CREATE TABLE IF NOT EXISTS delivery_instances_new (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    hetzner_id     INTEGER NOT NULL UNIQUE,
+    name           TEXT NOT NULL,
+    ipv4           TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT 'creating' CHECK(status IN ('creating','running','stopping','deleted','failed')),
+    server_type    TEXT NOT NULL DEFAULT 'cx23',
+    event_id       INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    last_health_at TEXT
+);
+
+INSERT INTO delivery_instances_new (id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at)
+    SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at
+    FROM delivery_instances;
+
+DROP TABLE delivery_instances;
+
+ALTER TABLE delivery_instances_new RENAME TO delivery_instances;
+
+PRAGMA foreign_keys = ON
 "#;
 
 // --- Client Profile ---

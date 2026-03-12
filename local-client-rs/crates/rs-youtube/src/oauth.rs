@@ -11,17 +11,14 @@ const SCOPES: &str = "https://www.googleapis.com/auth/youtube.readonly";
 pub fn authorization_url(config: &YouTubeConfig, redirect_uri: &str) -> String {
     format!(
         "{AUTH_URL}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
-        urlencoding(&config.client_id),
-        urlencoding(redirect_uri),
-        urlencoding(SCOPES),
+        urlencode(&config.client_id),
+        urlencode(redirect_uri),
+        urlencode(SCOPES),
     )
 }
 
-fn urlencoding(s: &str) -> String {
-    s.replace(':', "%3A")
-        .replace('/', "%2F")
-        .replace(' ', "+")
-        .replace('@', "%40")
+fn urlencode(s: &str) -> String {
+    urlencoding::encode(s).into_owned()
 }
 
 #[derive(Debug, Serialize)]

@@ -303,15 +303,11 @@ pub async fn upsert_delivery_endpoint_status(
     buff_size_bytes: i64,
     current_chunk_id: i64,
 ) -> Result<()> {
-    // Delete existing row for this instance+alias, then insert fresh
-    sqlx::query("DELETE FROM delivery_endpoint_status WHERE instance_id = ?1 AND alias = ?2")
-        .bind(instance_id)
-        .bind(alias)
-        .execute(pool)
-        .await?;
     sqlx::query(
         "INSERT INTO delivery_endpoint_status (instance_id, alias, alive, buff_size_bytes, current_chunk_id, last_check_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+         ON CONFLICT(instance_id, alias) DO UPDATE SET
+             alive = ?3, buff_size_bytes = ?4, current_chunk_id = ?5, last_check_at = datetime('now')",
     )
     .bind(instance_id)
     .bind(alias)

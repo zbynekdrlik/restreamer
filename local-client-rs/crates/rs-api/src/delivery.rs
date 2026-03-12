@@ -56,6 +56,11 @@ pub struct YouTubeStatus {
 }
 
 impl DeliveryOrchestrator {
+    /// Access the database pool (e.g. for background error handling).
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     pub fn new(pool: SqlitePool, config: Config) -> Option<Self> {
         let token = &config.hetzner.api_token;
         if token.is_empty() {
@@ -97,8 +102,7 @@ impl DeliveryOrchestrator {
 
         // Get event endpoints to determine server size
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
-        let server_type =
-            rs_cloud::select_server_type(endpoints.len(), &self.config.hetzner.default_server_type);
+        let server_type = rs_cloud::select_server_type(endpoints.len());
 
         let name = format!("rs-delivery-evt{event_id}");
         let cloud_init = rs_cloud::snapshot_cloud_init();
@@ -236,6 +240,9 @@ impl DeliveryOrchestrator {
         }
 
         // POST /api/init to configure endpoints
+        // ACCEPTED RISK: S3 credentials are sent over plaintext HTTP to the delivery VPS.
+        // The VPS is ephemeral and short-lived, and adding TLS to ad-hoc Hetzner instances
+        // is not practical. A future improvement could pass credentials via cloud-init user_data.
         // Query chunk ID now (not at delivery_start time) so OBS has had time to produce chunks
         let start_chunk_id = db::get_first_chunk_id_for_event(&self.pool, event_id)
             .await

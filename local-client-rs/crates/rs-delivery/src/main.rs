@@ -42,6 +42,10 @@ async fn main() {
 
     let addr = "0.0.0.0:8000";
     tracing::info!("Delivery service starting on {addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("failed to bind to 0.0.0.0:8000");
+    axum::serve(listener, app)
+        .await
+        .expect("delivery server error");
 }
