@@ -702,7 +702,7 @@ pub async fn delivery_start(
         if let Err(e) = orch.poll_and_init(instance_id, event_id, &event_name).await {
             tracing::error!("Background poll_and_init failed for instance {instance_id}: {e}");
             if let Err(db_err) =
-                db::update_delivery_instance_status(&orch.pool(), instance_id, "failed").await
+                db::update_delivery_instance_status(orch.pool(), instance_id, "failed").await
             {
                 tracing::error!("Failed to mark instance {instance_id} as failed: {db_err}");
             }
