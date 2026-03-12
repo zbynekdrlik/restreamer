@@ -20,7 +20,8 @@ use crate::state::AppState;
 const REDACTED: &str = "***";
 
 /// Known valid service types for endpoint configs.
-const VALID_SERVICE_TYPES: &[&str] = &["YT_HLS", "FB", "YT_RTMP", "VIMEO", "INSTAGRAM", "TEST_FILE"];
+const VALID_SERVICE_TYPES: &[&str] =
+    &["YT_HLS", "FB", "YT_RTMP", "VIMEO", "INSTAGRAM", "TEST_FILE"];
 
 pub async fn health() -> StatusCode {
     StatusCode::OK
