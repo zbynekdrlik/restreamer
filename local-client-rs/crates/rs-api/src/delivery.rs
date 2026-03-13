@@ -242,11 +242,30 @@ impl DeliveryOrchestrator {
         // ACCEPTED RISK: S3 credentials are sent over plaintext HTTP to the delivery VPS.
         // The VPS is ephemeral and short-lived, and adding TLS to ad-hoc Hetzner instances
         // is not practical. A future improvement could pass credentials via cloud-init user_data.
-        // Query chunk ID now (not at delivery_start time) so OBS has had time to produce chunks
-        let start_chunk_id = db::get_first_chunk_id_for_event(&self.pool, event_id)
-            .await
-            .unwrap_or(None)
-            .unwrap_or(0);
+        // Query chunk ID, retrying briefly in case chunks haven't been committed yet
+        let mut start_chunk_id = None;
+        for attempt in 0..10 {
+            match db::get_first_chunk_id_for_event(&self.pool, event_id).await {
+                Ok(Some(id)) => {
+                    start_chunk_id = Some(id);
+                    break;
+                }
+                Ok(None) => {
+                    info!(
+                        event_id,
+                        attempt, "No chunks found for event yet, retrying..."
+                    );
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                Err(e) => {
+                    warn!(event_id, "Failed to query chunk ID: {e}");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+            }
+        }
+        let start_chunk_id = start_chunk_id.ok_or_else(|| {
+            anyhow::anyhow!("No chunks found for event {event_id} after 30s")
+        })?;
         info!(event_id, start_chunk_id, "Starting delivery from chunk");
 
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
