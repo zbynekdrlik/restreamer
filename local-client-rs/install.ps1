@@ -63,7 +63,8 @@ New-Item -ItemType Directory -Path "$ConfigDir\chunks" -Force | Out-Null
 
 # --- Download service binary ---
 $serviceAsset = $latestRelease.assets | Where-Object { $_.name -like "restreamer-service-*-windows-x64.exe" } | Select-Object -First 1
-$checksumAsset = $latestRelease.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" } | Select-Object -First 1
+# Look for per-file .sha256 checksum (release creates restreamer-service-VERSION-windows-x64.exe.sha256)
+$checksumAsset = $latestRelease.assets | Where-Object { $_.name -eq "$($serviceAsset.name).sha256" } | Select-Object -First 1
 if ($serviceAsset) {
     Write-Status "Downloading service binary..."
     $servicePath = "$InstallDir\restreamer-service.exe"
@@ -73,8 +74,8 @@ if ($serviceAsset) {
     # Verify checksum if available
     if ($checksumAsset) {
         Write-Status "Verifying checksum..."
-        $checksums = (Invoke-WebRequest -Uri $checksumAsset.browser_download_url).Content
-        $expectedHash = ($checksums -split "`n" | Where-Object { $_ -match $serviceAsset.name } | ForEach-Object { ($_ -split '\s+')[0] })
+        $checksumContent = (Invoke-WebRequest -Uri $checksumAsset.browser_download_url).Content.Trim()
+        $expectedHash = ($checksumContent -split '\s+')[0]
         if ($expectedHash) {
             $actualHash = (Get-FileHash -Path $servicePath -Algorithm SHA256).Hash.ToLower()
             if ($actualHash -ne $expectedHash.ToLower()) {
@@ -87,6 +88,29 @@ if ($serviceAsset) {
 } else {
     Write-Err "Service binary not found in release assets"
     exit 1
+}
+
+# --- Ensure WebView2 runtime is installed ---
+Write-Status "Checking WebView2 runtime..."
+$wv2Found = $false
+foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
+    $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
+    if ($reg -and $reg.pv) { $wv2Found = $true; Write-Ok "WebView2 already installed: version $($reg.pv)"; break }
+}
+if (-not $wv2Found -and (Test-Path "C:\Program Files (x86)\Microsoft\EdgeWebView\Application")) {
+    $wv2Found = $true; Write-Ok "WebView2 already installed (detected from filesystem)"
+}
+if (-not $wv2Found) {
+    Write-Status "Installing WebView2 Evergreen Runtime..."
+    $bootstrapper = "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
+    Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
+    Start-Process -FilePath $bootstrapper -ArgumentList "/silent /install" -Wait
+    Remove-Item $bootstrapper -ErrorAction SilentlyContinue
+    if (Test-Path "C:\Program Files (x86)\Microsoft\EdgeWebView\Application") {
+        Write-Ok "WebView2 installed successfully"
+    } else {
+        Write-Err "WebView2 installation failed - dashboard may not render"
+    }
 }
 
 # --- Download and run Tauri NSIS installer ---
@@ -110,13 +134,23 @@ if (-not (Test-Path $ConfigFile)) {
     Write-Status "Creating default config..."
     $defaultConfig = @{
         client_uuid  = [guid]::NewGuid().ToString()
-        manager_url  = "https://restreamer.newlevel.media"
         s3           = @{
             bucket            = "restreamer-chunks"
             region            = "eu-central-1"
-            endpoint          = "https://eu-central-1.linodeobjects.com"
+            endpoint          = "https://fsn1.your-objectstorage.com"
             access_key_id     = ""
             secret_access_key = ""
+        }
+        hetzner      = @{
+            api_token          = ""
+            location           = "fsn1"
+            default_server_type = "cx23"
+            snapshot_label     = "rs-delivery"
+            ssh_key_name       = "restreamer"
+        }
+        youtube      = @{
+            client_id     = ""
+            client_secret = ""
         }
         inpoint      = @{
             rtmp_port         = 1234

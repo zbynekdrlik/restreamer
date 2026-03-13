@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use rs_api::state::AppState;
 use rs_core::config::Config;
 use rs_core::db;
-use rs_core::models::WsEvent;
+use rs_core::models::{InpointState, WsEvent};
 use tokio::sync::broadcast;
 
 /// Create a test AppState with in-memory SQLite.
@@ -47,7 +47,7 @@ async fn status_endpoint_returns_valid_json() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body.get("inpoint").is_some());
     assert!(body.get("endpoint").is_some());
-    assert!(body.get("poller").is_some());
+    assert!(body.get("delivery").is_some());
     assert!(body.get("streaming_event").is_some());
 }
 
@@ -66,7 +66,7 @@ async fn streaming_event_lifecycle() {
     assert!(body.is_null());
 
     // Create a streaming event directly in DB
-    db::upsert_streaming_event(&pool, "evt-integration-1", Some("Test Event"), "127.0.0.1")
+    db::upsert_streaming_event(&pool, "evt-integration-1")
         .await
         .unwrap();
 
@@ -76,8 +76,7 @@ async fn streaming_event_lifecycle() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["identifier"], "evt-integration-1");
-    assert_eq!(body["short_description"], "Test Event");
+    assert_eq!(body["name"], "evt-integration-1");
 
     // Delete it via API
     let client = reqwest::Client::new();
@@ -103,7 +102,7 @@ async fn chunks_crud_via_http() {
     let (base, _) = start_server(state).await;
 
     // Create a streaming event (chunks require one)
-    db::upsert_streaming_event(&pool, "evt-chunk-test", Some("Chunk Test"), "127.0.0.1")
+    db::upsert_streaming_event(&pool, "evt-chunk-test")
         .await
         .unwrap();
     let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
@@ -160,9 +159,7 @@ async fn chunks_pagination() {
     let pool = state.pool.clone();
     let (base, _) = start_server(state).await;
 
-    db::upsert_streaming_event(&pool, "evt-pag", None, "127.0.0.1")
-        .await
-        .unwrap();
+    db::upsert_streaming_event(&pool, "evt-pag").await.unwrap();
     let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
 
     // Insert 5 chunks
@@ -218,14 +215,14 @@ async fn config_patch_updates_and_validates() {
     let resp = client
         .patch(format!("{base}/config"))
         .json(&serde_json::json!({
-            "manager_url": "https://updated.example.com"
+            "client_uuid": "updated-uuid-12345678"
         }))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     let config: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(config["manager_url"], "https://updated.example.com");
+    assert_eq!(config["client_uuid"], "updated-uuid-12345678");
 
     // Invalid patch (empty client_uuid)
     let resp = client
@@ -253,7 +250,7 @@ async fn toggle_receiving_and_delivering() {
     assert_eq!(resp.status(), 404);
 
     // Create event
-    db::upsert_streaming_event(&pool, "evt-toggle", None, "127.0.0.1")
+    db::upsert_streaming_event(&pool, "evt-toggle")
         .await
         .unwrap();
 
@@ -398,7 +395,7 @@ async fn clear_chunks_resets_stats_to_zero() {
     let (base, _) = start_server(state).await;
 
     // Simulate old session: create event + chunks, mark some as sent
-    let event_id = db::upsert_streaming_event(&pool, "old-session", None, "127.0.0.1")
+    let event_id = db::upsert_streaming_event(&pool, "old-session")
         .await
         .unwrap();
     db::insert_chunk(&pool, event_id, "/tmp/old1.bin", 1024, "md5a")
@@ -434,14 +431,15 @@ async fn clear_chunks_resets_stats_to_zero() {
 }
 
 #[tokio::test]
-async fn cors_allows_localhost_origin() {
+async fn cors_allows_any_origin() {
     let state = test_state().await;
     let (base, _) = start_server(state).await;
     let client = reqwest::Client::new();
 
+    // Any origin should be accepted (LAN access)
     let resp = client
         .get(format!("{base}/health"))
-        .header("Origin", "http://localhost:5173")
+        .header("Origin", "http://192.168.1.100:8910")
         .send()
         .await
         .unwrap();
@@ -449,5 +447,34 @@ async fn cors_allows_localhost_origin() {
     assert_eq!(resp.status(), 200);
     let cors_header = resp.headers().get("access-control-allow-origin");
     assert!(cors_header.is_some());
-    assert_eq!(cors_header.unwrap(), "http://localhost:5173");
+    assert_eq!(cors_header.unwrap(), "*");
+}
+
+#[tokio::test]
+async fn status_shows_inpoint_disconnected_by_default() {
+    let state = test_state().await;
+    let (base, _) = start_server(state).await;
+
+    let resp = reqwest::get(format!("{base}/status")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["inpoint"]["state"], "disconnected");
+    assert_eq!(body["inpoint"]["details"]["rtmp_connected"], false);
+}
+
+#[tokio::test]
+async fn status_shows_inpoint_connected_when_set() {
+    let mut state = test_state().await;
+    let inpoint_state = InpointState::new();
+    inpoint_state.set_connected(true);
+    state.inpoint_state = inpoint_state;
+    let (base, _) = start_server(state).await;
+
+    let resp = reqwest::get(format!("{base}/status")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["inpoint"]["state"], "connected");
+    assert_eq!(body["inpoint"]["details"]["rtmp_connected"], true);
 }

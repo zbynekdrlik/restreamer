@@ -114,7 +114,8 @@ async fn rtmp_server_receives_ffmpeg_stream_and_produces_chunks() {
     let server = RtmpServer::new("127.0.0.1", port);
     let shutdown = server.shutdown_handle();
     let sink = Arc::clone(&chunk_sink);
-    let server_task = tokio::spawn(async move { server.run(sink).await });
+    let inpoint_state = rs_core::models::InpointState::new();
+    let server_task = tokio::spawn(async move { server.run(sink, inpoint_state).await });
 
     // Wait for RTMP server to be ready (TCP port accepting connections)
     assert!(
@@ -178,7 +179,8 @@ async fn rtmp_server_produces_multiple_chunks_from_stream() {
     let server = RtmpServer::new("127.0.0.1", port);
     let shutdown = server.shutdown_handle();
     let sink = Arc::clone(&chunk_sink);
-    let server_task = tokio::spawn(async move { server.run(sink).await });
+    let inpoint_state = rs_core::models::InpointState::new();
+    let server_task = tokio::spawn(async move { server.run(sink, inpoint_state).await });
 
     assert!(
         wait_for_port(port, Duration::from_secs(5)).await,
@@ -261,7 +263,8 @@ async fn rtmp_server_chunk_md5_matches_file() {
     let server = RtmpServer::new("127.0.0.1", port);
     let shutdown = server.shutdown_handle();
     let sink = Arc::clone(&chunk_sink);
-    let server_task = tokio::spawn(async move { server.run(sink).await });
+    let inpoint_state = rs_core::models::InpointState::new();
+    let server_task = tokio::spawn(async move { server.run(sink, inpoint_state).await });
 
     assert!(
         wait_for_port(port, Duration::from_secs(5)).await,

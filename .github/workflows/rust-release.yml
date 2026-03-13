@@ -77,6 +77,40 @@ jobs:
             local-client-rs/restreamer-service-*-windows-x64.exe
             local-client-rs/restreamer-service-*-windows-x64.exe.sha256
 
+  build-delivery:
+    name: Build delivery binary (Linux)
+    needs: validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local-client-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: local-client-rs
+      - name: Build delivery binary
+        run: cargo build --release -p rs-delivery
+        env:
+          SQLX_OFFLINE: true
+      - name: Rename artifact
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          cp target/release/rs-delivery "rs-delivery-${VERSION}-linux-amd64"
+      - name: Generate checksum
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          sha256sum "rs-delivery-${VERSION}-linux-amd64" > "rs-delivery-${VERSION}-linux-amd64.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: delivery-binary
+          path: |
+            local-client-rs/rs-delivery-*-linux-amd64
+            local-client-rs/rs-delivery-*-linux-amd64.sha256
+
   build-tauri:
     name: Build Tauri app (Windows)
     needs: validate
@@ -89,18 +123,17 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: local-client-rs
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install frontend dependencies
-        run: npm ci
+      - name: Install Trunk
+        run: cargo install trunk
       - name: Install Tauri CLI
-        run: npm install -g @tauri-apps/cli@latest
+        run: cargo install tauri-cli
       - name: Build Tauri app
-        run: npx tauri build
+        run: cargo tauri build
         env:
           SQLX_OFFLINE: true
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -112,7 +145,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [validate, build-service, build-tauri]
+    needs: [validate, build-service, build-delivery, build-tauri]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -131,12 +164,14 @@ jobs:
           prerelease: false
           files: |
             artifacts/service-binary/*
+            artifacts/delivery-binary/*
             artifacts/tauri-installer/*
           body: |
             ## Restreamer Local Client v${{ needs.validate.outputs.version }}
 
             ### Assets
             - `restreamer-service-*-windows-x64.exe` — Headless Windows service binary
+            - `rs-delivery-*-linux-amd64` — Linux delivery VPS binary
             - `Restreamer_*_x64-setup.exe` — Tauri NSIS installer (tray app + dashboard)
 
             ### Installation
@@ -146,7 +181,7 @@ jobs:
 
   deploy-stream-lan:
     name: Deploy to stream.lan
-    needs: [release, build-service, build-tauri]
+    needs: [release, build-service, build-delivery, build-tauri]
     runs-on: [self-hosted, windows, stream-lan]
     steps:
       - name: Clean old artifacts

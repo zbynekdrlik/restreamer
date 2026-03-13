@@ -10,11 +10,15 @@ pub fn Dashboard(status: StatusResponse) -> impl IntoView {
     let event = status.streaming_event.clone();
     let stats = status.chunk_stats;
 
-    // Determine inpoint status
-    let (inpoint_status, inpoint_class) = match &event {
-        Some(e) if e.receiving_activated => ("Receiving", "active"),
-        Some(_) => ("Paused", "idle"),
-        None => ("No Event", "disconnected"),
+    // Determine inpoint status based on actual RTMP connection state
+    let (inpoint_status, inpoint_class) = if status.inpoint_connected {
+        ("Receiving", "active")
+    } else {
+        match &event {
+            Some(e) if e.receiving_activated => ("Waiting for OBS", "idle"),
+            Some(_) => ("Paused", "idle"),
+            None => ("No Event", "disconnected"),
+        }
     };
 
     // Determine endpoint status
@@ -39,19 +43,7 @@ pub fn Dashboard(status: StatusResponse) -> impl IntoView {
                         <div class="event-info">
                             <div class="event-field">
                                 <div class="event-field-label">"Event Name"</div>
-                                <div class="event-field-value">
-                                    {e.short_description.unwrap_or_else(|| "Unnamed".to_string())}
-                                </div>
-                            </div>
-                            <div class="event-field">
-                                <div class="event-field-label">"Identifier"</div>
-                                <div class="event-field-value">
-                                    {e.identifier.unwrap_or_else(|| "-".to_string())}
-                                </div>
-                            </div>
-                            <div class="event-field">
-                                <div class="event-field-label">"Server IP"</div>
-                                <div class="event-field-value">{e.server_ip}</div>
+                                <div class="event-field-value">{e.name}</div>
                             </div>
                             <div class="event-field">
                                 <div class="event-field-label">"Received"</div>

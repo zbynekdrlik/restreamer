@@ -1,3 +1,6 @@
+#[rustfmt::skip]
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -9,10 +12,7 @@ pub struct ClientProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamingEvent {
     pub id: i64,
-    pub identifier: Option<String>,
-    pub short_description: Option<String>,
-    pub date_of_event: String,
-    pub server_ip: String,
+    pub name: String,
     pub received_bytes: i64,
     pub receiving_activated: bool,
     pub delivering_activated: bool,
@@ -28,6 +28,70 @@ pub struct ChunkRecord {
     pub md5: String,
     pub in_process: bool,
     pub sent: bool,
+}
+
+/// Endpoint configuration (e.g., YouTube HLS, Facebook RTMP).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointConfig {
+    pub id: i64,
+    pub alias: String,
+    pub service_type: String,
+    pub stream_key: String,
+    pub enabled: bool,
+    pub position_last: i64,
+    pub delivered_bytes: i64,
+    pub is_fast: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Event-endpoint many-to-many link.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventEndpoint {
+    pub event_id: i64,
+    pub endpoint_id: i64,
+}
+
+/// Hetzner delivery VPS instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryInstance {
+    pub id: i64,
+    pub hetzner_id: i64,
+    pub name: String,
+    pub ipv4: String,
+    pub status: String,
+    pub server_type: String,
+    pub event_id: Option<i64>,
+    pub created_at: String,
+    pub last_health_at: Option<String>,
+    /// Auth token for rs-delivery API (not serialized to API responses).
+    #[serde(skip)]
+    pub auth_token: String,
+}
+
+/// Per-endpoint status on delivery VPS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryEndpointStatus {
+    pub id: i64,
+    pub instance_id: i64,
+    pub alias: String,
+    pub alive: bool,
+    pub buff_size_bytes: i64,
+    pub current_chunk_id: i64,
+    pub last_check_at: String,
+}
+
+/// YouTube OAuth tokens (single row, id=1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YouTubeOAuth {
+    pub id: i64,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub token_uri: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub scopes: String,
+    pub expires_at: Option<String>,
 }
 
 /// Real-time event broadcast over WebSocket.
@@ -56,13 +120,14 @@ pub enum WsEvent {
     },
     StreamingEvent {
         action: String,
-        identifier: Option<String>,
+        name: Option<String>,
         receiving: bool,
         delivering: bool,
     },
-    ManagerPoll {
-        status_code: u16,
-        message: String,
+    DeliveryStatus {
+        instance_name: String,
+        status: String,
+        endpoint_count: u32,
     },
     Error {
         service: String,
@@ -75,7 +140,7 @@ pub enum WsEvent {
 pub struct ServiceStatus {
     pub inpoint: ComponentStatus,
     pub endpoint: ComponentStatus,
-    pub poller: ComponentStatus,
+    pub delivery: ComponentStatus,
     pub streaming_event: Option<StreamingEvent>,
 }
 
@@ -91,6 +156,37 @@ impl Default for ComponentStatus {
             state: String::new(),
             details: serde_json::Value::Object(Default::default()),
         }
+    }
+}
+
+/// Shared state tracking whether an RTMP publisher (e.g. OBS) is connected.
+///
+/// Uses `Arc<AtomicBool>` so clones share the same underlying state.
+/// Written by `MediaReceiver` on Publish/UnPublish, read by the API `/status` handler.
+#[derive(Debug, Clone)]
+pub struct InpointState {
+    rtmp_connected: Arc<AtomicBool>,
+}
+
+impl InpointState {
+    pub fn new() -> Self {
+        Self {
+            rtmp_connected: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn set_connected(&self, connected: bool) {
+        self.rtmp_connected.store(connected, Ordering::Relaxed);
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.rtmp_connected.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for InpointState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -132,13 +228,14 @@ mod tests {
             WsEvent::ChunkUploaded { chunk_id: 1 },
             WsEvent::StreamingEvent {
                 action: "created".to_string(),
-                identifier: Some("evt-1".to_string()),
+                name: Some("evt-1".to_string()),
                 receiving: true,
                 delivering: false,
             },
-            WsEvent::ManagerPoll {
-                status_code: 200,
-                message: "ok".to_string(),
+            WsEvent::DeliveryStatus {
+                instance_name: "rs-delivery-1".to_string(),
+                status: "running".to_string(),
+                endpoint_count: 2,
             },
             WsEvent::Error {
                 service: "inpoint".to_string(),
@@ -158,17 +255,14 @@ mod tests {
     fn streaming_event_serde() {
         let event = StreamingEvent {
             id: 1,
-            identifier: Some("test-event".to_string()),
-            short_description: Some("Test".to_string()),
-            date_of_event: "2026-01-01 00:00:00".to_string(),
-            server_ip: "127.0.0.1".to_string(),
+            name: "test-event".to_string(),
             received_bytes: 0,
             receiving_activated: true,
             delivering_activated: false,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: StreamingEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.identifier, event.identifier);
+        assert_eq!(parsed.name, event.name);
         assert_eq!(parsed.receiving_activated, true);
     }
 
@@ -178,5 +272,35 @@ mod tests {
         assert_eq!(stats.total_chunks, 0);
         assert_eq!(stats.pending_chunks, 0);
         assert_eq!(stats.buffer_duration_secs, 0.0);
+    }
+
+    #[test]
+    fn inpoint_state_defaults_to_disconnected() {
+        let state = InpointState::new();
+        assert!(!state.is_connected());
+    }
+
+    #[test]
+    fn inpoint_state_set_connected() {
+        let state = InpointState::new();
+        state.set_connected(true);
+        assert!(state.is_connected());
+    }
+
+    #[test]
+    fn inpoint_state_clone_shares_state() {
+        let state = InpointState::new();
+        let clone = state.clone();
+        state.set_connected(true);
+        assert!(clone.is_connected());
+    }
+
+    #[test]
+    fn inpoint_state_toggle() {
+        let state = InpointState::new();
+        state.set_connected(true);
+        assert!(state.is_connected());
+        state.set_connected(false);
+        assert!(!state.is_connected());
     }
 }

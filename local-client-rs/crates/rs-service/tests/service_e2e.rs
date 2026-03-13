@@ -170,8 +170,9 @@ async fn start_test_service(
     let server = RtmpServer::new("127.0.0.1", rtmp_port);
     let shutdown = server.shutdown_handle();
     let sink = Arc::clone(&chunk_sink);
+    let inpoint_state = rs_core::models::InpointState::new();
     let rtmp_task = tokio::spawn(async move {
-        let _ = server.run(sink).await;
+        let _ = server.run(sink, inpoint_state).await;
     });
 
     (api_base, pool, shutdown, vec![rtmp_task, chunk_fwd_task])
@@ -194,11 +195,10 @@ async fn full_pipeline_rtmp_to_db_chunks() {
         "RTMP server failed to bind within 5 seconds"
     );
 
-    // Create a streaming event directly in DB (the poller normally does this)
-    let event_id =
-        db::upsert_streaming_event(&pool, "e2e-test-stream", Some("E2E test"), "127.0.0.1")
-            .await
-            .unwrap();
+    // Create a streaming event directly in DB
+    let event_id = db::upsert_streaming_event(&pool, "e2e-test-stream")
+        .await
+        .unwrap();
     assert!(event_id > 0);
 
     // Publish a 4-second stream via ffmpeg
@@ -332,14 +332,9 @@ async fn api_shows_correct_status_during_stream() {
     );
 
     // Create streaming event directly in DB
-    db::upsert_streaming_event(
-        &pool,
-        "status-test-stream",
-        Some("Status test"),
-        "127.0.0.1",
-    )
-    .await
-    .unwrap();
+    db::upsert_streaming_event(&pool, "status-test-stream")
+        .await
+        .unwrap();
 
     // Health endpoint should work
     let client = reqwest::Client::new();

@@ -1,7 +1,7 @@
 use axum::Router;
-use axum::http::{HeaderValue, Method, header};
-use axum::routing::{delete, get, patch, post};
-use tower_http::cors::CorsLayer;
+use axum::http::{Method, header};
+use axum::routing::{delete, get, patch, post, put};
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::handlers;
@@ -11,6 +11,7 @@ use crate::websocket;
 /// Build the Axum router with all API routes.
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
+        // Core status/health
         .route("/health", get(handlers::health))
         .route("/status", get(handlers::get_status))
         .route("/streaming-event", get(handlers::get_streaming_event))
@@ -18,6 +19,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/chunks", get(handlers::get_chunks))
         .route("/chunks/stats", get(handlers::get_chunk_stats))
         .route("/chunks", delete(handlers::delete_chunks))
+        // Actions
         .route(
             "/actions/restart-inpoint",
             post(handlers::action_restart_inpoint),
@@ -34,26 +36,85 @@ pub fn build_router(state: AppState) -> Router {
             "/actions/toggle-delivering",
             post(handlers::action_toggle_delivering),
         )
+        // Config
         .route("/config", get(handlers::get_config))
         .route("/config", patch(handlers::patch_config))
+        // Logs
         .route("/logs/inpoint", get(handlers::get_logs_inpoint))
         .route("/logs/endpoint", get(handlers::get_logs_endpoint))
-        .route("/ws", get(websocket::ws_handler));
+        // WebSocket
+        .route("/ws", get(websocket::ws_handler))
+        // Events CRUD
+        .route("/events", get(handlers::list_events))
+        .route("/events", post(handlers::create_event))
+        .route("/events/{id}", get(handlers::get_event_by_id))
+        .route("/events/{id}", delete(handlers::delete_event_by_id))
+        .route("/events/{id}/activate", post(handlers::activate_event))
+        .route(
+            "/events/{id}/start-delivering",
+            post(handlers::start_delivering),
+        )
+        .route("/events/{id}/deactivate", post(handlers::deactivate_event))
+        .route("/events/{id}/endpoints", get(handlers::get_event_endpoints))
+        .route(
+            "/events/{event_id}/endpoints/{endpoint_id}",
+            post(handlers::attach_endpoint_to_event),
+        )
+        .route(
+            "/events/{event_id}/endpoints/{endpoint_id}",
+            delete(handlers::detach_endpoint_from_event),
+        )
+        // Endpoint Configs CRUD
+        .route("/endpoints", get(handlers::list_endpoints))
+        .route("/endpoints", post(handlers::create_endpoint))
+        .route("/endpoints/{id}", get(handlers::get_endpoint_by_id))
+        .route("/endpoints/{id}", put(handlers::update_endpoint))
+        .route("/endpoints/{id}", delete(handlers::delete_endpoint))
+        // Delivery orchestration
+        .route("/delivery/start", post(handlers::delivery_start))
+        .route("/delivery/status", get(handlers::delivery_status))
+        .route("/delivery/stop", post(handlers::delivery_stop))
+        .route(
+            "/delivery/instances",
+            get(handlers::list_delivery_instances),
+        )
+        // YouTube
+        .route("/youtube/status", get(handlers::youtube_status))
+        .route("/youtube/oauth/seed", post(handlers::youtube_oauth_seed))
+        .route("/youtube/oauth/start", get(handlers::youtube_oauth_start))
+        .route(
+            "/youtube/oauth/callback",
+            get(handlers::youtube_oauth_callback),
+        );
 
+    // Allow any origin so the dashboard is accessible from LAN devices
     let cors = CorsLayer::new()
-        .allow_origin([
-            "http://localhost:5173".parse::<HeaderValue>().unwrap(),
-            "tauri://localhost".parse::<HeaderValue>().unwrap(),
-            "https://tauri.localhost".parse::<HeaderValue>().unwrap(),
+        .allow_origin(Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::DELETE,
+            Method::PATCH,
+            Method::PUT,
         ])
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::PATCH])
         .allow_headers([header::CONTENT_TYPE, header::ACCEPT]);
 
-    Router::new()
+    let mut router = Router::new()
         .nest("/api/v1", api)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state.clone());
+
+    // Serve the WASM frontend from the www_dir if configured,
+    // so LAN browsers can access the dashboard at http://<host>:8910/
+    if let Some(www_dir) = &state.www_dir {
+        use tower_http::services::{ServeDir, ServeFile};
+        let index = www_dir.join("index.html");
+        let serve = ServeDir::new(www_dir).fallback(ServeFile::new(index));
+        router = router.fallback_service(serve);
+    }
+
+    router
 }
 
 #[cfg(test)]
@@ -233,7 +294,7 @@ mod tests {
         let state = test_state().await;
 
         // Create a streaming event first
-        db::upsert_streaming_event(&state.pool, "evt-1", Some("Test"), "127.0.0.1")
+        db::upsert_streaming_event(&state.pool, "evt-1")
             .await
             .unwrap();
 
@@ -426,7 +487,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "manager_url": "https://new-manager.example.com"
+                            "client_uuid": "updated-uuid-12345678"
                         })
                         .to_string(),
                     ))
@@ -440,9 +501,7 @@ mod tests {
             .await
             .unwrap();
         let config: rs_core::config::Config = serde_json::from_slice(&body).unwrap();
-        assert_eq!(config.manager_url, "https://new-manager.example.com");
-        // Other fields should be preserved from the original config
-        assert_eq!(config.client_uuid, "test-uuid-00000000");
+        assert_eq!(config.client_uuid, "updated-uuid-12345678");
         // Credentials should be redacted
         assert_eq!(config.s3.access_key_id, "***");
     }
@@ -523,7 +582,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "manager_url": "https://saved-manager.example.com"
+                            "client_uuid": "saved-uuid-12345678"
                         })
                         .to_string(),
                     ))
@@ -536,7 +595,7 @@ mod tests {
 
         // Verify the file was written
         let saved = rs_core::config::Config::load(&config_path).unwrap();
-        assert_eq!(saved.manager_url, "https://saved-manager.example.com");
+        assert_eq!(saved.client_uuid, "saved-uuid-12345678");
     }
 
     #[tokio::test]
@@ -641,5 +700,255 @@ mod tests {
         let logs: handlers::LogsResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(logs.entries.len(), 1);
         assert!(logs.entries[0].message.contains("Upload"));
+    }
+
+    #[tokio::test]
+    async fn delivery_start_returns_503_without_hetzner_token() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/delivery/start")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"event_id": 1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn delivery_status_returns_503_without_hetzner_token() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/status?event_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn delivery_stop_returns_503_without_hetzner_token() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/delivery/stop")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"event_id": 1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn youtube_status_returns_503_without_hetzner_token() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/youtube/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn youtube_oauth_seed_stores_tokens() {
+        let state = test_state().await;
+        let app = build_router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/youtube/oauth/seed")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "refresh_token": "test-refresh",
+                            "client_id": "test-client",
+                            "client_secret": "test-secret"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify tokens stored
+        let oauth = rs_core::db::get_youtube_oauth(&state.pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(oauth.refresh_token, "test-refresh");
+        assert_eq!(oauth.client_id, "test-client");
+    }
+
+    #[tokio::test]
+    async fn delivery_instances_list_returns_empty() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/instances")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let instances: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(instances.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod youtube_oauth_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::db;
+    use rs_core::models::WsEvent;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    fn yt_config() -> Config {
+        let mut c = Config::for_testing();
+        c.youtube.client_id = "yt-cid-for-test".into();
+        c.youtube.client_secret = "yt-cs-for-test".into();
+        c
+    }
+
+    #[tokio::test]
+    async fn oauth_start_returns_url() {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, yt_config(), ws_tx);
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/youtube/oauth/start")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let url = val["url"].as_str().unwrap();
+        assert!(url.contains("yt-cid-for-test"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("access_type=offline"));
+    }
+
+    #[tokio::test]
+    async fn oauth_start_no_creds_returns_400() {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/youtube/oauth/start")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_no_code_returns_400() {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, yt_config(), ws_tx);
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/youtube/oauth/callback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_error_param_returns_html() {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, yt_config(), ws_tx);
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/youtube/oauth/callback?error=access_denied")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("Authorization Failed"));
     }
 }

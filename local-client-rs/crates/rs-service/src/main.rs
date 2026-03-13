@@ -31,7 +31,12 @@ windows_service::define_windows_service!(ffi_service_main, windows_service_main)
 #[cfg(windows)]
 fn windows_service_main(_arguments: Vec<std::ffi::OsString>) {
     if let Err(e) = run_windows_service() {
-        eprintln!("Service error: {e}");
+        // Log to file since services have no console
+        let log_path = Config::default_path()
+            .parent()
+            .map(|p| p.join("service_error.log"))
+            .unwrap_or_else(|| std::path::PathBuf::from("service_error.log"));
+        let _ = std::fs::write(&log_path, format!("Service error: {e}\n"));
     }
 }
 
@@ -63,15 +68,11 @@ fn run_windows_service() -> anyhow::Result<()> {
 
     let status_handle = service_control_handler::register("RestreamerService", event_handler)?;
 
-    // Initialize logging and load config
+    // Initialize logging (no console output in service mode)
     let log_buffer = LogBuffer::new(1000);
-    init_tracing(&log_buffer);
+    init_service_tracing(&log_buffer);
 
-    let config_path = std::env::args()
-        .nth(1)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(Config::default_path);
-
+    let config_path = get_config_path();
     let config = load_config(&config_path)?;
     config
         .validate()
@@ -119,13 +120,9 @@ fn run_windows_service() -> anyhow::Result<()> {
 
 fn run_console() -> anyhow::Result<()> {
     let log_buffer = LogBuffer::new(1000);
-    init_tracing(&log_buffer);
+    init_console_tracing(&log_buffer);
 
-    let config_path = std::env::args()
-        .nth(1)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(Config::default_path);
-
+    let config_path = get_config_path();
     let config = load_config(&config_path)?;
     config
         .validate()
@@ -143,12 +140,34 @@ fn run_console() -> anyhow::Result<()> {
 
 // --- Shared helpers ---
 
-fn init_tracing(log_buffer: &LogBuffer) {
+/// Get config path from command line arguments, skipping flags like --console.
+fn get_config_path() -> std::path::PathBuf {
+    std::env::args()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(Config::default_path)
+}
+
+/// Initialize tracing for console mode (stdout + log buffer).
+fn init_console_tracing(log_buffer: &LogBuffer) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
+        .with(LogCaptureLayer::new(log_buffer.clone()))
+        .init();
+}
+
+/// Initialize tracing for Windows Service mode (log buffer only, no console output).
+/// Windows services have no console/stdout, so fmt::layer() would panic or silently fail.
+#[cfg(windows)]
+fn init_service_tracing(log_buffer: &LogBuffer) {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
         .with(LogCaptureLayer::new(log_buffer.clone()))
         .init();
 }

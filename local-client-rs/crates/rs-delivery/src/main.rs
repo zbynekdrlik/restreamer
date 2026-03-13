@@ -1,0 +1,56 @@
+/// Delivery binary — runs on Hetzner VPS to pull S3 chunks and pipe to ffmpeg.
+///
+/// Provides a minimal Axum API on :8000 for health, init, status, and stop.
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+mod api;
+mod endpoint_task;
+mod s3_fetch;
+
+pub use endpoint_task::EndpointHandle;
+
+/// Application state shared across API handlers.
+pub struct AppState {
+    pub endpoints: RwLock<HashMap<String, EndpointHandle>>,
+    pub version: &'static str,
+    pub ready: RwLock<bool>,
+    /// Bearer token for authenticating API requests. Set via DELIVERY_AUTH_TOKEN
+    /// env var or via the /api/init endpoint.
+    pub auth_token: RwLock<Option<String>>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        let auth_token = std::env::var("DELIVERY_AUTH_TOKEN").ok();
+        Self {
+            endpoints: RwLock::new(HashMap::new()),
+            version: env!("CARGO_PKG_VERSION"),
+            ready: RwLock::new(true),
+            auth_token: RwLock::new(auth_token),
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let state = Arc::new(AppState::default());
+    let app = api::router(state);
+
+    let addr = "0.0.0.0:8000";
+    tracing::info!("Delivery service starting on {addr}");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("failed to bind to 0.0.0.0:8000");
+    axum::serve(listener, app)
+        .await
+        .expect("delivery server error");
+}

@@ -42,6 +42,7 @@ impl<T> CommandResult<T> {
 pub struct StatusResponse {
     pub streaming_event: Option<StreamingEvent>,
     pub chunk_stats: ChunkStats,
+    pub inpoint_connected: bool,
 }
 
 /// Get the current service status including streaming event and chunk stats.
@@ -59,9 +60,12 @@ pub async fn get_status(
         Err(e) => return Ok(CommandResult::err(e)),
     };
 
+    let inpoint_connected = state.is_inpoint_connected();
+
     Ok(CommandResult::ok(StatusResponse {
         streaming_event,
         chunk_stats,
+        inpoint_connected,
     }))
 }
 
@@ -99,11 +103,45 @@ pub fn get_logs(
     CommandResult::ok(logs)
 }
 
-/// Get the current configuration.
+/// Redaction placeholder for sensitive config values.
+const REDACTED: &str = "***";
+
+/// Get the current configuration with sensitive fields redacted.
 #[tauri::command]
 pub fn get_config(state: State<'_, Arc<AppState>>) -> CommandResult<serde_json::Value> {
     match serde_json::to_value(state.config()) {
-        Ok(config) => CommandResult::ok(config),
+        Ok(mut config) => {
+            // Redact sensitive credentials before exposing to the frontend
+            if let Some(s3) = config.get_mut("s3") {
+                if let Some(obj) = s3.as_object_mut() {
+                    obj.insert(
+                        "access_key_id".to_string(),
+                        serde_json::Value::String(REDACTED.to_string()),
+                    );
+                    obj.insert(
+                        "secret_access_key".to_string(),
+                        serde_json::Value::String(REDACTED.to_string()),
+                    );
+                }
+            }
+            if let Some(hetzner) = config.get_mut("hetzner") {
+                if let Some(obj) = hetzner.as_object_mut() {
+                    obj.insert(
+                        "api_token".to_string(),
+                        serde_json::Value::String(REDACTED.to_string()),
+                    );
+                }
+            }
+            if let Some(youtube) = config.get_mut("youtube") {
+                if let Some(obj) = youtube.as_object_mut() {
+                    obj.insert(
+                        "client_secret".to_string(),
+                        serde_json::Value::String(REDACTED.to_string()),
+                    );
+                }
+            }
+            CommandResult::ok(config)
+        }
         Err(e) => CommandResult::err(e.to_string()),
     }
 }

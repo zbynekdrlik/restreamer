@@ -242,6 +242,210 @@
         .tab.active {
             background-color: var(--accent);
         }
+
+        .tab-content {
+            margin-top: 10px;
+        }
+
+        /* Base form element styles */
+        input[type="text"],
+        select {
+            padding: 10px 14px;
+            border-radius: 8px;
+            border: 1px solid var(--bg-card);
+            background-color: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            outline: none;
+        }
+
+        input[type="text"]:focus,
+        select:focus {
+            border-color: var(--accent);
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            background-color: var(--bg-card);
+            color: var(--text-primary);
+            cursor: pointer;
+            font-size: 0.95rem;
+        }
+
+        button:hover {
+            background-color: var(--bg-secondary);
+        }
+
+        button.danger {
+            background-color: var(--error);
+            color: #fff;
+        }
+
+        button.danger:hover {
+            background-color: #a71d2a;
+        }
+
+        /* Shared components */
+        .create-form {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .create-form input,
+        .create-form select {
+            flex: 1;
+            min-width: 150px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            background-color: var(--bg-secondary);
+            color: var(--text-secondary);
+        }
+
+        .badge.active {
+            background-color: var(--success);
+            color: #000;
+        }
+
+        .badge.fast {
+            background-color: var(--warning);
+            color: #000;
+        }
+
+        .empty {
+            color: var(--text-secondary);
+            text-align: center;
+            padding: 30px;
+            font-style: italic;
+        }
+
+        /* Events tab */
+        .events-tab h2,
+        .endpoints-tab h2 {
+            margin-bottom: 20px;
+            font-size: 1.3rem;
+        }
+
+        .event-list,
+        .endpoint-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .events-tab .event-card,
+        .endpoint-card {
+            background-color: var(--bg-card);
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        .event-header,
+        .endpoint-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+
+        .event-status {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .event-actions,
+        .endpoint-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .service-type {
+            color: var(--accent);
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        /* Endpoint assignment within events */
+        .assigned-endpoints {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: var(--bg-secondary);
+            border-radius: 8px;
+        }
+
+        .assigned-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .assigned-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .assigned-ep {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            background-color: var(--bg-card);
+            border-radius: 8px;
+            font-size: 0.85rem;
+        }
+
+        .service-badge {
+            color: var(--accent);
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .remove-ep {
+            padding: 2px 6px;
+            font-size: 0.75rem;
+            border-radius: 4px;
+            background-color: var(--error);
+            color: #fff;
+            cursor: pointer;
+            border: none;
+        }
+
+        .remove-ep:hover {
+            background-color: #a71d2a;
+        }
+
+        .empty-inline {
+            color: var(--text-secondary);
+            font-style: italic;
+            font-size: 0.85rem;
+        }
+
+        .assign-form {
+            display: flex;
+            gap: 8px;
+        }
+
+        .assign-form select {
+            flex: 1;
+            min-width: 150px;
+        }
     </style>
 </head>
 <body>

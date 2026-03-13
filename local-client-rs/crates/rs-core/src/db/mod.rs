@@ -6,6 +6,12 @@ use std::str::FromStr;
 use crate::error::Result;
 use crate::models::{ChunkRecord, ChunkStats, ClientProfile, StreamingEvent};
 
+mod v2;
+pub use v2::*;
+
+#[cfg(test)]
+mod tests;
+
 /// Create a SQLite connection pool.
 pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -32,9 +38,6 @@ pub async fn create_memory_pool() -> Result<SqlitePool> {
     Ok(pool)
 }
 
-/// Schema version for migration tracking.
-const SCHEMA_VERSION: i32 = 1;
-
 /// Run database migrations.
 ///
 /// Uses a version tracking table to support incremental schema changes.
@@ -49,19 +52,29 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         .await
         .map(|r| r.get("v"))?;
 
-    if current < SCHEMA_VERSION {
-        let mut tx = pool.begin().await?;
-        for statement in MIGRATION_V1_SQL.split(';') {
-            let trimmed = statement.trim();
-            if !trimmed.is_empty() {
-                sqlx::query(trimmed).execute(&mut *tx).await?;
+    let migrations: &[(i32, &str)] = &[
+        (1, MIGRATION_V1_SQL),
+        (2, MIGRATION_V2_SQL),
+        (3, MIGRATION_V3_SQL),
+        (4, MIGRATION_V4_SQL),
+        (5, MIGRATION_V5_SQL),
+    ];
+
+    for &(version, sql) in migrations {
+        if current < version {
+            let mut tx = pool.begin().await?;
+            for statement in sql.split(';') {
+                let trimmed = statement.trim();
+                if !trimmed.is_empty() {
+                    sqlx::query(trimmed).execute(&mut *tx).await?;
+                }
             }
+            sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
+                .bind(version)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
         }
-        sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
-            .bind(SCHEMA_VERSION)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
     }
 
     Ok(())
@@ -99,6 +112,115 @@ CREATE INDEX IF NOT EXISTS idx_chunks_unsent ON chunk_records(streaming_event_id
     WHERE sent = 0 AND in_process = 0
 "#;
 
+const MIGRATION_V2_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS endpoint_configs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    alias          TEXT NOT NULL UNIQUE,
+    service_type   TEXT NOT NULL CHECK(service_type IN ('YT_HLS','FB','YT_RTMP','VIMEO','INSTAGRAM','TEST_FILE')),
+    stream_key     TEXT NOT NULL DEFAULT '',
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    position_last  INTEGER NOT NULL DEFAULT 0,
+    delivered_bytes INTEGER NOT NULL DEFAULT 0,
+    is_fast        INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS event_endpoints (
+    event_id    INTEGER NOT NULL REFERENCES streaming_events(id) ON DELETE CASCADE,
+    endpoint_id INTEGER NOT NULL REFERENCES endpoint_configs(id) ON DELETE CASCADE,
+    PRIMARY KEY (event_id, endpoint_id)
+);
+
+CREATE TABLE IF NOT EXISTS delivery_instances (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    hetzner_id     INTEGER NOT NULL UNIQUE,
+    name           TEXT NOT NULL,
+    ipv4           TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT 'creating' CHECK(status IN ('creating','running','stopping','deleted')),
+    server_type    TEXT NOT NULL DEFAULT 'cx23',
+    event_id       INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    last_health_at TEXT,
+    auth_token     TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS delivery_endpoint_status (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id     INTEGER NOT NULL REFERENCES delivery_instances(id) ON DELETE CASCADE,
+    alias           TEXT NOT NULL,
+    alive           INTEGER NOT NULL DEFAULT 0,
+    buff_size_bytes INTEGER NOT NULL DEFAULT 0,
+    current_chunk_id INTEGER NOT NULL DEFAULT 0,
+    last_check_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS youtube_oauth (
+    id             INTEGER PRIMARY KEY DEFAULT 1,
+    access_token   TEXT NOT NULL DEFAULT '',
+    refresh_token  TEXT NOT NULL DEFAULT '',
+    token_uri      TEXT NOT NULL DEFAULT 'https://oauth2.googleapis.com/token',
+    client_id      TEXT NOT NULL DEFAULT '',
+    client_secret  TEXT NOT NULL DEFAULT '',
+    scopes         TEXT NOT NULL DEFAULT '',
+    expires_at     TEXT
+);
+
+"#;
+
+const MIGRATION_V3_SQL: &str = r#"
+DROP TABLE IF EXISTS scheduled_streams;
+
+CREATE TABLE IF NOT EXISTS streaming_events_new (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                 TEXT NOT NULL UNIQUE,
+    received_bytes       INTEGER NOT NULL DEFAULT 0,
+    receiving_activated  INTEGER NOT NULL DEFAULT 0,
+    delivering_activated INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT INTO streaming_events_new (id, name, received_bytes, receiving_activated, delivering_activated)
+    SELECT id, COALESCE(identifier, 'Event-' || id), received_bytes, receiving_activated, delivering_activated
+    FROM streaming_events;
+
+DROP TABLE streaming_events;
+
+ALTER TABLE streaming_events_new RENAME TO streaming_events
+"#;
+
+const MIGRATION_V4_SQL: &str = r#"
+CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_endpoint_status_instance_alias
+    ON delivery_endpoint_status(instance_id, alias);
+
+PRAGMA foreign_keys = OFF;
+
+CREATE TABLE IF NOT EXISTS delivery_instances_new (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    hetzner_id     INTEGER NOT NULL UNIQUE,
+    name           TEXT NOT NULL,
+    ipv4           TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT 'creating' CHECK(status IN ('creating','running','stopping','deleted','failed')),
+    server_type    TEXT NOT NULL DEFAULT 'cx23',
+    event_id       INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    last_health_at TEXT
+);
+
+INSERT INTO delivery_instances_new (id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at)
+    SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at
+    FROM delivery_instances;
+
+DROP TABLE delivery_instances;
+
+ALTER TABLE delivery_instances_new RENAME TO delivery_instances;
+
+PRAGMA foreign_keys = ON
+"#;
+
+const MIGRATION_V5_SQL: &str = r#"
+ALTER TABLE delivery_instances ADD COLUMN auth_token TEXT NOT NULL DEFAULT ''
+"#;
+
 // --- Client Profile ---
 
 pub async fn get_client_profile(pool: &SqlitePool) -> Result<Option<ClientProfile>> {
@@ -125,20 +247,17 @@ pub async fn upsert_client_profile(pool: &SqlitePool, user_uuid: &str) -> Result
 // --- Streaming Events ---
 
 pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEvent>> {
+    // Prefer the event with receiving_activated=1, fall back to highest ID
     let row = sqlx::query(
-        "SELECT id, identifier, short_description, date_of_event,
-         server_ip, received_bytes, receiving_activated, delivering_activated
-         FROM streaming_events ORDER BY id DESC LIMIT 1",
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated
+         FROM streaming_events ORDER BY receiving_activated DESC, id DESC LIMIT 1",
     )
     .fetch_optional(pool)
     .await?;
 
     Ok(row.map(|r| StreamingEvent {
         id: r.get("id"),
-        identifier: r.get("identifier"),
-        short_description: r.get("short_description"),
-        date_of_event: r.get("date_of_event"),
-        server_ip: r.get("server_ip"),
+        name: r.get("name"),
         received_bytes: r.get("received_bytes"),
         receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
@@ -150,8 +269,7 @@ pub async fn get_streaming_event_by_id(
     id: i64,
 ) -> Result<Option<StreamingEvent>> {
     let row = sqlx::query(
-        "SELECT id, identifier, short_description, date_of_event,
-         server_ip, received_bytes, receiving_activated, delivering_activated
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated
          FROM streaming_events WHERE id = ?1",
     )
     .bind(id)
@@ -160,35 +278,23 @@ pub async fn get_streaming_event_by_id(
 
     Ok(row.map(|r| StreamingEvent {
         id: r.get("id"),
-        identifier: r.get("identifier"),
-        short_description: r.get("short_description"),
-        date_of_event: r.get("date_of_event"),
-        server_ip: r.get("server_ip"),
+        name: r.get("name"),
         received_bytes: r.get("received_bytes"),
         receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
     }))
 }
 
-pub async fn upsert_streaming_event(
-    pool: &SqlitePool,
-    identifier: &str,
-    short_description: Option<&str>,
-    server_ip: &str,
-) -> Result<i64> {
+pub async fn upsert_streaming_event(pool: &SqlitePool, name: &str) -> Result<i64> {
     let row = sqlx::query(
-        "INSERT INTO streaming_events (identifier, short_description, server_ip, receiving_activated, delivering_activated)
-         VALUES (?1, ?2, ?3, 1, 1)
-         ON CONFLICT(identifier) DO UPDATE SET
-             short_description = COALESCE(?2, streaming_events.short_description),
-             server_ip = ?3,
+        "INSERT INTO streaming_events (name, receiving_activated, delivering_activated)
+         VALUES (?1, 1, 1)
+         ON CONFLICT(name) DO UPDATE SET
              receiving_activated = 1,
              delivering_activated = 1
          RETURNING id",
     )
-    .bind(identifier)
-    .bind(short_description)
-    .bind(server_ip)
+    .bind(name)
     .fetch_one(pool)
     .await?;
     Ok(row.get("id"))
@@ -233,6 +339,17 @@ pub async fn set_delivering_activated(pool: &SqlitePool, id: i64, delivering: bo
     Ok(())
 }
 
+/// Deactivate both receiving and delivering in a single atomic update.
+pub async fn deactivate_event(pool: &SqlitePool, id: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE streaming_events SET receiving_activated = 0, delivering_activated = 0 WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn update_received_bytes(
     pool: &SqlitePool,
     event_id: i64,
@@ -257,7 +374,7 @@ pub async fn delete_streaming_event(pool: &SqlitePool, id: i64) -> Result<()> {
 /// Delete all streaming events except the one with the given ID.
 ///
 /// Returns the number of deleted rows. This prevents stale events from
-/// winning the `ORDER BY id DESC` query in `get_streaming_event()`.
+/// interfering with `get_streaming_event()`.
 pub async fn delete_other_streaming_events(pool: &SqlitePool, keep_id: i64) -> Result<u64> {
     let result = sqlx::query("DELETE FROM streaming_events WHERE id != ?1")
         .bind(keep_id)
@@ -393,256 +510,23 @@ pub async fn get_chunk_stats(pool: &SqlitePool, chunk_duration_ms: u64) -> Resul
     })
 }
 
+/// Get the first (minimum) chunk ID for a specific streaming event.
+/// Returns None if no chunks exist for the event.
+pub async fn get_first_chunk_id_for_event(
+    pool: &SqlitePool,
+    streaming_event_id: i64,
+) -> Result<Option<i64>> {
+    let row =
+        sqlx::query("SELECT MIN(id) as min_id FROM chunk_records WHERE streaming_event_id = ?1")
+            .bind(streaming_event_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(row.get::<Option<i64>, _>("min_id"))
+}
+
 pub async fn delete_all_chunks(pool: &SqlitePool) -> Result<u64> {
     let result = sqlx::query("DELETE FROM chunk_records")
         .execute(pool)
         .await?;
     Ok(result.rows_affected())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    async fn setup_db() -> SqlitePool {
-        let pool = create_memory_pool().await.unwrap();
-        run_migrations(&pool).await.unwrap();
-        pool
-    }
-
-    #[tokio::test]
-    async fn client_profile_crud() {
-        let pool = setup_db().await;
-        assert!(get_client_profile(&pool).await.unwrap().is_none());
-
-        upsert_client_profile(&pool, "test-uuid").await.unwrap();
-        let profile = get_client_profile(&pool).await.unwrap().unwrap();
-        assert_eq!(profile.user_uuid, "test-uuid");
-
-        upsert_client_profile(&pool, "updated-uuid").await.unwrap();
-        let profile = get_client_profile(&pool).await.unwrap().unwrap();
-        assert_eq!(profile.user_uuid, "updated-uuid");
-    }
-
-    #[tokio::test]
-    async fn streaming_event_crud() {
-        let pool = setup_db().await;
-        assert!(get_streaming_event(&pool).await.unwrap().is_none());
-
-        let id = upsert_streaming_event(&pool, "evt-1", Some("Test Event"), "192.168.1.1")
-            .await
-            .unwrap();
-        assert!(id > 0);
-
-        let event = get_streaming_event(&pool).await.unwrap().unwrap();
-        assert_eq!(event.identifier.as_deref(), Some("evt-1"));
-        assert!(event.receiving_activated);
-        assert!(event.delivering_activated);
-
-        update_streaming_event_flags(&pool, id, false, false)
-            .await
-            .unwrap();
-        let event = get_streaming_event(&pool).await.unwrap().unwrap();
-        assert!(!event.receiving_activated);
-        assert!(!event.delivering_activated);
-
-        update_received_bytes(&pool, id, 1024).await.unwrap();
-        let event = get_streaming_event(&pool).await.unwrap().unwrap();
-        assert_eq!(event.received_bytes, 1024);
-
-        delete_streaming_event(&pool, id).await.unwrap();
-        assert!(get_streaming_event(&pool).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn chunk_record_crud() {
-        let pool = setup_db().await;
-        let event_id = upsert_streaming_event(&pool, "evt-1", None, "127.0.0.1")
-            .await
-            .unwrap();
-
-        let chunk_id = insert_chunk(&pool, event_id, "/tmp/chunk1.bin", 512, "abc123")
-            .await
-            .unwrap();
-        assert!(chunk_id > 0);
-
-        let unsent = get_unsent_chunks(&pool, 10).await.unwrap();
-        assert_eq!(unsent.len(), 1);
-        assert_eq!(unsent[0].md5, "abc123");
-        assert!(!unsent[0].in_process);
-        assert!(!unsent[0].sent);
-
-        set_chunk_in_process(&pool, chunk_id, true).await.unwrap();
-        let unsent = get_unsent_chunks(&pool, 10).await.unwrap();
-        assert_eq!(unsent.len(), 0);
-
-        set_chunk_sent(&pool, chunk_id).await.unwrap();
-        let stats = get_chunk_stats(&pool, 1000).await.unwrap();
-        assert_eq!(stats.total_chunks, 1);
-        assert_eq!(stats.sent_chunks, 1);
-        assert_eq!(stats.pending_chunks, 0);
-    }
-
-    #[tokio::test]
-    async fn chunk_stats_and_pagination() {
-        let pool = setup_db().await;
-        let event_id = upsert_streaming_event(&pool, "evt-1", None, "127.0.0.1")
-            .await
-            .unwrap();
-
-        for i in 0..5 {
-            insert_chunk(
-                &pool,
-                event_id,
-                &format!("/tmp/chunk{i}.bin"),
-                100 * (i + 1),
-                &format!("md5_{i}"),
-            )
-            .await
-            .unwrap();
-        }
-
-        let stats = get_chunk_stats(&pool, 1000).await.unwrap();
-        assert_eq!(stats.total_chunks, 5);
-        assert_eq!(stats.pending_chunks, 5);
-        assert_eq!(stats.total_bytes, 100 + 200 + 300 + 400 + 500);
-
-        let page = get_chunks_paginated(&pool, 0, 3).await.unwrap();
-        assert_eq!(page.len(), 3);
-
-        let page2 = get_chunks_paginated(&pool, 3, 3).await.unwrap();
-        assert_eq!(page2.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn delete_all_chunks_works() {
-        let pool = setup_db().await;
-        let event_id = upsert_streaming_event(&pool, "evt-1", None, "127.0.0.1")
-            .await
-            .unwrap();
-
-        for i in 0..3 {
-            insert_chunk(&pool, event_id, &format!("/tmp/c{i}.bin"), 100, "md5")
-                .await
-                .unwrap();
-        }
-
-        let deleted = delete_all_chunks(&pool).await.unwrap();
-        assert_eq!(deleted, 3);
-
-        let stats = get_chunk_stats(&pool, 1000).await.unwrap();
-        assert_eq!(stats.total_chunks, 0);
-    }
-
-    #[tokio::test]
-    async fn cascade_delete() {
-        let pool = setup_db().await;
-        let event_id = upsert_streaming_event(&pool, "evt-1", None, "127.0.0.1")
-            .await
-            .unwrap();
-        insert_chunk(&pool, event_id, "/tmp/c.bin", 100, "md5")
-            .await
-            .unwrap();
-
-        delete_streaming_event(&pool, event_id).await.unwrap();
-        let stats = get_chunk_stats(&pool, 1000).await.unwrap();
-        assert_eq!(stats.total_chunks, 0);
-    }
-
-    #[tokio::test]
-    async fn delete_other_streaming_events_keeps_only_target() {
-        let pool = setup_db().await;
-
-        // Insert 3 events
-        let id1 = upsert_streaming_event(&pool, "evt-1", Some("Event 1"), "10.0.0.1")
-            .await
-            .unwrap();
-        let id2 = upsert_streaming_event(&pool, "evt-2", Some("Event 2"), "10.0.0.2")
-            .await
-            .unwrap();
-        let id3 = upsert_streaming_event(&pool, "evt-3", Some("Event 3"), "10.0.0.3")
-            .await
-            .unwrap();
-        assert_ne!(id1, id2);
-        assert_ne!(id2, id3);
-
-        // Delete all except id2
-        let deleted = delete_other_streaming_events(&pool, id2).await.unwrap();
-        assert_eq!(deleted, 2);
-
-        // Only id2 should remain
-        let remaining = get_streaming_event(&pool).await.unwrap().unwrap();
-        assert_eq!(remaining.id, id2);
-        assert_eq!(remaining.identifier.as_deref(), Some("evt-2"));
-
-        // id1 and id3 should be gone
-        assert!(
-            get_streaming_event_by_id(&pool, id1)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            get_streaming_event_by_id(&pool, id3)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn delete_other_streaming_events_noop_when_only_one() {
-        let pool = setup_db().await;
-
-        let id = upsert_streaming_event(&pool, "evt-1", Some("Only Event"), "10.0.0.1")
-            .await
-            .unwrap();
-
-        let deleted = delete_other_streaming_events(&pool, id).await.unwrap();
-        assert_eq!(deleted, 0);
-
-        // Event should still exist
-        let event = get_streaming_event(&pool).await.unwrap().unwrap();
-        assert_eq!(event.id, id);
-    }
-
-    #[tokio::test]
-    async fn delete_other_streaming_events_cascades_chunks() {
-        let pool = setup_db().await;
-
-        let id1 = upsert_streaming_event(&pool, "stale", Some("Stale"), "10.0.0.1")
-            .await
-            .unwrap();
-        let id2 = upsert_streaming_event(&pool, "active", Some("Active"), "10.0.0.2")
-            .await
-            .unwrap();
-
-        // Add chunks to both events
-        insert_chunk(&pool, id1, "/tmp/stale.bin", 100, "md5_stale")
-            .await
-            .unwrap();
-        insert_chunk(&pool, id2, "/tmp/active.bin", 200, "md5_active")
-            .await
-            .unwrap();
-
-        // Delete stale event
-        let deleted = delete_other_streaming_events(&pool, id2).await.unwrap();
-        assert_eq!(deleted, 1);
-
-        // Only active event's chunk should remain (cascade delete)
-        let stats = get_chunk_stats(&pool, 1000).await.unwrap();
-        assert_eq!(stats.total_chunks, 1);
-        assert_eq!(stats.total_bytes, 200);
-    }
-
-    #[tokio::test]
-    async fn migration_is_idempotent() {
-        let pool = setup_db().await;
-        // Running migrations again should not fail
-        run_migrations(&pool).await.unwrap();
-        // Tables should still work
-        upsert_client_profile(&pool, "test").await.unwrap();
-        let profile = get_client_profile(&pool).await.unwrap().unwrap();
-        assert_eq!(profile.user_uuid, "test");
-    }
 }

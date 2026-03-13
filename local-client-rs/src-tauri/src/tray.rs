@@ -50,8 +50,8 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         MenuItem::with_id(app, "open_dashboard", "Open Dashboard", true, None::<&str>)?;
     let copy_rtmp =
         MenuItem::with_id(app, "copy_rtmp_url", "Copy RTMP URL", true, None::<&str>)?;
-    let copy_manager =
-        MenuItem::with_id(app, "copy_manager_url", "Copy Manager URL", true, None::<&str>)?;
+    let copy_api =
+        MenuItem::with_id(app, "copy_api_url", "Copy API URL", true, None::<&str>)?;
     let view_logs = MenuItem::with_id(app, "view_logs", "View Live Log", true, None::<&str>)?;
     let clear_chunks = MenuItem::with_id(
         app,
@@ -75,7 +75,7 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .separator()
         .item(&open_dashboard)
         .item(&copy_rtmp)
-        .item(&copy_manager)
+        .item(&copy_api)
         .item(&view_logs)
         .item(&clear_chunks)
         .separator()
@@ -98,7 +98,7 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         chunks: chunks_item,
     };
 
-    start_status_poller(app.handle().clone(), items);
+    start_status_updater(app.handle().clone(), items);
 
     Ok(())
 }
@@ -168,10 +168,10 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
                 Err(e) => tracing::error!("Failed to copy to clipboard: {e}"),
             }
         }
-        "copy_manager_url" => {
-            let url = "https://restreamer.newlevel.media/control/home/";
+        "copy_api_url" => {
+            let url = "http://127.0.0.1:8910/api/v1/status";
             match app.clipboard().write_text(url) {
-                Ok(()) => tracing::info!("Copied Manager URL to clipboard: {url}"),
+                Ok(()) => tracing::info!("Copied API URL to clipboard: {url}"),
                 Err(e) => tracing::error!("Failed to copy to clipboard: {e}"),
             }
         }
@@ -272,7 +272,7 @@ fn format_duration(secs: f64) -> String {
 
 /// Poll the service status directly from AppState (no HTTP).
 /// Updates menu item text in-place — never calls `set_menu()`.
-fn start_status_poller(handle: AppHandle<Wry>, items: DynamicMenuItems) {
+fn start_status_updater(handle: AppHandle<Wry>, items: DynamicMenuItems) {
     tauri::async_runtime::spawn(async move {
         // Wait for state to be initialized
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -287,8 +287,7 @@ fn start_status_poller(handle: AppHandle<Wry>, items: DynamicMenuItems) {
                 // Get streaming event
                 match state.get_streaming_event().await {
                     Ok(Some(event)) => {
-                        status.event_name =
-                            event.short_description.unwrap_or_default();
+                        status.event_name = event.name;
 
                         status.inpoint = if event.receiving_activated {
                             "Receiving".to_string()

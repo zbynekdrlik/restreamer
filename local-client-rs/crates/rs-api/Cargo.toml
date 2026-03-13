@@ -8,6 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 rs-core.workspace = true
+rs-cloud.workspace = true
+rs-youtube.workspace = true
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
@@ -19,8 +21,10 @@ thiserror.workspace = true
 anyhow.workspace = true
 sqlx.workspace = true
 futures.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+chrono.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-reqwest = { workspace = true, features = ["json"] }
 tokio-tungstenite = "0.26"
 tempfile = "3"
