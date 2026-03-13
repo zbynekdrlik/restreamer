@@ -171,6 +171,7 @@ pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec
 
 // --- Delivery Instances ---
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_delivery_instance(
     pool: &SqlitePool,
     hetzner_id: i64,
