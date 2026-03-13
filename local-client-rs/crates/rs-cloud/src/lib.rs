@@ -133,9 +133,15 @@ runcmd:
 }
 
 /// Cloud-init script for starting delivery from an existing snapshot.
-pub fn snapshot_cloud_init() -> &'static str {
-    r#"#cloud-config
+/// Downloads the latest binary from S3 to ensure the newest version runs,
+/// while the snapshot provides ffmpeg and other dependencies pre-installed.
+pub fn snapshot_cloud_init(delivery_binary_url: &str) -> String {
+    format!(
+        r#"#cloud-config
 runcmd:
+  - curl -fsSL -o /opt/restreamer/rs-delivery "{delivery_binary_url}"
+  - chmod +x /opt/restreamer/rs-delivery
   - nohup /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &
 "#
+    )
 }

@@ -105,21 +105,23 @@ impl DeliveryOrchestrator {
         let server_type = rs_cloud::select_server_type(endpoints.len());
 
         let name = format!("rs-delivery-evt{event_id}");
-        let cloud_init = rs_cloud::snapshot_cloud_init();
+        let binary_url = format!(
+            "{}/{}/rs-delivery",
+            self.config.s3.endpoint, self.config.s3.bucket,
+        );
 
         let mut labels = HashMap::new();
         labels.insert("app".to_string(), "restreamer".to_string());
         labels.insert("event_id".to_string(), event_id.to_string());
 
         // Find the snapshot or fall back to bootstrap cloud-init
+        // Both paths download the latest binary from S3 to ensure newest version runs
         let (image, user_data) = match self.find_delivery_image().await {
-            Ok(snapshot_id) => (snapshot_id, cloud_init.to_string()),
+            Ok(snapshot_id) => (
+                snapshot_id,
+                rs_cloud::snapshot_cloud_init(&binary_url),
+            ),
             Err(_) => {
-                // No snapshot available — bootstrap from bare Ubuntu
-                let binary_url = format!(
-                    "{}/{}/rs-delivery",
-                    self.config.s3.endpoint, self.config.s3.bucket,
-                );
                 info!(
                     "No delivery snapshot found, bootstrapping from {}",
                     binary_url
