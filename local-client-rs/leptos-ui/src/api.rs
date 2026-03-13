@@ -277,6 +277,21 @@ async fn http_delete(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+async fn http_put_json<T: Serialize>(path: &str, body: &T) -> Result<(), String> {
+    let url = format!("{}{path}", api_base());
+    let resp = gloo_net::http::Request::put(&url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(body).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Request error: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {e}"))?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
 // Events API
 pub async fn list_events() -> Result<Vec<StreamingEvent>, String> {
     http_get("/events").await
@@ -347,6 +362,25 @@ pub async fn create_endpoint(
 
 pub async fn delete_endpoint(id: i64) -> Result<(), String> {
     http_delete(&format!("/endpoints/{id}")).await
+}
+
+/// Request body for updating an endpoint (all fields optional).
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct UpdateEndpointRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_fast: Option<bool>,
+}
+
+pub async fn update_endpoint(id: i64, req: &UpdateEndpointRequest) -> Result<(), String> {
+    http_put_json(&format!("/endpoints/{id}"), req).await
 }
 
 // Event-Endpoint Assignment API
