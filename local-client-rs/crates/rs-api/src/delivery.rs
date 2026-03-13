@@ -295,12 +295,18 @@ impl DeliveryOrchestrator {
             .await?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("rs-delivery /api/init failed: {body}"));
+            return Err(anyhow::anyhow!(
+                "rs-delivery /api/init failed: {status} - {body}"
+            ));
         }
 
+        let init_resp = resp.text().await.unwrap_or_default();
+        info!(event_id, init_resp = %init_resp, "Init response received");
+
         db::update_delivery_instance_health(&self.pool, instance_id).await?;
-        info!(event_id, "Delivery endpoints initialized");
+        info!(event_id, "Delivery endpoints initialized successfully");
 
         Ok(())
     }
@@ -355,8 +361,25 @@ impl DeliveryOrchestrator {
 
                         (true, statuses)
                     }
-                    _ => (false, Vec::new()),
+                    Ok(resp) => {
+                        warn!(
+                            status = %resp.status(),
+                            "Delivery status check returned non-success"
+                        );
+                        (false, Vec::new())
+                    }
+                    Err(e) => {
+                        warn!("Delivery status check failed: {e}");
+                        (false, Vec::new())
+                    }
                 }
+            }
+            Some(inst) => {
+                info!(
+                    status = %inst.status,
+                    "Delivery instance not in running state"
+                );
+                (false, Vec::new())
             }
             _ => (false, Vec::new()),
         };

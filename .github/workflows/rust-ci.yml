@@ -1756,6 +1756,7 @@ jobs:
 
               Write-Host "--- Attempt ${i}/${maxRetries} ---"
               Write-Host "  server_ip: $($response.server_ip)"
+              Write-Host "  instance_status: $($response.instance_status)"
               Write-Host "  server_ready: $($response.server_ready)"
               Write-Host "  endpoints_alive: $($response.endpoints_alive)"
 

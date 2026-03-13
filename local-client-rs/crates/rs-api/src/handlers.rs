@@ -728,6 +728,7 @@ pub struct DeliveryStatusResponse {
     pub instance: Option<DeliveryInstance>,
     pub server_ready: bool,
     pub server_ip: Option<String>,
+    pub instance_status: Option<String>,
     pub endpoints_alive: bool,
     pub endpoint_details: Vec<DeliveryEndpointEntry>,
 }
@@ -771,10 +772,13 @@ pub async fn delivery_status(
     let endpoints_alive =
         !endpoint_details.is_empty() && endpoint_details.iter().all(|ep| ep.alive);
 
+    let instance_status = status.instance.as_ref().map(|i| i.status.clone());
+
     Ok(Json(DeliveryStatusResponse {
         instance: status.instance,
         server_ready: status.server_ready,
         server_ip,
+        instance_status,
         endpoints_alive,
         endpoint_details,
     }))
