@@ -1052,6 +1052,18 @@ jobs:
         shell: powershell
         run: |
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+
+          # Deactivate ALL other events first so get_streaming_event() returns our event
+          foreach ($ev in $events) {
+            if ($ev.name -ne "E2E-Test" -and $ev.receiving_activated) {
+              Write-Host "Deactivating other event: id=$($ev.id) name=$($ev.name)"
+              try {
+                Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/deactivate" `
+                  -Method POST -TimeoutSec 10
+              } catch { Write-Host "  Deactivate failed: $_" }
+            }
+          }
+
           $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
           if (-not $e2eEvent) {
             Write-Host "E2E-Test event not found, creating it..."
@@ -1442,6 +1454,18 @@ jobs:
         run: |
           # Find or create the event on the local client and activate it
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+
+          # Deactivate ALL other events first so get_streaming_event() returns our event
+          foreach ($ev in $events) {
+            if ($ev.name -ne $env:EVENT_NAME -and $ev.receiving_activated) {
+              Write-Host "Deactivating other event: id=$($ev.id) name=$($ev.name)"
+              try {
+                Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/deactivate" `
+                  -Method POST -TimeoutSec 10
+              } catch { Write-Host "  Deactivate failed: $_" }
+            }
+          }
+
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           if (-not $targetEvent) {
             Write-Host "$($env:EVENT_NAME) event not found locally, creating it..."
