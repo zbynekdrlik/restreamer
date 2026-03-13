@@ -117,10 +117,7 @@ impl DeliveryOrchestrator {
         // Find the snapshot or fall back to bootstrap cloud-init
         // Both paths download the latest binary from S3 to ensure newest version runs
         let (image, user_data) = match self.find_delivery_image().await {
-            Ok(snapshot_id) => (
-                snapshot_id,
-                rs_cloud::snapshot_cloud_init(&binary_url),
-            ),
+            Ok(snapshot_id) => (snapshot_id, rs_cloud::snapshot_cloud_init(&binary_url)),
             Err(_) => {
                 info!(
                     "No delivery snapshot found, bootstrapping from {}",
