@@ -238,29 +238,25 @@ pub async fn patch_config(
     State(state): State<AppState>,
     Json(updates): Json<serde_json::Value>,
 ) -> Result<Json<Config>, StatusCode> {
-    // Read current config from live state (may have been patched previously)
     let current_config = state
         .config_live
         .read()
         .map(|c| c.clone())
         .unwrap_or_else(|_| state.config.clone());
 
-    // Serialize current config to JSON for merging
     let current = serde_json::to_value(&*current_config).map_err(|e| {
         error!("Failed to serialize current config: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // Merge updates into current config
     let merged = merge_json(current, updates);
 
-    // Deserialize merged config
     let mut new_config: Config = serde_json::from_value(merged).map_err(|e| {
         tracing::warn!("Invalid config update: {e}");
         StatusCode::BAD_REQUEST
     })?;
 
-    // Preserve redacted credentials — if the client sends back the redaction placeholder, keep originals
+    // Preserve redacted credentials — keep originals if placeholder sent back
     if new_config.s3.access_key_id == REDACTED {
         new_config.s3.access_key_id = current_config.s3.access_key_id.clone();
     }
@@ -274,13 +270,11 @@ pub async fn patch_config(
         new_config.youtube.client_secret = current_config.youtube.client_secret.clone();
     }
 
-    // Validate the merged config
     new_config.validate().map_err(|e| {
         tracing::warn!("Config validation failed: {e}");
         StatusCode::BAD_REQUEST
     })?;
 
-    // Save to disk (atomic write via temp file + rename)
     if let Some(path) = &state.config_path {
         new_config.save(path).map_err(|e| {
             error!("Failed to save config: {e}");
@@ -289,12 +283,10 @@ pub async fn patch_config(
         tracing::info!("Config saved to {}", path.display());
     }
 
-    // Update the in-memory live config so subsequent requests see the change
     if let Ok(mut live) = state.config_live.write() {
         *live = std::sync::Arc::new(new_config.clone());
     }
 
-    // Redact credentials before returning
     new_config.s3.access_key_id = REDACTED.to_string();
     new_config.s3.secret_access_key = REDACTED.to_string();
     new_config.hetzner.api_token = REDACTED.to_string();
@@ -489,7 +481,6 @@ pub async fn update_endpoint(
     axum::extract::Path(id): axum::extract::Path<i64>,
     Json(req): Json<UpdateEndpointRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    // Validate service_type if provided
     if let Some(ref st) = req.service_type {
         if !VALID_SERVICE_TYPES.contains(&st.as_str()) {
             tracing::warn!("Invalid service_type in update: {st}");
@@ -497,7 +488,6 @@ pub async fn update_endpoint(
         }
     }
 
-    // Validate alias if provided
     if let Some(ref alias) = req.alias {
         if alias.trim().is_empty() || alias.len() > 255 {
             tracing::warn!("Invalid alias in update: empty or too long");
@@ -505,7 +495,6 @@ pub async fn update_endpoint(
         }
     }
 
-    // Get existing endpoint first
     let existing = db::get_endpoint_config(&state.pool, id)
         .await
         .map_err(|e| {
@@ -633,13 +622,10 @@ pub async fn deactivate_event(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Atomically deactivate both receiving and delivering in a single query
-    db::deactivate_event(&state.pool, id)
-        .await
-        .map_err(|e| {
-            error!("Failed to deactivate event {id}: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    db::deactivate_event(&state.pool, id).await.map_err(|e| {
+        error!("Failed to deactivate event {id}: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
         action: "deactivated".to_string(),

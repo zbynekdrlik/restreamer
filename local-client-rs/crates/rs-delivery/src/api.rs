@@ -19,10 +19,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/init", post(init_endpoints))
         .route("/api/status", get(endpoint_status))
         .route("/api/stop", post(stop_endpoints))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_auth,
-        ));
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     public.merge(protected).with_state(state)
 }
