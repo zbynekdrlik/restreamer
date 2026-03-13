@@ -1781,7 +1781,8 @@ jobs:
           $eventId = $targetEvent.id
 
           Write-Host "Waiting for delivery server to start ffmpeg endpoints..."
-          $maxRetries = 18
+          # Cloud-init can take 5-7 minutes: apt update + install ffmpeg + download binary + start
+          $maxRetries = 40
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
               $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
@@ -1820,7 +1821,7 @@ jobs:
             }
             Start-Sleep -Seconds 15
           }
-          throw "FAILED: Delivery server not ready after $maxRetries attempts (~4.5 min)"
+          throw "FAILED: Delivery server not ready after $maxRetries attempts (~10 min)"
 
       - name: Verify delivery progression
         shell: powershell

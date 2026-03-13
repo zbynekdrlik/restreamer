@@ -249,7 +249,8 @@ impl DeliveryOrchestrator {
         let delivery_url = format!("http://{}:8000", instance.ipv4);
         let client = reqwest::Client::new();
 
-        for attempt in 0..30 {
+        // Wait for rs-delivery to become ready (cloud-init can take several minutes)
+        for attempt in 0..60 {
             match client
                 .get(format!("{delivery_url}/api/health"))
                 .timeout(Duration::from_secs(5))
@@ -257,14 +258,31 @@ impl DeliveryOrchestrator {
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
-                    info!("rs-delivery health check passed on {}", instance.ipv4);
+                    info!(attempt, "rs-delivery health check passed on {}", instance.ipv4);
                     break;
                 }
-                _ => {
-                    if attempt == 29 {
+                Ok(resp) => {
+                    if attempt % 6 == 0 {
+                        info!(attempt, status = %resp.status(), "Health check returned non-OK");
+                    }
+                    if attempt == 59 {
                         return Err(anyhow::anyhow!(
-                            "Timeout waiting for rs-delivery on {}",
-                            instance.ipv4
+                            "rs-delivery returned {} after {} attempts",
+                            resp.status(),
+                            attempt + 1
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                Err(e) => {
+                    if attempt % 6 == 0 {
+                        info!(attempt, error = %e, "Health check connection failed");
+                    }
+                    if attempt == 59 {
+                        return Err(anyhow::anyhow!(
+                            "Timeout waiting for rs-delivery on {}: {}",
+                            instance.ipv4,
+                            e
                         ));
                     }
                     tokio::time::sleep(Duration::from_secs(5)).await;
