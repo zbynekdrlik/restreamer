@@ -263,9 +263,8 @@ impl DeliveryOrchestrator {
                 }
             }
         }
-        let start_chunk_id = start_chunk_id.ok_or_else(|| {
-            anyhow::anyhow!("No chunks found for event {event_id} after 30s")
-        })?;
+        let start_chunk_id = start_chunk_id
+            .ok_or_else(|| anyhow::anyhow!("No chunks found for event {event_id} after 30s"))?;
         info!(event_id, start_chunk_id, "Starting delivery from chunk");
 
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
