@@ -289,8 +289,11 @@ impl HetznerClient {
         loop {
             let url = format!("{}/images", self.base_url);
             let page_str = page.to_string();
-            let mut params: Vec<(&str, &str)> =
-                vec![("type", "snapshot"), ("page", &page_str), ("per_page", "50")];
+            let mut params: Vec<(&str, &str)> = vec![
+                ("type", "snapshot"),
+                ("page", &page_str),
+                ("per_page", "50"),
+            ];
             if let Some(selector) = label_selector {
                 params.push(("label_selector", selector));
             }
