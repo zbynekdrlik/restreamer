@@ -223,15 +223,21 @@ impl HetznerClient {
 
     pub async fn list_servers(&self, label_selector: Option<&str>) -> Result<Vec<Server>> {
         let mut all_servers = Vec::new();
-        let mut page = 1;
+        let mut page = 1u32;
         loop {
             let url = format!("{}/servers", self.base_url);
-            let mut req = self.client.get(&url).bearer_auth(&self.api_token);
-            req = req.query(&[("page", page.to_string()), ("per_page", "50".to_string())]);
+            let page_str = page.to_string();
+            let mut params: Vec<(&str, &str)> = vec![("page", &page_str), ("per_page", "50")];
             if let Some(selector) = label_selector {
-                req = req.query(&[("label_selector", selector)]);
+                params.push(("label_selector", selector));
             }
-            let resp = req.send().await?;
+            let resp = self
+                .client
+                .get(&url)
+                .bearer_auth(&self.api_token)
+                .query(&params)
+                .send()
+                .await?;
             let resp = self.check_error(resp).await?;
             let body: ServersResponse = resp.json().await?;
             if body.servers.is_empty() {
@@ -279,19 +285,22 @@ impl HetznerClient {
 
     pub async fn list_snapshots(&self, label_selector: Option<&str>) -> Result<Vec<Image>> {
         let mut all_images = Vec::new();
-        let mut page = 1;
+        let mut page = 1u32;
         loop {
             let url = format!("{}/images", self.base_url);
-            let mut req = self.client.get(&url).bearer_auth(&self.api_token);
-            req = req.query(&[
-                ("type", "snapshot"),
-                ("page", &page.to_string()),
-                ("per_page", "50"),
-            ]);
+            let page_str = page.to_string();
+            let mut params: Vec<(&str, &str)> =
+                vec![("type", "snapshot"), ("page", &page_str), ("per_page", "50")];
             if let Some(selector) = label_selector {
-                req = req.query(&[("label_selector", selector)]);
+                params.push(("label_selector", selector));
             }
-            let resp = req.send().await?;
+            let resp = self
+                .client
+                .get(&url)
+                .bearer_auth(&self.api_token)
+                .query(&params)
+                .send()
+                .await?;
             let resp = self.check_error(resp).await?;
             let body: ImagesResponse = resp.json().await?;
             if body.images.is_empty() {
