@@ -107,8 +107,32 @@ pub fn select_server_type(endpoint_count: usize) -> &'static str {
     }
 }
 
+/// S3 credentials passed to delivery VPS via cloud-init environment file.
+pub struct DeliveryS3Credentials {
+    pub bucket: String,
+    pub region: String,
+    pub endpoint: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+}
+
+/// Generate the environment file content for rs-delivery.
+fn delivery_env_file(s3: &DeliveryS3Credentials, auth_token: &str) -> String {
+    format!(
+        "DELIVERY_S3_BUCKET={}\nDELIVERY_S3_REGION={}\nDELIVERY_S3_ENDPOINT={}\nDELIVERY_S3_ACCESS_KEY_ID={}\nDELIVERY_S3_SECRET_ACCESS_KEY={}\nDELIVERY_AUTH_TOKEN={}\n",
+        s3.bucket, s3.region, s3.endpoint, s3.access_key_id, s3.secret_access_key, auth_token,
+    )
+}
+
 /// Cloud-init script for bootstrapping a delivery VPS from scratch.
-pub fn bootstrap_cloud_init(delivery_binary_url: &str) -> String {
+/// S3 credentials are written to an environment file on disk (mode 0600)
+/// so they never travel over plaintext HTTP.
+pub fn bootstrap_cloud_init(
+    delivery_binary_url: &str,
+    s3: &DeliveryS3Credentials,
+    auth_token: &str,
+) -> String {
+    let env_content = delivery_env_file(s3, auth_token);
     format!(
         r#"#cloud-config
 packages:
@@ -116,6 +140,10 @@ packages:
   - curl
 
 write_files:
+  - path: /opt/restreamer/rs-delivery.env
+    permissions: '0600'
+    content: |
+{env_lines}
   - path: /opt/restreamer/setup.sh
     permissions: '0755'
     content: |
@@ -124,24 +152,47 @@ write_files:
       mkdir -p /opt/restreamer
       curl -fsSL -o /opt/restreamer/rs-delivery "{delivery_binary_url}"
       chmod +x /opt/restreamer/rs-delivery
+      set -a; source /opt/restreamer/rs-delivery.env; set +a
       nohup /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &
 
 runcmd:
   - /opt/restreamer/setup.sh
-"#
+"#,
+        env_lines = env_content
+            .lines()
+            .map(|l| format!("      {l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
     )
 }
 
 /// Cloud-init script for starting delivery from an existing snapshot.
 /// Downloads the latest binary from S3 to ensure the newest version runs,
 /// while the snapshot provides ffmpeg and other dependencies pre-installed.
-pub fn snapshot_cloud_init(delivery_binary_url: &str) -> String {
+/// S3 credentials are written to an environment file on disk (mode 0600).
+pub fn snapshot_cloud_init(
+    delivery_binary_url: &str,
+    s3: &DeliveryS3Credentials,
+    auth_token: &str,
+) -> String {
+    let env_content = delivery_env_file(s3, auth_token);
     format!(
         r#"#cloud-config
+write_files:
+  - path: /opt/restreamer/rs-delivery.env
+    permissions: '0600'
+    content: |
+{env_lines}
+
 runcmd:
   - curl -fsSL -o /opt/restreamer/rs-delivery "{delivery_binary_url}"
   - chmod +x /opt/restreamer/rs-delivery
-  - nohup /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &
-"#
+  - bash -c 'set -a; source /opt/restreamer/rs-delivery.env; set +a; nohup /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &'
+"#,
+        env_lines = env_content
+            .lines()
+            .map(|l| format!("      {l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
     )
 }

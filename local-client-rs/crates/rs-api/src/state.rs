@@ -15,6 +15,9 @@ use crate::delivery::DeliveryOrchestrator;
 pub struct AppState {
     pub pool: SqlitePool,
     pub config: Arc<Config>,
+    /// Mutable config reference that can be swapped by patch_config.
+    /// Handlers that need the latest config after a patch should read from this.
+    pub config_live: Arc<std::sync::RwLock<Arc<Config>>>,
     pub ws_tx: broadcast::Sender<WsEvent>,
     pub config_path: Option<PathBuf>,
     pub log_buffer: LogBuffer,
@@ -33,9 +36,11 @@ pub struct AppState {
 impl AppState {
     pub fn new(pool: SqlitePool, config: Config, ws_tx: broadcast::Sender<WsEvent>) -> Self {
         let delivery = DeliveryOrchestrator::new(pool.clone(), config.clone());
+        let config = Arc::new(config);
         Self {
             pool,
-            config: Arc::new(config),
+            config_live: Arc::new(std::sync::RwLock::new(config.clone())),
+            config,
             ws_tx,
             config_path: None,
             log_buffer: LogBuffer::new(100),

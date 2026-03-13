@@ -4,18 +4,55 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
+    middleware,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/api/health", get(health))
+    // Health endpoint is public (used for readiness probes)
+    let public = Router::new().route("/api/health", get(health));
+
+    // All other endpoints require bearer token authentication
+    let protected = Router::new()
         .route("/api/init", post(init_endpoints))
         .route("/api/status", get(endpoint_status))
         .route("/api/stop", post(stop_endpoints))
-        .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ));
+
+    public.merge(protected).with_state(state)
+}
+
+/// Middleware that checks for a valid bearer token on protected endpoints.
+async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let token = state.auth_token.read().await;
+    // If no token is set yet, reject all requests
+    let expected = match token.as_deref() {
+        Some(t) if !t.is_empty() => t,
+        _ => return Err(StatusCode::UNAUTHORIZED),
+    };
+
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if let Some(bearer) = auth_header.strip_prefix("Bearer ") {
+        if bearer == expected {
+            return Ok(next.run(req).await);
+        }
+    }
+
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 #[derive(Serialize)]
@@ -37,6 +74,9 @@ pub struct InitRequest {
     pub s3_config: S3Config,
     pub event_identifier: String,
     pub start_chunk_id: i64,
+    /// Optional auth token — if provided, sets the bearer token for future requests.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -55,6 +95,30 @@ pub struct S3Config {
     pub secret_access_key: String,
 }
 
+impl S3Config {
+    /// Override fields with environment variables when available.
+    /// This allows S3 credentials to be passed securely via cloud-init
+    /// env file rather than over plaintext HTTP.
+    pub fn with_env_overrides(mut self) -> Self {
+        if let Ok(v) = std::env::var("DELIVERY_S3_BUCKET") {
+            self.bucket = v;
+        }
+        if let Ok(v) = std::env::var("DELIVERY_S3_REGION") {
+            self.region = v;
+        }
+        if let Ok(v) = std::env::var("DELIVERY_S3_ENDPOINT") {
+            self.endpoint = v;
+        }
+        if let Ok(v) = std::env::var("DELIVERY_S3_ACCESS_KEY_ID") {
+            self.access_key_id = v;
+        }
+        if let Ok(v) = std::env::var("DELIVERY_S3_SECRET_ACCESS_KEY") {
+            self.secret_access_key = v;
+        }
+        self
+    }
+}
+
 #[derive(Serialize)]
 struct InitResponse {
     status: String,
@@ -65,8 +129,18 @@ async fn init_endpoints(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InitRequest>,
 ) -> Result<Json<InitResponse>, StatusCode> {
+    // If an auth token is provided, store it for future request authentication
+    if let Some(token) = &req.auth_token {
+        if !token.is_empty() {
+            *state.auth_token.write().await = Some(token.clone());
+        }
+    }
+
+    // Apply environment variable overrides to S3 config (credentials come via cloud-init)
+    let s3_config = req.s3_config.clone().with_env_overrides();
+
     let mut endpoints = state.endpoints.write().await;
-    let count = req.endpoints.len();
+    let mut started = 0usize;
 
     for ep_cfg in &req.endpoints {
         if endpoints.contains_key(&ep_cfg.alias) {
@@ -75,19 +149,24 @@ async fn init_endpoints(
 
         let handle = EndpointHandle::spawn(
             ep_cfg.clone(),
-            req.s3_config.clone(),
+            s3_config.clone(),
             req.event_identifier.clone(),
             req.start_chunk_id,
         );
 
         endpoints.insert(ep_cfg.alias.clone(), handle);
+        started += 1;
     }
 
-    tracing::info!(count, "Initialized endpoints");
+    tracing::info!(
+        requested = req.endpoints.len(),
+        started,
+        "Initialized endpoints"
+    );
 
     Ok(Json(InitResponse {
         status: "ok".to_string(),
-        endpoints_started: count,
+        endpoints_started: started,
     }))
 }
 
@@ -173,10 +252,16 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use tokio::sync::RwLock;
     use tower::util::ServiceExt;
 
+    const TEST_TOKEN: &str = "test-secret-token";
+
     fn test_state() -> Arc<AppState> {
-        Arc::new(AppState::default())
+        let mut state = AppState::default();
+        // Pre-set auth token for tests
+        state.auth_token = RwLock::new(Some(TEST_TOKEN.to_string()));
+        Arc::new(state)
     }
 
     #[tokio::test]
@@ -198,10 +283,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_endpoint_requires_auth() {
+        let app = router(test_state());
+        // Request without auth header should be rejected
+        let req = Request::builder()
+            .uri("/api/status")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn status_endpoint_empty() {
         let app = router(test_state());
         let req = Request::builder()
             .uri("/api/status")
+            .header("authorization", format!("Bearer {TEST_TOKEN}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -221,6 +319,7 @@ mod tests {
             .method("POST")
             .uri("/api/stop")
             .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {TEST_TOKEN}"))
             .body(Body::from(r#"{"alias": null}"#))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();

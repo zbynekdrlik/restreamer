@@ -16,14 +16,19 @@ pub struct AppState {
     pub endpoints: RwLock<HashMap<String, EndpointHandle>>,
     pub version: &'static str,
     pub ready: RwLock<bool>,
+    /// Bearer token for authenticating API requests. Set via DELIVERY_AUTH_TOKEN
+    /// env var or via the /api/init endpoint.
+    pub auth_token: RwLock<Option<String>>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
+        let auth_token = std::env::var("DELIVERY_AUTH_TOKEN").ok();
         Self {
             endpoints: RwLock::new(HashMap::new()),
             version: env!("CARGO_PKG_VERSION"),
             ready: RwLock::new(true),
+            auth_token: RwLock::new(auth_token),
         }
     }
 }

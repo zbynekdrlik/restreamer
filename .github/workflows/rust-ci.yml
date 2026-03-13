@@ -1718,7 +1718,7 @@ jobs:
             $body = @{
               alias = "E2E-YouTube"
               service_type = "YT_HLS"
-              stream_key = "jadq-ytsq-f5px-60wk-3ref"
+              stream_key = "${{ secrets.YOUTUBE_STREAM_KEY }}"
               is_fast = $false
             } | ConvertTo-Json
             $ytEndpoint = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" `
@@ -2183,6 +2183,24 @@ jobs:
             Write-Host "You may need to manually restore OBS stream settings"
           }
           exit 0
+
+      - name: Cleanup sensitive config
+        if: always()
+        shell: powershell
+        run: |
+          # Remove Hetzner API token from config file after E2E tests
+          $configPath = "C:\ProgramData\Restreamer\config.json"
+          if (Test-Path $configPath) {
+            $config = Get-Content $configPath -Raw | ConvertFrom-Json
+            if ($config.hetzner) {
+              $config.hetzner.api_token = ""
+              $json = $config | ConvertTo-Json -Depth 5
+              [System.IO.File]::WriteAllText($configPath, $json)
+              Write-Host "Hetzner API token removed from config"
+            }
+            # Restart service to pick up cleaned config
+            Restart-Service -Name "RestreamerService" -Force -ErrorAction SilentlyContinue
+          }
 
   e2e-gate:
     name: E2E Gate

@@ -63,7 +63,8 @@ New-Item -ItemType Directory -Path "$ConfigDir\chunks" -Force | Out-Null
 
 # --- Download service binary ---
 $serviceAsset = $latestRelease.assets | Where-Object { $_.name -like "restreamer-service-*-windows-x64.exe" } | Select-Object -First 1
-$checksumAsset = $latestRelease.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" } | Select-Object -First 1
+# Look for per-file .sha256 checksum (release creates restreamer-service-VERSION-windows-x64.exe.sha256)
+$checksumAsset = $latestRelease.assets | Where-Object { $_.name -eq "$($serviceAsset.name).sha256" } | Select-Object -First 1
 if ($serviceAsset) {
     Write-Status "Downloading service binary..."
     $servicePath = "$InstallDir\restreamer-service.exe"
@@ -73,8 +74,8 @@ if ($serviceAsset) {
     # Verify checksum if available
     if ($checksumAsset) {
         Write-Status "Verifying checksum..."
-        $checksums = (Invoke-WebRequest -Uri $checksumAsset.browser_download_url).Content
-        $expectedHash = ($checksums -split "`n" | Where-Object { $_ -match $serviceAsset.name } | ForEach-Object { ($_ -split '\s+')[0] })
+        $checksumContent = (Invoke-WebRequest -Uri $checksumAsset.browser_download_url).Content.Trim()
+        $expectedHash = ($checksumContent -split '\s+')[0]
         if ($expectedHash) {
             $actualHash = (Get-FileHash -Path $servicePath -Algorithm SHA256).Hash.ToLower()
             if ($actualHash -ne $expectedHash.ToLower()) {

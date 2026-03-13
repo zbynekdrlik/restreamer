@@ -333,6 +333,17 @@ pub async fn set_delivering_activated(pool: &SqlitePool, id: i64, delivering: bo
     Ok(())
 }
 
+/// Deactivate both receiving and delivering in a single atomic update.
+pub async fn deactivate_event(pool: &SqlitePool, id: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE streaming_events SET receiving_activated = 0, delivering_activated = 0 WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn update_received_bytes(
     pool: &SqlitePool,
     event_id: i64,

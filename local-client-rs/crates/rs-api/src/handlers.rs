@@ -220,7 +220,12 @@ pub async fn action_toggle_delivering(
 }
 
 pub async fn get_config(State(state): State<AppState>) -> Json<Config> {
-    let mut config = (*state.config).clone();
+    let config_arc = state
+        .config_live
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or_else(|_| state.config.clone());
+    let mut config = (*config_arc).clone();
     // Redact sensitive credentials before sending over the API
     config.s3.access_key_id = REDACTED.to_string();
     config.s3.secret_access_key = REDACTED.to_string();
@@ -233,8 +238,15 @@ pub async fn patch_config(
     State(state): State<AppState>,
     Json(updates): Json<serde_json::Value>,
 ) -> Result<Json<Config>, StatusCode> {
+    // Read current config from live state (may have been patched previously)
+    let current_config = state
+        .config_live
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or_else(|_| state.config.clone());
+
     // Serialize current config to JSON for merging
-    let current = serde_json::to_value(&*state.config).map_err(|e| {
+    let current = serde_json::to_value(&*current_config).map_err(|e| {
         error!("Failed to serialize current config: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -250,16 +262,16 @@ pub async fn patch_config(
 
     // Preserve redacted credentials — if the client sends back the redaction placeholder, keep originals
     if new_config.s3.access_key_id == REDACTED {
-        new_config.s3.access_key_id = state.config.s3.access_key_id.clone();
+        new_config.s3.access_key_id = current_config.s3.access_key_id.clone();
     }
     if new_config.s3.secret_access_key == REDACTED {
-        new_config.s3.secret_access_key = state.config.s3.secret_access_key.clone();
+        new_config.s3.secret_access_key = current_config.s3.secret_access_key.clone();
     }
     if new_config.hetzner.api_token == REDACTED {
-        new_config.hetzner.api_token = state.config.hetzner.api_token.clone();
+        new_config.hetzner.api_token = current_config.hetzner.api_token.clone();
     }
     if new_config.youtube.client_secret == REDACTED {
-        new_config.youtube.client_secret = state.config.youtube.client_secret.clone();
+        new_config.youtube.client_secret = current_config.youtube.client_secret.clone();
     }
 
     // Validate the merged config
@@ -275,6 +287,11 @@ pub async fn patch_config(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
         tracing::info!("Config saved to {}", path.display());
+    }
+
+    // Update the in-memory live config so subsequent requests see the change
+    if let Ok(mut live) = state.config_live.write() {
+        *live = std::sync::Arc::new(new_config.clone());
     }
 
     // Redact credentials before returning
@@ -419,6 +436,11 @@ pub async fn create_endpoint(
     State(state): State<AppState>,
     Json(req): Json<CreateEndpointRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    if req.alias.trim().is_empty() || req.alias.len() > 255 {
+        tracing::warn!("Invalid alias: empty or too long (max 255 chars)");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     if !VALID_SERVICE_TYPES.contains(&req.service_type.as_str()) {
         tracing::warn!("Invalid service_type: {}", req.service_type);
         return Err(StatusCode::BAD_REQUEST);
@@ -467,6 +489,22 @@ pub async fn update_endpoint(
     axum::extract::Path(id): axum::extract::Path<i64>,
     Json(req): Json<UpdateEndpointRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    // Validate service_type if provided
+    if let Some(ref st) = req.service_type {
+        if !VALID_SERVICE_TYPES.contains(&st.as_str()) {
+            tracing::warn!("Invalid service_type in update: {st}");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    // Validate alias if provided
+    if let Some(ref alias) = req.alias {
+        if alias.trim().is_empty() || alias.len() > 255 {
+            tracing::warn!("Invalid alias in update: empty or too long");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
     // Get existing endpoint first
     let existing = db::get_endpoint_config(&state.pool, id)
         .await
@@ -595,16 +633,11 @@ pub async fn deactivate_event(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    db::set_receiving_activated(&state.pool, id, false)
+    // Atomically deactivate both receiving and delivering in a single query
+    db::deactivate_event(&state.pool, id)
         .await
         .map_err(|e| {
-            error!("Failed to deactivate receiving for event {id}: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    db::set_delivering_activated(&state.pool, id, false)
-        .await
-        .map_err(|e| {
-            error!("Failed to deactivate delivering for event {id}: {e}");
+            error!("Failed to deactivate event {id}: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -697,9 +730,13 @@ pub async fn delivery_start(
     // Spawn background task to poll Hetzner and init rs-delivery
     let instance_id = result.instance_id;
     let event_name = event.name.clone();
+    let auth_token = result.auth_token.clone();
     let orch = Arc::clone(orch);
     tokio::spawn(async move {
-        if let Err(e) = orch.poll_and_init(instance_id, event_id, &event_name).await {
+        if let Err(e) = orch
+            .poll_and_init(instance_id, event_id, &event_name, &auth_token)
+            .await
+        {
             tracing::error!("Background poll_and_init failed for instance {instance_id}: {e}");
             if let Err(db_err) =
                 db::update_delivery_instance_status(orch.pool(), instance_id, "failed").await

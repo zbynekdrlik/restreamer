@@ -86,7 +86,10 @@ pub fn Events() -> impl IntoView {
                             <div class="event-actions">
                                 <button on:click=move |_| {
                                     leptos::task::spawn_local(async move {
-                                        let _ = api::activate_event(id).await;
+                                        if let Err(e) = api::activate_event(id).await {
+                                            web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&format!("Failed to activate event {id}: {e}")));
+                                            set_error.set(Some(format!("Activate failed: {e}")));
+                                        }
                                         if let Ok(evts) = api::list_events().await {
                                             set_events.set(evts);
                                         }
@@ -94,7 +97,10 @@ pub fn Events() -> impl IntoView {
                                 }>"Activate"</button>
                                 <button on:click=move |_| {
                                     leptos::task::spawn_local(async move {
-                                        let _ = api::start_delivering(id).await;
+                                        if let Err(e) = api::start_delivering(id).await {
+                                            web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&format!("Failed to start delivering for event {id}: {e}")));
+                                            set_error.set(Some(format!("Start delivering failed: {e}")));
+                                        }
                                         if let Ok(evts) = api::list_events().await {
                                             set_events.set(evts);
                                         }
@@ -102,7 +108,10 @@ pub fn Events() -> impl IntoView {
                                 }>"Start Delivering"</button>
                                 <button class="danger" on:click=move |_| {
                                     leptos::task::spawn_local(async move {
-                                        let _ = api::deactivate_event(id).await;
+                                        if let Err(e) = api::deactivate_event(id).await {
+                                            web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&format!("Failed to deactivate event {id}: {e}")));
+                                            set_error.set(Some(format!("Deactivate failed: {e}")));
+                                        }
                                         if let Ok(evts) = api::list_events().await {
                                             set_events.set(evts);
                                         }

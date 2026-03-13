@@ -71,7 +71,13 @@ async fn endpoint_loop(
     stats: Stats,
 ) {
     let alias = ep_cfg.alias.clone();
-    let service_type: ServiceType = ep_cfg.service_type.parse().unwrap_or(ServiceType::TestFile);
+    let service_type: ServiceType = match ep_cfg.service_type.parse() {
+        Ok(st) => st,
+        Err(e) => {
+            tracing::error!(alias = %alias, "Unknown service type '{}': {e}", ep_cfg.service_type);
+            return;
+        }
+    };
 
     let fetcher = match S3Fetcher::new(&s3_cfg, &event_identifier) {
         Ok(f) => f,

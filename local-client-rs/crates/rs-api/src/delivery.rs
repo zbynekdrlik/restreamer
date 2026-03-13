@@ -22,13 +22,16 @@ pub struct DeliveryOrchestrator {
 }
 
 /// Result of starting a delivery instance.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StartDeliveryResult {
     pub instance_id: i64,
     pub hetzner_id: i64,
     pub name: String,
     pub server_type: String,
     pub status: String,
+    /// Auth token generated for this delivery instance (used for API auth).
+    #[serde(skip)]
+    pub auth_token: String,
 }
 
 /// Result of querying delivery status.
@@ -96,6 +99,7 @@ impl DeliveryOrchestrator {
                     name: existing.name,
                     server_type: existing.server_type,
                     status: existing.status,
+                    auth_token: String::new(),
                 });
             }
         }
@@ -114,10 +118,34 @@ impl DeliveryOrchestrator {
         labels.insert("app".to_string(), "restreamer".to_string());
         labels.insert("event_id".to_string(), event_id.to_string());
 
+        // S3 credentials are passed via cloud-init (written to env file on disk)
+        // so they never travel over plaintext HTTP to the delivery VPS.
+        let s3_creds = rs_cloud::DeliveryS3Credentials {
+            bucket: self.config.s3.bucket.clone(),
+            region: self.config.s3.region.clone(),
+            endpoint: self.config.s3.endpoint.clone(),
+            access_key_id: self.config.s3.access_key_id.clone(),
+            secret_access_key: self.config.s3.secret_access_key.clone(),
+        };
+
+        // Generate a random auth token for this delivery instance
+        let auth_token: String = {
+            use std::io::Read;
+            let mut buf = [0u8; 16];
+            std::fs::File::open("/dev/urandom")
+                .expect("/dev/urandom should be available")
+                .read_exact(&mut buf)
+                .expect("reading from /dev/urandom should not fail");
+            buf.iter().map(|b| format!("{b:02x}")).collect()
+        };
+
         // Find the snapshot or fall back to bootstrap cloud-init
         // Both paths download the latest binary from S3 to ensure newest version runs
         let (image, user_data) = match self.find_delivery_image().await {
-            Ok(snapshot_id) => (snapshot_id, rs_cloud::snapshot_cloud_init(&binary_url)),
+            Ok(snapshot_id) => (
+                snapshot_id,
+                rs_cloud::snapshot_cloud_init(&binary_url, &s3_creds, &auth_token),
+            ),
             Err(_) => {
                 info!(
                     "No delivery snapshot found, bootstrapping from {}",
@@ -125,7 +153,7 @@ impl DeliveryOrchestrator {
                 );
                 (
                     "ubuntu-24.04".to_string(),
-                    rs_cloud::bootstrap_cloud_init(&binary_url),
+                    rs_cloud::bootstrap_cloud_init(&binary_url, &s3_creds, &auth_token),
                 )
             }
         };
@@ -168,6 +196,7 @@ impl DeliveryOrchestrator {
             name,
             server_type: server_type.to_string(),
             status: "creating".to_string(),
+            auth_token,
         })
     }
 
@@ -177,6 +206,7 @@ impl DeliveryOrchestrator {
         instance_id: i64,
         event_id: i64,
         event_name: &str,
+        auth_token: &str,
     ) -> anyhow::Result<()> {
         let instance = db::get_delivery_instance(&self.pool, instance_id)
             .await?
@@ -238,10 +268,8 @@ impl DeliveryOrchestrator {
             }
         }
 
-        // POST /api/init to configure endpoints
-        // ACCEPTED RISK: S3 credentials are sent over plaintext HTTP to the delivery VPS.
-        // The VPS is ephemeral and short-lived, and adding TLS to ad-hoc Hetzner instances
-        // is not practical. A future improvement could pass credentials via cloud-init user_data.
+        // POST /api/init to configure endpoints.
+        // S3 credentials are already on the VPS via cloud-init env file.
         // Query chunk ID, retrying briefly in case chunks haven't been committed yet
         let mut start_chunk_id = None;
         for attempt in 0..10 {
@@ -280,8 +308,8 @@ impl DeliveryOrchestrator {
                 "bucket": self.config.s3.bucket,
                 "region": self.config.s3.region,
                 "endpoint": self.config.s3.endpoint,
-                "access_key_id": self.config.s3.access_key_id,
-                "secret_access_key": self.config.s3.secret_access_key,
+                "access_key_id": "from-env",
+                "secret_access_key": "from-env",
             },
             "event_identifier": event_name,
             "start_chunk_id": start_chunk_id,
@@ -289,6 +317,7 @@ impl DeliveryOrchestrator {
 
         let resp = client
             .post(format!("{delivery_url}/api/init"))
+            .bearer_auth(auth_token)
             .json(&init_body)
             .timeout(Duration::from_secs(30))
             .send()

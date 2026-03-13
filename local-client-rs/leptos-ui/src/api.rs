@@ -304,7 +304,9 @@ pub async fn start_delivering(id: i64) -> Result<(), String> {
     http_post(&format!("/events/{id}/start-delivering")).await?;
     // Also start the Hetzner delivery VPS
     let body = serde_json::json!({ "event_id": id });
-    let _ = http_post_json("/delivery/start", &body).await;
+    http_post_json("/delivery/start", &body).await.map_err(|e| {
+        format!("Delivery VPS start failed: {e}")
+    })?;
     Ok(())
 }
 

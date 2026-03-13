@@ -222,16 +222,12 @@ impl HetznerClient {
     }
 
     pub async fn list_servers(&self, label_selector: Option<&str>) -> Result<Vec<Server>> {
-        let mut url = format!("{}/servers", self.base_url);
+        let url = format!("{}/servers", self.base_url);
+        let mut req = self.client.get(&url).bearer_auth(&self.api_token);
         if let Some(selector) = label_selector {
-            url = format!("{url}?label_selector={selector}");
+            req = req.query(&[("label_selector", selector)]);
         }
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.api_token)
-            .send()
-            .await?;
+        let resp = req.send().await?;
         let resp = self.check_error(resp).await?;
         let body: ServersResponse = resp.json().await?;
         Ok(body.servers)
@@ -272,13 +268,15 @@ impl HetznerClient {
     }
 
     pub async fn list_snapshots(&self, label_selector: Option<&str>) -> Result<Vec<Image>> {
-        let mut url = format!("{}/images?type=snapshot", self.base_url);
+        let url = format!("{}/images", self.base_url);
+        let mut params: Vec<(&str, &str)> = vec![("type", "snapshot")];
         if let Some(selector) = label_selector {
-            url = format!("{url}&label_selector={selector}");
+            params.push(("label_selector", selector));
         }
         let resp = self
             .client
             .get(&url)
+            .query(&params)
             .bearer_auth(&self.api_token)
             .send()
             .await?;
