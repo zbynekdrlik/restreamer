@@ -148,12 +148,23 @@ write_files:
     permissions: '0755'
     content: |
       #!/bin/bash
-      set -e
+      set -ex
       mkdir -p /opt/restreamer
+      echo "[setup] Downloading binary..."
       curl -fsSL -o /opt/restreamer/rs-delivery "{delivery_binary_url}"
       chmod +x /opt/restreamer/rs-delivery
+      echo "[setup] Binary size: $(stat -c%s /opt/restreamer/rs-delivery) bytes"
       set -a; source /opt/restreamer/rs-delivery.env; set +a
-      nohup /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &
+      echo "[setup] Starting rs-delivery..."
+      /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &
+      RS_PID=$!
+      sleep 3
+      if ! kill -0 $RS_PID 2>/dev/null; then
+        echo "[setup] ERROR: Process crashed! Log:" >&2
+        cat /opt/restreamer/rs-delivery.log >&2
+        exit 1
+      fi
+      echo "[setup] rs-delivery running as PID $RS_PID"
 
 runcmd:
   - /opt/restreamer/setup.sh
