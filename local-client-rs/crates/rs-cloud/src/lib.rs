@@ -185,6 +185,7 @@ write_files:
 {env_lines}
 
 runcmd:
+  - pkill -f rs-delivery || true
   - curl -fsSL -o /opt/restreamer/rs-delivery "{delivery_binary_url}"
   - chmod +x /opt/restreamer/rs-delivery
   - bash -c 'set -a; source /opt/restreamer/rs-delivery.env; set +a; nohup /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &'
