@@ -1740,6 +1740,14 @@ jobs:
           }
           Write-Host "=== Delivery started: server=$($response.server_ip), hetzner_id=$($response.hetzner_id) ==="
 
+          # Diagnostic: check chunks for this event
+          $allEvents = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          foreach ($ev in $allEvents) {
+            Write-Host "  Event: id=$($ev.id) name=$($ev.name) receiving=$($ev.receiving_activated) delivering=$($ev.delivering_activated) bytes=$($ev.received_bytes)"
+          }
+          $chunkStats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 10
+          Write-Host "  Chunk stats: total=$($chunkStats.total_chunks) pending=$($chunkStats.pending_chunks) sent=$($chunkStats.sent_chunks)"
+
       - name: Wait for delivery server ready
         shell: powershell
         timeout-minutes: 5
@@ -1764,6 +1772,19 @@ jobs:
                 foreach ($ep in $response.endpoint_details) {
                   Write-Host "  Endpoint: $($ep.alias) | alive=$($ep.alive) | buffer=$($ep.buff_size_bytes)B | chunk=$($ep.current_chunk_id)"
                 }
+              }
+
+              if ($response.instance_status -eq "failed") {
+                Write-Host "  DIAGNOSTIC: Instance status is 'failed'"
+                $chunkStats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 10
+                Write-Host "  DIAGNOSTIC: total=$($chunkStats.total_chunks) pending=$($chunkStats.pending_chunks) sent=$($chunkStats.sent_chunks)"
+                # Get last 5 chunks to see their event IDs
+                try {
+                  $chunks = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks?limit=5&offset=$([math]::Max(0, $chunkStats.total_chunks - 5))" -TimeoutSec 10
+                  foreach ($c in $chunks) {
+                    Write-Host "  DIAGNOSTIC chunk: id=$($c.id) event_id=$($c.streaming_event_id) size=$($c.data_size) sent=$($c.sent_to_s3)"
+                  }
+                } catch { Write-Host "  DIAGNOSTIC: chunk query failed: $_" }
               }
 
               if ($response.server_ready -and $response.endpoints_alive) {
