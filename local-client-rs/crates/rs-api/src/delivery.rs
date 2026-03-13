@@ -443,7 +443,10 @@ impl DeliveryOrchestrator {
         // Abort any running poll_and_init background task for this instance
         if let Some(handle) = self.poll_handles.lock().await.remove(&instance.id) {
             handle.abort();
-            info!(instance_id = instance.id, "Aborted poll_and_init background task");
+            info!(
+                instance_id = instance.id,
+                "Aborted poll_and_init background task"
+            );
         }
 
         db::update_delivery_instance_status(&self.pool, instance.id, "stopping").await?;
