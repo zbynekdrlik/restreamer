@@ -324,9 +324,17 @@ async fn event_endpoint_cascade_on_event_delete() {
 async fn delivery_instance_crud() {
     let pool = setup_db().await;
 
-    let id = create_delivery_instance(&pool, 12345, "rs-delivery-1", "1.2.3.4", "cx23", None, "test-token-123")
-        .await
-        .unwrap();
+    let id = create_delivery_instance(
+        &pool,
+        12345,
+        "rs-delivery-1",
+        "1.2.3.4",
+        "cx23",
+        None,
+        "test-token-123",
+    )
+    .await
+    .unwrap();
     assert!(id > 0);
 
     let inst = get_delivery_instance(&pool, id).await.unwrap().unwrap();
@@ -432,9 +440,17 @@ async fn delivery_instance_by_event() {
             .is_none()
     );
 
-    let id = create_delivery_instance(&pool, 99999, "rs-del-1", "5.6.7.8", "cx23", Some(event_id), "token-evt")
-        .await
-        .unwrap();
+    let id = create_delivery_instance(
+        &pool,
+        99999,
+        "rs-del-1",
+        "5.6.7.8",
+        "cx23",
+        Some(event_id),
+        "token-evt",
+    )
+    .await
+    .unwrap();
 
     let inst = get_delivery_instance_by_event(&pool, event_id)
         .await
