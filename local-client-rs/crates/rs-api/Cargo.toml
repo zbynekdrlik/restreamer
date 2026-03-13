@@ -23,6 +23,7 @@ sqlx.workspace = true
 futures.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 chrono.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio-tungstenite = "0.26"

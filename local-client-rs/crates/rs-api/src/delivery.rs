@@ -140,16 +140,8 @@ impl DeliveryOrchestrator {
             secret_access_key: self.config.s3.secret_access_key.clone(),
         };
 
-        // Generate a random auth token for this delivery instance
-        let auth_token: String = {
-            use std::io::Read;
-            let mut buf = [0u8; 16];
-            std::fs::File::open("/dev/urandom")
-                .expect("/dev/urandom should be available")
-                .read_exact(&mut buf)
-                .expect("reading from /dev/urandom should not fail");
-            buf.iter().map(|b| format!("{b:02x}")).collect()
-        };
+        // Generate a random auth token for this delivery instance (cross-platform)
+        let auth_token = uuid::Uuid::new_v4().to_string().replace('-', "");
 
         // Find the snapshot or fall back to bootstrap cloud-init
         // Both paths download the latest binary from S3 to ensure newest version runs
