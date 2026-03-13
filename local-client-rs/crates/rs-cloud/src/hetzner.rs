@@ -222,15 +222,25 @@ impl HetznerClient {
     }
 
     pub async fn list_servers(&self, label_selector: Option<&str>) -> Result<Vec<Server>> {
-        let url = format!("{}/servers", self.base_url);
-        let mut req = self.client.get(&url).bearer_auth(&self.api_token);
-        if let Some(selector) = label_selector {
-            req = req.query(&[("label_selector", selector)]);
+        let mut all_servers = Vec::new();
+        let mut page = 1;
+        loop {
+            let url = format!("{}/servers", self.base_url);
+            let mut req = self.client.get(&url).bearer_auth(&self.api_token);
+            req = req.query(&[("page", page.to_string()), ("per_page", "50".to_string())]);
+            if let Some(selector) = label_selector {
+                req = req.query(&[("label_selector", selector)]);
+            }
+            let resp = req.send().await?;
+            let resp = self.check_error(resp).await?;
+            let body: ServersResponse = resp.json().await?;
+            if body.servers.is_empty() {
+                break;
+            }
+            all_servers.extend(body.servers);
+            page += 1;
         }
-        let resp = req.send().await?;
-        let resp = self.check_error(resp).await?;
-        let body: ServersResponse = resp.json().await?;
-        Ok(body.servers)
+        Ok(all_servers)
     }
 
     pub async fn delete_server(&self, id: i64) -> Result<()> {
@@ -268,21 +278,29 @@ impl HetznerClient {
     }
 
     pub async fn list_snapshots(&self, label_selector: Option<&str>) -> Result<Vec<Image>> {
-        let url = format!("{}/images", self.base_url);
-        let mut params: Vec<(&str, &str)> = vec![("type", "snapshot")];
-        if let Some(selector) = label_selector {
-            params.push(("label_selector", selector));
+        let mut all_images = Vec::new();
+        let mut page = 1;
+        loop {
+            let url = format!("{}/images", self.base_url);
+            let mut req = self.client.get(&url).bearer_auth(&self.api_token);
+            req = req.query(&[
+                ("type", "snapshot"),
+                ("page", &page.to_string()),
+                ("per_page", "50"),
+            ]);
+            if let Some(selector) = label_selector {
+                req = req.query(&[("label_selector", selector)]);
+            }
+            let resp = req.send().await?;
+            let resp = self.check_error(resp).await?;
+            let body: ImagesResponse = resp.json().await?;
+            if body.images.is_empty() {
+                break;
+            }
+            all_images.extend(body.images);
+            page += 1;
         }
-        let resp = self
-            .client
-            .get(&url)
-            .query(&params)
-            .bearer_auth(&self.api_token)
-            .send()
-            .await?;
-        let resp = self.check_error(resp).await?;
-        let body: ImagesResponse = resp.json().await?;
-        Ok(body.images)
+        Ok(all_images)
     }
 
     pub async fn delete_image(&self, id: i64) -> Result<()> {

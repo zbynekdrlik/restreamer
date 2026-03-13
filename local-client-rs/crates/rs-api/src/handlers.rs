@@ -714,23 +714,19 @@ pub async fn delivery_start(
         })?;
 
     // Spawn background task to poll Hetzner and init rs-delivery
-    let instance_id = result.instance_id;
-    let event_name = event.name.clone();
-    let auth_token = result.auth_token.clone();
-    let orch = Arc::clone(orch);
-    tokio::spawn(async move {
-        if let Err(e) = orch
-            .poll_and_init(instance_id, event_id, &event_name, &auth_token)
-            .await
-        {
+    let (instance_id, event_name) = (result.instance_id, event.name.clone());
+    let (auth_token, poll_handles, orch) =
+        (result.auth_token.clone(), orch.poll_handles(), Arc::clone(orch));
+    let handle = tokio::spawn(async move {
+        if let Err(e) = orch.poll_and_init(instance_id, event_id, &event_name, &auth_token).await {
             tracing::error!("Background poll_and_init failed for instance {instance_id}: {e}");
-            if let Err(db_err) =
-                db::update_delivery_instance_status(orch.pool(), instance_id, "failed").await
-            {
-                tracing::error!("Failed to mark instance {instance_id} as failed: {db_err}");
+            if let Err(e) = db::update_delivery_instance_status(orch.pool(), instance_id, "failed").await {
+                tracing::error!("Failed to mark instance {instance_id} as failed: {e}");
             }
         }
+        orch.poll_handles().lock().await.remove(&instance_id);
     });
+    poll_handles.lock().await.insert(instance_id, handle);
 
     Ok(Json(DeliveryStartResponse {
         instance_id: result.instance_id,

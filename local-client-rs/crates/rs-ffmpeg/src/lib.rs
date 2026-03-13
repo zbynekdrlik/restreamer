@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 
 #[derive(Debug, Error)]
@@ -227,13 +227,31 @@ impl FfmpegProcess {
             "Spawning ffmpeg"
         );
 
-        let child = Command::new("ffmpeg")
+        let mut child = Command::new("ffmpeg")
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
+
+        // Spawn a background task to drain stderr to prevent buffer blocking.
+        // Logs are discarded but the pipe is kept alive.
+        let stderr = child.stderr.take();
+        let alias_clone = alias.to_string();
+        tokio::spawn(async move {
+            if let Some(mut stderr) = stderr {
+                let mut buf = [0u8; 4096];
+                loop {
+                    match stderr.read(&mut buf).await {
+                        Ok(0) => break, // EOF
+                        Ok(_) => {}     // Discard data
+                        Err(_) => break,
+                    }
+                }
+                tracing::debug!(alias = %alias_clone, "ffmpeg stderr drain task finished");
+            }
+        });
 
         Ok(Self {
             child,

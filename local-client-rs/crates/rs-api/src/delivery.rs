@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::SqlitePool;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use rs_cloud::hetzner::HetznerClient;
@@ -19,6 +22,8 @@ pub struct DeliveryOrchestrator {
     pool: SqlitePool,
     config: Config,
     hetzner: HetznerClient,
+    /// Tracks poll_and_init background tasks by instance ID for cancellation on stop.
+    poll_handles: Arc<Mutex<HashMap<i64, JoinHandle<()>>>>,
 }
 
 /// Result of starting a delivery instance.
@@ -73,6 +78,7 @@ impl DeliveryOrchestrator {
             pool,
             hetzner: HetznerClient::new(token),
             config,
+            poll_handles: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -82,7 +88,13 @@ impl DeliveryOrchestrator {
             pool,
             hetzner: HetznerClient::with_base_url(&config.hetzner.api_token, base_url),
             config,
+            poll_handles: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Returns the poll_handles map for tracking background tasks.
+    pub fn poll_handles(&self) -> Arc<Mutex<HashMap<i64, JoinHandle<()>>>> {
+        Arc::clone(&self.poll_handles)
     }
 
     /// Start a delivery instance for the given event.
@@ -427,6 +439,12 @@ impl DeliveryOrchestrator {
             Some(i) => i,
             None => return Ok(()),
         };
+
+        // Abort any running poll_and_init background task for this instance
+        if let Some(handle) = self.poll_handles.lock().await.remove(&instance.id) {
+            handle.abort();
+            info!(instance_id = instance.id, "Aborted poll_and_init background task");
+        }
 
         db::update_delivery_instance_status(&self.pool, instance.id, "stopping").await?;
 
