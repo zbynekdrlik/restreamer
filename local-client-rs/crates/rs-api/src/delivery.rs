@@ -258,7 +258,10 @@ impl DeliveryOrchestrator {
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
-                    info!(attempt, "rs-delivery health check passed on {}", instance.ipv4);
+                    info!(
+                        attempt,
+                        "rs-delivery health check passed on {}", instance.ipv4
+                    );
                     break;
                 }
                 Ok(resp) => {
