@@ -505,6 +505,42 @@
         .edit-actions button.save:hover {
             background-color: #3db88a;
         }
+
+        .edit-actions button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        /* Stream key input with show/hide toggle */
+        .key-input-wrapper {
+            display: flex;
+            gap: 8px;
+        }
+
+        .key-input-wrapper input {
+            flex: 1;
+        }
+
+        .toggle-key-btn {
+            padding: 10px 14px;
+            min-width: 60px;
+            font-size: 0.85rem;
+        }
+
+        /* Password input styling */
+        input[type="password"] {
+            padding: 10px 14px;
+            border-radius: 8px;
+            border: 1px solid var(--bg-card);
+            background-color: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            outline: none;
+        }
+
+        input[type="password"]:focus {
+            border-color: var(--accent);
+        }
     </style>
 </head>
 <body>

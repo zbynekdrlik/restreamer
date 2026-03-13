@@ -4,6 +4,21 @@ use leptos::prelude::*;
 
 use crate::api::{self, UpdateEndpointRequest};
 
+/// Reusable service type options for select dropdowns.
+#[component]
+fn ServiceTypeOptions() -> impl IntoView {
+    view! {
+        <>
+            <option value="YT_HLS">"YouTube HLS"</option>
+            <option value="YT_RTMP">"YouTube RTMP"</option>
+            <option value="FB">"Facebook"</option>
+            <option value="VIMEO">"Vimeo"</option>
+            <option value="INSTAGRAM">"Instagram"</option>
+            <option value="TEST_FILE">"Test File"</option>
+        </>
+    }
+}
+
 /// Endpoints tab: list, create, edit endpoint configurations.
 #[component]
 pub fn Endpoints() -> impl IntoView {
@@ -20,6 +35,8 @@ pub fn Endpoints() -> impl IntoView {
     let (edit_key, set_edit_key) = signal(String::new());
     let (edit_enabled, set_edit_enabled) = signal(false);
     let (edit_fast, set_edit_fast) = signal(false);
+    let (saving, set_saving) = signal(false);
+    let (show_edit_key, set_show_edit_key) = signal(false);
 
     // Fetch on mount
     Effect::new(move |_| {
@@ -63,6 +80,8 @@ pub fn Endpoints() -> impl IntoView {
 
     let cancel_edit = move |_| {
         set_editing_id.set(None);
+        set_error.set(None);
+        set_show_edit_key.set(false);
     };
 
     let save_edit = move |_| {
@@ -81,6 +100,7 @@ pub fn Endpoints() -> impl IntoView {
             return;
         }
 
+        set_saving.set(true);
         leptos::task::spawn_local(async move {
             let req = UpdateEndpointRequest {
                 alias: Some(alias),
@@ -93,12 +113,14 @@ pub fn Endpoints() -> impl IntoView {
                 Ok(_) => {
                     set_editing_id.set(None);
                     set_error.set(None);
+                    set_show_edit_key.set(false);
                     if let Ok(eps) = api::list_endpoints().await {
                         set_endpoints.set(eps);
                     }
                 }
                 Err(e) => set_error.set(Some(format!("Update failed: {e}"))),
             }
+            set_saving.set(false);
         });
     };
 
@@ -121,12 +143,7 @@ pub fn Endpoints() -> impl IntoView {
                     prop:value=move || new_type.get()
                     on:change=move |ev| set_new_type.set(event_target_value(&ev))
                 >
-                    <option value="YT_HLS">"YouTube HLS"</option>
-                    <option value="YT_RTMP">"YouTube RTMP"</option>
-                    <option value="FB">"Facebook"</option>
-                    <option value="VIMEO">"Vimeo"</option>
-                    <option value="INSTAGRAM">"Instagram"</option>
-                    <option value="TEST_FILE">"Test File"</option>
+                    <ServiceTypeOptions />
                 </select>
                 <input
                     type="text"
@@ -167,21 +184,25 @@ pub fn Endpoints() -> impl IntoView {
                                                     prop:value=move || edit_type.get()
                                                     on:change=move |ev| set_edit_type.set(event_target_value(&ev))
                                                 >
-                                                    <option value="YT_HLS">"YouTube HLS"</option>
-                                                    <option value="YT_RTMP">"YouTube RTMP"</option>
-                                                    <option value="FB">"Facebook"</option>
-                                                    <option value="VIMEO">"Vimeo"</option>
-                                                    <option value="INSTAGRAM">"Instagram"</option>
-                                                    <option value="TEST_FILE">"Test File"</option>
+                                                    <ServiceTypeOptions />
                                                 </select>
                                             </div>
                                             <div class="edit-row">
                                                 <label>"Stream Key"</label>
-                                                <input
-                                                    type="text"
-                                                    prop:value=move || edit_key.get()
-                                                    on:input=move |ev| set_edit_key.set(event_target_value(&ev))
-                                                />
+                                                <div class="key-input-wrapper">
+                                                    <input
+                                                        type=move || if show_edit_key.get() { "text" } else { "password" }
+                                                        prop:value=move || edit_key.get()
+                                                        on:input=move |ev| set_edit_key.set(event_target_value(&ev))
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        class="toggle-key-btn"
+                                                        on:click=move |_| set_show_edit_key.set(!show_edit_key.get())
+                                                    >
+                                                        {move || if show_edit_key.get() { "Hide" } else { "Show" }}
+                                                    </button>
+                                                </div>
                                             </div>
                                             <div class="edit-row checkboxes">
                                                 <label class="checkbox-label">
@@ -202,8 +223,14 @@ pub fn Endpoints() -> impl IntoView {
                                                 </label>
                                             </div>
                                             <div class="edit-actions">
-                                                <button class="save" on:click=save_edit>"Save"</button>
-                                                <button on:click=cancel_edit>"Cancel"</button>
+                                                <button
+                                                    class="save"
+                                                    on:click=save_edit
+                                                    disabled=move || saving.get()
+                                                >
+                                                    {move || if saving.get() { "Saving..." } else { "Save" }}
+                                                </button>
+                                                <button on:click=cancel_edit disabled=move || saving.get()>"Cancel"</button>
                                             </div>
                                         </div>
                                     }.into_any()
