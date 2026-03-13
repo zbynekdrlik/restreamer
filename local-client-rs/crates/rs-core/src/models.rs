@@ -64,6 +64,9 @@ pub struct DeliveryInstance {
     pub event_id: Option<i64>,
     pub created_at: String,
     pub last_health_at: Option<String>,
+    /// Auth token for rs-delivery API (not serialized to API responses).
+    #[serde(skip)]
+    pub auth_token: String,
 }
 
 /// Per-endpoint status on delivery VPS.

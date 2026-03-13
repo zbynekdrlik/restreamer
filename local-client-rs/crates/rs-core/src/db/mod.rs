@@ -57,6 +57,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (2, MIGRATION_V2_SQL),
         (3, MIGRATION_V3_SQL),
         (4, MIGRATION_V4_SQL),
+        (5, MIGRATION_V5_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -140,7 +141,8 @@ CREATE TABLE IF NOT EXISTS delivery_instances (
     server_type    TEXT NOT NULL DEFAULT 'cx23',
     event_id       INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
     created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    last_health_at TEXT
+    last_health_at TEXT,
+    auth_token     TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS delivery_endpoint_status (
@@ -213,6 +215,10 @@ DROP TABLE delivery_instances;
 ALTER TABLE delivery_instances_new RENAME TO delivery_instances;
 
 PRAGMA foreign_keys = ON
+"#;
+
+const MIGRATION_V5_SQL: &str = r#"
+ALTER TABLE delivery_instances ADD COLUMN auth_token TEXT NOT NULL DEFAULT ''
 "#;
 
 // --- Client Profile ---

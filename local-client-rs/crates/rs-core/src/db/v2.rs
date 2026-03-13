@@ -178,16 +178,18 @@ pub async fn create_delivery_instance(
     ipv4: &str,
     server_type: &str,
     event_id: Option<i64>,
+    auth_token: &str,
 ) -> Result<i64> {
     let row = sqlx::query(
-        "INSERT INTO delivery_instances (hetzner_id, name, ipv4, server_type, event_id)
-         VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+        "INSERT INTO delivery_instances (hetzner_id, name, ipv4, server_type, event_id, auth_token)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
     )
     .bind(hetzner_id)
     .bind(name)
     .bind(ipv4)
     .bind(server_type)
     .bind(event_id)
+    .bind(auth_token)
     .fetch_one(pool)
     .await?;
     Ok(row.get("id"))
@@ -195,7 +197,7 @@ pub async fn create_delivery_instance(
 
 pub async fn get_delivery_instance(pool: &SqlitePool, id: i64) -> Result<Option<DeliveryInstance>> {
     let row = sqlx::query(
-        "SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at
+        "SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token
          FROM delivery_instances WHERE id = ?1",
     )
     .bind(id)
@@ -212,6 +214,7 @@ pub async fn get_delivery_instance(pool: &SqlitePool, id: i64) -> Result<Option<
         event_id: r.get("event_id"),
         created_at: r.get("created_at"),
         last_health_at: r.get("last_health_at"),
+        auth_token: r.get("auth_token"),
     }))
 }
 
@@ -246,7 +249,7 @@ pub async fn delete_delivery_instance(pool: &SqlitePool, id: i64) -> Result<()> 
 
 pub async fn list_delivery_instances(pool: &SqlitePool) -> Result<Vec<DeliveryInstance>> {
     let rows = sqlx::query(
-        "SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at
+        "SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token
          FROM delivery_instances WHERE status != 'deleted' ORDER BY id",
     )
     .fetch_all(pool)
@@ -264,6 +267,7 @@ pub async fn list_delivery_instances(pool: &SqlitePool) -> Result<Vec<DeliveryIn
             event_id: r.get("event_id"),
             created_at: r.get("created_at"),
             last_health_at: r.get("last_health_at"),
+            auth_token: r.get("auth_token"),
         })
         .collect())
 }
@@ -273,7 +277,7 @@ pub async fn get_delivery_instance_by_event(
     event_id: i64,
 ) -> Result<Option<DeliveryInstance>> {
     let row = sqlx::query(
-        "SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at
+        "SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token
          FROM delivery_instances WHERE event_id = ?1 AND status != 'deleted' LIMIT 1",
     )
     .bind(event_id)
@@ -290,6 +294,7 @@ pub async fn get_delivery_instance_by_event(
         event_id: r.get("event_id"),
         created_at: r.get("created_at"),
         last_health_at: r.get("last_health_at"),
+        auth_token: r.get("auth_token"),
     }))
 }
 

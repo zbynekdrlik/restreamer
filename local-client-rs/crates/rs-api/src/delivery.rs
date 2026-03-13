@@ -184,6 +184,7 @@ impl DeliveryOrchestrator {
             &ipv4,
             server_type,
             Some(event_id),
+            &auth_token,
         )
         .await?;
 
@@ -377,6 +378,7 @@ impl DeliveryOrchestrator {
 
                 match client
                     .get(format!("{delivery_url}/api/status"))
+                    .bearer_auth(&inst.auth_token)
                     .timeout(Duration::from_secs(10))
                     .send()
                     .await

@@ -324,7 +324,7 @@ async fn event_endpoint_cascade_on_event_delete() {
 async fn delivery_instance_crud() {
     let pool = setup_db().await;
 
-    let id = create_delivery_instance(&pool, 12345, "rs-delivery-1", "1.2.3.4", "cx23", None)
+    let id = create_delivery_instance(&pool, 12345, "rs-delivery-1", "1.2.3.4", "cx23", None, "test-token-123")
         .await
         .unwrap();
     assert!(id > 0);
@@ -333,6 +333,7 @@ async fn delivery_instance_crud() {
     assert_eq!(inst.hetzner_id, 12345);
     assert_eq!(inst.name, "rs-delivery-1");
     assert_eq!(inst.status, "creating");
+    assert_eq!(inst.auth_token, "test-token-123");
 
     update_delivery_instance_status(&pool, id, "running")
         .await
@@ -431,7 +432,7 @@ async fn delivery_instance_by_event() {
             .is_none()
     );
 
-    let id = create_delivery_instance(&pool, 99999, "rs-del-1", "5.6.7.8", "cx23", Some(event_id))
+    let id = create_delivery_instance(&pool, 99999, "rs-del-1", "5.6.7.8", "cx23", Some(event_id), "token-evt")
         .await
         .unwrap();
 
@@ -459,7 +460,7 @@ async fn delivery_instance_by_event() {
 async fn delivery_endpoint_status_crud() {
     let pool = setup_db().await;
 
-    let inst_id = create_delivery_instance(&pool, 11111, "rs-del-1", "1.2.3.4", "cx23", None)
+    let inst_id = create_delivery_instance(&pool, 11111, "rs-del-1", "1.2.3.4", "cx23", None, "")
         .await
         .unwrap();
 
@@ -506,7 +507,7 @@ async fn delivery_endpoint_status_crud() {
 async fn delivery_endpoint_status_cascade_on_instance_delete() {
     let pool = setup_db().await;
 
-    let inst_id = create_delivery_instance(&pool, 22222, "rs-del-2", "2.3.4.5", "cx23", None)
+    let inst_id = create_delivery_instance(&pool, 22222, "rs-del-2", "2.3.4.5", "cx23", None, "")
         .await
         .unwrap();
     upsert_delivery_endpoint_status(&pool, inst_id, "YT", true, 100, 5)
