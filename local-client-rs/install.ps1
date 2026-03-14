@@ -1,4 +1,4 @@
-# Restreamer Local Client Installer
+# Restreamer Installer
 # Usage: irm https://raw.githubusercontent.com/zbynekdrlik/restreamer/main/local-client-rs/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
@@ -27,22 +27,22 @@ if (-not $isAdmin) {
 }
 
 Write-Host ""
-Write-Host "  Restreamer Local Client Installer" -ForegroundColor Yellow
-Write-Host "  ==================================" -ForegroundColor Yellow
+Write-Host "  Restreamer Installer" -ForegroundColor Yellow
+Write-Host "  ====================" -ForegroundColor Yellow
 Write-Host ""
 
 # --- Fetch latest release ---
 Write-Status "Fetching latest release from GitHub..."
 $releaseUrl = "https://api.github.com/repos/$GithubRepo/releases"
 $releases = Invoke-RestMethod -Uri $releaseUrl -Headers @{ "User-Agent" = "Restreamer-Installer" }
-$latestRelease = $releases | Where-Object { $_.tag_name -like "local-client-rs-v*" } | Select-Object -First 1
+$latestRelease = $releases | Where-Object { $_.tag_name -like "restreamer-v*" } | Select-Object -First 1
 
 if (-not $latestRelease) {
-    Write-Err "No release found with tag 'local-client-rs-v*'"
+    Write-Err "No release found with tag 'restreamer-v*'"
     exit 1
 }
 
-$version = $latestRelease.tag_name -replace "local-client-rs-v", ""
+$version = $latestRelease.tag_name -replace "restreamer-v", ""
 Write-Ok "Latest version: $version"
 
 # --- Stop existing service and tray ---
@@ -189,12 +189,12 @@ Write-Ok "Service started"
 
 # --- Launch tray app ---
 Write-Status "Launching tray app..."
-$trayPath = "$env:LOCALAPPDATA\$TrayAppName\$TrayAppName.exe"
+$trayPath = "$InstallDir\$TrayAppName.exe"
 if (Test-Path $trayPath) {
     Start-Process -FilePath $trayPath
     Write-Ok "Tray app launched"
 } else {
-    Write-Status "Tray app not found at $trayPath — it may use a different install path"
+    Write-Status "Tray app not found at $trayPath"
 }
 
 Write-Host ""

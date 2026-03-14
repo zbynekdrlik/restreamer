@@ -3,11 +3,11 @@ name: Rust Release
 on:
   push:
     tags:
-      - "local-client-rs-v*"
+      - "restreamer-v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. local-client-rs-v0.1.0)"
+        description: "Tag to release (e.g. restreamer-v0.1.0)"
         required: true
 
 concurrency:
@@ -29,7 +29,7 @@ jobs:
         working-directory: local-client-rs
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          VERSION="${TAG#local-client-rs-v}"
+          VERSION="${TAG#restreamer-v}"
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
           echo "Tag version:   $VERSION"
@@ -132,10 +132,21 @@ jobs:
         run: cargo install trunk
       - name: Install Tauri CLI
         run: cargo install tauri-cli
+      - name: Set build version and timestamp
+        id: build-info
+        shell: pwsh
+        run: |
+          $version = "${{ needs.validate.outputs.version }}"
+          $timestamp = Get-Date -Format "MMM dd HH:mm"
+          echo "BUILD_VERSION=$version" >> $env:GITHUB_ENV
+          echo "BUILD_TIMESTAMP=$timestamp" >> $env:GITHUB_ENV
+          echo "Version: $version, Timestamp: $timestamp"
       - name: Build Tauri app
         run: cargo tauri build
         env:
           SQLX_OFFLINE: true
+          BUILD_VERSION: ${{ env.BUILD_VERSION }}
+          BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
@@ -158,8 +169,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: local-client-rs-v${{ needs.validate.outputs.version }}
-          name: Restreamer Local Client v${{ needs.validate.outputs.version }}
+          tag_name: restreamer-v${{ needs.validate.outputs.version }}
+          name: Restreamer v${{ needs.validate.outputs.version }}
           draft: false
           prerelease: false
           files: |
@@ -167,7 +178,7 @@ jobs:
             artifacts/delivery-binary/*
             artifacts/tauri-installer/*
           body: |
-            ## Restreamer Local Client v${{ needs.validate.outputs.version }}
+            ## Restreamer v${{ needs.validate.outputs.version }}
 
             ### Assets
             - `restreamer-service-*-windows-x64.exe` — Headless Windows service binary
@@ -222,7 +233,7 @@ jobs:
           net stop "restreamer-service" 2>&1 | Out-Null
           Start-Sleep -Seconds 2
           $null = cmd /c "taskkill /F /IM restreamer-service.exe 2>nul"
-          $null = cmd /c "taskkill /F /IM restreamer-tray.exe 2>nul"
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
           Start-Sleep -Seconds 1
 
           Write-Host "=== Installing service binary ==="
@@ -261,39 +272,38 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "SilentlyContinue"
-          $TaskName = "RestreamerTray"
-          $ExePath = "C:\Program Files\Restreamer\restreamer-tray.exe"
+          $TaskName = "RestreamerGUI"
+          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
           $Username = "newlevel"
 
           Write-Host "=== Configuring tray app launch ==="
 
-          $null = cmd /c "taskkill /F /IM restreamer-tray.exe 2>nul"
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
           Start-Sleep -Seconds 1
 
-          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*Tray*" } | ForEach-Object {
-            Write-Host "Removing duplicate task: $($_.TaskName)"
+          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" -and $_.TaskName -ne "RestreamerGUI" } | ForEach-Object {
+            Write-Host "Removing old task: $($_.TaskName)"
             Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
           }
 
           $action = New-ScheduledTaskAction -Execute $ExePath
           $trigger = New-ScheduledTaskTrigger -AtLogon -User $Username
           $principal = New-ScheduledTaskPrincipal -UserId $Username -LogonType Interactive -RunLevel Limited
-          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
 
-          $null = Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force 2>&1
+          Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+          Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
           Write-Host "Registered task: $TaskName"
 
-          $null = Start-ScheduledTask -TaskName $TaskName 2>&1
+          Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
 
-          $tray = Get-Process -Name "restreamer-tray" -ErrorAction SilentlyContinue
+          $tray = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
           if ($tray) {
-            Write-Host "=== Tray app launched (PID: $($tray.Id), Session: $($tray.SessionId)) ==="
+            Write-Host "=== Tray app launched (PID: $($tray.Id)) ==="
           } else {
-            Write-Host "WARNING: Tray process not found - will start on next user login"
+            Write-Host "Tray process not started - will start on next user login"
           }
-
-          exit 0
 
       - name: Verify deployment
         shell: powershell
