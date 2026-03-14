@@ -224,6 +224,13 @@ jobs:
           $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
           Start-Sleep -Seconds 3
 
+          Write-Host "=== Step 1.5: Clean up stale SQLite WAL files ==="
+          # Stale WAL files from previous processes can cause database lock errors
+          $DataDir = "C:\ProgramData\Restreamer"
+          Remove-Item "$DataDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$DataDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleaned up SQLite WAL files"
+
           Write-Host "=== Step 2: Remove old scheduled tasks ==="
           Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
             Write-Host "Removing task: $($_.TaskName)"

@@ -50,6 +50,11 @@ Write-Status "Stopping existing Restreamer..."
 Get-Process -Name $AppName -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
 
+# --- Clean up stale SQLite WAL files ---
+Write-Status "Cleaning up stale database files..."
+Remove-Item "$ConfigDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
+Remove-Item "$ConfigDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
+
 # --- Remove legacy Windows service if it exists ---
 Write-Status "Removing legacy Windows service..."
 foreach ($name in @("RestreamerService", "restreamer-service")) {
