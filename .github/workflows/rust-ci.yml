@@ -1222,7 +1222,7 @@ jobs:
           # Restart Restreamer in headless mode to pick up new config
           Write-Host "Restarting Restreamer..."
           $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
-          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
           Start-Sleep -Seconds 2
           Start-Process -FilePath $exePath -ArgumentList "--headless" -WindowStyle Hidden
           Start-Sleep -Seconds 5
@@ -2202,6 +2202,7 @@ jobs:
         if: always()
         shell: powershell
         run: |
+          $ErrorActionPreference = "Continue"
           # Remove Hetzner API token from config file after E2E tests
           $configPath = "C:\ProgramData\Restreamer\config.json"
           if (Test-Path $configPath) {
@@ -2214,10 +2215,12 @@ jobs:
             }
             # Restart Restreamer in headless mode to pick up cleaned config
             $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
-            taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+            $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
             Start-Sleep -Seconds 2
             Start-Process -FilePath $exePath -ArgumentList "--headless" -WindowStyle Hidden -ErrorAction SilentlyContinue
           }
+          # Always exit success for cleanup step
+          exit 0
 
   e2e-gate:
     name: E2E Gate
