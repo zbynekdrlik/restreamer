@@ -240,7 +240,8 @@ jobs:
           Write-Host "Created scheduled task: $TaskName"
 
           Write-Host "=== Step 4: Start Restreamer in user session ==="
-          Start-ScheduledTask -TaskName $TaskName
+          # Use schtasks.exe instead of Start-ScheduledTask for cross-context reliability
+          schtasks.exe /run /tn $TaskName
           Start-Sleep -Seconds 10
 
           Write-Host "=== Deployment steps complete ==="

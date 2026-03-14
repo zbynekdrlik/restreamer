@@ -172,7 +172,8 @@ Write-Ok "Scheduled task registered"
 
 # --- Start the app ---
 Write-Status "Starting Restreamer via scheduled task..."
-Start-ScheduledTask -TaskName $TaskName
+# Use schtasks.exe for cross-context reliability
+schtasks.exe /run /tn $TaskName
 Start-Sleep -Seconds 10
 
 # --- Verify deployment ---
