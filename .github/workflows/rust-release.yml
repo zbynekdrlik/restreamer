@@ -291,7 +291,7 @@ jobs:
               $healthOk = $true
               break
             } catch {
-              Write-Host "Attempt $i/$maxRetries: API not ready - $_"
+              Write-Host "Attempt ${i}/${maxRetries}: API not ready - ${_}"
               Start-Sleep -Seconds 5
             }
           }
