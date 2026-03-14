@@ -32,11 +32,17 @@ struct DynamicMenuItems {
 }
 
 pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = env!("BUILD_VERSION");
+    let timestamp = env!("BUILD_TIMESTAMP");
     let icon = Image::from_bytes(TRAY_ICON_BYTES)?;
 
-    // Static header
-    let header = MenuItem::new(app, format!("Restreamer v{version}"), false, None::<&str>)?;
+    // Static header with version and build timestamp
+    let header = MenuItem::new(
+        app,
+        format!("Restreamer v{version} ({timestamp})"),
+        false,
+        None::<&str>,
+    )?;
 
     // Dynamic status items (disabled — display only)
     let event_item = MenuItem::new(app, "No active event", false, None::<&str>)?;

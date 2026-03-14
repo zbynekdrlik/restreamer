@@ -132,10 +132,21 @@ jobs:
         run: cargo install trunk
       - name: Install Tauri CLI
         run: cargo install tauri-cli
+      - name: Set build version and timestamp
+        id: build-info
+        shell: pwsh
+        run: |
+          $version = "${{ needs.validate.outputs.version }}"
+          $timestamp = Get-Date -Format "MMM dd HH:mm"
+          echo "BUILD_VERSION=$version" >> $env:GITHUB_ENV
+          echo "BUILD_TIMESTAMP=$timestamp" >> $env:GITHUB_ENV
+          echo "Version: $version, Timestamp: $timestamp"
       - name: Build Tauri app
         run: cargo tauri build
         env:
           SQLX_OFFLINE: true
+          BUILD_VERSION: ${{ env.BUILD_VERSION }}
+          BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4

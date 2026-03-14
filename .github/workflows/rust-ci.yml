@@ -258,16 +258,34 @@ jobs:
           tar -xzf $outFile -C $env:TEMP
           Copy-Item "$env:TEMP\binaryen-$version\bin\wasm-opt.exe" "$env:CARGO_HOME\bin\"
           Write-Host "Installed wasm-opt to $env:CARGO_HOME\bin\"
+      - name: Set build version and timestamp
+        id: build-info
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path "Cargo.toml" -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $branch = "${{ github.ref_name }}"
+          if ($branch -eq "dev" -or $branch -ne "main") {
+            $version = "$version-dev"
+          }
+          $timestamp = Get-Date -Format "MMM dd HH:mm"
+          echo "BUILD_VERSION=$version" >> $env:GITHUB_ENV
+          echo "BUILD_TIMESTAMP=$timestamp" >> $env:GITHUB_ENV
+          echo "Version: $version, Timestamp: $timestamp"
       - name: Build Leptos UI (WASM)
         run: |
           cd leptos-ui
           trunk build --release
+        env:
+          BUILD_VERSION: ${{ env.BUILD_VERSION }}
+          BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
       - name: Install Tauri CLI
         run: cargo install tauri-cli
       - name: Build Tauri app
         run: cargo tauri build
         env:
           SQLX_OFFLINE: true
+          BUILD_VERSION: ${{ env.BUILD_VERSION }}
+          BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Upload Tauri installer
@@ -592,9 +610,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: local-client-rs/leptos-ui
+      - name: Set build version and timestamp
+        working-directory: local-client-rs
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          BRANCH="${{ github.ref_name }}"
+          if [ "$BRANCH" = "dev" ] || [ "$BRANCH" != "main" ]; then
+            VERSION="${VERSION}-dev"
+          fi
+          TIMESTAMP=$(date "+%b %d %H:%M")
+          echo "BUILD_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "BUILD_TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+          echo "Version: $VERSION, Timestamp: $TIMESTAMP"
       - name: Build WASM frontend
         working-directory: local-client-rs/leptos-ui
         run: trunk build --release
+        env:
+          BUILD_VERSION: ${{ env.BUILD_VERSION }}
+          BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
       - name: Install Playwright dependencies
         working-directory: local-client-rs/e2e
         run: |

@@ -53,7 +53,9 @@ pub fn App() -> impl IntoView {
         <div class="app">
             <header>
                 <h1>"Restreamer"</h1>
-                <span class="version">"v" {env!("CARGO_PKG_VERSION")}</span>
+                <span class="version">
+                    "v" {env!("BUILD_VERSION")} " · Built " {env!("BUILD_TIMESTAMP")}
+                </span>
             </header>
 
             <div class="tabs">

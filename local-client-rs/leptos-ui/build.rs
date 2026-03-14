@@ -7,7 +7,6 @@ fn main() {
 
     // Get build timestamp from environment or generate current time
     let timestamp = std::env::var("BUILD_TIMESTAMP").unwrap_or_else(|_| {
-        // Try to get current time, fall back to "dev" if chrono not available
         let output = Command::new("date")
             .args(["+%b %d %H:%M"])
             .output()
@@ -24,6 +23,4 @@ fn main() {
     // Re-run if these env vars change
     println!("cargo:rerun-if-env-changed=BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=BUILD_TIMESTAMP");
-
-    tauri_build::build();
 }
