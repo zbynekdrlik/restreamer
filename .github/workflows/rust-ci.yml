@@ -1026,11 +1026,13 @@ jobs:
 
           Write-Host "=== Step 1: Stop any running Restreamer ==="
           $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-          Start-Sleep -Seconds 2
+          # Wait for port 8910 to be released
+          Start-Sleep -Seconds 5
 
           Write-Host "=== Step 2: Start via scheduled task (GUI mode) ==="
           Start-ScheduledTask -TaskName $TaskName
-          Start-Sleep -Seconds 12
+          # GUI mode takes longer to initialize (WebView2 + tray + service core)
+          Start-Sleep -Seconds 15
 
           Write-Host "=== Step 3: Verify process is running ==="
           $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
@@ -1071,7 +1073,11 @@ jobs:
           Write-Host "OK: WorkingDirectory = $($taskAction.WorkingDirectory)"
 
           Write-Host "=== Step 7: Verify API responds ==="
-          $maxRetries = 6
+          # Show port status for diagnostics
+          Write-Host "Port 8910 listeners:"
+          netstat -ano | Select-String ":8910" | ForEach-Object { Write-Host $_ }
+
+          $maxRetries = 12
           $success = $false
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
@@ -1080,11 +1086,15 @@ jobs:
               $success = $true
               break
             } catch {
-              Write-Host "Attempt $i/$maxRetries : API not ready..."
+              Write-Host "Attempt $i/$maxRetries : API not ready - $_"
               Start-Sleep -Seconds 5
             }
           }
           if (-not $success) {
+            # Show process info for debugging
+            Write-Host "=== Debug info ==="
+            Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Format-List Id, ProcessName, WorkingSet64
+            netstat -ano | Select-String ":8910" | ForEach-Object { Write-Host $_ }
             Write-Error "FAIL: API did not respond after $maxRetries attempts"
             exit 1
           }
