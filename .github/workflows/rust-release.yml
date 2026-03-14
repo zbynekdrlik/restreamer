@@ -141,6 +141,13 @@ jobs:
           echo "BUILD_VERSION=$version" >> $env:GITHUB_ENV
           echo "BUILD_TIMESTAMP=$timestamp" >> $env:GITHUB_ENV
           echo "Version: $version, Timestamp: $timestamp"
+      - name: Build Leptos UI (WASM)
+        run: |
+          cd leptos-ui
+          trunk build --release
+        env:
+          BUILD_VERSION: ${{ env.BUILD_VERSION }}
+          BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
       - name: Build Tauri app
         run: cargo tauri build
         env:
