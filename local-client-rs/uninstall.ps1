@@ -1,4 +1,4 @@
-# Restreamer Local Client Uninstaller
+# Restreamer Uninstaller
 # Usage: irm https://raw.githubusercontent.com/zbynekdrlik/restreamer/main/local-client-rs/uninstall.ps1 | iex
 
 $ErrorActionPreference = "Stop"
@@ -20,8 +20,8 @@ if (-not $isAdmin) {
 }
 
 Write-Host ""
-Write-Host "  Restreamer Local Client Uninstaller" -ForegroundColor Yellow
-Write-Host "  ====================================" -ForegroundColor Yellow
+Write-Host "  Restreamer Uninstaller" -ForegroundColor Yellow
+Write-Host "  ======================" -ForegroundColor Yellow
 Write-Host ""
 
 # --- Stop and remove service ---

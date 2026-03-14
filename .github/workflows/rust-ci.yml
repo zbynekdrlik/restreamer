@@ -84,7 +84,7 @@ jobs:
       - name: Check Cargo.toml version is not already tagged
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          TAG="local-client-rs-v${VERSION}"
+          TAG="restreamer-v${VERSION}"
           echo "Version: $VERSION"
           echo "Tag: $TAG"
           if git tag -l | grep -qx "$TAG"; then
@@ -788,7 +788,6 @@ jobs:
           Write-Host "=== Stopping old processes ==="
           sc.exe stop "RestreamerService" 2>&1 | Out-Null
           taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
-          taskkill /F /IM "restreamer-tray.exe" 2>&1 | Out-Null
           taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
 
           # CRITICAL: Stop and disable old Python NSSM services that block RTMP port 1234
@@ -911,10 +910,35 @@ jobs:
             exit 1
           }
 
-          # Remove old Tauri scheduled tasks (service handles everything now)
-          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
+          # Create scheduled task to auto-start Restreamer GUI on login
+          $taskName = "RestreamerGUI"
+          $exePath = "$env:LOCALAPPDATA\Restreamer\Restreamer.exe"
+
+          # Remove old tasks first (but not the new RestreamerGUI task we're about to create)
+          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" -and $_.TaskName -ne "RestreamerGUI" } | ForEach-Object {
             Write-Host "Removing old task: $($_.TaskName)"
             Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+          }
+
+          # Create new scheduled task for GUI
+          $action = New-ScheduledTaskAction -Execute $exePath
+          $trigger = New-ScheduledTaskTrigger -AtLogOn -User "newlevel"
+          $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
+
+          Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+          Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+          Write-Host "Registered task: $taskName"
+
+          # Start the GUI app now (if user session is available)
+          Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+          $tray = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if ($tray) {
+            Write-Host "=== Tray app launched (PID: $($tray.Id)) ==="
+          } else {
+            Write-Host "Tray process not started - will start on next user login"
           }
 
       - name: Verify deployment
@@ -2305,7 +2329,7 @@ jobs:
       - name: Create release tag
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          TAG="local-client-rs-v${VERSION}"
+          TAG="restreamer-v${VERSION}"
           if git tag -l | grep -qx "$TAG"; then
             echo "Tag $TAG already exists, skipping."
             exit 0
