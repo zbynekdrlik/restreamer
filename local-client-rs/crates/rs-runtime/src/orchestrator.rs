@@ -421,8 +421,7 @@ mod tests {
         let log_buffer = LogBuffer::new(10);
 
         // Act: Create ServiceCore with externally provided pool
-        let core = ServiceCore::new(config, config_path, log_buffer)
-            .with_pool(pool.clone());
+        let core = ServiceCore::new(config, config_path, log_buffer).with_pool(pool.clone());
 
         // Assert: ServiceCore should have the provided pool stored
         assert!(
@@ -440,15 +439,16 @@ mod tests {
         db::run_migrations(&pool).await.unwrap();
 
         // Insert a test client profile to verify we're using THIS pool
-        db::upsert_client_profile(&pool, "test-client-uuid").await.unwrap();
+        db::upsert_client_profile(&pool, "test-client-uuid")
+            .await
+            .unwrap();
 
         let config = Config::for_testing();
         let config_path = PathBuf::from("/tmp/test-config.json");
         let log_buffer = LogBuffer::new(10);
 
         // Act: Create ServiceCore with the pool containing test data
-        let core = ServiceCore::new(config, config_path, log_buffer)
-            .with_pool(pool.clone());
+        let core = ServiceCore::new(config, config_path, log_buffer).with_pool(pool.clone());
 
         // Assert: The pool should be the same one we provided (has our test data)
         let provided_pool = core.provided_pool.as_ref().unwrap();
