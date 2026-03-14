@@ -446,6 +446,101 @@
             flex: 1;
             min-width: 150px;
         }
+
+        /* Endpoint edit form */
+        .endpoint-edit-form {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .edit-row {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .edit-row label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .edit-row input[type="text"],
+        .edit-row select {
+            width: 100%;
+        }
+
+        .edit-row.checkboxes {
+            flex-direction: row;
+            gap: 20px;
+            margin-top: 4px;
+        }
+
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            font-size: 0.95rem;
+        }
+
+        .checkbox-label input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            accent-color: var(--accent);
+            cursor: pointer;
+        }
+
+        .edit-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .edit-actions button.save {
+            background-color: var(--success);
+            color: #000;
+        }
+
+        .edit-actions button.save:hover {
+            background-color: #3db88a;
+        }
+
+        .edit-actions button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        /* Stream key input with show/hide toggle */
+        .key-input-wrapper {
+            display: flex;
+            gap: 8px;
+        }
+
+        .key-input-wrapper input {
+            flex: 1;
+        }
+
+        .toggle-key-btn {
+            padding: 10px 14px;
+            min-width: 60px;
+            font-size: 0.85rem;
+        }
+
+        /* Password input styling */
+        input[type="password"] {
+            padding: 10px 14px;
+            border-radius: 8px;
+            border: 1px solid var(--bg-card);
+            background-color: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            outline: none;
+        }
+
+        input[type="password"]:focus {
+            border-color: var(--accent);
+        }
     </style>
 </head>
 <body>
