@@ -96,6 +96,8 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(move |app, event| handle_menu_event(app, event.id().as_ref()))
         .build(app)?;
 
+    tracing::info!("System tray icon initialized successfully");
+
     let items = DynamicMenuItems {
         event: event_item,
         inpoint: inpoint_item,

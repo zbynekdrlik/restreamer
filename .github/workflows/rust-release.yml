@@ -228,7 +228,8 @@ jobs:
           }
 
           # Create scheduled task for GUI auto-start at user login (for interactive use)
-          $action = New-ScheduledTaskAction -Execute $ExePath
+          $InstallDir = "C:\Program Files\Restreamer"
+          $action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
           $trigger = New-ScheduledTaskTrigger -AtLogon -User $Username
           $principal = New-ScheduledTaskPrincipal -UserId $Username -LogonType Interactive -RunLevel Limited
           $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0

@@ -890,7 +890,8 @@ jobs:
           }
 
           # Create scheduled task for GUI auto-start at user login (for interactive use)
-          $action = New-ScheduledTaskAction -Execute $exePath
+          $installDir = "C:\Program Files\Restreamer"
+          $action = New-ScheduledTaskAction -Execute $exePath -WorkingDirectory $installDir
           $trigger = New-ScheduledTaskTrigger -AtLogOn -User "newlevel"
           $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
           $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
@@ -1015,6 +1016,74 @@ jobs:
             exit 1
           }
           Write-Host "Scheduled task: $($task.TaskName) (State: $($task.State))"
+
+      - name: Verify tray icon deployment (GUI mode)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $TaskName = "RestreamerGUI"
+          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
+
+          Write-Host "=== Step 1: Stop any running Restreamer ==="
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
+          Start-Sleep -Seconds 2
+
+          Write-Host "=== Step 2: Start via scheduled task (GUI mode) ==="
+          Start-ScheduledTask -TaskName $TaskName
+          Start-Sleep -Seconds 8
+
+          Write-Host "=== Step 3: Verify process is running ==="
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if (-not $proc) {
+            Write-Error "FAIL: Restreamer.exe not running after scheduled task start"
+            exit 1
+          }
+          Write-Host "OK: Process running (PID: $($proc.Id))"
+
+          Write-Host "=== Step 4: Verify user session (not SYSTEM) ==="
+          $session = (Get-Process -Id $proc.Id).SessionId
+          if ($session -eq 0) {
+            Write-Error "FAIL: Running in Session 0 (SYSTEM) - tray icon impossible"
+            exit 1
+          }
+          Write-Host "OK: Running in user session $session"
+
+          Write-Host "=== Step 5: Verify GUI initialized (memory > 50MB) ==="
+          $memMB = [math]::Round($proc.WorkingSet64 / 1MB, 2)
+          if ($memMB -lt 50) {
+            Write-Error "FAIL: Memory usage ${memMB}MB suggests headless mode, not GUI"
+            exit 1
+          }
+          Write-Host "OK: Memory usage ${memMB}MB indicates GUI mode"
+
+          Write-Host "=== Step 6: Verify scheduled task has WorkingDirectory ==="
+          $taskAction = (Get-ScheduledTask -TaskName $TaskName).Actions | Select-Object -First 1
+          if (-not $taskAction.WorkingDirectory) {
+            Write-Error "FAIL: Scheduled task missing WorkingDirectory parameter"
+            exit 1
+          }
+          Write-Host "OK: WorkingDirectory = $($taskAction.WorkingDirectory)"
+
+          Write-Host "=== Step 7: Verify API responds ==="
+          $maxRetries = 6
+          $success = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 5
+              Write-Host "OK: API health check passed"
+              $success = $true
+              break
+            } catch {
+              Write-Host "Attempt $i/$maxRetries : API not ready..."
+              Start-Sleep -Seconds 5
+            }
+          }
+          if (-not $success) {
+            Write-Error "FAIL: API did not respond after $maxRetries attempts"
+            exit 1
+          }
+
+          Write-Host "=== TRAY VERIFICATION PASSED ==="
 
   e2e-streaming-test:
     name: E2E Streaming Test

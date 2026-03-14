@@ -162,7 +162,7 @@ Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-O
 }
 
 # Create scheduled task for auto-start at login
-$action = New-ScheduledTaskAction -Execute $exePath
+$action = New-ScheduledTaskAction -Execute $exePath -WorkingDirectory $InstallDir
 $trigger = New-ScheduledTaskTrigger -AtLogon
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
