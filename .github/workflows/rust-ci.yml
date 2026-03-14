@@ -897,25 +897,11 @@ jobs:
           $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
 
           Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-          Write-Host "Created scheduled task: $TaskName (will auto-start on user login)"
+          Write-Host "Created scheduled task: $TaskName"
 
-          Write-Host "=== Step 4: Start Restreamer ==="
-          # Try scheduled task first (for user session with tray icon)
-          try {
-            Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-            Start-Sleep -Seconds 10
-            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-            if ($proc) {
-              Write-Host "Started via scheduled task (Session: $($proc.SessionId))"
-            } else {
-              throw "Task started but process not running"
-            }
-          } catch {
-            Write-Host "Scheduled task start failed: $_"
-            Write-Host "Falling back to headless mode for CI testing..."
-            Start-Process -FilePath $ExePath -ArgumentList "--headless" -WindowStyle Hidden
-            Start-Sleep -Seconds 10
-          }
+          Write-Host "=== Step 4: Start Restreamer in user session ==="
+          Start-ScheduledTask -TaskName $TaskName
+          Start-Sleep -Seconds 10
 
           Write-Host "=== Deployment steps complete ==="
 
@@ -932,14 +918,14 @@ jobs:
             Write-Error "FAIL: Restreamer.exe is not running"
             exit 1
           }
-          Write-Host "OK: Process running (PID: $($proc.Id), Memory: $([math]::Round($proc.WorkingSet64/1MB))MB, Session: $($proc.SessionId))"
+          Write-Host "OK: Process running (PID: $($proc.Id), Memory: $([math]::Round($proc.WorkingSet64/1MB))MB)"
 
-          Write-Host "=== CHECK 2: Session info ==="
+          Write-Host "=== CHECK 2: Running in user session (not SYSTEM) ==="
           if ($proc.SessionId -eq 0) {
-            Write-Host "INFO: Running in Session 0 (headless mode) - tray icon not available but API works"
-          } else {
-            Write-Host "OK: Running in user session $($proc.SessionId) - tray icon should be visible"
+            Write-Error "FAIL: Running in Session 0 (SYSTEM) - tray icon will NOT be visible. User session must be available."
+            exit 1
           }
+          Write-Host "OK: Running in user session $($proc.SessionId) - tray icon visible"
 
           Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
           $listener = netstat -ano | Select-String "LISTENING" | Select-String ":8910"
@@ -1056,33 +1042,21 @@ jobs:
         shell: powershell
         run: |
           $TaskName = "RestreamerGUI"
-          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
           $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
           if ($proc) {
             Write-Host "Restreamer is running (PID: $($proc.Id), Session: $($proc.SessionId))"
           } else {
-            Write-Host "Restreamer not running, trying to start..."
-            # Try scheduled task first
-            try {
-              Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-              Start-Sleep -Seconds 10
-              $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-              if ($proc) {
-                Write-Host "Started via scheduled task (Session: $($proc.SessionId))"
-              } else {
-                throw "Task started but process not running"
-              }
-            } catch {
-              Write-Host "Scheduled task start failed: $_"
-              Write-Host "Falling back to headless mode..."
-              Start-Process -FilePath $ExePath -ArgumentList "--headless" -WindowStyle Hidden
-              Start-Sleep -Seconds 10
-              $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-              if (-not $proc) {
-                throw "Failed to start Restreamer"
-              }
-              Write-Host "Started in headless mode (Session: $($proc.SessionId))"
+            Write-Host "Restreamer not running, starting via scheduled task..."
+            Start-ScheduledTask -TaskName $TaskName
+            Start-Sleep -Seconds 10
+            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+            if (-not $proc) {
+              throw "Failed to start Restreamer via scheduled task"
             }
+            if ($proc.SessionId -eq 0) {
+              throw "Restreamer started in Session 0 (SYSTEM) - must run in user session"
+            }
+            Write-Host "Restreamer started (PID: $($proc.Id), Session: $($proc.SessionId))"
           }
 
       - name: Verify API is responding
@@ -1263,21 +1237,13 @@ jobs:
           [System.IO.File]::WriteAllText($configPath, $json)
           Write-Host "Config file updated with Hetzner settings"
 
-          # Restart Restreamer to pick up new config
-          Write-Host "Restarting Restreamer..."
+          # Restart Restreamer via scheduled task to pick up new config
+          Write-Host "Restarting Restreamer via scheduled task..."
           $TaskName = "RestreamerGUI"
-          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
           $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
           Start-Sleep -Seconds 3
-          # Try scheduled task first, fallback to headless
-          try {
-            Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-            Start-Sleep -Seconds 10
-          } catch {
-            Write-Host "Scheduled task failed, using headless mode: $_"
-            Start-Process -FilePath $ExePath -ArgumentList "--headless" -WindowStyle Hidden
-            Start-Sleep -Seconds 10
-          }
+          Start-ScheduledTask -TaskName $TaskName
+          Start-Sleep -Seconds 10
 
           # Verify Restreamer is back up
           $maxRetries = 15

@@ -89,14 +89,51 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
 - **FIX FAILURES IMMEDIATELY**: If any CI job fails, investigate and fix immediately. Push fixes and monitor again until green.
 - **VERIFY DEPLOYMENT**: After `deploy-stream-lan` job completes, verify deployment was successful:
   ```bash
-  # Check Windows Service is running
-  sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Get-Service RestreamerService | Format-List Name,Status"'
-  # Check service binary version
-  sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "(Get-Item \"C:\\Program Files\\Restreamer\\restreamer-service.exe\").VersionInfo.FileVersion"'
+  # Check Restreamer tray app is running in user session
+  sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Get-Process -Name Restreamer | Format-List Id,SessionId,WorkingSet64"'
   # Check API responds
   sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/status"'
   ```
 - **NEVER CLAIM DONE** until CI is fully green AND deployment is verified working on stream.lan.
+
+### Tray App Deployment (CRITICAL)
+
+**The Restreamer app MUST run as a tray application in the user's desktop session, NOT as a background service or headless process.**
+
+#### Requirements
+
+1. **Always GUI mode** - Never use `--headless` flag. Always start via scheduled task in user session.
+2. **User session required** - The app MUST run in SessionId > 0 (not Session 0/SYSTEM). This ensures the tray icon is visible.
+3. **Left-click = Dashboard** - Clicking the tray icon opens the dashboard window.
+4. **Right-click = Menu** - Right-clicking shows the context menu.
+5. **No fallback to headless** - If scheduled task fails, CI must fail. Do not fall back to headless mode.
+
+#### CI Deployment Flow
+
+```powershell
+# 1. Stop existing instances
+taskkill /F /IM "Restreamer.exe"
+
+# 2. Create scheduled task for user session
+$action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
+$trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
+$principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName "RestreamerGUI" ...
+
+# 3. Start via scheduled task (NOT Start-Process!)
+Start-ScheduledTask -TaskName "RestreamerGUI"
+
+# 4. Verify running in user session
+$proc = Get-Process -Name "Restreamer"
+if ($proc.SessionId -eq 0) { throw "Must run in user session, not SYSTEM" }
+```
+
+#### Why This Matters
+
+- stream.lan always has user "newlevel" logged in
+- Scheduled task runs in the user's interactive session
+- Tray icon only works in interactive sessions (not Session 0)
+- Headless mode was a workaround that should never be used
 
 ### Testing — PRIMARY GOAL
 

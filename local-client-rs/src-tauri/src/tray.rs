@@ -94,6 +94,20 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .menu(&menu)
         .tooltip("Restreamer - Starting...")
         .on_menu_event(move |app, event| handle_menu_event(app, event.id().as_ref()))
+        .on_tray_icon_event(|tray, event| {
+            // Left click opens dashboard directly
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        })
         .build(app)?;
 
     tracing::info!("System tray icon initialized successfully");
