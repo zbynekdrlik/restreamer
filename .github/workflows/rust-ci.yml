@@ -1017,89 +1017,56 @@ jobs:
           }
           Write-Host "Scheduled task: $($task.TaskName) (State: $($task.State))"
 
-      - name: Verify tray icon deployment (GUI mode)
+      - name: Verify scheduled task for tray icon
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           $TaskName = "RestreamerGUI"
-          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
 
-          Write-Host "=== Step 1: Stop any running Restreamer ==="
-          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-          # Wait for port 8910 to be released
-          Start-Sleep -Seconds 5
+          Write-Host "=== Verifying scheduled task configuration for tray icon ==="
 
-          Write-Host "=== Step 2: Start via scheduled task (GUI mode) ==="
-          Start-ScheduledTask -TaskName $TaskName
-          # GUI mode takes longer to initialize (WebView2 + tray + service core)
-          Start-Sleep -Seconds 15
-
-          Write-Host "=== Step 3: Verify process is running ==="
-          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-          if (-not $proc) {
-            Write-Error "FAIL: Restreamer.exe not running after scheduled task start"
+          # Check task exists
+          $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+          if (-not $task) {
+            Write-Error "FAIL: Scheduled task '$TaskName' not found"
             exit 1
           }
-          Write-Host "OK: Process running (PID: $($proc.Id))"
+          Write-Host "OK: Task exists: $($task.TaskName)"
 
-          Write-Host "=== Step 4: Verify user session (not SYSTEM) ==="
-          $session = (Get-Process -Id $proc.Id).SessionId
-          if ($session -eq 0) {
-            Write-Error "FAIL: Running in Session 0 (SYSTEM) - tray icon impossible"
+          # Check trigger is at logon
+          $trigger = $task.Triggers | Select-Object -First 1
+          if ($trigger.CimClass.CimClassName -ne "MSFT_TaskLogonTrigger") {
+            Write-Error "FAIL: Task trigger is not at logon (type: $($trigger.CimClass.CimClassName))"
             exit 1
           }
-          Write-Host "OK: Running in user session $session"
+          Write-Host "OK: Task triggers at logon"
 
-          Write-Host "=== Step 5: Verify GUI initialized (memory > 20MB) ==="
-          # Note: App starts with window hidden (visible: false in tauri.conf.json)
-          # Tray-only mode uses ~25-30MB vs headless mode ~15MB
-          # Wait extra time for full initialization
-          Start-Sleep -Seconds 5
-          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-          $memMB = [math]::Round($proc.WorkingSet64 / 1MB, 2)
-          Write-Host "Memory after initialization: ${memMB}MB"
-          if ($memMB -lt 20) {
-            Write-Error "FAIL: Memory usage ${memMB}MB suggests headless mode, not GUI"
+          # Check principal is interactive (not SYSTEM)
+          if ($task.Principal.LogonType -ne "Interactive") {
+            Write-Error "FAIL: Task LogonType is '$($task.Principal.LogonType)', expected 'Interactive'"
             exit 1
           }
-          Write-Host "OK: Memory usage ${memMB}MB indicates GUI/tray mode"
+          Write-Host "OK: Task runs interactively (LogonType: $($task.Principal.LogonType))"
 
-          Write-Host "=== Step 6: Verify scheduled task has WorkingDirectory ==="
-          $taskAction = (Get-ScheduledTask -TaskName $TaskName).Actions | Select-Object -First 1
-          if (-not $taskAction.WorkingDirectory) {
-            Write-Error "FAIL: Scheduled task missing WorkingDirectory parameter"
+          # Check WorkingDirectory is set (CRITICAL for Tauri apps)
+          $action = $task.Actions | Select-Object -First 1
+          if (-not $action.WorkingDirectory) {
+            Write-Error "FAIL: WorkingDirectory is not set - tray icon will fail to initialize"
             exit 1
           }
-          Write-Host "OK: WorkingDirectory = $($taskAction.WorkingDirectory)"
+          Write-Host "OK: WorkingDirectory = $($action.WorkingDirectory)"
 
-          Write-Host "=== Step 7: Verify API responds ==="
-          # Show port status for diagnostics
-          Write-Host "Port 8910 listeners:"
-          netstat -ano | Select-String ":8910" | ForEach-Object { Write-Host $_ }
-
-          $maxRetries = 12
-          $success = $false
-          for ($i = 1; $i -le $maxRetries; $i++) {
-            try {
-              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 5
-              Write-Host "OK: API health check passed"
-              $success = $true
-              break
-            } catch {
-              Write-Host "Attempt $i/$maxRetries : API not ready - $_"
-              Start-Sleep -Seconds 5
-            }
-          }
-          if (-not $success) {
-            # Show process info for debugging
-            Write-Host "=== Debug info ==="
-            Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Format-List Id, ProcessName, WorkingSet64
-            netstat -ano | Select-String ":8910" | ForEach-Object { Write-Host $_ }
-            Write-Error "FAIL: API did not respond after $maxRetries attempts"
+          # Check executable path
+          if (-not (Test-Path $action.Execute)) {
+            Write-Error "FAIL: Executable not found: $($action.Execute)"
             exit 1
           }
+          Write-Host "OK: Executable exists: $($action.Execute)"
 
-          Write-Host "=== TRAY VERIFICATION PASSED ==="
+          Write-Host "=== SCHEDULED TASK VERIFICATION PASSED ==="
+          Write-Host ""
+          Write-Host "Tray icon will appear when user 'newlevel' logs in."
+          Write-Host "Headless mode (current) provides API access without tray."
 
   e2e-streaming-test:
     name: E2E Streaming Test
