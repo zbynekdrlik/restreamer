@@ -227,32 +227,44 @@ jobs:
             Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
           }
 
+          # Create scheduled task for GUI auto-start at user login (for interactive use)
           $action = New-ScheduledTaskAction -Execute $ExePath
           $trigger = New-ScheduledTaskTrigger -AtLogon -User $Username
           $principal = New-ScheduledTaskPrincipal -UserId $Username -LogonType Interactive -RunLevel Limited
           $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
 
-          Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
           Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-          Write-Host "Registered task: $TaskName"
+          Write-Host "Registered scheduled task: $TaskName (for interactive login)"
 
-          Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 2
+          # For CI: Start in headless mode (no GUI, just service)
+          Write-Host "=== Starting Restreamer in headless mode ==="
+          Start-Process -FilePath $ExePath -ArgumentList "--headless" -WindowStyle Hidden
+          Start-Sleep -Seconds 5
 
-          $tray = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-          if ($tray) {
-            Write-Host "=== Tray app launched (PID: $($tray.Id)) ==="
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if ($proc) {
+            Write-Host "=== Restreamer running (PID: $($proc.Id)) ==="
           } else {
-            Write-Host "Tray process not started - will start on next user login"
+            Write-Host "Restreamer process not started - will start on next user login"
           }
 
       - name: Verify deployment
         shell: powershell
         run: |
-          try {
-            $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 10
-            Write-Host "API Health: OK"
-          } catch {
-            Write-Host "API Health: FAILED - $_"
+          $maxRetries = 6
+          $success = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 10
+              Write-Host "API Health: OK"
+              $success = $true
+              break
+            } catch {
+              Write-Host "Attempt $i/$maxRetries : $_"
+              Start-Sleep -Seconds 5
+            }
+          }
+          if (-not $success) {
+            Write-Error "API Health: FAILED after $maxRetries attempts"
             exit 1
           }

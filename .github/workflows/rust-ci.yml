@@ -876,7 +876,8 @@ jobs:
         shell: powershell
         run: |
           # The unified Tauri binary contains embedded service + tray icon.
-          # It runs via scheduled task for auto-start at user login.
+          # For GUI mode: scheduled task starts at user login
+          # For CI: start in headless mode directly (no GUI needed)
           $taskName = "RestreamerGUI"
           $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
 
@@ -888,21 +889,21 @@ jobs:
             Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
           }
 
-          # Create scheduled task for auto-start at login
+          # Create scheduled task for GUI auto-start at user login (for interactive use)
           $action = New-ScheduledTaskAction -Execute $exePath
           $trigger = New-ScheduledTaskTrigger -AtLogOn -User "newlevel"
           $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
           $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
 
           Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-          Write-Host "Registered task: $taskName"
+          Write-Host "Registered scheduled task: $taskName (for interactive login)"
 
-          # Start the app now
-          Write-Host "=== Starting Restreamer ==="
-          Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+          # For CI: Start in headless mode (no GUI, just service)
+          Write-Host "=== Starting Restreamer in headless mode ==="
+          Start-Process -FilePath $exePath -ArgumentList "--headless" -WindowStyle Hidden
           Start-Sleep -Seconds 5
 
-          # Wait for app to fully initialize (RTMP + API servers)
+          # Wait for API to be ready
           $maxWait = 30
           $elapsed = 0
           while ($elapsed -lt $maxWait) {
@@ -917,7 +918,8 @@ jobs:
           }
 
           if (-not $proc) {
-            Write-Host "Restreamer process not started - will start on next user login"
+            Write-Error "Restreamer failed to start in headless mode"
+            exit 1
           }
 
       - name: Verify deployment
@@ -1024,13 +1026,19 @@ jobs:
       - name: Verify Restreamer is running
         shell: powershell
         run: |
+          $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
           $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
           if ($proc) {
             Write-Host "Restreamer is running (PID: $($proc.Id))"
           } else {
-            Write-Host "Restreamer not running, starting it via scheduled task..."
-            Start-ScheduledTask -TaskName "RestreamerGUI" -ErrorAction Stop
+            Write-Host "Restreamer not running, starting in headless mode..."
+            Start-Process -FilePath $exePath -ArgumentList "--headless" -WindowStyle Hidden
             Start-Sleep -Seconds 5
+            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+            if (-not $proc) {
+              throw "Failed to start Restreamer"
+            }
+            Write-Host "Restreamer started (PID: $($proc.Id))"
           }
 
       - name: Verify API is responding
@@ -1211,11 +1219,12 @@ jobs:
           [System.IO.File]::WriteAllText($configPath, $json)
           Write-Host "Config file updated with Hetzner settings"
 
-          # Restart Restreamer to pick up new config
+          # Restart Restreamer in headless mode to pick up new config
           Write-Host "Restarting Restreamer..."
+          $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
           taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
           Start-Sleep -Seconds 2
-          Start-ScheduledTask -TaskName "RestreamerGUI" -ErrorAction SilentlyContinue
+          Start-Process -FilePath $exePath -ArgumentList "--headless" -WindowStyle Hidden
           Start-Sleep -Seconds 5
 
           # Verify Restreamer is back up
@@ -2203,10 +2212,11 @@ jobs:
               [System.IO.File]::WriteAllText($configPath, $json)
               Write-Host "Hetzner API token removed from config"
             }
-            # Restart Restreamer to pick up cleaned config
+            # Restart Restreamer in headless mode to pick up cleaned config
+            $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
             taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
             Start-Sleep -Seconds 2
-            Start-ScheduledTask -TaskName "RestreamerGUI" -ErrorAction SilentlyContinue
+            Start-Process -FilePath $exePath -ArgumentList "--headless" -WindowStyle Hidden -ErrorAction SilentlyContinue
           }
 
   e2e-gate:
