@@ -872,82 +872,115 @@ jobs:
           New-NetFirewallRule -DisplayName "Restreamer API" -Direction Inbound -Protocol TCP -LocalPort 8910 -Action Allow | Out-Null
           Write-Host "=== Firewall rule created for port 8910 ==="
 
-      - name: Setup Restreamer auto-start
+      - name: Deploy and start Restreamer
         shell: powershell
         run: |
-          # The unified Tauri binary contains embedded service + tray icon.
-          # For GUI mode: scheduled task starts at user login
-          # For CI: start in headless mode directly (no GUI needed)
-          $taskName = "RestreamerGUI"
-          $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
+          $ErrorActionPreference = "Stop"
+          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
+          $TaskName = "RestreamerGUI"
+          $InstallDir = "C:\Program Files\Restreamer"
 
-          Write-Host "=== Setting up Restreamer auto-start ==="
+          Write-Host "=== Step 1: Stop any existing instances ==="
+          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          Start-Sleep -Seconds 3
 
-          # Remove old scheduled tasks
+          Write-Host "=== Step 2: Remove old scheduled tasks ==="
           Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
-            Write-Host "Removing old task: $($_.TaskName)"
+            Write-Host "Removing task: $($_.TaskName)"
             Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
           }
 
-          # Create scheduled task for GUI auto-start at user login (for interactive use)
-          $installDir = "C:\Program Files\Restreamer"
-          $action = New-ScheduledTaskAction -Execute $exePath -WorkingDirectory $installDir
-          $trigger = New-ScheduledTaskTrigger -AtLogOn -User "newlevel"
+          Write-Host "=== Step 3: Create scheduled task with correct configuration ==="
+          $action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
+          $trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
           $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
           $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
 
-          Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-          Write-Host "Registered scheduled task: $taskName (for interactive login)"
+          Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+          Write-Host "Created scheduled task: $TaskName"
 
-          # For CI: Start in headless mode (no GUI, just service)
-          Write-Host "=== Starting Restreamer in headless mode ==="
-          Start-Process -FilePath $exePath -ArgumentList "--headless" -WindowStyle Hidden
-          Start-Sleep -Seconds 5
+          Write-Host "=== Step 4: Start Restreamer in user session ==="
+          Start-ScheduledTask -TaskName $TaskName
+          Start-Sleep -Seconds 10
 
-          # Wait for API to be ready
-          $maxWait = 30
-          $elapsed = 0
-          while ($elapsed -lt $maxWait) {
-            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-            if ($proc) {
-              Write-Host "=== Restreamer running (PID: $($proc.Id)) after ${elapsed}s ==="
-              break
-            }
-            Start-Sleep -Seconds 3
-            $elapsed += 3
-            Write-Host "Waiting for Restreamer to start... (${elapsed}s / ${maxWait}s)"
-          }
+          Write-Host "=== Deployment steps complete ==="
 
-          if (-not $proc) {
-            Write-Error "Restreamer failed to start in headless mode"
-            exit 1
-          }
-
-      - name: Verify deployment
+      - name: Verify Restreamer is running correctly
         shell: powershell
         run: |
-          # Wait for Restreamer to fully initialize (RTMP + API servers)
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== CHECK 1: Process is running ==="
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if (-not $proc) {
+            Write-Host "Process not running, showing recent event log entries:"
+            Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Format-Table TimeCreated,ProviderName,Message -Wrap
+            Write-Error "FAIL: Restreamer.exe is not running"
+            exit 1
+          }
+          Write-Host "OK: Process running (PID: $($proc.Id), Memory: $([math]::Round($proc.WorkingSet64/1MB))MB)"
+
+          Write-Host "=== CHECK 2: Running in user session (not SYSTEM) ==="
+          if ($proc.SessionId -eq 0) {
+            Write-Error "FAIL: Running in Session 0 (SYSTEM) - tray icon will NOT be visible"
+            exit 1
+          }
+          Write-Host "OK: Running in user session $($proc.SessionId)"
+
+          Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
+          $listener = netstat -ano | Select-String "LISTENING" | Select-String ":8910"
+          if (-not $listener) {
+            Write-Host "Current port status:"
+            netstat -ano | Select-String ":8910"
+            Write-Host "Recent log file:"
+            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Write-Error "FAIL: Port 8910 is NOT listening - ServiceCore did not start"
+            exit 1
+          }
+          Write-Host "OK: Port 8910 is listening"
+          Write-Host $listener
+
+          Write-Host "=== CHECK 4: API health endpoint responds ==="
           $maxRetries = 6
-          $success = $false
+          $healthOk = $false
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
-              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
-              Write-Host "API Status: OK"
-              Write-Host "Streaming event: $($response.streaming_event.name)"
-              $success = $true
+              $health = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 5
+              Write-Host "OK: API health check passed"
+              $healthOk = $true
               break
             } catch {
-              Write-Host "Attempt $i/$maxRetries : $_"
+              Write-Host "Attempt $i/$maxRetries: API not ready - $_"
               Start-Sleep -Seconds 5
             }
           }
-          if (-not $success) {
-            # Show process status and recent logs for debugging
-            Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Format-List Id,ProcessName,WorkingSet64
-            Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Format-Table TimeCreated,ProviderName,Message -Wrap
-            Write-Error "API not responding after Restreamer start"
+          if (-not $healthOk) {
+            Write-Error "FAIL: API health endpoint not responding"
             exit 1
           }
+
+          Write-Host "=== CHECK 5: API status endpoint works ==="
+          try {
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+            Write-Host "OK: Status API works - inpoint: $($status.inpoint_status)"
+          } catch {
+            Write-Error "FAIL: Status API not working - $_"
+            exit 1
+          }
+
+          Write-Host "=== CHECK 6: Database accessible (chunk stats) ==="
+          try {
+            $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunk-stats" -TimeoutSec 5
+            Write-Host "OK: Database accessible - chunks: $($stats.total_chunks)"
+          } catch {
+            Write-Error "FAIL: Chunk stats API not working - database may be locked"
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "ALL CHECKS PASSED - DEPLOYMENT SUCCESSFUL"
+          Write-Host "=========================================="
 
       - name: Verify WebView2 runtime installed
         shell: powershell
@@ -998,76 +1031,6 @@ jobs:
             exit 1
           }
 
-      - name: Verify Restreamer is running
-        shell: powershell
-        run: |
-          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-          if (-not $proc) {
-            Write-Error "Restreamer process not found"
-            exit 1
-          }
-          $memMB = [math]::Round($proc.WorkingSet64 / 1MB, 1)
-          Write-Host "Restreamer PID: $($proc.Id), Memory: ${memMB} MB"
-
-          # Verify scheduled task exists
-          $task = Get-ScheduledTask -TaskName "RestreamerGUI" -ErrorAction SilentlyContinue
-          if (-not $task) {
-            Write-Error "RestreamerGUI scheduled task not found"
-            exit 1
-          }
-          Write-Host "Scheduled task: $($task.TaskName) (State: $($task.State))"
-
-      - name: Verify scheduled task for tray icon
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-          $TaskName = "RestreamerGUI"
-
-          Write-Host "=== Verifying scheduled task configuration for tray icon ==="
-
-          # Check task exists
-          $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-          if (-not $task) {
-            Write-Error "FAIL: Scheduled task '$TaskName' not found"
-            exit 1
-          }
-          Write-Host "OK: Task exists: $($task.TaskName)"
-
-          # Check trigger is at logon
-          $trigger = $task.Triggers | Select-Object -First 1
-          if ($trigger.CimClass.CimClassName -ne "MSFT_TaskLogonTrigger") {
-            Write-Error "FAIL: Task trigger is not at logon (type: $($trigger.CimClass.CimClassName))"
-            exit 1
-          }
-          Write-Host "OK: Task triggers at logon"
-
-          # Check principal is interactive (not SYSTEM)
-          if ($task.Principal.LogonType -ne "Interactive") {
-            Write-Error "FAIL: Task LogonType is '$($task.Principal.LogonType)', expected 'Interactive'"
-            exit 1
-          }
-          Write-Host "OK: Task runs interactively (LogonType: $($task.Principal.LogonType))"
-
-          # Check WorkingDirectory is set (CRITICAL for Tauri apps)
-          $action = $task.Actions | Select-Object -First 1
-          if (-not $action.WorkingDirectory) {
-            Write-Error "FAIL: WorkingDirectory is not set - tray icon will fail to initialize"
-            exit 1
-          }
-          Write-Host "OK: WorkingDirectory = $($action.WorkingDirectory)"
-
-          # Check executable path
-          if (-not (Test-Path $action.Execute)) {
-            Write-Error "FAIL: Executable not found: $($action.Execute)"
-            exit 1
-          }
-          Write-Host "OK: Executable exists: $($action.Execute)"
-
-          Write-Host "=== SCHEDULED TASK VERIFICATION PASSED ==="
-          Write-Host ""
-          Write-Host "Tray icon will appear when user 'newlevel' logs in."
-          Write-Host "Headless mode (current) provides API access without tray."
-
   e2e-streaming-test:
     name: E2E Streaming Test
     needs: [deploy-stream-lan]
@@ -1078,19 +1041,19 @@ jobs:
       - name: Verify Restreamer is running
         shell: powershell
         run: |
-          $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
+          $TaskName = "RestreamerGUI"
           $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
           if ($proc) {
-            Write-Host "Restreamer is running (PID: $($proc.Id))"
+            Write-Host "Restreamer is running (PID: $($proc.Id), Session: $($proc.SessionId))"
           } else {
-            Write-Host "Restreamer not running, starting in headless mode..."
-            Start-Process -FilePath $exePath -ArgumentList "--headless" -WindowStyle Hidden
-            Start-Sleep -Seconds 5
+            Write-Host "Restreamer not running, starting via scheduled task..."
+            Start-ScheduledTask -TaskName $TaskName
+            Start-Sleep -Seconds 10
             $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
             if (-not $proc) {
-              throw "Failed to start Restreamer"
+              throw "Failed to start Restreamer via scheduled task"
             }
-            Write-Host "Restreamer started (PID: $($proc.Id))"
+            Write-Host "Restreamer started (PID: $($proc.Id), Session: $($proc.SessionId))"
           }
 
       - name: Verify API is responding
@@ -1271,13 +1234,13 @@ jobs:
           [System.IO.File]::WriteAllText($configPath, $json)
           Write-Host "Config file updated with Hetzner settings"
 
-          # Restart Restreamer in headless mode to pick up new config
-          Write-Host "Restarting Restreamer..."
-          $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
+          # Restart Restreamer via scheduled task to pick up new config
+          Write-Host "Restarting Restreamer via scheduled task..."
+          $TaskName = "RestreamerGUI"
           $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-          Start-Sleep -Seconds 2
-          Start-Process -FilePath $exePath -ArgumentList "--headless" -WindowStyle Hidden
-          Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 3
+          Start-ScheduledTask -TaskName $TaskName
+          Start-Sleep -Seconds 10
 
           # Verify Restreamer is back up
           $maxRetries = 15
@@ -2265,11 +2228,11 @@ jobs:
               [System.IO.File]::WriteAllText($configPath, $json)
               Write-Host "Hetzner API token removed from config"
             }
-            # Restart Restreamer in headless mode to pick up cleaned config
-            $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
+            # Restart Restreamer via scheduled task to pick up cleaned config
+            $TaskName = "RestreamerGUI"
             $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-            Start-Sleep -Seconds 2
-            Start-Process -FilePath $exePath -ArgumentList "--headless" -WindowStyle Hidden -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
           }
           # Always exit success for cleanup step
           exit 0

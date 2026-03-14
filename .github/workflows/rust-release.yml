@@ -212,60 +212,112 @@ jobs:
             Write-Host "Installed: $($installer.Name)"
           }
 
-      - name: Setup Restreamer auto-start
+      - name: Deploy and start Restreamer
         shell: powershell
         run: |
-          $TaskName = "RestreamerGUI"
+          $ErrorActionPreference = "Stop"
           $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
-          $Username = "newlevel"
+          $TaskName = "RestreamerGUI"
+          $InstallDir = "C:\Program Files\Restreamer"
 
-          Write-Host "=== Setting up Restreamer auto-start ==="
+          Write-Host "=== Step 1: Stop any existing instances ==="
+          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          Start-Sleep -Seconds 3
 
-          # Remove old scheduled tasks
+          Write-Host "=== Step 2: Remove old scheduled tasks ==="
           Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
-            Write-Host "Removing old task: $($_.TaskName)"
+            Write-Host "Removing task: $($_.TaskName)"
             Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
           }
 
-          # Create scheduled task for GUI auto-start at user login (for interactive use)
-          $InstallDir = "C:\Program Files\Restreamer"
+          Write-Host "=== Step 3: Create scheduled task with correct configuration ==="
           $action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
-          $trigger = New-ScheduledTaskTrigger -AtLogon -User $Username
-          $principal = New-ScheduledTaskPrincipal -UserId $Username -LogonType Interactive -RunLevel Limited
+          $trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
+          $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
           $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
 
           Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-          Write-Host "Registered scheduled task: $TaskName (for interactive login)"
+          Write-Host "Created scheduled task: $TaskName"
 
-          # For CI: Start in headless mode (no GUI, just service)
-          Write-Host "=== Starting Restreamer in headless mode ==="
-          Start-Process -FilePath $ExePath -ArgumentList "--headless" -WindowStyle Hidden
-          Start-Sleep -Seconds 5
+          Write-Host "=== Step 4: Start Restreamer in user session ==="
+          Start-ScheduledTask -TaskName $TaskName
+          Start-Sleep -Seconds 10
 
-          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-          if ($proc) {
-            Write-Host "=== Restreamer running (PID: $($proc.Id)) ==="
-          } else {
-            Write-Host "Restreamer process not started - will start on next user login"
-          }
+          Write-Host "=== Deployment steps complete ==="
 
-      - name: Verify deployment
+      - name: Verify Restreamer is running correctly
         shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== CHECK 1: Process is running ==="
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if (-not $proc) {
+            Write-Host "Process not running, showing recent event log entries:"
+            Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Format-Table TimeCreated,ProviderName,Message -Wrap
+            Write-Error "FAIL: Restreamer.exe is not running"
+            exit 1
+          }
+          Write-Host "OK: Process running (PID: $($proc.Id), Memory: $([math]::Round($proc.WorkingSet64/1MB))MB)"
+
+          Write-Host "=== CHECK 2: Running in user session (not SYSTEM) ==="
+          if ($proc.SessionId -eq 0) {
+            Write-Error "FAIL: Running in Session 0 (SYSTEM) - tray icon will NOT be visible"
+            exit 1
+          }
+          Write-Host "OK: Running in user session $($proc.SessionId)"
+
+          Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
+          $listener = netstat -ano | Select-String "LISTENING" | Select-String ":8910"
+          if (-not $listener) {
+            Write-Host "Current port status:"
+            netstat -ano | Select-String ":8910"
+            Write-Host "Recent log file:"
+            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Write-Error "FAIL: Port 8910 is NOT listening - ServiceCore did not start"
+            exit 1
+          }
+          Write-Host "OK: Port 8910 is listening"
+          Write-Host $listener
+
+          Write-Host "=== CHECK 4: API health endpoint responds ==="
           $maxRetries = 6
-          $success = $false
+          $healthOk = $false
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
-              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 10
-              Write-Host "API Health: OK"
-              $success = $true
+              $health = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 5
+              Write-Host "OK: API health check passed"
+              $healthOk = $true
               break
             } catch {
-              Write-Host "Attempt $i/$maxRetries : $_"
+              Write-Host "Attempt $i/$maxRetries: API not ready - $_"
               Start-Sleep -Seconds 5
             }
           }
-          if (-not $success) {
-            Write-Error "API Health: FAILED after $maxRetries attempts"
+          if (-not $healthOk) {
+            Write-Error "FAIL: API health endpoint not responding"
             exit 1
           }
+
+          Write-Host "=== CHECK 5: API status endpoint works ==="
+          try {
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+            Write-Host "OK: Status API works - inpoint: $($status.inpoint_status)"
+          } catch {
+            Write-Error "FAIL: Status API not working - $_"
+            exit 1
+          }
+
+          Write-Host "=== CHECK 6: Database accessible (chunk stats) ==="
+          try {
+            $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunk-stats" -TimeoutSec 5
+            Write-Host "OK: Database accessible - chunks: $($stats.total_chunks)"
+          } catch {
+            Write-Error "FAIL: Chunk stats API not working - database may be locked"
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "ALL CHECKS PASSED - DEPLOYMENT SUCCESSFUL"
+          Write-Host "=========================================="

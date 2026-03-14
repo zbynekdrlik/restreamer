@@ -33,6 +33,8 @@ pub struct ServiceCore {
     db_path: PathBuf,
     chunk_dir: PathBuf,
     inpoint_state: InpointState,
+    /// Externally provided database pool (used in GUI mode to avoid duplicate pools)
+    provided_pool: Option<SqlitePool>,
 }
 
 impl ServiceCore {
@@ -60,7 +62,17 @@ impl ServiceCore {
             config_path,
             log_buffer,
             inpoint_state,
+            provided_pool: None,
         }
+    }
+
+    /// Provide an externally created database pool.
+    ///
+    /// When set, `run_with_signal()` will use this pool instead of creating a new one.
+    /// This is essential for GUI mode where the Tauri app already created a pool for AppState.
+    pub fn with_pool(mut self, pool: SqlitePool) -> Self {
+        self.provided_pool = Some(pool);
+        self
     }
 
     /// Start all service components and wait for shutdown via Ctrl+C.
@@ -74,19 +86,28 @@ impl ServiceCore {
 
     /// Start all service components and wait for the given shutdown signal.
     pub async fn run_with_signal(
-        self,
+        mut self,
         shutdown_signal: impl Future<Output = ()>,
     ) -> anyhow::Result<()> {
         let shutdown = ShutdownCoordinator::new();
 
-        // Database
-        let pool = db::create_pool(&self.db_path)
-            .await
-            .context("failed to create database pool")?;
-        db::run_migrations(&pool)
-            .await
-            .context("failed to run database migrations")?;
-        info!("Database initialized at {}", self.db_path.display());
+        // Database: use provided pool or create a new one
+        let pool = match self.provided_pool.take() {
+            Some(pool) => {
+                info!("Using externally provided database pool");
+                pool
+            }
+            None => {
+                let pool = db::create_pool(&self.db_path)
+                    .await
+                    .context("failed to create database pool")?;
+                db::run_migrations(&pool)
+                    .await
+                    .context("failed to run database migrations")?;
+                info!("Database initialized at {}", self.db_path.display());
+                pool
+            }
+        };
 
         // Set up client profile
         db::upsert_client_profile(&pool, &self.config.client_uuid)
@@ -378,5 +399,61 @@ async fn run_endpoint_loop(
         }
 
         info!("Restarting endpoint uploader...");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rs_core::db;
+
+    /// Test: ServiceCore should accept an externally provided pool via with_pool()
+    /// This prevents duplicate pool creation in GUI mode.
+    #[tokio::test]
+    async fn service_core_with_pool_stores_provided_pool() {
+        // Arrange: Create a pool externally (simulating GUI mode)
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+
+        // Create test config
+        let config = Config::for_testing();
+        let config_path = PathBuf::from("/tmp/test-config.json");
+        let log_buffer = LogBuffer::new(10);
+
+        // Act: Create ServiceCore with externally provided pool
+        let core = ServiceCore::new(config, config_path, log_buffer)
+            .with_pool(pool.clone());
+
+        // Assert: ServiceCore should have the provided pool stored
+        assert!(
+            core.provided_pool.is_some(),
+            "ServiceCore should store the provided pool"
+        );
+    }
+
+    /// Test: When pool is provided, the provided pool should contain our test data
+    /// This verifies we're using the SAME pool, not creating a new one.
+    #[tokio::test]
+    async fn service_core_with_pool_uses_same_pool_instance() {
+        // Arrange: Create a pool and insert test data
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+
+        // Insert a test client profile to verify we're using THIS pool
+        db::upsert_client_profile(&pool, "test-client-uuid").await.unwrap();
+
+        let config = Config::for_testing();
+        let config_path = PathBuf::from("/tmp/test-config.json");
+        let log_buffer = LogBuffer::new(10);
+
+        // Act: Create ServiceCore with the pool containing test data
+        let core = ServiceCore::new(config, config_path, log_buffer)
+            .with_pool(pool.clone());
+
+        // Assert: The pool should be the same one we provided (has our test data)
+        let provided_pool = core.provided_pool.as_ref().unwrap();
+        let profile = db::get_client_profile(provided_pool).await.unwrap();
+        assert!(profile.is_some(), "Should find test data in provided pool");
+        assert_eq!(profile.unwrap().user_uuid, "test-client-uuid");
     }
 }

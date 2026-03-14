@@ -171,15 +171,35 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Pr
 Write-Ok "Scheduled task registered"
 
 # --- Start the app ---
-Write-Status "Starting Restreamer..."
+Write-Status "Starting Restreamer via scheduled task..."
 Start-ScheduledTask -TaskName $TaskName
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 10
+
+# --- Verify deployment ---
+Write-Status "Verifying deployment..."
 
 $proc = Get-Process -Name $AppName -ErrorAction SilentlyContinue
-if ($proc) {
-    Write-Ok "Restreamer started (PID: $($proc.Id))"
-} else {
+if (-not $proc) {
+    Write-Err "Restreamer process not running"
     Write-Status "Restreamer will start on next login"
+} else {
+    Write-Ok "Process running (PID: $($proc.Id), Session: $($proc.SessionId))"
+
+    # Check port is listening
+    $listener = netstat -ano | Select-String "LISTENING" | Select-String ":8910"
+    if ($listener) {
+        Write-Ok "Port 8910 is listening"
+
+        # Check API health
+        try {
+            $health = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 5
+            Write-Ok "API health check passed"
+        } catch {
+            Write-Err "API health check failed - ServiceCore may not have started correctly"
+        }
+    } else {
+        Write-Err "Port 8910 not listening - ServiceCore may not have started correctly"
+    }
 }
 
 Write-Host ""

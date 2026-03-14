@@ -172,6 +172,9 @@ pub fn run() {
                 }
 
                 // Create app state with direct database access
+                // Clone the pool to share with ServiceCore (avoids duplicate pool creation)
+                let pool_for_service = pool.clone();
+
                 let app_state = AppState::new(
                     pool,
                     config_clone.clone(),
@@ -186,13 +189,15 @@ pub fn run() {
 
                 tracing::info!("Embedded service state initialized");
 
-                // Start the service core with shared inpoint state
+                // Start the service core with shared inpoint state AND shared pool
+                // This prevents the duplicate pool bug that caused SQLite lock conflicts
                 let core = ServiceCore::with_inpoint_state(
                     config_clone,
                     config_path_clone,
                     LogBuffer::new(1000),
                     inpoint_state,
-                );
+                )
+                .with_pool(pool_for_service);
 
                 if let Err(e) = core
                     .run_with_signal(async {
