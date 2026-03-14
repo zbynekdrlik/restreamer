@@ -110,9 +110,11 @@ impl ServiceCore {
         };
 
         // Set up client profile
-        db::upsert_client_profile(&pool, &self.config.client_uuid)
-            .await
-            .context("failed to set client profile")?;
+        if let Err(e) = db::upsert_client_profile(&pool, &self.config.client_uuid).await {
+            tracing::error!("Failed to set client profile: {e:?}");
+            tracing::error!("client_uuid was: {:?}", self.config.client_uuid);
+            return Err(e).context("failed to set client profile");
+        }
 
         // WebSocket broadcast channel
         let (ws_tx, _) = broadcast::channel::<WsEvent>(256);

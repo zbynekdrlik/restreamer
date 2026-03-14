@@ -207,7 +207,9 @@ pub fn run() {
                     })
                     .await
                 {
+                    // Log full error chain for debugging
                     tracing::error!("Service error: {e}");
+                    tracing::error!("Error chain: {e:#}");
                 }
             });
 
