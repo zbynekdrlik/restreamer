@@ -912,7 +912,7 @@ jobs:
 
           # Create scheduled task to auto-start Restreamer GUI on login
           $taskName = "RestreamerGUI"
-          $exePath = "$env:LOCALAPPDATA\Restreamer\Restreamer.exe"
+          $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
 
           # Remove old tasks first (but not the new RestreamerGUI task we're about to create)
           Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" -and $_.TaskName -ne "RestreamerGUI" } | ForEach-Object {

@@ -262,7 +262,7 @@ jobs:
         run: |
           $ErrorActionPreference = "SilentlyContinue"
           $TaskName = "RestreamerGUI"
-          $ExePath = "C:\Users\newlevel\AppData\Local\Restreamer\Restreamer.exe"
+          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
           $Username = "newlevel"
 
           Write-Host "=== Configuring tray app launch ==="

@@ -189,12 +189,12 @@ Write-Ok "Service started"
 
 # --- Launch tray app ---
 Write-Status "Launching tray app..."
-$trayPath = "$env:LOCALAPPDATA\$TrayAppName\$TrayAppName.exe"
+$trayPath = "$InstallDir\$TrayAppName.exe"
 if (Test-Path $trayPath) {
     Start-Process -FilePath $trayPath
     Write-Ok "Tray app launched"
 } else {
-    Write-Status "Tray app not found at $trayPath — it may use a different install path"
+    Write-Status "Tray app not found at $trayPath"
 }
 
 Write-Host ""
