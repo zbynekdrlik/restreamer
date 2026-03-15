@@ -22,10 +22,10 @@ pub fn App() -> impl IntoView {
             <div class="app">
                 <Header />
                 <nav class="nav-bar">
-                    <A href="/" class="nav-link">"Dashboard"</A>
-                    <A href="/events" class="nav-link">"Events"</A>
-                    <A href="/endpoints" class="nav-link">"Endpoints"</A>
-                    <A href="/logs" class="nav-link">"Logs"</A>
+                    <A href="/" attr:class="nav-link">"Dashboard"</A>
+                    <A href="/events" attr:class="nav-link">"Events"</A>
+                    <A href="/endpoints" attr:class="nav-link">"Endpoints"</A>
+                    <A href="/logs" attr:class="nav-link">"Logs"</A>
                 </nav>
                 <main class="content">
                     <Routes fallback=|| view! { <div class="empty">"Page not found"</div> }>
