@@ -19,6 +19,9 @@ use rs_runtime::{LogCaptureLayer, ServiceCore};
 
 use crate::state::AppState;
 
+#[cfg(windows)]
+use tokio::signal::windows::{ctrl_c, ctrl_break};
+
 /// Data directory path (platform-specific).
 fn data_dir() -> PathBuf {
     if cfg!(windows) {
@@ -169,6 +172,9 @@ pub fn run() {
                 }
 
                 // Create app state with direct database access
+                // Clone the pool to share with ServiceCore (avoids duplicate pool creation)
+                let pool_for_service = pool.clone();
+
                 let app_state = AppState::new(
                     pool,
                     config_clone.clone(),
@@ -183,13 +189,15 @@ pub fn run() {
 
                 tracing::info!("Embedded service state initialized");
 
-                // Start the service core with shared inpoint state
+                // Start the service core with shared inpoint state AND shared pool
+                // This prevents the duplicate pool bug that caused SQLite lock conflicts
                 let core = ServiceCore::with_inpoint_state(
                     config_clone,
                     config_path_clone,
                     LogBuffer::new(1000),
                     inpoint_state,
-                );
+                )
+                .with_pool(pool_for_service);
 
                 if let Err(e) = core
                     .run_with_signal(async {
@@ -199,7 +207,9 @@ pub fn run() {
                     })
                     .await
                 {
+                    // Log full error chain for debugging
                     tracing::error!("Service error: {e}");
+                    tracing::error!("Error chain: {e:#}");
                 }
             });
 
@@ -230,4 +240,93 @@ pub fn run() {
         eprintln!("Tauri application failed to start: {e}");
         std::process::exit(1);
     }
+}
+
+/// Run in headless mode without GUI (for CI/service deployments).
+/// This starts the ServiceCore directly without Tauri.
+pub fn run_headless() {
+    // Initialize logging early
+    let log_buffer = LogBuffer::new(1000);
+    init_tracing(&log_buffer);
+
+    tracing::info!("Starting Restreamer in headless mode");
+
+    // Load configuration
+    let config = match load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to load config: {e}");
+            eprintln!("Failed to load config: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Validate configuration
+    if let Err(e) = config.validate() {
+        tracing::error!("Invalid config: {e}");
+        eprintln!("Invalid config: {e}");
+        std::process::exit(1);
+    }
+
+    let config_path = Config::default_path();
+
+    // Run the service core in a tokio runtime
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    rt.block_on(async {
+        let core = ServiceCore::new(config, config_path, log_buffer);
+
+        // Handle shutdown signals
+        #[cfg(windows)]
+        {
+            let mut ctrl_c_signal =
+                ctrl_c().expect("Failed to register Ctrl+C handler");
+            let mut ctrl_break_signal =
+                ctrl_break().expect("Failed to register Ctrl+Break handler");
+
+            if let Err(e) = core
+                .run_with_signal(async {
+                    tokio::select! {
+                        _ = ctrl_c_signal.recv() => {
+                            tracing::info!("Received Ctrl+C, shutting down...");
+                        }
+                        _ = ctrl_break_signal.recv() => {
+                            tracing::info!("Received Ctrl+Break, shutting down...");
+                        }
+                    }
+                })
+                .await
+            {
+                tracing::error!("Service error: {e}");
+                std::process::exit(1);
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())
+                .expect("Failed to register SIGTERM handler");
+            let mut sigint =
+                signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
+
+            if let Err(e) = core
+                .run_with_signal(async {
+                    tokio::select! {
+                        _ = sigterm.recv() => {
+                            tracing::info!("Received SIGTERM, shutting down...");
+                        }
+                        _ = sigint.recv() => {
+                            tracing::info!("Received SIGINT, shutting down...");
+                        }
+                    }
+                })
+                .await
+            {
+                tracing::error!("Service error: {e}");
+                std::process::exit(1);
+            }
+        }
+
+        tracing::info!("Restreamer headless mode shutdown complete");
+    });
 }

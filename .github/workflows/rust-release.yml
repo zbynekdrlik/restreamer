@@ -42,41 +42,6 @@ jobs:
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-  build-service:
-    name: Build service (Windows)
-    needs: validate
-    runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: local-client-rs
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: local-client-rs
-      - name: Build service binary
-        run: cargo build --release -p rs-service
-        env:
-          SQLX_OFFLINE: true
-      - name: Rename artifact
-        run: |
-          $VERSION = "${{ needs.validate.outputs.version }}"
-          Copy-Item "target/release/restreamer-service.exe" "restreamer-service-${VERSION}-windows-x64.exe"
-      - name: Generate checksum
-        run: |
-          $VERSION = "${{ needs.validate.outputs.version }}"
-          $hash = Get-FileHash "restreamer-service-${VERSION}-windows-x64.exe" -Algorithm SHA256
-          "$($hash.Hash.ToLower())  restreamer-service-${VERSION}-windows-x64.exe" | Out-File -Encoding ASCII "restreamer-service-${VERSION}-windows-x64.exe.sha256"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: service-binary
-          path: |
-            local-client-rs/restreamer-service-*-windows-x64.exe
-            local-client-rs/restreamer-service-*-windows-x64.exe.sha256
-
   build-delivery:
     name: Build delivery binary (Linux)
     needs: validate
@@ -160,10 +125,16 @@ jobs:
         with:
           name: tauri-installer
           path: local-client-rs/src-tauri/target/release/bundle/nsis/*.exe
+      - name: Upload WASM frontend for LAN serving
+        uses: actions/upload-artifact@v4
+        with:
+          name: restreamer-www
+          path: local-client-rs/dist/
+          if-no-files-found: warn
 
   release:
     name: Create GitHub Release
-    needs: [validate, build-service, build-delivery, build-tauri]
+    needs: [validate, build-delivery, build-tauri]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -181,16 +152,14 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            artifacts/service-binary/*
             artifacts/delivery-binary/*
             artifacts/tauri-installer/*
           body: |
             ## Restreamer v${{ needs.validate.outputs.version }}
 
             ### Assets
-            - `restreamer-service-*-windows-x64.exe` — Headless Windows service binary
+            - `Restreamer_*_x64-setup.exe` — Tauri NSIS installer (unified app with embedded service + tray icon)
             - `rs-delivery-*-linux-amd64` — Linux delivery VPS binary
-            - `Restreamer_*_x64-setup.exe` — Tauri NSIS installer (tray app + dashboard)
 
             ### Installation
             ```powershell
@@ -199,7 +168,7 @@ jobs:
 
   deploy-stream-lan:
     name: Deploy to stream.lan
-    needs: [release, build-service, build-delivery, build-tauri]
+    needs: [release, build-tauri]
     runs-on: [self-hosted, windows, stream-lan]
     steps:
       - name: Clean old artifacts
@@ -209,45 +178,77 @@ jobs:
           Remove-Item -Path "artifacts" -Recurse -Force -ErrorAction SilentlyContinue
           Write-Host "Cleaned artifacts directory"
 
-      - name: Download service binary
-        uses: actions/download-artifact@v4
-        with:
-          name: service-binary
-          path: artifacts/service
-
       - name: Download Tauri installer
         uses: actions/download-artifact@v4
         with:
           name: tauri-installer
           path: artifacts/tauri
 
+      - name: Download WASM frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: restreamer-www
+          path: artifacts/www
+
       - name: List artifacts
         run: |
-          Write-Host "=== Service binary ==="
-          Get-ChildItem artifacts/service/
           Write-Host "=== Tauri installer ==="
           Get-ChildItem artifacts/tauri/
+          Write-Host "=== WASM frontend (for LAN serving) ==="
+          Get-ChildItem artifacts/www/ -ErrorAction SilentlyContinue
         shell: powershell
 
-      - name: Deploy
+      - name: Install WebView2 runtime
+        shell: powershell
+        run: |
+          function Get-WebView2Version {
+            foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
+              $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
+              if ($reg -and $reg.pv) { return $reg.pv }
+            }
+            $dir = "C:\Program Files (x86)\Microsoft\EdgeWebView\Application"
+            if (Test-Path $dir) { return "installed (detected from filesystem)" }
+            return $null
+          }
+
+          $version = Get-WebView2Version
+          if ($version) {
+            Write-Host "WebView2 already installed: $version"
+          } else {
+            Write-Host "WebView2 not found - installing Evergreen Runtime..."
+            $bootstrapper = "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
+            Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
+            Start-Process -FilePath $bootstrapper -ArgumentList "/silent /install" -Wait
+            Remove-Item $bootstrapper -ErrorAction SilentlyContinue
+
+            $version = Get-WebView2Version
+            if (-not $version) {
+              Write-Error "WebView2 runtime installation FAILED - dashboard will be blank"
+              exit 1
+            }
+            Write-Host "WebView2 installed: $version"
+          }
+
+      - name: Deploy Tauri app
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"
           $InstallDir = "C:\Program Files\Restreamer"
-          $ConfigFile = "C:\ProgramData\Restreamer\config.json"
 
-          Write-Host "=== Stopping service and processes ==="
-          net stop "restreamer-service" 2>&1 | Out-Null
-          Start-Sleep -Seconds 2
-          $null = cmd /c "taskkill /F /IM restreamer-service.exe 2>nul"
-          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
+          Write-Host "=== Stopping old processes ==="
+          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
           Start-Sleep -Seconds 1
 
-          Write-Host "=== Installing service binary ==="
-          New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-          $serviceBin = Get-ChildItem "artifacts/service/*.exe" -Exclude "*.sha256" | Select-Object -First 1
-          Copy-Item $serviceBin.FullName "$InstallDir\restreamer-service.exe" -Force
-          Write-Host "Installed: $($serviceBin.Name)"
+          # Remove legacy Windows service if it exists
+          Write-Host "=== Removing legacy Windows service ==="
+          foreach ($name in @("RestreamerService", "restreamer-service")) {
+            sc.exe stop $name 2>&1 | Out-Null
+            sc.exe delete $name 2>&1 | Out-Null
+          }
+
+          # Clean up old service binary
+          Remove-Item "$InstallDir\restreamer-service.exe" -Force -ErrorAction SilentlyContinue
 
           Write-Host "=== Running NSIS installer ==="
           $installer = Get-ChildItem "artifacts/tauri/*setup*.exe" | Select-Object -First 1
@@ -256,69 +257,218 @@ jobs:
             Write-Host "Installed: $($installer.Name)"
           }
 
-          Write-Host "=== Registering service ==="
-          $svcQuery = sc.exe query "restreamer-service" 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            sc.exe create "restreamer-service" binPath= "`"$InstallDir\restreamer-service.exe`" `"$ConfigFile`"" start= auto DisplayName= "Restreamer Service"
-            sc.exe description "restreamer-service" "Restreamer local client service"
-          }
-
-          Write-Host "=== Starting service ==="
-          net start "restreamer-service"
-          Start-Sleep -Seconds 3
-
-          $svcQuery = sc.exe query "restreamer-service" 2>&1
-          if ($svcQuery -match "RUNNING") {
-            Write-Host "=== Service started successfully ==="
-          } else {
-            Write-Host "WARNING: Service may not be running"
-            Write-Host $svcQuery
-          }
-
-      - name: Launch tray app via Task Scheduler
+      - name: Deploy WASM frontend for LAN access
         shell: powershell
         run: |
-          $ErrorActionPreference = "SilentlyContinue"
-          $TaskName = "RestreamerGUI"
+          $wwwDir = "C:\Program Files\Restreamer\www"
+          Remove-Item -Path $wwwDir -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item -Path "artifacts\www" -Destination $wwwDir -Recurse -Force
+          Write-Host "=== WASM frontend deployed to $wwwDir ==="
+          Get-ChildItem $wwwDir
+
+          Remove-NetFirewallRule -DisplayName "Restreamer API" -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "Restreamer API" -Direction Inbound -Protocol TCP -LocalPort 8910 -Action Allow | Out-Null
+          Write-Host "=== Firewall rule created for port 8910 ==="
+
+      - name: Configure Hetzner credentials
+        shell: powershell
+        env:
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $configPath = "C:\ProgramData\Restreamer\config.json"
+
+          if (-not (Test-Path $configPath)) {
+            Write-Error "Config file not found at $configPath"
+            exit 1
+          }
+
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.hetzner) {
+            $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue @{} -Force
+          }
+          $config.hetzner.api_token = $env:HETZNER_API_TOKEN
+
+          $json = $config | ConvertTo-Json -Depth 10
+          [System.IO.File]::WriteAllText($configPath, $json)
+          Write-Host "Hetzner API token configured"
+
+      - name: Deploy and start Restreamer
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
           $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
-          $Username = "newlevel"
+          $TaskName = "RestreamerGUI"
+          $InstallDir = "C:\Program Files\Restreamer"
 
-          Write-Host "=== Configuring tray app launch ==="
-
+          Write-Host "=== Step 1: Stop any existing instances ==="
           $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-          Start-Sleep -Seconds 1
+          Start-Sleep -Seconds 3
 
-          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" -and $_.TaskName -ne "RestreamerGUI" } | ForEach-Object {
-            Write-Host "Removing old task: $($_.TaskName)"
+          Write-Host "=== Step 1.5: Clean up stale SQLite WAL files ==="
+          # Stale WAL files from previous processes can cause database lock errors
+          $DataDir = "C:\ProgramData\Restreamer"
+          Remove-Item "$DataDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$DataDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleaned up SQLite WAL files"
+
+          Write-Host "=== Step 2: Remove old scheduled tasks ==="
+          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
+            Write-Host "Removing task: $($_.TaskName)"
             Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
           }
 
-          $action = New-ScheduledTaskAction -Execute $ExePath
-          $trigger = New-ScheduledTaskTrigger -AtLogon -User $Username
-          $principal = New-ScheduledTaskPrincipal -UserId $Username -LogonType Interactive -RunLevel Limited
+          Write-Host "=== Step 3: Create scheduled task with correct configuration ==="
+          $action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
+          $trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
+          $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
           $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
 
-          Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
           Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-          Write-Host "Registered task: $TaskName"
+          Write-Host "Created scheduled task: $TaskName"
 
-          Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 2
+          Write-Host "=== Step 4: Start Restreamer in user session ==="
+          # Use schtasks.exe instead of Start-ScheduledTask for cross-context reliability
+          schtasks.exe /run /tn $TaskName
+          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+          Start-Sleep -Seconds 10
 
-          $tray = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-          if ($tray) {
-            Write-Host "=== Tray app launched (PID: $($tray.Id)) ==="
-          } else {
-            Write-Host "Tray process not started - will start on next user login"
-          }
+          Write-Host "=== Deployment steps complete ==="
 
-      - name: Verify deployment
+      - name: Verify Restreamer is running correctly
         shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== CHECK 1: Process is running ==="
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $proc) {
+            Write-Host "Process not running, showing recent event log entries:"
+            Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Format-Table TimeCreated,ProviderName,Message -Wrap
+            Write-Error "FAIL: Restreamer.exe is not running"
+            exit 1
+          }
+          Write-Host "OK: Process running (PID: $($proc.Id), Memory: $([math]::Round($proc.WorkingSet64/1MB))MB)"
+
+          Write-Host "=== CHECK 2: Running in user session (not SYSTEM) ==="
+          if ($proc.SessionId -eq 0) {
+            Write-Error "FAIL: Running in Session 0 (SYSTEM) - tray icon will NOT be visible. User session must be available."
+            exit 1
+          }
+          Write-Host "OK: Running in user session $($proc.SessionId) - tray icon visible"
+
+          Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
+          $listener = netstat -ano | Select-String "LISTENING" | Select-String "\b:8910\b"
+          if (-not $listener) {
+            Write-Host "Current port status:"
+            netstat -ano | Select-String "\b:8910\b"
+            Write-Host "Recent log file:"
+            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Write-Error "FAIL: Port 8910 is NOT listening - ServiceCore did not start"
+            exit 1
+          }
+          Write-Host "OK: Port 8910 is listening"
+          Write-Host $listener
+
+          Write-Host "=== CHECK 3b: RTMP port 1234 is LISTENING ==="
+          $rtmpListener = netstat -ano | Select-String "LISTENING" | Select-String "\b:1234\b"
+          if (-not $rtmpListener) {
+            Write-Host "Current port 1234 status:"
+            netstat -ano | Select-String ":1234"
+            Write-Host "Recent log file:"
+            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Write-Error "FAIL: RTMP port 1234 is NOT listening - RTMP server did not start"
+            exit 1
+          }
+          Write-Host "OK: RTMP port 1234 is listening"
+          Write-Host $rtmpListener
+
+          Write-Host "=== CHECK 4: API health endpoint responds ==="
+          $maxRetries = 6
+          $healthOk = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $health = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 5
+              Write-Host "OK: API health check passed"
+              $healthOk = $true
+              break
+            } catch {
+              Write-Host "Attempt ${i}/${maxRetries}: API not ready - ${_}"
+              Start-Sleep -Seconds 5
+            }
+          }
+          if (-not $healthOk) {
+            Write-Error "FAIL: API health endpoint not responding"
+            exit 1
+          }
+
+          Write-Host "=== CHECK 5: API status endpoint works ==="
           try {
-            $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 10
-            Write-Host "API Health: OK"
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+            Write-Host "OK: Status API works - inpoint: $($status.inpoint_status)"
           } catch {
-            Write-Host "API Health: FAILED - $_"
+            Write-Error "FAIL: Status API not working - $_"
+            exit 1
+          }
+
+          Write-Host "=== CHECK 6: Database accessible (chunk stats) ==="
+          try {
+            $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunk-stats" -TimeoutSec 5
+            Write-Host "OK: Database accessible - chunks: $($stats.total_chunks)"
+          } catch {
+            Write-Error "FAIL: Chunk stats API not working - database may be locked"
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "ALL CHECKS PASSED - DEPLOYMENT SUCCESSFUL"
+          Write-Host "=========================================="
+
+      - name: Verify WebView2 runtime installed
+        shell: powershell
+        run: |
+          $found = $false
+          foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
+            $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
+            if ($reg -and $reg.pv) {
+              Write-Host "WebView2 version: $($reg.pv)"
+              $found = $true
+              break
+            }
+          }
+          if (-not $found) {
+            if (Test-Path "C:\Program Files (x86)\Microsoft\EdgeWebView\Application") {
+              Write-Host "WebView2 detected from filesystem"
+              $found = $true
+            }
+          }
+          if (-not $found) {
+            Write-Error "WebView2 runtime is NOT installed - dashboard will be empty"
+            exit 1
+          }
+
+      - name: Verify dashboard renders via HTTP
+        shell: powershell
+        run: |
+          $maxRetries = 3
+          $success = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://127.0.0.1:8910/" -TimeoutSec 10 -UseBasicParsing
+              if ($response.StatusCode -eq 200 -and $response.Content -match "restreamer|Restreamer|wasm") {
+                Write-Host "Dashboard accessible - contains expected frontend content"
+                $success = $true
+                break
+              } else {
+                Write-Host "Attempt $i : HTTP $($response.StatusCode) but no expected content"
+              }
+            } catch {
+              Write-Host "Attempt $i : $_"
+            }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $success) {
+            Write-Error "Dashboard HTTP endpoint not serving expected WASM frontend content"
             exit 1
           }

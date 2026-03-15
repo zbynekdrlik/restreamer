@@ -295,17 +295,6 @@ jobs:
           path: local-client-rs/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: warn
           retention-days: 7
-      - name: Build standalone service binary
-        run: cargo build --release -p rs-service
-        env:
-          SQLX_OFFLINE: true
-      - name: Upload service binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: restreamer-service-binary
-          path: local-client-rs/target/release/restreamer-service.exe
-          if-no-files-found: warn
-          retention-days: 7
       - name: Upload WASM frontend for LAN serving
         uses: actions/upload-artifact@v4
         with:
@@ -749,12 +738,6 @@ jobs:
           name: restreamer-tauri-installer
           path: artifacts/tauri
 
-      - name: Download service binary
-        uses: actions/download-artifact@v4
-        with:
-          name: restreamer-service-binary
-          path: artifacts/service
-
       - name: Download WASM frontend
         uses: actions/download-artifact@v4
         with:
@@ -765,8 +748,6 @@ jobs:
         run: |
           Write-Host "=== Tauri installer (unified app with embedded service) ==="
           Get-ChildItem artifacts/tauri/
-          Write-Host "=== Standalone service binary ==="
-          Get-ChildItem artifacts/service/
           Write-Host "=== WASM frontend (for LAN serving) ==="
           Get-ChildItem artifacts/www/
         shell: powershell
@@ -804,10 +785,10 @@ jobs:
             Write-Host "WebView2 installed: $version"
           }
 
-      - name: Deploy unified app
+      - name: Deploy Tauri app
         shell: powershell
         run: |
-          # Deploy Tauri app + standalone service binary
+          # Deploy single unified Tauri binary (contains embedded service + tray icon)
           $ErrorActionPreference = "Continue"
 
           $stagingDir = "C:\ProgramData\Restreamer\staging"
@@ -817,11 +798,17 @@ jobs:
           Copy-Item $installer.FullName "$stagingDir\Restreamer-Setup.exe" -Force
           Write-Host "Staged: $($installer.Name)"
 
-          # Stop running processes and service
+          # Stop running processes
           Write-Host "=== Stopping old processes ==="
-          sc.exe stop "RestreamerService" 2>&1 | Out-Null
-          taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
           taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
+
+          # Remove legacy Windows service if it exists
+          Write-Host "=== Removing legacy Windows service ==="
+          foreach ($name in @("RestreamerService", "restreamer-service")) {
+            sc.exe stop $name 2>&1 | Out-Null
+            sc.exe delete $name 2>&1 | Out-Null
+          }
 
           # CRITICAL: Stop and disable old Python NSSM services that block RTMP port 1234
           Write-Host "=== Disabling legacy Python services ==="
@@ -849,32 +836,24 @@ jobs:
             Write-Host "WARNING: Ports still in use after ${timeout}s"
           }
 
-          # Stop old Windows service if exists
-          Write-Host "=== Stopping old Windows service ==="
-          sc.exe stop "RestreamerService" 2>&1 | Out-Null
-          sc.exe stop "restreamer-service" 2>&1 | Out-Null
           Start-Sleep -Seconds 2
 
           # Clean up old files
           Write-Host "=== Cleaning up old files ==="
           $InstallDir = "C:\Program Files\Restreamer"
           Remove-Item "$InstallDir\restreamer-tray.exe" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$InstallDir\restreamer-service.exe" -Force -ErrorAction SilentlyContinue
           Remove-Item "$stagingDir\deploy.ps1" -Force -ErrorAction SilentlyContinue
 
           # Run NSIS installer (installs unified Tauri app)
           Write-Host "=== Installing unified Tauri app ==="
           Start-Process -FilePath "$stagingDir\Restreamer-Setup.exe" -ArgumentList "/S" -Wait
 
-          # Deploy standalone service binary (runs headlessly as Windows Service)
-          Write-Host "=== Deploying service binary ==="
-          Copy-Item "artifacts\service\restreamer-service.exe" "$InstallDir\restreamer-service.exe" -Force
-
           # Verify install
           Write-Host "=== Verifying install ==="
           Get-ChildItem "$InstallDir\*.exe"
 
           Write-Host "=== Deployment complete ==="
-          # Ensure success exit code (net stop/taskkill/sc.exe may have set non-zero)
           exit 0
 
       - name: Deploy WASM frontend for LAN access
@@ -893,112 +872,137 @@ jobs:
           New-NetFirewallRule -DisplayName "Restreamer API" -Direction Inbound -Protocol TCP -LocalPort 8910 -Action Allow | Out-Null
           Write-Host "=== Firewall rule created for port 8910 ==="
 
-      - name: Install and start Windows Service
+      - name: Deploy and start Restreamer
         shell: powershell
         run: |
-          # The standalone service binary runs headlessly as a Windows Service.
-          # No desktop session required — unlike the Tauri GUI app.
-          $ServiceName = "RestreamerService"
-          $ExePath = "C:\Program Files\Restreamer\restreamer-service.exe"
+          $ErrorActionPreference = "Stop"
+          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
+          $TaskName = "RestreamerGUI"
+          $InstallDir = "C:\Program Files\Restreamer"
 
-          Write-Host "=== Installing Windows Service ==="
+          Write-Host "=== Step 1: Stop any existing instances ==="
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
+          Start-Sleep -Seconds 3
 
-          # Delete old service registration if exists (handles both old and new names)
-          foreach ($name in @("RestreamerService", "restreamer-service")) {
-            sc.exe delete $name 2>&1 | Out-Null
-          }
+          Write-Host "=== Step 1.5: Clean up stale SQLite WAL files ==="
+          # Stale WAL files from previous processes can cause database lock errors
+          $DataDir = "C:\ProgramData\Restreamer"
+          Remove-Item "$DataDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$DataDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleaned up SQLite WAL files"
 
-          # Create Windows Service (config auto-loaded from C:\ProgramData\Restreamer\config.json)
-          sc.exe create $ServiceName binPath= "`"$ExePath`"" start= auto DisplayName= "Restreamer Streaming Service"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Failed to create Windows Service"
-            exit 1
-          }
-
-          # Configure service recovery: restart on failure
-          sc.exe failure $ServiceName reset= 60 actions= restart/5000/restart/10000/restart/30000
-
-          # Start the service
-          Write-Host "=== Starting service ==="
-          sc.exe start $ServiceName
-
-          # Wait for service to reach Running state (may take time for DB migration + server init)
-          $maxWait = 30
-          $elapsed = 0
-          while ($elapsed -lt $maxWait) {
-            Start-Sleep -Seconds 3
-            $elapsed += 3
-            $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-            if ($svc.Status -eq "Running") {
-              Write-Host "=== Service running after ${elapsed}s ==="
-              break
-            }
-            Write-Host "Service status: $($svc.Status) (${elapsed}s / ${maxWait}s)"
-          }
-
-          if ($svc.Status -ne "Running") {
-            Write-Host "Service failed to start after ${maxWait}s (status: $($svc.Status))"
-            Get-WinEvent -FilterHashtable @{LogName="System"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Where-Object { $_.Message -like "*Restreamer*" -or $_.Message -like "*service*" } | Format-Table TimeCreated,Message -Wrap
-            Write-Error "Service failed to start"
-            exit 1
-          }
-
-          # Create scheduled task to auto-start Restreamer GUI on login
-          $taskName = "RestreamerGUI"
-          $exePath = "C:\Program Files\Restreamer\Restreamer.exe"
-
-          # Remove old tasks first (but not the new RestreamerGUI task we're about to create)
-          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" -and $_.TaskName -ne "RestreamerGUI" } | ForEach-Object {
-            Write-Host "Removing old task: $($_.TaskName)"
+          Write-Host "=== Step 2: Remove old scheduled tasks ==="
+          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
+            Write-Host "Removing task: $($_.TaskName)"
             Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
           }
 
-          # Create new scheduled task for GUI
-          $action = New-ScheduledTaskAction -Execute $exePath
-          $trigger = New-ScheduledTaskTrigger -AtLogOn -User "newlevel"
+          Write-Host "=== Step 3: Create scheduled task with correct configuration ==="
+          $action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
+          $trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
           $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
           $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
 
-          Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-          Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-          Write-Host "Registered task: $taskName"
+          Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+          Write-Host "Created scheduled task: $TaskName"
 
-          # Start the GUI app now (if user session is available)
-          Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 2
+          Write-Host "=== Step 4: Start Restreamer in user session ==="
+          # Use schtasks.exe instead of Start-ScheduledTask for cross-context reliability
+          schtasks.exe /run /tn $TaskName
+          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+          Start-Sleep -Seconds 10
 
-          $tray = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
-          if ($tray) {
-            Write-Host "=== Tray app launched (PID: $($tray.Id)) ==="
-          } else {
-            Write-Host "Tray process not started - will start on next user login"
-          }
+          Write-Host "=== Deployment steps complete ==="
 
-      - name: Verify deployment
+      - name: Verify Restreamer is running correctly
         shell: powershell
         run: |
-          # Wait for service to fully initialize (RTMP + API servers)
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== CHECK 1: Process is running ==="
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $proc) {
+            Write-Host "Process not running, showing recent event log entries:"
+            Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Format-Table TimeCreated,ProviderName,Message -Wrap
+            Write-Error "FAIL: Restreamer.exe is not running"
+            exit 1
+          }
+          Write-Host "OK: Process running (PID: $($proc.Id), Memory: $([math]::Round($proc.WorkingSet64/1MB))MB)"
+
+          Write-Host "=== CHECK 2: Running in user session (not SYSTEM) ==="
+          if ($proc.SessionId -eq 0) {
+            Write-Error "FAIL: Running in Session 0 (SYSTEM) - tray icon will NOT be visible. User session must be available."
+            exit 1
+          }
+          Write-Host "OK: Running in user session $($proc.SessionId) - tray icon visible"
+
+          Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
+          $listener = netstat -ano | Select-String "LISTENING" | Select-String "\b:8910\b"
+          if (-not $listener) {
+            Write-Host "Current port status:"
+            netstat -ano | Select-String "\b:8910\b"
+            Write-Host "Recent log file:"
+            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Write-Error "FAIL: Port 8910 is NOT listening - ServiceCore did not start"
+            exit 1
+          }
+          Write-Host "OK: Port 8910 is listening"
+          Write-Host $listener
+
+          Write-Host "=== CHECK 3b: RTMP port 1234 is LISTENING ==="
+          $rtmpListener = netstat -ano | Select-String "LISTENING" | Select-String "\b:1234\b"
+          if (-not $rtmpListener) {
+            Write-Host "Current port 1234 status:"
+            netstat -ano | Select-String ":1234"
+            Write-Host "Recent log file:"
+            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Write-Error "FAIL: RTMP port 1234 is NOT listening - RTMP server did not start"
+            exit 1
+          }
+          Write-Host "OK: RTMP port 1234 is listening"
+          Write-Host $rtmpListener
+
+          Write-Host "=== CHECK 4: API health endpoint responds ==="
           $maxRetries = 6
-          $success = $false
+          $healthOk = $false
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
-              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
-              Write-Host "API Status: OK"
-              Write-Host "Streaming event: $($response.streaming_event.name)"
-              $success = $true
+              $health = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 5
+              Write-Host "OK: API health check passed"
+              $healthOk = $true
               break
             } catch {
-              Write-Host "Attempt $i/$maxRetries : $_"
+              Write-Host "Attempt ${i}/${maxRetries}: API not ready - ${_}"
               Start-Sleep -Seconds 5
             }
           }
-          if (-not $success) {
-            # Show service status and recent logs for debugging
-            Get-Service -Name "RestreamerService" -ErrorAction SilentlyContinue | Format-List Name,Status,StartType
-            Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Format-Table TimeCreated,ProviderName,Message -Wrap
-            Write-Error "API not responding after service start"
+          if (-not $healthOk) {
+            Write-Error "FAIL: API health endpoint not responding"
             exit 1
           }
+
+          Write-Host "=== CHECK 5: API status endpoint works ==="
+          try {
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+            Write-Host "OK: Status API works - inpoint: $($status.inpoint_status)"
+          } catch {
+            Write-Error "FAIL: Status API not working - $_"
+            exit 1
+          }
+
+          Write-Host "=== CHECK 6: Database accessible (chunk stats) ==="
+          try {
+            $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunk-stats" -TimeoutSec 5
+            Write-Host "OK: Database accessible - chunks: $($stats.total_chunks)"
+          } catch {
+            Write-Error "FAIL: Chunk stats API not working - database may be locked"
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "ALL CHECKS PASSED - DEPLOYMENT SUCCESSFUL"
+          Write-Host "=========================================="
 
       - name: Verify WebView2 runtime installed
         shell: powershell
@@ -1049,27 +1053,6 @@ jobs:
             exit 1
           }
 
-      - name: Verify Windows Service is running
-        shell: powershell
-        run: |
-          $svc = Get-Service -Name "RestreamerService" -ErrorAction SilentlyContinue
-          if (-not $svc) {
-            Write-Error "RestreamerService not found"
-            exit 1
-          }
-          if ($svc.Status -ne "Running") {
-            Write-Error "RestreamerService is $($svc.Status), expected Running"
-            exit 1
-          }
-          Write-Host "RestreamerService: $($svc.Status)"
-
-          # Show service process info
-          $proc = Get-Process -Name "restreamer-service" -ErrorAction SilentlyContinue
-          if ($proc) {
-            $memMB = [math]::Round($proc.WorkingSet64 / 1MB, 1)
-            Write-Host "Service PID: $($proc.Id), Memory: ${memMB} MB"
-          }
-
   e2e-streaming-test:
     name: E2E Streaming Test
     needs: [deploy-stream-lan]
@@ -1077,16 +1060,26 @@ jobs:
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 10
     steps:
-      - name: Verify service is running
+      - name: Verify Restreamer is running
         shell: powershell
         run: |
-          $svc = Get-Service -Name "RestreamerService" -ErrorAction SilentlyContinue
-          if ($svc -and $svc.Status -eq "Running") {
-            Write-Host "RestreamerService is running"
+          $TaskName = "RestreamerGUI"
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($proc) {
+            Write-Host "Restreamer is running (PID: $($proc.Id), Session: $($proc.SessionId))"
           } else {
-            Write-Host "RestreamerService not running, starting it..."
-            Start-Service -Name "RestreamerService" -ErrorAction Stop
-            Start-Sleep -Seconds 5
+            Write-Host "Restreamer not running, starting via scheduled task..."
+            schtasks.exe /run /tn $TaskName
+            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+            Start-Sleep -Seconds 10
+            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $proc) {
+              throw "Failed to start Restreamer via scheduled task"
+            }
+            if ($proc.SessionId -eq 0) {
+              throw "Restreamer started in Session 0 (SYSTEM) - must run in user session"
+            }
+            Write-Host "Restreamer started (PID: $($proc.Id), Session: $($proc.SessionId))"
           }
 
       - name: Verify API is responding
@@ -1267,11 +1260,16 @@ jobs:
           [System.IO.File]::WriteAllText($configPath, $json)
           Write-Host "Config file updated with Hetzner settings"
 
-          # Restart the Windows Service to pick up new config
-          Restart-Service -Name "RestreamerService" -Force
-          Start-Sleep -Seconds 5
+          # Restart Restreamer via scheduled task to pick up new config
+          Write-Host "Restarting Restreamer via scheduled task..."
+          $TaskName = "RestreamerGUI"
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
+          Start-Sleep -Seconds 3
+          schtasks.exe /run /tn $TaskName
+          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+          Start-Sleep -Seconds 10
 
-          # Verify service is back up
+          # Verify Restreamer is back up
           $maxRetries = 15
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
@@ -1317,7 +1315,8 @@ jobs:
 
             Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
             Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-            Start-ScheduledTask -TaskName "Start OBS Studio"
+            schtasks.exe /run /tn "Start OBS Studio"
+            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start OBS Studio (exit code: $LASTEXITCODE)" }
             Start-Sleep -Seconds 10
 
             $obs = Get-Process obs64 -ErrorAction SilentlyContinue
@@ -1345,7 +1344,8 @@ jobs:
 
             Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
             Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-            Start-ScheduledTask -TaskName "Start OBS Studio"
+            schtasks.exe /run /tn "Start OBS Studio"
+            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start OBS Studio (exit code: $LASTEXITCODE)" }
             Start-Sleep -Seconds 10
 
             $obs = Get-Process obs64 -ErrorAction SilentlyContinue
@@ -2242,23 +2242,41 @@ jobs:
           }
           exit 0
 
-      - name: Cleanup sensitive config
+      - name: Verify production config is intact
         if: always()
         shell: powershell
         run: |
-          # Remove Hetzner API token from config file after E2E tests
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== CHECK 7: Hetzner API token present ==="
           $configPath = "C:\ProgramData\Restreamer\config.json"
-          if (Test-Path $configPath) {
-            $config = Get-Content $configPath -Raw | ConvertFrom-Json
-            if ($config.hetzner) {
-              $config.hetzner.api_token = ""
-              $json = $config | ConvertTo-Json -Depth 5
-              [System.IO.File]::WriteAllText($configPath, $json)
-              Write-Host "Hetzner API token removed from config"
-            }
-            # Restart service to pick up cleaned config
-            Restart-Service -Name "RestreamerService" -Force -ErrorAction SilentlyContinue
+          if (-not (Test-Path $configPath)) {
+            Write-Error "FAIL: Config file not found at $configPath"
+            exit 1
           }
+
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.hetzner -or [string]::IsNullOrWhiteSpace($config.hetzner.api_token)) {
+            Write-Error "FAIL: Hetzner API token is missing from production config"
+            Write-Host "Delivery functionality will fail without this token"
+            exit 1
+          }
+          Write-Host "OK: Hetzner API token present"
+
+          Write-Host "=== CHECK 8: Delivery API accessible ==="
+          try {
+            $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+            Write-Host "OK: Delivery API accessible - instances: $($instances.Count)"
+          } catch {
+            Write-Error "FAIL: Delivery API not working - DeliveryOrchestrator may not be available"
+            Write-Host "Error: $_"
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "PRODUCTION CONFIG VERIFIED"
+          Write-Host "=========================================="
 
   e2e-gate:
     name: E2E Gate

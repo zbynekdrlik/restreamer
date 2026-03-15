@@ -4,12 +4,12 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$ServiceName = "restreamer-service"
 $InstallDir = "C:\Program Files\Restreamer"
 $ConfigDir = "C:\ProgramData\Restreamer"
 $ConfigFile = "$ConfigDir\config.json"
 $GithubRepo = "zbynekdrlik/restreamer"
-$TrayAppName = "Restreamer"
+$AppName = "Restreamer"
+$TaskName = "RestreamerGUI"
 
 function Write-Status($msg) { Write-Host "  [*] $msg" -ForegroundColor Cyan }
 function Write-Ok($msg) { Write-Host "  [+] $msg" -ForegroundColor Green }
@@ -45,50 +45,36 @@ if (-not $latestRelease) {
 $version = $latestRelease.tag_name -replace "restreamer-v", ""
 Write-Ok "Latest version: $version"
 
-# --- Stop existing service and tray ---
-Write-Status "Stopping existing service and tray app..."
-$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($svc -and $svc.Status -eq "Running") {
-    Stop-Service -Name $ServiceName -Force
-    Write-Ok "Service stopped"
-}
-Get-Process -Name $TrayAppName -ErrorAction SilentlyContinue | Stop-Process -Force
+# --- Stop existing app ---
+Write-Status "Stopping existing Restreamer..."
+Get-Process -Name $AppName -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
+
+# --- Clean up stale SQLite WAL files ---
+Write-Status "Cleaning up stale database files..."
+Remove-Item "$ConfigDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
+Remove-Item "$ConfigDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
+
+# --- Remove legacy Windows service if it exists ---
+Write-Status "Removing legacy Windows service..."
+foreach ($name in @("RestreamerService", "restreamer-service")) {
+    $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+    if ($svc) {
+        if ($svc.Status -eq "Running") {
+            Stop-Service -Name $name -Force
+        }
+        sc.exe delete $name | Out-Null
+        Write-Ok "Removed legacy service: $name"
+    }
+}
+# Clean up old service binary
+Remove-Item "$InstallDir\restreamer-service.exe" -Force -ErrorAction SilentlyContinue
 
 # --- Create directories ---
 Write-Status "Creating directories..."
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
 New-Item -ItemType Directory -Path "$ConfigDir\chunks" -Force | Out-Null
-
-# --- Download service binary ---
-$serviceAsset = $latestRelease.assets | Where-Object { $_.name -like "restreamer-service-*-windows-x64.exe" } | Select-Object -First 1
-# Look for per-file .sha256 checksum (release creates restreamer-service-VERSION-windows-x64.exe.sha256)
-$checksumAsset = $latestRelease.assets | Where-Object { $_.name -eq "$($serviceAsset.name).sha256" } | Select-Object -First 1
-if ($serviceAsset) {
-    Write-Status "Downloading service binary..."
-    $servicePath = "$InstallDir\restreamer-service.exe"
-    Invoke-WebRequest -Uri $serviceAsset.browser_download_url -OutFile $servicePath
-    Write-Ok "Downloaded: $($serviceAsset.name)"
-
-    # Verify checksum if available
-    if ($checksumAsset) {
-        Write-Status "Verifying checksum..."
-        $checksumContent = (Invoke-WebRequest -Uri $checksumAsset.browser_download_url).Content.Trim()
-        $expectedHash = ($checksumContent -split '\s+')[0]
-        if ($expectedHash) {
-            $actualHash = (Get-FileHash -Path $servicePath -Algorithm SHA256).Hash.ToLower()
-            if ($actualHash -ne $expectedHash.ToLower()) {
-                Write-Err "Checksum mismatch for $($serviceAsset.name)! Expected: $expectedHash, Got: $actualHash"
-                exit 1
-            }
-            Write-Ok "Checksum verified"
-        }
-    }
-} else {
-    Write-Err "Service binary not found in release assets"
-    exit 1
-}
 
 # --- Ensure WebView2 runtime is installed ---
 Write-Status "Checking WebView2 runtime..."
@@ -165,41 +151,68 @@ if (-not (Test-Path $ConfigFile)) {
     $defaultConfig | ConvertTo-Json -Depth 3 | Set-Content -Path $ConfigFile -Encoding UTF8
     Write-Ok "Config created at $ConfigFile"
     Write-Host ""
-    Write-Host "  IMPORTANT: Edit $ConfigFile to set your S3 credentials" -ForegroundColor Yellow
+    Write-Host "  IMPORTANT: Edit $ConfigFile to configure:" -ForegroundColor Yellow
+    Write-Host "    - S3 credentials (s3.access_key_id, s3.secret_access_key)" -ForegroundColor Yellow
+    Write-Host "    - Hetzner API token (hetzner.api_token) for delivery functionality" -ForegroundColor Yellow
     Write-Host ""
 } else {
     Write-Ok "Existing config preserved at $ConfigFile"
 }
 
-# --- Register Windows service ---
-Write-Status "Registering Windows service..."
-$existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($existingSvc) {
-    sc.exe delete $ServiceName | Out-Null
-    Start-Sleep -Seconds 1
+# --- Setup scheduled task for auto-start ---
+Write-Status "Setting up auto-start..."
+$exePath = "$InstallDir\$AppName.exe"
+
+# Remove old scheduled tasks
+Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
+    Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
 }
-sc.exe create $ServiceName binPath= "`"$InstallDir\restreamer-service.exe`" `"$ConfigFile`"" start= auto DisplayName= "Restreamer Service" | Out-Null
-sc.exe description $ServiceName "Restreamer local client service - RTMP capture, chunk upload, manager sync" | Out-Null
-Write-Ok "Service registered"
 
-# --- Start service ---
-Write-Status "Starting service..."
-Start-Service -Name $ServiceName
-Write-Ok "Service started"
+# Create scheduled task for auto-start at login
+$action = New-ScheduledTaskAction -Execute $exePath -WorkingDirectory $InstallDir
+$trigger = New-ScheduledTaskTrigger -AtLogon
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
 
-# --- Launch tray app ---
-Write-Status "Launching tray app..."
-$trayPath = "$InstallDir\$TrayAppName.exe"
-if (Test-Path $trayPath) {
-    Start-Process -FilePath $trayPath
-    Write-Ok "Tray app launched"
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+Write-Ok "Scheduled task registered"
+
+# --- Start the app ---
+Write-Status "Starting Restreamer via scheduled task..."
+# Use schtasks.exe for cross-context reliability
+schtasks.exe /run /tn $TaskName
+Start-Sleep -Seconds 10
+
+# --- Verify deployment ---
+Write-Status "Verifying deployment..."
+
+$proc = Get-Process -Name $AppName -ErrorAction SilentlyContinue
+if (-not $proc) {
+    Write-Err "Restreamer process not running"
+    Write-Status "Restreamer will start on next login"
 } else {
-    Write-Status "Tray app not found at $trayPath"
+    Write-Ok "Process running (PID: $($proc.Id), Session: $($proc.SessionId))"
+
+    # Check port is listening
+    $listener = netstat -ano | Select-String "LISTENING" | Select-String ":8910"
+    if ($listener) {
+        Write-Ok "Port 8910 is listening"
+
+        # Check API health
+        try {
+            $health = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 5
+            Write-Ok "API health check passed"
+        } catch {
+            Write-Err "API health check failed - ServiceCore may not have started correctly"
+        }
+    } else {
+        Write-Err "Port 8910 not listening - ServiceCore may not have started correctly"
+    }
 }
 
 Write-Host ""
 Write-Host "  Installation complete! v$version" -ForegroundColor Green
-Write-Host "  Service: $ServiceName (running)" -ForegroundColor Green
+Write-Host "  App:     $InstallDir\$AppName.exe" -ForegroundColor Green
 Write-Host "  Config:  $ConfigFile" -ForegroundColor Green
 Write-Host "  API:     http://127.0.0.1:8910/api/v1/health" -ForegroundColor Green
 Write-Host ""

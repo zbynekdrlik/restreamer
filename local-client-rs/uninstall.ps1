@@ -3,10 +3,10 @@
 
 $ErrorActionPreference = "Stop"
 
-$ServiceName = "restreamer-service"
 $InstallDir = "C:\Program Files\Restreamer"
 $ConfigDir = "C:\ProgramData\Restreamer"
-$TrayAppName = "Restreamer"
+$AppName = "Restreamer"
+$TaskName = "RestreamerGUI"
 
 function Write-Status($msg) { Write-Host "  [*] $msg" -ForegroundColor Cyan }
 function Write-Ok($msg) { Write-Host "  [+] $msg" -ForegroundColor Green }
@@ -24,34 +24,40 @@ Write-Host "  Restreamer Uninstaller" -ForegroundColor Yellow
 Write-Host "  ======================" -ForegroundColor Yellow
 Write-Host ""
 
-# --- Stop and remove service ---
-Write-Status "Stopping service..."
-$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($svc) {
-    if ($svc.Status -eq "Running") {
-        Stop-Service -Name $ServiceName -Force
-        Write-Ok "Service stopped"
-    }
-    sc.exe delete $ServiceName | Out-Null
-    Write-Ok "Service removed"
-} else {
-    Write-Ok "Service not found (already removed)"
+# --- Stop app ---
+Write-Status "Stopping Restreamer..."
+Get-Process -Name $AppName -ErrorAction SilentlyContinue | Stop-Process -Force
+Write-Ok "Restreamer stopped"
+
+# --- Remove scheduled task ---
+Write-Status "Removing scheduled task..."
+Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
+    Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Write-Ok "Removed task: $($_.TaskName)"
 }
 
-# --- Kill tray app ---
-Write-Status "Stopping tray app..."
-Get-Process -Name $TrayAppName -ErrorAction SilentlyContinue | Stop-Process -Force
-Write-Ok "Tray app stopped"
+# --- Remove legacy Windows service if it exists ---
+Write-Status "Removing legacy Windows service..."
+foreach ($name in @("RestreamerService", "restreamer-service")) {
+    $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+    if ($svc) {
+        if ($svc.Status -eq "Running") {
+            Stop-Service -Name $name -Force
+        }
+        sc.exe delete $name | Out-Null
+        Write-Ok "Removed legacy service: $name"
+    }
+}
 
-# --- Remove service binary ---
-Write-Status "Removing service binary..."
+# --- Remove install directory ---
+Write-Status "Removing install directory..."
 if (Test-Path $InstallDir) {
     Remove-Item -Path $InstallDir -Recurse -Force
     Write-Ok "Removed $InstallDir"
 }
 
 # --- Remove Tauri app via uninstaller ---
-$uninstaller = "$env:LOCALAPPDATA\$TrayAppName\uninstall.exe"
+$uninstaller = "$env:LOCALAPPDATA\$AppName\uninstall.exe"
 if (Test-Path $uninstaller) {
     Write-Status "Running Tauri uninstaller..."
     Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait
