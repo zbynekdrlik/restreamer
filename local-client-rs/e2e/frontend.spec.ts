@@ -12,9 +12,9 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript(tauriMockScript);
 });
 
-// --- Dashboard tab ---
+// --- Dashboard route (/) ---
 
-test.describe("Dashboard tab", () => {
+test.describe("Dashboard route", () => {
   test("renders header with Restreamer title and version", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator("h1")).toHaveText("Restreamer");
@@ -22,27 +22,30 @@ test.describe("Dashboard tab", () => {
     await expect(page.locator(".version")).toContainText("v");
   });
 
-  test("shows 4 tab buttons", async ({ page }) => {
+  test("shows 4 navigation links", async ({ page }) => {
     await page.goto("/");
-    const tabs = page.locator(".tabs button.tab");
-    await expect(tabs).toHaveCount(4);
-    await expect(tabs.nth(0)).toHaveText("Dashboard");
-    await expect(tabs.nth(1)).toHaveText("Events");
-    await expect(tabs.nth(2)).toHaveText("Endpoints");
-    await expect(tabs.nth(3)).toHaveText("Logs");
+    const links = page.locator(".nav-bar .nav-link");
+    await expect(links).toHaveCount(4);
+    await expect(links.nth(0)).toHaveText("Dashboard");
+    await expect(links.nth(1)).toHaveText("Events");
+    await expect(links.nth(2)).toHaveText("Endpoints");
+    await expect(links.nth(3)).toHaveText("Logs");
   });
 
-  test("Dashboard tab is active by default", async ({ page }) => {
+  test("Dashboard link is active by default", async ({ page }) => {
     await page.goto("/");
-    const dashTab = page.locator('.tabs button.tab:has-text("Dashboard")');
-    await expect(dashTab).toHaveClass(/active/);
+    const dashLink = page.locator('.nav-bar .nav-link:has-text("Dashboard")');
+    await expect(dashLink).toHaveAttribute("aria-current", "page");
   });
 
-  test('shows "Loading..." initially, then content after API response', async ({
-    page,
-  }) => {
+  test("shows WebSocket connection status", async ({ page }) => {
     await page.goto("/");
-    // After Tauri mock resolves, should show status grid
+    await expect(page.locator(".ws-status")).toBeVisible();
+    await expect(page.locator(".ws-status .status-indicator")).toBeVisible();
+  });
+
+  test("shows status grid after WebSocket/API data loads", async ({ page }) => {
+    await page.goto("/");
     await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
   });
 
@@ -75,22 +78,26 @@ test.describe("Dashboard tab", () => {
   });
 });
 
-// --- Events tab ---
+// --- Events route (/events) ---
 
-test.describe("Events tab", () => {
-  test("clicking Events tab switches view", async ({ page }) => {
+test.describe("Events route", () => {
+  test("navigating to Events shows events view", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Events")');
+    await page.click('.nav-link:has-text("Events")');
     await expect(page.locator(".events-tab")).toBeVisible();
     await expect(page.locator(".events-tab h2")).toHaveText("Streaming Events");
   });
 
+  test("direct navigation to /events works", async ({ page }) => {
+    await page.goto("/events");
+    await expect(page.locator(".events-tab")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator(".events-tab h2")).toHaveText("Streaming Events");
+  });
+
   test("displays event list from API", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Events")');
-    await expect(page.locator(".event-list")).toBeVisible();
+    await page.goto("/events");
+    await expect(page.locator(".event-list")).toBeVisible({ timeout: 10000 });
     // Two events from mock data
     await expect(page.locator(".events-tab .event-card")).toHaveCount(2);
     await expect(page.locator(".events-tab .event-card").first()).toContainText(
@@ -102,9 +109,8 @@ test.describe("Events tab", () => {
   });
 
   test("shows create form with input and button", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Events")');
+    await page.goto("/events");
+    await expect(page.locator(".events-tab")).toBeVisible({ timeout: 10000 });
     await expect(
       page.locator('.events-tab .create-form input[type="text"]'),
     ).toBeVisible();
@@ -114,9 +120,8 @@ test.describe("Events tab", () => {
   });
 
   test("shows receiving/delivering badges per event", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Events")');
+    await page.goto("/events");
+    await expect(page.locator(".event-list")).toBeVisible({ timeout: 10000 });
     // First event has receiving_activated=true
     const firstEvent = page.locator(".events-tab .event-card").first();
     await expect(firstEvent.locator(".badge.active")).toContainText([
@@ -130,9 +135,8 @@ test.describe("Events tab", () => {
   test("shows Activate/Start Delivering/Deactivate buttons", async ({
     page,
   }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Events")');
+    await page.goto("/events");
+    await expect(page.locator(".event-list")).toBeVisible({ timeout: 10000 });
     const firstEvent = page.locator(".events-tab .event-card").first();
     const actions = firstEvent.locator(".event-actions button");
     await expect(actions).toHaveCount(3);
@@ -142,9 +146,8 @@ test.describe("Events tab", () => {
   });
 
   test("shows assigned endpoints section", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Events")');
+    await page.goto("/events");
+    await expect(page.locator(".event-list")).toBeVisible({ timeout: 10000 });
     const firstEvent = page.locator(".events-tab .event-card").first();
     await expect(firstEvent.locator(".assigned-endpoints")).toBeVisible();
     await expect(firstEvent.locator(".assigned-label")).toHaveText(
@@ -153,9 +156,8 @@ test.describe("Events tab", () => {
   });
 
   test("shows assigned endpoint with service badge", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Events")');
+    await page.goto("/events");
+    await expect(page.locator(".event-list")).toBeVisible({ timeout: 10000 });
     const firstEvent = page.locator(".events-tab .event-card").first();
     // First event has YouTube Main assigned in mock data
     await expect(firstEvent.locator(".assigned-ep")).toBeVisible({
@@ -168,9 +170,8 @@ test.describe("Events tab", () => {
   });
 
   test("shows assign endpoint dropdown", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Events")');
+    await page.goto("/events");
+    await expect(page.locator(".event-list")).toBeVisible({ timeout: 10000 });
     const firstEvent = page.locator(".events-tab .event-card").first();
     await expect(firstEvent.locator(".assign-form select")).toBeVisible();
     await expect(
@@ -179,32 +180,38 @@ test.describe("Events tab", () => {
   });
 
   test("second event shows None for assigned endpoints", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Events")');
+    await page.goto("/events");
+    await expect(page.locator(".event-list")).toBeVisible({ timeout: 10000 });
     const secondEvent = page.locator(".events-tab .event-card").nth(1);
     await expect(secondEvent.locator(".empty-inline")).toHaveText("None");
   });
 });
 
-// --- Endpoints tab ---
+// --- Endpoints route (/endpoints) ---
 
-test.describe("Endpoints tab", () => {
-  test("clicking Endpoints tab switches view", async ({ page }) => {
+test.describe("Endpoints route", () => {
+  test("navigating to Endpoints shows endpoints view", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Endpoints")');
+    await page.click('.nav-link:has-text("Endpoints")');
     await expect(page.locator(".endpoints-tab")).toBeVisible();
     await expect(page.locator(".endpoints-tab h2")).toHaveText(
       "Endpoint Configurations",
     );
   });
 
+  test("direct navigation to /endpoints works", async ({ page }) => {
+    await page.goto("/endpoints");
+    await expect(page.locator(".endpoints-tab")).toBeVisible({
+      timeout: 10000,
+    });
+  });
+
   test("displays endpoint list from API", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Endpoints")');
-    await expect(page.locator(".endpoint-list")).toBeVisible();
+    await page.goto("/endpoints");
+    await expect(page.locator(".endpoint-list")).toBeVisible({
+      timeout: 10000,
+    });
     await expect(page.locator(".endpoint-card")).toHaveCount(2);
     await expect(page.locator(".endpoint-card").first()).toContainText(
       "YouTube Main",
@@ -217,9 +224,10 @@ test.describe("Endpoints tab", () => {
   test("shows create form with alias, service type dropdown, and stream key", async ({
     page,
   }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Endpoints")');
+    await page.goto("/endpoints");
+    await expect(page.locator(".endpoints-tab")).toBeVisible({
+      timeout: 10000,
+    });
     const form = page.locator(".endpoints-tab .create-form");
     await expect(form.locator('input[type="text"]')).toHaveCount(2);
     await expect(form.locator("select")).toBeVisible();
@@ -227,9 +235,10 @@ test.describe("Endpoints tab", () => {
   });
 
   test("service type dropdown has all options", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Endpoints")');
+    await page.goto("/endpoints");
+    await expect(page.locator(".endpoints-tab")).toBeVisible({
+      timeout: 10000,
+    });
     const options = page.locator(".endpoints-tab .create-form select option");
     await expect(options).toHaveCount(6);
     const values = await options.evaluateAll((opts) =>
@@ -246,9 +255,10 @@ test.describe("Endpoints tab", () => {
   });
 
   test("displays enabled/disabled and Fast badges", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Endpoints")');
+    await page.goto("/endpoints");
+    await expect(page.locator(".endpoint-list")).toBeVisible({
+      timeout: 10000,
+    });
     // First endpoint: enabled=true
     const first = page.locator(".endpoint-card").first();
     await expect(first.locator(".badge.active")).toContainText("Enabled");
@@ -259,9 +269,10 @@ test.describe("Endpoints tab", () => {
   });
 
   test("shows service type label", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Endpoints")');
+    await page.goto("/endpoints");
+    await expect(page.locator(".endpoint-list")).toBeVisible({
+      timeout: 10000,
+    });
     await expect(
       page.locator(".endpoint-card").first().locator(".service-type"),
     ).toContainText("YT_HLS");
@@ -271,9 +282,10 @@ test.describe("Endpoints tab", () => {
   });
 
   test("shows delete button per endpoint", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Endpoints")');
+    await page.goto("/endpoints");
+    await expect(page.locator(".endpoint-list")).toBeVisible({
+      timeout: 10000,
+    });
     const deleteButtons = page.locator(
       '.endpoint-actions button:has-text("Delete")',
     );
@@ -281,20 +293,23 @@ test.describe("Endpoints tab", () => {
   });
 });
 
-// --- Logs tab ---
+// --- Logs route (/logs) ---
 
-test.describe("Logs tab", () => {
-  test("clicking Logs tab switches view", async ({ page }) => {
+test.describe("Logs route", () => {
+  test("navigating to Logs shows log viewer", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Logs")');
+    await page.click('.nav-link:has-text("Logs")');
+    await expect(page.locator(".log-viewer")).toBeVisible({ timeout: 10000 });
+  });
+
+  test("direct navigation to /logs works", async ({ page }) => {
+    await page.goto("/logs");
     await expect(page.locator(".log-viewer")).toBeVisible({ timeout: 10000 });
   });
 
   test("displays log entries with level, target, message", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Logs")');
+    await page.goto("/logs");
     await expect(page.locator(".log-viewer")).toBeVisible({ timeout: 10000 });
     // Should have log entries
     const entries = page.locator(".log-entry");
@@ -305,9 +320,7 @@ test.describe("Logs tab", () => {
   });
 
   test("color-codes log levels", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Logs")');
+    await page.goto("/logs");
     await expect(page.locator(".log-viewer")).toBeVisible({ timeout: 10000 });
     // INFO level should have success color
     const infoLevel = page.locator(".log-level.INFO").first();
@@ -318,45 +331,74 @@ test.describe("Logs tab", () => {
   });
 
   test("shows WARN and ERROR levels", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    await page.click('.tab:has-text("Logs")');
+    await page.goto("/logs");
     await expect(page.locator(".log-viewer")).toBeVisible({ timeout: 10000 });
     await expect(page.locator(".log-level.WARN")).toBeVisible();
     await expect(page.locator(".log-level.ERROR")).toBeVisible();
   });
 });
 
-// --- Tab navigation ---
+// --- Route navigation ---
 
-test.describe("Tab navigation", () => {
-  test("switching between all tabs works", async ({ page }) => {
+test.describe("Route navigation", () => {
+  test("switching between all routes works", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
 
-    // Switch to each tab and verify content
-    await page.click('.tab:has-text("Events")');
+    // Switch to each route and verify content
+    await page.click('.nav-link:has-text("Events")');
     await expect(page.locator(".events-tab")).toBeVisible();
 
-    await page.click('.tab:has-text("Endpoints")');
+    await page.click('.nav-link:has-text("Endpoints")');
     await expect(page.locator(".endpoints-tab")).toBeVisible();
 
-    await page.click('.tab:has-text("Logs")');
+    await page.click('.nav-link:has-text("Logs")');
     await expect(page.locator(".log-viewer")).toBeVisible({ timeout: 10000 });
 
     // Back to dashboard
-    await page.click('.tab:has-text("Dashboard")');
+    await page.click('.nav-link:has-text("Dashboard")');
     await expect(page.locator(".status-grid")).toBeVisible();
   });
 
-  test("active tab has active class", async ({ page }) => {
+  test("active route link has aria-current attribute", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
 
-    await page.click('.tab:has-text("Events")');
-    await expect(page.locator('.tab:has-text("Events")')).toHaveClass(/active/);
-    await expect(page.locator('.tab:has-text("Dashboard")')).not.toHaveClass(
-      /active/,
+    await page.click('.nav-link:has-text("Events")');
+    await expect(page.locator('.nav-link:has-text("Events")')).toHaveAttribute(
+      "aria-current",
+      "page",
     );
+    await expect(
+      page.locator('.nav-link:has-text("Dashboard")'),
+    ).not.toHaveAttribute("aria-current", "page");
+  });
+
+  test("browser back button works after route change", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
+
+    await page.click('.nav-link:has-text("Events")');
+    await expect(page.locator(".events-tab")).toBeVisible();
+
+    await page.goBack();
+    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
+  });
+
+  test("URL changes when navigating between routes", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
+
+    await page.click('.nav-link:has-text("Events")');
+    await expect(page).toHaveURL(/\/events/);
+
+    await page.click('.nav-link:has-text("Endpoints")');
+    await expect(page).toHaveURL(/\/endpoints/);
+
+    await page.click('.nav-link:has-text("Logs")');
+    await expect(page).toHaveURL(/\/logs/);
+
+    await page.click('.nav-link:has-text("Dashboard")');
+    await expect(page).toHaveURL(/\/$/);
   });
 });

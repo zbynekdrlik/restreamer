@@ -1,8 +1,9 @@
-//! Endpoint configs management component.
+//! Endpoint configs management component reading from the global store.
 
 use leptos::prelude::*;
 
 use crate::api::{self, UpdateEndpointRequest};
+use crate::store::DashboardStore;
 
 /// Reusable service type options for select dropdowns.
 #[component]
@@ -19,10 +20,10 @@ fn ServiceTypeOptions() -> impl IntoView {
     }
 }
 
-/// Endpoints tab: list, create, edit endpoint configurations.
+/// Endpoints view: list, create, edit endpoint configurations.
 #[component]
-pub fn Endpoints() -> impl IntoView {
-    let (endpoints, set_endpoints) = signal::<Vec<api::EndpointConfig>>(Vec::new());
+pub fn EndpointsView() -> impl IntoView {
+    let store = use_context::<DashboardStore>().expect("DashboardStore not provided");
     let (error, set_error) = signal::<Option<String>>(None);
     let (new_alias, set_new_alias) = signal(String::new());
     let (new_type, set_new_type) = signal("YT_HLS".to_string());
@@ -38,12 +39,11 @@ pub fn Endpoints() -> impl IntoView {
     let (saving, set_saving) = signal(false);
     let (show_edit_key, set_show_edit_key) = signal(false);
 
-    // Fetch on mount
+    // Refresh on mount
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            match api::list_endpoints().await {
-                Ok(eps) => set_endpoints.set(eps),
-                Err(e) => set_error.set(Some(e)),
+            if let Ok(eps) = api::list_endpoints().await {
+                store.endpoints_list.set(eps);
             }
         });
     });
@@ -61,7 +61,7 @@ pub fn Endpoints() -> impl IntoView {
                     set_new_alias.set(String::new());
                     set_new_key.set(String::new());
                     if let Ok(eps) = api::list_endpoints().await {
-                        set_endpoints.set(eps);
+                        store.endpoints_list.set(eps);
                     }
                 }
                 Err(e) => set_error.set(Some(e)),
@@ -115,7 +115,7 @@ pub fn Endpoints() -> impl IntoView {
                     set_error.set(None);
                     set_show_edit_key.set(false);
                     if let Ok(eps) = api::list_endpoints().await {
-                        set_endpoints.set(eps);
+                        store.endpoints_list.set(eps);
                     }
                 }
                 Err(e) => set_error.set(Some(format!("Update failed: {e}"))),
@@ -155,7 +155,7 @@ pub fn Endpoints() -> impl IntoView {
             </div>
 
             <div class="endpoint-list">
-                {move || endpoints.get().into_iter().map(|ep| {
+                {move || store.endpoints_list.get().into_iter().map(|ep| {
                     let id = ep.id;
                     let enabled = ep.enabled;
                     let is_fast = ep.is_fast;
@@ -167,7 +167,6 @@ pub fn Endpoints() -> impl IntoView {
                         <div class="endpoint-card">
                             {move || {
                                 if editing_id.get() == Some(id) {
-                                    // Edit mode
                                     view! {
                                         <div class="endpoint-edit-form">
                                             <div class="edit-row">
@@ -235,7 +234,6 @@ pub fn Endpoints() -> impl IntoView {
                                         </div>
                                     }.into_any()
                                 } else {
-                                    // View mode
                                     let ep_clone = ep_for_edit.clone();
                                     view! {
                                         <>
@@ -253,7 +251,7 @@ pub fn Endpoints() -> impl IntoView {
                                                     leptos::task::spawn_local(async move {
                                                         let _ = api::delete_endpoint(id).await;
                                                         if let Ok(eps) = api::list_endpoints().await {
-                                                            set_endpoints.set(eps);
+                                                            store.endpoints_list.set(eps);
                                                         }
                                                     });
                                                 }>"Delete"</button>

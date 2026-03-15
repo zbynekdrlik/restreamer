@@ -1,0 +1,247 @@
+//! WebSocket client with auto-reconnect and event dispatch.
+//!
+//! Connects to `/api/v1/ws`, deserializes `WsEvent` messages, and
+//! dispatches them to the corresponding signals in `DashboardStore`.
+
+use gloo_net::websocket::futures::WebSocket;
+use gloo_net::websocket::Message;
+use gloo_timers::callback::Timeout;
+use leptos::prelude::*;
+use serde::Deserialize;
+use wasm_bindgen_futures::spawn_local;
+
+use crate::api;
+use crate::store::DashboardStore;
+
+/// Tagged WsEvent matching the backend's `#[serde(tag = "type", content = "data")]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum WsEvent {
+    InpointStatus {
+        #[allow(dead_code)]
+        state: String,
+        rtmp_connected: bool,
+        received_bytes: u64,
+        chunk_count: u64,
+    },
+    EndpointStatus {
+        #[allow(dead_code)]
+        state: String,
+        pending_chunks: u64,
+        active_uploads: u32,
+        buffer_duration: String,
+    },
+    ChunkReceived {
+        #[allow(dead_code)]
+        id: i64,
+        data_size: i64,
+        #[allow(dead_code)]
+        md5: String,
+    },
+    ChunkUploaded {
+        #[allow(dead_code)]
+        chunk_id: i64,
+    },
+    StreamingEvent {
+        #[allow(dead_code)]
+        action: String,
+        #[allow(dead_code)]
+        name: Option<String>,
+        receiving: bool,
+        delivering: bool,
+    },
+    DeliveryStatus {
+        #[allow(dead_code)]
+        instance_name: String,
+        #[allow(dead_code)]
+        status: String,
+        #[allow(dead_code)]
+        endpoint_count: u32,
+    },
+    Error {
+        service: String,
+        message: String,
+    },
+}
+
+/// Compute the WebSocket URL from the current page location.
+fn ws_url() -> String {
+    let location = gloo_utils::window().location();
+    let protocol = location.protocol().unwrap_or_else(|_| "http:".into());
+    let ws_proto = if protocol == "https:" { "wss:" } else { "ws:" };
+    let host = location.host().unwrap_or_else(|_| "127.0.0.1:8910".into());
+
+    // In Tauri, location is tauri://localhost — use direct address
+    if protocol == "tauri:" {
+        return "ws://127.0.0.1:8910/api/v1/ws".into();
+    }
+
+    format!("{ws_proto}//{host}/api/v1/ws")
+}
+
+/// Fetch the initial status from HTTP and populate the store.
+async fn load_initial_state(store: DashboardStore) {
+    if let Ok(status) = api::get_status().await {
+        store.inpoint_connected.set(status.inpoint_connected);
+        store.chunk_stats.set(status.chunk_stats);
+        store.streaming_event.set(status.streaming_event);
+    }
+    if let Ok(events) = api::list_events().await {
+        store.events_list.set(events);
+    }
+    if let Ok(endpoints) = api::list_endpoints().await {
+        store.endpoints_list.set(endpoints);
+    }
+}
+
+/// Dispatch a single WebSocket event to the store.
+fn dispatch_event(store: DashboardStore, event: WsEvent) {
+    match event {
+        WsEvent::InpointStatus {
+            rtmp_connected,
+            received_bytes,
+            chunk_count,
+            ..
+        } => {
+            store.inpoint_connected.set(rtmp_connected);
+            // Update chunk stats with live received data
+            store.chunk_stats.update(|stats| {
+                // received_bytes comes from the total on the event
+                let _ = received_bytes;
+                stats.total_chunks = chunk_count as i64;
+            });
+        }
+        WsEvent::EndpointStatus {
+            pending_chunks,
+            active_uploads,
+            buffer_duration,
+            ..
+        } => {
+            store.chunk_stats.update(|stats| {
+                stats.pending_chunks = pending_chunks as i64;
+                stats.in_process_chunks = active_uploads as i64;
+                // Parse buffer_duration from HH:MM:SS to seconds
+                let secs = parse_duration(&buffer_duration);
+                stats.buffer_duration_secs = secs;
+            });
+        }
+        WsEvent::ChunkReceived { data_size, .. } => {
+            store.chunk_stats.update(|stats| {
+                stats.total_chunks += 1;
+                stats.pending_chunks += 1;
+                stats.total_bytes += data_size;
+            });
+        }
+        WsEvent::ChunkUploaded { .. } => {
+            store.chunk_stats.update(|stats| {
+                if stats.pending_chunks > 0 {
+                    stats.pending_chunks -= 1;
+                }
+                stats.sent_chunks += 1;
+            });
+        }
+        WsEvent::StreamingEvent {
+            receiving,
+            delivering,
+            ..
+        } => {
+            // Update the streaming event's flags in-place
+            store.streaming_event.update(|evt| {
+                if let Some(e) = evt.as_mut() {
+                    e.receiving_activated = receiving;
+                    e.delivering_activated = delivering;
+                }
+            });
+            // Refresh the full events list from HTTP
+            spawn_local(async move {
+                if let Ok(events) = api::list_events().await {
+                    store.events_list.set(events);
+                }
+                // Also refresh current streaming event
+                if let Ok(evt) = api::get_streaming_event().await {
+                    store.streaming_event.set(evt);
+                }
+            });
+        }
+        WsEvent::DeliveryStatus { .. } => {
+            // Delivery status updates — could extend store later
+        }
+        WsEvent::Error { service, message } => {
+            store.push_error(service, message);
+        }
+    }
+}
+
+/// Parse "HH:MM:SS" into f64 seconds.
+fn parse_duration(s: &str) -> f64 {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() == 3 {
+        let h: f64 = parts[0].parse().unwrap_or(0.0);
+        let m: f64 = parts[1].parse().unwrap_or(0.0);
+        let s: f64 = parts[2].parse().unwrap_or(0.0);
+        h * 3600.0 + m * 60.0 + s
+    } else {
+        0.0
+    }
+}
+
+/// Start the WebSocket connection with auto-reconnect.
+///
+/// Should be called once on app mount. Will reconnect on disconnection
+/// with exponential backoff (1s → 2s → 4s → 8s → max 30s).
+pub fn connect_websocket(store: DashboardStore) {
+    connect_with_backoff(store, 1000);
+}
+
+fn connect_with_backoff(store: DashboardStore, delay_ms: u32) {
+    use futures::StreamExt;
+
+    let url = ws_url();
+
+    let ws = match WebSocket::open(&url) {
+        Ok(ws) => {
+            store.ws_connected.set(true);
+            ws
+        }
+        Err(_) => {
+            store.ws_connected.set(false);
+            schedule_reconnect(store, delay_ms);
+            return;
+        }
+    };
+
+    let (_write, mut read) = ws.split();
+
+    // Load initial state on connect
+    spawn_local(load_initial_state(store));
+
+    spawn_local(async move {
+        while let Some(msg) = read.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    if let Ok(event) = serde_json::from_str::<WsEvent>(&text) {
+                        dispatch_event(store, event);
+                    }
+                }
+                Ok(Message::Bytes(_)) => {
+                    // Binary messages not expected
+                }
+                Err(_) => {
+                    break;
+                }
+            }
+        }
+
+        // Disconnected — reconnect
+        store.ws_connected.set(false);
+        schedule_reconnect(store, 1000);
+    });
+}
+
+fn schedule_reconnect(store: DashboardStore, delay_ms: u32) {
+    let next_delay = (delay_ms * 2).min(30_000);
+    let timeout = Timeout::new(delay_ms, move || {
+        connect_with_backoff(store, next_delay);
+    });
+    timeout.forget();
+}
