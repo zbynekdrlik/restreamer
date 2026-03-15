@@ -212,6 +212,29 @@ jobs:
             Write-Host "Installed: $($installer.Name)"
           }
 
+      - name: Configure Hetzner credentials
+        shell: powershell
+        env:
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $configPath = "C:\ProgramData\Restreamer\config.json"
+
+          if (-not (Test-Path $configPath)) {
+            Write-Error "Config file not found at $configPath"
+            exit 1
+          }
+
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.hetzner) {
+            $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue @{} -Force
+          }
+          $config.hetzner.api_token = $env:HETZNER_API_TOKEN
+
+          $json = $config | ConvertTo-Json -Depth 10
+          [System.IO.File]::WriteAllText($configPath, $json)
+          Write-Host "Hetzner API token configured"
+
       - name: Deploy and start Restreamer
         shell: powershell
         run: |

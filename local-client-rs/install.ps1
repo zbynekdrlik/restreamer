@@ -151,7 +151,9 @@ if (-not (Test-Path $ConfigFile)) {
     $defaultConfig | ConvertTo-Json -Depth 3 | Set-Content -Path $ConfigFile -Encoding UTF8
     Write-Ok "Config created at $ConfigFile"
     Write-Host ""
-    Write-Host "  IMPORTANT: Edit $ConfigFile to set your S3 credentials" -ForegroundColor Yellow
+    Write-Host "  IMPORTANT: Edit $ConfigFile to configure:" -ForegroundColor Yellow
+    Write-Host "    - S3 credentials (s3.access_key_id, s3.secret_access_key)" -ForegroundColor Yellow
+    Write-Host "    - Hetzner API token (hetzner.api_token) for delivery functionality" -ForegroundColor Yellow
     Write-Host ""
 } else {
     Write-Ok "Existing config preserved at $ConfigFile"

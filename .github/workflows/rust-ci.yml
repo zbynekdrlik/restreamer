@@ -2224,29 +2224,41 @@ jobs:
           }
           exit 0
 
-      - name: Cleanup sensitive config
+      - name: Verify production config is intact
         if: always()
         shell: powershell
         run: |
-          $ErrorActionPreference = "Continue"
-          # Remove Hetzner API token from config file after E2E tests
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== CHECK 7: Hetzner API token present ==="
           $configPath = "C:\ProgramData\Restreamer\config.json"
-          if (Test-Path $configPath) {
-            $config = Get-Content $configPath -Raw | ConvertFrom-Json
-            if ($config.hetzner) {
-              $config.hetzner.api_token = ""
-              $json = $config | ConvertTo-Json -Depth 5
-              [System.IO.File]::WriteAllText($configPath, $json)
-              Write-Host "Hetzner API token removed from config"
-            }
-            # Restart Restreamer via scheduled task to pick up cleaned config
-            $TaskName = "RestreamerGUI"
-            $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-            Start-Sleep -Seconds 3
-            Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+          if (-not (Test-Path $configPath)) {
+            Write-Error "FAIL: Config file not found at $configPath"
+            exit 1
           }
-          # Always exit success for cleanup step
-          exit 0
+
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.hetzner -or [string]::IsNullOrWhiteSpace($config.hetzner.api_token)) {
+            Write-Error "FAIL: Hetzner API token is missing from production config"
+            Write-Host "Delivery functionality will fail without this token"
+            exit 1
+          }
+          Write-Host "OK: Hetzner API token present (length: $($config.hetzner.api_token.Length))"
+
+          Write-Host "=== CHECK 8: Delivery API accessible ==="
+          try {
+            $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+            Write-Host "OK: Delivery API accessible - instances: $($instances.Count)"
+          } catch {
+            Write-Error "FAIL: Delivery API not working - DeliveryOrchestrator may not be available"
+            Write-Host "Error: $_"
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "PRODUCTION CONFIG VERIFIED"
+          Write-Host "=========================================="
 
   e2e-gate:
     name: E2E Gate
