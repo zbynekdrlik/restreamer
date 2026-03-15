@@ -909,6 +909,7 @@ jobs:
           Write-Host "=== Step 4: Start Restreamer in user session ==="
           # Use schtasks.exe instead of Start-ScheduledTask for cross-context reliability
           schtasks.exe /run /tn $TaskName
+          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
           Start-Sleep -Seconds 10
 
           Write-Host "=== Deployment steps complete ==="
@@ -919,7 +920,7 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           Write-Host "=== CHECK 1: Process is running ==="
-          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $proc) {
             Write-Host "Process not running, showing recent event log entries:"
             Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Format-Table TimeCreated,ProviderName,Message -Wrap
@@ -936,10 +937,10 @@ jobs:
           Write-Host "OK: Running in user session $($proc.SessionId) - tray icon visible"
 
           Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
-          $listener = netstat -ano | Select-String "LISTENING" | Select-String ":8910"
+          $listener = netstat -ano | Select-String "LISTENING" | Select-String "\b:8910\b"
           if (-not $listener) {
             Write-Host "Current port status:"
-            netstat -ano | Select-String ":8910"
+            netstat -ano | Select-String "\b:8910\b"
             Write-Host "Recent log file:"
             Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
             Write-Error "FAIL: Port 8910 is NOT listening - ServiceCore did not start"
@@ -947,6 +948,19 @@ jobs:
           }
           Write-Host "OK: Port 8910 is listening"
           Write-Host $listener
+
+          Write-Host "=== CHECK 3b: RTMP port 1234 is LISTENING ==="
+          $rtmpListener = netstat -ano | Select-String "LISTENING" | Select-String "\b:1234\b"
+          if (-not $rtmpListener) {
+            Write-Host "Current port 1234 status:"
+            netstat -ano | Select-String ":1234"
+            Write-Host "Recent log file:"
+            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Write-Error "FAIL: RTMP port 1234 is NOT listening - RTMP server did not start"
+            exit 1
+          }
+          Write-Host "OK: RTMP port 1234 is listening"
+          Write-Host $rtmpListener
 
           Write-Host "=== CHECK 4: API health endpoint responds ==="
           $maxRetries = 6
@@ -1050,14 +1064,15 @@ jobs:
         shell: powershell
         run: |
           $TaskName = "RestreamerGUI"
-          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($proc) {
             Write-Host "Restreamer is running (PID: $($proc.Id), Session: $($proc.SessionId))"
           } else {
             Write-Host "Restreamer not running, starting via scheduled task..."
-            Start-ScheduledTask -TaskName $TaskName
+            schtasks.exe /run /tn $TaskName
+            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
             Start-Sleep -Seconds 10
-            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
             if (-not $proc) {
               throw "Failed to start Restreamer via scheduled task"
             }
@@ -1250,7 +1265,8 @@ jobs:
           $TaskName = "RestreamerGUI"
           $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
           Start-Sleep -Seconds 3
-          Start-ScheduledTask -TaskName $TaskName
+          schtasks.exe /run /tn $TaskName
+          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
           Start-Sleep -Seconds 10
 
           # Verify Restreamer is back up
@@ -1299,7 +1315,8 @@ jobs:
 
             Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
             Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-            Start-ScheduledTask -TaskName "Start OBS Studio"
+            schtasks.exe /run /tn "Start OBS Studio"
+            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start OBS Studio (exit code: $LASTEXITCODE)" }
             Start-Sleep -Seconds 10
 
             $obs = Get-Process obs64 -ErrorAction SilentlyContinue
@@ -1327,7 +1344,8 @@ jobs:
 
             Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
             Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-            Start-ScheduledTask -TaskName "Start OBS Studio"
+            schtasks.exe /run /tn "Start OBS Studio"
+            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start OBS Studio (exit code: $LASTEXITCODE)" }
             Start-Sleep -Seconds 10
 
             $obs = Get-Process obs64 -ErrorAction SilentlyContinue
@@ -2243,7 +2261,7 @@ jobs:
             Write-Host "Delivery functionality will fail without this token"
             exit 1
           }
-          Write-Host "OK: Hetzner API token present (length: $($config.hetzner.api_token.Length))"
+          Write-Host "OK: Hetzner API token present"
 
           Write-Host "=== CHECK 8: Delivery API accessible ==="
           try {

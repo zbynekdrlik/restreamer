@@ -70,6 +70,11 @@ impl ServiceCore {
     ///
     /// When set, `run_with_signal()` will use this pool instead of creating a new one.
     /// This is essential for GUI mode where the Tauri app already created a pool for AppState.
+    ///
+    /// # Precondition
+    ///
+    /// The caller **must** run `db::run_migrations(&pool)` before passing the pool,
+    /// because `run_with_signal()` skips migrations for externally provided pools.
     pub fn with_pool(mut self, pool: SqlitePool) -> Self {
         self.provided_pool = Some(pool);
         self
