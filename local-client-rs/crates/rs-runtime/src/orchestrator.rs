@@ -263,6 +263,23 @@ impl ServiceCore {
             .await;
         });
 
+        // Periodic status broadcast for live dashboard updates
+        let status_pool = pool.clone();
+        let status_ws_tx = ws_tx.clone();
+        let status_inpoint = inpoint_state.clone();
+        let status_chunk_ms = self.config.inpoint.chunk_duration_ms;
+        let status_shutdown_rx = shutdown.subscribe();
+        let status_task = tokio::spawn(async move {
+            run_status_broadcast(
+                status_pool,
+                status_ws_tx,
+                status_inpoint,
+                status_chunk_ms,
+                status_shutdown_rx,
+            )
+            .await;
+        });
+
         // Wait for shutdown signal
         info!("All services started.");
         shutdown_signal.await;
@@ -289,6 +306,10 @@ impl ServiceCore {
             Ok(()) => info!("Chunk forwarder stopped cleanly"),
             Err(e) => tracing::error!("Chunk forwarder panicked: {e}"),
         }
+        // Stop periodic status broadcast
+        status_task.abort();
+        info!("Status broadcast stopped");
+
         // Abort the API server (it has no shutdown signal)
         api_handle.abort();
         info!("API server stopped");
@@ -406,6 +427,78 @@ async fn run_endpoint_loop(
         }
 
         info!("Restarting endpoint uploader...");
+    }
+}
+
+/// Broadcast InpointStatus and EndpointStatus every 2 seconds so the
+/// WebSocket-driven dashboard has live-updating numbers without HTTP polling.
+async fn run_status_broadcast(
+    pool: SqlitePool,
+    ws_tx: broadcast::Sender<WsEvent>,
+    inpoint_state: InpointState,
+    chunk_duration_ms: u64,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = shutdown_rx.recv() => {
+                info!("Status broadcast shutting down");
+                break;
+            }
+        }
+
+        let rtmp_connected = inpoint_state.is_connected();
+
+        // Get current streaming event for received_bytes
+        let (received_bytes, receiving) = match db::get_streaming_event(&pool).await {
+            Ok(Some(evt)) => (evt.received_bytes as u64, evt.receiving_activated),
+            _ => (0, false),
+        };
+
+        // Get chunk stats
+        let stats = db::get_chunk_stats(&pool, chunk_duration_ms)
+            .await
+            .unwrap_or_default();
+
+        let inpoint_state_str = if rtmp_connected {
+            "receiving"
+        } else if receiving {
+            "waiting"
+        } else {
+            "idle"
+        };
+
+        let _ = ws_tx.send(WsEvent::InpointStatus {
+            state: inpoint_state_str.to_string(),
+            rtmp_connected,
+            received_bytes,
+            chunk_count: stats.total_chunks as u64,
+        });
+
+        let ep_state = if stats.pending_chunks > 0 {
+            "uploading"
+        } else if stats.total_chunks > 0 {
+            "idle"
+        } else {
+            "waiting"
+        };
+
+        let buffer_duration = {
+            let total = stats.buffer_duration_secs as u64;
+            let h = total / 3600;
+            let m = (total % 3600) / 60;
+            let s = total % 60;
+            format!("{h:02}:{m:02}:{s:02}")
+        };
+
+        let _ = ws_tx.send(WsEvent::EndpointStatus {
+            state: ep_state.to_string(),
+            pending_chunks: stats.pending_chunks as u64,
+            active_uploads: stats.in_process_chunks as u32,
+            buffer_duration,
+        });
     }
 }
 

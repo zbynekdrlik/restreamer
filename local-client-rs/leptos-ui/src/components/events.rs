@@ -1,27 +1,25 @@
-//! Events management component.
+//! Events management component reading from the global store.
 
 use leptos::prelude::*;
 
 use crate::api;
+use crate::store::DashboardStore;
 
-/// Events tab: list, create, activate/deactivate streaming events with endpoint assignment.
+/// Events view: list, create, activate/deactivate streaming events with endpoint assignment.
 #[component]
-pub fn Events() -> impl IntoView {
-    let (events, set_events) = signal::<Vec<api::StreamingEvent>>(Vec::new());
-    let (all_endpoints, set_all_endpoints) = signal::<Vec<api::EndpointConfig>>(Vec::new());
+pub fn EventsView() -> impl IntoView {
+    let store = use_context::<DashboardStore>().expect("DashboardStore not provided");
     let (error, set_error) = signal::<Option<String>>(None);
     let (new_name, set_new_name) = signal(String::new());
 
-    // Fetch events and endpoints on mount
+    // Refresh events and endpoints on mount
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
-            match api::list_events().await {
-                Ok(evts) => set_events.set(evts),
-                Err(e) => set_error.set(Some(e)),
+            if let Ok(evts) = api::list_events().await {
+                store.events_list.set(evts);
             }
-            match api::list_endpoints().await {
-                Ok(eps) => set_all_endpoints.set(eps),
-                Err(e) => set_error.set(Some(e)),
+            if let Ok(eps) = api::list_endpoints().await {
+                store.endpoints_list.set(eps);
             }
         });
     });
@@ -36,7 +34,7 @@ pub fn Events() -> impl IntoView {
                 Ok(_) => {
                     set_new_name.set(String::new());
                     if let Ok(evts) = api::list_events().await {
-                        set_events.set(evts);
+                        store.events_list.set(evts);
                     }
                 }
                 Err(e) => set_error.set(Some(e)),
@@ -63,7 +61,7 @@ pub fn Events() -> impl IntoView {
             </div>
 
             <div class="event-list">
-                {move || events.get().into_iter().map(|evt| {
+                {move || store.events_list.get().into_iter().map(|evt| {
                     let id = evt.id;
                     let name = evt.name.clone();
                     let receiving = evt.receiving_activated;
@@ -82,38 +80,35 @@ pub fn Events() -> impl IntoView {
                                     {if delivering { "Delivering" } else { "Stopped" }}
                                 </span>
                             </div>
-                            <EventEndpoints event_id=id all_endpoints=all_endpoints set_error=set_error />
+                            <EventEndpoints event_id=id set_error=set_error />
                             <div class="event-actions">
                                 <button on:click=move |_| {
                                     leptos::task::spawn_local(async move {
                                         if let Err(e) = api::activate_event(id).await {
-                                            web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&format!("Failed to activate event {id}: {e}")));
                                             set_error.set(Some(format!("Activate failed: {e}")));
                                         }
                                         if let Ok(evts) = api::list_events().await {
-                                            set_events.set(evts);
+                                            store.events_list.set(evts);
                                         }
                                     });
                                 }>"Activate"</button>
                                 <button on:click=move |_| {
                                     leptos::task::spawn_local(async move {
                                         if let Err(e) = api::start_delivering(id).await {
-                                            web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&format!("Failed to start delivering for event {id}: {e}")));
                                             set_error.set(Some(format!("Start delivering failed: {e}")));
                                         }
                                         if let Ok(evts) = api::list_events().await {
-                                            set_events.set(evts);
+                                            store.events_list.set(evts);
                                         }
                                     });
                                 }>"Start Delivering"</button>
                                 <button class="danger" on:click=move |_| {
                                     leptos::task::spawn_local(async move {
                                         if let Err(e) = api::deactivate_event(id).await {
-                                            web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&format!("Failed to deactivate event {id}: {e}")));
                                             set_error.set(Some(format!("Deactivate failed: {e}")));
                                         }
                                         if let Ok(evts) = api::list_events().await {
-                                            set_events.set(evts);
+                                            store.events_list.set(evts);
                                         }
                                     });
                                 }>"Deactivate"</button>
@@ -130,9 +125,9 @@ pub fn Events() -> impl IntoView {
 #[component]
 fn EventEndpoints(
     event_id: i64,
-    all_endpoints: ReadSignal<Vec<api::EndpointConfig>>,
     set_error: WriteSignal<Option<String>>,
 ) -> impl IntoView {
+    let store = use_context::<DashboardStore>().expect("DashboardStore not provided");
     let (assigned, set_assigned) = signal::<Vec<api::EndpointConfig>>(Vec::new());
     let (selected_ep, set_selected_ep) = signal(String::new());
 
@@ -207,7 +202,7 @@ fn EventEndpoints(
                     <option value="">"-- Assign endpoint --"</option>
                     {move || {
                         let assigned_ids: Vec<i64> = assigned.get().iter().map(|e| e.id).collect();
-                        all_endpoints.get().into_iter()
+                        store.endpoints_list.get().into_iter()
                             .filter(move |ep| !assigned_ids.contains(&ep.id))
                             .map(|ep| {
                                 let val = ep.id.to_string();
