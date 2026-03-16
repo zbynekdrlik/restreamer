@@ -429,3 +429,28 @@ pub struct DeliveryInstanceInfo {
 pub async fn get_delivery_status(event_id: i64) -> Result<DeliveryStatusResponse, String> {
     http_get(&format!("/delivery/status?event_id={event_id}")).await
 }
+
+/// Cached delivery status response (matches WsEvent::DeliveryStatus shape).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CachedDeliveryStatus {
+    pub instance_name: String,
+    pub status: String,
+    pub server_ip: Option<String>,
+    pub endpoint_count: u32,
+    pub endpoints: Vec<CachedDeliveryEndpoint>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CachedDeliveryEndpoint {
+    pub alias: String,
+    pub alive: bool,
+    pub current_chunk_id: i64,
+    pub buff_size_bytes: i64,
+    pub bytes_processed_total: i64,
+    pub chunk_delay_secs: f64,
+}
+
+/// Get cached delivery status (instant, no VPS round-trip).
+pub async fn get_delivery_status_cached() -> Result<CachedDeliveryStatus, String> {
+    http_get("/delivery/status/cached").await
+}

@@ -221,6 +221,19 @@ app.get("/api/v1/chunks/stats", (_req, res) => {
   res.json(statusResponse.chunk_stats);
 });
 
+// --- Cached delivery status (for instant initial load) ---
+let cachedDelivery = {
+  instance_name: "",
+  status: "none",
+  server_ip: null,
+  endpoint_count: 0,
+  endpoints: [],
+};
+
+app.get("/api/v1/delivery/status/cached", (_req, res) => {
+  res.json(cachedDelivery);
+});
+
 // --- Logs endpoint ---
 app.get("/api/v1/logs", (_req, res) => {
   res.json([
@@ -299,7 +312,8 @@ wss.on("connection", (ws) => {
     },
   };
 
-  // Send after a brief delay to let the frontend connect
+  // Update cache and send after a brief delay
+  cachedDelivery = deliveryEvent.data;
   setTimeout(() => {
     if (ws.readyState === ws.OPEN) {
       ws.send(JSON.stringify(deliveryEvent));

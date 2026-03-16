@@ -93,43 +93,33 @@ async fn load_initial_state(store: DashboardStore) {
     if let Ok(status) = api::get_status().await {
         store.inpoint_connected.set(status.inpoint_connected);
         store.chunk_stats.set(status.chunk_stats);
-        if let Some(ref event) = status.streaming_event {
-            // Fetch delivery status for the active event
-            if event.delivering_activated {
-                if let Ok(ds) = api::get_delivery_status(event.id).await {
-                    let inst_status = ds.instance_status.unwrap_or_default();
-                    let inst_name = ds
-                        .instance
-                        .as_ref()
-                        .map(|i| i.name.clone())
-                        .unwrap_or_default();
-                    let server_ip = ds.server_ip;
-                    let endpoints: Vec<DeliveryEndpointState> = ds
-                        .endpoint_details
-                        .into_iter()
-                        .map(|ep| DeliveryEndpointState {
-                            alias: ep.alias,
-                            alive: ep.alive,
-                            current_chunk_id: ep.current_chunk_id,
-                            buff_size_bytes: ep.buff_size_bytes,
-                            bytes_processed_total: ep.bytes_processed_total,
-                            chunk_delay_secs: ep.chunk_delay_secs,
-                            bandwidth_bps: 0.0,
-                            prev_bytes_total: 0,
-                        })
-                        .collect();
-                    let endpoint_count = endpoints.len() as u32;
-                    store.delivery.set(DeliveryState {
-                        status: inst_status,
-                        instance_name: inst_name,
-                        server_ip,
-                        endpoint_count,
-                        endpoints,
-                    });
-                }
-            }
-        }
         store.streaming_event.set(status.streaming_event);
+    }
+    // Fetch cached delivery status (instant, no VPS round-trip)
+    if let Ok(ds) = api::get_delivery_status_cached().await {
+        if !ds.status.is_empty() && ds.status != "none" {
+            let endpoints: Vec<DeliveryEndpointState> = ds
+                .endpoints
+                .into_iter()
+                .map(|ep| DeliveryEndpointState {
+                    alias: ep.alias,
+                    alive: ep.alive,
+                    current_chunk_id: ep.current_chunk_id,
+                    buff_size_bytes: ep.buff_size_bytes,
+                    bytes_processed_total: ep.bytes_processed_total,
+                    chunk_delay_secs: ep.chunk_delay_secs,
+                    bandwidth_bps: 0.0,
+                    prev_bytes_total: 0,
+                })
+                .collect();
+            store.delivery.set(DeliveryState {
+                status: ds.status,
+                instance_name: ds.instance_name,
+                server_ip: ds.server_ip,
+                endpoint_count: ds.endpoint_count,
+                endpoints,
+            });
+        }
     }
     if let Ok(events) = api::list_events().await {
         store.events_list.set(events);
