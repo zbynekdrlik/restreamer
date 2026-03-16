@@ -406,7 +406,8 @@ impl DeliveryOrchestrator {
                             let chunk_id = entry["current_chunk_id"].as_i64().unwrap_or(0);
                             let bytes_total = entry["bytes_processed_total"].as_i64().unwrap_or(0);
                             let chunks_processed = entry["chunks_processed"].as_i64().unwrap_or(0);
-                            let stall_reason = entry["stall_reason"].as_str().map(|s| s.to_string());
+                            let stall_reason =
+                                entry["stall_reason"].as_str().map(|s| s.to_string());
                             let ffmpeg_restart_count =
                                 entry["ffmpeg_restart_count"].as_u64().unwrap_or(0) as u32;
                             let last_error = entry["last_error"].as_str().map(|s| s.to_string());

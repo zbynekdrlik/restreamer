@@ -268,9 +268,8 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                         );
                         s.stall_reason = Some("ffmpeg_crash_loop".to_string());
                         drop(s);
-                        let sleep_dur = std::time::Duration::from_secs(
-                            CIRCUIT_BREAKER_COOLDOWN_SECS,
-                        );
+                        let sleep_dur =
+                            std::time::Duration::from_secs(CIRCUIT_BREAKER_COOLDOWN_SECS);
                         tokio::select! {
                             _ = tokio::time::sleep(sleep_dur) => {}
                             _ = stop_rx.changed() => {
@@ -327,6 +326,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                             tracing::warn!(alias = %alias, "ffmpeg write failed: {e}");
                             let mut s = stats.lock().await;
                             s.last_error = Some(e);
+                            s.ffmpeg_restart_count += 1;
                             drop(s);
                             if let Some(mut p) = proc.take() {
                                 p.kill().await;
@@ -342,6 +342,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                             let mut s = stats.lock().await;
                             s.last_error = Some("write_timeout".to_string());
                             s.stall_reason = Some("write_timeout".to_string());
+                            s.ffmpeg_restart_count += 1;
                             drop(s);
                             if let Some(mut p) = proc.take() {
                                 p.kill().await;
@@ -623,11 +624,8 @@ mod tests {
         tokio::task::yield_now().await;
         let _ = stop_tx.send(true);
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handle,
-        )
-        .await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
         assert!(result.is_ok(), "Task should have stopped cleanly");
     }
 
