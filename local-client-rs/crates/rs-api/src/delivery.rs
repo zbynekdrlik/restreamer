@@ -402,8 +402,7 @@ impl DeliveryOrchestrator {
                             let alive = entry["alive"].as_bool().unwrap_or(false);
                             let chunk_id = entry["current_chunk_id"].as_i64().unwrap_or(0);
                             let bytes_total = entry["bytes_processed_total"].as_i64().unwrap_or(0);
-                            let chunks_processed =
-                                entry["chunks_processed"].as_i64().unwrap_or(0);
+                            let chunks_processed = entry["chunks_processed"].as_i64().unwrap_or(0);
 
                             // Compute chunk delay
                             let chunk_gap = (latest_local_chunk - chunk_id).max(0) as f64;
