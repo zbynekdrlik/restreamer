@@ -5,6 +5,17 @@ use leptos::prelude::*;
 use crate::api::{format_bytes, format_duration};
 use crate::store::{DashboardStore, DeliveryEndpointState};
 
+/// Format delay as human-readable string (e.g., "11m 9s", "3.2s").
+fn format_delay(secs: f64) -> String {
+    if secs < 60.0 {
+        format!("{:.1}s", secs)
+    } else {
+        let mins = (secs / 60.0).floor() as u64;
+        let remaining = (secs % 60.0).floor() as u64;
+        format!("{}m {}s", mins, remaining)
+    }
+}
+
 /// Dashboard view reading live data from the store signals.
 #[component]
 pub fn DashboardView() -> impl IntoView {
@@ -296,19 +307,41 @@ fn DeliveryLifecycle(status: String) -> impl IntoView {
 /// Per-endpoint delivery metrics card.
 #[component]
 fn DeliveryEndpointCard(endpoint: DeliveryEndpointState) -> impl IntoView {
-    let alive_class = if endpoint.alive {
+    let is_stalled = endpoint.stall_count >= 3;
+
+    let alive_class = if is_stalled {
+        "status-indicator idle"
+    } else if endpoint.alive {
         "status-indicator active"
     } else {
         "status-indicator error"
     };
-    let alive_text = if endpoint.alive { "Alive" } else { "Dead" };
+    let alive_text = if is_stalled {
+        "Stalled"
+    } else if endpoint.alive {
+        "Alive"
+    } else {
+        "Dead"
+    };
 
-    let delay_class = if endpoint.chunk_delay_secs < 5.0 {
+    // Delay color: green <30s, yellow <2min, red >=2min
+    let delay_class = if endpoint.chunk_delay_secs < 30.0 {
         "delay-low"
-    } else if endpoint.chunk_delay_secs < 10.0 {
+    } else if endpoint.chunk_delay_secs < 120.0 {
         "delay-medium"
     } else {
         "delay-high"
+    };
+
+    let speed_text = if is_stalled {
+        "Stalled".to_string()
+    } else {
+        format_bandwidth(endpoint.bandwidth_bytes_sec)
+    };
+    let speed_class = if is_stalled {
+        "metric-value delay-high"
+    } else {
+        "metric-value"
     };
 
     let alias = endpoint.alias.clone();
@@ -321,24 +354,17 @@ fn DeliveryEndpointCard(endpoint: DeliveryEndpointState) -> impl IntoView {
             </div>
             <div class="endpoint-metrics">
                 <div class="metric">
-                    <span class="metric-label">"Chunk"</span>
-                    <span class="metric-value">{"#"}{endpoint.current_chunk_id}</span>
-                </div>
-                <div class="metric">
                     <span class="metric-label">"Delay"</span>
-                    <span class={format!("metric-value {delay_class}")}>{format!("{:.1}s", endpoint.chunk_delay_secs)}</span>
+                    <span class={format!("metric-value {delay_class}")}>{format_delay(endpoint.chunk_delay_secs)}</span>
                 </div>
                 <div class="metric">
-                    <span class="metric-label">"Buffer"</span>
-                    <span class="metric-value">{format_bytes(endpoint.buff_size_bytes)}</span>
+                    <span class="metric-label">"Delivered"</span>
+                    <span class="metric-value">{format!("{} chunks", endpoint.chunks_processed)}</span>
+                    <span class="metric-sub">{format_bytes(endpoint.bytes_processed_total)}</span>
                 </div>
                 <div class="metric">
-                    <span class="metric-label">"Bandwidth"</span>
-                    <span class="metric-value">{format_bandwidth(endpoint.bandwidth_bps)}</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">"Total"</span>
-                    <span class="metric-value">{format_bytes(endpoint.bytes_processed_total)}</span>
+                    <span class="metric-label">"Speed"</span>
+                    <span class=speed_class>{speed_text}</span>
                 </div>
             </div>
         </div>

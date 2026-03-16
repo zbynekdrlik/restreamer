@@ -392,27 +392,27 @@ test.describe("Delivery monitoring section", () => {
     await expect(cards).toHaveCount(2);
     // First card: YouTube Main
     await expect(cards.first()).toContainText("YouTube Main");
-    await expect(cards.first()).toContainText("#142");
     await expect(cards.first()).toContainText("3.2s");
+    await expect(cards.first()).toContainText("1847 chunks");
     // Second card: Facebook Page
     await expect(cards.nth(1)).toContainText("Facebook Page");
-    await expect(cards.nth(1)).toContainText("#140");
-    await expect(cards.nth(1)).toContainText("5.1s");
+    await expect(cards.nth(1)).toContainText("45.0s");
+    await expect(cards.nth(1)).toContainText("1620 chunks");
   });
 
   test("delay color coding for low/medium values", async ({ page }) => {
     await page.goto("/");
     const cards = page.locator(".delivery-endpoint-card");
     await expect(cards.first()).toBeVisible({ timeout: 10000 });
-    // YouTube Main has delay 3.2s — should have delay-low (green)
+    // YouTube Main has delay 3.2s (<30s) — should have delay-low (green)
     const ytDelay = cards.first().locator(".delay-low");
     await expect(ytDelay).toBeVisible();
-    // Facebook Page has delay 5.1s — should have delay-medium (yellow)
+    // Facebook Page has delay 45.0s (30-120s) — should have delay-medium (yellow)
     const fbDelay = cards.nth(1).locator(".delay-medium");
     await expect(fbDelay).toBeVisible();
   });
 
-  test("endpoint cards show Chunk, Delay, Buffer, Bandwidth, Total labels", async ({
+  test("endpoint cards show Delay, Delivered, Speed labels", async ({
     page,
   }) => {
     await page.goto("/");
@@ -420,11 +420,9 @@ test.describe("Delivery monitoring section", () => {
     await expect(cards.first()).toBeVisible({ timeout: 10000 });
     const card = cards.first();
     await expect(card.locator(".metric-label")).toContainText([
-      "Chunk",
       "Delay",
-      "Buffer",
-      "Bandwidth",
-      "Total",
+      "Delivered",
+      "Speed",
     ]);
   });
 });

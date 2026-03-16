@@ -750,9 +750,9 @@ pub struct DeliveryStatusResponse {
 pub struct DeliveryEndpointEntry {
     pub alias: String,
     pub alive: bool,
-    pub buff_size_bytes: i64,
     pub current_chunk_id: i64,
     pub bytes_processed_total: i64,
+    pub chunks_processed: i64,
     pub chunk_delay_secs: f64,
 }
 
@@ -780,9 +780,9 @@ pub async fn delivery_status(
         .map(|ep| DeliveryEndpointEntry {
             alias: ep.alias,
             alive: ep.alive,
-            buff_size_bytes: ep.buff_size_bytes,
             current_chunk_id: ep.current_chunk_id,
             bytes_processed_total: ep.bytes_processed_total,
+            chunks_processed: ep.chunks_processed,
             chunk_delay_secs: ep.chunk_delay_secs,
         })
         .collect();

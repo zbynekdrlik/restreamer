@@ -76,7 +76,7 @@ pub struct DeliveryEndpointStatus {
     pub instance_id: i64,
     pub alias: String,
     pub alive: bool,
-    pub buff_size_bytes: i64,
+    pub chunks_processed: i64,
     pub current_chunk_id: i64,
     pub bytes_processed_total: i64,
     pub last_check_at: String,
@@ -144,8 +144,8 @@ pub struct DeliveryEndpointMetrics {
     pub alias: String,
     pub alive: bool,
     pub current_chunk_id: i64,
-    pub buff_size_bytes: i64,
     pub bytes_processed_total: i64,
+    pub chunks_processed: i64,
     pub chunk_delay_secs: f64,
 }
 
@@ -255,8 +255,8 @@ mod tests {
                     alias: "YouTube".to_string(),
                     alive: true,
                     current_chunk_id: 42,
-                    buff_size_bytes: 4096,
                     bytes_processed_total: 1048576,
+                    chunks_processed: 100,
                     chunk_delay_secs: 3.2,
                 }],
             },

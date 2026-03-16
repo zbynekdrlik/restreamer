@@ -30,11 +30,13 @@ pub struct DeliveryEndpointState {
     pub alias: String,
     pub alive: bool,
     pub current_chunk_id: i64,
-    pub buff_size_bytes: i64,
     pub bytes_processed_total: i64,
+    pub chunks_processed: i64,
     pub chunk_delay_secs: f64,
-    pub bandwidth_bps: f64,
+    pub bandwidth_bytes_sec: f64,
     pub prev_bytes_total: i64,
+    pub prev_chunk_id: i64,
+    pub stall_count: u32,
 }
 
 /// Central reactive state shared via Leptos context.

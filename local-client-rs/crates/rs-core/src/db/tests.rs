@@ -487,7 +487,7 @@ async fn delivery_endpoint_status_crud() {
     assert!(statuses.is_empty());
 
     // Insert status for two endpoints
-    upsert_delivery_endpoint_status(&pool, inst_id, "YouTube", true, 4096, 42, 1048576)
+    upsert_delivery_endpoint_status(&pool, inst_id, "YouTube", true, 100, 42, 1048576)
         .await
         .unwrap();
     upsert_delivery_endpoint_status(&pool, inst_id, "Facebook", false, 0, 10, 0)
@@ -503,11 +503,11 @@ async fn delivery_endpoint_status_crud() {
     assert!(!statuses[0].alive);
     assert_eq!(statuses[1].alias, "YouTube");
     assert!(statuses[1].alive);
-    assert_eq!(statuses[1].buff_size_bytes, 4096);
+    assert_eq!(statuses[1].chunks_processed, 100);
     assert_eq!(statuses[1].current_chunk_id, 42);
 
     // Upsert updates existing
-    upsert_delivery_endpoint_status(&pool, inst_id, "YouTube", true, 8192, 99, 2097152)
+    upsert_delivery_endpoint_status(&pool, inst_id, "YouTube", true, 200, 99, 2097152)
         .await
         .unwrap();
     let statuses = get_delivery_endpoint_statuses(&pool, inst_id)
@@ -515,7 +515,7 @@ async fn delivery_endpoint_status_crud() {
         .unwrap();
     assert_eq!(statuses.len(), 2);
     let yt = statuses.iter().find(|s| s.alias == "YouTube").unwrap();
-    assert_eq!(yt.buff_size_bytes, 8192);
+    assert_eq!(yt.chunks_processed, 200);
     assert_eq!(yt.current_chunk_id, 99);
 }
 
@@ -526,7 +526,7 @@ async fn delivery_endpoint_status_cascade_on_instance_delete() {
     let inst_id = create_delivery_instance(&pool, 22222, "rs-del-2", "2.3.4.5", "cx23", None, "")
         .await
         .unwrap();
-    upsert_delivery_endpoint_status(&pool, inst_id, "YT", true, 100, 5, 500)
+    upsert_delivery_endpoint_status(&pool, inst_id, "YT", true, 10, 5, 500)
         .await
         .unwrap();
 
@@ -572,7 +572,7 @@ async fn migration_v6_bytes_processed_total_column_exists() {
         .await
         .unwrap();
 
-    upsert_delivery_endpoint_status(&pool, inst_id, "YT", true, 1024, 10, 999999)
+    upsert_delivery_endpoint_status(&pool, inst_id, "YT", true, 50, 10, 999999)
         .await
         .unwrap();
 
@@ -581,6 +581,7 @@ async fn migration_v6_bytes_processed_total_column_exists() {
         .unwrap();
     assert_eq!(statuses.len(), 1);
     assert_eq!(statuses[0].bytes_processed_total, 999999);
+    assert_eq!(statuses[0].chunks_processed, 50);
 }
 
 #[tokio::test]

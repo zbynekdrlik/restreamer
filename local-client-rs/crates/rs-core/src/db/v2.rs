@@ -307,20 +307,20 @@ pub async fn upsert_delivery_endpoint_status(
     instance_id: i64,
     alias: &str,
     alive: bool,
-    buff_size_bytes: i64,
+    chunks_processed: i64,
     current_chunk_id: i64,
     bytes_processed_total: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO delivery_endpoint_status (instance_id, alias, alive, buff_size_bytes, current_chunk_id, bytes_processed_total, last_check_at)
+        "INSERT INTO delivery_endpoint_status (instance_id, alias, alive, chunks_processed, current_chunk_id, bytes_processed_total, last_check_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
          ON CONFLICT(instance_id, alias) DO UPDATE SET
-             alive = ?3, buff_size_bytes = ?4, current_chunk_id = ?5, bytes_processed_total = ?6, last_check_at = datetime('now')",
+             alive = ?3, chunks_processed = ?4, current_chunk_id = ?5, bytes_processed_total = ?6, last_check_at = datetime('now')",
     )
     .bind(instance_id)
     .bind(alias)
     .bind(alive as i32)
-    .bind(buff_size_bytes)
+    .bind(chunks_processed)
     .bind(current_chunk_id)
     .bind(bytes_processed_total)
     .execute(pool)
@@ -333,7 +333,7 @@ pub async fn get_delivery_endpoint_statuses(
     instance_id: i64,
 ) -> Result<Vec<DeliveryEndpointStatus>> {
     let rows = sqlx::query(
-        "SELECT id, instance_id, alias, alive, buff_size_bytes, current_chunk_id, bytes_processed_total, last_check_at
+        "SELECT id, instance_id, alias, alive, chunks_processed, current_chunk_id, bytes_processed_total, last_check_at
          FROM delivery_endpoint_status WHERE instance_id = ?1 ORDER BY alias",
     )
     .bind(instance_id)
@@ -347,7 +347,7 @@ pub async fn get_delivery_endpoint_statuses(
             instance_id: r.get("instance_id"),
             alias: r.get("alias"),
             alive: r.get::<i32, _>("alive") != 0,
-            buff_size_bytes: r.get("buff_size_bytes"),
+            chunks_processed: r.get("chunks_processed"),
             current_chunk_id: r.get("current_chunk_id"),
             bytes_processed_total: r.get("bytes_processed_total"),
             last_check_at: r.get("last_check_at"),

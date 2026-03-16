@@ -59,6 +59,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (4, MIGRATION_V4_SQL),
         (5, MIGRATION_V5_SQL),
         (6, MIGRATION_V6_SQL),
+        (7, MIGRATION_V7_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -225,6 +226,10 @@ ALTER TABLE delivery_instances ADD COLUMN auth_token TEXT NOT NULL DEFAULT ''
 const MIGRATION_V6_SQL: &str = r#"
 ALTER TABLE chunk_records ADD COLUMN sent_at TEXT;
 ALTER TABLE delivery_endpoint_status ADD COLUMN bytes_processed_total INTEGER NOT NULL DEFAULT 0
+"#;
+
+const MIGRATION_V7_SQL: &str = r#"
+ALTER TABLE delivery_endpoint_status RENAME COLUMN buff_size_bytes TO chunks_processed
 "#;
 
 // --- Client Profile ---

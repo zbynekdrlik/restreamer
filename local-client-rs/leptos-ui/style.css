@@ -746,6 +746,11 @@ input[type="password"]:focus {
   color: var(--error);
 }
 
+.metric-sub {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
 /* Responsive layout */
 @media (max-width: 768px) {
   .app {

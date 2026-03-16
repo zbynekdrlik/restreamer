@@ -51,9 +51,9 @@ pub struct DeliveryStatus {
 pub struct EndpointDeliveryStatus {
     pub alias: String,
     pub alive: bool,
-    pub buff_size_bytes: i64,
     pub current_chunk_id: i64,
     pub bytes_processed_total: i64,
+    pub chunks_processed: i64,
     pub chunk_delay_secs: f64,
 }
 
@@ -400,9 +400,10 @@ impl DeliveryOrchestrator {
                         for entry in ep_entries {
                             let alias = entry["alias"].as_str().unwrap_or("").to_string();
                             let alive = entry["alive"].as_bool().unwrap_or(false);
-                            let buff = entry["buff_size_bytes"].as_i64().unwrap_or(0);
                             let chunk_id = entry["current_chunk_id"].as_i64().unwrap_or(0);
                             let bytes_total = entry["bytes_processed_total"].as_i64().unwrap_or(0);
+                            let chunks_processed =
+                                entry["chunks_processed"].as_i64().unwrap_or(0);
 
                             // Compute chunk delay
                             let chunk_gap = (latest_local_chunk - chunk_id).max(0) as f64;
@@ -414,7 +415,7 @@ impl DeliveryOrchestrator {
                                 inst.id,
                                 &alias,
                                 alive,
-                                buff,
+                                chunks_processed,
                                 chunk_id,
                                 bytes_total,
                             )
@@ -426,9 +427,9 @@ impl DeliveryOrchestrator {
                             statuses.push(EndpointDeliveryStatus {
                                 alias,
                                 alive,
-                                buff_size_bytes: buff,
                                 current_chunk_id: chunk_id,
                                 bytes_processed_total: bytes_total,
+                                chunks_processed,
                                 chunk_delay_secs,
                             });
                         }
@@ -499,8 +500,8 @@ impl DeliveryOrchestrator {
                 alias: ep.alias,
                 alive: ep.alive,
                 current_chunk_id: ep.current_chunk_id,
-                buff_size_bytes: ep.buff_size_bytes,
                 bytes_processed_total: ep.bytes_processed_total,
+                chunks_processed: ep.chunks_processed,
                 chunk_delay_secs: ep.chunk_delay_secs,
             })
             .collect();

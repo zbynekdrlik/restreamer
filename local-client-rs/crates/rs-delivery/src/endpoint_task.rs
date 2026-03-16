@@ -13,8 +13,15 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 
-/// Stats tracked per endpoint: (bytes_processed, current_chunk_id)
-type Stats = Arc<Mutex<(u64, i64)>>;
+/// Stats tracked per endpoint.
+#[derive(Debug, Default)]
+pub struct EndpointStats {
+    pub bytes_processed_total: u64,
+    pub current_chunk_id: i64,
+    pub chunks_processed: u64,
+}
+
+type Stats = Arc<Mutex<EndpointStats>>;
 
 pub struct EndpointHandle {
     task: JoinHandle<()>,
@@ -30,7 +37,11 @@ impl EndpointHandle {
         start_chunk_id: i64,
     ) -> Self {
         let (stop_tx, stop_rx) = watch::channel(false);
-        let stats: Stats = Arc::new(Mutex::new((0, start_chunk_id)));
+        let stats: Stats = Arc::new(Mutex::new(EndpointStats {
+            bytes_processed_total: 0,
+            current_chunk_id: start_chunk_id,
+            chunks_processed: 0,
+        }));
 
         let task = tokio::spawn(endpoint_loop(
             ep_cfg,
@@ -52,8 +63,9 @@ impl EndpointHandle {
         !self.task.is_finished()
     }
 
-    pub async fn stats(&self) -> (u64, i64) {
-        *self.stats.lock().await
+    pub async fn stats(&self) -> (u64, i64, u64) {
+        let s = self.stats.lock().await;
+        (s.bytes_processed_total, s.current_chunk_id, s.chunks_processed)
     }
 
     pub async fn stop(self) {
@@ -140,8 +152,9 @@ async fn endpoint_loop(
                     match proc.write(&processed).await {
                         Ok(()) => {
                             let mut s = stats.lock().await;
-                            s.0 += processed.len() as u64;
-                            s.1 = chunk_id;
+                            s.bytes_processed_total += processed.len() as u64;
+                            s.current_chunk_id = chunk_id;
+                            s.chunks_processed += 1;
                         }
                         Err(e) => {
                             tracing::warn!(alias = %alias, "ffmpeg write failed: {e}");

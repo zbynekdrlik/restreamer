@@ -178,9 +178,9 @@ struct StatusResponse {
 struct EndpointStatusEntry {
     alias: String,
     alive: bool,
-    buff_size_bytes: u64,
     current_chunk_id: i64,
     bytes_processed_total: u64,
+    chunks_processed: u64,
 }
 
 async fn endpoint_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
@@ -192,9 +192,9 @@ async fn endpoint_status(State(state): State<Arc<AppState>>) -> Json<StatusRespo
         entries.push(EndpointStatusEntry {
             alias: alias.clone(),
             alive: handle.is_alive(),
-            buff_size_bytes: stats.0,
             current_chunk_id: stats.1,
             bytes_processed_total: stats.0,
+            chunks_processed: stats.2,
         });
     }
 

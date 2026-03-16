@@ -413,9 +413,9 @@ pub struct DeliveryStatusResponse {
 pub struct DeliveryEndpointDetail {
     pub alias: String,
     pub alive: bool,
-    pub buff_size_bytes: i64,
     pub current_chunk_id: i64,
     pub bytes_processed_total: i64,
+    pub chunks_processed: i64,
     pub chunk_delay_secs: f64,
 }
 
@@ -445,8 +445,8 @@ pub struct CachedDeliveryEndpoint {
     pub alias: String,
     pub alive: bool,
     pub current_chunk_id: i64,
-    pub buff_size_bytes: i64,
     pub bytes_processed_total: i64,
+    pub chunks_processed: i64,
     pub chunk_delay_secs: f64,
 }
 

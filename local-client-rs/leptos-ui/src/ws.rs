@@ -68,8 +68,8 @@ struct WsDeliveryEndpoint {
     alias: String,
     alive: bool,
     current_chunk_id: i64,
-    buff_size_bytes: i64,
     bytes_processed_total: i64,
+    chunks_processed: i64,
     chunk_delay_secs: f64,
 }
 
@@ -105,11 +105,13 @@ async fn load_initial_state(store: DashboardStore) {
                     alias: ep.alias,
                     alive: ep.alive,
                     current_chunk_id: ep.current_chunk_id,
-                    buff_size_bytes: ep.buff_size_bytes,
                     bytes_processed_total: ep.bytes_processed_total,
+                    chunks_processed: ep.chunks_processed,
                     chunk_delay_secs: ep.chunk_delay_secs,
-                    bandwidth_bps: 0.0,
+                    bandwidth_bytes_sec: 0.0,
                     prev_bytes_total: 0,
+                    prev_chunk_id: 0,
+                    stall_count: 0,
                 })
                 .collect();
             store.delivery.set(DeliveryState {
@@ -210,25 +212,44 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                 let new_endpoints: Vec<DeliveryEndpointState> = endpoints
                     .into_iter()
                     .map(|ep| {
-                        // Find previous bytes total for this alias to compute bandwidth
-                        let prev = d
+                        // Find previous state for this alias
+                        let prev_state = d
                             .endpoints
                             .iter()
-                            .find(|prev_ep| prev_ep.alias == ep.alias)
-                            .map(|prev_ep| prev_ep.bytes_processed_total)
+                            .find(|prev_ep| prev_ep.alias == ep.alias);
+                        let prev_bytes = prev_state
+                            .map(|p| p.bytes_processed_total)
                             .unwrap_or(0);
-                        let delta = (ep.bytes_processed_total - prev).max(0) as f64;
-                        let bandwidth_bps = delta / 2.0; // 2-second poll interval
+                        let prev_chunk = prev_state
+                            .map(|p| p.current_chunk_id)
+                            .unwrap_or(0);
+                        let prev_stall = prev_state
+                            .map(|p| p.stall_count)
+                            .unwrap_or(0);
+
+                        let delta = (ep.bytes_processed_total - prev_bytes).max(0) as f64;
+                        let bandwidth_bytes_sec = delta / 2.0; // 2-second poll interval
+
+                        // Stall detection: if chunk ID hasn't changed, increment counter
+                        let stall_count = if prev_chunk > 0
+                            && ep.current_chunk_id == prev_chunk
+                        {
+                            prev_stall + 1
+                        } else {
+                            0
+                        };
 
                         DeliveryEndpointState {
                             alias: ep.alias,
                             alive: ep.alive,
                             current_chunk_id: ep.current_chunk_id,
-                            buff_size_bytes: ep.buff_size_bytes,
                             bytes_processed_total: ep.bytes_processed_total,
+                            chunks_processed: ep.chunks_processed,
                             chunk_delay_secs: ep.chunk_delay_secs,
-                            bandwidth_bps,
-                            prev_bytes_total: prev,
+                            bandwidth_bytes_sec,
+                            prev_bytes_total: prev_bytes,
+                            prev_chunk_id: prev_chunk,
+                            stall_count,
                         }
                     })
                     .collect();
