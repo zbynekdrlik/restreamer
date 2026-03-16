@@ -674,6 +674,12 @@ input[type="password"]:focus {
   color: var(--text-primary);
 }
 
+/* Delivery Idle State */
+.delivery-idle {
+  text-align: center;
+  padding: 10px 0;
+}
+
 /* Delivery Endpoints Grid */
 .delivery-endpoints {
   display: grid;

@@ -198,31 +198,55 @@ fn format_bandwidth(bps: f64) -> String {
     }
 }
 
-/// Delivery monitoring section — visible when delivery status is not "none".
+/// Delivery monitoring section — always visible, shows idle state when not delivering.
 #[component]
 fn DeliverySection() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore not provided");
 
     view! {
-        {move || {
-            let delivery = store.delivery.get();
-            if delivery.status == "none" || delivery.status.is_empty() {
-                return view! { <div></div> }.into_any();
-            }
-            let status = delivery.status.clone();
-            let endpoints = delivery.endpoints.clone();
-            view! {
-                <div class="delivery-section">
-                    <h3 class="section-title">"Delivery Pipeline"</h3>
-                    <DeliveryLifecycle status=status.clone() />
-                    <div class="delivery-endpoints">
-                        {endpoints.into_iter().map(|ep| {
-                            view! { <DeliveryEndpointCard endpoint=ep /> }
-                        }).collect::<Vec<_>>()}
-                    </div>
-                </div>
-            }.into_any()
-        }}
+        <div class="delivery-section">
+            <div class="card-header">
+                <span class="card-title">"Delivery Pipeline"</span>
+                <span class=move || {
+                    let status = store.delivery.get().status;
+                    match status.as_str() {
+                        "running" | "delivering" => "status-indicator active",
+                        "creating" | "booting" | "deploying" | "ready" => "status-indicator idle",
+                        "failed" => "status-indicator error",
+                        _ => "status-indicator disconnected",
+                    }
+                }></span>
+            </div>
+            {move || {
+                let delivery = store.delivery.get();
+                let status = delivery.status.clone();
+                let endpoints = delivery.endpoints.clone();
+                let is_idle = status == "none" || status.is_empty();
+
+                if is_idle {
+                    view! {
+                        <div class="delivery-idle">
+                            <DeliveryLifecycle status="idle".to_string() />
+                            <div class="card-value" style="color: var(--text-secondary); font-size: 1rem;">
+                                "No active delivery"
+                            </div>
+                            <div class="card-label">"Start delivering on an event to monitor VPS endpoints"</div>
+                        </div>
+                    }.into_any()
+                } else {
+                    view! {
+                        <div>
+                            <DeliveryLifecycle status=status.clone() />
+                            <div class="delivery-endpoints">
+                                {endpoints.into_iter().map(|ep| {
+                                    view! { <DeliveryEndpointCard endpoint=ep /> }
+                                }).collect::<Vec<_>>()}
+                            </div>
+                        </div>
+                    }.into_any()
+                }
+            }}
+        </div>
     }
 }
 

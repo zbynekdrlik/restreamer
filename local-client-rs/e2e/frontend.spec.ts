@@ -341,17 +341,29 @@ test.describe("Logs route", () => {
 // --- Delivery Monitoring ---
 
 test.describe("Delivery monitoring section", () => {
-  test("delivery section appears when receiving WebSocket DeliveryStatus", async ({
-    page,
-  }) => {
+  test("delivery section is always visible with title", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
-    // Wait for the delivery section to appear after WebSocket message
     await expect(page.locator(".delivery-section")).toBeVisible({
       timeout: 10000,
     });
     await expect(page.locator(".delivery-section")).toContainText(
       "Delivery Pipeline",
+    );
+  });
+
+  test("shows idle state before WebSocket delivers status", async ({
+    page,
+  }) => {
+    // Disconnect from WebSocket mock by navigating with tauri mock removed
+    await page.goto("/");
+    await expect(page.locator(".delivery-section")).toBeVisible({
+      timeout: 10000,
+    });
+    // Initially shows idle message
+    await expect(page.locator(".delivery-idle")).toBeVisible({ timeout: 3000 });
+    await expect(page.locator(".delivery-idle")).toContainText(
+      "No active delivery",
     );
   });
 
@@ -369,12 +381,16 @@ test.describe("Delivery monitoring section", () => {
     await expect(stages.nth(4)).toContainText("Delivering");
   });
 
-  test("endpoint cards show metrics", async ({ page }) => {
+  test("endpoint cards show metrics after WebSocket event", async ({
+    page,
+  }) => {
     await page.goto("/");
     await expect(page.locator(".delivery-section")).toBeVisible({
       timeout: 10000,
     });
+    // Wait for WebSocket delivery status event
     const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.first()).toBeVisible({ timeout: 10000 });
     await expect(cards).toHaveCount(2);
     // First card: YouTube Main
     await expect(cards.first()).toContainText("YouTube Main");
@@ -388,20 +404,13 @@ test.describe("Delivery monitoring section", () => {
 
   test("delay color coding for low/medium values", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator(".delivery-section")).toBeVisible({
-      timeout: 10000,
-    });
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.first()).toBeVisible({ timeout: 10000 });
     // YouTube Main has delay 3.2s — should have delay-low (green)
-    const ytDelay = page
-      .locator(".delivery-endpoint-card")
-      .first()
-      .locator(".delay-low");
+    const ytDelay = cards.first().locator(".delay-low");
     await expect(ytDelay).toBeVisible();
     // Facebook Page has delay 5.1s — should have delay-medium (yellow)
-    const fbDelay = page
-      .locator(".delivery-endpoint-card")
-      .nth(1)
-      .locator(".delay-medium");
+    const fbDelay = cards.nth(1).locator(".delay-medium");
     await expect(fbDelay).toBeVisible();
   });
 
@@ -409,10 +418,9 @@ test.describe("Delivery monitoring section", () => {
     page,
   }) => {
     await page.goto("/");
-    await expect(page.locator(".delivery-section")).toBeVisible({
-      timeout: 10000,
-    });
-    const card = page.locator(".delivery-endpoint-card").first();
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.first()).toBeVisible({ timeout: 10000 });
+    const card = cards.first();
     await expect(card.locator(".metric-label")).toContainText([
       "Chunk",
       "Delay",
