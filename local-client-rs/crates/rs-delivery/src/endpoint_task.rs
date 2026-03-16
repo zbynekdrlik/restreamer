@@ -624,8 +624,7 @@ mod tests {
         tokio::task::yield_now().await;
         let _ = stop_tx.send(true);
 
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
         assert!(result.is_ok(), "Task should have stopped cleanly");
     }
 
