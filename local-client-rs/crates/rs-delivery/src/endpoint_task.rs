@@ -266,8 +266,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                             failures = consecutive_ffmpeg_failures,
                             "ffmpeg circuit breaker, cooldown {cooldown}s"
                         );
-                        s.stall_reason =
-                            Some("ffmpeg_crash_loop".to_string());
+                        s.stall_reason = Some("ffmpeg_crash_loop".to_string());
                         drop(s);
                         let sleep_dur = std::time::Duration::from_secs(
                             CIRCUIT_BREAKER_COOLDOWN_SECS,
@@ -624,8 +623,11 @@ mod tests {
         tokio::task::yield_now().await;
         let _ = stop_tx.send(true);
 
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle,
+        )
+        .await;
         assert!(result.is_ok(), "Task should have stopped cleanly");
     }
 

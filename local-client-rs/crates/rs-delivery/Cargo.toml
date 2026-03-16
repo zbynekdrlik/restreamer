@@ -27,3 +27,4 @@ rs-ffmpeg = { path = "../rs-ffmpeg" }
 tempfile = "3"
 reqwest.workspace = true
 tower = { version = "0.5", features = ["util"] }
+tokio = { workspace = true, features = ["test-util"] }
