@@ -78,6 +78,7 @@ pub struct DeliveryEndpointStatus {
     pub alive: bool,
     pub buff_size_bytes: i64,
     pub current_chunk_id: i64,
+    pub bytes_processed_total: i64,
     pub last_check_at: String,
 }
 
@@ -127,12 +128,25 @@ pub enum WsEvent {
     DeliveryStatus {
         instance_name: String,
         status: String,
+        server_ip: Option<String>,
         endpoint_count: u32,
+        endpoints: Vec<DeliveryEndpointMetrics>,
     },
     Error {
         service: String,
         message: String,
     },
+}
+
+/// Per-endpoint delivery metrics broadcast via WebSocket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryEndpointMetrics {
+    pub alias: String,
+    pub alive: bool,
+    pub current_chunk_id: i64,
+    pub buff_size_bytes: i64,
+    pub bytes_processed_total: i64,
+    pub chunk_delay_secs: f64,
 }
 
 /// Service status summary returned by the /status endpoint.
@@ -235,7 +249,16 @@ mod tests {
             WsEvent::DeliveryStatus {
                 instance_name: "rs-delivery-1".to_string(),
                 status: "running".to_string(),
+                server_ip: Some("1.2.3.4".to_string()),
                 endpoint_count: 2,
+                endpoints: vec![DeliveryEndpointMetrics {
+                    alias: "YouTube".to_string(),
+                    alive: true,
+                    current_chunk_id: 42,
+                    buff_size_bytes: 4096,
+                    bytes_processed_total: 1048576,
+                    chunk_delay_secs: 3.2,
+                }],
             },
             WsEvent::Error {
                 service: "inpoint".to_string(),

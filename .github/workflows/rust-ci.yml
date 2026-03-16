@@ -622,14 +622,12 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
-      - name: Start mock API server
+      - name: Start mock API server (serves frontend + API + WebSocket)
         working-directory: local-client-rs/e2e
         run: node mock-api.js &
-      - name: Serve frontend
-        run: npx serve local-client-rs/dist -l 5173 -s &
-      - name: Wait for servers
+      - name: Wait for server
         run: |
-          npx wait-on http://127.0.0.1:5173 http://127.0.0.1:8910/api/v1/status --timeout 30000
+          npx wait-on http://127.0.0.1:8910/api/v1/status --timeout 30000
       - name: Run Playwright tests
         working-directory: local-client-rs/e2e
         run: npx playwright test

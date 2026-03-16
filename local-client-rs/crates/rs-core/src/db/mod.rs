@@ -58,6 +58,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (3, MIGRATION_V3_SQL),
         (4, MIGRATION_V4_SQL),
         (5, MIGRATION_V5_SQL),
+        (6, MIGRATION_V6_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -219,6 +220,11 @@ PRAGMA foreign_keys = ON
 
 const MIGRATION_V5_SQL: &str = r#"
 ALTER TABLE delivery_instances ADD COLUMN auth_token TEXT NOT NULL DEFAULT ''
+"#;
+
+const MIGRATION_V6_SQL: &str = r#"
+ALTER TABLE chunk_records ADD COLUMN sent_at TEXT;
+ALTER TABLE delivery_endpoint_status ADD COLUMN bytes_processed_total INTEGER NOT NULL DEFAULT 0
 "#;
 
 // --- Client Profile ---
@@ -444,10 +450,12 @@ pub async fn set_chunk_in_process(pool: &SqlitePool, id: i64, in_process: bool) 
 }
 
 pub async fn set_chunk_sent(pool: &SqlitePool, id: i64) -> Result<()> {
-    sqlx::query("UPDATE chunk_records SET sent = 1, in_process = 0 WHERE id = ?1")
-        .bind(id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE chunk_records SET sent = 1, in_process = 0, sent_at = datetime('now') WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -522,6 +530,20 @@ pub async fn get_first_chunk_id_for_event(
             .fetch_one(pool)
             .await?;
     Ok(row.get::<Option<i64>, _>("min_id"))
+}
+
+/// Get the latest (maximum) chunk ID for a specific streaming event.
+/// Returns None if no chunks exist for the event.
+pub async fn get_latest_chunk_id_for_event(
+    pool: &SqlitePool,
+    streaming_event_id: i64,
+) -> Result<Option<i64>> {
+    let row =
+        sqlx::query("SELECT MAX(id) as max_id FROM chunk_records WHERE streaming_event_id = ?1")
+            .bind(streaming_event_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(row.get::<Option<i64>, _>("max_id"))
 }
 
 pub async fn delete_all_chunks(pool: &SqlitePool) -> Result<u64> {

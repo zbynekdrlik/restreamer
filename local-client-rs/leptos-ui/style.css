@@ -615,6 +615,131 @@ input[type="password"]:focus {
   border-color: var(--accent);
 }
 
+/* Delivery Section */
+.delivery-section {
+  background-color: var(--bg-card);
+  border-radius: 12px;
+  padding: 20px;
+  margin-top: 20px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+/* Lifecycle Bar */
+.lifecycle-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 20px;
+  padding: 10px 0;
+}
+
+.lifecycle-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  position: relative;
+}
+
+.lifecycle-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  margin-bottom: 6px;
+  transition: background-color 0.3s;
+}
+
+.lifecycle-stage.completed .lifecycle-dot {
+  background-color: var(--success);
+}
+
+.lifecycle-stage.active .lifecycle-dot {
+  background-color: var(--success);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.lifecycle-stage.pending .lifecycle-dot {
+  background-color: var(--text-secondary);
+  opacity: 0.5;
+}
+
+.lifecycle-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  text-transform: capitalize;
+}
+
+.lifecycle-stage.active .lifecycle-label,
+.lifecycle-stage.completed .lifecycle-label {
+  color: var(--text-primary);
+}
+
+/* Delivery Endpoints Grid */
+.delivery-endpoints {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.delivery-endpoint-card {
+  background-color: var(--bg-secondary);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.endpoint-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.endpoint-alias {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.endpoint-alive-text {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.endpoint-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: 10px;
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+}
+
+.metric-label {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+.metric-value {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+/* Delay color coding */
+.delay-low {
+  color: var(--success);
+}
+
+.delay-medium {
+  color: var(--warning);
+}
+
+.delay-high {
+  color: var(--error);
+}
+
 /* Responsive layout */
 @media (max-width: 768px) {
   .app {
@@ -644,5 +769,14 @@ input[type="password"]:focus {
   .chunk-row {
     grid-template-columns: 1fr 80px 80px 60px;
     font-size: 0.8rem;
+  }
+
+  .delivery-endpoints {
+    grid-template-columns: 1fr;
+  }
+
+  .lifecycle-bar {
+    flex-wrap: wrap;
+    gap: 8px;
   }
 }

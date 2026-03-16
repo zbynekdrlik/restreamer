@@ -11,7 +11,7 @@ use serde::Deserialize;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::api;
-use crate::store::DashboardStore;
+use crate::store::{DashboardStore, DeliveryEndpointState, DeliveryState};
 
 /// Tagged WsEvent matching the backend's `#[serde(tag = "type", content = "data")]`.
 #[derive(Debug, Clone, Deserialize)]
@@ -51,17 +51,26 @@ enum WsEvent {
         delivering: bool,
     },
     DeliveryStatus {
-        #[allow(dead_code)]
         instance_name: String,
-        #[allow(dead_code)]
         status: String,
-        #[allow(dead_code)]
+        server_ip: Option<String>,
         endpoint_count: u32,
+        endpoints: Vec<WsDeliveryEndpoint>,
     },
     Error {
         service: String,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WsDeliveryEndpoint {
+    alias: String,
+    alive: bool,
+    current_chunk_id: i64,
+    buff_size_bytes: i64,
+    bytes_processed_total: i64,
+    chunk_delay_secs: f64,
 }
 
 /// Compute the WebSocket URL from the current page location.
@@ -163,8 +172,49 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                 }
             });
         }
-        WsEvent::DeliveryStatus { .. } => {
-            // Delivery status updates — could extend store later
+        WsEvent::DeliveryStatus {
+            instance_name,
+            status,
+            server_ip,
+            endpoint_count,
+            endpoints,
+        } => {
+            store.delivery.update(|d| {
+                // Compute bandwidth from bytes_processed_total delta (poll interval ~2s)
+                let new_endpoints: Vec<DeliveryEndpointState> = endpoints
+                    .into_iter()
+                    .map(|ep| {
+                        // Find previous bytes total for this alias to compute bandwidth
+                        let prev = d
+                            .endpoints
+                            .iter()
+                            .find(|prev_ep| prev_ep.alias == ep.alias)
+                            .map(|prev_ep| prev_ep.bytes_processed_total)
+                            .unwrap_or(0);
+                        let delta = (ep.bytes_processed_total - prev).max(0) as f64;
+                        let bandwidth_bps = delta / 2.0; // 2-second poll interval
+
+                        DeliveryEndpointState {
+                            alias: ep.alias,
+                            alive: ep.alive,
+                            current_chunk_id: ep.current_chunk_id,
+                            buff_size_bytes: ep.buff_size_bytes,
+                            bytes_processed_total: ep.bytes_processed_total,
+                            chunk_delay_secs: ep.chunk_delay_secs,
+                            bandwidth_bps,
+                            prev_bytes_total: prev,
+                        }
+                    })
+                    .collect();
+
+                *d = DeliveryState {
+                    status,
+                    instance_name,
+                    server_ip,
+                    endpoint_count,
+                    endpoints: new_endpoints,
+                };
+            });
         }
         WsEvent::Error { service, message } => {
             store.push_error(service, message);

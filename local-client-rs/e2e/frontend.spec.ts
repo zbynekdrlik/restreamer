@@ -338,6 +338,91 @@ test.describe("Logs route", () => {
   });
 });
 
+// --- Delivery Monitoring ---
+
+test.describe("Delivery monitoring section", () => {
+  test("delivery section appears when receiving WebSocket DeliveryStatus", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
+    // Wait for the delivery section to appear after WebSocket message
+    await expect(page.locator(".delivery-section")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.locator(".delivery-section")).toContainText(
+      "Delivery Pipeline",
+    );
+  });
+
+  test("lifecycle bar shows 5 stages", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".delivery-section")).toBeVisible({
+      timeout: 10000,
+    });
+    const stages = page.locator(".lifecycle-stage");
+    await expect(stages).toHaveCount(5);
+    await expect(stages.nth(0)).toContainText("Creating");
+    await expect(stages.nth(1)).toContainText("Booting");
+    await expect(stages.nth(2)).toContainText("Deploying");
+    await expect(stages.nth(3)).toContainText("Ready");
+    await expect(stages.nth(4)).toContainText("Delivering");
+  });
+
+  test("endpoint cards show metrics", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".delivery-section")).toBeVisible({
+      timeout: 10000,
+    });
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards).toHaveCount(2);
+    // First card: YouTube Main
+    await expect(cards.first()).toContainText("YouTube Main");
+    await expect(cards.first()).toContainText("#142");
+    await expect(cards.first()).toContainText("3.2s");
+    // Second card: Facebook Page
+    await expect(cards.nth(1)).toContainText("Facebook Page");
+    await expect(cards.nth(1)).toContainText("#140");
+    await expect(cards.nth(1)).toContainText("5.1s");
+  });
+
+  test("delay color coding for low/medium values", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".delivery-section")).toBeVisible({
+      timeout: 10000,
+    });
+    // YouTube Main has delay 3.2s — should have delay-low (green)
+    const ytDelay = page
+      .locator(".delivery-endpoint-card")
+      .first()
+      .locator(".delay-low");
+    await expect(ytDelay).toBeVisible();
+    // Facebook Page has delay 5.1s — should have delay-medium (yellow)
+    const fbDelay = page
+      .locator(".delivery-endpoint-card")
+      .nth(1)
+      .locator(".delay-medium");
+    await expect(fbDelay).toBeVisible();
+  });
+
+  test("endpoint cards show Chunk, Delay, Buffer, Bandwidth, Total labels", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.locator(".delivery-section")).toBeVisible({
+      timeout: 10000,
+    });
+    const card = page.locator(".delivery-endpoint-card").first();
+    await expect(card.locator(".metric-label")).toContainText([
+      "Chunk",
+      "Delay",
+      "Buffer",
+      "Bandwidth",
+      "Total",
+    ]);
+  });
+});
+
 // --- Route navigation ---
 
 test.describe("Route navigation", () => {
