@@ -377,8 +377,7 @@ impl DeliveryOrchestrator {
             .await
             .unwrap_or(None)
             .unwrap_or(0);
-        let chunk_duration_secs =
-            self.config.inpoint.chunk_duration_ms as f64 / 1000.0;
+        let chunk_duration_secs = self.config.inpoint.chunk_duration_ms as f64 / 1000.0;
 
         let (server_ready, endpoints) = match &instance {
             Some(inst) if inst.status == "running" => {
@@ -403,8 +402,7 @@ impl DeliveryOrchestrator {
                             let alive = entry["alive"].as_bool().unwrap_or(false);
                             let buff = entry["buff_size_bytes"].as_i64().unwrap_or(0);
                             let chunk_id = entry["current_chunk_id"].as_i64().unwrap_or(0);
-                            let bytes_total =
-                                entry["bytes_processed_total"].as_i64().unwrap_or(0);
+                            let bytes_total = entry["bytes_processed_total"].as_i64().unwrap_or(0);
 
                             // Compute chunk delay
                             let chunk_gap = (latest_local_chunk - chunk_id).max(0) as f64;
@@ -476,7 +474,13 @@ impl DeliveryOrchestrator {
     pub async fn poll_delivery_metrics(
         &self,
         event_id: i64,
-    ) -> anyhow::Result<(String, String, Option<String>, u32, Vec<DeliveryEndpointMetrics>)> {
+    ) -> anyhow::Result<(
+        String,
+        String,
+        Option<String>,
+        u32,
+        Vec<DeliveryEndpointMetrics>,
+    )> {
         let status = self.get_delivery_status(event_id).await?;
 
         let (name, inst_status, server_ip) = match &status.instance {

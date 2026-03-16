@@ -670,8 +670,6 @@ pub async fn start_delivering(
     Ok(StatusCode::OK)
 }
 
-// --- Delivery Orchestration ---
-
 #[derive(Deserialize)]
 pub struct DeliveryStartRequest {
     pub event_id: i64,
@@ -837,8 +835,6 @@ pub async fn delivery_stop(
     Ok(StatusCode::OK)
 }
 
-// --- YouTube Status ---
-
 #[derive(Serialize)]
 pub struct YouTubeStatusResponse {
     pub authenticated: bool,
@@ -862,8 +858,6 @@ pub async fn youtube_status(
         error: status.error,
     }))
 }
-
-// --- YouTube OAuth Seed ---
 
 #[derive(Deserialize)]
 pub struct YouTubeOAuthSeedRequest {
@@ -895,8 +889,6 @@ pub async fn youtube_oauth_seed(
     tracing::info!("YouTube OAuth tokens seeded");
     Ok(StatusCode::OK)
 }
-
-// --- YouTube OAuth Authorization Flow ---
 
 #[derive(Serialize)]
 pub struct YouTubeOAuthStartResponse {
@@ -990,7 +982,6 @@ pub async fn youtube_oauth_callback(
     ))
 }
 
-// --- Delivery Instances List ---
 pub async fn list_delivery_instances(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<DeliveryInstance>>, StatusCode> {
