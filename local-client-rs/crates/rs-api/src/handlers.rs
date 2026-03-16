@@ -754,6 +754,11 @@ pub struct DeliveryEndpointEntry {
     pub bytes_processed_total: i64,
     pub chunks_processed: i64,
     pub chunk_delay_secs: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stall_reason: Option<String>,
+    pub ffmpeg_restart_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 pub async fn delivery_status(
@@ -784,6 +789,9 @@ pub async fn delivery_status(
             bytes_processed_total: ep.bytes_processed_total,
             chunks_processed: ep.chunks_processed,
             chunk_delay_secs: ep.chunk_delay_secs,
+            stall_reason: ep.stall_reason,
+            ffmpeg_restart_count: ep.ffmpeg_restart_count,
+            last_error: ep.last_error,
         })
         .collect();
     let endpoints_alive =

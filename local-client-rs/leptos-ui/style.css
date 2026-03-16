@@ -697,7 +697,20 @@ input[type="password"]:focus {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 4px;
+}
+
+.stall-reason {
+  font-size: 0.8rem;
+  color: var(--warning, #f0c040);
+  margin-bottom: 4px;
+  padding: 2px 0;
+}
+
+.stall-error {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
 }
 
 .endpoint-alias {

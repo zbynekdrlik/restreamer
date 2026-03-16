@@ -304,10 +304,20 @@ fn DeliveryLifecycle(status: String) -> impl IntoView {
     }
 }
 
+/// Format stall reason as human-readable text.
+fn format_stall_reason(reason: &str, restart_count: u32) -> String {
+    match reason {
+        "ffmpeg_crash_loop" => format!("ffmpeg crash loop ({} restarts)", restart_count),
+        "chunk_gap" => "chunk gap (missing S3 data)".to_string(),
+        "write_timeout" => "ffmpeg write timeout".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Per-endpoint delivery metrics card.
 #[component]
 fn DeliveryEndpointCard(endpoint: DeliveryEndpointState) -> impl IntoView {
-    let is_stalled = endpoint.stall_count >= 3;
+    let is_stalled = endpoint.stall_count >= 3 || endpoint.stall_reason.is_some();
 
     let alive_class = if is_stalled {
         "status-indicator idle"
@@ -344,6 +354,12 @@ fn DeliveryEndpointCard(endpoint: DeliveryEndpointState) -> impl IntoView {
         "metric-value"
     };
 
+    let stall_reason_text = endpoint
+        .stall_reason
+        .as_ref()
+        .map(|r| format_stall_reason(r, endpoint.ffmpeg_restart_count));
+    let last_error_text = endpoint.last_error.clone();
+
     let alias = endpoint.alias.clone();
     view! {
         <div class="delivery-endpoint-card">
@@ -352,6 +368,12 @@ fn DeliveryEndpointCard(endpoint: DeliveryEndpointState) -> impl IntoView {
                 <span class=alive_class></span>
                 <span class="endpoint-alive-text">{alive_text}</span>
             </div>
+            {stall_reason_text.map(|reason| view! {
+                <div class="stall-reason">{reason}</div>
+            })}
+            {last_error_text.filter(|e| !e.is_empty()).map(|err| view! {
+                <div class="stall-error">{format!("Last error: {}", err)}</div>
+            })}
             <div class="endpoint-metrics">
                 <div class="metric">
                     <span class="metric-label">"Delay"</span>

@@ -425,6 +425,44 @@ test.describe("Delivery monitoring section", () => {
       "Speed",
     ]);
   });
+
+  test("shows stall reason when endpoint has backend stall_reason", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.nth(1)).toBeVisible({ timeout: 10000 });
+    // Facebook Page has stall_reason: "chunk_gap" in mock data
+    const fbCard = cards.nth(1);
+    await expect(fbCard.locator(".stall-reason")).toBeVisible();
+    await expect(fbCard.locator(".stall-reason")).toContainText("chunk gap");
+  });
+
+  test("shows last error when endpoint has backend last_error", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.nth(1)).toBeVisible({ timeout: 10000 });
+    // Facebook Page has last_error: "S3 fetch timeout" in mock data
+    const fbCard = cards.nth(1);
+    await expect(fbCard.locator(".stall-error")).toBeVisible();
+    await expect(fbCard.locator(".stall-error")).toContainText(
+      "S3 fetch timeout",
+    );
+  });
+
+  test("healthy endpoint does not show stall reason or error", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.first()).toBeVisible({ timeout: 10000 });
+    // YouTube Main has no stall_reason and no last_error
+    const ytCard = cards.first();
+    await expect(ytCard.locator(".stall-reason")).toHaveCount(0);
+    await expect(ytCard.locator(".stall-error")).toHaveCount(0);
+  });
 });
 
 // --- Route navigation ---

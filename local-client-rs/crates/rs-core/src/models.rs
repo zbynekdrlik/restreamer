@@ -147,6 +147,12 @@ pub struct DeliveryEndpointMetrics {
     pub bytes_processed_total: i64,
     pub chunks_processed: i64,
     pub chunk_delay_secs: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_reason: Option<String>,
+    #[serde(default)]
+    pub ffmpeg_restart_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// Service status summary returned by the /status endpoint.
@@ -258,6 +264,9 @@ mod tests {
                     bytes_processed_total: 1048576,
                     chunks_processed: 100,
                     chunk_delay_secs: 3.2,
+                    stall_reason: None,
+                    ffmpeg_restart_count: 0,
+                    last_error: None,
                 }],
             },
             WsEvent::Error {
@@ -316,6 +325,67 @@ mod tests {
         let clone = state.clone();
         state.set_connected(true);
         assert!(clone.is_connected());
+    }
+
+    #[test]
+    fn delivery_metrics_diagnostics_roundtrip() {
+        let metrics = DeliveryEndpointMetrics {
+            alias: "YouTube".to_string(),
+            alive: true,
+            current_chunk_id: 42,
+            bytes_processed_total: 1048576,
+            chunks_processed: 100,
+            chunk_delay_secs: 3.2,
+            stall_reason: Some("chunk_gap".to_string()),
+            ffmpeg_restart_count: 5,
+            last_error: Some("S3 timeout".to_string()),
+        };
+        let json = serde_json::to_string(&metrics).unwrap();
+        let parsed: DeliveryEndpointMetrics = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.stall_reason, Some("chunk_gap".to_string()));
+        assert_eq!(parsed.ffmpeg_restart_count, 5);
+        assert_eq!(parsed.last_error, Some("S3 timeout".to_string()));
+    }
+
+    #[test]
+    fn delivery_metrics_missing_diagnostics_defaults() {
+        let json = r#"{
+            "alias": "Test",
+            "alive": true,
+            "current_chunk_id": 1,
+            "bytes_processed_total": 100,
+            "chunks_processed": 5,
+            "chunk_delay_secs": 1.0
+        }"#;
+        let parsed: DeliveryEndpointMetrics = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.stall_reason, None);
+        assert_eq!(parsed.ffmpeg_restart_count, 0);
+        assert_eq!(parsed.last_error, None);
+    }
+
+    #[test]
+    fn ws_event_delivery_with_diagnostics_roundtrip() {
+        let event = WsEvent::DeliveryStatus {
+            instance_name: "test-vps".to_string(),
+            status: "running".to_string(),
+            server_ip: Some("1.2.3.4".to_string()),
+            endpoint_count: 1,
+            endpoints: vec![DeliveryEndpointMetrics {
+                alias: "YT".to_string(),
+                alive: false,
+                current_chunk_id: 15,
+                bytes_processed_total: 582000,
+                chunks_processed: 15,
+                chunk_delay_secs: 211.0,
+                stall_reason: Some("ffmpeg_crash_loop".to_string()),
+                ffmpeg_restart_count: 10,
+                last_error: Some("Connection refused".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: WsEvent = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(json, json2);
     }
 
     #[test]

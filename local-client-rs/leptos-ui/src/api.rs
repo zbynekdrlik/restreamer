@@ -417,6 +417,12 @@ pub struct DeliveryEndpointDetail {
     pub bytes_processed_total: i64,
     pub chunks_processed: i64,
     pub chunk_delay_secs: f64,
+    #[serde(default)]
+    pub stall_reason: Option<String>,
+    #[serde(default)]
+    pub ffmpeg_restart_count: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -448,6 +454,12 @@ pub struct CachedDeliveryEndpoint {
     pub bytes_processed_total: i64,
     pub chunks_processed: i64,
     pub chunk_delay_secs: f64,
+    #[serde(default)]
+    pub stall_reason: Option<String>,
+    #[serde(default)]
+    pub ffmpeg_restart_count: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 /// Get cached delivery status (instant, no VPS round-trip).

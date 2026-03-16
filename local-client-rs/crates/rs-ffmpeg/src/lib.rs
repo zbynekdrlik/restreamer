@@ -5,10 +5,12 @@
 /// command configuration.
 ///
 /// Ported from Python delivering-service endpoints.py ffmpeg construction.
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 #[derive(Debug, Error)]
@@ -206,11 +208,15 @@ fn build_test_file_args(alias: &str) -> Vec<String> {
     ]
 }
 
+/// Max stderr lines to keep in the ring buffer.
+const STDERR_BUFFER_SIZE: usize = 5;
+
 /// Managed ffmpeg process with stdin pipe for writing data.
 pub struct FfmpegProcess {
     child: Child,
     service_type: ServiceType,
     alias: String,
+    stderr_lines: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl FfmpegProcess {
@@ -235,18 +241,22 @@ impl FfmpegProcess {
             .kill_on_drop(true)
             .spawn()?;
 
-        // Spawn a background task to drain stderr to prevent buffer blocking.
-        // Logs are discarded but the pipe is kept alive.
+        // Spawn a background task to drain stderr and capture last N lines.
         let stderr = child.stderr.take();
         let alias_clone = alias.to_string();
+        let stderr_lines: Arc<Mutex<VecDeque<String>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_SIZE)));
+        let stderr_lines_clone = Arc::clone(&stderr_lines);
         tokio::spawn(async move {
-            if let Some(mut stderr) = stderr {
-                let mut buf = [0u8; 4096];
-                loop {
-                    match stderr.read(&mut buf).await {
-                        Ok(0) => break, // EOF
-                        Ok(_) => {}     // Discard data
-                        Err(_) => break,
+            if let Some(stderr) = stderr {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Ok(mut buf) = stderr_lines_clone.lock() {
+                        if buf.len() >= STDERR_BUFFER_SIZE {
+                            buf.pop_front();
+                        }
+                        buf.push_back(line);
                     }
                 }
                 tracing::debug!(alias = %alias_clone, "ffmpeg stderr drain task finished");
@@ -257,6 +267,7 @@ impl FfmpegProcess {
             child,
             service_type,
             alias: alias.to_string(),
+            stderr_lines,
         })
     }
 
@@ -288,6 +299,23 @@ impl FfmpegProcess {
     /// Kill the process.
     pub async fn kill(&mut self) {
         let _ = self.child.kill().await;
+    }
+
+    /// Get the last stderr line captured from ffmpeg.
+    pub fn last_stderr_line(&self) -> Option<String> {
+        self.stderr_lines
+            .lock()
+            .ok()
+            .and_then(|buf| buf.back().cloned())
+    }
+
+    /// Get all captured stderr lines (up to STDERR_BUFFER_SIZE).
+    pub fn stderr_lines(&self) -> Vec<String> {
+        self.stderr_lines
+            .lock()
+            .ok()
+            .map(|buf| buf.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn service_type(&self) -> ServiceType {

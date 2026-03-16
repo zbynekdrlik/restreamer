@@ -181,6 +181,15 @@ struct EndpointStatusEntry {
     current_chunk_id: i64,
     bytes_processed_total: u64,
     chunks_processed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stall_reason: Option<String>,
+    ffmpeg_restart_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ffmpeg_last_stderr: Option<String>,
+    consecutive_chunk_misses: u32,
+    consecutive_ffmpeg_failures: u32,
 }
 
 async fn endpoint_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
@@ -192,9 +201,15 @@ async fn endpoint_status(State(state): State<Arc<AppState>>) -> Json<StatusRespo
         entries.push(EndpointStatusEntry {
             alias: alias.clone(),
             alive: handle.is_alive(),
-            current_chunk_id: stats.1,
-            bytes_processed_total: stats.0,
-            chunks_processed: stats.2,
+            current_chunk_id: stats.current_chunk_id,
+            bytes_processed_total: stats.bytes_processed_total,
+            chunks_processed: stats.chunks_processed,
+            stall_reason: stats.stall_reason,
+            ffmpeg_restart_count: stats.ffmpeg_restart_count,
+            last_error: stats.last_error,
+            ffmpeg_last_stderr: stats.ffmpeg_last_stderr,
+            consecutive_chunk_misses: stats.consecutive_chunk_misses,
+            consecutive_ffmpeg_failures: stats.consecutive_ffmpeg_failures,
         });
     }
 
@@ -309,6 +324,25 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["endpoint_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn status_response_includes_diagnostic_fields() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .uri("/api/status")
+            .header("authorization", format!("Bearer {TEST_TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // When there are no endpoints, the array is empty but the shape is correct
+        assert!(json["endpoints"].is_array());
     }
 
     #[tokio::test]

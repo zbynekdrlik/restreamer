@@ -71,6 +71,12 @@ struct WsDeliveryEndpoint {
     bytes_processed_total: i64,
     chunks_processed: i64,
     chunk_delay_secs: f64,
+    #[serde(default)]
+    stall_reason: Option<String>,
+    #[serde(default)]
+    ffmpeg_restart_count: u32,
+    #[serde(default)]
+    last_error: Option<String>,
 }
 
 /// Compute the WebSocket URL from the current page location.
@@ -112,6 +118,9 @@ async fn load_initial_state(store: DashboardStore) {
                     prev_bytes_total: 0,
                     prev_chunk_id: 0,
                     stall_count: 0,
+                    stall_reason: ep.stall_reason,
+                    ffmpeg_restart_count: ep.ffmpeg_restart_count,
+                    last_error: ep.last_error,
                 })
                 .collect();
             store.delivery.set(DeliveryState {
@@ -240,7 +249,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                         };
 
                         DeliveryEndpointState {
-                            alias: ep.alias,
+                            alias: ep.alias.clone(),
                             alive: ep.alive,
                             current_chunk_id: ep.current_chunk_id,
                             bytes_processed_total: ep.bytes_processed_total,
@@ -250,6 +259,9 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                             prev_bytes_total: prev_bytes,
                             prev_chunk_id: prev_chunk,
                             stall_count,
+                            stall_reason: ep.stall_reason.clone(),
+                            ffmpeg_restart_count: ep.ffmpeg_restart_count,
+                            last_error: ep.last_error.clone(),
                         }
                     })
                     .collect();
