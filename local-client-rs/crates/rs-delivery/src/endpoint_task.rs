@@ -7,13 +7,14 @@
 /// 4. Auto-restarts ffmpeg on crash (with circuit breaker)
 /// 5. Skips ahead on chunk gaps after timeout
 use async_trait::async_trait;
-use crate::api::{EndpointConfig, S3Config};
-use crate::s3_fetch::S3Fetcher;
 use rs_ffmpeg::{FfmpegProcess, ServiceType};
 use rs_ts_normalize::TSTimestampNormalizer;
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
+
+use crate::api::{EndpointConfig, S3Config};
+use crate::s3_fetch::S3Fetcher;
 
 // --- Resilience constants ---
 const MAX_FFMPEG_RESTARTS: u32 = 10;
@@ -259,15 +260,20 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
 
                     // Circuit breaker: after MAX_FFMPEG_RESTARTS, enter cooldown
                     if consecutive_ffmpeg_failures >= MAX_FFMPEG_RESTARTS {
+                        let cooldown = CIRCUIT_BREAKER_COOLDOWN_SECS;
                         tracing::error!(
                             alias = %alias,
                             failures = consecutive_ffmpeg_failures,
-                            "ffmpeg circuit breaker triggered, cooling down {CIRCUIT_BREAKER_COOLDOWN_SECS}s"
+                            "ffmpeg circuit breaker, cooldown {cooldown}s"
                         );
-                        s.stall_reason = Some("ffmpeg_crash_loop".to_string());
+                        s.stall_reason =
+                            Some("ffmpeg_crash_loop".to_string());
                         drop(s);
+                        let sleep_dur = std::time::Duration::from_secs(
+                            CIRCUIT_BREAKER_COOLDOWN_SECS,
+                        );
                         tokio::select! {
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(CIRCUIT_BREAKER_COOLDOWN_SECS)) => {}
+                            _ = tokio::time::sleep(sleep_dur) => {}
                             _ = stop_rx.changed() => {
                                 if *stop_rx.borrow() { break; }
                             }
@@ -330,7 +336,10 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                         }
                         Err(_) => {
                             // Write timeout
-                            tracing::error!(alias = %alias, "ffmpeg write timed out after {WRITE_TIMEOUT_SECS}s");
+                            tracing::error!(
+                                alias = %alias,
+                                "ffmpeg write timed out"
+                            );
                             let mut s = stats.lock().await;
                             s.last_error = Some("write_timeout".to_string());
                             s.stall_reason = Some("write_timeout".to_string());
