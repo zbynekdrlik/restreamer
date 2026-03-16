@@ -15,12 +15,13 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 use crate::state::AppState;
+use crate::tray_icons::{self, TrayState};
 
-/// Status polling interval (3 seconds).
-const POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// Status polling interval for static states (3 seconds).
+const POLL_INTERVAL_STATIC: Duration = Duration::from_secs(3);
 
-/// Embedded tray icon (32x32 PNG from bundle).
-const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/32x32.png");
+/// Status polling interval for animated states (1 second).
+const POLL_INTERVAL_ANIMATED: Duration = Duration::from_secs(1);
 
 /// Holds references to menu items whose text changes at runtime.
 struct DynamicMenuItems {
@@ -34,7 +35,8 @@ struct DynamicMenuItems {
 pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let version = env!("BUILD_VERSION");
     let timestamp = env!("BUILD_TIMESTAMP");
-    let icon = Image::from_bytes(TRAY_ICON_BYTES)?;
+    let rgba = tray_icons::generate_icon(TrayState::Idle, 0);
+    let icon = Image::new_owned(rgba, 32, 32);
 
     // Static header with version and build timestamp
     let header = MenuItem::new(
@@ -292,20 +294,53 @@ fn format_duration(secs: f64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
+/// Derive the tray icon state from service status.
+fn derive_tray_state(status: &TrayStatus, inpoint_connected: bool) -> TrayState {
+    match status.inpoint.as_str() {
+        "Error" => TrayState::Error,
+        "Receiving" => {
+            if inpoint_connected {
+                if status.pending > 0 {
+                    TrayState::Uploading
+                } else {
+                    TrayState::Receiving
+                }
+            } else {
+                TrayState::Ready
+            }
+        }
+        "Paused" => TrayState::Ready,
+        "No Event" => TrayState::Idle,
+        _ => TrayState::Idle, // "Starting...", "Initializing..."
+    }
+}
+
 /// Poll the service status directly from AppState (no HTTP).
 /// Updates menu item text in-place — never calls `set_menu()`.
+/// Also updates the tray icon based on derived state with animation support.
 fn start_status_updater(handle: AppHandle<Wry>, items: DynamicMenuItems) {
     tauri::async_runtime::spawn(async move {
         // Wait for state to be initialized
         tokio::time::sleep(Duration::from_secs(2)).await;
 
+        let mut current_state = TrayState::Idle;
+        let mut animation_frame: u8 = 0;
+
         loop {
-            tokio::time::sleep(POLL_INTERVAL).await;
+            let sleep_duration = if current_state.is_animated() {
+                POLL_INTERVAL_ANIMATED
+            } else {
+                POLL_INTERVAL_STATIC
+            };
+            tokio::time::sleep(sleep_duration).await;
 
             let mut status = TrayStatus::default();
+            let mut inpoint_connected = false;
 
             // Get state if available
             if let Some(state) = handle.try_state::<Arc<AppState>>() {
+                inpoint_connected = state.is_inpoint_connected();
+
                 // Get streaming event
                 match state.get_streaming_event().await {
                     Ok(Some(event)) => {
@@ -355,15 +390,41 @@ fn start_status_updater(handle: AppHandle<Wry>, items: DynamicMenuItems) {
                 format!("Event: {}", status.event_name)
             };
             let _ = items.event.set_text(&event_text);
-            let _ = items.inpoint.set_text(format!("Inpoint: {}", status.inpoint));
-            let _ = items.buffer.set_text(format!("Buffer: {}", status.buffer));
-            let _ = items.uploader.set_text(format!("Uploader: {}", status.endpoint));
             let _ = items
-                .chunks
-                .set_text(format!("Chunks: {} sent, {} pending", status.sent_chunks, status.pending));
+                .inpoint
+                .set_text(format!("Inpoint: {}", status.inpoint));
+            let _ = items
+                .buffer
+                .set_text(format!("Buffer: {}", status.buffer));
+            let _ = items
+                .uploader
+                .set_text(format!("Uploader: {}", status.endpoint));
+            let _ = items.chunks.set_text(format!(
+                "Chunks: {} sent, {} pending",
+                status.sent_chunks, status.pending
+            ));
 
-            // Tooltip always safe to update
+            // Derive tray state and update icon
+            let new_state = derive_tray_state(&status, inpoint_connected);
+            let state_changed = new_state != current_state;
+
+            if state_changed {
+                // State changed — reset animation
+                current_state = new_state;
+                animation_frame = 0;
+            } else if current_state.is_animated() {
+                // Same animated state — advance frame
+                animation_frame = animation_frame.wrapping_add(1);
+            }
+
+            // Update icon when state changed or animating
             if let Some(tray) = handle.tray_by_id("restreamer") {
+                if state_changed || current_state.is_animated() {
+                    let rgba = tray_icons::generate_icon(current_state, animation_frame);
+                    let icon = Image::new_owned(rgba, 32, 32);
+                    let _ = tray.set_icon(Some(icon));
+                }
+
                 let tooltip = build_tooltip(&status);
                 let _ = tray.set_tooltip(Some(&tooltip));
             }
@@ -375,15 +436,71 @@ fn start_status_updater(handle: AppHandle<Wry>, items: DynamicMenuItems) {
 mod tests {
     use super::*;
 
+    // --- derive_tray_state tests ---
+
     #[test]
-    fn tray_icon_bytes_not_empty() {
-        assert!(!TRAY_ICON_BYTES.is_empty());
+    fn derive_state_no_event_is_idle() {
+        let status = TrayStatus {
+            inpoint: "No Event".to_string(),
+            ..TrayStatus::default()
+        };
+        assert_eq!(derive_tray_state(&status, false), TrayState::Idle);
     }
 
     #[test]
-    fn tray_icon_bytes_valid_png() {
-        // PNG magic bytes: 0x89 P N G
-        assert_eq!(&TRAY_ICON_BYTES[..4], &[0x89, 0x50, 0x4E, 0x47]);
+    fn derive_state_paused_is_ready() {
+        let status = TrayStatus {
+            inpoint: "Paused".to_string(),
+            ..TrayStatus::default()
+        };
+        assert_eq!(derive_tray_state(&status, false), TrayState::Ready);
+    }
+
+    #[test]
+    fn derive_state_receiving_connected_no_pending_is_receiving() {
+        let status = TrayStatus {
+            inpoint: "Receiving".to_string(),
+            pending: 0,
+            ..TrayStatus::default()
+        };
+        assert_eq!(derive_tray_state(&status, true), TrayState::Receiving);
+    }
+
+    #[test]
+    fn derive_state_receiving_connected_with_pending_is_uploading() {
+        let status = TrayStatus {
+            inpoint: "Receiving".to_string(),
+            pending: 5,
+            ..TrayStatus::default()
+        };
+        assert_eq!(derive_tray_state(&status, true), TrayState::Uploading);
+    }
+
+    #[test]
+    fn derive_state_receiving_not_connected_is_ready() {
+        let status = TrayStatus {
+            inpoint: "Receiving".to_string(),
+            ..TrayStatus::default()
+        };
+        assert_eq!(derive_tray_state(&status, false), TrayState::Ready);
+    }
+
+    #[test]
+    fn derive_state_error_is_error() {
+        let status = TrayStatus {
+            inpoint: "Error".to_string(),
+            ..TrayStatus::default()
+        };
+        assert_eq!(derive_tray_state(&status, false), TrayState::Error);
+    }
+
+    #[test]
+    fn derive_state_initializing_is_idle() {
+        let status = TrayStatus {
+            inpoint: "Initializing...".to_string(),
+            ..TrayStatus::default()
+        };
+        assert_eq!(derive_tray_state(&status, false), TrayState::Idle);
     }
 
     #[test]

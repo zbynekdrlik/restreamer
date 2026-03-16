@@ -1,6 +1,7 @@
 mod commands;
 mod state;
 mod tray;
+mod tray_icons;
 mod updater;
 
 use std::path::PathBuf;
