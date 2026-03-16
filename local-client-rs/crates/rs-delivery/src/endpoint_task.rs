@@ -65,7 +65,11 @@ impl EndpointHandle {
 
     pub async fn stats(&self) -> (u64, i64, u64) {
         let s = self.stats.lock().await;
-        (s.bytes_processed_total, s.current_chunk_id, s.chunks_processed)
+        (
+            s.bytes_processed_total,
+            s.current_chunk_id,
+            s.chunks_processed,
+        )
     }
 
     pub async fn stop(self) {
