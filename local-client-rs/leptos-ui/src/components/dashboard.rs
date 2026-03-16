@@ -287,10 +287,11 @@ fn DeliveryEndpointCard(endpoint: DeliveryEndpointState) -> impl IntoView {
         "delay-high"
     };
 
+    let alias = endpoint.alias.clone();
     view! {
         <div class="delivery-endpoint-card">
             <div class="endpoint-card-header">
-                <span class="endpoint-alias">{&endpoint.alias}</span>
+                <span class="endpoint-alias">{alias}</span>
                 <span class=alive_class></span>
                 <span class="endpoint-alive-text">{alive_text}</span>
             </div>
