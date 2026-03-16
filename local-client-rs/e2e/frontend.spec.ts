@@ -352,19 +352,17 @@ test.describe("Delivery monitoring section", () => {
     );
   });
 
-  test("shows idle state before WebSocket delivers status", async ({
+  test("shows endpoint data immediately from cached status on load", async ({
     page,
   }) => {
-    // Disconnect from WebSocket mock by navigating with tauri mock removed
     await page.goto("/");
     await expect(page.locator(".delivery-section")).toBeVisible({
       timeout: 10000,
     });
-    // Initially shows idle message
-    await expect(page.locator(".delivery-idle")).toBeVisible({ timeout: 3000 });
-    await expect(page.locator(".delivery-idle")).toContainText(
-      "No active delivery",
-    );
+    // Cached endpoint provides data instantly — endpoint cards should appear without waiting for WebSocket
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.first()).toBeVisible({ timeout: 5000 });
+    await expect(cards).toHaveCount(2);
   });
 
   test("lifecycle bar shows 5 stages", async ({ page }) => {
