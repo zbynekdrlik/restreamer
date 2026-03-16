@@ -754,10 +754,8 @@ pub struct DeliveryEndpointEntry {
     pub bytes_processed_total: i64,
     pub chunks_processed: i64,
     pub chunk_delay_secs: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stall_reason: Option<String>,
     pub ffmpeg_restart_count: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
 
