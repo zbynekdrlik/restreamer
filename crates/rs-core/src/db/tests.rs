@@ -662,15 +662,33 @@ async fn sequence_numbers_are_contiguous_with_many_events() {
 
     // Insert 10 chunks each, interleaved across 3 events
     for i in 0..10 {
-        insert_chunk(&pool, evt1, &format!("/tmp/e1c{i}.bin"), 100, &format!("e1m{i}"))
-            .await
-            .unwrap();
-        insert_chunk(&pool, evt2, &format!("/tmp/e2c{i}.bin"), 100, &format!("e2m{i}"))
-            .await
-            .unwrap();
-        insert_chunk(&pool, evt3, &format!("/tmp/e3c{i}.bin"), 100, &format!("e3m{i}"))
-            .await
-            .unwrap();
+        insert_chunk(
+            &pool,
+            evt1,
+            &format!("/tmp/e1c{i}.bin"),
+            100,
+            &format!("e1m{i}"),
+        )
+        .await
+        .unwrap();
+        insert_chunk(
+            &pool,
+            evt2,
+            &format!("/tmp/e2c{i}.bin"),
+            100,
+            &format!("e2m{i}"),
+        )
+        .await
+        .unwrap();
+        insert_chunk(
+            &pool,
+            evt3,
+            &format!("/tmp/e3c{i}.bin"),
+            100,
+            &format!("e3m{i}"),
+        )
+        .await
+        .unwrap();
     }
 
     // Each event should have sequence numbers 1..10 with no gaps
