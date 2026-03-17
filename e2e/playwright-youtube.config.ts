@@ -9,7 +9,7 @@ import { defineConfig } from "@playwright/test";
  */
 export default defineConfig({
   testDir: ".",
-  testMatch: "*.spec.ts",
+  testMatch: "youtube-studio-check.spec.ts",
   timeout: 120_000,
   retries: 0,
   workers: 1,
