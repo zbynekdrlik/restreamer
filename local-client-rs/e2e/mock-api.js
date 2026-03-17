@@ -1,16 +1,26 @@
 // Mock API server for frontend E2E tests.
 // Provides fake responses for all API endpoints used by the Leptos WASM frontend.
+// Also serves the WASM dist/ and WebSocket for unified testing.
 
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Serve the WASM frontend from dist/ for unified WebSocket + static serving
+const distDir = path.join(__dirname, "..", "dist");
+app.use(express.static(distDir));
+
 // --- Mock data ---
 
 const statusResponse = {
+  inpoint: {
+    state: "connected",
+    details: { rtmp_connected: true },
+  },
   streaming_event: {
     id: 1,
     name: "Sunday Service",
@@ -211,6 +221,19 @@ app.get("/api/v1/chunks/stats", (_req, res) => {
   res.json(statusResponse.chunk_stats);
 });
 
+// --- Cached delivery status (for instant initial load) ---
+let cachedDelivery = {
+  instance_name: "",
+  status: "none",
+  server_ip: null,
+  endpoint_count: 0,
+  endpoints: [],
+};
+
+app.get("/api/v1/delivery/status/cached", (_req, res) => {
+  res.json(cachedDelivery);
+});
+
 // --- Logs endpoint ---
 app.get("/api/v1/logs", (_req, res) => {
   res.json([
@@ -242,7 +265,68 @@ app.get("/api/v1/logs", (_req, res) => {
   ]);
 });
 
+// SPA fallback: serve index.html for any non-API route that wasn't matched by static
+app.get("*", (req, res) => {
+  res.sendFile(path.join(distDir, "index.html"));
+});
+
+// --- WebSocket endpoint (broadcasts delivery status) ---
+const { WebSocketServer } = require("ws");
+
 const PORT = 8910;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Mock API server running on http://127.0.0.1:${PORT}`);
+});
+
+const wss = new WebSocketServer({ server, path: "/api/v1/ws" });
+
+wss.on("connection", (ws) => {
+  console.log("[ws] Client connected");
+
+  // Immediately send a delivery status event for E2E testing
+  const deliveryEvent = {
+    type: "DeliveryStatus",
+    data: {
+      instance_name: "rs-delivery-evt1",
+      status: "running",
+      server_ip: "1.2.3.4",
+      endpoint_count: 2,
+      endpoints: [
+        {
+          alias: "YouTube Main",
+          alive: true,
+          current_chunk_id: 142,
+          bytes_processed_total: 1073741824,
+          chunks_processed: 1847,
+          chunk_delay_secs: 3.2,
+          stall_reason: null,
+          ffmpeg_restart_count: 0,
+          last_error: null,
+        },
+        {
+          alias: "Facebook Page",
+          alive: true,
+          current_chunk_id: 140,
+          bytes_processed_total: 943718400,
+          chunks_processed: 1620,
+          chunk_delay_secs: 45.0,
+          stall_reason: "chunk_gap",
+          ffmpeg_restart_count: 3,
+          last_error: "S3 fetch timeout",
+        },
+      ],
+    },
+  };
+
+  // Update cache and send after a brief delay
+  cachedDelivery = deliveryEvent.data;
+  setTimeout(() => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify(deliveryEvent));
+    }
+  }, 200);
+
+  ws.on("close", () => {
+    console.log("[ws] Client disconnected");
+  });
 });

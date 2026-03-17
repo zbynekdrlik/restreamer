@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use rs_cloud::hetzner::HetznerClient;
 use rs_core::config::Config;
 use rs_core::db;
-use rs_core::models::DeliveryInstance;
+use rs_core::models::{DeliveryEndpointMetrics, DeliveryInstance};
 use rs_youtube::oauth;
 use rs_youtube::streams;
 
@@ -51,8 +51,13 @@ pub struct DeliveryStatus {
 pub struct EndpointDeliveryStatus {
     pub alias: String,
     pub alive: bool,
-    pub buff_size_bytes: i64,
     pub current_chunk_id: i64,
+    pub bytes_processed_total: i64,
+    pub chunks_processed: i64,
+    pub chunk_delay_secs: f64,
+    pub stall_reason: Option<String>,
+    pub ffmpeg_restart_count: u32,
+    pub last_error: Option<String>,
 }
 
 /// Result of querying YouTube status.
@@ -370,6 +375,13 @@ impl DeliveryOrchestrator {
     pub async fn get_delivery_status(&self, event_id: i64) -> anyhow::Result<DeliveryStatus> {
         let instance = db::get_delivery_instance_by_event(&self.pool, event_id).await?;
 
+        // Get latest local chunk ID for delay calculation
+        let latest_local_chunk = db::get_latest_chunk_id_for_event(&self.pool, event_id)
+            .await
+            .unwrap_or(None)
+            .unwrap_or(0);
+        let chunk_duration_secs = self.config.inpoint.chunk_duration_ms as f64 / 1000.0;
+
         let (server_ready, endpoints) = match &instance {
             Some(inst) if inst.status == "running" => {
                 // Fetch live status from rs-delivery
@@ -379,7 +391,7 @@ impl DeliveryOrchestrator {
                 match client
                     .get(format!("{delivery_url}/api/status"))
                     .bearer_auth(&inst.auth_token)
-                    .timeout(Duration::from_secs(10))
+                    .timeout(Duration::from_secs(5))
                     .send()
                     .await
                 {
@@ -391,12 +403,28 @@ impl DeliveryOrchestrator {
                         for entry in ep_entries {
                             let alias = entry["alias"].as_str().unwrap_or("").to_string();
                             let alive = entry["alive"].as_bool().unwrap_or(false);
-                            let buff = entry["buff_size_bytes"].as_i64().unwrap_or(0);
                             let chunk_id = entry["current_chunk_id"].as_i64().unwrap_or(0);
+                            let bytes_total = entry["bytes_processed_total"].as_i64().unwrap_or(0);
+                            let chunks_processed = entry["chunks_processed"].as_i64().unwrap_or(0);
+                            let stall_reason =
+                                entry["stall_reason"].as_str().map(|s| s.to_string());
+                            let ffmpeg_restart_count =
+                                entry["ffmpeg_restart_count"].as_u64().unwrap_or(0) as u32;
+                            let last_error = entry["last_error"].as_str().map(|s| s.to_string());
+
+                            // Compute chunk delay
+                            let chunk_gap = (latest_local_chunk - chunk_id).max(0) as f64;
+                            let chunk_delay_secs = chunk_gap * chunk_duration_secs;
 
                             // Update DB with latest status
                             if let Err(e) = db::upsert_delivery_endpoint_status(
-                                &self.pool, inst.id, &alias, alive, buff, chunk_id,
+                                &self.pool,
+                                inst.id,
+                                &alias,
+                                alive,
+                                chunks_processed,
+                                chunk_id,
+                                bytes_total,
                             )
                             .await
                             {
@@ -406,8 +434,13 @@ impl DeliveryOrchestrator {
                             statuses.push(EndpointDeliveryStatus {
                                 alias,
                                 alive,
-                                buff_size_bytes: buff,
                                 current_chunk_id: chunk_id,
+                                bytes_processed_total: bytes_total,
+                                chunks_processed,
+                                chunk_delay_secs,
+                                stall_reason,
+                                ffmpeg_restart_count,
+                                last_error,
                             });
                         }
 
@@ -445,6 +478,49 @@ impl DeliveryOrchestrator {
             server_ready,
             endpoints,
         })
+    }
+
+    /// Poll delivery metrics and return data suitable for WsEvent broadcast.
+    /// Returns (instance_name, status, server_ip, endpoint_count, Vec<DeliveryEndpointMetrics>).
+    pub async fn poll_delivery_metrics(
+        &self,
+        event_id: i64,
+    ) -> anyhow::Result<(
+        String,
+        String,
+        Option<String>,
+        u32,
+        Vec<DeliveryEndpointMetrics>,
+    )> {
+        let status = self.get_delivery_status(event_id).await?;
+
+        let (name, inst_status, server_ip) = match &status.instance {
+            Some(inst) => (
+                inst.name.clone(),
+                inst.status.clone(),
+                Some(inst.ipv4.clone()),
+            ),
+            None => ("none".to_string(), "none".to_string(), None),
+        };
+
+        let metrics: Vec<DeliveryEndpointMetrics> = status
+            .endpoints
+            .into_iter()
+            .map(|ep| DeliveryEndpointMetrics {
+                alias: ep.alias,
+                alive: ep.alive,
+                current_chunk_id: ep.current_chunk_id,
+                bytes_processed_total: ep.bytes_processed_total,
+                chunks_processed: ep.chunks_processed,
+                chunk_delay_secs: ep.chunk_delay_secs,
+                stall_reason: ep.stall_reason,
+                ffmpeg_restart_count: ep.ffmpeg_restart_count,
+                last_error: ep.last_error,
+            })
+            .collect();
+
+        let endpoint_count = metrics.len() as u32;
+        Ok((name, inst_status, server_ip, endpoint_count, metrics))
     }
 
     /// Stop delivery for an event: POST /api/stop, then delete Hetzner server.

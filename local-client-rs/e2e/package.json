@@ -8,7 +8,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",
+    "cors": "^2.8.5",
     "express": "^4.21.0",
-    "cors": "^2.8.5"
+    "ws": "^8.19.0"
   }
 }

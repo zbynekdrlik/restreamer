@@ -10,6 +10,17 @@ use rs_core::models::{InpointState, WsEvent};
 
 use crate::delivery::DeliveryOrchestrator;
 
+/// Cached delivery metrics from the last broadcast loop poll.
+/// Updated every 2 seconds by the delivery broadcast loop.
+#[derive(Clone, Default, serde::Serialize)]
+pub struct CachedDeliveryStatus {
+    pub instance_name: String,
+    pub status: String,
+    pub server_ip: Option<String>,
+    pub endpoint_count: u32,
+    pub endpoints: Vec<rs_core::models::DeliveryEndpointMetrics>,
+}
+
 /// Shared application state for all Axum handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -31,6 +42,9 @@ pub struct AppState {
     /// Delivery orchestrator for Hetzner VPS management.
     /// Only present when Hetzner API token is configured.
     pub delivery_orchestrator: Option<Arc<DeliveryOrchestrator>>,
+    /// Cached delivery status from the last broadcast loop poll.
+    /// Allows instant initial load without hitting the VPS.
+    pub cached_delivery: Arc<std::sync::RwLock<CachedDeliveryStatus>>,
 }
 
 impl AppState {
@@ -49,6 +63,7 @@ impl AppState {
             www_dir: None,
             inpoint_state: InpointState::new(),
             delivery_orchestrator: delivery.map(Arc::new),
+            cached_delivery: Arc::new(std::sync::RwLock::new(CachedDeliveryStatus::default())),
         }
     }
 

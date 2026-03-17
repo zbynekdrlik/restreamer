@@ -11,7 +11,7 @@ use serde::Deserialize;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::api;
-use crate::store::DashboardStore;
+use crate::store::{DashboardStore, DeliveryEndpointState, DeliveryState};
 
 /// Tagged WsEvent matching the backend's `#[serde(tag = "type", content = "data")]`.
 #[derive(Debug, Clone, Deserialize)]
@@ -51,17 +51,32 @@ enum WsEvent {
         delivering: bool,
     },
     DeliveryStatus {
-        #[allow(dead_code)]
         instance_name: String,
-        #[allow(dead_code)]
         status: String,
-        #[allow(dead_code)]
+        server_ip: Option<String>,
         endpoint_count: u32,
+        endpoints: Vec<WsDeliveryEndpoint>,
     },
     Error {
         service: String,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WsDeliveryEndpoint {
+    alias: String,
+    alive: bool,
+    current_chunk_id: i64,
+    bytes_processed_total: i64,
+    chunks_processed: i64,
+    chunk_delay_secs: f64,
+    #[serde(default)]
+    stall_reason: Option<String>,
+    #[serde(default)]
+    ffmpeg_restart_count: u32,
+    #[serde(default)]
+    last_error: Option<String>,
 }
 
 /// Compute the WebSocket URL from the current page location.
@@ -85,6 +100,37 @@ async fn load_initial_state(store: DashboardStore) {
         store.inpoint_connected.set(status.inpoint_connected);
         store.chunk_stats.set(status.chunk_stats);
         store.streaming_event.set(status.streaming_event);
+    }
+    // Fetch cached delivery status (instant, no VPS round-trip)
+    if let Ok(ds) = api::get_delivery_status_cached().await {
+        if !ds.status.is_empty() && ds.status != "none" {
+            let endpoints: Vec<DeliveryEndpointState> = ds
+                .endpoints
+                .into_iter()
+                .map(|ep| DeliveryEndpointState {
+                    alias: ep.alias,
+                    alive: ep.alive,
+                    current_chunk_id: ep.current_chunk_id,
+                    bytes_processed_total: ep.bytes_processed_total,
+                    chunks_processed: ep.chunks_processed,
+                    chunk_delay_secs: ep.chunk_delay_secs,
+                    bandwidth_bytes_sec: 0.0,
+                    prev_bytes_total: 0,
+                    prev_chunk_id: 0,
+                    stall_count: 0,
+                    stall_reason: ep.stall_reason,
+                    ffmpeg_restart_count: ep.ffmpeg_restart_count,
+                    last_error: ep.last_error,
+                })
+                .collect();
+            store.delivery.set(DeliveryState {
+                status: ds.status,
+                instance_name: ds.instance_name,
+                server_ip: ds.server_ip,
+                endpoint_count: ds.endpoint_count,
+                endpoints,
+            });
+        }
     }
     if let Ok(events) = api::list_events().await {
         store.events_list.set(events);
@@ -163,8 +209,71 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                 }
             });
         }
-        WsEvent::DeliveryStatus { .. } => {
-            // Delivery status updates — could extend store later
+        WsEvent::DeliveryStatus {
+            instance_name,
+            status,
+            server_ip,
+            endpoint_count,
+            endpoints,
+        } => {
+            store.delivery.update(|d| {
+                // Compute bandwidth from bytes_processed_total delta (poll interval ~2s)
+                let new_endpoints: Vec<DeliveryEndpointState> = endpoints
+                    .into_iter()
+                    .map(|ep| {
+                        // Find previous state for this alias
+                        let prev_state = d
+                            .endpoints
+                            .iter()
+                            .find(|prev_ep| prev_ep.alias == ep.alias);
+                        let prev_bytes = prev_state
+                            .map(|p| p.bytes_processed_total)
+                            .unwrap_or(0);
+                        let prev_chunk = prev_state
+                            .map(|p| p.current_chunk_id)
+                            .unwrap_or(0);
+                        let prev_stall = prev_state
+                            .map(|p| p.stall_count)
+                            .unwrap_or(0);
+
+                        let delta = (ep.bytes_processed_total - prev_bytes).max(0) as f64;
+                        let bandwidth_bytes_sec = delta / 2.0; // 2-second poll interval
+
+                        // Stall detection: if chunk ID hasn't changed, increment counter
+                        let stall_count = if prev_chunk > 0
+                            && ep.current_chunk_id == prev_chunk
+                        {
+                            prev_stall + 1
+                        } else {
+                            0
+                        };
+
+                        DeliveryEndpointState {
+                            alias: ep.alias.clone(),
+                            alive: ep.alive,
+                            current_chunk_id: ep.current_chunk_id,
+                            bytes_processed_total: ep.bytes_processed_total,
+                            chunks_processed: ep.chunks_processed,
+                            chunk_delay_secs: ep.chunk_delay_secs,
+                            bandwidth_bytes_sec,
+                            prev_bytes_total: prev_bytes,
+                            prev_chunk_id: prev_chunk,
+                            stall_count,
+                            stall_reason: ep.stall_reason.clone(),
+                            ffmpeg_restart_count: ep.ffmpeg_restart_count,
+                            last_error: ep.last_error.clone(),
+                        }
+                    })
+                    .collect();
+
+                *d = DeliveryState {
+                    status,
+                    instance_name,
+                    server_ip,
+                    endpoint_count,
+                    endpoints: new_endpoints,
+                };
+            });
         }
         WsEvent::Error { service, message } => {
             store.push_error(service, message);

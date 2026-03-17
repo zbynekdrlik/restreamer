@@ -395,3 +395,74 @@ pub async fn attach_endpoint(event_id: i64, endpoint_id: i64) -> Result<(), Stri
 pub async fn detach_endpoint(event_id: i64, endpoint_id: i64) -> Result<(), String> {
     http_delete(&format!("/events/{event_id}/endpoints/{endpoint_id}")).await
 }
+
+// Delivery status API
+
+/// Delivery status response from the HTTP API.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct DeliveryStatusResponse {
+    pub instance_status: Option<String>,
+    pub server_ip: Option<String>,
+    pub server_ready: bool,
+    pub endpoints_alive: bool,
+    pub endpoint_details: Vec<DeliveryEndpointDetail>,
+    pub instance: Option<DeliveryInstanceInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct DeliveryEndpointDetail {
+    pub alias: String,
+    pub alive: bool,
+    pub current_chunk_id: i64,
+    pub bytes_processed_total: i64,
+    pub chunks_processed: i64,
+    pub chunk_delay_secs: f64,
+    #[serde(default)]
+    pub stall_reason: Option<String>,
+    #[serde(default)]
+    pub ffmpeg_restart_count: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct DeliveryInstanceInfo {
+    pub name: String,
+    pub status: String,
+    pub ipv4: String,
+}
+
+pub async fn get_delivery_status(event_id: i64) -> Result<DeliveryStatusResponse, String> {
+    http_get(&format!("/delivery/status?event_id={event_id}")).await
+}
+
+/// Cached delivery status response (matches WsEvent::DeliveryStatus shape).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CachedDeliveryStatus {
+    pub instance_name: String,
+    pub status: String,
+    pub server_ip: Option<String>,
+    pub endpoint_count: u32,
+    pub endpoints: Vec<CachedDeliveryEndpoint>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CachedDeliveryEndpoint {
+    pub alias: String,
+    pub alive: bool,
+    pub current_chunk_id: i64,
+    pub bytes_processed_total: i64,
+    pub chunks_processed: i64,
+    pub chunk_delay_secs: f64,
+    #[serde(default)]
+    pub stall_reason: Option<String>,
+    #[serde(default)]
+    pub ffmpeg_restart_count: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// Get cached delivery status (instant, no VPS round-trip).
+pub async fn get_delivery_status_cached() -> Result<CachedDeliveryStatus, String> {
+    http_get("/delivery/status/cached").await
+}

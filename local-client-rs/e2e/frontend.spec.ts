@@ -338,6 +338,133 @@ test.describe("Logs route", () => {
   });
 });
 
+// --- Delivery Monitoring ---
+
+test.describe("Delivery monitoring section", () => {
+  test("delivery section is always visible with title", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".status-grid")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator(".delivery-section")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.locator(".delivery-section")).toContainText(
+      "Delivery Pipeline",
+    );
+  });
+
+  test("shows endpoint data immediately from cached status on load", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.locator(".delivery-section")).toBeVisible({
+      timeout: 10000,
+    });
+    // Cached endpoint provides data instantly — endpoint cards should appear without waiting for WebSocket
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.first()).toBeVisible({ timeout: 5000 });
+    await expect(cards).toHaveCount(2);
+  });
+
+  test("lifecycle bar shows 5 stages", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".delivery-section")).toBeVisible({
+      timeout: 10000,
+    });
+    const stages = page.locator(".lifecycle-stage");
+    await expect(stages).toHaveCount(5);
+    await expect(stages.nth(0)).toContainText("Creating");
+    await expect(stages.nth(1)).toContainText("Booting");
+    await expect(stages.nth(2)).toContainText("Deploying");
+    await expect(stages.nth(3)).toContainText("Ready");
+    await expect(stages.nth(4)).toContainText("Delivering");
+  });
+
+  test("endpoint cards show metrics after WebSocket event", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.locator(".delivery-section")).toBeVisible({
+      timeout: 10000,
+    });
+    // Wait for WebSocket delivery status event
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.first()).toBeVisible({ timeout: 10000 });
+    await expect(cards).toHaveCount(2);
+    // First card: YouTube Main
+    await expect(cards.first()).toContainText("YouTube Main");
+    await expect(cards.first()).toContainText("3.2s");
+    await expect(cards.first()).toContainText("1847 chunks");
+    // Second card: Facebook Page
+    await expect(cards.nth(1)).toContainText("Facebook Page");
+    await expect(cards.nth(1)).toContainText("45.0s");
+    await expect(cards.nth(1)).toContainText("1620 chunks");
+  });
+
+  test("delay color coding for low/medium values", async ({ page }) => {
+    await page.goto("/");
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.first()).toBeVisible({ timeout: 10000 });
+    // YouTube Main has delay 3.2s (<30s) — should have delay-low (green)
+    const ytDelay = cards.first().locator(".delay-low");
+    await expect(ytDelay).toBeVisible();
+    // Facebook Page has delay 45.0s (30-120s) — should have delay-medium (yellow)
+    const fbDelay = cards.nth(1).locator(".delay-medium");
+    await expect(fbDelay).toBeVisible();
+  });
+
+  test("endpoint cards show Delay, Delivered, Speed labels", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.first()).toBeVisible({ timeout: 10000 });
+    const card = cards.first();
+    await expect(card.locator(".metric-label")).toContainText([
+      "Delay",
+      "Delivered",
+      "Speed",
+    ]);
+  });
+
+  test("shows stall reason when endpoint has backend stall_reason", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.nth(1)).toBeVisible({ timeout: 10000 });
+    // Facebook Page has stall_reason: "chunk_gap" in mock data
+    const fbCard = cards.nth(1);
+    await expect(fbCard.locator(".stall-reason")).toBeVisible();
+    await expect(fbCard.locator(".stall-reason")).toContainText("chunk gap");
+  });
+
+  test("shows last error when endpoint has backend last_error", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.nth(1)).toBeVisible({ timeout: 10000 });
+    // Facebook Page has last_error: "S3 fetch timeout" in mock data
+    const fbCard = cards.nth(1);
+    await expect(fbCard.locator(".stall-error")).toBeVisible();
+    await expect(fbCard.locator(".stall-error")).toContainText(
+      "S3 fetch timeout",
+    );
+  });
+
+  test("healthy endpoint does not show stall reason or error", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const cards = page.locator(".delivery-endpoint-card");
+    await expect(cards.first()).toBeVisible({ timeout: 10000 });
+    // YouTube Main has no stall_reason and no last_error
+    const ytCard = cards.first();
+    await expect(ytCard.locator(".stall-reason")).toHaveCount(0);
+    await expect(ytCard.locator(".stall-error")).toHaveCount(0);
+  });
+});
+
 // --- Route navigation ---
 
 test.describe("Route navigation", () => {

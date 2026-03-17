@@ -16,10 +16,7 @@ use rs_core::models::{
 
 use crate::state::AppState;
 
-/// Redaction placeholder for sensitive config values sent over the API.
 const REDACTED: &str = "***";
-
-/// Known valid service types for endpoint configs.
 const VALID_SERVICE_TYPES: &[&str] =
     &["YT_HLS", "FB", "YT_RTMP", "VIMEO", "INSTAGRAM", "TEST_FILE"];
 
@@ -88,7 +85,6 @@ pub struct PaginationParams {
     pub limit: Option<i64>,
 }
 
-/// Maximum allowed pagination limit to prevent excessive queries.
 const MAX_PAGINATION_LIMIT: i64 = 500;
 
 pub async fn get_chunks(
@@ -341,8 +337,6 @@ pub struct LogQueryParams {
     pub limit: Option<usize>,
 }
 
-// --- Streaming Events CRUD ---
-
 pub async fn list_events(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<StreamingEvent>>, StatusCode> {
@@ -402,8 +396,6 @@ pub async fn delete_event_by_id(
         })?;
     Ok(StatusCode::NO_CONTENT)
 }
-
-// --- Endpoint Configs CRUD ---
 
 pub async fn list_endpoints(
     State(state): State<AppState>,
@@ -535,8 +527,6 @@ pub async fn delete_endpoint(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// --- Event-Endpoint Attachment ---
-
 pub async fn attach_endpoint_to_event(
     State(state): State<AppState>,
     axum::extract::Path((event_id, endpoint_id)): axum::extract::Path<(i64, i64)>,
@@ -575,8 +565,6 @@ pub async fn get_event_endpoints(
         })?;
     Ok(Json(links))
 }
-
-// --- Event Lifecycle ---
 
 pub async fn activate_event(
     State(state): State<AppState>,
@@ -670,8 +658,6 @@ pub async fn start_delivering(
     Ok(StatusCode::OK)
 }
 
-// --- Delivery Orchestration ---
-
 #[derive(Deserialize)]
 pub struct DeliveryStartRequest {
     pub event_id: i64,
@@ -764,8 +750,13 @@ pub struct DeliveryStatusResponse {
 pub struct DeliveryEndpointEntry {
     pub alias: String,
     pub alive: bool,
-    pub buff_size_bytes: i64,
     pub current_chunk_id: i64,
+    pub bytes_processed_total: i64,
+    pub chunks_processed: i64,
+    pub chunk_delay_secs: f64,
+    pub stall_reason: Option<String>,
+    pub ffmpeg_restart_count: u32,
+    pub last_error: Option<String>,
 }
 
 pub async fn delivery_status(
@@ -792,8 +783,13 @@ pub async fn delivery_status(
         .map(|ep| DeliveryEndpointEntry {
             alias: ep.alias,
             alive: ep.alive,
-            buff_size_bytes: ep.buff_size_bytes,
             current_chunk_id: ep.current_chunk_id,
+            bytes_processed_total: ep.bytes_processed_total,
+            chunks_processed: ep.chunks_processed,
+            chunk_delay_secs: ep.chunk_delay_secs,
+            stall_reason: ep.stall_reason,
+            ffmpeg_restart_count: ep.ffmpeg_restart_count,
+            last_error: ep.last_error,
         })
         .collect();
     let endpoints_alive =
@@ -833,8 +829,6 @@ pub async fn delivery_stop(
     Ok(StatusCode::OK)
 }
 
-// --- YouTube Status ---
-
 #[derive(Serialize)]
 pub struct YouTubeStatusResponse {
     pub authenticated: bool,
@@ -858,8 +852,6 @@ pub async fn youtube_status(
         error: status.error,
     }))
 }
-
-// --- YouTube OAuth Seed ---
 
 #[derive(Deserialize)]
 pub struct YouTubeOAuthSeedRequest {
@@ -891,8 +883,6 @@ pub async fn youtube_oauth_seed(
     tracing::info!("YouTube OAuth tokens seeded");
     Ok(StatusCode::OK)
 }
-
-// --- YouTube OAuth Authorization Flow ---
 
 #[derive(Serialize)]
 pub struct YouTubeOAuthStartResponse {
@@ -986,7 +976,17 @@ pub async fn youtube_oauth_callback(
     ))
 }
 
-// --- Delivery Instances List ---
+pub async fn delivery_status_cached(
+    State(state): State<AppState>,
+) -> Json<crate::state::CachedDeliveryStatus> {
+    let cached = state
+        .cached_delivery
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or_default();
+    Json(cached)
+}
+
 pub async fn list_delivery_instances(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<DeliveryInstance>>, StatusCode> {

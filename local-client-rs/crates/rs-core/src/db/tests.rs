@@ -487,10 +487,10 @@ async fn delivery_endpoint_status_crud() {
     assert!(statuses.is_empty());
 
     // Insert status for two endpoints
-    upsert_delivery_endpoint_status(&pool, inst_id, "YouTube", true, 4096, 42)
+    upsert_delivery_endpoint_status(&pool, inst_id, "YouTube", true, 100, 42, 1048576)
         .await
         .unwrap();
-    upsert_delivery_endpoint_status(&pool, inst_id, "Facebook", false, 0, 10)
+    upsert_delivery_endpoint_status(&pool, inst_id, "Facebook", false, 0, 10, 0)
         .await
         .unwrap();
 
@@ -503,11 +503,11 @@ async fn delivery_endpoint_status_crud() {
     assert!(!statuses[0].alive);
     assert_eq!(statuses[1].alias, "YouTube");
     assert!(statuses[1].alive);
-    assert_eq!(statuses[1].buff_size_bytes, 4096);
+    assert_eq!(statuses[1].chunks_processed, 100);
     assert_eq!(statuses[1].current_chunk_id, 42);
 
     // Upsert updates existing
-    upsert_delivery_endpoint_status(&pool, inst_id, "YouTube", true, 8192, 99)
+    upsert_delivery_endpoint_status(&pool, inst_id, "YouTube", true, 200, 99, 2097152)
         .await
         .unwrap();
     let statuses = get_delivery_endpoint_statuses(&pool, inst_id)
@@ -515,7 +515,7 @@ async fn delivery_endpoint_status_crud() {
         .unwrap();
     assert_eq!(statuses.len(), 2);
     let yt = statuses.iter().find(|s| s.alias == "YouTube").unwrap();
-    assert_eq!(yt.buff_size_bytes, 8192);
+    assert_eq!(yt.chunks_processed, 200);
     assert_eq!(yt.current_chunk_id, 99);
 }
 
@@ -526,7 +526,7 @@ async fn delivery_endpoint_status_cascade_on_instance_delete() {
     let inst_id = create_delivery_instance(&pool, 22222, "rs-del-2", "2.3.4.5", "cx23", None, "")
         .await
         .unwrap();
-    upsert_delivery_endpoint_status(&pool, inst_id, "YT", true, 100, 5)
+    upsert_delivery_endpoint_status(&pool, inst_id, "YT", true, 10, 5, 500)
         .await
         .unwrap();
 
@@ -535,4 +535,76 @@ async fn delivery_endpoint_status_cascade_on_instance_delete() {
         .await
         .unwrap();
     assert!(statuses.is_empty());
+}
+
+#[tokio::test]
+async fn migration_v6_sent_at_column_exists() {
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "evt-v6").await.unwrap();
+    let chunk_id = insert_chunk(&pool, event_id, "/tmp/v6.bin", 100, "md5v6")
+        .await
+        .unwrap();
+
+    // Before marking sent, sent_at should be NULL
+    let row = sqlx::query("SELECT sent_at FROM chunk_records WHERE id = ?1")
+        .bind(chunk_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let sent_at: Option<String> = row.get("sent_at");
+    assert!(sent_at.is_none());
+
+    // Mark as sent — should populate sent_at
+    set_chunk_sent(&pool, chunk_id).await.unwrap();
+    let row = sqlx::query("SELECT sent_at FROM chunk_records WHERE id = ?1")
+        .bind(chunk_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let sent_at: Option<String> = row.get("sent_at");
+    assert!(sent_at.is_some());
+}
+
+#[tokio::test]
+async fn migration_v6_bytes_processed_total_column_exists() {
+    let pool = setup_db().await;
+    let inst_id = create_delivery_instance(&pool, 33333, "rs-del-v6", "3.3.3.3", "cx23", None, "")
+        .await
+        .unwrap();
+
+    upsert_delivery_endpoint_status(&pool, inst_id, "YT", true, 50, 10, 999999)
+        .await
+        .unwrap();
+
+    let statuses = get_delivery_endpoint_statuses(&pool, inst_id)
+        .await
+        .unwrap();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].bytes_processed_total, 999999);
+    assert_eq!(statuses[0].chunks_processed, 50);
+}
+
+#[tokio::test]
+async fn get_latest_chunk_id_for_event_works() {
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "evt-latest").await.unwrap();
+
+    // No chunks — returns None
+    let latest = get_latest_chunk_id_for_event(&pool, event_id)
+        .await
+        .unwrap();
+    assert_eq!(latest, None);
+
+    // Insert chunks
+    let _c1 = insert_chunk(&pool, event_id, "/tmp/l1.bin", 100, "md5a")
+        .await
+        .unwrap();
+    let c2 = insert_chunk(&pool, event_id, "/tmp/l2.bin", 100, "md5b")
+        .await
+        .unwrap();
+
+    let latest = get_latest_chunk_id_for_event(&pool, event_id)
+        .await
+        .unwrap();
+    assert_eq!(latest, Some(c2));
 }
