@@ -1,0 +1,39 @@
+[package]
+name = "restreamer"
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/zbynekdrlik/restreamer"
+rust-version = "1.85"
+
+[[bin]]
+name = "Restreamer"
+path = "src/main.rs"
+
+[lib]
+name = "restreamer_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rs-core = { path = "../crates/rs-core" }
+rs-runtime = { path = "../crates/rs-runtime" }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full", "signal"] }
+tracing = "0.1"
+clap = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+[dev-dependencies]
+tempfile = "3"

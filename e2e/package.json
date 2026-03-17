@@ -3,10 +3,15 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "npx playwright test",
-    "setup-yt-profile": "npx playwright test youtube-studio-check --headed"
+    "test:frontend": "playwright test --config playwright-frontend.config.ts",
+    "test:youtube": "playwright test --config playwright-youtube.config.ts",
+    "mock-api": "node mock-api.js",
+    "setup-yt-profile": "npx playwright test --config playwright-youtube.config.ts --headed"
   },
   "devDependencies": {
-    "@playwright/test": "^1.50.0"
+    "@playwright/test": "^1.50.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "ws": "^8.19.0"
   }
 }
