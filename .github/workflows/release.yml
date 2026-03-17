@@ -1,0 +1,463 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "restreamer-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. restreamer-v0.1.0)"
+        required: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Extract and validate version
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#restreamer-v}"
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+          echo "Tag version:   $VERSION"
+          echo "Cargo version: $CARGO_VERSION"
+
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "ERROR: Tag version ($VERSION) does not match Cargo.toml ($CARGO_VERSION)"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  build-delivery:
+    name: Build delivery binary (Linux)
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build delivery binary
+        run: cargo build --release -p rs-delivery
+        env:
+          SQLX_OFFLINE: true
+      - name: Rename artifact
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          cp target/release/rs-delivery "rs-delivery-${VERSION}-linux-amd64"
+      - name: Generate checksum
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          sha256sum "rs-delivery-${VERSION}-linux-amd64" > "rs-delivery-${VERSION}-linux-amd64.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: delivery-binary
+          path: |
+            rs-delivery-*-linux-amd64
+            rs-delivery-*-linux-amd64.sha256
+
+  build-tauri:
+    name: Build Tauri app (Windows)
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Trunk
+        run: cargo install trunk
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli
+      - name: Set build version and timestamp
+        id: build-info
+        shell: pwsh
+        run: |
+          $version = "${{ needs.validate.outputs.version }}"
+          $timestamp = Get-Date -Format "MMM dd HH:mm"
+          echo "BUILD_VERSION=$version" >> $env:GITHUB_ENV
+          echo "BUILD_TIMESTAMP=$timestamp" >> $env:GITHUB_ENV
+          echo "Version: $version, Timestamp: $timestamp"
+      - name: Build Leptos UI (WASM)
+        run: |
+          cd leptos-ui
+          trunk build --release
+        env:
+          BUILD_VERSION: ${{ env.BUILD_VERSION }}
+          BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
+      - name: Build Tauri app
+        run: cargo tauri build
+        env:
+          SQLX_OFFLINE: true
+          BUILD_VERSION: ${{ env.BUILD_VERSION }}
+          BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tauri-installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+      - name: Upload WASM frontend for LAN serving
+        uses: actions/upload-artifact@v4
+        with:
+          name: restreamer-www
+          path: dist/
+          if-no-files-found: warn
+
+  release:
+    name: Create GitHub Release
+    needs: [validate, build-delivery, build-tauri]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: List artifacts
+        run: find artifacts -type f | sort
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: restreamer-v${{ needs.validate.outputs.version }}
+          name: Restreamer v${{ needs.validate.outputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/delivery-binary/*
+            artifacts/tauri-installer/*
+          body: |
+            ## Restreamer v${{ needs.validate.outputs.version }}
+
+            ### Assets
+            - `Restreamer_*_x64-setup.exe` — Tauri NSIS installer (unified app with embedded service + tray icon)
+            - `rs-delivery-*-linux-amd64` — Linux delivery VPS binary
+
+            ### Installation
+            ```powershell
+            irm https://raw.githubusercontent.com/zbynekdrlik/restreamer/main/scripts/install.ps1 | iex
+            ```
+
+  deploy-stream-lan:
+    name: Deploy to stream.lan
+    needs: [release, build-tauri]
+    runs-on: [self-hosted, windows, stream-lan]
+    steps:
+      - name: Clean old artifacts
+        shell: powershell
+        run: |
+          # Remove old artifacts to prevent version mix-ups on self-hosted runner
+          Remove-Item -Path "artifacts" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleaned artifacts directory"
+
+      - name: Download Tauri installer
+        uses: actions/download-artifact@v4
+        with:
+          name: tauri-installer
+          path: artifacts/tauri
+
+      - name: Download WASM frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: restreamer-www
+          path: artifacts/www
+
+      - name: List artifacts
+        run: |
+          Write-Host "=== Tauri installer ==="
+          Get-ChildItem artifacts/tauri/
+          Write-Host "=== WASM frontend (for LAN serving) ==="
+          Get-ChildItem artifacts/www/ -ErrorAction SilentlyContinue
+        shell: powershell
+
+      - name: Install WebView2 runtime
+        shell: powershell
+        run: |
+          function Get-WebView2Version {
+            foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
+              $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
+              if ($reg -and $reg.pv) { return $reg.pv }
+            }
+            $dir = "C:\Program Files (x86)\Microsoft\EdgeWebView\Application"
+            if (Test-Path $dir) { return "installed (detected from filesystem)" }
+            return $null
+          }
+
+          $version = Get-WebView2Version
+          if ($version) {
+            Write-Host "WebView2 already installed: $version"
+          } else {
+            Write-Host "WebView2 not found - installing Evergreen Runtime..."
+            $bootstrapper = "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
+            Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
+            Start-Process -FilePath $bootstrapper -ArgumentList "/silent /install" -Wait
+            Remove-Item $bootstrapper -ErrorAction SilentlyContinue
+
+            $version = Get-WebView2Version
+            if (-not $version) {
+              Write-Error "WebView2 runtime installation FAILED - dashboard will be blank"
+              exit 1
+            }
+            Write-Host "WebView2 installed: $version"
+          }
+
+      - name: Deploy Tauri app
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          $InstallDir = "C:\Program Files\Restreamer"
+
+          Write-Host "=== Stopping old processes ==="
+          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
+          Start-Sleep -Seconds 1
+
+          # Remove legacy Windows service if it exists
+          Write-Host "=== Removing legacy Windows service ==="
+          foreach ($name in @("RestreamerService", "restreamer-service")) {
+            sc.exe stop $name 2>&1 | Out-Null
+            sc.exe delete $name 2>&1 | Out-Null
+          }
+
+          # Clean up old service binary
+          Remove-Item "$InstallDir\restreamer-service.exe" -Force -ErrorAction SilentlyContinue
+
+          Write-Host "=== Running NSIS installer ==="
+          $installer = Get-ChildItem "artifacts/tauri/*setup*.exe" | Select-Object -First 1
+          if ($installer) {
+            Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
+            Write-Host "Installed: $($installer.Name)"
+          }
+
+      - name: Deploy WASM frontend for LAN access
+        shell: powershell
+        run: |
+          $wwwDir = "C:\Program Files\Restreamer\www"
+          Remove-Item -Path $wwwDir -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item -Path "artifacts\www" -Destination $wwwDir -Recurse -Force
+          Write-Host "=== WASM frontend deployed to $wwwDir ==="
+          Get-ChildItem $wwwDir
+
+          Remove-NetFirewallRule -DisplayName "Restreamer API" -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "Restreamer API" -Direction Inbound -Protocol TCP -LocalPort 8910 -Action Allow | Out-Null
+          Write-Host "=== Firewall rule created for port 8910 ==="
+
+      - name: Configure Hetzner credentials
+        shell: powershell
+        env:
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $configPath = "C:\ProgramData\Restreamer\config.json"
+
+          if (-not (Test-Path $configPath)) {
+            Write-Error "Config file not found at $configPath"
+            exit 1
+          }
+
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.hetzner) {
+            $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue @{} -Force
+          }
+          $config.hetzner.api_token = $env:HETZNER_API_TOKEN
+
+          $json = $config | ConvertTo-Json -Depth 10
+          [System.IO.File]::WriteAllText($configPath, $json)
+          Write-Host "Hetzner API token configured"
+
+      - name: Deploy and start Restreamer
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
+          $TaskName = "RestreamerGUI"
+          $InstallDir = "C:\Program Files\Restreamer"
+
+          Write-Host "=== Step 1: Stop any existing instances ==="
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
+          Start-Sleep -Seconds 3
+
+          Write-Host "=== Step 1.5: Clean up stale SQLite WAL files ==="
+          # Stale WAL files from previous processes can cause database lock errors
+          $DataDir = "C:\ProgramData\Restreamer"
+          Remove-Item "$DataDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$DataDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleaned up SQLite WAL files"
+
+          Write-Host "=== Step 2: Remove old scheduled tasks ==="
+          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
+            Write-Host "Removing task: $($_.TaskName)"
+            Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+          }
+
+          Write-Host "=== Step 3: Create scheduled task with correct configuration ==="
+          $action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
+          $trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
+          $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
+
+          Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+          Write-Host "Created scheduled task: $TaskName"
+
+          Write-Host "=== Step 4: Start Restreamer in user session ==="
+          # Use schtasks.exe instead of Start-ScheduledTask for cross-context reliability
+          schtasks.exe /run /tn $TaskName
+          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+          Start-Sleep -Seconds 10
+
+          Write-Host "=== Deployment steps complete ==="
+
+      - name: Verify Restreamer is running correctly
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== CHECK 1: Process is running ==="
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $proc) {
+            Write-Host "Process not running, showing recent event log entries:"
+            Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Format-Table TimeCreated,ProviderName,Message -Wrap
+            Write-Error "FAIL: Restreamer.exe is not running"
+            exit 1
+          }
+          Write-Host "OK: Process running (PID: $($proc.Id), Memory: $([math]::Round($proc.WorkingSet64/1MB))MB)"
+
+          Write-Host "=== CHECK 2: Running in user session (not SYSTEM) ==="
+          if ($proc.SessionId -eq 0) {
+            Write-Error "FAIL: Running in Session 0 (SYSTEM) - tray icon will NOT be visible. User session must be available."
+            exit 1
+          }
+          Write-Host "OK: Running in user session $($proc.SessionId) - tray icon visible"
+
+          Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
+          $listener = netstat -ano | Select-String "LISTENING" | Select-String "\b:8910\b"
+          if (-not $listener) {
+            Write-Host "Current port status:"
+            netstat -ano | Select-String "\b:8910\b"
+            Write-Host "Recent log file:"
+            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Write-Error "FAIL: Port 8910 is NOT listening - ServiceCore did not start"
+            exit 1
+          }
+          Write-Host "OK: Port 8910 is listening"
+          Write-Host $listener
+
+          Write-Host "=== CHECK 3b: RTMP port 1234 is LISTENING ==="
+          $rtmpListener = netstat -ano | Select-String "LISTENING" | Select-String "\b:1234\b"
+          if (-not $rtmpListener) {
+            Write-Host "Current port 1234 status:"
+            netstat -ano | Select-String ":1234"
+            Write-Host "Recent log file:"
+            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Write-Error "FAIL: RTMP port 1234 is NOT listening - RTMP server did not start"
+            exit 1
+          }
+          Write-Host "OK: RTMP port 1234 is listening"
+          Write-Host $rtmpListener
+
+          Write-Host "=== CHECK 4: API health endpoint responds ==="
+          $maxRetries = 6
+          $healthOk = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $health = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 5
+              Write-Host "OK: API health check passed"
+              $healthOk = $true
+              break
+            } catch {
+              Write-Host "Attempt ${i}/${maxRetries}: API not ready - ${_}"
+              Start-Sleep -Seconds 5
+            }
+          }
+          if (-not $healthOk) {
+            Write-Error "FAIL: API health endpoint not responding"
+            exit 1
+          }
+
+          Write-Host "=== CHECK 5: API status endpoint works ==="
+          try {
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+            Write-Host "OK: Status API works - inpoint: $($status.inpoint_status)"
+          } catch {
+            Write-Error "FAIL: Status API not working - $_"
+            exit 1
+          }
+
+          Write-Host "=== CHECK 6: Database accessible (chunk stats) ==="
+          try {
+            $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunk-stats" -TimeoutSec 5
+            Write-Host "OK: Database accessible - chunks: $($stats.total_chunks)"
+          } catch {
+            Write-Error "FAIL: Chunk stats API not working - database may be locked"
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "ALL CHECKS PASSED - DEPLOYMENT SUCCESSFUL"
+          Write-Host "=========================================="
+
+      - name: Verify WebView2 runtime installed
+        shell: powershell
+        run: |
+          $found = $false
+          foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
+            $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
+            if ($reg -and $reg.pv) {
+              Write-Host "WebView2 version: $($reg.pv)"
+              $found = $true
+              break
+            }
+          }
+          if (-not $found) {
+            if (Test-Path "C:\Program Files (x86)\Microsoft\EdgeWebView\Application") {
+              Write-Host "WebView2 detected from filesystem"
+              $found = $true
+            }
+          }
+          if (-not $found) {
+            Write-Error "WebView2 runtime is NOT installed - dashboard will be empty"
+            exit 1
+          }
+
+      - name: Verify dashboard renders via HTTP
+        shell: powershell
+        run: |
+          $maxRetries = 3
+          $success = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://127.0.0.1:8910/" -TimeoutSec 10 -UseBasicParsing
+              if ($response.StatusCode -eq 200 -and $response.Content -match "restreamer|Restreamer|wasm") {
+                Write-Host "Dashboard accessible - contains expected frontend content"
+                $success = $true
+                break
+              } else {
+                Write-Host "Attempt $i : HTTP $($response.StatusCode) but no expected content"
+              }
+            } catch {
+              Write-Host "Attempt $i : $_"
+            }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $success) {
+            Write-Error "Dashboard HTTP endpoint not serving expected WASM frontend content"
+            exit 1
+          }

@@ -1,233 +1,26 @@
-name: CI
+name: Rust CI
 
 on:
   push:
-    branches: [dev]
-    paths:
-      - "VERSION"
-      - "local-client/**"
-      - "manager-server/**"
-      - "delivering-service/**"
-      - ".github/workflows/ci.yml"
-      - "requirements*.txt"
-      - "pyproject.toml"
-      - "ruff.toml"
+    branches: [dev, main]
   pull_request:
     branches: [main]
-    paths:
-      - "VERSION"
-      - "local-client/**"
-      - "manager-server/**"
-      - "delivering-service/**"
-      - ".github/workflows/ci.yml"
-      - "requirements*.txt"
-      - "pyproject.toml"
-      - "ruff.toml"
+  workflow_dispatch:
+    inputs:
+      deploy_to_stream_lan:
+        description: "Deploy to stream.lan after CI passes"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: rust-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  preflight:
-    name: Preflight checks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check dev is synced with main
-        if: github.ref == 'refs/heads/dev' || github.event_name == 'pull_request'
-        run: |
-          git fetch origin main dev
-          MAIN_SHA=$(git rev-parse origin/main)
-          if ! git merge-base --is-ancestor "$MAIN_SHA" origin/dev; then
-            echo "ERROR: dev branch is NOT synced with main."
-            echo "  main HEAD: $MAIN_SHA"
-            echo "  dev is missing commits from main. Please merge or rebase."
-            exit 1
-          fi
-          echo "OK: dev contains all commits from main."
-
-      - name: Check dev VERSION > main VERSION
-        run: |
-          git fetch origin main
-          DEV_VERSION=$(cat VERSION | tr -d '[:space:]')
-          MAIN_VERSION=$(git show origin/main:VERSION 2>/dev/null | tr -d '[:space:]' || echo "0.0.0")
-
-          echo "Dev version:  $DEV_VERSION"
-          echo "Main version: $MAIN_VERSION"
-
-          pip install packaging --quiet
-
-          python3 -c "
-          from packaging.version import Version
-          dev = Version('$DEV_VERSION')
-          main = Version('$MAIN_VERSION')
-          if dev <= main:
-              import sys
-              print('ERROR: dev VERSION must be greater than main VERSION.')
-              print(f'  main: {main}')
-              print(f'  dev:  {dev}')
-              sys.exit(1)
-          print(f'Version OK: {main} < {dev}')
-          "
-
-  lint:
-    name: Lint (ruff)
-    needs: preflight
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install ruff
-      - run: ruff check .
-      - run: ruff format --check .
-
-  test-local-client:
-    name: Test local-client
-    needs: lint
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: local-client
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install dependencies (filter Windows-only packages)
-        run: |
-          grep -ivE "^(pystray|pyuac|pywin32|Win32Security)" requirements.txt > requirements_ci.txt
-          pip install -r requirements_ci.txt
-      - name: Django check
-        run: python manage.py check
-        env:
-          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
-      - name: Run tests
-        run: python manage.py test --verbosity=2 2>&1 | tee test_output.txt
-        env:
-          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
-      - name: Verify no tests skipped
-        run: |
-          if grep -qE "^(SKIP|skip|Skipped)" test_output.txt; then
-            echo "ERROR: Tests were skipped! All tests must run."
-            grep -E "^(SKIP|skip|Skipped)" test_output.txt
-            exit 1
-          fi
-          if grep -qE "skipped=[1-9]" test_output.txt; then
-            echo "ERROR: Tests were skipped! All tests must run."
-            grep -E "skipped=" test_output.txt
-            exit 1
-          fi
-          echo "OK: No tests were skipped."
-
-  test-delivering-service:
-    name: Test delivering-service
-    needs: lint
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: delivering-service/delivering_service
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install dependencies
-        run: pip install -r ../requirements.txt
-      - name: Django check
-        run: python manage.py check
-        env:
-          DJANGO_SETTINGS_MODULE: delivering_service.settings_ci
-      - name: Run tests
-        run: python manage.py test --verbosity=2 2>&1 | tee test_output.txt
-        env:
-          DJANGO_SETTINGS_MODULE: delivering_service.settings_ci
-      - name: Verify no tests skipped
-        run: |
-          if grep -qE "^(SKIP|skip|Skipped)" test_output.txt; then
-            echo "ERROR: Tests were skipped! All tests must run."
-            grep -E "^(SKIP|skip|Skipped)" test_output.txt
-            exit 1
-          fi
-          if grep -qE "skipped=[1-9]" test_output.txt; then
-            echo "ERROR: Tests were skipped! All tests must run."
-            grep -E "skipped=" test_output.txt
-            exit 1
-          fi
-          echo "OK: No tests were skipped."
-
-  test-manager-server:
-    name: Test manager-server
-    needs: lint
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: ci_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      redis:
-        image: redis:7
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    defaults:
-      run:
-        working-directory: manager-server
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Django check
-        run: python manage.py check
-        env:
-          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
-      - name: Generate migrations
-        run: python manage.py makemigrations --verbosity=0
-        env:
-          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
-      - name: Run migrations
-        run: python manage.py migrate --verbosity=0
-        env:
-          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
-      - name: Run tests
-        run: python manage.py test --verbosity=2 2>&1 | tee test_output.txt
-        env:
-          DJANGO_SETTINGS_MODULE: nl_restreamer.settings_ci
-      - name: Verify no tests skipped
-        run: |
-          if grep -qE "^(SKIP|skip|Skipped)" test_output.txt; then
-            echo "ERROR: Tests were skipped! All tests must run."
-            grep -E "^(SKIP|skip|Skipped)" test_output.txt
-            exit 1
-          fi
-          if grep -qE "skipped=[1-9]" test_output.txt; then
-            echo "ERROR: Tests were skipped! All tests must run."
-            grep -E "skipped=" test_output.txt
-            exit 1
-          fi
-          echo "OK: No tests were skipped."
-
   version-check:
     name: Version check
     if: github.event_name == 'pull_request'
@@ -236,15 +29,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Compare VERSION against main
+      - name: Require Cargo.toml version bump on PR to main
         run: |
-          PR_VERSION=$(cat VERSION | tr -d '[:space:]')
+          PR_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           git fetch origin main
-          MAIN_VERSION=$(git show origin/main:VERSION | tr -d '[:space:]')
+          MAIN_VERSION=$(git show origin/main:Cargo.toml | grep '^version' | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
           echo "PR version:   $PR_VERSION"
           echo "Main version: $MAIN_VERSION"
 
+          # Compare versions using Python
           pip install packaging --quiet
 
           python3 -c "
@@ -254,7 +48,7 @@ jobs:
           if pr <= main:
               import sys
               print()
-              print('ERROR: VERSION must be bumped higher than main.')
+              print('ERROR: Cargo.toml version must be bumped higher than main.')
               print(f'  Current main: {main}')
               print(f'  This PR:      {pr}')
               parts = str(main).split('.')
@@ -267,56 +61,2246 @@ jobs:
               sys.exit(1)
           print(f'Version bump OK: {main} -> {pr}')
           "
+      - name: Check Cargo.toml version is not already tagged
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          TAG="restreamer-v${VERSION}"
+          echo "Version: $VERSION"
+          echo "Tag: $TAG"
+          if git tag -l | grep -qx "$TAG"; then
+            echo "ERROR: Tag $TAG already exists. Bump the version in Cargo.toml."
+            exit 1
+          fi
+          echo "OK: Tag $TAG does not exist yet."
 
-  ci-gate:
-    name: CI Gate (all checks)
+  lint:
+    name: Lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ffmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          $ffmpegZip = "$env:TEMP\ffmpeg.zip"
+          $ffmpegDir = "C:\ffmpeg"
+
+          Write-Host "Downloading ffmpeg..."
+          Invoke-WebRequest -Uri $ffmpegUrl -OutFile $ffmpegZip
+
+          Write-Host "Extracting ffmpeg..."
+          Expand-Archive -Path $ffmpegZip -DestinationPath $env:TEMP -Force
+
+          # Find the extracted folder (includes version number)
+          $extractedDir = Get-ChildItem "$env:TEMP\ffmpeg-*-essentials_build" | Select-Object -First 1
+          if ($extractedDir) {
+            Move-Item "$($extractedDir.FullName)\bin" $ffmpegDir -Force
+            Write-Host "Installed ffmpeg to $ffmpegDir"
+            echo "$ffmpegDir" >> $env:GITHUB_PATH
+          } else {
+            Write-Error "Failed to find extracted ffmpeg directory"
+            exit 1
+          }
+      - name: Verify ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          C:\ffmpeg\ffmpeg.exe -version
+      - name: Run tests
+        run: cargo test --workspace --verbose
+        env:
+          SQLX_OFFLINE: true
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+      - name: Run coverage
+        run: cargo tarpaulin --workspace --exclude-files "src-tauri/*" --fail-under 55 --skip-clean --timeout 300
+
+  security:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Run audit
+        run: |
+          for i in 1 2 3; do
+            cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0037 && exit 0
+            echo "Attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+          exit 1
+
+  build-tauri:
+    name: Build Tauri app
+    needs: [lint, test]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install trunk and wasm-bindgen-cli
+        run: |
+          cargo install trunk wasm-bindgen-cli
+      - name: Install binaryen (wasm-opt)
+        shell: pwsh
+        run: |
+          # Download and extract binaryen for wasm optimization
+          $version = "version_123"
+          $url = "https://github.com/WebAssembly/binaryen/releases/download/$version/binaryen-$version-x86_64-windows.tar.gz"
+          $outFile = "$env:TEMP\binaryen.tar.gz"
+          $retries = 3
+          for ($i = 1; $i -le $retries; $i++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $outFile -TimeoutSec 120
+              break
+            } catch {
+              Write-Host "Download attempt $i failed: $_"
+              if ($i -eq $retries) { throw "Failed to download binaryen after $retries attempts" }
+              Start-Sleep -Seconds 10
+            }
+          }
+          tar -xzf $outFile -C $env:TEMP
+          Copy-Item "$env:TEMP\binaryen-$version\bin\wasm-opt.exe" "$env:CARGO_HOME\bin\"
+          Write-Host "Installed wasm-opt to $env:CARGO_HOME\bin\"
+      - name: Set build version and timestamp
+        id: build-info
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path "Cargo.toml" -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $branch = "${{ github.ref_name }}"
+          if ($branch -eq "dev" -or $branch -ne "main") {
+            $version = "$version-dev"
+          }
+          $timestamp = Get-Date -Format "MMM dd HH:mm"
+          echo "BUILD_VERSION=$version" >> $env:GITHUB_ENV
+          echo "BUILD_TIMESTAMP=$timestamp" >> $env:GITHUB_ENV
+          echo "Version: $version, Timestamp: $timestamp"
+      - name: Build Leptos UI (WASM)
+        run: |
+          cd leptos-ui
+          trunk build --release
+        env:
+          BUILD_VERSION: ${{ env.BUILD_VERSION }}
+          BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli
+      - name: Build Tauri app
+        run: cargo tauri build
+        env:
+          SQLX_OFFLINE: true
+          BUILD_VERSION: ${{ env.BUILD_VERSION }}
+          BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Upload Tauri installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: restreamer-tauri-installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Upload WASM frontend for LAN serving
+        uses: actions/upload-artifact@v4
+        with:
+          name: restreamer-www
+          path: dist/
+          if-no-files-found: warn
+          retention-days: 7
+
+  build-delivery:
+    name: Build rs-delivery (Linux)
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - name: Build rs-delivery
+        run: cargo build --release -p rs-delivery
+      - name: Upload rs-delivery binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rs-delivery-binary
+          path: target/release/rs-delivery
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload rs-delivery to S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+        run: |
+          pip install awscli
+          aws s3 cp target/release/rs-delivery \
+            s3://restreamer-chunks/rs-delivery \
+            --endpoint-url https://eu-central-1.linodeobjects.com \
+            --acl public-read
+
+  file-size:
+    name: File size check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check no .rs file exceeds 1000 lines
+        run: |
+          OVERSIZED=$(find crates src-tauri leptos-ui -name '*.rs' -exec sh -c 'lines=$(wc -l < "$1"); if [ "$lines" -gt 1000 ]; then echo "$1: $lines lines"; fi' _ {} \;)
+          if [ -n "$OVERSIZED" ]; then
+            echo "ERROR: The following Rust files exceed 1000 lines:"
+            echo "$OVERSIZED"
+            exit 1
+          fi
+          echo "OK: All Rust files are within the 1000-line limit."
+
+  test-integrity:
+    name: Test integrity check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
+      - name: Scan for #[ignore] on tests
+        run: |
+          IGNORED=$(grep -rn '#\[ignore\]' --include='*.rs' . || true)
+          if [ -n "$IGNORED" ]; then
+            echo "ERROR: Found #[ignore] attributes on tests. All tests must run."
+            echo "$IGNORED"
+            exit 1
+          fi
+          echo "OK: No #[ignore] attributes found."
+      - name: Scan for assert!(true) false positives
+        run: |
+          FALSE_POS=$(grep -rn 'assert!(true)' --include='*.rs' . || true)
+          if [ -n "$FALSE_POS" ]; then
+            echo "ERROR: Found assert!(true) — tests must verify real behavior."
+            echo "$FALSE_POS"
+            exit 1
+          fi
+          echo "OK: No assert!(true) found."
+      - name: Scan for empty test bodies
+        run: |
+          # Find test functions whose body is just {} or { } with nothing meaningful
+          EMPTY=$(grep -Pzo '#\[test\]\s*\n\s*(async\s+)?fn\s+\w+\([^)]*\)[^{]*\{\s*\}' --include='*.rs' -rn . || true)
+          if [ -n "$EMPTY" ]; then
+            echo "ERROR: Found empty test bodies — tests must contain real assertions."
+            echo "$EMPTY"
+            exit 1
+          fi
+          echo "OK: No empty test bodies found."
+      - name: Scan for assert_eq with trivial values
+        run: |
+          # Catch assert_eq!(1, 1), assert_eq!(true, true), etc.
+          TRIVIAL=$(grep -rn 'assert_eq!(1,\s*1)\|assert_eq!(true,\s*true)\|assert_eq!("",\s*"")' --include='*.rs' . || true)
+          if [ -n "$TRIVIAL" ]; then
+            echo "ERROR: Found trivial assertions — tests must verify real behavior."
+            echo "$TRIVIAL"
+            exit 1
+          fi
+          echo "OK: No trivial assertions found."
+      - name: Verify zero ignored tests in cargo test output
+        run: |
+          # Run tests and capture output
+          OUTPUT=$(cargo test --workspace 2>&1)
+          echo "$OUTPUT"
+
+          # Check for any ignored tests
+          IGNORED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ ignored' | grep -v '0 ignored' || true)
+          if [ -n "$IGNORED_COUNT" ]; then
+            echo "ERROR: Some tests were ignored:"
+            echo "$IGNORED_COUNT"
+            exit 1
+          fi
+
+          # Check for any filtered tests
+          FILTERED_COUNT=$(echo "$OUTPUT" | grep -oP '\d+ filtered out' | grep -v '0 filtered out' || true)
+          if [ -n "$FILTERED_COUNT" ]; then
+            echo "ERROR: Some tests were filtered out:"
+            echo "$FILTERED_COUNT"
+            exit 1
+          fi
+
+          # Verify at least a minimum number of tests ran
+          TOTAL_PASSED=$(echo "$OUTPUT" | grep -oP '(\d+) passed' | grep -oP '\d+' | paste -sd+ | bc)
+          echo "Total tests passed: $TOTAL_PASSED"
+          if [ "$TOTAL_PASSED" -lt 130 ]; then
+            echo "ERROR: Expected at least 130 tests, but only $TOTAL_PASSED passed."
+            echo "This may indicate tests were removed or are not being discovered."
+            exit 1
+          fi
+
+          echo "OK: All $TOTAL_PASSED tests ran with 0 ignored and 0 filtered."
+      - name: Verify deploy-stream-lan has always() condition
+        run: |
+          # Check that deploy-stream-lan job uses always() to prevent incorrect skipping
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          DEPLOY_CONDITION=$(grep -A3 "deploy-stream-lan:" "$WORKFLOW_FILE" | grep "if:" || true)
+
+          if [ -z "$DEPLOY_CONDITION" ]; then
+            echo "ERROR: deploy-stream-lan job missing 'if' condition"
+            exit 1
+          fi
+
+          if ! echo "$DEPLOY_CONDITION" | grep -q "always()"; then
+            echo "ERROR: deploy-stream-lan job MUST use always() to ensure condition evaluation"
+            echo "Found: $DEPLOY_CONDITION"
+            echo ""
+            echo "Without always(), the job may be incorrectly skipped when needed jobs"
+            echo "have complex conditions (like rust-ci-gate with if: always())."
+            exit 1
+          fi
+
+          echo "OK: deploy-stream-lan uses always() in condition."
+      - name: Verify auto-release has always() condition
+        run: |
+          # Check that auto-release job uses always() to prevent incorrect skipping
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          RELEASE_CONDITION=$(grep -A3 "auto-release:" "$WORKFLOW_FILE" | grep "if:" || true)
+
+          if [ -z "$RELEASE_CONDITION" ]; then
+            echo "ERROR: auto-release job missing 'if' condition"
+            exit 1
+          fi
+
+          if ! echo "$RELEASE_CONDITION" | grep -q "always()"; then
+            echo "ERROR: auto-release job MUST use always() to ensure condition evaluation"
+            echo "Found: $RELEASE_CONDITION"
+            exit 1
+          fi
+
+          echo "OK: auto-release uses always() in condition."
+      - name: Verify E2E tests use != failure (not == success)
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+
+          # e2e-streaming-test must use != 'failure' so it runs when deploy is skipped
+          STREAMING_CONDITION=$(grep -A3 "e2e-streaming-test:" "$WORKFLOW_FILE" | grep "if:" || true)
+          if echo "$STREAMING_CONDITION" | grep -q "== 'success'"; then
+            echo "ERROR: e2e-streaming-test uses '== success' which skips tests when deploy is skipped."
+            echo "Must use '!= failure' so E2E tests run on every dev/main push."
+            echo "Found: $STREAMING_CONDITION"
+            exit 1
+          fi
+          if ! echo "$STREAMING_CONDITION" | grep -q "!= 'failure'"; then
+            echo "ERROR: e2e-streaming-test must use '!= failure' condition for deploy-stream-lan."
+            echo "Found: $STREAMING_CONDITION"
+            exit 1
+          fi
+          if ! echo "$STREAMING_CONDITION" | grep -q "workflow_dispatch"; then
+            echo "ERROR: e2e-streaming-test must run on workflow_dispatch (not just push)."
+            echo "Found: $STREAMING_CONDITION"
+            exit 1
+          fi
+          echo "OK: e2e-streaming-test uses != failure condition and includes workflow_dispatch."
+
+          # e2e-obs-youtube-test must use != 'failure' so it runs when deploy is skipped
+          YOUTUBE_CONDITION=$(grep -A3 "e2e-obs-youtube-test:" "$WORKFLOW_FILE" | grep "if:" || true)
+          if echo "$YOUTUBE_CONDITION" | grep -q "== 'success'"; then
+            echo "ERROR: e2e-obs-youtube-test uses '== success' which skips tests when deploy is skipped."
+            echo "Must use '!= failure' so E2E tests run on every dev/main push."
+            echo "Found: $YOUTUBE_CONDITION"
+            exit 1
+          fi
+          if ! echo "$YOUTUBE_CONDITION" | grep -q "!= 'failure'"; then
+            echo "ERROR: e2e-obs-youtube-test must use '!= failure' condition for deploy-stream-lan."
+            echo "Found: $YOUTUBE_CONDITION"
+            exit 1
+          fi
+          if ! echo "$YOUTUBE_CONDITION" | grep -q "workflow_dispatch"; then
+            echo "ERROR: e2e-obs-youtube-test must run on workflow_dispatch (not just push)."
+            echo "Found: $YOUTUBE_CONDITION"
+            exit 1
+          fi
+          echo "OK: e2e-obs-youtube-test uses != failure condition and includes workflow_dispatch."
+      - name: Verify e2e-gate requires both E2E tests
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+
+          # e2e-gate must exist and depend on both E2E test jobs
+          GATE_NEEDS=$(grep -A5 "e2e-gate:" "$WORKFLOW_FILE" | grep "needs:" || true)
+          if [ -z "$GATE_NEEDS" ]; then
+            echo "ERROR: e2e-gate job not found or missing needs"
+            exit 1
+          fi
+
+          if ! echo "$GATE_NEEDS" | grep -q "e2e-streaming-test"; then
+            echo "ERROR: e2e-gate must depend on e2e-streaming-test"
+            echo "Found: $GATE_NEEDS"
+            exit 1
+          fi
+
+          if ! echo "$GATE_NEEDS" | grep -q "e2e-obs-youtube-test"; then
+            echo "ERROR: e2e-gate must depend on e2e-obs-youtube-test"
+            echo "Found: $GATE_NEEDS"
+            exit 1
+          fi
+
+          echo "OK: e2e-gate depends on both E2E test jobs."
+      - name: Verify auto-release depends on e2e-gate (not just rust-ci-gate)
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+
+          # auto-release must depend on e2e-gate so releases only happen after E2E passes
+          RELEASE_NEEDS=$(grep -A3 "auto-release:" "$WORKFLOW_FILE" | grep "needs:" || true)
+          if ! echo "$RELEASE_NEEDS" | grep -q "e2e-gate"; then
+            echo "ERROR: auto-release must depend on e2e-gate (the final gate that includes E2E verification)"
+            echo "Found: $RELEASE_NEEDS"
+            exit 1
+          fi
+
+          # auto-release must NOT bypass e2e-gate by depending directly on rust-ci-gate
+          if echo "$RELEASE_NEEDS" | grep -q "rust-ci-gate"; then
+            echo "ERROR: auto-release depends on rust-ci-gate directly — must go through e2e-gate instead"
+            echo "Found: $RELEASE_NEEDS"
+            exit 1
+          fi
+
+          echo "OK: auto-release depends on e2e-gate."
+
+  frontend-e2e:
+    name: Frontend E2E (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Cache trunk and wasm-bindgen-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: trunk-wasm-bindgen-${{ runner.os }}
+      - name: Install trunk and wasm-bindgen-cli
+        run: |
+          command -v trunk || cargo install trunk
+          command -v wasm-bindgen || cargo install wasm-bindgen-cli
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: leptos-ui
+      - name: Set build version and timestamp
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          BRANCH="${{ github.ref_name }}"
+          if [ "$BRANCH" = "dev" ] || [ "$BRANCH" != "main" ]; then
+            VERSION="${VERSION}-dev"
+          fi
+          TIMESTAMP=$(date "+%b %d %H:%M")
+          echo "BUILD_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "BUILD_TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+          echo "Version: $VERSION, Timestamp: $TIMESTAMP"
+      - name: Build WASM frontend
+        working-directory: leptos-ui
+        run: trunk build --release
+        env:
+          BUILD_VERSION: ${{ env.BUILD_VERSION }}
+          BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
+      - name: Install Playwright dependencies
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Start mock API server (serves frontend + API + WebSocket)
+        working-directory: e2e
+        run: node mock-api.js &
+      - name: Wait for server
+        run: |
+          npx wait-on http://127.0.0.1:8910/api/v1/status --timeout 30000
+      - name: Run Playwright tests
+        working-directory: e2e
+        run: npx playwright test --config playwright-frontend.config.ts
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: e2e/playwright-report/
+          if-no-files-found: ignore
+
+  rust-ci-gate:
+    name: Rust CI Gate
     if: always()
     needs:
       [
-        preflight,
-        lint,
-        test-local-client,
-        test-delivering-service,
-        test-manager-server,
         version-check,
+        lint,
+        test,
+        coverage,
+        security,
+        build-tauri,
+        build-delivery,
+        file-size,
+        test-integrity,
+        frontend-e2e,
       ]
     runs-on: ubuntu-latest
     steps:
-      - name: Check all results
+      - name: Check results
         run: |
-          echo "preflight:           ${{ needs.preflight.result }}"
-          echo "lint:                ${{ needs.lint.result }}"
-          echo "test-local-client:   ${{ needs.test-local-client.result }}"
-          echo "test-delivering:     ${{ needs.test-delivering-service.result }}"
-          echo "test-manager:        ${{ needs.test-manager-server.result }}"
-          echo "version-check:       ${{ needs.version-check.result }}"
+          echo "version-check:  ${{ needs.version-check.result }}"
+          echo "lint:           ${{ needs.lint.result }}"
+          echo "test:           ${{ needs.test.result }}"
+          echo "coverage:       ${{ needs.coverage.result }}"
+          echo "security:       ${{ needs.security.result }}"
+          echo "build-tauri:    ${{ needs.build-tauri.result }}"
+          echo "build-delivery: ${{ needs.build-delivery.result }}"
+          echo "file-size:      ${{ needs.file-size.result }}"
+          echo "test-integrity: ${{ needs.test-integrity.result }}"
+          echo "frontend-e2e:   ${{ needs.frontend-e2e.result }}"
 
-          # All jobs must succeed
-          if [[ "${{ needs.preflight.result }}" != "success" ]]; then
-            echo "FAIL: preflight did not succeed"
-            exit 1
-          fi
-          if [[ "${{ needs.lint.result }}" != "success" ]]; then
-            echo "FAIL: lint did not succeed"
-            exit 1
-          fi
-          if [[ "${{ needs.test-local-client.result }}" != "success" ]]; then
-            echo "FAIL: test-local-client did not succeed"
-            exit 1
-          fi
-          if [[ "${{ needs.test-delivering-service.result }}" != "success" ]]; then
-            echo "FAIL: test-delivering-service did not succeed"
-            exit 1
-          fi
-          if [[ "${{ needs.test-manager-server.result }}" != "success" ]]; then
-            echo "FAIL: test-manager-server did not succeed"
-            exit 1
+          FAILED=0
+
+          # version-check is only required on pull_request (skipped on push is OK)
+          VERSION_RESULT="${{ needs.version-check.result }}"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ "$VERSION_RESULT" != "success" ]]; then
+              echo "FAIL: version-check did not succeed (result: $VERSION_RESULT)"
+              FAILED=1
+            fi
+          else
+            echo "version-check: $VERSION_RESULT (OK - only required on PRs)"
           fi
 
-          # Version check: required on PRs, skipped on pushes
-          if [[ "${{ needs.version-check.result }}" == "failure" ]]; then
-            echo "FAIL: version-check failed"
+          # All other jobs must succeed
+          for job_result in \
+            "lint:${{ needs.lint.result }}" \
+            "test:${{ needs.test.result }}" \
+            "coverage:${{ needs.coverage.result }}" \
+            "security:${{ needs.security.result }}" \
+            "build-tauri:${{ needs.build-tauri.result }}" \
+            "build-delivery:${{ needs.build-delivery.result }}" \
+            "file-size:${{ needs.file-size.result }}" \
+            "test-integrity:${{ needs.test-integrity.result }}" \
+            "frontend-e2e:${{ needs.frontend-e2e.result }}"; do
+            name="${job_result%%:*}"
+            result="${job_result##*:}"
+            if [[ "$result" != "success" ]]; then
+              echo "FAIL: $name did not succeed (result: $result)"
+              FAILED=1
+            fi
+          done
+
+          if [[ "$FAILED" == "1" ]]; then
             exit 1
           fi
 
-          echo "All checks passed!"
+          echo "All CI checks passed!"
+
+  deploy-stream-lan:
+    name: Deploy to stream.lan
+    needs: [rust-ci-gate, build-tauri]
+    if: always() && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.rust-ci-gate.result == 'success' && needs.build-tauri.result == 'success'
+    runs-on: [self-hosted, windows, stream-lan]
+    steps:
+      - name: Clean old artifacts
+        shell: powershell
+        run: |
+          # Remove old artifacts to prevent version mix-ups on self-hosted runner
+          Remove-Item -Path "artifacts" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleaned artifacts directory"
+
+      - name: Download Tauri installer
+        uses: actions/download-artifact@v4
+        with:
+          name: restreamer-tauri-installer
+          path: artifacts/tauri
+
+      - name: Download WASM frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: restreamer-www
+          path: artifacts/www
+
+      - name: List artifacts
+        run: |
+          Write-Host "=== Tauri installer (unified app with embedded service) ==="
+          Get-ChildItem artifacts/tauri/
+          Write-Host "=== WASM frontend (for LAN serving) ==="
+          Get-ChildItem artifacts/www/
+        shell: powershell
+
+      - name: Install WebView2 runtime
+        shell: powershell
+        run: |
+          # Check if WebView2 is already installed (check both known GUIDs and file path)
+          function Get-WebView2Version {
+            foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
+              $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
+              if ($reg -and $reg.pv) { return $reg.pv }
+            }
+            # Fallback: check if the runtime directory exists
+            $dir = "C:\Program Files (x86)\Microsoft\EdgeWebView\Application"
+            if (Test-Path $dir) { return "installed (detected from filesystem)" }
+            return $null
+          }
+
+          $version = Get-WebView2Version
+          if ($version) {
+            Write-Host "WebView2 already installed: $version"
+          } else {
+            Write-Host "WebView2 not found - installing Evergreen Runtime..."
+            $bootstrapper = "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
+            Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
+            Start-Process -FilePath $bootstrapper -ArgumentList "/silent /install" -Wait
+            Remove-Item $bootstrapper -ErrorAction SilentlyContinue
+
+            $version = Get-WebView2Version
+            if (-not $version) {
+              Write-Error "WebView2 runtime installation FAILED - dashboard will be blank"
+              exit 1
+            }
+            Write-Host "WebView2 installed: $version"
+          }
+
+      - name: Deploy Tauri app
+        shell: powershell
+        run: |
+          # Deploy single unified Tauri binary (contains embedded service + tray icon)
+          $ErrorActionPreference = "Continue"
+
+          $stagingDir = "C:\ProgramData\Restreamer\staging"
+          New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+
+          $installer = Get-ChildItem "artifacts/tauri/*.exe" | Select-Object -First 1
+          Copy-Item $installer.FullName "$stagingDir\Restreamer-Setup.exe" -Force
+          Write-Host "Staged: $($installer.Name)"
+
+          # Stop running processes
+          Write-Host "=== Stopping old processes ==="
+          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          taskkill /F /IM "restreamer-service.exe" 2>&1 | Out-Null
+
+          # Remove legacy Windows service if it exists
+          Write-Host "=== Removing legacy Windows service ==="
+          foreach ($name in @("RestreamerService", "restreamer-service")) {
+            sc.exe stop $name 2>&1 | Out-Null
+            sc.exe delete $name 2>&1 | Out-Null
+          }
+
+          # CRITICAL: Stop and disable old Python NSSM services that block RTMP port 1234
+          Write-Host "=== Disabling legacy Python services ==="
+          foreach ($svc in @("inpoint_service", "endpoint_service")) {
+            $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+            if ($service) {
+              Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+              Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
+              Write-Host "Disabled: $svc"
+            }
+          }
+          # Kill any ffmpeg processes spawned by old services (they hold RTMP port 1234)
+          taskkill /F /IM "ffmpeg.exe" 2>&1 | Out-Null
+          # Wait for ports 1234 (RTMP) and 8910 (API) to be free (up to 30 seconds)
+          $timeout = 30
+          $elapsed = 0
+          while ($elapsed -lt $timeout) {
+            $portInUse = netstat -an | Select-String ":1234 |:8910 " | Select-String "LISTENING|TIME_WAIT"
+            if (-not $portInUse) { break }
+            Start-Sleep -Seconds 2
+            $elapsed += 2
+            Write-Host "Waiting for ports to be released... ($elapsed s)"
+          }
+          if ($elapsed -ge $timeout) {
+            Write-Host "WARNING: Ports still in use after ${timeout}s"
+          }
+
+          Start-Sleep -Seconds 2
+
+          # Clean up old files
+          Write-Host "=== Cleaning up old files ==="
+          $InstallDir = "C:\Program Files\Restreamer"
+          Remove-Item "$InstallDir\restreamer-tray.exe" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$InstallDir\restreamer-service.exe" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$stagingDir\deploy.ps1" -Force -ErrorAction SilentlyContinue
+
+          # Run NSIS installer (installs unified Tauri app)
+          Write-Host "=== Installing unified Tauri app ==="
+          Start-Process -FilePath "$stagingDir\Restreamer-Setup.exe" -ArgumentList "/S" -Wait
+
+          # Verify install
+          Write-Host "=== Verifying install ==="
+          Get-ChildItem "$InstallDir\*.exe"
+
+          Write-Host "=== Deployment complete ==="
+          exit 0
+
+      - name: Deploy WASM frontend for LAN access
+        shell: powershell
+        run: |
+          $wwwDir = "C:\Program Files\Restreamer\www"
+          # Remove old www directory
+          Remove-Item -Path $wwwDir -Recurse -Force -ErrorAction SilentlyContinue
+          # Copy new WASM frontend files
+          Copy-Item -Path "artifacts\www" -Destination $wwwDir -Recurse -Force
+          Write-Host "=== WASM frontend deployed to $wwwDir ==="
+          Get-ChildItem $wwwDir
+
+          # Allow LAN access through Windows Firewall
+          Remove-NetFirewallRule -DisplayName "Restreamer API" -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "Restreamer API" -Direction Inbound -Protocol TCP -LocalPort 8910 -Action Allow | Out-Null
+          Write-Host "=== Firewall rule created for port 8910 ==="
+
+      - name: Deploy and start Restreamer
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ExePath = "C:\Program Files\Restreamer\Restreamer.exe"
+          $TaskName = "RestreamerGUI"
+          $InstallDir = "C:\Program Files\Restreamer"
+
+          Write-Host "=== Step 1: Stop any existing instances ==="
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
+          Start-Sleep -Seconds 3
+
+          Write-Host "=== Step 1.5: Clean up stale SQLite WAL files ==="
+          # Stale WAL files from previous processes can cause database lock errors
+          $DataDir = "C:\ProgramData\Restreamer"
+          Remove-Item "$DataDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$DataDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleaned up SQLite WAL files"
+
+          Write-Host "=== Step 2: Remove old scheduled tasks ==="
+          Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
+            Write-Host "Removing task: $($_.TaskName)"
+            Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+          }
+
+          Write-Host "=== Step 3: Create scheduled task with correct configuration ==="
+          $action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
+          $trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
+          $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0
+
+          Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+          Write-Host "Created scheduled task: $TaskName"
+
+          Write-Host "=== Step 4: Start Restreamer in user session ==="
+          # Use schtasks.exe instead of Start-ScheduledTask for cross-context reliability
+          schtasks.exe /run /tn $TaskName
+          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+          Start-Sleep -Seconds 10
+
+          Write-Host "=== Deployment steps complete ==="
+
+      - name: Verify Restreamer is running correctly
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== CHECK 1: Process is running ==="
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $proc) {
+            Write-Host "Process not running, showing recent event log entries:"
+            Get-WinEvent -FilterHashtable @{LogName="Application"; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Format-Table TimeCreated,ProviderName,Message -Wrap
+            Write-Error "FAIL: Restreamer.exe is not running"
+            exit 1
+          }
+          Write-Host "OK: Process running (PID: $($proc.Id), Memory: $([math]::Round($proc.WorkingSet64/1MB))MB)"
+
+          Write-Host "=== CHECK 2: Running in user session (not SYSTEM) ==="
+          if ($proc.SessionId -eq 0) {
+            Write-Error "FAIL: Running in Session 0 (SYSTEM) - tray icon will NOT be visible. User session must be available."
+            exit 1
+          }
+          Write-Host "OK: Running in user session $($proc.SessionId) - tray icon visible"
+
+          Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
+          $listener = netstat -ano | Select-String "LISTENING" | Select-String "\b:8910\b"
+          if (-not $listener) {
+            Write-Host "Current port status:"
+            netstat -ano | Select-String "\b:8910\b"
+            Write-Host "Recent log file:"
+            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Write-Error "FAIL: Port 8910 is NOT listening - ServiceCore did not start"
+            exit 1
+          }
+          Write-Host "OK: Port 8910 is listening"
+          Write-Host $listener
+
+          Write-Host "=== CHECK 3b: RTMP port 1234 is LISTENING ==="
+          $rtmpListener = netstat -ano | Select-String "LISTENING" | Select-String "\b:1234\b"
+          if (-not $rtmpListener) {
+            Write-Host "Current port 1234 status:"
+            netstat -ano | Select-String ":1234"
+            Write-Host "Recent log file:"
+            Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
+            Write-Error "FAIL: RTMP port 1234 is NOT listening - RTMP server did not start"
+            exit 1
+          }
+          Write-Host "OK: RTMP port 1234 is listening"
+          Write-Host $rtmpListener
+
+          Write-Host "=== CHECK 4: API health endpoint responds ==="
+          $maxRetries = 6
+          $healthOk = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $health = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/health" -TimeoutSec 5
+              Write-Host "OK: API health check passed"
+              $healthOk = $true
+              break
+            } catch {
+              Write-Host "Attempt ${i}/${maxRetries}: API not ready - ${_}"
+              Start-Sleep -Seconds 5
+            }
+          }
+          if (-not $healthOk) {
+            Write-Error "FAIL: API health endpoint not responding"
+            exit 1
+          }
+
+          Write-Host "=== CHECK 5: API status endpoint works ==="
+          try {
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+            Write-Host "OK: Status API works - inpoint: $($status.inpoint_status)"
+          } catch {
+            Write-Error "FAIL: Status API not working - $_"
+            exit 1
+          }
+
+          Write-Host "=== CHECK 6: Database accessible (chunk stats) ==="
+          try {
+            $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunk-stats" -TimeoutSec 5
+            Write-Host "OK: Database accessible - chunks: $($stats.total_chunks)"
+          } catch {
+            Write-Error "FAIL: Chunk stats API not working - database may be locked"
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "ALL CHECKS PASSED - DEPLOYMENT SUCCESSFUL"
+          Write-Host "=========================================="
+
+      - name: Verify WebView2 runtime installed
+        shell: powershell
+        run: |
+          $found = $false
+          foreach ($guid in @("{F3017226-FE2A-4295-8BEF-AE82F87EC1B0}", "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
+            $reg = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid" -ErrorAction SilentlyContinue
+            if ($reg -and $reg.pv) {
+              Write-Host "WebView2 version: $($reg.pv)"
+              $found = $true
+              break
+            }
+          }
+          if (-not $found) {
+            if (Test-Path "C:\Program Files (x86)\Microsoft\EdgeWebView\Application") {
+              Write-Host "WebView2 detected from filesystem"
+              $found = $true
+            }
+          }
+          if (-not $found) {
+            Write-Error "WebView2 runtime is NOT installed - dashboard will be empty"
+            exit 1
+          }
+
+      - name: Verify dashboard renders via HTTP
+        shell: powershell
+        run: |
+          # The WASM frontend is served by Axum on the same port
+          $maxRetries = 3
+          $success = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://127.0.0.1:8910/" -TimeoutSec 10 -UseBasicParsing
+              if ($response.StatusCode -eq 200 -and $response.Content -match "restreamer|Restreamer|wasm") {
+                Write-Host "Dashboard accessible - contains expected frontend content"
+                $success = $true
+                break
+              } else {
+                Write-Host "Attempt $i : HTTP $($response.StatusCode) but no expected content"
+              }
+            } catch {
+              Write-Host "Attempt $i : $_"
+            }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $success) {
+            Write-Error "Dashboard HTTP endpoint not serving expected WASM frontend content"
+            exit 1
+          }
+
+  e2e-streaming-test:
+    name: E2E Streaming Test
+    needs: [deploy-stream-lan]
+    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, windows, stream-lan]
+    timeout-minutes: 10
+    steps:
+      - name: Verify Restreamer is running
+        shell: powershell
+        run: |
+          $TaskName = "RestreamerGUI"
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($proc) {
+            Write-Host "Restreamer is running (PID: $($proc.Id), Session: $($proc.SessionId))"
+          } else {
+            Write-Host "Restreamer not running, starting via scheduled task..."
+            schtasks.exe /run /tn $TaskName
+            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+            Start-Sleep -Seconds 10
+            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $proc) {
+              throw "Failed to start Restreamer via scheduled task"
+            }
+            if ($proc.SessionId -eq 0) {
+              throw "Restreamer started in Session 0 (SYSTEM) - must run in user session"
+            }
+            Write-Host "Restreamer started (PID: $($proc.Id), Session: $($proc.SessionId))"
+          }
+
+      - name: Verify API is responding
+        shell: powershell
+        run: |
+          $maxRetries = 5
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
+              Write-Host "API responding on attempt $i"
+              break
+            } catch {
+              Write-Host "Attempt $i failed: $_"
+              if ($i -eq $maxRetries) { throw "API not responding after $maxRetries attempts" }
+              Start-Sleep -Seconds 5
+            }
+          }
+
+      - name: Create and activate E2E-Test event
+        shell: powershell
+        run: |
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+
+          # Deactivate ALL other events first so get_streaming_event() returns our event
+          foreach ($ev in $events) {
+            if ($ev.name -ne "E2E-Test" -and $ev.receiving_activated) {
+              Write-Host "Deactivating other event: id=$($ev.id) name=$($ev.name)"
+              try {
+                Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/deactivate" `
+                  -Method POST -TimeoutSec 10
+              } catch { Write-Host "  Deactivate failed: $_" }
+            }
+          }
+
+          $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
+          if (-not $e2eEvent) {
+            Write-Host "E2E-Test event not found, creating it..."
+            $body = @{ name = "E2E-Test" } | ConvertTo-Json
+            $e2eEvent = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" `
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
+          }
+          Write-Host "E2E-Test event id: $($e2eEvent.id)"
+
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)/activate" `
+            -Method POST -TimeoutSec 10
+
+          $event = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)" -TimeoutSec 10
+          if (-not $event.receiving_activated) {
+            throw "FAILED: E2E-Test event not activated"
+          }
+          Write-Host "E2E-Test event activated: receiving_activated=$($event.receiving_activated)"
+
+      - name: Clear chunks from previous test runs
+        shell: powershell
+        run: |
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks" -Method Delete
+          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          if ($stats.total_chunks -ne 0) {
+            throw "FAILED: Chunks not cleared (total: $($stats.total_chunks))"
+          }
+          Write-Host "Chunks cleared, starting fresh"
+
+      - name: Send test RTMP stream via ffmpeg
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+
+          Write-Host "Starting 15-second test RTMP stream..."
+          $proc = Start-Process -FilePath $ffmpegPath -ArgumentList @(
+            "-y", "-re",
+            "-f", "lavfi", "-i", "testsrc=duration=15:size=320x240:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=1000:duration=15",
+            "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+            "-f", "flv", "rtmp://127.0.0.1:1234/live/ci-e2e-test"
+          ) -NoNewWindow -Wait -PassThru
+
+          if ($proc.ExitCode -ne 0) {
+            throw "ffmpeg failed with exit code $($proc.ExitCode)"
+          }
+          Write-Host "Test stream completed successfully"
+
+      - name: Wait for chunk processing
+        shell: powershell
+        run: |
+          Write-Host "Waiting for chunks to be processed and uploaded..."
+          Start-Sleep -Seconds 10
+
+      - name: Verify chunks created and uploaded to S3
+        shell: powershell
+        run: |
+          # Wait up to 30s for all chunks to be uploaded (pending -> 0)
+          $maxWait = 6
+          $stats = $null
+          for ($w = 1; $w -le $maxWait; $w++) {
+            $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+            if ($stats.pending_chunks -eq 0) {
+              Write-Host "All chunks uploaded (attempt $w/$maxWait)"
+              break
+            }
+            Write-Host "Pending chunks: $($stats.pending_chunks) - waiting for S3 upload (attempt $w/$maxWait)..."
+            Start-Sleep -Seconds 5
+          }
+
+          Write-Host "=== E2E Test Results ==="
+          Write-Host "Total chunks:   $($stats.total_chunks)"
+          Write-Host "Sent chunks:    $($stats.sent_chunks)"
+          Write-Host "Pending:        $($stats.pending_chunks)"
+          Write-Host "Total bytes:    $($stats.total_bytes)"
+
+          if ($stats.total_chunks -lt 8) {
+            throw "Expected at least 8 chunks from 15s stream, got $($stats.total_chunks)"
+          }
+
+          if ($stats.pending_chunks -gt 0) {
+            throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload after 30s wait"
+          }
+
+          Write-Host "=== E2E Streaming Test PASSED ==="
+          Write-Host "RTMP -> Restreamer -> Chunks -> S3: VERIFIED (all via local Rust APIs)"
+
+      - name: Deactivate streaming event
+        if: always()
+        shell: powershell
+        run: |
+          try {
+            $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+            $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
+            if ($e2eEvent) {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)/deactivate" `
+                -Method POST -TimeoutSec 10
+              Write-Host "Deactivated E2E-Test on local client (id=$($e2eEvent.id))"
+            }
+          } catch {
+            Write-Host "Local deactivation failed: $_"
+          }
+          exit 0
+
+  e2e-obs-youtube-test:
+    name: E2E OBS-to-YouTube Test
+    needs: [deploy-stream-lan]
+    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, windows, stream-lan]
+    timeout-minutes: 15
+    env:
+      OBS_WS_HOST: "127.0.0.1"
+      OBS_WS_PORT: "4455"
+      OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}
+      EVENT_NAME: "E2E-Test"
+      HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+      YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+      YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+      YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure Hetzner API token
+        shell: powershell
+        run: |
+          if (-not $env:HETZNER_API_TOKEN) {
+            throw "HETZNER_API_TOKEN secret not set"
+          }
+          # Write Hetzner token directly into config file and restart service
+          $configPath = "C:\ProgramData\Restreamer\config.json"
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.hetzner) {
+            $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue @{}
+          }
+          $config.hetzner = @{
+            api_token = $env:HETZNER_API_TOKEN
+            location = "fsn1"
+            default_server_type = "cx22"
+            snapshot_label = "rs-delivery"
+            ssh_key_name = "restreamer-ci"
+          }
+          $json = $config | ConvertTo-Json -Depth 5
+          [System.IO.File]::WriteAllText($configPath, $json)
+          Write-Host "Config file updated with Hetzner settings"
+
+          # Restart Restreamer via scheduled task to pick up new config
+          Write-Host "Restarting Restreamer via scheduled task..."
+          $TaskName = "RestreamerGUI"
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
+          Start-Sleep -Seconds 3
+          schtasks.exe /run /tn $TaskName
+          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+          Start-Sleep -Seconds 10
+
+          # Verify Restreamer is back up
+          $maxRetries = 15
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+              Write-Host "Restreamer restarted with Hetzner API token configured"
+              return
+            } catch {
+              Write-Host "Waiting for Restreamer restart (attempt $i/$maxRetries)..."
+              Start-Sleep -Seconds 3
+            }
+          }
+          throw "FAILED: Restreamer did not restart after config update"
+
+      - name: Seed YouTube OAuth tokens
+        shell: powershell
+        run: |
+          if (-not $env:YOUTUBE_REFRESH_TOKEN) {
+            throw "YOUTUBE_REFRESH_TOKEN secret not set"
+          }
+          $body = @{
+            refresh_token = $env:YOUTUBE_REFRESH_TOKEN
+            client_id = $env:YOUTUBE_CLIENT_ID
+            client_secret = $env:YOUTUBE_CLIENT_SECRET
+          } | ConvertTo-Json
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/oauth/seed" `
+            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
+          Write-Host "YouTube OAuth tokens seeded"
+
+      - name: Ensure OBS is running
+        shell: powershell
+        run: |
+          $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+          if (-not $obs) {
+            Write-Host "OBS not running, registering scheduled task with correct WorkingDirectory..."
+
+            $action = New-ScheduledTaskAction `
+              -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
+              -Argument "--disable-shutdown-check" `
+              -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"
+            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
+            $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
+
+            Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
+            Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+            schtasks.exe /run /tn "Start OBS Studio"
+            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start OBS Studio (exit code: $LASTEXITCODE)" }
+            Start-Sleep -Seconds 10
+
+            $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+            if (-not $obs) {
+              throw "FAILED: Could not start OBS Studio"
+            }
+          }
+
+          # Verify OBS is healthy (not in broken state)
+          $mem = $obs.WorkingSet64 / 1MB
+          Write-Host "OBS PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
+          if ($mem -lt 100) {
+            Write-Host "WARNING: OBS memory too low ($([math]::Round($mem))MB) - broken start detected"
+            Write-Host "Killing broken OBS and restarting with correct WorkingDirectory..."
+            Stop-Process -Id $obs.Id -Force
+            Start-Sleep -Seconds 5
+
+            $action = New-ScheduledTaskAction `
+              -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
+              -Argument "--disable-shutdown-check" `
+              -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"
+            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
+            $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
+
+            Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
+            Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+            schtasks.exe /run /tn "Start OBS Studio"
+            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start OBS Studio (exit code: $LASTEXITCODE)" }
+            Start-Sleep -Seconds 10
+
+            $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+            if (-not $obs) {
+              throw "FAILED: Could not restart OBS Studio"
+            }
+            $mem = $obs.WorkingSet64 / 1MB
+            Write-Host "OBS restarted - PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
+            if ($mem -lt 100) {
+              throw "FAILED: OBS still in broken state after restart ($([math]::Round($mem))MB)"
+            }
+          }
+          Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
+
+      - name: Save original OBS stream settings and switch to Restreamer
+        id: obs-setup
+        shell: powershell
+        run: |
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+
+          try {
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+            Write-Host "Connected to OBS WebSocket"
+          } catch {
+            throw "FAILED: Cannot connect to OBS WebSocket at $uri - $_"
+          }
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          # Receive Hello message
+          $hello = Receive-OBSMessage $ws
+          Write-Host "OBS WebSocket version: $($hello.d.obsWebSocketVersion)"
+
+          # Build auth string
+          $authRequired = $hello.d.authentication
+          if ($authRequired) {
+            $challenge = $authRequired.challenge
+            $salt = $authRequired.salt
+
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $salt)
+            $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+
+            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $challenge)
+            $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+
+            $identify = @{
+              op = 1
+              d = @{
+                rpcVersion = 1
+                authentication = $authHash
+              }
+            } | ConvertTo-Json -Depth 5
+          } else {
+            $identify = @{
+              op = 1
+              d = @{
+                rpcVersion = 1
+              }
+            } | ConvertTo-Json -Depth 5
+          }
+
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+          Write-Host "OBS identified: op=$($identified.op)"
+
+          # Get current stream service settings
+          $getSettings = @{
+            op = 6
+            d = @{
+              requestType = "GetStreamServiceSettings"
+              requestId = "get-settings-1"
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $getSettings
+          $settingsResp = Receive-OBSMessage $ws
+          $currentSettings = $settingsResp.d.responseData.streamServiceSettings
+          $currentType = $settingsResp.d.responseData.streamServiceType
+
+          Write-Host "Original stream type: $currentType"
+          Write-Host "Original server: $($currentSettings.server)"
+
+          # Save original settings for restoration
+          $origServer = $currentSettings.server
+          $origKey = $currentSettings.key
+          "ORIG_SERVER=$origServer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "ORIG_KEY=$origKey" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "ORIG_TYPE=$currentType" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          # Switch to local Restreamer RTMP
+          $setSettings = @{
+            op = 6
+            d = @{
+              requestType = "SetStreamServiceSettings"
+              requestId = "set-settings-1"
+              requestData = @{
+                streamServiceType = "rtmp_custom"
+                streamServiceSettings = @{
+                  server = "rtmp://127.0.0.1:1234/live"
+                  key = "obs-e2e-test"
+                }
+              }
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $setSettings
+          $setResp = Receive-OBSMessage $ws
+          Write-Host "Switched OBS to Restreamer RTMP: rtmp://127.0.0.1:1234/live/obs-e2e-test"
+
+          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+      - name: "Pre-flight: verify no stale delivery instances"
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Checking for stale delivery instances..."
+          try {
+            $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+            if ($instances -and $instances.Count -gt 0) {
+              Write-Host "WARNING: Found $($instances.Count) stale delivery instance(s), stopping..."
+              foreach ($inst in $instances) {
+                Write-Host "  Stopping instance: id=$($inst.id), event_id=$($inst.event_id), status=$($inst.status)"
+                $body = @{ event_id = $inst.event_id } | ConvertTo-Json
+                try {
+                  Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/stop" `
+                    -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+                } catch {
+                  Write-Host "  Stop failed for event_id=$($inst.event_id): $_"
+                }
+              }
+              Start-Sleep -Seconds 5
+            }
+            Write-Host "No stale delivery instances, proceeding with E2E test"
+          } catch {
+            Write-Host "Could not check delivery instances: $_ - proceeding anyway"
+          }
+
+      - name: Activate event on local client
+        shell: powershell
+        run: |
+          # Find or create the event on the local client and activate it
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+
+          # Deactivate ALL other events first so get_streaming_event() returns our event
+          foreach ($ev in $events) {
+            if ($ev.name -ne $env:EVENT_NAME -and $ev.receiving_activated) {
+              Write-Host "Deactivating other event: id=$($ev.id) name=$($ev.name)"
+              try {
+                Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/deactivate" `
+                  -Method POST -TimeoutSec 10
+              } catch { Write-Host "  Deactivate failed: $_" }
+            }
+          }
+
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          if (-not $targetEvent) {
+            Write-Host "$($env:EVENT_NAME) event not found locally, creating it..."
+            $body = @{ name = $env:EVENT_NAME } | ConvertTo-Json
+            $targetEvent = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" `
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
+          }
+          Write-Host "Event id: $($targetEvent.id), name: $($targetEvent.name)"
+
+          # Activate receiving on local client
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/activate" `
+            -Method POST -TimeoutSec 10
+
+          # Verify
+          $event = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" -TimeoutSec 10
+          if (-not $event.receiving_activated) {
+            throw "FAILED: Event not activated on local client"
+          }
+          Write-Host "Event activated: receiving_activated=$($event.receiving_activated)"
+
+      - name: Start OBS stream
+        shell: powershell
+        run: |
+          # Send StartStream via OBS WebSocket, then disconnect.
+          # We verify stream status separately to avoid event message noise.
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          # Receive Hello + Identify
+          $hello = Receive-OBSMessage $ws
+          $authRequired = $hello.d.authentication
+          if ($authRequired) {
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+            $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+            $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+          } else {
+            $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+          }
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+
+          # Send StartStream request
+          $startStream = @{
+            op = 6
+            d = @{
+              requestType = "StartStream"
+              requestId = "start-stream-1"
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $startStream
+          # Read response - skip any event messages (op=5) that arrive before the response (op=7)
+          for ($r = 0; $r -lt 5; $r++) {
+            $startResp = Receive-OBSMessage $ws
+            Write-Host "Received message: op=$($startResp.op)"
+            if ($startResp.op -eq 7) { break }
+          }
+
+          $ws.CloseOutputAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          $ws.Dispose()
+          Write-Host "StartStream sent, waiting for OBS to connect to RTMP..."
+
+      - name: Verify OBS is streaming
+        shell: powershell
+        run: |
+          # Reconnect to check stream status (avoids event noise from StartStream)
+          Start-Sleep -Seconds 5
+
+          $maxRetries = 6
+          for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $identified = Receive-OBSMessage $ws
+
+            $getStatus = @{
+              op = 6
+              d = @{
+                requestType = "GetStreamStatus"
+                requestId = "get-status-$attempt"
+              }
+            } | ConvertTo-Json -Depth 5
+
+            Send-OBSMessage $ws $getStatus
+
+            # Read responses, skip events (op=5)
+            $statusResp = $null
+            for ($r = 0; $r -lt 5; $r++) {
+              $msg = Receive-OBSMessage $ws
+              if ($msg.op -eq 7) {
+                $statusResp = $msg
+                break
+              }
+              Write-Host "Skipping event: op=$($msg.op)"
+            }
+
+            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+            if ($statusResp -and $statusResp.d.responseData.outputActive) {
+              Write-Host "OBS is streaming (attempt ${attempt}/${maxRetries})"
+              Write-Host "OBS is now streaming to Restreamer RTMP"
+              return
+            }
+
+            Write-Host "OBS not streaming yet (attempt ${attempt}/${maxRetries}), waiting..."
+            Start-Sleep -Seconds 5
+          }
+
+          throw "FAILED: OBS stream did not start after $maxRetries attempts"
+
+      - name: Wait for chunks and verify upload
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          Write-Host "Waiting for chunks to be created and uploaded to S3..."
+
+          $initialStats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          $initialCount = $initialStats.total_chunks
+          Write-Host "Initial chunk count: $initialCount"
+
+          $maxRetries = 30
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+            $newChunks = $stats.total_chunks - $initialCount
+            Write-Host "Attempt ${i}/${maxRetries}: new_chunks=$newChunks, pending=$($stats.pending_chunks)"
+
+            if ($newChunks -ge 8 -and $stats.pending_chunks -eq 0) {
+              Write-Host "=== Chunks verified: $newChunks new chunks, 0 pending ==="
+              return
+            }
+            Start-Sleep -Seconds 3
+          }
+
+          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          $newChunks = $stats.total_chunks - $initialCount
+          if ($newChunks -lt 8) {
+            throw "FAILED: Only $newChunks new chunks created (need >= 8)"
+          }
+          if ($stats.pending_chunks -gt 0) {
+            throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload"
+          }
+
+      - name: Verify YouTube is NOT receiving stream (baseline)
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # BASELINE CHECK: Before delivery starts, verify YouTube is NOT
+          # receiving stream data. Uses local Rust YouTube API (rs-youtube
+          # with server-side OAuth, auto-refresh, no browser needed).
+          # This proves the post-delivery check detects a real state change.
+          Write-Host "Checking YouTube stream status via local API..."
+          $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
+
+          Write-Host "stream_receiving: $($response.stream_receiving)"
+          Write-Host "stream_count: $($response.stream_count)"
+
+          if ($response.error) {
+            throw "BASELINE FAILED: YouTube API error: $($response.error)"
+          }
+
+          if ($response.streams) {
+            foreach ($s in $response.streams) {
+              Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+            }
+          }
+
+          if ($response.stream_receiving) {
+            throw "BASELINE FAILED: YouTube is already receiving stream data before delivery started. A stale stream from a previous run may still be active."
+          }
+
+          Write-Host "=== Baseline PASSED: YouTube is NOT receiving stream data ==="
+
+      - name: Attach YouTube endpoint to E2E event
+        shell: powershell
+        run: |
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          $eventId = $targetEvent.id
+
+          # Check if endpoint already exists
+          $endpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -TimeoutSec 10
+          $ytEndpoint = $endpoints | Where-Object { $_.alias -eq "E2E-YouTube" }
+
+          if (-not $ytEndpoint) {
+            # Create a YT_HLS endpoint for e2e testing
+            $body = @{
+              alias = "E2E-YouTube"
+              service_type = "YT_HLS"
+              stream_key = "${{ secrets.YOUTUBE_STREAM_KEY }}"
+              is_fast = $false
+            } | ConvertTo-Json
+            $ytEndpoint = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" `
+              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
+            Write-Host "Created endpoint: id=$($ytEndpoint.id) alias=$($ytEndpoint.alias)"
+          } else {
+            Write-Host "Endpoint already exists: id=$($ytEndpoint.id)"
+          }
+
+          # Attach endpoint to event
+          try {
+            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$eventId/endpoints/$($ytEndpoint.id)" `
+              -Method POST -TimeoutSec 10
+            Write-Host "Attached endpoint $($ytEndpoint.id) to event $eventId"
+          } catch {
+            Write-Host "Endpoint may already be attached: $_"
+          }
+
+          # Verify
+          $eventEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$eventId/endpoints" -TimeoutSec 10
+          Write-Host "Event $eventId has $($eventEndpoints.Count) endpoint(s)"
+
+      - name: Start delivery (Hetzner VPS)
+        shell: powershell
+        timeout-minutes: 8
+        run: |
+          # Find the active event to get event_id
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          if (-not $targetEvent) {
+            throw "FAILED: Event '$($env:EVENT_NAME)' not found"
+          }
+          $eventId = $targetEvent.id
+          Write-Host "Starting delivery for event_id=$eventId..."
+
+          $body = @{ event_id = $eventId } | ConvertTo-Json
+          $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/start" `
+            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 300
+
+          Write-Host "Delivery start response: $($response | ConvertTo-Json -Depth 3)"
+          if ($response.error) {
+            throw "FAILED: Delivery start error: $($response.error)"
+          }
+          Write-Host "=== Delivery started: server=$($response.server_ip), hetzner_id=$($response.hetzner_id) ==="
+
+          # Diagnostic: check chunks for this event
+          $allEvents = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          foreach ($ev in $allEvents) {
+            Write-Host "  Event: id=$($ev.id) name=$($ev.name) receiving=$($ev.receiving_activated) delivering=$($ev.delivering_activated) bytes=$($ev.received_bytes)"
+          }
+          $chunkStats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 10
+          Write-Host "  Chunk stats: total=$($chunkStats.total_chunks) pending=$($chunkStats.pending_chunks) sent=$($chunkStats.sent_chunks)"
+
+      - name: Wait for delivery server ready
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          $eventId = $targetEvent.id
+
+          Write-Host "Waiting for delivery server to start ffmpeg endpoints..."
+          # Cloud-init can take 5-7 minutes: apt update + install ffmpeg + download binary + start
+          $maxRetries = 40
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+
+              Write-Host "--- Attempt ${i}/${maxRetries} ---"
+              Write-Host "  server_ip: $($response.server_ip)"
+              Write-Host "  instance_status: $($response.instance_status)"
+              Write-Host "  server_ready: $($response.server_ready)"
+              Write-Host "  endpoints_alive: $($response.endpoints_alive)"
+
+              if ($response.endpoint_details) {
+                foreach ($ep in $response.endpoint_details) {
+                  Write-Host "  Endpoint: $($ep.alias) | alive=$($ep.alive) | buffer=$($ep.buff_size_bytes)B | chunk=$($ep.current_chunk_id)"
+                }
+              }
+
+              if ($response.instance_status -eq "failed") {
+                Write-Host "  DIAGNOSTIC: Instance status is 'failed'"
+                $chunkStats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 10
+                Write-Host "  DIAGNOSTIC: total=$($chunkStats.total_chunks) pending=$($chunkStats.pending_chunks) sent=$($chunkStats.sent_chunks)"
+                # Get last 5 chunks to see their event IDs
+                try {
+                  $chunks = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks?limit=5&offset=$([math]::Max(0, $chunkStats.total_chunks - 5))" -TimeoutSec 10
+                  foreach ($c in $chunks) {
+                    Write-Host "  DIAGNOSTIC chunk: id=$($c.id) event_id=$($c.streaming_event_id) size=$($c.data_size) sent=$($c.sent_to_s3)"
+                  }
+                } catch { Write-Host "  DIAGNOSTIC: chunk query failed: $_" }
+              }
+
+              if ($response.server_ready -and $response.endpoints_alive) {
+                Write-Host "=== Delivery server fully operational with live endpoints ==="
+                return
+              }
+            } catch {
+              Write-Host "Request failed on attempt ${i}: $_"
+            }
+            Start-Sleep -Seconds 15
+          }
+          throw "FAILED: Delivery server not ready after $maxRetries attempts (~10 min)"
+
+      - name: Verify delivery progression
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          # Delivering server sends to YouTube via YT_HLS (HTTPS PUT), not RTMP
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          $eventId = $targetEvent.id
+
+          Write-Host "Verifying delivery server is actively sending to YouTube (YT_HLS)..."
+          Write-Host "Taking two readings 20s apart to confirm chunk progression..."
+
+          $r1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          $chunk1 = 0
+          $alive1 = $false
+          if ($r1.endpoint_details -and $r1.endpoint_details.Count -gt 0) {
+            $chunk1 = $r1.endpoint_details[0].current_chunk_id
+            $alive1 = $r1.endpoint_details[0].alive
+          }
+          Write-Host "Reading 1: chunk_id=$chunk1, alive=$alive1, server_ready=$($r1.server_ready)"
+
+          Start-Sleep -Seconds 20
+
+          $r2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          $chunk2 = 0
+          $alive2 = $false
+          if ($r2.endpoint_details -and $r2.endpoint_details.Count -gt 0) {
+            $chunk2 = $r2.endpoint_details[0].current_chunk_id
+            $alive2 = $r2.endpoint_details[0].alive
+          }
+          Write-Host "Reading 2: chunk_id=$chunk2, alive=$alive2, server_ready=$($r2.server_ready)"
+
+          if ($chunk2 -gt $chunk1) {
+            Write-Host ""
+            Write-Host "=========================================="
+            Write-Host "  DELIVERY CONFIRMED: chunks advancing $chunk1 -> $chunk2"
+            Write-Host "  ffmpeg is alive and sending to YouTube via YT_HLS"
+            Write-Host "=========================================="
+          } else {
+            throw "FAILED: chunk_id did not advance ($chunk1 -> $chunk2) - ffmpeg may not be sending"
+          }
+
+      - name: Verify YouTube is receiving stream data
+        id: verify_yt_receiving
+        shell: powershell
+        timeout-minutes: 4
+        run: |
+          # Hard-fail check: Query the local Rust YouTube API to verify
+          # YouTube's ingest server IS receiving stream data.
+          # Uses rs-youtube with server-side OAuth (auto-refresh, no browser needed).
+          #
+          # Auto-start is BANNED (YouTube destroys the stream afterward), so
+          # the broadcast stays in "testing" state — we check liveStreams.list
+          # for streamStatus == "active" which means data IS arriving.
+          $maxRetries = 12
+          $retryDelay = 15
+
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            Write-Host "--- Attempt ${i}/${maxRetries}: checking YouTube stream status ---"
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
+
+              Write-Host "  stream_receiving: $($response.stream_receiving)"
+              Write-Host "  stream_count: $($response.stream_count)"
+
+              if ($response.error) {
+                Write-Host "  API error: $($response.error)"
+                throw "YouTube API error: $($response.error)"
+              }
+
+              if ($response.streams) {
+                foreach ($s in $response.streams) {
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+                }
+              }
+
+              if ($response.stream_receiving) {
+                Write-Host "=========================================="
+                Write-Host "  YOUTUBE IS RECEIVING STREAM DATA"
+                Write-Host "  (Broadcast in testing state - auto-start banned)"
+                Write-Host "=========================================="
+                return
+              }
+
+              Write-Host "  YouTube not yet receiving stream data"
+            } catch {
+              Write-Host "  Request failed: $_"
+            }
+
+            if ($i -lt $maxRetries) {
+              Write-Host "  Waiting ${retryDelay}s before retry..."
+              Start-Sleep -Seconds $retryDelay
+            }
+          }
+
+          throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts (~$($maxRetries * $retryDelay)s). The delivery server confirmed chunk progression, but YouTube's ingest server does not show streamStatus=active."
+
+      - name: Stop OBS stream
+        if: always()
+        shell: powershell
+        run: |
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $identified = Receive-OBSMessage $ws
+
+            $stopStream = @{
+              op = 6
+              d = @{
+                requestType = "StopStream"
+                requestId = "stop-stream-1"
+              }
+            } | ConvertTo-Json -Depth 5
+
+            Send-OBSMessage $ws $stopStream
+            $stopResp = Receive-OBSMessage $ws
+            Write-Host "OBS stream stopped"
+
+            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          } catch {
+            Write-Host "Failed to stop OBS stream (may not have been streaming): $_"
+          }
+
+      - name: Deactivate streaming event
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # Stop delivery (Hetzner VPS)
+          try {
+            $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+            $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+            if ($targetEvent) {
+              $body = @{ event_id = $targetEvent.id } | ConvertTo-Json
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/stop" `
+                -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
+              Write-Host "Delivery stopped for event_id=$($targetEvent.id)"
+            }
+          } catch {
+            Write-Host "Delivery stop failed: $_"
+          }
+
+          # Deactivate event on local client
+          try {
+            $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+            $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+            if ($targetEvent) {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/deactivate" `
+                -Method POST -TimeoutSec 10
+              Write-Host "Deactivated $($env:EVENT_NAME) on local client (id=$($targetEvent.id))"
+            }
+          } catch {
+            Write-Host "Local deactivation failed: $_"
+          }
+          # Always exit successfully - deactivation is best-effort cleanup
+          exit 0
+
+      - name: Verify delivery instances cleaned up
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Verifying all delivery instances have been cleaned up..."
+          $maxRetries = 6
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+
+              if (-not $instances -or $instances.Count -eq 0) {
+                Write-Host "All delivery instances cleaned up"
+                exit 0
+              }
+
+              Write-Host "--- Attempt ${i}/${maxRetries} ---"
+              foreach ($inst in $instances) {
+                Write-Host "  Instance: id=$($inst.id), status=$($inst.status), event_id=$($inst.event_id)"
+              }
+
+              if ($i -lt $maxRetries) {
+                Write-Host "  Waiting 10s for cleanup..."
+                Start-Sleep -Seconds 10
+              }
+            } catch {
+              Write-Host "Request failed: $_"
+              if ($i -lt $maxRetries) { Start-Sleep -Seconds 10 }
+            }
+          }
+          throw "FAIL: Delivery instances still exist after $maxRetries attempts"
+
+      - name: Verify YouTube stopped receiving after deactivation
+        if: always() && steps.verify_yt_receiving.outcome == 'success'
+        shell: powershell
+        timeout-minutes: 4
+        run: |
+          # Post-deactivation check: verify YouTube's ingest server is no longer
+          # receiving stream data after the event was deactivated.
+          # Completes the 3-phase lifecycle: not-receiving → receiving → not-receiving.
+          $maxRetries = 12
+          $retryDelay = 15
+
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            Write-Host "--- Attempt ${i}/${maxRetries}: checking YouTube stopped receiving ---"
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
+
+              Write-Host "  stream_receiving: $($response.stream_receiving)"
+              Write-Host "  stream_count: $($response.stream_count)"
+
+              if ($response.error) {
+                Write-Host "  API error: $($response.error)"
+                throw "YouTube API error: $($response.error)"
+              }
+
+              if ($response.streams) {
+                foreach ($s in $response.streams) {
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+                }
+              }
+
+              if (-not $response.stream_receiving) {
+                Write-Host "=========================================="
+                Write-Host "  YOUTUBE CONFIRMED NOT RECEIVING (post-deactivation)"
+                Write-Host "  3-phase lifecycle verified: inactive -> active -> inactive"
+                Write-Host "=========================================="
+                return
+              }
+
+              Write-Host "  YouTube still receiving stream data"
+            } catch {
+              Write-Host "  Request failed: $_"
+            }
+
+            if ($i -lt $maxRetries) {
+              Write-Host "  Waiting ${retryDelay}s before retry..."
+              Start-Sleep -Seconds $retryDelay
+            }
+          }
+
+          throw "FAILED: YouTube is still receiving stream data after deactivation ($maxRetries attempts, ~$($maxRetries * $retryDelay)s). Deactivation did not stop delivery to YouTube."
+
+      - name: Restore OBS stream settings
+        if: always()
+        shell: powershell
+        run: |
+          $origServer = "${{ steps.obs-setup.outputs.ORIG_SERVER }}"
+          $origKey = "${{ steps.obs-setup.outputs.ORIG_KEY }}"
+          $origType = "${{ steps.obs-setup.outputs.ORIG_TYPE }}"
+
+          if (-not $origServer -or -not $origKey) {
+            Write-Host "No original settings saved - skipping restore"
+            exit 0
+          }
+
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $identified = Receive-OBSMessage $ws
+
+            # Restore original settings
+            $serviceType = if ($origType) { $origType } else { "rtmp_custom" }
+            $setSettings = @{
+              op = 6
+              d = @{
+                requestType = "SetStreamServiceSettings"
+                requestId = "restore-settings-1"
+                requestData = @{
+                  streamServiceType = $serviceType
+                  streamServiceSettings = @{
+                    server = $origServer
+                    key = $origKey
+                  }
+                }
+              }
+            } | ConvertTo-Json -Depth 5
+
+            Send-OBSMessage $ws $setSettings
+            $setResp = Receive-OBSMessage $ws
+            Write-Host "Restored OBS to original destination"
+
+            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          } catch {
+            Write-Host "WARNING: Failed to restore OBS settings: $_"
+            Write-Host "You may need to manually restore OBS stream settings"
+          }
+          exit 0
+
+      - name: Verify production config is intact
+        if: always()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== CHECK 7: Hetzner API token present ==="
+          $configPath = "C:\ProgramData\Restreamer\config.json"
+          if (-not (Test-Path $configPath)) {
+            Write-Error "FAIL: Config file not found at $configPath"
+            exit 1
+          }
+
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.hetzner -or [string]::IsNullOrWhiteSpace($config.hetzner.api_token)) {
+            Write-Error "FAIL: Hetzner API token is missing from production config"
+            Write-Host "Delivery functionality will fail without this token"
+            exit 1
+          }
+          Write-Host "OK: Hetzner API token present"
+
+          Write-Host "=== CHECK 8: Delivery API accessible ==="
+          try {
+            $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+            Write-Host "OK: Delivery API accessible - instances: $($instances.Count)"
+          } catch {
+            Write-Error "FAIL: Delivery API not working - DeliveryOrchestrator may not be available"
+            Write-Host "Error: $_"
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "PRODUCTION CONFIG VERIFIED"
+          Write-Host "=========================================="
+
+  e2e-gate:
+    name: E2E Gate
+    if: always()
+    needs: [rust-ci-gate, e2e-streaming-test, e2e-obs-youtube-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all checks passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "rust-ci-gate:          ${{ needs.rust-ci-gate.result }}"
+          echo "e2e-streaming-test:    ${{ needs.e2e-streaming-test.result }}"
+          echo "e2e-obs-youtube-test:  ${{ needs.e2e-obs-youtube-test.result }}"
+
+          # Gate must always pass
+          if [[ "${{ needs.rust-ci-gate.result }}" != "success" ]]; then
+            echo "FAIL: rust-ci-gate did not succeed"
+            exit 1
+          fi
+
+          # On push/workflow_dispatch to dev/main, E2E tests MUST succeed — no exceptions
+          if [[ "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ needs.e2e-streaming-test.result }}" != "success" ]]; then
+              echo "FAIL: E2E Streaming Test did not succeed (result: ${{ needs.e2e-streaming-test.result }})"
+              echo "E2E tests must pass on every dev/main run."
+              exit 1
+            fi
+            if [[ "${{ needs.e2e-obs-youtube-test.result }}" != "success" ]]; then
+              echo "FAIL: E2E OBS-to-YouTube Test did not succeed (result: ${{ needs.e2e-obs-youtube-test.result }})"
+              echo "E2E tests must pass on every dev/main run."
+              exit 1
+            fi
+            echo "All E2E tests passed!"
+          else
+            # On PR events, E2E tests don't run here — but a push-triggered run
+            # for the same commit DOES run E2E tests. We must check that run's
+            # E2E Gate result to prevent a green PR when push E2E tests fail.
+            echo "PR event: checking push-triggered E2E Gate for commit ${{ github.event.pull_request.head.sha }}..."
+            SHA="${{ github.event.pull_request.head.sha }}"
+            MAX_WAIT=20
+            WAIT_INTERVAL=30
+            for i in $(seq 1 $MAX_WAIT); do
+              # Find E2E Gate check run from the push-triggered workflow on this commit.
+              # Filter out check runs from the current workflow run by matching the run ID
+              # in the details_url (check_run.id != github.run_id doesn't work because
+              # they're different ID namespaces).
+              PUSH_GATE=$(gh api "repos/${{ github.repository }}/commits/${SHA}/check-runs?check_name=E2E+Gate&per_page=100" \
+                --jq "[.check_runs[] | select(.details_url | test(\"/${{ github.run_id }}/\") | not)] | sort_by(.started_at) | last")
+
+              if [[ -z "$PUSH_GATE" || "$PUSH_GATE" == "null" ]]; then
+                echo "Attempt $i/$MAX_WAIT: Push-triggered E2E Gate not found yet, waiting ${WAIT_INTERVAL}s..."
+                sleep $WAIT_INTERVAL
+                continue
+              fi
+
+              STATUS=$(echo "$PUSH_GATE" | jq -r '.status')
+              CONCLUSION=$(echo "$PUSH_GATE" | jq -r '.conclusion')
+              RUN_URL=$(echo "$PUSH_GATE" | jq -r '.html_url')
+
+              echo "Push E2E Gate: status=$STATUS conclusion=$CONCLUSION"
+              echo "Run: $RUN_URL"
+
+              if [[ "$STATUS" == "completed" ]]; then
+                if [[ "$CONCLUSION" == "success" ]]; then
+                  echo "Push-triggered E2E Gate passed!"
+                  break
+                else
+                  echo "FAIL: Push-triggered E2E Gate did not succeed (conclusion: $CONCLUSION)"
+                  echo "PR cannot be green when push E2E tests fail."
+                  exit 1
+                fi
+              fi
+
+              echo "Attempt $i/$MAX_WAIT: Push E2E Gate still running ($STATUS), waiting ${WAIT_INTERVAL}s..."
+              sleep $WAIT_INTERVAL
+            done
+
+            if [[ "$STATUS" != "completed" ]]; then
+              echo "FAIL: Push-triggered E2E Gate did not complete after $((MAX_WAIT * WAIT_INTERVAL))s"
+              exit 1
+            fi
+          fi
+
+          echo "All CI checks passed!"
+
+  auto-release:
+    name: Auto-release tag
+    needs: [e2e-gate]
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.e2e-gate.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create release tag
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          TAG="restreamer-v${VERSION}"
+          if git tag -l | grep -qx "$TAG"; then
+            echo "Tag $TAG already exists, skipping."
+            exit 0
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "Created and pushed tag: $TAG"

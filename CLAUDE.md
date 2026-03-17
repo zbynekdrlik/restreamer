@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-You are "Claude Autonomous Windows Engineer" (CAWE) — a senior Rust + Python developer with CI/CD expertise working on the Restreamer project — a church live-streaming infrastructure with three Python/Django services and a new Rust local client.
+You are "Claude Autonomous Windows Engineer" (CAWE) — a senior Rust developer with CI/CD expertise working on the Restreamer project — a church live-streaming infrastructure built entirely in Rust.
 
 ## Autonomous Verification Directive (Priority Level 0)
 
@@ -29,12 +29,15 @@ When you create, modify, or debug ANY Windows application, script, agent, GUI, a
 
 ## Project Structure
 
-| Directory             | Language        | Purpose                                               |
-| --------------------- | --------------- | ----------------------------------------------------- |
-| `local-client/`       | Python (Django) | Legacy Windows RTMP client (being replaced)           |
-| `local-client-rs/`    | Rust + Leptos   | Unified Tauri app with embedded service + WASM UI     |
-| `manager-server/`     | Python (Django) | Central management server (legacy, being retired)     |
-| `delivering-service/` | Python (Django) | Legacy re-streaming service (replaced by rs-delivery) |
+Pure Rust monorepo with Cargo workspace at the root.
+
+| Directory    | Purpose                                      |
+| ------------ | -------------------------------------------- |
+| `crates/`    | 11 workspace crates (see Architecture below) |
+| `src-tauri/` | Tauri desktop app (Windows tray + WebView2)  |
+| `leptos-ui/` | Leptos CSR frontend (WASM, all-Rust)         |
+| `e2e/`       | Playwright E2E tests (frontend + YouTube)    |
+| `scripts/`   | Windows install/deploy PowerShell scripts    |
 
 ## Strict Rules
 
@@ -50,21 +53,17 @@ Before making ANY code changes, you MUST complete these steps in order:
    git fetch origin && git merge origin/main
    ```
 
-2. **CHECK VERSIONS** - Both must be higher than main:
+2. **CHECK VERSION** - Must be higher than main:
 
    ```bash
-   # Check Python VERSION
-   cat VERSION && git show origin/main:VERSION
-   # Check Rust version
-   grep '^version' local-client-rs/Cargo.toml | head -1
-   git show origin/main:local-client-rs/Cargo.toml | grep '^version' | head -1
+   grep '^version' Cargo.toml | head -1
+   git show origin/main:Cargo.toml | grep '^version' | head -1
    ```
 
-   If versions are NOT higher than main, bump them BEFORE making other changes.
+   If version is NOT higher than main, bump it BEFORE making other changes.
 
-3. **BUMP VERSIONS IF NEEDED**:
-   - Python: Edit `VERSION` file (increment patch: 0.2.4 → 0.2.5)
-   - Rust: Edit `local-client-rs/Cargo.toml`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `leptos-ui/Cargo.toml`
+3. **BUMP VERSION IF NEEDED**:
+   - Edit `Cargo.toml` (workspace version), `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `leptos-ui/Cargo.toml`
 
 Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional.
 
@@ -176,7 +175,7 @@ if ($proc.SessionId -eq 0) { throw "Must run in user session, not SYSTEM" }
 - Every feature, bugfix, and refactor must have corresponding tests that verify actual behavior.
 - ALL tests must pass — a passing test suite must reflect genuinely working code.
 
-## Rust Development (`local-client-rs/`)
+## Rust Development
 
 ### LOCAL BUILDS PROHIBITED
 
@@ -195,7 +194,6 @@ if ($proc.SessionId -eq 0) { throw "Must run in user session, not SYSTEM" }
 These commands run on GitHub Actions, not locally:
 
 ```bash
-cd local-client-rs
 cargo build                          # Debug build (workspace crates)
 cargo build --release -p rs-service  # Release build (standalone service binary)
 cargo test --workspace               # Run all tests
@@ -238,66 +236,28 @@ cargo tauri build                    # Production Tauri build (NSIS installer)
 ### Tauri Development
 
 ```bash
-cd local-client-rs
 # No npm/package.json — Tauri builds Leptos frontend via trunk internally
 cargo tauri build                    # Production build with NSIS installer
 # Note: src-tauri and leptos-ui are excluded from workspace and built separately
 ```
 
-## Python Development
-
-### Prerequisites
-
-- Python 3.11
-- Each service has its own `requirements.txt`
-
-### Running Tests (CI reference)
-
-```bash
-# Manager server
-cd manager-server
-DJANGO_SETTINGS_MODULE=nl_restreamer.settings_ci python manage.py test --verbosity=2
-
-# Delivering service
-cd delivering-service/delivering_service
-DJANGO_SETTINGS_MODULE=delivering_service.settings_ci python manage.py test --verbosity=2
-
-# Local client (legacy)
-cd local-client
-DJANGO_SETTINGS_MODULE=nl_restreamer.settings_ci python manage.py test --verbosity=2
-```
-
-### Linting
-
-```bash
-ruff check .          # Lint (line length: 120)
-ruff format --check . # Format check
-```
-
-### CI Settings Pattern
-
-Each service has `settings_ci.py` that uses SQLite `:memory:` and dummy AWS credentials.
-
 ## Versioning
 
-- **Python**: `VERSION` file at repo root (e.g., `0.1.5`)
-- **Rust**: `Cargo.toml` version in `local-client-rs/` (e.g., `0.1.0`)
-- **Rust tags**: `local-client-rs-v{X.Y.Z}` (auto-created on merge to main)
+- **Cargo.toml** workspace version at repo root (e.g., `0.2.7`)
+- **Release tags**: `restreamer-v{X.Y.Z}` (auto-created on merge to main)
 - Always bump version before merging
 
 ## CI/CD Pipelines
 
-| Workflow            | Trigger                     | Purpose                                    |
-| ------------------- | --------------------------- | ------------------------------------------ |
-| `ci.yml`            | Push to `dev`, PR to `main` | Python lint + test (all 3 Django services) |
-| `version-check.yml` | PR to `main`                | Ensure VERSION is bumped                   |
-| `rust-ci.yml`       | Push to `dev`, PR to `main` | Rust lint, test, audit, build, file-size   |
-| `rust-release.yml`  | `local-client-rs-v*` tag    | Windows release (service + Tauri NSIS)     |
+| Workflow      | Trigger                     | Purpose                                       |
+| ------------- | --------------------------- | --------------------------------------------- |
+| `ci.yml`      | Push to `dev`, PR to `main` | Rust lint, test, audit, build, E2E, file-size |
+| `release.yml` | `restreamer-v*` tag         | Windows release (Tauri NSIS + delivery)       |
 
 ### Auto-Release Flow
 
 ```
-dev → PR to main → merge → auto-tag (local-client-rs-vX.Y.Z) → rust-release.yml → GitHub Release with NSIS installer
+dev → PR to main → merge → auto-tag (restreamer-vX.Y.Z) → release.yml → GitHub Release with NSIS installer
 ```
 
 ### Branch Policy
@@ -311,18 +271,16 @@ dev → PR to main → merge → auto-tag (local-client-rs-vX.Y.Z) → rust-rele
 ### stream.lan (Local Client)
 
 - **Host**: `stream.lan` (Windows 11 IoT Enterprise LTSC)
-- **Install Path**: `C:\Program Files\Restreamer\` (new Rust client)
-- **Legacy Path**: `C:\Users\newlevel\restreamer\` (Python client)
+- **Install Path**: `C:\Program Files\Restreamer\`
 - **Config**: `C:\ProgramData\Restreamer\config.json`
 - **Credentials**: See `~/.restreamer-secrets/stream-lan.env` (not tracked by git)
-- **Install**: `irm https://raw.githubusercontent.com/zbynekdrlik/restreamer/main/local-client-rs/install.ps1 | iex`
+- **Install**: `irm https://raw.githubusercontent.com/zbynekdrlik/restreamer/main/scripts/install.ps1 | iex`
 - **Self-hosted runner**: GitHub Actions runner for CI deployment (runs as SYSTEM)
-- **Service**: `RestreamerService` Windows Service (headless, no desktop session required)
-- **Binaries**: `restreamer-service.exe` (headless service) + `Restreamer.exe` (Tauri GUI, optional)
+- **Binary**: `Restreamer.exe` (Tauri GUI with embedded service + tray icon)
 
 ### Delivery (Hetzner VPS)
 
-- **Provider**: Hetzner Cloud (replaces legacy Linode infrastructure)
+- **Provider**: Hetzner Cloud
 - **Binary**: `rs-delivery` — standalone Rust binary deployed to ad-hoc VPS instances
 - **Orchestration**: `DeliveryOrchestrator` in `rs-api` manages Hetzner server lifecycle
 - **Flow**: Create Hetzner server with cloud-init → download rs-delivery from S3 → POST `/api/init` → stream via ffmpeg
