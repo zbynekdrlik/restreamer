@@ -550,7 +550,7 @@ jobs:
       - name: Install Playwright dependencies
         working-directory: e2e
         run: |
-          npm ci
+          npm install
           npx playwright install --with-deps chromium
       - name: Start mock API server (serves frontend + API + WebSocket)
         working-directory: e2e
