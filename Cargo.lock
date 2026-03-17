@@ -1091,6 +1091,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-range-header"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1580,6 +1586,16 @@ name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
+]
 
 [[package]]
 name = "miniz_oxide"
@@ -2228,13 +2244,16 @@ dependencies = [
 
 [[package]]
 name = "rs-api"
-version = "0.1.8"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
  "futures",
  "reqwest 0.12.28",
+ "rs-cloud",
  "rs-core",
+ "rs-youtube",
  "serde",
  "serde_json",
  "sqlx",
@@ -2245,11 +2264,24 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "rs-cloud"
+version = "0.3.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "rs-core"
-version = "0.1.8"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "serde",
@@ -2264,8 +2296,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "rs-delivery"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "reqwest 0.12.28",
+ "rs-ffmpeg",
+ "rs-ts-normalize",
+ "rust-s3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rs-endpoint"
-version = "0.1.8"
+version = "0.3.0"
 dependencies = [
  "axum",
  "md-5",
@@ -2284,8 +2336,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rs-ffmpeg"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rs-inpoint"
-version = "0.1.8"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2310,7 +2374,7 @@ dependencies = [
 
 [[package]]
 name = "rs-runtime"
-version = "0.1.8"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2329,7 +2393,7 @@ dependencies = [
 
 [[package]]
 name = "rs-service"
-version = "0.1.8"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -2344,6 +2408,24 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-service",
+]
+
+[[package]]
+name = "rs-ts-normalize"
+version = "0.3.0"
+
+[[package]]
+name = "rs-youtube"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "urlencoding",
 ]
 
 [[package]]
@@ -3428,11 +3510,20 @@ checksum = "d4e6559d53cc268e5031cd8429d05415bc4cb4aefc4aa5d6cc35fbf5b924a1f8"
 dependencies = [
  "bitflags 2.10.0",
  "bytes",
+ "futures-core",
  "futures-util",
  "http 1.4.0",
  "http-body 1.0.1",
+ "http-body-util",
+ "http-range-header",
+ "httpdate",
  "iri-string",
+ "mime",
+ "mime_guess",
+ "percent-encoding",
  "pin-project-lite",
+ "tokio",
+ "tokio-util 0.7.18",
  "tower",
  "tower-layer",
  "tower-service",
@@ -3573,6 +3664,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
+name = "unicase"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
+
+[[package]]
 name = "unicode-bidi"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3622,6 +3719,12 @@ dependencies = [
  "percent-encoding",
  "serde",
 ]
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "utf-8"
