@@ -1732,7 +1732,11 @@ jobs:
             throw "FAILED: Event '$($env:EVENT_NAME)' not found"
           }
           $eventId = $targetEvent.id
-          Write-Host "Starting delivery for event_id=$eventId..."
+
+          # Log chunk status for this event before delivery starts
+          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 10
+          Write-Host "Pre-delivery chunk stats: total=$($stats.total_chunks), sent=$($stats.sent_chunks), pending=$($stats.pending_chunks)"
+          Write-Host "Starting delivery for event_id=$eventId (uses per-event sequence numbers)..."
 
           $body = @{ event_id = $eventId } | ConvertTo-Json
           $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/start" `
