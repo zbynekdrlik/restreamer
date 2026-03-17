@@ -33,7 +33,11 @@ jobs:
         run: |
           PR_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           git fetch origin main
-          MAIN_VERSION=$(git show origin/main:Cargo.toml | grep '^version' | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          # Try root Cargo.toml first, fall back to old local-client-rs/ path
+          MAIN_VERSION=$(git show origin/main:Cargo.toml 2>/dev/null | grep '^version' | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ -z "$MAIN_VERSION" ]; then
+            MAIN_VERSION=$(git show origin/main:local-client-rs/Cargo.toml 2>/dev/null | grep '^version' | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          fi
 
           echo "PR version:   $PR_VERSION"
           echo "Main version: $MAIN_VERSION"
