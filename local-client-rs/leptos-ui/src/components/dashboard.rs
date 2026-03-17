@@ -375,7 +375,7 @@ fn DeliveryEndpointCard(endpoint: DeliveryEndpointState) -> impl IntoView {
                 <div class="stall-error">{format!("Last error: {}", err)}</div>
             })}
             <div class="endpoint-metrics">
-                <div class="metric">
+                <div class="metric" title="How far behind live recording. Gap between local chunk and delivery chunk × chunk duration.">
                     <span class="metric-label">"Delay"</span>
                     <span class={format!("metric-value {delay_class}")}>{format_delay(endpoint.chunk_delay_secs)}</span>
                 </div>
@@ -384,7 +384,7 @@ fn DeliveryEndpointCard(endpoint: DeliveryEndpointState) -> impl IntoView {
                     <span class="metric-value">{format!("{} chunks", endpoint.chunks_processed)}</span>
                     <span class="metric-sub">{format_bytes(endpoint.bytes_processed_total)}</span>
                 </div>
-                <div class="metric">
+                <div class="metric" title="Delivery throughput. Should match OBS bitrate when keeping up in real-time.">
                     <span class="metric-label">"Speed"</span>
                     <span class=speed_class>{speed_text}</span>
                 </div>
