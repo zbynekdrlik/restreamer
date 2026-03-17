@@ -585,6 +585,110 @@ async fn migration_v6_bytes_processed_total_column_exists() {
 }
 
 #[tokio::test]
+async fn interleaved_events_have_independent_sequence_numbers() {
+    let pool = setup_db().await;
+    let evt1 = upsert_streaming_event(&pool, "evt-1").await.unwrap();
+    let evt2 = upsert_streaming_event(&pool, "evt-2").await.unwrap();
+
+    // Interleave chunks: evt1, evt2, evt1, evt2, evt1
+    let _c1 = insert_chunk(&pool, evt1, "/tmp/c1.bin", 100, "md5a")
+        .await
+        .unwrap();
+    let _c2 = insert_chunk(&pool, evt2, "/tmp/c2.bin", 100, "md5b")
+        .await
+        .unwrap();
+    let _c3 = insert_chunk(&pool, evt1, "/tmp/c3.bin", 100, "md5c")
+        .await
+        .unwrap();
+    let _c4 = insert_chunk(&pool, evt2, "/tmp/c4.bin", 100, "md5d")
+        .await
+        .unwrap();
+    let _c5 = insert_chunk(&pool, evt1, "/tmp/c5.bin", 100, "md5e")
+        .await
+        .unwrap();
+
+    // evt1 chunks should have sequence 1, 2, 3 (regardless of global ID gaps)
+    let chunks_evt1 = get_chunks_for_event(&pool, evt1).await.unwrap();
+    assert_eq!(chunks_evt1.len(), 3);
+    assert_eq!(chunks_evt1[0].sequence_number, 1);
+    assert_eq!(chunks_evt1[1].sequence_number, 2);
+    assert_eq!(chunks_evt1[2].sequence_number, 3);
+
+    // evt2 chunks should have sequence 1, 2
+    let chunks_evt2 = get_chunks_for_event(&pool, evt2).await.unwrap();
+    assert_eq!(chunks_evt2.len(), 2);
+    assert_eq!(chunks_evt2[0].sequence_number, 1);
+    assert_eq!(chunks_evt2[1].sequence_number, 2);
+
+    // Verify first/last sequence number queries
+    let first1 = get_first_sequence_number_for_event(&pool, evt1)
+        .await
+        .unwrap();
+    assert_eq!(first1, Some(1));
+    let last1 = get_latest_sequence_number_for_event(&pool, evt1)
+        .await
+        .unwrap();
+    assert_eq!(last1, Some(3));
+
+    let first2 = get_first_sequence_number_for_event(&pool, evt2)
+        .await
+        .unwrap();
+    assert_eq!(first2, Some(1));
+    let last2 = get_latest_sequence_number_for_event(&pool, evt2)
+        .await
+        .unwrap();
+    assert_eq!(last2, Some(2));
+}
+
+#[tokio::test]
+async fn sequence_number_starts_at_one_for_new_event() {
+    let pool = setup_db().await;
+    let evt = upsert_streaming_event(&pool, "evt-seq").await.unwrap();
+
+    let _c1 = insert_chunk(&pool, evt, "/tmp/s1.bin", 50, "md5x")
+        .await
+        .unwrap();
+    let chunks = get_chunks_for_event(&pool, evt).await.unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].sequence_number, 1);
+}
+
+#[tokio::test]
+async fn sequence_numbers_are_contiguous_with_many_events() {
+    let pool = setup_db().await;
+    let evt1 = upsert_streaming_event(&pool, "busy-1").await.unwrap();
+    let evt2 = upsert_streaming_event(&pool, "busy-2").await.unwrap();
+    let evt3 = upsert_streaming_event(&pool, "busy-3").await.unwrap();
+
+    // Insert 10 chunks each, interleaved across 3 events
+    for i in 0..10 {
+        insert_chunk(&pool, evt1, &format!("/tmp/e1c{i}.bin"), 100, &format!("e1m{i}"))
+            .await
+            .unwrap();
+        insert_chunk(&pool, evt2, &format!("/tmp/e2c{i}.bin"), 100, &format!("e2m{i}"))
+            .await
+            .unwrap();
+        insert_chunk(&pool, evt3, &format!("/tmp/e3c{i}.bin"), 100, &format!("e3m{i}"))
+            .await
+            .unwrap();
+    }
+
+    // Each event should have sequence numbers 1..10 with no gaps
+    for (evt_id, evt_name) in [(evt1, "busy-1"), (evt2, "busy-2"), (evt3, "busy-3")] {
+        let chunks = get_chunks_for_event(&pool, evt_id).await.unwrap();
+        assert_eq!(chunks.len(), 10, "Event {evt_name} should have 10 chunks");
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(
+                chunk.sequence_number,
+                (i + 1) as i64,
+                "Event {evt_name} chunk {i} should have sequence {}",
+                i + 1
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn get_latest_chunk_id_for_event_works() {
     let pool = setup_db().await;
     let event_id = upsert_streaming_event(&pool, "evt-latest").await.unwrap();

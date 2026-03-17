@@ -71,9 +71,10 @@ impl S3Client {
     }
 
     /// Generate an S3 key for a chunk file.
-    /// Format: `{event_id}/{chunk_id}_{event_id}.bin` to match Python legacy client.
-    pub fn chunk_key(event_identifier: &str, chunk_id: i64) -> String {
-        format!("{event_identifier}/{chunk_id}_{event_identifier}.bin")
+    /// Format: `{event_id}/{sequence_number}_{event_id}.bin`
+    /// Uses per-event sequence numbers to avoid interleaving when multiple events run concurrently.
+    pub fn chunk_key(event_identifier: &str, sequence_number: i64) -> String {
+        format!("{event_identifier}/{sequence_number}_{event_identifier}.bin")
     }
 }
 

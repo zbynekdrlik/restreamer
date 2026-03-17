@@ -2,7 +2,7 @@
 //! with a mock S3 server.
 //!
 //! These tests exercise:
-//! - S3 upload with correct key format (`{event_id}/{chunk_id}_{event_id}.bin`)
+//! - S3 upload with correct key format (`{event_id}/{sequence_number}_{event_id}.bin`)
 //! - Database state transitions (in_process, sent)
 //! - Local file cleanup after successful upload
 

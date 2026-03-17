@@ -931,6 +931,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_processes_100_sequential_chunks() {
+        tokio::time::pause();
+        let chunks: Vec<(i64, Vec<u8>)> = (1..=100).map(|i| (i, vec![i as u8; 100])).collect();
+        let fetcher = MockFetcher::new(chunks);
+        let factory = MockProcessFactory::new();
+        let writes = factory.writes.clone();
+
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+
+        let stats_clone = stats.clone();
+        let handle = tokio::spawn(async move {
+            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, stop_rx, stats_clone).await;
+        });
+
+        // Advance time to process all 100 chunks (100ms per chunk + overhead)
+        for _ in 0..150 {
+            tokio::time::advance(std::time::Duration::from_millis(200)).await;
+            tokio::task::yield_now().await;
+        }
+
+        let s = stats.lock().await;
+        assert_eq!(s.chunks_processed, 100, "Must process all 100 chunks");
+        assert_eq!(s.current_chunk_id, 100);
+        assert_eq!(s.bytes_processed_total, 10000);
+        assert!(s.stall_reason.is_none(), "No stall: {:?}", s.stall_reason);
+        drop(s);
+
+        let w = writes.lock().await;
+        assert_eq!(w.len(), 100);
+        drop(w);
+
+        let _ = stop_tx.send(true);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+    }
+
+    #[tokio::test]
     async fn test_stats_struct_serializes() {
         let stats = EndpointStats {
             bytes_processed_total: 1000,

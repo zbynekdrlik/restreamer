@@ -28,6 +28,7 @@ pub struct ChunkRecord {
     pub md5: String,
     pub in_process: bool,
     pub sent: bool,
+    pub sequence_number: i64,
 }
 
 /// Endpoint configuration (e.g., YouTube HLS, Facebook RTMP).

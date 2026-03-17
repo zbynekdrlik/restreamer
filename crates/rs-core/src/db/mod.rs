@@ -60,6 +60,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (5, MIGRATION_V5_SQL),
         (6, MIGRATION_V6_SQL),
         (7, MIGRATION_V7_SQL),
+        (8, MIGRATION_V8_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -230,6 +231,18 @@ ALTER TABLE delivery_endpoint_status ADD COLUMN bytes_processed_total INTEGER NO
 
 const MIGRATION_V7_SQL: &str = r#"
 ALTER TABLE delivery_endpoint_status RENAME COLUMN buff_size_bytes TO chunks_processed
+"#;
+
+const MIGRATION_V8_SQL: &str = r#"
+ALTER TABLE chunk_records ADD COLUMN sequence_number INTEGER NOT NULL DEFAULT 0;
+
+UPDATE chunk_records SET sequence_number = (
+    SELECT COUNT(*) FROM chunk_records c2
+    WHERE c2.streaming_event_id = chunk_records.streaming_event_id
+    AND c2.id <= chunk_records.id
+);
+
+CREATE INDEX idx_chunks_event_sequence ON chunk_records(streaming_event_id, sequence_number)
 "#;
 
 // --- Client Profile ---
@@ -404,8 +417,10 @@ pub async fn insert_chunk(
     md5: &str,
 ) -> Result<i64> {
     let row = sqlx::query(
-        "INSERT INTO chunk_records (streaming_event_id, chunk_file_path, data_size, md5)
-         VALUES (?1, ?2, ?3, ?4) RETURNING id",
+        "INSERT INTO chunk_records (streaming_event_id, chunk_file_path, data_size, md5, sequence_number)
+         VALUES (?1, ?2, ?3, ?4,
+           COALESCE((SELECT MAX(sequence_number) FROM chunk_records WHERE streaming_event_id = ?1), 0) + 1
+         ) RETURNING id",
     )
     .bind(streaming_event_id)
     .bind(chunk_file_path)
@@ -419,7 +434,7 @@ pub async fn insert_chunk(
 pub async fn get_unsent_chunks(pool: &SqlitePool, limit: i64) -> Result<Vec<ChunkRecord>> {
     let rows = sqlx::query(
         "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-         in_process, sent
+         in_process, sent, sequence_number
          FROM chunk_records
          WHERE sent = 0 AND in_process = 0
          ORDER BY id ASC
@@ -440,6 +455,7 @@ pub async fn get_unsent_chunks(pool: &SqlitePool, limit: i64) -> Result<Vec<Chun
             md5: r.get("md5"),
             in_process: r.get::<i32, _>("in_process") != 0,
             sent: r.get::<i32, _>("sent") != 0,
+            sequence_number: r.get("sequence_number"),
         })
         .collect())
 }
@@ -471,7 +487,7 @@ pub async fn get_chunks_paginated(
 ) -> Result<Vec<ChunkRecord>> {
     let rows = sqlx::query(
         "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-         in_process, sent
+         in_process, sent, sequence_number
          FROM chunk_records ORDER BY id DESC LIMIT ?1 OFFSET ?2",
     )
     .bind(limit)
@@ -490,6 +506,7 @@ pub async fn get_chunks_paginated(
             md5: r.get("md5"),
             in_process: r.get::<i32, _>("in_process") != 0,
             sent: r.get::<i32, _>("sent") != 0,
+            sequence_number: r.get("sequence_number"),
         })
         .collect())
 }
@@ -549,6 +566,67 @@ pub async fn get_latest_chunk_id_for_event(
             .fetch_one(pool)
             .await?;
     Ok(row.get::<Option<i64>, _>("max_id"))
+}
+
+/// Get the first (minimum) sequence number for a specific streaming event.
+/// Returns None if no chunks exist for the event.
+pub async fn get_first_sequence_number_for_event(
+    pool: &SqlitePool,
+    streaming_event_id: i64,
+) -> Result<Option<i64>> {
+    let row = sqlx::query(
+        "SELECT MIN(sequence_number) as min_seq FROM chunk_records WHERE streaming_event_id = ?1",
+    )
+    .bind(streaming_event_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get::<Option<i64>, _>("min_seq"))
+}
+
+/// Get the latest (maximum) sequence number for a specific streaming event.
+/// Returns None if no chunks exist for the event.
+pub async fn get_latest_sequence_number_for_event(
+    pool: &SqlitePool,
+    streaming_event_id: i64,
+) -> Result<Option<i64>> {
+    let row = sqlx::query(
+        "SELECT MAX(sequence_number) as max_seq FROM chunk_records WHERE streaming_event_id = ?1",
+    )
+    .bind(streaming_event_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get::<Option<i64>, _>("max_seq"))
+}
+
+/// Get all chunks for a specific streaming event, ordered by sequence number.
+pub async fn get_chunks_for_event(
+    pool: &SqlitePool,
+    streaming_event_id: i64,
+) -> Result<Vec<ChunkRecord>> {
+    let rows = sqlx::query(
+        "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
+         in_process, sent, sequence_number
+         FROM chunk_records WHERE streaming_event_id = ?1
+         ORDER BY sequence_number ASC",
+    )
+    .bind(streaming_event_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| ChunkRecord {
+            id: r.get("id"),
+            streaming_event_id: r.get("streaming_event_id"),
+            chunk_file_path: r.get("chunk_file_path"),
+            data_size: r.get("data_size"),
+            created_at: r.get("created_at"),
+            md5: r.get("md5"),
+            in_process: r.get::<i32, _>("in_process") != 0,
+            sent: r.get::<i32, _>("sent") != 0,
+            sequence_number: r.get("sequence_number"),
+        })
+        .collect())
 }
 
 pub async fn delete_all_chunks(pool: &SqlitePool) -> Result<u64> {

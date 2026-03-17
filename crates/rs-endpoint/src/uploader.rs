@@ -117,8 +117,9 @@ impl ChunkUploader {
                     return;
                 }
 
-                // Use chunk.id for S3 key to match legacy format
-                let s3_key = S3Client::chunk_key(&event_id, chunk.id);
+                // Use sequence_number for S3 key — per-event sequential numbering
+                // avoids interleaving when multiple events create chunks concurrently
+                let s3_key = S3Client::chunk_key(&event_id, chunk.sequence_number);
 
                 // Upload to S3 with retry
                 let mut uploaded = false;
@@ -155,7 +156,7 @@ impl ChunkUploader {
                 }
 
                 // Mark as sent — no manager notification needed,
-                // delivery VPS probes S3 directly by sequential chunk ID
+                // delivery VPS probes S3 directly by sequential sequence_number
                 if let Err(e) = db::set_chunk_sent(&pool, chunk.id).await {
                     error!("Failed to mark chunk {} as sent: {e}", chunk.id);
                     return;

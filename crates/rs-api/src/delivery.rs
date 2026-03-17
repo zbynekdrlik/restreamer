@@ -301,12 +301,14 @@ impl DeliveryOrchestrator {
 
         // POST /api/init to configure endpoints.
         // S3 credentials are already on the VPS via cloud-init env file.
-        // Query chunk ID, retrying briefly in case chunks haven't been committed yet
+        // Query first sequence number, retrying briefly in case chunks haven't been committed yet.
+        // Uses per-event sequence_number (not global DB id) to avoid chunk interleaving
+        // when multiple events create chunks concurrently.
         let mut start_chunk_id = None;
         for attempt in 0..10 {
-            match db::get_first_chunk_id_for_event(&self.pool, event_id).await {
-                Ok(Some(id)) => {
-                    start_chunk_id = Some(id);
+            match db::get_first_sequence_number_for_event(&self.pool, event_id).await {
+                Ok(Some(seq)) => {
+                    start_chunk_id = Some(seq);
                     break;
                 }
                 Ok(None) => {
@@ -317,14 +319,14 @@ impl DeliveryOrchestrator {
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
                 Err(e) => {
-                    warn!(event_id, "Failed to query chunk ID: {e}");
+                    warn!(event_id, "Failed to query chunk sequence: {e}");
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
             }
         }
         let start_chunk_id = start_chunk_id
             .ok_or_else(|| anyhow::anyhow!("No chunks found for event {event_id} after 30s"))?;
-        info!(event_id, start_chunk_id, "Starting delivery from chunk");
+        info!(event_id, start_chunk_id, "Starting delivery from sequence");
 
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
         let init_body = serde_json::json!({
@@ -375,8 +377,8 @@ impl DeliveryOrchestrator {
     pub async fn get_delivery_status(&self, event_id: i64) -> anyhow::Result<DeliveryStatus> {
         let instance = db::get_delivery_instance_by_event(&self.pool, event_id).await?;
 
-        // Get latest local chunk ID for delay calculation
-        let latest_local_chunk = db::get_latest_chunk_id_for_event(&self.pool, event_id)
+        // Get latest local sequence number for delay calculation (per-event sequential)
+        let latest_local_chunk = db::get_latest_sequence_number_for_event(&self.pool, event_id)
             .await
             .unwrap_or(None)
             .unwrap_or(0);
