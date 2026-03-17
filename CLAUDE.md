@@ -243,7 +243,7 @@ cargo tauri build                    # Production build with NSIS installer
 
 ## Versioning
 
-- **Cargo.toml** workspace version at repo root (e.g., `0.2.7`)
+- **Cargo.toml** workspace version at repo root (e.g., `0.3.0`)
 - **Release tags**: `restreamer-v{X.Y.Z}` (auto-created on merge to main)
 - Always bump version before merging
 
