@@ -84,6 +84,8 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
 #### CI Monitoring (MANDATORY)
 
 - **ALWAYS MONITOR CI**: After every push to `dev`, you MUST monitor CI until ALL jobs are green. Do NOT move on to other tasks or claim work is done while CI is running.
+- **MONITOR ALL WORKFLOWS**: This includes the Rust CI workflow, the Release workflow (on tag push), and any re-runs. You must poll `gh run view <run-id>` repeatedly until the run reaches a terminal state (success or failure). Never assume a workflow will pass — watch it to completion.
+- **MONITOR AFTER MERGE**: After a PR is merged to `main`, monitor the main branch CI run AND the release workflow (triggered by auto-tag) until both complete successfully. A merge is not done until the release is published.
 - **CHECK CI STATUS**: Use `gh run list --branch dev --limit 3` to see recent workflow runs, then `gh run view <run-id>` to check status.
 - **FIX FAILURES IMMEDIATELY**: If any CI job fails, investigate and fix immediately. Push fixes and monitor again until green.
 - **VERIFY DEPLOYMENT**: After `deploy-stream-lan` job completes, verify deployment was successful:
