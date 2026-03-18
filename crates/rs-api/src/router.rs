@@ -7,6 +7,7 @@ use tower_http::trace::TraceLayer;
 use crate::handlers;
 use crate::state::AppState;
 use crate::websocket;
+use crate::youtube;
 
 /// Build the Axum router with all API routes.
 pub fn build_router(state: AppState) -> Router {
@@ -92,12 +93,12 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_delivery_instances),
         )
         // YouTube
-        .route("/youtube/status", get(handlers::youtube_status))
-        .route("/youtube/oauth/seed", post(handlers::youtube_oauth_seed))
-        .route("/youtube/oauth/start", get(handlers::youtube_oauth_start))
+        .route("/youtube/status", get(youtube::youtube_status))
+        .route("/youtube/oauth/seed", post(youtube::youtube_oauth_seed))
+        .route("/youtube/oauth/start", get(youtube::youtube_oauth_start))
         .route(
             "/youtube/oauth/callback",
-            get(handlers::youtube_oauth_callback),
+            get(youtube::youtube_oauth_callback),
         );
 
     // Allow any origin so the dashboard is accessible from LAN devices

@@ -16,14 +16,11 @@ use tokio::task::JoinHandle;
 use crate::api::{EndpointConfig, S3Config};
 use crate::s3_fetch::S3Fetcher;
 
-// --- Resilience constants ---
 const MAX_FFMPEG_RESTARTS: u32 = 10;
 const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
 const MAX_CHUNK_MISS_COUNT: u32 = 60; // ~2min at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
 const WRITE_TIMEOUT_SECS: u64 = 30;
-
-// --- Traits for testability ---
 
 /// Trait for fetching chunks (S3 or mock).
 pub trait ChunkFetcher: Send + Sync {
@@ -52,8 +49,6 @@ pub trait OutputProcessFactory: Send + Sync {
         alias: &str,
     ) -> Result<Box<dyn OutputProcess>, String>;
 }
-
-// --- Real implementations ---
 
 /// Real S3 chunk fetcher implementing ChunkFetcher.
 impl ChunkFetcher for S3Fetcher {
@@ -101,8 +96,6 @@ impl OutputProcessFactory for FfmpegProcessFactory {
             .map_err(|e| e.to_string())
     }
 }
-
-// --- Enriched endpoint stats ---
 
 /// Stats tracked per endpoint with diagnostics.
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -206,41 +199,17 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
 
     // Wait for enough chunks to buffer before starting (delayed start approach)
     if delivery_delay_chunks > 0 {
-        tracing::info!(
-            alias = %alias,
-            delay_chunks = delivery_delay_chunks,
-            "Waiting for buffer to fill before starting delivery"
-        );
+        let target_chunk = start_chunk_id + delivery_delay_chunks;
+        tracing::info!(alias = %alias, target_chunk, "Waiting for buffer fill");
         loop {
-            if *stop_rx.borrow() {
-                tracing::info!(alias = %alias, "Stop signal during buffer wait");
-                return;
+            if *stop_rx.borrow() { return; }
+            if let Ok(Some(_)) = fetcher.fetch_chunk(target_chunk).await {
+                tracing::info!(alias = %alias, target_chunk, "Buffer filled");
+                break;
             }
-
-            // Probe S3 for the latest chunk to see how many are available
-            let target_chunk = start_chunk_id + delivery_delay_chunks;
-            match fetcher.fetch_chunk(target_chunk).await {
-                Ok(Some(_)) => {
-                    tracing::info!(
-                        alias = %alias,
-                        target_chunk,
-                        "Buffer filled, starting delivery"
-                    );
-                    break;
-                }
-                _ => {
-                    tracing::debug!(
-                        alias = %alias,
-                        target_chunk,
-                        "Buffer not yet filled, waiting..."
-                    );
-                    tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                        _ = stop_rx.changed() => {
-                            if *stop_rx.borrow() { return; }
-                        }
-                    }
-                }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                _ = stop_rx.changed() => { if *stop_rx.borrow() { return; } }
             }
         }
     }
@@ -490,8 +459,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use tokio::sync::Mutex as TokioMutex;
 
-    // --- Mock chunk fetcher ---
-
     struct MockFetcher {
         chunks: Arc<TokioMutex<std::collections::HashMap<i64, Vec<u8>>>>,
     }
@@ -511,8 +478,6 @@ mod tests {
             Ok(map.get(&chunk_id).cloned())
         }
     }
-
-    // --- Mock output process ---
 
     struct MockProcess {
         alive: Arc<AtomicBool>,
@@ -565,8 +530,6 @@ mod tests {
             Some("mock stderr line".to_string())
         }
     }
-
-    // --- Mock process factory ---
 
     struct MockProcessFactory {
         alive: Arc<AtomicBool>,

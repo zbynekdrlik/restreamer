@@ -3,6 +3,7 @@ pub mod handlers;
 pub mod router;
 pub mod state;
 pub mod websocket;
+pub mod youtube;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
