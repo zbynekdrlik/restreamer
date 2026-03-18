@@ -80,6 +80,7 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
   The PR is ONLY ready when: `mergeable: true` AND `mergeable_state: "clean"`. If `mergeable_state` is "behind", sync branches first with `git fetch origin && git merge origin/main`. If "blocked" or "dirty", fix the issues. NEVER claim a PR is ready without this verification.
 - Every PR MUST include tests covering the implemented changes. No PR is complete without tests.
 - NEVER merge a PR. Only the user may merge pull requests. The agent must only create the PR, ensure CI is green, and provide the URL. Merging is exclusively the user's action.
+- **ALWAYS REPORT DASHBOARD URL**: When providing a PR URL, also provide the dashboard URL at `http://10.77.9.204:8910/` so the user can verify the deployed UI. Format: "PR: <url> | Dashboard: http://10.77.9.204:8910/"
 
 #### CI Monitoring (MANDATORY)
 
