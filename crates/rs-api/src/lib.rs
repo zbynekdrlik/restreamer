@@ -168,17 +168,11 @@ async fn delivery_broadcast_loop(
                             source: "delivery".to_string(),
                         });
                     } else if !ep.alive && was_alive {
-                        let reason = ep
-                            .stall_reason
-                            .as_deref()
-                            .unwrap_or("unknown");
+                        let reason = ep.stall_reason.as_deref().unwrap_or("unknown");
                         let _ = ws_tx.send(WsEvent::ActivityFeed {
                             timestamp: chrono::Utc::now().to_rfc3339(),
                             severity: "warning".to_string(),
-                            message: format!(
-                                "Endpoint '{}' stalled: {}",
-                                ep.alias, reason
-                            ),
+                            message: format!("Endpoint '{}' stalled: {}", ep.alias, reason),
                             source: "delivery".to_string(),
                         });
                     }

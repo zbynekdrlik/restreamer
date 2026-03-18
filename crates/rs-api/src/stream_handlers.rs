@@ -88,9 +88,7 @@ pub async fn start_stream(
                             db::update_delivery_instance_status(orch.pool(), instance_id, "failed")
                                 .await
                         {
-                            tracing::error!(
-                                "Failed to mark instance {instance_id} as failed: {e}"
-                            );
+                            tracing::error!("Failed to mark instance {instance_id} as failed: {e}");
                         }
                     }
                     orch.poll_handles().lock().await.remove(&instance_id);
