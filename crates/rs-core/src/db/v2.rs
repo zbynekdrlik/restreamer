@@ -444,13 +444,11 @@ pub async fn update_streaming_event(
     name: &str,
     cache_delay_secs: Option<i64>,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE streaming_events SET name = ?1, cache_delay_secs = ?2 WHERE id = ?3",
-    )
-    .bind(name)
-    .bind(cache_delay_secs)
-    .bind(id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE streaming_events SET name = ?1, cache_delay_secs = ?2 WHERE id = ?3")
+        .bind(name)
+        .bind(cache_delay_secs)
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }

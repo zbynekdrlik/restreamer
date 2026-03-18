@@ -1,11 +1,4 @@
-/// Per-endpoint tokio task: S3 poll -> normalize -> ffmpeg pipe.
-///
-/// Each endpoint runs as an independent async task that:
-/// 1. Polls S3 for the next chunk by sequential ID
-/// 2. Normalizes timestamps (YT_HLS only)
-/// 3. Pipes data to ffmpeg stdin
-/// 4. Auto-restarts ffmpeg on crash (with circuit breaker)
-/// 5. Skips ahead on chunk gaps after timeout
+/// Per-endpoint delivery task: S3 poll -> normalize -> ffmpeg pipe.
 use async_trait::async_trait;
 use rs_ffmpeg::{FfmpegProcess, ServiceType};
 use rs_ts_normalize::TSTimestampNormalizer;
@@ -152,7 +145,11 @@ impl EndpointHandle {
         };
 
         // Fast endpoints skip the delay entirely
-        let effective_delay = if ep_cfg.is_fast { 0 } else { delivery_delay_chunks };
+        let effective_delay = if ep_cfg.is_fast {
+            0
+        } else {
+            delivery_delay_chunks
+        };
 
         let task = tokio::spawn(endpoint_loop(
             fetcher,
@@ -202,7 +199,9 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
         let target_chunk = start_chunk_id + delivery_delay_chunks;
         tracing::info!(alias = %alias, target_chunk, "Waiting for buffer fill");
         loop {
-            if *stop_rx.borrow() { return; }
+            if *stop_rx.borrow() {
+                return;
+            }
             if let Ok(Some(_)) = fetcher.fetch_chunk(target_chunk).await {
                 tracing::info!(alias = %alias, target_chunk, "Buffer filled");
                 break;

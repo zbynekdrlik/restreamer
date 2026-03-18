@@ -57,14 +57,8 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::start_delivering),
         )
         .route("/events/{id}/deactivate", post(handlers::deactivate_event))
-        .route(
-            "/events/{id}/start-stream",
-            post(handlers::start_stream),
-        )
-        .route(
-            "/events/{id}/stop-stream",
-            post(handlers::stop_stream),
-        )
+        .route("/events/{id}/start-stream", post(handlers::start_stream))
+        .route("/events/{id}/stop-stream", post(handlers::stop_stream))
         .route("/events/{id}/endpoints", get(handlers::get_event_endpoints))
         .route(
             "/events/{event_id}/endpoints/{endpoint_id}",
