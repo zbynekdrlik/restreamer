@@ -183,6 +183,7 @@ impl EndpointHandle {
 }
 
 /// Core endpoint loop — generic over ChunkFetcher and OutputProcessFactory for testability.
+#[allow(clippy::too_many_arguments)]
 pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     fetcher: F,
     factory: P,
