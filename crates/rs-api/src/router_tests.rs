@@ -1,0 +1,257 @@
+//! Additional router integration tests (stream control, events, delivery).
+//! Split from router.rs to keep files under 1000 lines.
+
+#[cfg(test)]
+mod stream_tests {
+    use crate::router::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::db;
+    use rs_core::models::WsEvent;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let config = Config::for_testing();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        AppState::new(pool, config, ws_tx)
+    }
+
+    #[tokio::test]
+    async fn start_stream_sets_both_flags() {
+        let state = test_state().await;
+        db::create_streaming_event(&state.pool, "test-event")
+            .await
+            .unwrap();
+        let events = db::list_streaming_events(&state.pool).await.unwrap();
+        let event_id = events[0].id;
+
+        let app = build_router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/v1/events/{event_id}/start-stream"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(evt.receiving_activated);
+        assert!(evt.delivering_activated);
+    }
+
+    #[tokio::test]
+    async fn start_stream_conflict_with_active_event() {
+        let state = test_state().await;
+        db::create_streaming_event(&state.pool, "event-1")
+            .await
+            .unwrap();
+        db::create_streaming_event(&state.pool, "event-2")
+            .await
+            .unwrap();
+        let events = db::list_streaming_events(&state.pool).await.unwrap();
+        let id1 = events[0].id;
+        let id2 = events[1].id;
+
+        db::update_streaming_event_flags(&state.pool, id1, true, true)
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/v1/events/{id2}/start-stream"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn stop_stream_deactivates_both_flags() {
+        let state = test_state().await;
+        db::create_streaming_event(&state.pool, "test-event")
+            .await
+            .unwrap();
+        let events = db::list_streaming_events(&state.pool).await.unwrap();
+        let event_id = events[0].id;
+
+        db::update_streaming_event_flags(&state.pool, event_id, true, true)
+            .await
+            .unwrap();
+
+        let app = build_router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/v1/events/{event_id}/stop-stream"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!evt.receiving_activated);
+        assert!(!evt.delivering_activated);
+    }
+
+    #[tokio::test]
+    async fn start_stop_stream_full_cycle() {
+        let state = test_state().await;
+        db::create_streaming_event(&state.pool, "cycle-event")
+            .await
+            .unwrap();
+        let events = db::list_streaming_events(&state.pool).await.unwrap();
+        let event_id = events[0].id;
+        let app = build_router(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/v1/events/{event_id}/start-stream"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(evt.receiving_activated);
+        assert!(evt.delivering_activated);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/v1/events/{event_id}/stop-stream"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!evt.receiving_activated);
+        assert!(!evt.delivering_activated);
+    }
+
+    #[tokio::test]
+    async fn update_event_sets_cache_delay() {
+        let state = test_state().await;
+        db::create_streaming_event(&state.pool, "delay-event")
+            .await
+            .unwrap();
+        let events = db::list_streaming_events(&state.pool).await.unwrap();
+        let event_id = events[0].id;
+
+        let app = build_router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(&format!("/api/v1/events/{event_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "cache_delay_secs": 300 }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(evt.cache_delay_secs, Some(300));
+    }
+
+    #[tokio::test]
+    async fn update_event_preserves_cache_delay_when_omitted() {
+        let state = test_state().await;
+        db::create_streaming_event(&state.pool, "preserve-event")
+            .await
+            .unwrap();
+        let events = db::list_streaming_events(&state.pool).await.unwrap();
+        let event_id = events[0].id;
+
+        let app = build_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(&format!("/api/v1/events/{event_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "cache_delay_secs": 180 }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let app = build_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(&format!("/api/v1/events/{event_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "name": "Renamed Event" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(evt.name, "Renamed Event");
+        assert_eq!(evt.cache_delay_secs, Some(180));
+    }
+}

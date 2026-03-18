@@ -6,6 +6,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::handlers;
 use crate::state::AppState;
+use crate::stream_handlers;
 use crate::websocket;
 use crate::youtube;
 
@@ -50,15 +51,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/events", post(handlers::create_event))
         .route("/events/{id}", get(handlers::get_event_by_id))
         .route("/events/{id}", delete(handlers::delete_event_by_id))
-        .route("/events/{id}", patch(handlers::update_event))
+        .route("/events/{id}", patch(stream_handlers::update_event))
         .route("/events/{id}/activate", post(handlers::activate_event))
         .route(
             "/events/{id}/start-delivering",
             post(handlers::start_delivering),
         )
         .route("/events/{id}/deactivate", post(handlers::deactivate_event))
-        .route("/events/{id}/start-stream", post(handlers::start_stream))
-        .route("/events/{id}/stop-stream", post(handlers::stop_stream))
+        .route("/events/{id}/start-stream", post(stream_handlers::start_stream))
+        .route("/events/{id}/stop-stream", post(stream_handlers::stop_stream))
         .route("/events/{id}/endpoints", get(handlers::get_event_endpoints))
         .route(
             "/events/{event_id}/endpoints/{endpoint_id}",
@@ -708,252 +709,6 @@ mod tests {
         let logs: handlers::LogsResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(logs.entries.len(), 1);
         assert!(logs.entries[0].message.contains("Upload"));
-    }
-
-    #[tokio::test]
-    async fn start_stream_sets_both_flags() {
-        let state = test_state().await;
-        // Create an event
-        db::create_streaming_event(&state.pool, "test-event")
-            .await
-            .unwrap();
-        let events = db::list_streaming_events(&state.pool).await.unwrap();
-        let event_id = events[0].id;
-
-        let app = build_router(state.clone());
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(&format!("/api/v1/events/{event_id}/start-stream"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        // Verify DB state
-        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(evt.receiving_activated);
-        assert!(evt.delivering_activated);
-    }
-
-    #[tokio::test]
-    async fn start_stream_conflict_with_active_event() {
-        let state = test_state().await;
-        // Create two events
-        db::create_streaming_event(&state.pool, "event-1")
-            .await
-            .unwrap();
-        db::create_streaming_event(&state.pool, "event-2")
-            .await
-            .unwrap();
-        let events = db::list_streaming_events(&state.pool).await.unwrap();
-        let id1 = events[0].id;
-        let id2 = events[1].id;
-
-        // Start first event
-        db::update_streaming_event_flags(&state.pool, id1, true, true)
-            .await
-            .unwrap();
-
-        let app = build_router(state);
-
-        // Try to start second event — should conflict
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(&format!("/api/v1/events/{id2}/start-stream"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-    }
-
-    #[tokio::test]
-    async fn stop_stream_deactivates_both_flags() {
-        let state = test_state().await;
-        db::create_streaming_event(&state.pool, "test-event")
-            .await
-            .unwrap();
-        let events = db::list_streaming_events(&state.pool).await.unwrap();
-        let event_id = events[0].id;
-
-        // Activate both flags
-        db::update_streaming_event_flags(&state.pool, event_id, true, true)
-            .await
-            .unwrap();
-
-        let app = build_router(state.clone());
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(&format!("/api/v1/events/{event_id}/stop-stream"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        // Verify DB state — both flags should be false
-        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!evt.receiving_activated);
-        assert!(!evt.delivering_activated);
-    }
-
-    #[tokio::test]
-    async fn start_stop_stream_full_cycle() {
-        let state = test_state().await;
-        db::create_streaming_event(&state.pool, "cycle-event")
-            .await
-            .unwrap();
-        let events = db::list_streaming_events(&state.pool).await.unwrap();
-        let event_id = events[0].id;
-        let app = build_router(state.clone());
-
-        // Start
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(&format!("/api/v1/events/{event_id}/start-stream"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(evt.receiving_activated);
-        assert!(evt.delivering_activated);
-
-        // Stop
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(&format!("/api/v1/events/{event_id}/stop-stream"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!evt.receiving_activated);
-        assert!(!evt.delivering_activated);
-    }
-
-    #[tokio::test]
-    async fn update_event_sets_cache_delay() {
-        let state = test_state().await;
-        db::create_streaming_event(&state.pool, "delay-event")
-            .await
-            .unwrap();
-        let events = db::list_streaming_events(&state.pool).await.unwrap();
-        let event_id = events[0].id;
-
-        let app = build_router(state.clone());
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri(&format!("/api/v1/events/{event_id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "cache_delay_secs": 300 }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(evt.cache_delay_secs, Some(300));
-    }
-
-    #[tokio::test]
-    async fn update_event_preserves_cache_delay_when_omitted() {
-        let state = test_state().await;
-        db::create_streaming_event(&state.pool, "preserve-event")
-            .await
-            .unwrap();
-        let events = db::list_streaming_events(&state.pool).await.unwrap();
-        let event_id = events[0].id;
-
-        // First set a cache delay
-        let app = build_router(state.clone());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri(&format!("/api/v1/events/{event_id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "cache_delay_secs": 180 }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        // Now update only name (cache_delay_secs omitted)
-        let app = build_router(state.clone());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri(&format!("/api/v1/events/{event_id}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "name": "Renamed Event" }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        // Verify cache_delay_secs was preserved
-        let evt = db::get_streaming_event_by_id(&state.pool, event_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(evt.name, "Renamed Event");
-        assert_eq!(evt.cache_delay_secs, Some(180));
     }
 
     #[tokio::test]
