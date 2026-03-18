@@ -202,7 +202,7 @@ test.describe("Operator Dashboard", () => {
     // Wait for ActivityFeed WebSocket event
     await page.waitForTimeout(1000);
     // Activity feed should no longer show empty state
-    const feedItems = page.locator(".activity-feed .feed-item");
+    const feedItems = page.locator(".activity-feed .activity-entry");
     await expect(feedItems.first()).toBeVisible({ timeout: 5000 });
     const feedText = await feedItems.first().textContent();
     expect(feedText).toContain("Stream started");
