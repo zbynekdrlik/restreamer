@@ -901,6 +901,61 @@ pub async fn start_stream(
         tracing::debug!("No WS subscribers for ActivityFeed: {e}");
     }
 
+    // Start delivery VPS if orchestrator is available
+    if let Some(orch) = state.delivery_orchestrator.as_ref() {
+        match orch.start_delivery(id).await {
+            Ok(result) => {
+                let (instance_id, event_name) = (result.instance_id, event.name.clone());
+                let (auth_token, poll_handles, orch) = (
+                    result.auth_token.clone(),
+                    orch.poll_handles(),
+                    Arc::clone(orch),
+                );
+                let handle = tokio::spawn(async move {
+                    if let Err(e) = orch
+                        .poll_and_init(instance_id, id, &event_name, &auth_token)
+                        .await
+                    {
+                        tracing::error!(
+                            "Background poll_and_init failed for instance {instance_id}: {e}"
+                        );
+                        if let Err(e) =
+                            db::update_delivery_instance_status(orch.pool(), instance_id, "failed")
+                                .await
+                        {
+                            tracing::error!(
+                                "Failed to mark instance {instance_id} as failed: {e}"
+                            );
+                        }
+                    }
+                    orch.poll_handles().lock().await.remove(&instance_id);
+                });
+                poll_handles.lock().await.insert(instance_id, handle);
+
+                if let Err(e) = state.ws_tx.send(WsEvent::ActivityFeed {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    severity: "info".to_string(),
+                    message: "Delivery VPS creation started".to_string(),
+                    source: "delivery".to_string(),
+                }) {
+                    tracing::debug!("No WS subscribers for ActivityFeed: {e}");
+                }
+            }
+            Err(e) => {
+                error!("Failed to start delivery VPS: {e}");
+                if let Err(e) = state.ws_tx.send(WsEvent::ActivityFeed {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    severity: "error".to_string(),
+                    message: format!("Delivery VPS start failed: {e}"),
+                    source: "delivery".to_string(),
+                }) {
+                    tracing::debug!("No WS subscribers for ActivityFeed: {e}");
+                }
+                // Don't fail the whole start_stream — receiving still works
+            }
+        }
+    }
+
     Ok(StatusCode::OK)
 }
 

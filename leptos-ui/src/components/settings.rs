@@ -73,10 +73,7 @@ fn EventsSection() -> impl IntoView {
                                     </div>
                                 </div>
                                 <div class="card-body">
-                                    <span class="cache-info">
-                                        {format!("Cache delay: {}s", cache.unwrap_or(-1))}
-                                        {if cache.is_none() { " (using global default)" } else { "" }}
-                                    </span>
+                                    <CacheDelayEditor event_id=id initial_delay=cache />
                                     <EventEndpoints event_id=id />
                                 </div>
                                 <div class="card-actions">
@@ -94,6 +91,60 @@ fn EventsSection() -> impl IntoView {
                     }).collect::<Vec<_>>()
                 }}
             </div>
+        </div>
+    }
+}
+
+/// Editable cache delay input for an event.
+#[component]
+fn CacheDelayEditor(event_id: i64, initial_delay: Option<i64>) -> impl IntoView {
+    let store = use_context::<DashboardStore>().expect("DashboardStore");
+    let delay_value = RwSignal::new(
+        initial_delay
+            .map(|d| d.to_string())
+            .unwrap_or_default(),
+    );
+
+    let on_save = move |_| {
+        let val = delay_value.get();
+        let delay: Option<i64> = if val.trim().is_empty() {
+            None
+        } else {
+            val.parse().ok()
+        };
+        let eid = event_id;
+        spawn_local(async move {
+            let req = api::UpdateEventRequest {
+                cache_delay_secs: delay,
+                ..Default::default()
+            };
+            let _ = api::update_event(eid, &req).await;
+            if let Ok(events) = api::list_events().await {
+                store.events_list.set(events);
+            }
+        });
+    };
+
+    view! {
+        <div class="cache-edit">
+            <label>"Cache delay (seconds):"</label>
+            <input
+                type="number"
+                class="cache-delay-input"
+                placeholder="Default (120)"
+                prop:value=move || delay_value.get()
+                on:input=move |ev| delay_value.set(event_target_value(&ev))
+            />
+            <button class="btn-small" on:click=on_save>"Save"</button>
+            <span class="cache-hint">
+                {move || {
+                    if delay_value.get().trim().is_empty() {
+                        "Using global default (120s)"
+                    } else {
+                        ""
+                    }
+                }}
+            </span>
         </div>
     }
 }

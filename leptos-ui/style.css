@@ -1209,6 +1209,49 @@ input[type="password"]:focus {
   color: var(--text-secondary);
 }
 
+.cache-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.cache-edit label {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.cache-delay-input {
+  width: 80px;
+  padding: 4px 8px;
+  border: 1px solid var(--bg-card);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.cache-edit .btn-small {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+}
+
+.cache-edit .btn-small:hover {
+  opacity: 0.85;
+}
+
+.cache-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
 .event-endpoints {
   margin-top: 8px;
 }

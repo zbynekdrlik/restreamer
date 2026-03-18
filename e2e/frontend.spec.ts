@@ -144,21 +144,68 @@ test.describe("Operator Dashboard", () => {
     ).toBeVisible();
   });
 
-  test("endpoint cards appear after delivery status WebSocket", async ({
+  test("endpoint cards appear with alias text after delivery WebSocket", async ({
     page,
   }) => {
     await page.goto("/");
     // Wait for WebSocket delivery event to arrive
     await page.waitForTimeout(2000);
-    // Should show endpoint cards
+    // Should show endpoint cards with actual alias text
     const endpointCards = page.locator(".endpoint-card");
     await expect(endpointCards.first()).toBeVisible({ timeout: 10000 });
+    const cardTexts = await endpointCards.allTextContents();
+    const allText = cardTexts.join(" ");
+    expect(allText).toContain("YouTube Main");
+    expect(allText).toContain("Facebook Page");
   });
 
   test("state badge shows idle by default", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".state-badge")).toBeVisible({ timeout: 10000 });
     await expect(page.locator(".state-badge")).toContainText("Idle");
+  });
+
+  test("Start Delivering updates state badge after API call", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    // Select first event
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    // Click start — mock broadcasts PipelineState with "buffering"
+    await page.locator(".start-btn").click();
+    // Wait for WebSocket PipelineState to update the badge
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+  });
+
+  test("Stop Delivering returns to idle state", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await page.waitForTimeout(500);
+    // Now stop
+    await page.locator(".stop-btn").click();
+    await expect(page.locator(".state-badge")).toContainText("Idle", {
+      timeout: 5000,
+    });
+  });
+
+  test("activity feed populates after start stream", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    // Wait for ActivityFeed WebSocket event
+    await page.waitForTimeout(1000);
+    // Activity feed should no longer show empty state
+    const feedItems = page.locator(".activity-feed .feed-item");
+    await expect(feedItems.first()).toBeVisible({ timeout: 5000 });
+    const feedText = await feedItems.first().textContent();
+    expect(feedText).toContain("Stream started");
   });
 });
 
@@ -211,7 +258,9 @@ test.describe("Settings page", () => {
     ).toBeVisible();
   });
 
-  test("can create a new event", async ({ page }) => {
+  test("can create a new event and it appears with correct name", async ({
+    page,
+  }) => {
     await page.goto("/settings");
     await page.waitForTimeout(1000);
     const section = page.locator('.settings-section:has(h3:text("Events"))');
@@ -220,14 +269,50 @@ test.describe("Settings page", () => {
     await page.waitForTimeout(500);
     // Should now show the new event in the list
     await expect(section.locator(".settings-card")).toHaveCount(3);
+    // Verify the new event name appears
+    const cardTexts = await section.locator(".settings-card").allTextContents();
+    expect(cardTexts.join(" ")).toContain("Test Event");
   });
 
-  test("endpoint list shows existing endpoints", async ({ page }) => {
+  test("event card shows cache delay editor", async ({ page }) => {
+    await page.goto("/settings");
+    await page.waitForTimeout(1000);
+    const section = page.locator('.settings-section:has(h3:text("Events"))');
+    // Should have cache delay input
+    const cacheInput = section.locator(".cache-delay-input").first();
+    await expect(cacheInput).toBeVisible({ timeout: 5000 });
+  });
+
+  test("cache delay save calls PATCH API", async ({ page }) => {
+    await page.goto("/settings");
+    await page.waitForTimeout(1000);
+    const section = page.locator('.settings-section:has(h3:text("Events"))');
+    const cacheInput = section.locator(".cache-delay-input").first();
+    await cacheInput.fill("300");
+
+    // Intercept the PATCH call
+    const [request] = await Promise.all([
+      page.waitForRequest(
+        (req) => req.url().includes("/events/") && req.method() === "PATCH",
+      ),
+      section.locator(".btn-small").first().click(),
+    ]);
+    const body = request.postDataJSON();
+    expect(body.cache_delay_secs).toBe(300);
+  });
+
+  test("endpoint list shows existing endpoints with aliases", async ({
+    page,
+  }) => {
     await page.goto("/settings");
     await page.waitForTimeout(1000);
     const section = page.locator('.settings-section:has(h3:text("Endpoints"))');
     const cards = section.locator(".settings-card");
     await expect(cards).toHaveCount(2);
+    const cardTexts = await cards.allTextContents();
+    const allText = cardTexts.join(" ");
+    expect(allText).toContain("YouTube Main");
+    expect(allText).toContain("Facebook Page");
   });
 
   test("navigating to dashboard from settings works", async ({ page }) => {

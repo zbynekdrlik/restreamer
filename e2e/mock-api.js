@@ -177,6 +177,30 @@ app.post("/api/v1/events/:id/start-stream", (req, res) => {
   }
   evt.receiving_activated = true;
   evt.delivering_activated = true;
+
+  // Broadcast activity feed and pipeline state via WebSocket
+  broadcastWs({
+    type: "ActivityFeed",
+    data: {
+      timestamp: new Date().toISOString(),
+      severity: "info",
+      message: `Stream started: ${evt.name}`,
+      source: "system",
+    },
+  });
+  broadcastWs({
+    type: "PipelineState",
+    data: {
+      state: "buffering",
+      event_id: id,
+      event_name: evt.name,
+      buffer_progress: 0.0,
+      target_delay_secs: 120,
+      current_delay_secs: 0.0,
+      session_start: null,
+    },
+  });
+
   res.json({ status: "ok" });
 });
 
@@ -185,6 +209,29 @@ app.post("/api/v1/events/:id/stop-stream", (req, res) => {
   if (evt) {
     evt.receiving_activated = false;
     evt.delivering_activated = false;
+
+    broadcastWs({
+      type: "ActivityFeed",
+      data: {
+        timestamp: new Date().toISOString(),
+        severity: "info",
+        message: `Stream stopped: ${evt.name}`,
+        source: "system",
+      },
+    });
+    broadcastWs({
+      type: "PipelineState",
+      data: {
+        state: "idle",
+        event_id: null,
+        event_name: null,
+        buffer_progress: 0.0,
+        target_delay_secs: 0,
+        current_delay_secs: 0.0,
+        session_start: null,
+      },
+    });
+
     res.json({ status: "ok" });
   } else {
     res.status(404).json({ error: "not found" });
@@ -255,6 +302,20 @@ app.post("/api/v1/endpoints", (req, res) => {
   res.json(newEp);
 });
 
+app.put("/api/v1/endpoints/:id", (req, res) => {
+  const ep = endpoints.find((e) => e.id === parseInt(req.params.id));
+  if (!ep) {
+    return res.status(404).json({ error: "not found" });
+  }
+  if (req.body.alias !== undefined) ep.alias = req.body.alias;
+  if (req.body.service_type !== undefined)
+    ep.service_type = req.body.service_type;
+  if (req.body.stream_key !== undefined) ep.stream_key = req.body.stream_key;
+  if (req.body.enabled !== undefined) ep.enabled = req.body.enabled;
+  if (req.body.is_fast !== undefined) ep.is_fast = req.body.is_fast;
+  res.json({ status: "ok" });
+});
+
 app.delete("/api/v1/endpoints/:id", (req, res) => {
   endpoints = endpoints.filter((e) => e.id !== parseInt(req.params.id));
   res.json({ status: "ok" });
@@ -323,6 +384,16 @@ const server = app.listen(PORT, () => {
 });
 
 const wss = new WebSocketServer({ server, path: "/api/v1/ws" });
+
+// Broadcast a message to all connected WebSocket clients
+function broadcastWs(message) {
+  const data = JSON.stringify(message);
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(data);
+    }
+  });
+}
 
 wss.on("connection", (ws) => {
   console.log("[ws] Client connected");
