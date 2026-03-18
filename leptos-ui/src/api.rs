@@ -26,6 +26,8 @@ pub struct StreamingEvent {
     pub received_bytes: i64,
     pub receiving_activated: bool,
     pub delivering_activated: bool,
+    #[serde(default)]
+    pub cache_delay_secs: Option<i64>,
 }
 
 /// Chunk statistics from the backend.
@@ -292,6 +294,21 @@ async fn http_put_json<T: Serialize>(path: &str, body: &T) -> Result<(), String>
     Ok(())
 }
 
+async fn http_patch_json<T: Serialize>(path: &str, body: &T) -> Result<(), String> {
+    let url = format!("{}{path}", api_base());
+    let resp = gloo_net::http::Request::patch(&url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(body).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Request error: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {e}"))?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
 // Events API
 pub async fn list_events() -> Result<Vec<StreamingEvent>, String> {
     http_get("/events").await
@@ -394,6 +411,29 @@ pub async fn attach_endpoint(event_id: i64, endpoint_id: i64) -> Result<(), Stri
 
 pub async fn detach_endpoint(event_id: i64, endpoint_id: i64) -> Result<(), String> {
     http_delete(&format!("/events/{event_id}/endpoints/{endpoint_id}")).await
+}
+
+// Stream control API
+
+pub async fn start_stream(event_id: i64) -> Result<(), String> {
+    http_post(&format!("/events/{event_id}/start-stream")).await
+}
+
+pub async fn stop_stream(event_id: i64) -> Result<(), String> {
+    http_post(&format!("/events/{event_id}/stop-stream")).await
+}
+
+/// Request body for updating an event (all fields optional).
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct UpdateEventRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_delay_secs: Option<i64>,
+}
+
+pub async fn update_event(id: i64, req: &UpdateEventRequest) -> Result<(), String> {
+    http_patch_json(&format!("/events/{id}"), req).await
 }
 
 // Delivery status API

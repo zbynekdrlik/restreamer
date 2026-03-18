@@ -61,6 +61,21 @@ enum WsEvent {
         service: String,
         message: String,
     },
+    ActivityFeed {
+        timestamp: String,
+        severity: String,
+        message: String,
+        source: String,
+    },
+    PipelineState {
+        state: String,
+        event_id: Option<i64>,
+        event_name: Option<String>,
+        buffer_progress: f64,
+        target_delay_secs: u64,
+        current_delay_secs: f64,
+        session_start: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -277,6 +292,43 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
         }
         WsEvent::Error { service, message } => {
             store.push_error(service, message);
+        }
+        WsEvent::ActivityFeed {
+            timestamp,
+            severity,
+            message,
+            source,
+        } => {
+            store.activity_feed.update(|feed| {
+                feed.push(crate::store::ActivityEntry {
+                    timestamp,
+                    severity,
+                    message,
+                    source,
+                });
+                if feed.len() > 200 {
+                    feed.remove(0);
+                }
+            });
+        }
+        WsEvent::PipelineState {
+            state,
+            event_id,
+            event_name,
+            buffer_progress,
+            target_delay_secs,
+            current_delay_secs,
+            session_start,
+        } => {
+            store.pipeline_state.set(crate::store::PipelineState {
+                state,
+                event_id,
+                event_name,
+                buffer_progress,
+                target_delay_secs,
+                current_delay_secs,
+                session_start,
+            });
         }
     }
 }

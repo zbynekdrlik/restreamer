@@ -16,6 +16,7 @@ pub struct StreamingEvent {
     pub received_bytes: i64,
     pub receiving_activated: bool,
     pub delivering_activated: bool,
+    pub cache_delay_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +137,21 @@ pub enum WsEvent {
     Error {
         service: String,
         message: String,
+    },
+    ActivityFeed {
+        timestamp: String,
+        severity: String,
+        message: String,
+        source: String,
+    },
+    PipelineState {
+        state: String,
+        event_id: Option<i64>,
+        event_name: Option<String>,
+        buffer_progress: f64,
+        target_delay_secs: u64,
+        current_delay_secs: f64,
+        session_start: Option<String>,
     },
 }
 
@@ -274,6 +290,21 @@ mod tests {
                 service: "inpoint".to_string(),
                 message: "connection lost".to_string(),
             },
+            WsEvent::ActivityFeed {
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                severity: "info".to_string(),
+                message: "Stream started".to_string(),
+                source: "system".to_string(),
+            },
+            WsEvent::PipelineState {
+                state: "buffering".to_string(),
+                event_id: Some(1),
+                event_name: Some("Sunday Service".to_string()),
+                buffer_progress: 0.75,
+                target_delay_secs: 120,
+                current_delay_secs: 90.5,
+                session_start: Some("2026-01-01T10:00:00Z".to_string()),
+            },
         ];
 
         for event in events {
@@ -292,11 +323,13 @@ mod tests {
             received_bytes: 0,
             receiving_activated: true,
             delivering_activated: false,
+            cache_delay_secs: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: StreamingEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, event.name);
         assert_eq!(parsed.receiving_activated, true);
+        assert_eq!(parsed.cache_delay_secs, None);
     }
 
     #[test]

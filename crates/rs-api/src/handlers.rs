@@ -998,3 +998,153 @@ pub async fn list_delivery_instances(
         })?;
     Ok(Json(instances))
 }
+
+pub async fn start_stream(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    // Verify event exists
+    let event = db::get_streaming_event_by_id(&state.pool, id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get event {id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Enforce single-event: check if any other event is active
+    let all_events = db::list_streaming_events(&state.pool).await.map_err(|e| {
+        error!("Failed to list events: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    for evt in &all_events {
+        if evt.id != id && (evt.receiving_activated || evt.delivering_activated) {
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+
+    // Set both flags
+    db::update_streaming_event_flags(&state.pool, id, true, true)
+        .await
+        .map_err(|e| {
+            error!("Failed to start stream for event {id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Broadcast WS event
+    if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
+        action: "start_stream".to_string(),
+        name: Some(event.name.clone()),
+        receiving: true,
+        delivering: true,
+    }) {
+        tracing::debug!("No WS subscribers: {e}");
+    }
+
+    // Broadcast activity feed event
+    if let Err(e) = state.ws_tx.send(WsEvent::ActivityFeed {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        severity: "info".to_string(),
+        message: format!("Stream started: {}", event.name),
+        source: "system".to_string(),
+    }) {
+        tracing::debug!("No WS subscribers for ActivityFeed: {e}");
+    }
+
+    Ok(StatusCode::OK)
+}
+
+pub async fn stop_stream(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    let event = db::get_streaming_event_by_id(&state.pool, id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get event {id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Deactivate both flags
+    db::deactivate_event(&state.pool, id).await.map_err(|e| {
+        error!("Failed to stop stream for event {id}: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Stop delivery VPS if running
+    if let Some(orch) = state.delivery_orchestrator.as_ref() {
+        if let Err(e) = orch.stop_delivery(id).await {
+            error!("Failed to stop delivery for event {id}: {e}");
+        }
+    }
+
+    // Broadcast WS event
+    if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
+        action: "stop_stream".to_string(),
+        name: Some(event.name.clone()),
+        receiving: false,
+        delivering: false,
+    }) {
+        tracing::debug!("No WS subscribers: {e}");
+    }
+
+    // Broadcast activity feed
+    if let Err(e) = state.ws_tx.send(WsEvent::ActivityFeed {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        severity: "info".to_string(),
+        message: format!("Stream stopped: {}", event.name),
+        source: "system".to_string(),
+    }) {
+        tracing::debug!("No WS subscribers for ActivityFeed: {e}");
+    }
+
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+pub struct UpdateEventRequest {
+    pub name: Option<String>,
+    pub cache_delay_secs: Option<i64>,
+}
+
+pub async fn update_event(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(req): Json<UpdateEventRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let existing = db::get_streaming_event_by_id(&state.pool, id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get event {id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let new_name = req.name.as_deref().unwrap_or(&existing.name);
+    if new_name.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Merge: preserve existing cache_delay_secs if not provided in request
+    let new_delay = req.cache_delay_secs.or(existing.cache_delay_secs);
+
+    db::update_streaming_event(&state.pool, id, new_name, new_delay)
+        .await
+        .map_err(|e| {
+            error!("Failed to update event {id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Broadcast WS event
+    if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
+        action: "updated".to_string(),
+        name: Some(new_name.to_string()),
+        receiving: existing.receiving_activated,
+        delivering: existing.delivering_activated,
+    }) {
+        tracing::debug!("No WS subscribers: {e}");
+    }
+
+    Ok(StatusCode::OK)
+}

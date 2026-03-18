@@ -74,6 +74,8 @@ pub struct InitRequest {
     /// Optional auth token — if provided, sets the bearer token for future requests.
     #[serde(default)]
     pub auth_token: Option<String>,
+    #[serde(default)]
+    pub delivery_delay_chunks: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -81,6 +83,8 @@ pub struct EndpointConfig {
     pub alias: String,
     pub service_type: String,
     pub stream_key: String,
+    #[serde(default)]
+    pub is_fast: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -149,6 +153,7 @@ async fn init_endpoints(
             s3_config.clone(),
             req.event_identifier.clone(),
             req.start_chunk_id,
+            req.delivery_delay_chunks,
         );
 
         endpoints.insert(ep_cfg.alias.clone(), handle);

@@ -25,8 +25,9 @@ const statusResponse = {
     id: 1,
     name: "Sunday Service",
     received_bytes: 52428800,
-    receiving_activated: true,
+    receiving_activated: false,
     delivering_activated: false,
+    cache_delay_secs: null,
   },
   chunk_stats: {
     total_chunks: 42,
@@ -43,8 +44,9 @@ let events = [
     id: 1,
     name: "Sunday Service",
     received_bytes: 52428800,
-    receiving_activated: true,
+    receiving_activated: false,
     delivering_activated: false,
+    cache_delay_secs: null,
   },
   {
     id: 2,
@@ -52,6 +54,7 @@ let events = [
     received_bytes: 0,
     receiving_activated: false,
     delivering_activated: false,
+    cache_delay_secs: 300,
   },
 ];
 
@@ -105,6 +108,7 @@ app.post("/api/v1/events", (req, res) => {
     received_bytes: 0,
     receiving_activated: false,
     delivering_activated: false,
+    cache_delay_secs: null,
   };
   events.push(newEvent);
   eventEndpoints[newEvent.id] = [];
@@ -156,6 +160,46 @@ app.post("/api/v1/events/:id/deactivate", (req, res) => {
   } else {
     res.status(404).json({ error: "not found" });
   }
+});
+
+app.post("/api/v1/events/:id/start-stream", (req, res) => {
+  const id = parseInt(req.params.id);
+  const evt = events.find((e) => e.id === id);
+  if (!evt) {
+    return res.status(404).json({ error: "not found" });
+  }
+  // Check for conflict - another active event
+  const conflict = events.find(
+    (e) => e.id !== id && (e.receiving_activated || e.delivering_activated),
+  );
+  if (conflict) {
+    return res.status(409).json({ error: "another event is active" });
+  }
+  evt.receiving_activated = true;
+  evt.delivering_activated = true;
+  res.json({ status: "ok" });
+});
+
+app.post("/api/v1/events/:id/stop-stream", (req, res) => {
+  const evt = events.find((e) => e.id === parseInt(req.params.id));
+  if (evt) {
+    evt.receiving_activated = false;
+    evt.delivering_activated = false;
+    res.json({ status: "ok" });
+  } else {
+    res.status(404).json({ error: "not found" });
+  }
+});
+
+app.patch("/api/v1/events/:id", (req, res) => {
+  const evt = events.find((e) => e.id === parseInt(req.params.id));
+  if (!evt) {
+    return res.status(404).json({ error: "not found" });
+  }
+  if (req.body.name) evt.name = req.body.name;
+  if (req.body.cache_delay_secs !== undefined)
+    evt.cache_delay_secs = req.body.cache_delay_secs;
+  res.json({ status: "ok" });
 });
 
 // --- Event-Endpoint M2M ---

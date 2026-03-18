@@ -1,10 +1,10 @@
 //! Main application component with router and WebSocket initialization.
 
 use leptos::prelude::*;
-use leptos_router::components::{Route, Router, Routes, A};
+use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
 
-use crate::components::{DashboardView, EndpointsView, EventsView, Header, LogsView};
+use crate::components::{Header, OperatorDashboard, SettingsView};
 use crate::store::DashboardStore;
 use crate::ws;
 
@@ -21,18 +21,10 @@ pub fn App() -> impl IntoView {
         <Router>
             <div class="app">
                 <Header />
-                <nav class="nav-bar">
-                    <A href="/" attr:class="nav-link">"Dashboard"</A>
-                    <A href="/events" attr:class="nav-link">"Events"</A>
-                    <A href="/endpoints" attr:class="nav-link">"Endpoints"</A>
-                    <A href="/logs" attr:class="nav-link">"Logs"</A>
-                </nav>
                 <main class="content">
                     <Routes fallback=|| view! { <div class="empty">"Page not found"</div> }>
-                        <Route path=path!("/") view=DashboardView />
-                        <Route path=path!("/events") view=EventsView />
-                        <Route path=path!("/endpoints") view=EndpointsView />
-                        <Route path=path!("/logs") view=LogsView />
+                        <Route path=path!("/") view=OperatorDashboard />
+                        <Route path=path!("/settings") view=SettingsView />
                     </Routes>
                 </main>
             </div>
