@@ -1125,6 +1125,27 @@ jobs:
           Write-Host "=== E2E Streaming Test PASSED ==="
           Write-Host "RTMP -> Restreamer -> Chunks -> S3: VERIFIED (all via local Rust APIs, 45s stream, $($stats.total_chunks) chunks)"
 
+      - name: Verify RTMP disconnected after stream stop
+        shell: powershell
+        run: |
+          Write-Host "Verifying rtmp_connected is false after ffmpeg stream ended..."
+          $maxRetries = 5
+          $retryDelay = 2
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
+            $connected = $status.inpoint.details.rtmp_connected
+            $state = $status.inpoint.state
+            Write-Host "Attempt ${i}/${maxRetries}: state=$state, rtmp_connected=$connected"
+            if ($connected -eq $false) {
+              Write-Host "=== RTMP disconnect verified: rtmp_connected=false ==="
+              return
+            }
+            if ($i -lt $maxRetries) {
+              Start-Sleep -Seconds $retryDelay
+            }
+          }
+          throw "FAILED: rtmp_connected is still true after stream ended ($maxRetries attempts, $($maxRetries * $retryDelay)s). The inpoint state did not reset after RTMP client disconnected."
+
       - name: Deactivate streaming event
         if: always()
         shell: powershell
@@ -1952,6 +1973,32 @@ jobs:
           } catch {
             Write-Host "Failed to stop OBS stream (may not have been streaming): $_"
           }
+
+      - name: Verify RTMP disconnected after OBS stream stop
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "Verifying rtmp_connected is false after OBS stream stopped..."
+          $maxRetries = 10
+          $retryDelay = 2
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
+              $connected = $status.inpoint.details.rtmp_connected
+              $state = $status.inpoint.state
+              Write-Host "Attempt ${i}/${maxRetries}: state=$state, rtmp_connected=$connected"
+              if ($connected -eq $false) {
+                Write-Host "=== RTMP disconnect verified: rtmp_connected=false ==="
+                return
+              }
+            } catch {
+              Write-Host "Attempt ${i}/${maxRetries}: API request failed: $_"
+            }
+            if ($i -lt $maxRetries) {
+              Start-Sleep -Seconds $retryDelay
+            }
+          }
+          throw "FAILED: rtmp_connected is still true after OBS stream stopped ($maxRetries attempts, $($maxRetries * $retryDelay)s). The inpoint state did not reset after RTMP client disconnected."
 
       - name: Deactivate streaming event
         if: always()
