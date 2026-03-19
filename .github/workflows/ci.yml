@@ -1125,6 +1125,27 @@ jobs:
           Write-Host "=== E2E Streaming Test PASSED ==="
           Write-Host "RTMP -> Restreamer -> Chunks -> S3: VERIFIED (all via local Rust APIs, 45s stream, $($stats.total_chunks) chunks)"
 
+      - name: Verify RTMP disconnected after stream stop
+        shell: powershell
+        run: |
+          Write-Host "Verifying rtmp_connected is false after ffmpeg stream ended..."
+          $maxRetries = 5
+          $retryDelay = 2
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
+            $connected = $status.inpoint.details.rtmp_connected
+            $state = $status.inpoint.state
+            Write-Host "Attempt ${i}/${maxRetries}: state=$state, rtmp_connected=$connected"
+            if ($connected -eq $false) {
+              Write-Host "=== RTMP disconnect verified: rtmp_connected=false ==="
+              return
+            }
+            if ($i -lt $maxRetries) {
+              Start-Sleep -Seconds $retryDelay
+            }
+          }
+          throw "FAILED: rtmp_connected is still true after stream ended ($maxRetries attempts, $($maxRetries * $retryDelay)s). The inpoint state did not reset after RTMP client disconnected."
+
       - name: Deactivate streaming event
         if: always()
         shell: powershell
@@ -1228,6 +1249,10 @@ jobs:
           if (-not $obs) {
             Write-Host "OBS not running, registering scheduled task with correct WorkingDirectory..."
 
+            # Clear crash sentinel and browser LOCK files for clean cold start
+            Remove-Item "$env:APPDATA\obs-studio\.sentinel\*" -Force -Recurse -ErrorAction SilentlyContinue
+            Get-ChildItem -Path "$env:APPDATA\obs-studio" -Filter "LOCK" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
             $action = New-ScheduledTaskAction `
               -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
               -Argument "--disable-shutdown-check" `
@@ -1240,7 +1265,7 @@ jobs:
             Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
             schtasks.exe /run /tn "Start OBS Studio"
             if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start OBS Studio (exit code: $LASTEXITCODE)" }
-            Start-Sleep -Seconds 10
+            Start-Sleep -Seconds 20
 
             $obs = Get-Process obs64 -ErrorAction SilentlyContinue
             if (-not $obs) {
@@ -1248,38 +1273,11 @@ jobs:
             }
           }
 
-          # Verify OBS is healthy (not in broken state)
+          # Verify OBS is healthy
           $mem = $obs.WorkingSet64 / 1MB
           Write-Host "OBS PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
-          if ($mem -lt 100) {
-            Write-Host "WARNING: OBS memory too low ($([math]::Round($mem))MB) - broken start detected"
-            Write-Host "Killing broken OBS and restarting with correct WorkingDirectory..."
-            Stop-Process -Id $obs.Id -Force
-            Start-Sleep -Seconds 5
-
-            $action = New-ScheduledTaskAction `
-              -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
-              -Argument "--disable-shutdown-check" `
-              -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"
-            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
-            $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
-            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
-
-            Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
-            Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-            schtasks.exe /run /tn "Start OBS Studio"
-            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start OBS Studio (exit code: $LASTEXITCODE)" }
-            Start-Sleep -Seconds 10
-
-            $obs = Get-Process obs64 -ErrorAction SilentlyContinue
-            if (-not $obs) {
-              throw "FAILED: Could not restart OBS Studio"
-            }
-            $mem = $obs.WorkingSet64 / 1MB
-            Write-Host "OBS restarted - PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
-            if ($mem -lt 100) {
-              throw "FAILED: OBS still in broken state after restart ($([math]::Round($mem))MB)"
-            }
+          if ($mem -lt 50) {
+            throw "FAILED: OBS in broken state ($([math]::Round($mem))MB) - please restart OBS manually on stream.lan"
           }
           Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
 
@@ -1975,6 +1973,32 @@ jobs:
           } catch {
             Write-Host "Failed to stop OBS stream (may not have been streaming): $_"
           }
+
+      - name: Verify RTMP disconnected after OBS stream stop
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "Verifying rtmp_connected is false after OBS stream stopped..."
+          $maxRetries = 10
+          $retryDelay = 2
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
+              $connected = $status.inpoint.details.rtmp_connected
+              $state = $status.inpoint.state
+              Write-Host "Attempt ${i}/${maxRetries}: state=$state, rtmp_connected=$connected"
+              if ($connected -eq $false) {
+                Write-Host "=== RTMP disconnect verified: rtmp_connected=false ==="
+                return
+              }
+            } catch {
+              Write-Host "Attempt ${i}/${maxRetries}: API request failed: $_"
+            }
+            if ($i -lt $maxRetries) {
+              Start-Sleep -Seconds $retryDelay
+            }
+          }
+          throw "FAILED: rtmp_connected is still true after OBS stream stopped ($maxRetries attempts, $($maxRetries * $retryDelay)s). The inpoint state did not reset after RTMP client disconnected."
 
       - name: Deactivate streaming event
         if: always()

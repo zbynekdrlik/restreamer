@@ -6,7 +6,9 @@ use tower_http::trace::TraceLayer;
 
 use crate::handlers;
 use crate::state::AppState;
+use crate::stream_handlers;
 use crate::websocket;
+use crate::youtube;
 
 /// Build the Axum router with all API routes.
 pub fn build_router(state: AppState) -> Router {
@@ -49,12 +51,21 @@ pub fn build_router(state: AppState) -> Router {
         .route("/events", post(handlers::create_event))
         .route("/events/{id}", get(handlers::get_event_by_id))
         .route("/events/{id}", delete(handlers::delete_event_by_id))
+        .route("/events/{id}", patch(stream_handlers::update_event))
         .route("/events/{id}/activate", post(handlers::activate_event))
         .route(
             "/events/{id}/start-delivering",
             post(handlers::start_delivering),
         )
         .route("/events/{id}/deactivate", post(handlers::deactivate_event))
+        .route(
+            "/events/{id}/start-stream",
+            post(stream_handlers::start_stream),
+        )
+        .route(
+            "/events/{id}/stop-stream",
+            post(stream_handlers::stop_stream),
+        )
         .route("/events/{id}/endpoints", get(handlers::get_event_endpoints))
         .route(
             "/events/{event_id}/endpoints/{endpoint_id}",
@@ -83,12 +94,12 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_delivery_instances),
         )
         // YouTube
-        .route("/youtube/status", get(handlers::youtube_status))
-        .route("/youtube/oauth/seed", post(handlers::youtube_oauth_seed))
-        .route("/youtube/oauth/start", get(handlers::youtube_oauth_start))
+        .route("/youtube/status", get(youtube::youtube_status))
+        .route("/youtube/oauth/seed", post(youtube::youtube_oauth_seed))
+        .route("/youtube/oauth/start", get(youtube::youtube_oauth_start))
         .route(
             "/youtube/oauth/callback",
-            get(handlers::youtube_oauth_callback),
+            get(youtube::youtube_oauth_callback),
         );
 
     // Allow any origin so the dashboard is accessible from LAN devices

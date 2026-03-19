@@ -18,15 +18,16 @@ app.use(express.static(distDir));
 
 const statusResponse = {
   inpoint: {
-    state: "connected",
-    details: { rtmp_connected: true },
+    state: "idle",
+    details: { rtmp_connected: false },
   },
   streaming_event: {
     id: 1,
     name: "Sunday Service",
     received_bytes: 52428800,
-    receiving_activated: true,
+    receiving_activated: false,
     delivering_activated: false,
+    cache_delay_secs: null,
   },
   chunk_stats: {
     total_chunks: 42,
@@ -43,8 +44,9 @@ let events = [
     id: 1,
     name: "Sunday Service",
     received_bytes: 52428800,
-    receiving_activated: true,
+    receiving_activated: false,
     delivering_activated: false,
+    cache_delay_secs: null,
   },
   {
     id: 2,
@@ -52,6 +54,7 @@ let events = [
     received_bytes: 0,
     receiving_activated: false,
     delivering_activated: false,
+    cache_delay_secs: 300,
   },
 ];
 
@@ -105,6 +108,7 @@ app.post("/api/v1/events", (req, res) => {
     received_bytes: 0,
     receiving_activated: false,
     delivering_activated: false,
+    cache_delay_secs: null,
   };
   events.push(newEvent);
   eventEndpoints[newEvent.id] = [];
@@ -158,6 +162,93 @@ app.post("/api/v1/events/:id/deactivate", (req, res) => {
   }
 });
 
+app.post("/api/v1/events/:id/start-stream", (req, res) => {
+  const id = parseInt(req.params.id);
+  const evt = events.find((e) => e.id === id);
+  if (!evt) {
+    return res.status(404).json({ error: "not found" });
+  }
+  // Check for conflict - another active event
+  const conflict = events.find(
+    (e) => e.id !== id && (e.receiving_activated || e.delivering_activated),
+  );
+  if (conflict) {
+    return res.status(409).json({ error: "another event is active" });
+  }
+  evt.receiving_activated = true;
+  evt.delivering_activated = true;
+
+  // Broadcast activity feed and pipeline state via WebSocket
+  broadcastWs({
+    type: "ActivityFeed",
+    data: {
+      timestamp: new Date().toISOString(),
+      severity: "info",
+      message: `Stream started: ${evt.name}`,
+      source: "system",
+    },
+  });
+  broadcastWs({
+    type: "PipelineState",
+    data: {
+      state: "buffering",
+      event_id: id,
+      event_name: evt.name,
+      buffer_progress: 0.0,
+      target_delay_secs: 120,
+      current_delay_secs: 0.0,
+      session_start: null,
+    },
+  });
+
+  res.json({ status: "ok" });
+});
+
+app.post("/api/v1/events/:id/stop-stream", (req, res) => {
+  const evt = events.find((e) => e.id === parseInt(req.params.id));
+  if (evt) {
+    evt.receiving_activated = false;
+    evt.delivering_activated = false;
+
+    broadcastWs({
+      type: "ActivityFeed",
+      data: {
+        timestamp: new Date().toISOString(),
+        severity: "info",
+        message: `Stream stopped: ${evt.name}`,
+        source: "system",
+      },
+    });
+    broadcastWs({
+      type: "PipelineState",
+      data: {
+        state: "idle",
+        event_id: null,
+        event_name: null,
+        buffer_progress: 0.0,
+        target_delay_secs: 0,
+        current_delay_secs: 0.0,
+        session_start: null,
+      },
+    });
+
+    res.json({ status: "ok" });
+  } else {
+    res.status(404).json({ error: "not found" });
+  }
+});
+
+app.patch("/api/v1/events/:id", (req, res) => {
+  const evt = events.find((e) => e.id === parseInt(req.params.id));
+  if (!evt) {
+    return res.status(404).json({ error: "not found" });
+  }
+  if (req.body.name) evt.name = req.body.name;
+  if (req.body.cache_delay_secs !== undefined)
+    evt.cache_delay_secs = req.body.cache_delay_secs;
+  res.json({ status: "ok" });
+});
+
 // --- Event-Endpoint M2M ---
 app.get("/api/v1/events/:id/endpoints", (req, res) => {
   const id = parseInt(req.params.id);
@@ -209,6 +300,20 @@ app.post("/api/v1/endpoints", (req, res) => {
   };
   endpoints.push(newEp);
   res.json(newEp);
+});
+
+app.put("/api/v1/endpoints/:id", (req, res) => {
+  const ep = endpoints.find((e) => e.id === parseInt(req.params.id));
+  if (!ep) {
+    return res.status(404).json({ error: "not found" });
+  }
+  if (req.body.alias !== undefined) ep.alias = req.body.alias;
+  if (req.body.service_type !== undefined)
+    ep.service_type = req.body.service_type;
+  if (req.body.stream_key !== undefined) ep.stream_key = req.body.stream_key;
+  if (req.body.enabled !== undefined) ep.enabled = req.body.enabled;
+  if (req.body.is_fast !== undefined) ep.is_fast = req.body.is_fast;
+  res.json({ status: "ok" });
 });
 
 app.delete("/api/v1/endpoints/:id", (req, res) => {
@@ -265,6 +370,12 @@ app.get("/api/v1/logs", (_req, res) => {
   ]);
 });
 
+// Test-only: broadcast arbitrary WebSocket events for E2E pipeline state tests
+app.post("/api/v1/_test/ws-broadcast", (req, res) => {
+  broadcastWs(req.body);
+  res.json({ status: "ok" });
+});
+
 // SPA fallback: serve index.html for any non-API route that wasn't matched by static
 app.get("*", (req, res) => {
   res.sendFile(path.join(distDir, "index.html"));
@@ -279,6 +390,16 @@ const server = app.listen(PORT, () => {
 });
 
 const wss = new WebSocketServer({ server, path: "/api/v1/ws" });
+
+// Broadcast a message to all connected WebSocket clients
+function broadcastWs(message) {
+  const data = JSON.stringify(message);
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(data);
+    }
+  });
+}
 
 wss.on("connection", (ws) => {
   console.log("[ws] Client connected");

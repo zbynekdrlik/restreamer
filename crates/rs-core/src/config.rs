@@ -15,6 +15,8 @@ pub struct Config {
     pub inpoint: InpointConfig,
     #[serde(default)]
     pub api: ApiConfig,
+    #[serde(default)]
+    pub delivery: DeliveryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +146,24 @@ impl Default for ApiConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryConfig {
+    #[serde(default = "default_delivery_delay_secs")]
+    pub delivery_delay_secs: u64,
+}
+
+fn default_delivery_delay_secs() -> u64 {
+    120
+}
+
+impl Default for DeliveryConfig {
+    fn default() -> Self {
+        Self {
+            delivery_delay_secs: default_delivery_delay_secs(),
+        }
+    }
+}
+
 impl Config {
     /// Load config from file, with env var overrides.
     pub fn load(path: &Path) -> Result<Self> {
@@ -216,6 +236,12 @@ impl Config {
         if let Ok(v) = std::env::var("RESTREAMER_API_BIND") {
             self.api.bind = v;
         }
+        if let Ok(v) = std::env::var("RESTREAMER_DELIVERY_DELAY_SECS") {
+            match v.parse() {
+                Ok(secs) => self.delivery.delivery_delay_secs = secs,
+                Err(e) => tracing::warn!("Invalid RESTREAMER_DELIVERY_DELAY_SECS '{v}': {e}"),
+            }
+        }
     }
 
     /// Validate that required configuration fields are present.
@@ -253,6 +279,7 @@ impl Config {
                 port: 0, // random port for tests
                 bind: "127.0.0.1".to_string(),
             },
+            delivery: DeliveryConfig::default(),
         }
     }
 }
@@ -272,6 +299,7 @@ impl Default for Config {
             youtube: YouTubeOAuthConfig::default(),
             inpoint: InpointConfig::default(),
             api: ApiConfig::default(),
+            delivery: DeliveryConfig::default(),
         }
     }
 }
@@ -291,6 +319,7 @@ mod tests {
         assert_eq!(parsed.inpoint.rtmp_port, config.inpoint.rtmp_port);
         assert_eq!(parsed.api.port, config.api.port);
         assert_eq!(parsed.hetzner.location, "fsn1");
+        assert_eq!(parsed.delivery.delivery_delay_secs, 120);
     }
 
     #[test]
@@ -311,6 +340,7 @@ mod tests {
         assert_eq!(config.api.port, 8910);
         assert_eq!(config.api.bind, "127.0.0.1");
         assert_eq!(config.hetzner.default_server_type, "cx23");
+        assert_eq!(config.delivery.delivery_delay_secs, 120);
     }
 
     #[test]

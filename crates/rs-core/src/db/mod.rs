@@ -61,6 +61,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (6, MIGRATION_V6_SQL),
         (7, MIGRATION_V7_SQL),
         (8, MIGRATION_V8_SQL),
+        (9, MIGRATION_V9_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -245,6 +246,10 @@ UPDATE chunk_records SET sequence_number = (
 CREATE INDEX idx_chunks_event_sequence ON chunk_records(streaming_event_id, sequence_number)
 "#;
 
+const MIGRATION_V9_SQL: &str = r#"
+ALTER TABLE streaming_events ADD COLUMN cache_delay_secs INTEGER
+"#;
+
 // --- Client Profile ---
 
 pub async fn get_client_profile(pool: &SqlitePool) -> Result<Option<ClientProfile>> {
@@ -273,7 +278,7 @@ pub async fn upsert_client_profile(pool: &SqlitePool, user_uuid: &str) -> Result
 pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEvent>> {
     // Prefer the event with receiving_activated=1, fall back to highest ID
     let row = sqlx::query(
-        "SELECT id, name, received_bytes, receiving_activated, delivering_activated
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs
          FROM streaming_events ORDER BY receiving_activated DESC, id DESC LIMIT 1",
     )
     .fetch_optional(pool)
@@ -285,6 +290,7 @@ pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEv
         received_bytes: r.get("received_bytes"),
         receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
+        cache_delay_secs: r.get("cache_delay_secs"),
     }))
 }
 
@@ -293,7 +299,7 @@ pub async fn get_streaming_event_by_id(
     id: i64,
 ) -> Result<Option<StreamingEvent>> {
     let row = sqlx::query(
-        "SELECT id, name, received_bytes, receiving_activated, delivering_activated
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs
          FROM streaming_events WHERE id = ?1",
     )
     .bind(id)
@@ -306,6 +312,7 @@ pub async fn get_streaming_event_by_id(
         received_bytes: r.get("received_bytes"),
         receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
+        cache_delay_secs: r.get("cache_delay_secs"),
     }))
 }
 

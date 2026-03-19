@@ -14,6 +14,27 @@ pub struct ErrorEntry {
     pub message: String,
 }
 
+/// Pipeline state from WebSocket.
+#[derive(Debug, Clone, Default)]
+pub struct PipelineState {
+    pub state: String,
+    pub event_id: Option<i64>,
+    pub event_name: Option<String>,
+    pub buffer_progress: f64,
+    pub target_delay_secs: u64,
+    pub current_delay_secs: f64,
+    pub session_start: Option<String>,
+}
+
+/// Activity feed entry from WebSocket.
+#[derive(Debug, Clone)]
+pub struct ActivityEntry {
+    pub timestamp: String,
+    pub severity: String,
+    pub message: String,
+    pub source: String,
+}
+
 /// Delivery VPS state tracked via WebSocket updates.
 #[derive(Debug, Clone, Default)]
 pub struct DeliveryState {
@@ -62,6 +83,11 @@ pub struct DashboardStore {
 
     // Delivery monitoring
     pub delivery: RwSignal<DeliveryState>,
+
+    // Pipeline state and activity feed
+    pub pipeline_state: RwSignal<PipelineState>,
+    pub activity_feed: RwSignal<Vec<ActivityEntry>>,
+    pub selected_event_id: RwSignal<Option<i64>>,
 }
 
 impl DashboardStore {
@@ -77,6 +103,9 @@ impl DashboardStore {
             logs: RwSignal::new(Vec::new()),
             log_component: RwSignal::new("rs_inpoint".to_string()),
             delivery: RwSignal::new(DeliveryState::default()),
+            pipeline_state: RwSignal::new(PipelineState::default()),
+            activity_feed: RwSignal::new(Vec::new()),
+            selected_event_id: RwSignal::new(None),
         }
     }
 

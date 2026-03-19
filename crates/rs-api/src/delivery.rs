@@ -329,12 +329,29 @@ impl DeliveryOrchestrator {
         info!(event_id, start_chunk_id, "Starting delivery from sequence");
 
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
+
+        // Resolve effective cache delay
+        let event = db::get_streaming_event_by_id(&self.pool, event_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Event {event_id} not found"))?;
+        let delay_secs = event
+            .cache_delay_secs
+            .map(|s| s as u64)
+            .unwrap_or(self.config.delivery.delivery_delay_secs);
+        let chunk_duration_ms = self.config.inpoint.chunk_duration_ms;
+        let delivery_delay_chunks = if chunk_duration_ms > 0 {
+            (delay_secs * 1000 / chunk_duration_ms) as i64
+        } else {
+            0
+        };
+
         let init_body = serde_json::json!({
             "endpoints": endpoints.iter().map(|ep| {
                 serde_json::json!({
                     "alias": ep.alias,
                     "service_type": ep.service_type,
                     "stream_key": ep.stream_key,
+                    "is_fast": ep.is_fast,
                 })
             }).collect::<Vec<_>>(),
             "s3_config": {
@@ -346,6 +363,7 @@ impl DeliveryOrchestrator {
             },
             "event_identifier": event_name,
             "start_chunk_id": start_chunk_id,
+            "delivery_delay_chunks": delivery_delay_chunks,
         });
 
         let resp = client
