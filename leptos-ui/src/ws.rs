@@ -75,6 +75,8 @@ enum WsEvent {
         target_delay_secs: u64,
         current_delay_secs: f64,
         session_start: Option<String>,
+        #[serde(default)]
+        predicted: bool,
     },
 }
 
@@ -319,6 +321,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
             target_delay_secs,
             current_delay_secs,
             session_start,
+            predicted,
         } => {
             store.pipeline_state.set(crate::store::PipelineState {
                 state,
@@ -328,6 +331,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                 target_delay_secs,
                 current_delay_secs,
                 session_start,
+                predicted,
             });
         }
     }

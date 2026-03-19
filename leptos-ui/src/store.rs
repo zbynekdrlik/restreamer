@@ -24,6 +24,7 @@ pub struct PipelineState {
     pub target_delay_secs: u64,
     pub current_delay_secs: f64,
     pub session_start: Option<String>,
+    pub predicted: bool,
 }
 
 /// Activity feed entry from WebSocket.

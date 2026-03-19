@@ -145,7 +145,7 @@ pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec
          e.delivered_bytes, e.is_fast, e.created_at, e.updated_at
          FROM endpoint_configs e
          INNER JOIN event_endpoints ee ON ee.endpoint_id = e.id
-         WHERE ee.event_id = ?1
+         WHERE ee.event_id = ?1 AND e.enabled = 1
          ORDER BY e.id",
     )
     .bind(event_id)

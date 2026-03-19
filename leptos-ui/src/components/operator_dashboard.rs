@@ -70,7 +70,7 @@ fn ControlBar() -> impl IntoView {
     let pipeline_state = move || store.pipeline_state.get().state.clone();
     let is_active = move || {
         let s = pipeline_state();
-        s == "streaming" || s == "buffering"
+        s == "streaming" || s == "buffering" || s == "buffer_exhausted"
     };
 
     let session_duration = move || {
@@ -94,6 +94,7 @@ fn ControlBar() -> impl IntoView {
             "buffering" => "Buffering",
             "streaming" => "Streaming",
             "stopping" => "Stopping",
+            "buffer_exhausted" => "Exhausted",
             _ => "Idle",
         }
         .to_string()
@@ -145,7 +146,8 @@ fn ControlBar() -> impl IntoView {
                     "Cache: "
                     {move || {
                         let ps = store.pipeline_state.get();
-                        format!("{}s / {}s", ps.current_delay_secs as u64, ps.target_delay_secs)
+                        let prefix = if ps.predicted { "~" } else { "" };
+                        format!("{prefix}{}s / {}s", ps.current_delay_secs as u64, ps.target_delay_secs)
                     }}
                 </span>
             </div>
@@ -211,18 +213,37 @@ fn CacheBar() -> impl IntoView {
     let progress = move || store.pipeline_state.get().buffer_progress;
     let target = move || store.pipeline_state.get().target_delay_secs;
     let current = move || store.pipeline_state.get().current_delay_secs;
+    let is_predicted = move || store.pipeline_state.get().predicted;
+    let is_exhausted = move || store.pipeline_state.get().state == "buffer_exhausted";
     let is_visible = move || {
         let ps = store.pipeline_state.get();
-        ps.state == "buffering" || ps.state == "streaming"
+        ps.state == "buffering" || ps.state == "streaming" || ps.state == "buffer_exhausted"
+    };
+    let bar_class = move || {
+        if is_exhausted() {
+            "cache-bar-fill exhausted"
+        } else if is_predicted() {
+            "cache-bar-fill predicted"
+        } else {
+            "cache-bar-fill"
+        }
     };
 
     view! {
         <div class="cache-bar-container" style:display=move || if is_visible() { "block" } else { "none" }>
             <div class="cache-bar">
-                <div class="cache-bar-fill" style:width=move || format!("{}%", (progress() * 100.0).min(100.0))></div>
+                <div class={bar_class} style:width=move || format!("{}%", (progress() * 100.0).min(100.0))></div>
             </div>
             <span class="cache-bar-label">
-                {move || format!("Cache: {}s / {}s target", current() as u64, target())}
+                {move || {
+                    if is_exhausted() {
+                        "Buffer Exhausted — delivery VPS has no remaining cache".to_string()
+                    } else if is_predicted() {
+                        format!("~{}s / {}s target (predicted — VPS unreachable)", current() as u64, target())
+                    } else {
+                        format!("Cache: {}s / {}s target", current() as u64, target())
+                    }
+                }}
             </span>
         </div>
     }

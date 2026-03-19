@@ -152,6 +152,8 @@ pub enum WsEvent {
         target_delay_secs: u64,
         current_delay_secs: f64,
         session_start: Option<String>,
+        #[serde(default)]
+        predicted: bool,
     },
 }
 
@@ -304,6 +306,7 @@ mod tests {
                 target_delay_secs: 120,
                 current_delay_secs: 90.5,
                 session_start: Some("2026-01-01T10:00:00Z".to_string()),
+                predicted: false,
             },
         ];
 

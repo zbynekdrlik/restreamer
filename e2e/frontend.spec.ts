@@ -318,7 +318,9 @@ test.describe("Settings page", () => {
     await expect(page.locator(".settings-page")).toBeVisible({
       timeout: 10000,
     });
-    await expect(page.locator("h2")).toHaveText("Settings");
+    await expect(page.locator(".settings-page > h2").first()).toHaveText(
+      "Settings",
+    );
   });
 
   test("settings shows back arrow to dashboard", async ({ page }) => {
@@ -339,12 +341,10 @@ test.describe("Settings page", () => {
 
   test("endpoints section renders with create form", async ({ page }) => {
     await page.goto("/settings");
-    await expect(
-      page.locator('.settings-section:has(h3:text("Endpoints"))'),
-    ).toBeVisible({ timeout: 10000 });
-    await expect(
-      page.locator('.settings-section:has(h3:text("Endpoints")) .create-form'),
-    ).toBeVisible();
+    await expect(page.locator(".endpoints-tab")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.locator(".endpoints-tab .create-form")).toBeVisible();
   });
 
   test("event create form exists", async ({ page }) => {
@@ -407,8 +407,8 @@ test.describe("Settings page", () => {
   }) => {
     await page.goto("/settings");
     await page.waitForTimeout(1000);
-    const section = page.locator('.settings-section:has(h3:text("Endpoints"))');
-    const cards = section.locator(".settings-card");
+    const section = page.locator(".endpoints-tab");
+    const cards = section.locator(".endpoint-card");
     await expect(cards).toHaveCount(2);
     const cardTexts = await cards.allTextContents();
     const allText = cardTexts.join(" ");
@@ -422,6 +422,239 @@ test.describe("Settings page", () => {
     await expect(page.locator(".operator-dashboard")).toBeVisible({
       timeout: 10000,
     });
+  });
+});
+
+// --- Endpoint Editing ---
+
+test.describe("Endpoint Editing", () => {
+  test("endpoint edit shows stream key with show/hide toggle", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await page.waitForTimeout(1000);
+    const section = page.locator(".endpoints-tab");
+    // Click Edit on the first endpoint
+    await section
+      .locator(".endpoint-card")
+      .first()
+      .locator('button:has-text("Edit")')
+      .click();
+    // Should show edit form with stream key field
+    await expect(section.locator(".endpoint-edit-form")).toBeVisible({
+      timeout: 5000,
+    });
+    // Key input should be a password field by default
+    const keyInput = section.locator(".key-input-wrapper input");
+    await expect(keyInput).toBeVisible();
+    await expect(keyInput).toHaveAttribute("type", "password");
+    // Click Show button
+    await section.locator(".toggle-key-btn").click();
+    await expect(keyInput).toHaveAttribute("type", "text");
+    // Click Hide button
+    await section.locator(".toggle-key-btn").click();
+    await expect(keyInput).toHaveAttribute("type", "password");
+  });
+
+  test("endpoint edit form shows correct service type for non-HLS endpoint", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await page.waitForTimeout(1000);
+    const section = page.locator(".endpoints-tab");
+    // Click Edit on the SECOND endpoint (Facebook Page, type=FB)
+    await section
+      .locator(".endpoint-card")
+      .nth(1)
+      .locator('button:has-text("Edit")')
+      .click();
+    await expect(section.locator(".endpoint-edit-form")).toBeVisible({
+      timeout: 5000,
+    });
+    // The type dropdown MUST show "FB", not "YT_HLS"
+    const typeSelect = section.locator(
+      '.edit-row:has(label:text("Type")) select',
+    );
+    await expect(typeSelect).toHaveValue("FB");
+  });
+
+  test("saving endpoint preserves original service type when unchanged", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await page.waitForTimeout(1000);
+    const section = page.locator(".endpoints-tab");
+    // Edit second endpoint (FB type) — only change alias, don't touch type
+    await section
+      .locator(".endpoint-card")
+      .nth(1)
+      .locator('button:has-text("Edit")')
+      .click();
+    await expect(section.locator(".endpoint-edit-form")).toBeVisible({
+      timeout: 5000,
+    });
+    const aliasInput = section.locator(
+      '.edit-row:has(label:text("Alias")) input',
+    );
+    await aliasInput.clear();
+    await aliasInput.fill("Facebook Updated");
+    // Intercept the PUT — service_type MUST be "FB", not "YT_HLS"
+    const [request] = await Promise.all([
+      page.waitForRequest(
+        (req) => req.url().includes("/endpoints/") && req.method() === "PUT",
+      ),
+      section.locator('button:has-text("Save")').click(),
+    ]);
+    const body = request.postDataJSON();
+    expect(body.service_type).toBe("FB");
+  });
+
+  test("endpoint edit saves changes", async ({ page }) => {
+    await page.goto("/settings");
+    await page.waitForTimeout(1000);
+    const section = page.locator(".endpoints-tab");
+    // Click Edit on the first endpoint
+    await section
+      .locator(".endpoint-card")
+      .first()
+      .locator('button:has-text("Edit")')
+      .click();
+    await expect(section.locator(".endpoint-edit-form")).toBeVisible({
+      timeout: 5000,
+    });
+    // Clear and change alias
+    const aliasInput = section.locator(
+      '.edit-row:has(label:text("Alias")) input',
+    );
+    await aliasInput.clear();
+    await aliasInput.fill("YouTube Updated");
+    // Intercept the PUT call
+    const [request] = await Promise.all([
+      page.waitForRequest(
+        (req) => req.url().includes("/endpoints/") && req.method() === "PUT",
+      ),
+      section.locator('button:has-text("Save")').click(),
+    ]);
+    const body = request.postDataJSON();
+    expect(body.alias).toBe("YouTube Updated");
+  });
+});
+
+// --- Predictive Buffer State ---
+
+test.describe("Predictive Buffer State", () => {
+  test("cache bar shows predicted state with warning style", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast predicted PipelineState
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffering",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.5,
+          target_delay_secs: 120,
+          current_delay_secs: 60.0,
+          session_start: null,
+          predicted: true,
+        },
+      },
+    });
+
+    // Cache bar should be visible with predicted class
+    const fill = page.locator(".cache-bar-fill");
+    await expect(fill).toHaveClass(/predicted/, { timeout: 5000 });
+    // Label should contain "predicted"
+    await expect(page.locator(".cache-bar-label")).toContainText("predicted");
+  });
+
+  test("cache bar shows buffer exhausted state", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast buffer_exhausted PipelineState
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffer_exhausted",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.0,
+          target_delay_secs: 120,
+          current_delay_secs: 0.0,
+          session_start: null,
+          predicted: true,
+        },
+      },
+    });
+
+    // Cache bar should be visible with exhausted class
+    const fill = page.locator(".cache-bar-fill");
+    await expect(fill).toHaveClass(/exhausted/, { timeout: 5000 });
+    // Label should mention "Buffer Exhausted"
+    await expect(page.locator(".cache-bar-label")).toContainText(
+      "Buffer Exhausted",
+    );
+    // State badge should show "Exhausted"
+    await expect(page.locator(".state-badge")).toContainText("Exhausted");
+  });
+
+  test("transitions from predicted back to live data", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Start with predicted state
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffering",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.3,
+          target_delay_secs: 120,
+          current_delay_secs: 36.0,
+          session_start: null,
+          predicted: true,
+        },
+      },
+    });
+    await expect(page.locator(".cache-bar-fill")).toHaveClass(/predicted/, {
+      timeout: 5000,
+    });
+
+    // Transition back to live
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.8,
+          target_delay_secs: 120,
+          current_delay_secs: 96.0,
+          session_start: null,
+          predicted: false,
+        },
+      },
+    });
+
+    // Should no longer have predicted class
+    await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/predicted/, {
+      timeout: 5000,
+    });
+    await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/exhausted/);
+    // Label should show normal format
+    await expect(page.locator(".cache-bar-label")).toContainText(
+      "Cache: 96s / 120s target",
+    );
   });
 });
 
