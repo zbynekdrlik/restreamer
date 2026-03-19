@@ -10,7 +10,7 @@ use serde::Deserialize;
 use tracing::error;
 
 use rs_core::db;
-use rs_core::models::WsEvent;
+use rs_core::models::{DeliveryEndpointMetrics, WsEvent};
 
 use crate::state::AppState;
 
@@ -45,6 +45,14 @@ pub async fn start_stream(
             error!("Failed to start stream for event {id}: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    // Clear stale chunks from prior sessions so buffer starts at 0%
+    let deleted = db::delete_chunks_for_event(&state.pool, id)
+        .await
+        .unwrap_or(0);
+    if deleted > 0 {
+        tracing::info!("Cleared {deleted} stale chunks for event {id}");
+    }
 
     // Broadcast WS event
     if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
@@ -103,6 +111,47 @@ pub async fn start_stream(
                 }) {
                     tracing::debug!("No WS subscribers for ActivityFeed: {e}");
                 }
+
+                // Send immediate placeholder DeliveryStatus + PipelineState
+                // so the dashboard shows endpoint cards and cache bar right away
+                let configured = db::get_event_endpoints(&state.pool, id)
+                    .await
+                    .unwrap_or_default();
+                let placeholder_eps: Vec<DeliveryEndpointMetrics> = configured
+                    .iter()
+                    .map(|ep| DeliveryEndpointMetrics {
+                        alias: ep.alias.clone(),
+                        alive: false,
+                        current_chunk_id: 0,
+                        bytes_processed_total: 0,
+                        chunks_processed: 0,
+                        chunk_delay_secs: 0.0,
+                        stall_reason: None,
+                        ffmpeg_restart_count: 0,
+                        last_error: None,
+                    })
+                    .collect();
+                let _ = state.ws_tx.send(WsEvent::DeliveryStatus {
+                    instance_name: result.name.clone(),
+                    status: "creating".to_string(),
+                    server_ip: None,
+                    endpoint_count: placeholder_eps.len() as u32,
+                    endpoints: placeholder_eps,
+                });
+                let target_delay = event
+                    .cache_delay_secs
+                    .map(|s| s as u64)
+                    .unwrap_or(state.config.delivery.delivery_delay_secs);
+                let _ = state.ws_tx.send(WsEvent::PipelineState {
+                    state: "buffering".to_string(),
+                    event_id: Some(id),
+                    event_name: Some(event.name.clone()),
+                    buffer_progress: 0.0,
+                    target_delay_secs: target_delay,
+                    current_delay_secs: 0.0,
+                    session_start: Some(chrono::Utc::now().to_rfc3339()),
+                    predicted: false,
+                });
             }
             Err(e) => {
                 error!("Failed to start delivery VPS: {e}");
