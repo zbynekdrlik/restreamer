@@ -207,6 +207,107 @@ test.describe("Operator Dashboard", () => {
     const feedText = await feedItems.first().textContent();
     expect(feedText).toContain("Stream started");
   });
+
+  test("pipeline shows OBS Disconnected and RTMP Idle by default", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.locator(".pipeline-flow")).toBeVisible({
+      timeout: 10000,
+    });
+    const metrics = page.locator(".pipeline-metric");
+    await expect(metrics.nth(0)).toHaveText("Disconnected");
+    await expect(metrics.nth(1)).toHaveText("Idle");
+  });
+
+  test("OBS and RTMP status dots are not active by default", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.locator(".pipeline-flow")).toBeVisible({
+      timeout: 10000,
+    });
+    const dots = page.locator(".pipeline-flow .status-dot");
+    await expect(dots.nth(0)).not.toHaveClass(/active/);
+    await expect(dots.nth(1)).not.toHaveClass(/active/);
+  });
+
+  test("pipeline shows Connected after InpointStatus WebSocket event", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.locator(".pipeline-metric").nth(0)).toHaveText(
+      "Disconnected",
+      { timeout: 10000 },
+    );
+
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "InpointStatus",
+        data: {
+          state: "receiving",
+          rtmp_connected: true,
+          received_bytes: 1024,
+          chunk_count: 5,
+        },
+      },
+    });
+
+    await expect(page.locator(".pipeline-metric").nth(0)).toHaveText(
+      "Connected",
+      { timeout: 5000 },
+    );
+    await expect(page.locator(".pipeline-metric").nth(1)).toHaveText(
+      "Receiving",
+    );
+    await expect(page.locator(".pipeline-flow .status-dot").nth(0)).toHaveClass(
+      /active/,
+    );
+  });
+
+  test("pipeline reverts to Disconnected after rtmp_connected=false", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.locator(".pipeline-flow")).toBeVisible({
+      timeout: 10000,
+    });
+
+    // Connect
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "InpointStatus",
+        data: {
+          state: "receiving",
+          rtmp_connected: true,
+          received_bytes: 1024,
+          chunk_count: 5,
+        },
+      },
+    });
+    await expect(page.locator(".pipeline-metric").nth(0)).toHaveText(
+      "Connected",
+      { timeout: 5000 },
+    );
+
+    // Disconnect
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "InpointStatus",
+        data: {
+          state: "idle",
+          rtmp_connected: false,
+          received_bytes: 1024,
+          chunk_count: 5,
+        },
+      },
+    });
+    await expect(page.locator(".pipeline-metric").nth(0)).toHaveText(
+      "Disconnected",
+      { timeout: 5000 },
+    );
+    await expect(page.locator(".pipeline-metric").nth(1)).toHaveText("Idle");
+  });
 });
 
 // --- Settings Page (/settings) ---

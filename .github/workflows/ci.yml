@@ -2177,6 +2177,18 @@ jobs:
           }
           exit 0
 
+      - name: Stop OBS process after E2E tests
+        if: always()
+        shell: powershell
+        run: |
+          $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+          if ($obs) {
+            Stop-Process -Name obs64 -Force
+            Write-Host "OBS process stopped (PID: $($obs.Id))"
+          } else {
+            Write-Host "OBS was not running"
+          }
+
       - name: Verify production config is intact
         if: always()
         shell: powershell

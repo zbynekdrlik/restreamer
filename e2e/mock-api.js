@@ -18,8 +18,8 @@ app.use(express.static(distDir));
 
 const statusResponse = {
   inpoint: {
-    state: "connected",
-    details: { rtmp_connected: true },
+    state: "idle",
+    details: { rtmp_connected: false },
   },
   streaming_event: {
     id: 1,
@@ -368,6 +368,12 @@ app.get("/api/v1/logs", (_req, res) => {
       message: "Chunk uploaded: chunk_042.ts",
     },
   ]);
+});
+
+// Test-only: broadcast arbitrary WebSocket events for E2E pipeline state tests
+app.post("/api/v1/_test/ws-broadcast", (req, res) => {
+  broadcastWs(req.body);
+  res.json({ status: "ok" });
 });
 
 // SPA fallback: serve index.html for any non-API route that wasn't matched by static
