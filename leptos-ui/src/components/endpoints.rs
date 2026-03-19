@@ -5,21 +5,6 @@ use leptos::prelude::*;
 use crate::api::{self, UpdateEndpointRequest};
 use crate::store::DashboardStore;
 
-/// Reusable service type options for select dropdowns.
-#[component]
-fn ServiceTypeOptions() -> impl IntoView {
-    view! {
-        <>
-            <option value="YT_HLS">"YouTube HLS"</option>
-            <option value="YT_RTMP">"YouTube RTMP"</option>
-            <option value="FB">"Facebook"</option>
-            <option value="VIMEO">"Vimeo"</option>
-            <option value="INSTAGRAM">"Instagram"</option>
-            <option value="TEST_FILE">"Test File"</option>
-        </>
-    }
-}
-
 /// Endpoints view: list, create, edit endpoint configurations.
 #[component]
 pub fn EndpointsView() -> impl IntoView {
@@ -140,10 +125,14 @@ pub fn EndpointsView() -> impl IntoView {
                     on:input=move |ev| set_new_alias.set(event_target_value(&ev))
                 />
                 <select
-                    prop:value=move || new_type.get()
                     on:change=move |ev| set_new_type.set(event_target_value(&ev))
                 >
-                    <ServiceTypeOptions />
+                    <option value="YT_HLS" selected=move || new_type.get() == "YT_HLS">"YouTube HLS"</option>
+                    <option value="YT_RTMP" selected=move || new_type.get() == "YT_RTMP">"YouTube RTMP"</option>
+                    <option value="FB" selected=move || new_type.get() == "FB">"Facebook"</option>
+                    <option value="VIMEO" selected=move || new_type.get() == "VIMEO">"Vimeo"</option>
+                    <option value="INSTAGRAM" selected=move || new_type.get() == "INSTAGRAM">"Instagram"</option>
+                    <option value="TEST_FILE" selected=move || new_type.get() == "TEST_FILE">"Test File"</option>
                 </select>
                 <input
                     type="text"
@@ -180,10 +169,14 @@ pub fn EndpointsView() -> impl IntoView {
                                             <div class="edit-row">
                                                 <label>"Type"</label>
                                                 <select
-                                                    prop:value=move || edit_type.get()
                                                     on:change=move |ev| set_edit_type.set(event_target_value(&ev))
                                                 >
-                                                    <ServiceTypeOptions />
+                                                    <option value="YT_HLS" selected=move || edit_type.get() == "YT_HLS">"YouTube HLS"</option>
+                                                    <option value="YT_RTMP" selected=move || edit_type.get() == "YT_RTMP">"YouTube RTMP"</option>
+                                                    <option value="FB" selected=move || edit_type.get() == "FB">"Facebook"</option>
+                                                    <option value="VIMEO" selected=move || edit_type.get() == "VIMEO">"Vimeo"</option>
+                                                    <option value="INSTAGRAM" selected=move || edit_type.get() == "INSTAGRAM">"Instagram"</option>
+                                                    <option value="TEST_FILE" selected=move || edit_type.get() == "TEST_FILE">"Test File"</option>
                                                 </select>
                                             </div>
                                             <div class="edit-row">

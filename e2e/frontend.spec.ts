@@ -456,6 +456,59 @@ test.describe("Endpoint Editing", () => {
     await expect(keyInput).toHaveAttribute("type", "password");
   });
 
+  test("endpoint edit form shows correct service type for non-HLS endpoint", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await page.waitForTimeout(1000);
+    const section = page.locator(".endpoints-tab");
+    // Click Edit on the SECOND endpoint (Facebook Page, type=FB)
+    await section
+      .locator(".endpoint-card")
+      .nth(1)
+      .locator('button:has-text("Edit")')
+      .click();
+    await expect(section.locator(".endpoint-edit-form")).toBeVisible({
+      timeout: 5000,
+    });
+    // The type dropdown MUST show "FB", not "YT_HLS"
+    const typeSelect = section.locator(
+      '.edit-row:has(label:text("Type")) select',
+    );
+    await expect(typeSelect).toHaveValue("FB");
+  });
+
+  test("saving endpoint preserves original service type when unchanged", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await page.waitForTimeout(1000);
+    const section = page.locator(".endpoints-tab");
+    // Edit second endpoint (FB type) — only change alias, don't touch type
+    await section
+      .locator(".endpoint-card")
+      .nth(1)
+      .locator('button:has-text("Edit")')
+      .click();
+    await expect(section.locator(".endpoint-edit-form")).toBeVisible({
+      timeout: 5000,
+    });
+    const aliasInput = section.locator(
+      '.edit-row:has(label:text("Alias")) input',
+    );
+    await aliasInput.clear();
+    await aliasInput.fill("Facebook Updated");
+    // Intercept the PUT — service_type MUST be "FB", not "YT_HLS"
+    const [request] = await Promise.all([
+      page.waitForRequest(
+        (req) => req.url().includes("/endpoints/") && req.method() === "PUT",
+      ),
+      section.locator('button:has-text("Save")').click(),
+    ]);
+    const body = request.postDataJSON();
+    expect(body.service_type).toBe("FB");
+  });
+
   test("endpoint edit saves changes", async ({ page }) => {
     await page.goto("/settings");
     await page.waitForTimeout(1000);
