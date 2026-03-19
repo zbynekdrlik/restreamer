@@ -1224,14 +1224,13 @@ jobs:
       - name: Ensure OBS is running
         shell: powershell
         run: |
-          # Clear crash sentinel and browser LOCK files so OBS starts cleanly after force-kill
-          Remove-Item "$env:APPDATA\obs-studio\.sentinel\*" -Force -Recurse -ErrorAction SilentlyContinue
-          Get-ChildItem -Path "$env:APPDATA\obs-studio" -Filter "LOCK" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-          Write-Host "Cleared OBS crash sentinel and browser LOCK files"
-
           $obs = Get-Process obs64 -ErrorAction SilentlyContinue
           if (-not $obs) {
             Write-Host "OBS not running, registering scheduled task with correct WorkingDirectory..."
+
+            # Clear crash sentinel and browser LOCK files for clean cold start
+            Remove-Item "$env:APPDATA\obs-studio\.sentinel\*" -Force -Recurse -ErrorAction SilentlyContinue
+            Get-ChildItem -Path "$env:APPDATA\obs-studio" -Filter "LOCK" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
             $action = New-ScheduledTaskAction `
               -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
@@ -1245,7 +1244,7 @@ jobs:
             Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
             schtasks.exe /run /tn "Start OBS Studio"
             if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start OBS Studio (exit code: $LASTEXITCODE)" }
-            Start-Sleep -Seconds 10
+            Start-Sleep -Seconds 20
 
             $obs = Get-Process obs64 -ErrorAction SilentlyContinue
             if (-not $obs) {
@@ -1253,83 +1252,13 @@ jobs:
             }
           }
 
-          # Verify OBS is healthy (not in broken state)
+          # Verify OBS is healthy
           $mem = $obs.WorkingSet64 / 1MB
           Write-Host "OBS PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
           if ($mem -lt 50) {
-            Write-Host "WARNING: OBS memory too low ($([math]::Round($mem))MB) - broken start detected"
-            Write-Host "Killing broken OBS and restarting with correct WorkingDirectory..."
-            Stop-Process -Id $obs.Id -Force
-            Start-Sleep -Seconds 5
-
-            $action = New-ScheduledTaskAction `
-              -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
-              -Argument "--disable-shutdown-check" `
-              -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"
-            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
-            $principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
-            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
-
-            Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
-            Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-            schtasks.exe /run /tn "Start OBS Studio"
-            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start OBS Studio (exit code: $LASTEXITCODE)" }
-            Start-Sleep -Seconds 10
-
-            $obs = Get-Process obs64 -ErrorAction SilentlyContinue
-            if (-not $obs) {
-              throw "FAILED: Could not restart OBS Studio"
-            }
-            $mem = $obs.WorkingSet64 / 1MB
-            Write-Host "OBS restarted - PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
-            if ($mem -lt 50) {
-              throw "FAILED: OBS still in broken state after restart ($([math]::Round($mem))MB)"
-            }
+            throw "FAILED: OBS in broken state ($([math]::Round($mem))MB) - please restart OBS manually on stream.lan"
           }
           Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
-
-          # Wait for OBS WebSocket server to be ready (cold starts need time)
-          # Use TCP connection test - simpler and more reliable than full WebSocket handshake
-          $wsReady = $false
-          for ($wsAttempt = 1; $wsAttempt -le 12; $wsAttempt++) {
-            try {
-              $tcp = New-Object System.Net.Sockets.TcpClient
-              $tcp.ConnectAsync($env:OBS_WS_HOST, [int]$env:OBS_WS_PORT).Wait(5000) | Out-Null
-              if ($tcp.Connected) {
-                $tcp.Close()
-                Write-Host "OBS WebSocket ready (attempt $wsAttempt/12)"
-                $wsReady = $true
-                break
-              }
-              $tcp.Close()
-            } catch {
-              # ignore
-            }
-            Write-Host "OBS WebSocket not ready yet (attempt $wsAttempt/12), waiting 5s..."
-            Start-Sleep -Seconds 5
-          }
-          if (-not $wsReady) {
-            Write-Host "OBS WebSocket not reachable — killing OBS, cleaning up, and retrying..."
-            Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 3
-            Remove-Item "$env:APPDATA\obs-studio\.sentinel\*" -Force -Recurse -ErrorAction SilentlyContinue
-            Get-ChildItem -Path "$env:APPDATA\obs-studio" -Filter "LOCK" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-            schtasks.exe /run /tn "Start OBS Studio"
-            Start-Sleep -Seconds 20
-            $tcp = New-Object System.Net.Sockets.TcpClient
-            try {
-              $tcp.ConnectAsync($env:OBS_WS_HOST, [int]$env:OBS_WS_PORT).Wait(5000) | Out-Null
-              if ($tcp.Connected) {
-                $tcp.Close()
-                Write-Host "OBS WebSocket ready after retry"
-              } else {
-                $tcp.Close()
-                throw "still not listening"
-              }
-            } catch {
-              throw "FAILED: OBS WebSocket not reachable even after full restart"
-            }
-          }
 
       - name: Save original OBS stream settings and switch to Restreamer
         id: obs-setup
@@ -2224,89 +2153,6 @@ jobs:
             Write-Host "You may need to manually restore OBS stream settings"
           }
           exit 0
-
-      - name: Stop OBS process after E2E tests
-        if: always()
-        shell: powershell
-        run: |
-          $obs = Get-Process obs64 -ErrorAction SilentlyContinue
-          if (-not $obs) {
-            Write-Host "OBS was not running"
-            exit 0
-          }
-
-          # Try graceful exit via OBS WebSocket to avoid crash-on-next-start
-          try {
-            $ws = New-Object System.Net.WebSockets.ClientWebSocket
-            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
-            $cts = New-Object System.Threading.CancellationTokenSource
-            $cts.CancelAfter(5000)
-            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
-
-            function Send-OBSMsg($ws, $message) {
-              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
-              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
-              $cts2 = New-Object System.Threading.CancellationTokenSource
-              $cts2.CancelAfter(5000)
-              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
-            }
-
-            function Recv-OBSMsg($ws) {
-              $buffer = New-Object byte[] 65536
-              $result = ""
-              do {
-                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
-                $cts3 = New-Object System.Threading.CancellationTokenSource
-                $cts3.CancelAfter(5000)
-                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
-                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
-              } while (-not $recv.EndOfMessage)
-              return $result | ConvertFrom-Json
-            }
-
-            $hello = Recv-OBSMsg $ws
-            $authRequired = $hello.d.authentication
-            if ($authRequired) {
-              $sha256 = [System.Security.Cryptography.SHA256]::Create()
-              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
-              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
-              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
-              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
-              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
-            } else {
-              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
-            }
-            Send-OBSMsg $ws $identify
-            $identified = Recv-OBSMsg $ws
-
-            # Send ExitOBS request for graceful shutdown
-            $exitObs = @{
-              op = 6
-              d = @{
-                requestType = "ExitOBS"
-                requestId = "exit-cleanup-1"
-              }
-            } | ConvertTo-Json -Depth 5
-            Send-OBSMsg $ws $exitObs
-            Write-Host "Sent ExitOBS command, waiting for graceful shutdown..."
-            Start-Sleep -Seconds 10
-
-            $obs = Get-Process obs64 -ErrorAction SilentlyContinue
-            if (-not $obs) {
-              Write-Host "OBS exited gracefully"
-              exit 0
-            }
-          } catch {
-            Write-Host "WebSocket graceful exit failed: $_"
-          }
-
-          # Fallback: force kill
-          Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
-          Write-Host "OBS force-killed (PID: $($obs.Id))"
-          # Clear sentinel and browser LOCK files so next OBS start doesn't show crash dialog
-          Remove-Item "$env:APPDATA\obs-studio\.sentinel\*" -Force -Recurse -ErrorAction SilentlyContinue
-          Get-ChildItem -Path "$env:APPDATA\obs-studio" -Filter "LOCK" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-          Write-Host "Cleared OBS crash sentinel and browser LOCK files"
 
       - name: Verify production config is intact
         if: always()
