@@ -1283,6 +1283,28 @@ jobs:
           }
           Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
 
+          # Wait for OBS WebSocket server to be ready (cold starts need time)
+          $wsReady = $false
+          for ($wsAttempt = 1; $wsAttempt -le 12; $wsAttempt++) {
+            try {
+              $testWs = New-Object System.Net.WebSockets.ClientWebSocket
+              $testUri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+              $testCts = New-Object System.Threading.CancellationTokenSource
+              $testCts.CancelAfter(5000)
+              $testWs.ConnectAsync($testUri, $testCts.Token).GetAwaiter().GetResult()
+              $testWs.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+              Write-Host "OBS WebSocket ready (attempt $wsAttempt/12)"
+              $wsReady = $true
+              break
+            } catch {
+              Write-Host "OBS WebSocket not ready yet (attempt $wsAttempt/12), waiting 5s..."
+              Start-Sleep -Seconds 5
+            }
+          }
+          if (-not $wsReady) {
+            throw "FAILED: OBS WebSocket not reachable after 60s"
+          }
+
       - name: Save original OBS stream settings and switch to Restreamer
         id: obs-setup
         shell: powershell
