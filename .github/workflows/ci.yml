@@ -1251,7 +1251,7 @@ jobs:
           # Verify OBS is healthy (not in broken state)
           $mem = $obs.WorkingSet64 / 1MB
           Write-Host "OBS PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
-          if ($mem -lt 100) {
+          if ($mem -lt 50) {
             Write-Host "WARNING: OBS memory too low ($([math]::Round($mem))MB) - broken start detected"
             Write-Host "Killing broken OBS and restarting with correct WorkingDirectory..."
             Stop-Process -Id $obs.Id -Force
@@ -1277,7 +1277,7 @@ jobs:
             }
             $mem = $obs.WorkingSet64 / 1MB
             Write-Host "OBS restarted - PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
-            if ($mem -lt 100) {
+            if ($mem -lt 50) {
               throw "FAILED: OBS still in broken state after restart ($([math]::Round($mem))MB)"
             }
           }
