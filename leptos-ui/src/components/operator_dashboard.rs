@@ -305,21 +305,33 @@ fn EndpointGroups() -> impl IntoView {
                         view! { <div class="empty-state">"No delivery endpoints"</div> }.into_any()
                     } else {
                         delivery_eps.into_iter().map(|ep| {
-                            let delay_class = if ep.chunk_delay_secs < 30.0 {
+                            let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
+                            let card_class = if is_pending {
+                                "endpoint-card delivery pending"
+                            } else {
+                                "endpoint-card delivery"
+                            };
+                            let delay_class = if is_pending {
+                                "delay-metric"
+                            } else if ep.chunk_delay_secs < 30.0 {
                                 "delay-metric green"
                             } else if ep.chunk_delay_secs < 120.0 {
                                 "delay-metric yellow"
                             } else {
                                 "delay-metric red"
                             };
-                            let status_class = if ep.alive {
+                            let status_class = if is_pending {
+                                "status-indicator pending"
+                            } else if ep.alive {
                                 "status-indicator alive"
                             } else if ep.stall_count >= 3 {
                                 "status-indicator stalled"
                             } else {
                                 "status-indicator dead"
                             };
-                            let status_text = if ep.alive {
+                            let status_text = if is_pending {
+                                "Initializing..."
+                            } else if ep.alive {
                                 "Alive"
                             } else if ep.stall_count >= 3 {
                                 "Stalled"
@@ -334,23 +346,41 @@ fn EndpointGroups() -> impl IntoView {
                             let last_error = ep.last_error.clone();
                             let ffmpeg_restart_count = ep.ffmpeg_restart_count;
                             view! {
-                                <div class="endpoint-card delivery">
+                                <div class={card_class}>
                                     <div class="endpoint-header">
                                         <span class="endpoint-alias">{alias}</span>
                                     </div>
                                     <div class="endpoint-metrics">
                                         <span class={status_class}>{status_text}</span>
-                                        <span class={delay_class}>{format!("{delay:.0}s delay")}</span>
-                                        <span class="chunks-metric">{format!("{chunks} chunks")}</span>
-                                        <span class="bytes-metric">{api::format_bytes(bytes)}</span>
+                                        {if is_pending {
+                                            view! {
+                                                <span class={delay_class}>{"— delay"}</span>
+                                                <span class="chunks-metric">{"—"}</span>
+                                                <span class="bytes-metric">{"—"}</span>
+                                            }.into_any()
+                                        } else {
+                                            view! {
+                                                <span class={delay_class}>{format!("{delay:.0}s delay")}</span>
+                                                <span class="chunks-metric">{format!("{chunks} chunks")}</span>
+                                                <span class="bytes-metric">{api::format_bytes(bytes)}</span>
+                                            }.into_any()
+                                        }}
                                     </div>
-                                    {stall_reason.map(|reason| {
-                                        view! { <div class="stall-info">{format!("Stall: {reason}")}</div> }
-                                    })}
-                                    {last_error.map(|err| {
-                                        view! { <div class="error-info">{err}</div> }
-                                    })}
-                                    {if ffmpeg_restart_count > 0 {
+                                    {if !is_pending {
+                                        stall_reason.map(|reason| {
+                                            view! { <div class="stall-info">{format!("Stall: {reason}")}</div> }
+                                        })
+                                    } else {
+                                        None
+                                    }}
+                                    {if !is_pending {
+                                        last_error.map(|err| {
+                                            view! { <div class="error-info">{err}</div> }
+                                        })
+                                    } else {
+                                        None
+                                    }}
+                                    {if !is_pending && ffmpeg_restart_count > 0 {
                                         Some(view! { <div class="restart-info">{format!("ffmpeg restarts: {ffmpeg_restart_count}")}</div> })
                                     } else {
                                         None

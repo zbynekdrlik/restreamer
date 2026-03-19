@@ -636,6 +636,20 @@ pub async fn get_chunks_for_event(
         .collect())
 }
 
+/// Count chunks that have been sent to S3 for a specific streaming event.
+pub async fn get_sent_chunk_count_for_event(
+    pool: &SqlitePool,
+    streaming_event_id: i64,
+) -> Result<i64> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) as cnt FROM chunk_records WHERE streaming_event_id = ?1 AND sent = 1",
+    )
+    .bind(streaming_event_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get::<i32, _>("cnt") as i64)
+}
+
 pub async fn delete_all_chunks(pool: &SqlitePool) -> Result<u64> {
     let result = sqlx::query("DELETE FROM chunk_records")
         .execute(pool)

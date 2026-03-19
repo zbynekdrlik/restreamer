@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 use tracing::info;
 
 use rs_core::db;
-use rs_core::models::WsEvent;
+use rs_core::models::{DeliveryEndpointMetrics, WsEvent};
 
 use crate::state::AppState;
 
@@ -115,27 +115,53 @@ async fn delivery_broadcast_loop(
         };
 
         match orch.poll_delivery_metrics(event.id).await {
-            Ok((name, status, server_ip, endpoint_count, endpoints)) => {
+            Ok((name, status, server_ip, _endpoint_count, endpoints)) => {
+                // Supplement empty endpoints with configured placeholders
+                let (final_endpoints, final_ep_count) = if endpoints.is_empty() {
+                    let configured = db::get_event_endpoints(&pool, event.id)
+                        .await
+                        .unwrap_or_default();
+                    let placeholders: Vec<DeliveryEndpointMetrics> = configured
+                        .iter()
+                        .map(|ep| DeliveryEndpointMetrics {
+                            alias: ep.alias.clone(),
+                            alive: false,
+                            current_chunk_id: 0,
+                            bytes_processed_total: 0,
+                            chunks_processed: 0,
+                            chunk_delay_secs: 0.0,
+                            stall_reason: None,
+                            ffmpeg_restart_count: 0,
+                            last_error: None,
+                        })
+                        .collect();
+                    let count = placeholders.len() as u32;
+                    (placeholders, count)
+                } else {
+                    let count = endpoints.len() as u32;
+                    (endpoints.clone(), count)
+                };
+
                 // Cache for instant HTTP retrieval
                 if let Ok(mut c) = cached.write() {
                     *c = state::CachedDeliveryStatus {
                         instance_name: name.clone(),
                         status: status.clone(),
                         server_ip: server_ip.clone(),
-                        endpoint_count,
-                        endpoints: endpoints.clone(),
+                        endpoint_count: final_ep_count,
+                        endpoints: final_endpoints.clone(),
                     };
                 }
                 let _ = ws_tx.send(WsEvent::DeliveryStatus {
                     instance_name: name,
                     status,
                     server_ip,
-                    endpoint_count,
-                    endpoints: endpoints.clone(),
+                    endpoint_count: final_ep_count,
+                    endpoints: final_endpoints.clone(),
                 });
 
                 // Compute and broadcast PipelineState
-                let any_alive = endpoints.iter().any(|m| m.alive);
+                let any_alive = final_endpoints.iter().any(|m| m.alive);
                 let state_str = if any_alive { "streaming" } else { "buffering" };
 
                 let target_delay = event
@@ -143,21 +169,33 @@ async fn delivery_broadcast_loop(
                     .map(|s| s as u64)
                     .unwrap_or(config.delivery.delivery_delay_secs);
 
-                let current_delay = endpoints
-                    .iter()
-                    .filter(|m| m.chunk_delay_secs > 0.0)
-                    .map(|m| m.chunk_delay_secs)
-                    .fold(f64::MAX, f64::min);
-                let current_delay = if current_delay == f64::MAX {
-                    0.0
+                // Compute buffer: local S3 count if VPS not yet responding, else real VPS delay
+                let (current_delay, buffer_progress) = if endpoints.is_empty() {
+                    // VPS not responding — use local S3 buffer as progress indicator
+                    let sent = db::get_sent_chunk_count_for_event(&pool, event.id)
+                        .await
+                        .unwrap_or(0);
+                    let chunk_dur = config.inpoint.chunk_duration_ms as f64 / 1000.0;
+                    let local_buf = sent as f64 * chunk_dur;
+                    let progress = if target_delay > 0 {
+                        (local_buf / target_delay as f64).min(1.0)
+                    } else {
+                        0.0
+                    };
+                    (local_buf, progress)
                 } else {
-                    current_delay
-                };
-
-                let buffer_progress = if target_delay > 0 {
-                    (current_delay / target_delay as f64).min(1.0)
-                } else {
-                    1.0
+                    let delay = final_endpoints
+                        .iter()
+                        .filter(|m| m.chunk_delay_secs > 0.0)
+                        .map(|m| m.chunk_delay_secs)
+                        .fold(f64::MAX, f64::min);
+                    let delay = if delay == f64::MAX { 0.0 } else { delay };
+                    let progress = if target_delay > 0 {
+                        (delay / target_delay as f64).min(1.0)
+                    } else {
+                        1.0
+                    };
+                    (delay, progress)
                 };
 
                 // Emit restoration event if recovering from prediction
@@ -191,7 +229,7 @@ async fn delivery_broadcast_loop(
                 });
 
                 // Emit ActivityFeed for endpoint state transitions
-                for ep in &endpoints {
+                for ep in &final_endpoints {
                     let was_alive = prev_alive.get(&ep.alias).copied().unwrap_or(false);
                     if ep.alive && !was_alive {
                         let _ = ws_tx.send(WsEvent::ActivityFeed {

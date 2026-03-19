@@ -739,6 +739,41 @@ async fn sequence_numbers_are_contiguous_with_many_events() {
 }
 
 #[tokio::test]
+async fn get_sent_chunk_count_for_event_works() {
+    let pool = setup_db().await;
+    let evt1 = upsert_streaming_event(&pool, "evt-1").await.unwrap();
+    let evt2 = upsert_streaming_event(&pool, "evt-2").await.unwrap();
+
+    // No chunks — count is 0
+    let count = get_sent_chunk_count_for_event(&pool, evt1).await.unwrap();
+    assert_eq!(count, 0);
+
+    // Insert 3 chunks for evt1, mark 2 as sent
+    let c1 = insert_chunk(&pool, evt1, "/tmp/s1.bin", 100, "md5a")
+        .await
+        .unwrap();
+    let c2 = insert_chunk(&pool, evt1, "/tmp/s2.bin", 100, "md5b")
+        .await
+        .unwrap();
+    let _c3 = insert_chunk(&pool, evt1, "/tmp/s3.bin", 100, "md5c")
+        .await
+        .unwrap();
+
+    set_chunk_sent(&pool, c1).await.unwrap();
+    set_chunk_sent(&pool, c2).await.unwrap();
+
+    let count = get_sent_chunk_count_for_event(&pool, evt1).await.unwrap();
+    assert_eq!(count, 2);
+
+    // evt2 should have 0 sent chunks
+    let _c4 = insert_chunk(&pool, evt2, "/tmp/s4.bin", 100, "md5d")
+        .await
+        .unwrap();
+    let count2 = get_sent_chunk_count_for_event(&pool, evt2).await.unwrap();
+    assert_eq!(count2, 0);
+}
+
+#[tokio::test]
 async fn get_latest_chunk_id_for_event_works() {
     let pool = setup_db().await;
     let event_id = upsert_streaming_event(&pool, "evt-latest").await.unwrap();

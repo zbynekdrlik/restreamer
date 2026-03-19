@@ -1062,6 +1062,21 @@ input[type="password"]:focus {
   border-radius: 8px;
 }
 
+.endpoint-card.pending {
+  opacity: 0.5;
+  border-left-style: dashed;
+}
+
+.status-indicator.pending {
+  background: rgba(160, 160, 160, 0.2);
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 11px;
+  animation: pulse 2s ease-in-out infinite;
+}
+
 .monitor-badge {
   font-size: 16px;
 }

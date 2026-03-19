@@ -658,6 +658,175 @@ test.describe("Predictive Buffer State", () => {
   });
 });
 
+// --- Pending Endpoint State ---
+
+test.describe("Pending Endpoint State", () => {
+  test("pending endpoints show Initializing... with pending CSS class", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast DeliveryStatus with placeholder endpoints (alive=false, chunks=0, delay=0)
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "rs-delivery-1",
+          status: "creating",
+          server_ip: null,
+          endpoint_count: 2,
+          endpoints: [
+            {
+              alias: "YouTube Main",
+              alive: false,
+              current_chunk_id: 0,
+              bytes_processed_total: 0,
+              chunks_processed: 0,
+              chunk_delay_secs: 0.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+            },
+            {
+              alias: "Facebook Page",
+              alive: false,
+              current_chunk_id: 0,
+              bytes_processed_total: 0,
+              chunks_processed: 0,
+              chunk_delay_secs: 0.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+            },
+          ],
+        },
+      },
+    });
+
+    // Endpoint cards should appear with pending class
+    const pendingCards = page.locator(".endpoint-card.pending");
+    await expect(pendingCards).toHaveCount(2, { timeout: 5000 });
+    // Should show "Initializing..." text
+    const cardTexts = await pendingCards.allTextContents();
+    const allText = cardTexts.join(" ");
+    expect(allText).toContain("Initializing...");
+    // Status indicator should have pending class
+    await expect(
+      page.locator(".status-indicator.pending").first(),
+    ).toBeVisible();
+  });
+
+  test("pending endpoints transition to alive state", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Start with pending endpoints
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "rs-delivery-1",
+          status: "creating",
+          server_ip: null,
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "YouTube Main",
+              alive: false,
+              current_chunk_id: 0,
+              bytes_processed_total: 0,
+              chunks_processed: 0,
+              chunk_delay_secs: 0.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+            },
+          ],
+        },
+      },
+    });
+    await expect(page.locator(".endpoint-card.pending")).toHaveCount(1, {
+      timeout: 5000,
+    });
+
+    // Transition to alive
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "rs-delivery-1",
+          status: "running",
+          server_ip: "1.2.3.4",
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "YouTube Main",
+              alive: true,
+              current_chunk_id: 42,
+              bytes_processed_total: 1048576,
+              chunks_processed: 100,
+              chunk_delay_secs: 45.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+            },
+          ],
+        },
+      },
+    });
+
+    // Pending class should be gone
+    await expect(page.locator(".endpoint-card.pending")).toHaveCount(0, {
+      timeout: 5000,
+    });
+    // Should show Alive status
+    await expect(page.locator(".status-indicator.alive")).toBeVisible();
+    // Should show real metrics
+    await expect(page.locator(".endpoint-card.delivery")).toContainText(
+      "45s delay",
+    );
+  });
+
+  test("pending endpoints show placeholder metrics", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "rs-delivery-1",
+          status: "creating",
+          server_ip: null,
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "YouTube Main",
+              alive: false,
+              current_chunk_id: 0,
+              bytes_processed_total: 0,
+              chunks_processed: 0,
+              chunk_delay_secs: 0.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+            },
+          ],
+        },
+      },
+    });
+
+    const card = page.locator(".endpoint-card.pending").first();
+    await expect(card).toBeVisible({ timeout: 5000 });
+    // Pending card should show dash placeholders instead of "0s delay" / "0 chunks"
+    const text = await card.textContent();
+    expect(text).toContain("—");
+    expect(text).not.toContain("0s delay");
+    expect(text).not.toContain("0 chunks");
+  });
+});
+
 // --- Navigation ---
 
 test.describe("Navigation", () => {
