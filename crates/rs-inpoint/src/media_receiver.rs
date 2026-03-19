@@ -63,6 +63,7 @@ impl MediaReceiver {
                         // Subscribe to the stream and process frames
                         self.process_stream(&identifier, &mut frame_processor).await;
                         info!("Stream processing ended for: {identifier}");
+                        self.inpoint_state.set_connected(false);
                     }
                     BroadcastEvent::UnPublish { identifier } => {
                         info!("Stream unpublished: {identifier}");
