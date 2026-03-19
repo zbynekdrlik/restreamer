@@ -76,8 +76,16 @@ fn ControlBar() -> impl IntoView {
     let session_duration = move || {
         let ps = store.pipeline_state.get();
         if let Some(ref start) = ps.session_start {
-            // Simple display of session start time
-            start.clone()
+            let start_ms = js_sys::Date::parse(start);
+            if start_ms.is_nan() {
+                return "--:--:--".to_string();
+            }
+            let now_ms = js_sys::Date::now();
+            let elapsed_secs = ((now_ms - start_ms) / 1000.0).max(0.0) as u64;
+            let h = elapsed_secs / 3600;
+            let m = (elapsed_secs % 3600) / 60;
+            let s = elapsed_secs % 60;
+            format!("{h:02}:{m:02}:{s:02}")
         } else {
             "--:--:--".to_string()
         }
@@ -255,44 +263,53 @@ fn EndpointGroups() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
 
     let has_endpoints = move || !store.delivery.get().endpoints.is_empty();
+    let has_monitor_eps = move || {
+        store.delivery.get().endpoints.iter()
+            .any(|ep| ep.chunk_delay_secs < 10.0 && ep.alive)
+    };
 
     view! {
-        <div class="endpoint-groups" style:display=move || if has_endpoints() { "grid" } else { "none" }>
-            <div class="endpoint-group">
-                <h3 class="group-title">"Monitor Endpoints"</h3>
-                {move || {
-                    let delivery = store.delivery.get();
-                    let monitor_eps: Vec<_> = delivery.endpoints.iter()
-                        .filter(|ep| ep.chunk_delay_secs < 10.0 && ep.alive)
-                        .cloned()
-                        .collect();
-                    if monitor_eps.is_empty() {
-                        view! { <div class="empty-state">"No monitor endpoints"</div> }.into_any()
-                    } else {
-                        monitor_eps.into_iter().map(|ep| {
-                            let alias = ep.alias.clone();
-                            let alive = ep.alive;
-                            let delay = ep.chunk_delay_secs;
-                            let chunks = ep.chunks_processed;
-                            view! {
-                                <div class="endpoint-card monitor">
-                                    <div class="endpoint-header">
-                                        <span class="monitor-badge">{"\u{26A1}"}</span>
-                                        <span class="endpoint-alias">{alias}</span>
-                                    </div>
-                                    <div class="endpoint-metrics">
-                                        <span class={if alive { "status-indicator alive" } else { "status-indicator dead" }}>
-                                            {if alive { "Alive" } else { "Dead" }}
-                                        </span>
-                                        <span class="delay-metric">{format!("{delay:.1}s delay")}</span>
-                                        <span class="chunks-metric">{format!("{chunks} chunks")}</span>
-                                    </div>
-                                </div>
-                            }
-                        }).collect::<Vec<_>>().into_any()
-                    }
-                }}
-            </div>
+        <div class="endpoint-groups" style:display=move || if has_endpoints() { "grid" } else { "none" }
+             style:grid-template-columns=move || if has_monitor_eps() { "1fr 1fr" } else { "1fr" }>
+            {move || {
+                if has_monitor_eps() {
+                    Some(view! {
+                        <div class="endpoint-group">
+                            <h3 class="group-title">"Monitor Endpoints"</h3>
+                            {move || {
+                                let delivery = store.delivery.get();
+                                let monitor_eps: Vec<_> = delivery.endpoints.iter()
+                                    .filter(|ep| ep.chunk_delay_secs < 10.0 && ep.alive)
+                                    .cloned()
+                                    .collect();
+                                monitor_eps.into_iter().map(|ep| {
+                                    let alias = ep.alias.clone();
+                                    let alive = ep.alive;
+                                    let delay = ep.chunk_delay_secs;
+                                    let chunks = ep.chunks_processed;
+                                    view! {
+                                        <div class="endpoint-card monitor">
+                                            <div class="endpoint-header">
+                                                <span class="monitor-badge">{"\u{26A1}"}</span>
+                                                <span class="endpoint-alias">{alias}</span>
+                                            </div>
+                                            <div class="endpoint-metrics">
+                                                <span class={if alive { "status-indicator alive" } else { "status-indicator dead" }}>
+                                                    {if alive { "Alive" } else { "Dead" }}
+                                                </span>
+                                                <span class="delay-metric">{format!("{delay:.1}s delay")}</span>
+                                                <span class="chunks-metric">{format!("{chunks} chunks")}</span>
+                                            </div>
+                                        </div>
+                                    }
+                                }).collect::<Vec<_>>()
+                            }}
+                        </div>
+                    })
+                } else {
+                    None
+                }
+            }}
             <div class="endpoint-group">
                 <h3 class="group-title">"Delivery Endpoints"</h3>
                 {move || {

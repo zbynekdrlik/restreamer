@@ -139,6 +139,43 @@ async fn get_first_chunk_id_for_event_works() {
 }
 
 #[tokio::test]
+async fn delete_chunks_for_event_works() {
+    let pool = setup_db().await;
+    let evt1 = upsert_streaming_event(&pool, "evt-1").await.unwrap();
+    let evt2 = upsert_streaming_event(&pool, "evt-2").await.unwrap();
+
+    // Insert chunks for both events
+    for i in 0..3 {
+        insert_chunk(&pool, evt1, &format!("/tmp/e1c{i}.bin"), 100, "md5")
+            .await
+            .unwrap();
+    }
+    for i in 0..2 {
+        insert_chunk(&pool, evt2, &format!("/tmp/e2c{i}.bin"), 200, "md5")
+            .await
+            .unwrap();
+    }
+
+    // Delete only evt1 chunks
+    let deleted = delete_chunks_for_event(&pool, evt1).await.unwrap();
+    assert_eq!(deleted, 3);
+
+    // evt1 should have 0 chunks
+    let count1 = get_sent_chunk_count_for_event(&pool, evt1).await.unwrap();
+    let chunks1 = get_chunks_for_event(&pool, evt1).await.unwrap();
+    assert_eq!(count1, 0);
+    assert!(chunks1.is_empty());
+
+    // evt2 should still have its chunks
+    let chunks2 = get_chunks_for_event(&pool, evt2).await.unwrap();
+    assert_eq!(chunks2.len(), 2);
+
+    // Deleting again should return 0
+    let deleted_again = delete_chunks_for_event(&pool, evt1).await.unwrap();
+    assert_eq!(deleted_again, 0);
+}
+
+#[tokio::test]
 async fn delete_all_chunks_works() {
     let pool = setup_db().await;
     let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();

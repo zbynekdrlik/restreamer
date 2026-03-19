@@ -74,6 +74,9 @@ async fn delivery_broadcast_loop(
     let mut last_state_str = String::from("idle");
     let mut was_predicted = false;
 
+    // Track session start time for display in dashboard
+    let mut session_start_time: Option<String> = None;
+
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -110,9 +113,15 @@ async fn delivery_broadcast_loop(
                 // Reset prediction state when not delivering
                 last_success_time = None;
                 was_predicted = false;
+                session_start_time = None;
                 continue;
             }
         };
+
+        // Initialize session start time on first delivering tick
+        if session_start_time.is_none() {
+            session_start_time = Some(chrono::Utc::now().to_rfc3339());
+        }
 
         match orch.poll_delivery_metrics(event.id).await {
             Ok((name, status, server_ip, _endpoint_count, endpoints)) => {
@@ -224,7 +233,7 @@ async fn delivery_broadcast_loop(
                     buffer_progress,
                     target_delay_secs: target_delay,
                     current_delay_secs: current_delay,
-                    session_start: None,
+                    session_start: session_start_time.clone(),
                     predicted: false,
                 });
 
@@ -272,7 +281,7 @@ async fn delivery_broadcast_loop(
                         buffer_progress: predicted_progress,
                         target_delay_secs: last_target_delay,
                         current_delay_secs: predicted_delay,
-                        session_start: None,
+                        session_start: session_start_time.clone(),
                         predicted: true,
                     });
                     // Emit disconnect notice once (within first poll after failure)

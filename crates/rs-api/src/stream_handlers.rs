@@ -46,6 +46,14 @@ pub async fn start_stream(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    // Clear stale chunks from prior sessions so buffer starts at 0%
+    let deleted = db::delete_chunks_for_event(&state.pool, id)
+        .await
+        .unwrap_or(0);
+    if deleted > 0 {
+        tracing::info!("Cleared {deleted} stale chunks for event {id}");
+    }
+
     // Broadcast WS event
     if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
         action: "start_stream".to_string(),
@@ -141,7 +149,7 @@ pub async fn start_stream(
                     buffer_progress: 0.0,
                     target_delay_secs: target_delay,
                     current_delay_secs: 0.0,
-                    session_start: None,
+                    session_start: Some(chrono::Utc::now().to_rfc3339()),
                     predicted: false,
                 });
             }
