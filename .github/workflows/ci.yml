@@ -1224,6 +1224,10 @@ jobs:
       - name: Ensure OBS is running
         shell: powershell
         run: |
+          # Clear crash sentinel files so OBS doesn't show crash dialog on cold start
+          Remove-Item "$env:APPDATA\obs-studio\.sentinel\*" -Force -Recurse -ErrorAction SilentlyContinue
+          Write-Host "Cleared OBS crash sentinel files"
+
           $obs = Get-Process obs64 -ErrorAction SilentlyContinue
           if (-not $obs) {
             Write-Host "OBS not running, registering scheduled task with correct WorkingDirectory..."
@@ -2204,12 +2208,82 @@ jobs:
         shell: powershell
         run: |
           $obs = Get-Process obs64 -ErrorAction SilentlyContinue
-          if ($obs) {
-            Stop-Process -Name obs64 -Force
-            Write-Host "OBS process stopped (PID: $($obs.Id))"
-          } else {
+          if (-not $obs) {
             Write-Host "OBS was not running"
+            exit 0
           }
+
+          # Try graceful exit via OBS WebSocket to avoid crash-on-next-start
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(5000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMsg($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(5000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Recv-OBSMsg($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(5000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            $hello = Recv-OBSMsg $ws
+            $authRequired = $hello.d.authentication
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMsg $ws $identify
+            $identified = Recv-OBSMsg $ws
+
+            # Send ExitOBS request for graceful shutdown
+            $exitObs = @{
+              op = 6
+              d = @{
+                requestType = "ExitOBS"
+                requestId = "exit-cleanup-1"
+              }
+            } | ConvertTo-Json -Depth 5
+            Send-OBSMsg $ws $exitObs
+            Write-Host "Sent ExitOBS command, waiting for graceful shutdown..."
+            Start-Sleep -Seconds 10
+
+            $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+            if (-not $obs) {
+              Write-Host "OBS exited gracefully"
+              exit 0
+            }
+          } catch {
+            Write-Host "WebSocket graceful exit failed: $_"
+          }
+
+          # Fallback: force kill
+          Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+          Write-Host "OBS force-killed (PID: $($obs.Id))"
+          # Clear sentinel files so next OBS start doesn't show crash dialog
+          Remove-Item "$env:APPDATA\obs-studio\.sentinel\*" -Force -Recurse -ErrorAction SilentlyContinue
+          Write-Host "Cleared OBS crash sentinel files"
 
       - name: Verify production config is intact
         if: always()
