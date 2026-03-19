@@ -305,6 +305,38 @@ async fn event_endpoint_attachment() {
 }
 
 #[tokio::test]
+async fn get_event_endpoints_filters_disabled() {
+    let pool = setup_db().await;
+
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
+    let ep1 = create_endpoint_config(&pool, "YouTube", "YT_HLS", "key1", false)
+        .await
+        .unwrap();
+    let ep2 = create_endpoint_config(&pool, "Facebook", "FB", "key2", false)
+        .await
+        .unwrap();
+
+    attach_endpoint_to_event(&pool, event_id, ep1)
+        .await
+        .unwrap();
+    attach_endpoint_to_event(&pool, event_id, ep2)
+        .await
+        .unwrap();
+
+    // Both enabled — should return 2
+    let eps = get_event_endpoints(&pool, event_id).await.unwrap();
+    assert_eq!(eps.len(), 2);
+
+    // Disable ep2 — should only return ep1
+    update_endpoint_config(&pool, ep2, "Facebook", "FB", "key2", false, false)
+        .await
+        .unwrap();
+    let eps = get_event_endpoints(&pool, event_id).await.unwrap();
+    assert_eq!(eps.len(), 1);
+    assert_eq!(eps[0].alias, "YouTube");
+}
+
+#[tokio::test]
 async fn event_endpoint_cascade_on_event_delete() {
     let pool = setup_db().await;
 

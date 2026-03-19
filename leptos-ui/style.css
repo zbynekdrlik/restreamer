@@ -916,6 +916,10 @@ input[type="password"]:focus {
   background: #e9456033;
   color: var(--error);
 }
+.state-badge.buffer_exhausted {
+  background: #dc354533;
+  color: var(--error);
+}
 
 .session-timer {
   font-family: monospace;
@@ -1001,6 +1005,22 @@ input[type="password"]:focus {
   background: var(--accent);
   border-radius: 4px;
   transition: width 0.5s ease;
+}
+.cache-bar-fill.predicted {
+  background: var(--warning);
+  animation: pulse-bar 1.5s ease-in-out infinite;
+}
+.cache-bar-fill.exhausted {
+  background: var(--error);
+}
+@keyframes pulse-bar {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 
 .cache-bar-label {

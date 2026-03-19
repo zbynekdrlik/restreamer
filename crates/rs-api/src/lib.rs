@@ -65,6 +65,15 @@ async fn delivery_broadcast_loop(
     // Track previous endpoint alive state for ActivityFeed transitions
     let mut prev_alive: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
 
+    // Track last-known state for predictive buffer drain
+    let mut last_success_time: Option<std::time::Instant> = None;
+    let mut last_delay_secs: f64 = 0.0;
+    let mut last_target_delay: u64 = 0;
+    let mut last_event_id: Option<i64> = None;
+    let mut last_event_name: Option<String> = None;
+    let mut last_state_str = String::from("idle");
+    let mut was_predicted = false;
+
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -95,8 +104,12 @@ async fn delivery_broadcast_loop(
                     target_delay_secs: 0,
                     current_delay_secs: 0.0,
                     session_start: None,
+                    predicted: false,
                 });
                 prev_alive.clear();
+                // Reset prediction state when not delivering
+                last_success_time = None;
+                was_predicted = false;
                 continue;
             }
         };
@@ -147,6 +160,25 @@ async fn delivery_broadcast_loop(
                     1.0
                 };
 
+                // Emit restoration event if recovering from prediction
+                if was_predicted {
+                    let _ = ws_tx.send(WsEvent::ActivityFeed {
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        severity: "info".to_string(),
+                        message: "Delivery VPS connection restored".to_string(),
+                        source: "delivery".to_string(),
+                    });
+                    was_predicted = false;
+                }
+
+                // Save last-known state for predictive drain
+                last_success_time = Some(std::time::Instant::now());
+                last_delay_secs = current_delay;
+                last_target_delay = target_delay;
+                last_event_id = Some(event.id);
+                last_event_name = Some(event.name.clone());
+                last_state_str = state_str.to_string();
+
                 let _ = ws_tx.send(WsEvent::PipelineState {
                     state: state_str.to_string(),
                     event_id: Some(event.id),
@@ -155,6 +187,7 @@ async fn delivery_broadcast_loop(
                     target_delay_secs: target_delay,
                     current_delay_secs: current_delay,
                     session_start: None,
+                    predicted: false,
                 });
 
                 // Emit ActivityFeed for endpoint state transitions
@@ -181,6 +214,43 @@ async fn delivery_broadcast_loop(
             }
             Err(e) => {
                 tracing::debug!("Delivery metrics poll failed: {e}");
+                if let Some(last_time) = last_success_time {
+                    let elapsed = last_time.elapsed().as_secs_f64();
+                    let predicted_delay = (last_delay_secs - elapsed).max(0.0);
+                    let predicted_progress = if last_target_delay > 0 {
+                        (predicted_delay / last_target_delay as f64).min(1.0)
+                    } else {
+                        0.0
+                    };
+                    let predicted_state = if predicted_delay <= 0.0 {
+                        "buffer_exhausted"
+                    } else {
+                        &last_state_str
+                    };
+                    let _ = ws_tx.send(WsEvent::PipelineState {
+                        state: predicted_state.to_string(),
+                        event_id: last_event_id,
+                        event_name: last_event_name.clone(),
+                        buffer_progress: predicted_progress,
+                        target_delay_secs: last_target_delay,
+                        current_delay_secs: predicted_delay,
+                        session_start: None,
+                        predicted: true,
+                    });
+                    // Emit disconnect notice once (within first poll after failure)
+                    if elapsed < 3.0 {
+                        let _ = ws_tx.send(WsEvent::ActivityFeed {
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            severity: "warning".to_string(),
+                            message: format!(
+                                "Delivery VPS unreachable — predicted buffer: {:.0}s",
+                                predicted_delay
+                            ),
+                            source: "delivery".to_string(),
+                        });
+                    }
+                    was_predicted = true;
+                }
             }
         }
     }

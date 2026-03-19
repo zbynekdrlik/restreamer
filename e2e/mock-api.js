@@ -198,6 +198,7 @@ app.post("/api/v1/events/:id/start-stream", (req, res) => {
       target_delay_secs: 120,
       current_delay_secs: 0.0,
       session_start: null,
+      predicted: false,
     },
   });
 
@@ -229,6 +230,7 @@ app.post("/api/v1/events/:id/stop-stream", (req, res) => {
         target_delay_secs: 0,
         current_delay_secs: 0.0,
         session_start: null,
+        predicted: false,
       },
     });
 
