@@ -1224,9 +1224,10 @@ jobs:
       - name: Ensure OBS is running
         shell: powershell
         run: |
-          # Clear crash sentinel files so OBS doesn't show crash dialog on cold start
+          # Clear crash sentinel and browser LOCK files so OBS starts cleanly after force-kill
           Remove-Item "$env:APPDATA\obs-studio\.sentinel\*" -Force -Recurse -ErrorAction SilentlyContinue
-          Write-Host "Cleared OBS crash sentinel files"
+          Get-ChildItem -Path "$env:APPDATA\obs-studio" -Filter "LOCK" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleared OBS crash sentinel and browser LOCK files"
 
           $obs = Get-Process obs64 -ErrorAction SilentlyContinue
           if (-not $obs) {
@@ -1308,7 +1309,26 @@ jobs:
             Start-Sleep -Seconds 5
           }
           if (-not $wsReady) {
-            throw "FAILED: OBS WebSocket not reachable after 60s"
+            Write-Host "OBS WebSocket not reachable — killing OBS, cleaning up, and retrying..."
+            Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            Remove-Item "$env:APPDATA\obs-studio\.sentinel\*" -Force -Recurse -ErrorAction SilentlyContinue
+            Get-ChildItem -Path "$env:APPDATA\obs-studio" -Filter "LOCK" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+            schtasks.exe /run /tn "Start OBS Studio"
+            Start-Sleep -Seconds 20
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            try {
+              $tcp.ConnectAsync($env:OBS_WS_HOST, [int]$env:OBS_WS_PORT).Wait(5000) | Out-Null
+              if ($tcp.Connected) {
+                $tcp.Close()
+                Write-Host "OBS WebSocket ready after retry"
+              } else {
+                $tcp.Close()
+                throw "still not listening"
+              }
+            } catch {
+              throw "FAILED: OBS WebSocket not reachable even after full restart"
+            }
           }
 
       - name: Save original OBS stream settings and switch to Restreamer
@@ -2283,9 +2303,10 @@ jobs:
           # Fallback: force kill
           Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
           Write-Host "OBS force-killed (PID: $($obs.Id))"
-          # Clear sentinel files so next OBS start doesn't show crash dialog
+          # Clear sentinel and browser LOCK files so next OBS start doesn't show crash dialog
           Remove-Item "$env:APPDATA\obs-studio\.sentinel\*" -Force -Recurse -ErrorAction SilentlyContinue
-          Write-Host "Cleared OBS crash sentinel files"
+          Get-ChildItem -Path "$env:APPDATA\obs-studio" -Filter "LOCK" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleared OBS crash sentinel and browser LOCK files"
 
       - name: Verify production config is intact
         if: always()
