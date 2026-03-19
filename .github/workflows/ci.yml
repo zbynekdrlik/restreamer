@@ -1288,22 +1288,24 @@ jobs:
           Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
 
           # Wait for OBS WebSocket server to be ready (cold starts need time)
+          # Use TCP connection test - simpler and more reliable than full WebSocket handshake
           $wsReady = $false
           for ($wsAttempt = 1; $wsAttempt -le 12; $wsAttempt++) {
             try {
-              $testWs = New-Object System.Net.WebSockets.ClientWebSocket
-              $testUri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
-              $testCts = New-Object System.Threading.CancellationTokenSource
-              $testCts.CancelAfter(5000)
-              $testWs.ConnectAsync($testUri, $testCts.Token).GetAwaiter().GetResult()
-              $testWs.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
-              Write-Host "OBS WebSocket ready (attempt $wsAttempt/12)"
-              $wsReady = $true
-              break
+              $tcp = New-Object System.Net.Sockets.TcpClient
+              $tcp.ConnectAsync($env:OBS_WS_HOST, [int]$env:OBS_WS_PORT).Wait(5000) | Out-Null
+              if ($tcp.Connected) {
+                $tcp.Close()
+                Write-Host "OBS WebSocket ready (attempt $wsAttempt/12)"
+                $wsReady = $true
+                break
+              }
+              $tcp.Close()
             } catch {
-              Write-Host "OBS WebSocket not ready yet (attempt $wsAttempt/12), waiting 5s..."
-              Start-Sleep -Seconds 5
+              # ignore
             }
+            Write-Host "OBS WebSocket not ready yet (attempt $wsAttempt/12), waiting 5s..."
+            Start-Sleep -Seconds 5
           }
           if (-not $wsReady) {
             throw "FAILED: OBS WebSocket not reachable after 60s"
