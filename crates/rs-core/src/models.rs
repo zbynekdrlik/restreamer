@@ -154,6 +154,10 @@ pub enum WsEvent {
         session_start: Option<String>,
         #[serde(default)]
         predicted: bool,
+        #[serde(default)]
+        local_buffer_chunks: i64,
+        #[serde(default)]
+        s3_queue_chunks: i64,
     },
 }
 
@@ -307,6 +311,8 @@ mod tests {
                 current_delay_secs: 90.5,
                 session_start: Some("2026-01-01T10:00:00Z".to_string()),
                 predicted: false,
+                local_buffer_chunks: 3,
+                s3_queue_chunks: 15,
             },
         ];
 

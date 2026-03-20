@@ -16,6 +16,7 @@ pub fn OperatorDashboard() -> impl IntoView {
             <ControlBar />
             <PipelineFlow />
             <CacheBar />
+            <ChunkPipeline />
             <EndpointGroups />
             <ActivityFeed />
         </div>
@@ -232,8 +233,12 @@ fn CacheBar() -> impl IntoView {
             "cache-bar-fill exhausted"
         } else if is_predicted() {
             "cache-bar-fill predicted"
+        } else if progress() >= 0.75 {
+            "cache-bar-fill healthy"
+        } else if progress() >= 0.40 {
+            "cache-bar-fill warning"
         } else {
-            "cache-bar-fill"
+            "cache-bar-fill critical"
         }
     };
 
@@ -249,10 +254,51 @@ fn CacheBar() -> impl IntoView {
                     } else if is_predicted() {
                         format!("~{}s / {}s target (predicted — VPS unreachable)", current() as u64, target())
                     } else {
-                        format!("Cache: {}s / {}s target", current() as u64, target())
+                        let zone = if progress() >= 0.75 {
+                            "healthy"
+                        } else if progress() >= 0.40 {
+                            "building"
+                        } else {
+                            "low"
+                        };
+                        format!("Cache: {}s / {}s target ({zone})", current() as u64, target())
                     }
                 }}
             </span>
+        </div>
+    }
+}
+
+/// Chunk pipeline breakdown showing local buffer, S3 queue, and delivered counts.
+#[component]
+fn ChunkPipeline() -> impl IntoView {
+    let store = use_context::<DashboardStore>().expect("DashboardStore");
+
+    let is_visible = move || {
+        let ps = store.pipeline_state.get();
+        ps.state == "buffering" || ps.state == "streaming" || ps.state == "buffer_exhausted"
+    };
+    let local_chunks = move || store.pipeline_state.get().local_buffer_chunks;
+    let s3_queue = move || store.pipeline_state.get().s3_queue_chunks;
+    let delivered = move || {
+        let d = store.delivery.get();
+        d.endpoints.iter().map(|ep| ep.chunks_processed).max().unwrap_or(0)
+    };
+
+    view! {
+        <div class="pipeline-breakdown" style:display=move || if is_visible() { "flex" } else { "none" }>
+            <div class="pipeline-segment local">
+                <span class="segment-count">{local_chunks}</span>
+                <span class="segment-label">"Local"</span>
+            </div>
+            <div class="pipeline-segment s3-queue">
+                <span class="segment-count">{s3_queue}</span>
+                <span class="segment-label">"S3 Queue"</span>
+            </div>
+            <div class="pipeline-segment delivered">
+                <span class="segment-count">{delivered}</span>
+                <span class="segment-label">"Delivered"</span>
+            </div>
         </div>
     }
 }

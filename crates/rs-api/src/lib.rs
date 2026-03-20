@@ -108,6 +108,8 @@ async fn delivery_broadcast_loop(
                     current_delay_secs: 0.0,
                     session_start: None,
                     predicted: false,
+                    local_buffer_chunks: 0,
+                    s3_queue_chunks: 0,
                 });
                 prev_alive.clear();
                 // Reset prediction state when not delivering
@@ -226,6 +228,20 @@ async fn delivery_broadcast_loop(
                 last_event_name = Some(event.name.clone());
                 last_state_str = state_str.to_string();
 
+                // Compute chunk pipeline breakdown
+                let pending_chunks = db::get_pending_chunk_count_for_event(&pool, event.id)
+                    .await
+                    .unwrap_or(0);
+                let sent_chunks = db::get_sent_chunk_count_for_event(&pool, event.id)
+                    .await
+                    .unwrap_or(0);
+                let max_delivery_chunk = final_endpoints
+                    .iter()
+                    .map(|m| m.current_chunk_id)
+                    .max()
+                    .unwrap_or(0);
+                let s3_queue = (sent_chunks - max_delivery_chunk).max(0);
+
                 let _ = ws_tx.send(WsEvent::PipelineState {
                     state: state_str.to_string(),
                     event_id: Some(event.id),
@@ -235,6 +251,8 @@ async fn delivery_broadcast_loop(
                     current_delay_secs: current_delay,
                     session_start: session_start_time.clone(),
                     predicted: false,
+                    local_buffer_chunks: pending_chunks,
+                    s3_queue_chunks: s3_queue,
                 });
 
                 // Emit ActivityFeed for endpoint state transitions
@@ -283,6 +301,8 @@ async fn delivery_broadcast_loop(
                         current_delay_secs: predicted_delay,
                         session_start: session_start_time.clone(),
                         predicted: true,
+                        local_buffer_chunks: 0,
+                        s3_queue_chunks: 0,
                     });
                     // Emit disconnect notice once (within first poll after failure)
                     if elapsed < 3.0 {

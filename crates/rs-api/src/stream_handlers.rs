@@ -151,6 +151,8 @@ pub async fn start_stream(
                     current_delay_secs: 0.0,
                     session_start: Some(chrono::Utc::now().to_rfc3339()),
                     predicted: false,
+                    local_buffer_chunks: 0,
+                    s3_queue_chunks: 0,
                 });
             }
             Err(e) => {

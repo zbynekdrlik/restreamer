@@ -1013,6 +1013,16 @@ input[type="password"]:focus {
 .cache-bar-fill.exhausted {
   background: var(--error);
 }
+.cache-bar-fill.healthy {
+  background: var(--success);
+}
+.cache-bar-fill.warning {
+  background: var(--warning);
+}
+.cache-bar-fill.critical {
+  background: var(--error);
+  animation: pulse-bar 1.5s ease-in-out infinite;
+}
 @keyframes pulse-bar {
   0%,
   100% {
@@ -1026,6 +1036,45 @@ input[type="password"]:focus {
 .cache-bar-label {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* Chunk Pipeline Breakdown */
+.pipeline-breakdown {
+  display: flex;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border-radius: 8px;
+}
+.pipeline-segment {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px;
+  border-radius: 6px;
+  background: var(--bg-secondary);
+}
+.pipeline-segment .segment-count {
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.pipeline-segment .segment-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.pipeline-segment.local .segment-count {
+  color: var(--warning);
+}
+.pipeline-segment.s3-queue .segment-count {
+  color: var(--accent);
+}
+.pipeline-segment.delivered .segment-count {
+  color: var(--success);
 }
 
 /* Endpoint Groups */

@@ -77,6 +77,10 @@ enum WsEvent {
         session_start: Option<String>,
         #[serde(default)]
         predicted: bool,
+        #[serde(default)]
+        local_buffer_chunks: i64,
+        #[serde(default)]
+        s3_queue_chunks: i64,
     },
 }
 
@@ -320,6 +324,8 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
             current_delay_secs,
             session_start,
             predicted,
+            local_buffer_chunks,
+            s3_queue_chunks,
         } => {
             store.pipeline_state.set(crate::store::PipelineState {
                 state,
@@ -330,6 +336,8 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                 current_delay_secs,
                 session_start,
                 predicted,
+                local_buffer_chunks,
+                s3_queue_chunks,
             });
         }
     }

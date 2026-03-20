@@ -653,7 +653,7 @@ test.describe("Predictive Buffer State", () => {
     await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/exhausted/);
     // Label should show normal format
     await expect(page.locator(".cache-bar-label")).toContainText(
-      "Cache: 96s / 120s target",
+      "Cache: 96s / 120s target (healthy)",
     );
   });
 });
@@ -824,6 +824,257 @@ test.describe("Pending Endpoint State", () => {
     expect(text).toContain("—");
     expect(text).not.toContain("0s delay");
     expect(text).not.toContain("0 chunks");
+  });
+});
+
+// --- Cache Bar Health Colors ---
+
+test.describe("Cache Bar Health Colors", () => {
+  test("cache bar shows healthy class when progress >= 75%", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.85,
+          target_delay_secs: 120,
+          current_delay_secs: 102.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 2,
+          s3_queue_chunks: 10,
+        },
+      },
+    });
+
+    const fill = page.locator(".cache-bar-fill");
+    await expect(fill).toHaveClass(/healthy/, { timeout: 5000 });
+    await expect(page.locator(".cache-bar-label")).toContainText("healthy");
+  });
+
+  test("cache bar shows warning class when progress 40-75%", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffering",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.5,
+          target_delay_secs: 120,
+          current_delay_secs: 60.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 5,
+          s3_queue_chunks: 20,
+        },
+      },
+    });
+
+    const fill = page.locator(".cache-bar-fill");
+    await expect(fill).toHaveClass(/warning/, { timeout: 5000 });
+    await expect(page.locator(".cache-bar-label")).toContainText("building");
+  });
+
+  test("cache bar shows critical class when progress < 40%", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffering",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.2,
+          target_delay_secs: 120,
+          current_delay_secs: 24.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 8,
+          s3_queue_chunks: 5,
+        },
+      },
+    });
+
+    const fill = page.locator(".cache-bar-fill");
+    await expect(fill).toHaveClass(/critical/, { timeout: 5000 });
+    await expect(page.locator(".cache-bar-label")).toContainText("low");
+  });
+
+  test("cache bar transitions from critical to healthy as buffer fills", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Start critical
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffering",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.1,
+          target_delay_secs: 120,
+          current_delay_secs: 12.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 10,
+          s3_queue_chunks: 2,
+        },
+      },
+    });
+    await expect(page.locator(".cache-bar-fill")).toHaveClass(/critical/, {
+      timeout: 5000,
+    });
+
+    // Transition to healthy
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.9,
+          target_delay_secs: 120,
+          current_delay_secs: 108.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 1,
+          s3_queue_chunks: 15,
+        },
+      },
+    });
+    await expect(page.locator(".cache-bar-fill")).toHaveClass(/healthy/, {
+      timeout: 5000,
+    });
+    await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/critical/);
+  });
+});
+
+// --- Chunk Pipeline Breakdown ---
+
+test.describe("Chunk Pipeline Breakdown", () => {
+  test("pipeline breakdown shows local, S3 queue, and delivered counts", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast PipelineState with chunk data
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.8,
+          target_delay_secs: 120,
+          current_delay_secs: 96.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 5,
+          s3_queue_chunks: 42,
+        },
+      },
+    });
+
+    // Also broadcast delivery status so delivered count is available
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "rs-delivery-1",
+          status: "running",
+          server_ip: "1.2.3.4",
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "YouTube Main",
+              alive: true,
+              current_chunk_id: 1200,
+              bytes_processed_total: 5000000,
+              chunks_processed: 1203,
+              chunk_delay_secs: 96.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+            },
+          ],
+        },
+      },
+    });
+
+    const breakdown = page.locator(".pipeline-breakdown");
+    await expect(breakdown).toBeVisible({ timeout: 5000 });
+
+    // Check segment labels
+    await expect(
+      page.locator(".pipeline-segment.local .segment-label"),
+    ).toHaveText("Local");
+    await expect(
+      page.locator(".pipeline-segment.s3-queue .segment-label"),
+    ).toHaveText("S3 Queue");
+    await expect(
+      page.locator(".pipeline-segment.delivered .segment-label"),
+    ).toHaveText("Delivered");
+
+    // Check counts
+    await expect(
+      page.locator(".pipeline-segment.local .segment-count"),
+    ).toHaveText("5");
+    await expect(
+      page.locator(".pipeline-segment.s3-queue .segment-count"),
+    ).toHaveText("42");
+    await expect(
+      page.locator(".pipeline-segment.delivered .segment-count"),
+    ).toHaveText("1203");
+  });
+
+  test("pipeline breakdown hidden when idle", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast idle PipelineState
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "idle",
+          event_id: null,
+          event_name: null,
+          buffer_progress: 0.0,
+          target_delay_secs: 0,
+          current_delay_secs: 0.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 0,
+        },
+      },
+    });
+
+    const breakdown = page.locator(".pipeline-breakdown");
+    await expect(breakdown).toBeHidden({ timeout: 5000 });
   });
 });
 
