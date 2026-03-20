@@ -1618,6 +1618,29 @@ jobs:
 
           throw "FAILED: OBS stream did not start after $maxRetries attempts"
 
+      - name: Verify Restreamer RTMP inpoint connected
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # OBS may report "streaming" before the RTMP connection is fully established.
+          # Verify that Restreamer's inpoint actually sees the connection.
+          $maxRetries = 20
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+              $connected = $status.inpoint.details.rtmp_connected
+              if ($connected) {
+                Write-Host "RTMP inpoint connected (attempt ${i}/${maxRetries})"
+                return
+              }
+              Write-Host "RTMP not connected yet (attempt ${i}/${maxRetries}), state=$($status.inpoint.state)"
+            } catch {
+              Write-Host "Status check failed (attempt ${i}/${maxRetries}): $_"
+            }
+            Start-Sleep -Seconds 3
+          }
+          throw "FAILED: Restreamer RTMP inpoint never connected after OBS started streaming"
+
       - name: Wait for chunks and verify upload
         shell: powershell
         timeout-minutes: 3
@@ -1632,7 +1655,13 @@ jobs:
           for ($i = 1; $i -le $maxRetries; $i++) {
             $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
             $newChunks = $stats.total_chunks - $initialCount
-            Write-Host "Attempt ${i}/${maxRetries}: new_chunks=$newChunks, pending=$($stats.pending_chunks)"
+            # Log inpoint state periodically for diagnostics
+            if ($i % 5 -eq 1 -or $newChunks -gt 0) {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+              Write-Host "Attempt ${i}/${maxRetries}: new_chunks=$newChunks, pending=$($stats.pending_chunks), rtmp=$($status.inpoint.details.rtmp_connected), event_active=$($status.streaming_event.receiving_activated)"
+            } else {
+              Write-Host "Attempt ${i}/${maxRetries}: new_chunks=$newChunks, pending=$($stats.pending_chunks)"
+            }
 
             if ($newChunks -ge 8 -and $stats.pending_chunks -eq 0) {
               Write-Host "=== Chunks verified: $newChunks new chunks, 0 pending ==="
@@ -1641,10 +1670,13 @@ jobs:
             Start-Sleep -Seconds 3
           }
 
+          # Final diagnostics before failing
           $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
           $newChunks = $stats.total_chunks - $initialCount
+          Write-Host "Final state: new_chunks=$newChunks, rtmp=$($status.inpoint.details.rtmp_connected), event=$($status.streaming_event.name), active=$($status.streaming_event.receiving_activated)"
           if ($newChunks -lt 8) {
-            throw "FAILED: Only $newChunks new chunks created (need >= 8)"
+            throw "FAILED: Only $newChunks new chunks created (need >= 8). RTMP connected: $($status.inpoint.details.rtmp_connected)"
           }
           if ($stats.pending_chunks -gt 0) {
             throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload"
