@@ -1,5 +1,6 @@
 //! Operator-facing single-page dashboard.
 
+use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -73,7 +74,15 @@ fn ControlBar() -> impl IntoView {
         s == "streaming" || s == "buffering" || s == "buffer_exhausted"
     };
 
+    // 1-second tick signal to force session_duration re-evaluation every second
+    let tick = RwSignal::new(0u32);
+    let _interval = Interval::new(1_000, move || {
+        tick.update(|t| *t = t.wrapping_add(1));
+    });
+    std::mem::forget(_interval);
+
     let session_duration = move || {
+        let _ = tick.get(); // subscribe to 1s tick
         let ps = store.pipeline_state.get();
         if let Some(ref start) = ps.session_start {
             let start_ms = js_sys::Date::parse(start);

@@ -364,6 +364,7 @@ impl DeliveryOrchestrator {
             "event_identifier": event_name,
             "start_chunk_id": start_chunk_id,
             "delivery_delay_chunks": delivery_delay_chunks,
+            "chunk_duration_ms": chunk_duration_ms,
         });
 
         let resp = client

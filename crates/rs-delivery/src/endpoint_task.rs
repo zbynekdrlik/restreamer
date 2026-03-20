@@ -120,6 +120,7 @@ impl EndpointHandle {
         event_identifier: String,
         start_chunk_id: i64,
         delivery_delay_chunks: i64,
+        chunk_duration_ms: u64,
     ) -> Self {
         let (stop_tx, stop_rx) = watch::channel(false);
         let stats: Stats = Arc::new(Mutex::new(EndpointStats {
@@ -157,6 +158,7 @@ impl EndpointHandle {
             ep_cfg,
             start_chunk_id,
             effective_delay,
+            chunk_duration_ms,
             stop_rx,
             stats.clone(),
         ));
@@ -190,6 +192,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     ep_cfg: EndpointConfig,
     start_chunk_id: i64,
     delivery_delay_chunks: i64,
+    chunk_duration_ms: u64,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
 ) {
@@ -230,6 +233,8 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     };
 
     let mut chunk_id = start_chunk_id;
+    let playback_start = tokio::time::Instant::now();
+    let base_chunk_id = chunk_id;
     let mut proc: Option<Box<dyn OutputProcess>> = None;
     let mut consecutive_ffmpeg_failures: u32 = 0;
     let mut consecutive_chunk_misses: u32 = 0;
@@ -370,8 +375,15 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
 
                 chunk_id += 1;
-                // Small delay to match real-time playback
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // Time-anchored pacing: consume chunks at exactly real-time rate
+                // to preserve the buffer gap between inpoint production and delivery consumption.
+                let chunks_done = (chunk_id - base_chunk_id) as u64;
+                let expected_elapsed =
+                    std::time::Duration::from_millis(chunks_done * chunk_duration_ms);
+                let actual_elapsed = playback_start.elapsed();
+                if expected_elapsed > actual_elapsed {
+                    tokio::time::sleep(expected_elapsed - actual_elapsed).await;
+                }
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;
@@ -594,12 +606,23 @@ mod tests {
 
         let stats_clone = stats.clone();
         let handle = tokio::spawn(async move {
-            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+            endpoint_loop(
+                fetcher,
+                factory,
+                test_ep_cfg(),
+                1,
+                0,
+                1000,
+                stop_rx,
+                stats_clone,
+            )
+            .await;
         });
 
         // Let the loop process chunks — advance time past chunk processing
-        for _ in 0..10 {
-            tokio::time::advance(std::time::Duration::from_millis(200)).await;
+        // With 1000ms chunk_duration_ms, 5 chunks need ~5s
+        for _ in 0..12 {
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
             tokio::task::yield_now().await;
         }
 
@@ -628,7 +651,17 @@ mod tests {
 
         let stats_clone = stats.clone();
         let handle = tokio::spawn(async move {
-            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+            endpoint_loop(
+                fetcher,
+                factory,
+                test_ep_cfg(),
+                1,
+                0,
+                1000,
+                stop_rx,
+                stats_clone,
+            )
+            .await;
         });
 
         // Advance a bit, then stop
@@ -655,7 +688,17 @@ mod tests {
 
         let stats_clone = stats.clone();
         let handle = tokio::spawn(async move {
-            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+            endpoint_loop(
+                fetcher,
+                factory,
+                test_ep_cfg(),
+                1,
+                0,
+                1000,
+                stop_rx,
+                stats_clone,
+            )
+            .await;
         });
 
         // Process time for chunks + restart delays
@@ -700,7 +743,17 @@ mod tests {
 
         let stats_clone = stats.clone();
         let handle = tokio::spawn(async move {
-            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+            endpoint_loop(
+                fetcher,
+                factory,
+                test_ep_cfg(),
+                1,
+                0,
+                1000,
+                stop_rx,
+                stats_clone,
+            )
+            .await;
         });
 
         for _ in 0..30 {
@@ -732,7 +785,17 @@ mod tests {
 
         let stats_clone = stats.clone();
         let handle = tokio::spawn(async move {
-            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+            endpoint_loop(
+                fetcher,
+                factory,
+                test_ep_cfg(),
+                1,
+                0,
+                1000,
+                stop_rx,
+                stats_clone,
+            )
+            .await;
         });
 
         // Process chunk 1, then accumulate misses for chunk 2
@@ -768,7 +831,17 @@ mod tests {
 
         let stats_clone = stats.clone();
         let handle = tokio::spawn(async move {
-            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+            endpoint_loop(
+                fetcher,
+                factory,
+                test_ep_cfg(),
+                1,
+                0,
+                1000,
+                stop_rx,
+                stats_clone,
+            )
+            .await;
         });
 
         for _ in 0..15 {
@@ -798,7 +871,17 @@ mod tests {
 
         let stats_clone = stats.clone();
         let handle = tokio::spawn(async move {
-            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+            endpoint_loop(
+                fetcher,
+                factory,
+                test_ep_cfg(),
+                1,
+                0,
+                1000,
+                stop_rx,
+                stats_clone,
+            )
+            .await;
         });
 
         // Let it attempt MAX_FFMPEG_RESTARTS spawns (5s each) then enter cooldown
@@ -840,7 +923,17 @@ mod tests {
 
         let stats_clone = stats.clone();
         let handle = tokio::spawn(async move {
-            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+            endpoint_loop(
+                fetcher,
+                factory,
+                test_ep_cfg(),
+                1,
+                0,
+                1000,
+                stop_rx,
+                stats_clone,
+            )
+            .await;
         });
 
         // Process chunks 1-15 fast, then wait for miss timeout (~120s at 2s each)
@@ -880,7 +973,17 @@ mod tests {
 
         let stats_clone = stats.clone();
         let handle = tokio::spawn(async move {
-            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+            endpoint_loop(
+                fetcher,
+                factory,
+                test_ep_cfg(),
+                1,
+                0,
+                1000,
+                stop_rx,
+                stats_clone,
+            )
+            .await;
         });
 
         // Process 15 chunks then wait for MAX_CHUNK_MISS_COUNT misses
@@ -916,7 +1019,17 @@ mod tests {
 
         let stats_clone = stats.clone();
         let handle = tokio::spawn(async move {
-            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+            endpoint_loop(
+                fetcher,
+                factory,
+                test_ep_cfg(),
+                1,
+                0,
+                1000,
+                stop_rx,
+                stats_clone,
+            )
+            .await;
         });
 
         // Advance past the write timeout
@@ -955,12 +1068,22 @@ mod tests {
 
         let stats_clone = stats.clone();
         let handle = tokio::spawn(async move {
-            endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+            endpoint_loop(
+                fetcher,
+                factory,
+                test_ep_cfg(),
+                1,
+                0,
+                1000,
+                stop_rx,
+                stats_clone,
+            )
+            .await;
         });
 
-        // Advance time to process all 100 chunks (100ms per chunk + overhead)
-        for _ in 0..150 {
-            tokio::time::advance(std::time::Duration::from_millis(200)).await;
+        // Advance time to process all 100 chunks (1000ms per chunk + overhead)
+        for _ in 0..120 {
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
             tokio::task::yield_now().await;
         }
 
