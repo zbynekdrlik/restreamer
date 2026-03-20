@@ -4,6 +4,10 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{Mutex, broadcast};
 use tracing::info;
 
+/// Maximum buffer size before a forced flush (50 MB).
+/// Prevents unbounded memory growth if chunk duration is long or streaming stalls.
+const MAX_BUFFER_SIZE: usize = 50 * 1024 * 1024;
+
 /// Receives pre-muxed MPEG-TS data and produces time-based chunk files.
 ///
 /// Chunks are accumulated for `chunk_duration` and then flushed to disk
@@ -95,13 +99,22 @@ impl ChunkSink {
             // Buffer the pre-muxed MPEG-TS data directly
             inner.buffer.extend_from_slice(data);
 
-            // Check if chunk duration has elapsed
-            if let Some(start) = inner.chunk_start {
-                if start.elapsed() >= inner.chunk_duration {
-                    Self::extract_chunk(&mut inner)
-                } else {
-                    None
-                }
+            // Force-flush if buffer exceeds max size to prevent memory exhaustion
+            let duration_elapsed = inner
+                .chunk_start
+                .map(|s| s.elapsed() >= inner.chunk_duration)
+                .unwrap_or(false);
+            let buffer_exceeded = inner.buffer.len() >= MAX_BUFFER_SIZE;
+
+            if buffer_exceeded {
+                tracing::warn!(
+                    "Chunk buffer exceeded {}MB limit, force-flushing",
+                    MAX_BUFFER_SIZE / (1024 * 1024)
+                );
+            }
+
+            if duration_elapsed || buffer_exceeded {
+                Self::extract_chunk(&mut inner)
             } else {
                 None
             }
@@ -327,5 +340,13 @@ mod tests {
         let file_data = std::fs::read(&chunk.path).unwrap();
         assert_eq!(file_data[0], 0x47);
         assert_eq!(file_data[188], 0x47);
+    }
+
+    #[test]
+    fn max_buffer_size_constant_is_reasonable() {
+        // 50 MB — large enough for normal chunks, small enough to prevent OOM
+        assert_eq!(MAX_BUFFER_SIZE, 50 * 1024 * 1024);
+        assert!(MAX_BUFFER_SIZE > 1024 * 1024); // at least 1MB
+        assert!(MAX_BUFFER_SIZE <= 100 * 1024 * 1024); // at most 100MB
     }
 }

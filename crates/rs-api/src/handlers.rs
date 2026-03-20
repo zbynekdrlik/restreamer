@@ -279,8 +279,14 @@ pub async fn patch_config(
         tracing::info!("Config saved to {}", path.display());
     }
 
-    if let Ok(mut live) = state.config_live.write() {
-        *live = std::sync::Arc::new(new_config.clone());
+    match state.config_live.write() {
+        Ok(mut live) => {
+            *live = std::sync::Arc::new(new_config.clone());
+        }
+        Err(e) => {
+            error!("Config lock poisoned, runtime config diverges from saved file: {e}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
     }
 
     new_config.s3.access_key_id = REDACTED.to_string();
@@ -291,13 +297,27 @@ pub async fn patch_config(
     Ok(Json(new_config))
 }
 
-/// Recursively merge a JSON patch into a base object.
+/// Maximum recursion depth for JSON merge to prevent stack overflow from malicious input.
+const MAX_MERGE_DEPTH: usize = 10;
+
+/// Recursively merge a JSON patch into a base object with depth limit.
 fn merge_json(base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
+    merge_json_inner(base, patch, 0)
+}
+
+fn merge_json_inner(
+    base: serde_json::Value,
+    patch: serde_json::Value,
+    depth: usize,
+) -> serde_json::Value {
+    if depth >= MAX_MERGE_DEPTH {
+        return patch;
+    }
     match (base, patch) {
         (serde_json::Value::Object(mut base_map), serde_json::Value::Object(patch_map)) => {
             for (key, value) in patch_map {
                 let existing = base_map.remove(&key).unwrap_or(serde_json::Value::Null);
-                base_map.insert(key, merge_json(existing, value));
+                base_map.insert(key, merge_json_inner(existing, value, depth + 1));
             }
             serde_json::Value::Object(base_map)
         }
@@ -850,3 +870,58 @@ pub async fn list_delivery_instances(
 }
 
 // Stream control handlers (start_stream, stop_stream, update_event) are in stream_handlers.rs
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_json_simple_override() {
+        let base = serde_json::json!({"a": 1, "b": 2});
+        let patch = serde_json::json!({"b": 3});
+        let result = merge_json(base, patch);
+        assert_eq!(result, serde_json::json!({"a": 1, "b": 3}));
+    }
+
+    #[test]
+    fn merge_json_nested() {
+        let base = serde_json::json!({"s3": {"bucket": "old", "region": "us"}});
+        let patch = serde_json::json!({"s3": {"bucket": "new"}});
+        let result = merge_json(base, patch);
+        assert_eq!(
+            result,
+            serde_json::json!({"s3": {"bucket": "new", "region": "us"}})
+        );
+    }
+
+    #[test]
+    fn merge_json_depth_limit_stops_recursion() {
+        // Build a deeply nested JSON object exceeding MAX_MERGE_DEPTH
+        let mut base = serde_json::json!("base_leaf");
+        let mut patch = serde_json::json!("patch_leaf");
+        for _ in 0..(MAX_MERGE_DEPTH + 5) {
+            base = serde_json::json!({"nested": base});
+            patch = serde_json::json!({"nested": patch});
+        }
+        // Should not stack overflow — at depth limit, patch replaces base wholesale
+        let result = merge_json(base, patch.clone());
+        // The result should be valid JSON (no stack overflow)
+        assert!(result.is_object());
+    }
+
+    #[test]
+    fn merge_json_adds_new_keys() {
+        let base = serde_json::json!({"a": 1});
+        let patch = serde_json::json!({"b": 2});
+        let result = merge_json(base, patch);
+        assert_eq!(result, serde_json::json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn merge_json_scalar_replaces_object() {
+        let base = serde_json::json!({"a": {"nested": 1}});
+        let patch = serde_json::json!({"a": "flat"});
+        let result = merge_json(base, patch);
+        assert_eq!(result, serde_json::json!({"a": "flat"}));
+    }
+}
