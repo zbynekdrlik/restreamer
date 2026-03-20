@@ -1858,7 +1858,7 @@ jobs:
       - name: Verify YouTube is receiving stream data
         id: verify_yt_receiving
         shell: powershell
-        timeout-minutes: 4
+        timeout-minutes: 7
         run: |
           # Hard-fail check: Query the local Rust YouTube API to verify
           # YouTube's ingest server IS receiving stream data.
@@ -1867,7 +1867,11 @@ jobs:
           # Auto-start is BANNED (YouTube destroys the stream afterward), so
           # the broadcast stays in "testing" state — we check liveStreams.list
           # for streamStatus == "active" which means data IS arriving.
-          $maxRetries = 12
+          #
+          # With real-time chunk pacing (1 chunk/sec), the delivery VPS needs
+          # ~120s to fill the buffer before sending to YouTube, plus YouTube
+          # needs ~30-60s to detect the incoming stream. 20 retries × 15s = 300s.
+          $maxRetries = 20
           $retryDelay = 15
 
           for ($i = 1; $i -le $maxRetries; $i++) {
