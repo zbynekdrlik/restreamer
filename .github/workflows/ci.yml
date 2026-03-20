@@ -1290,6 +1290,93 @@ jobs:
           }
           Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
 
+      - name: Stop stale OBS stream
+        shell: powershell
+        run: |
+          # Deploy restarts Restreamer, dropping any active OBS RTMP connection.
+          # OBS enters a broken stream state and won't reconnect cleanly.
+          # Stop the stream now so StartStream later makes a fresh connection.
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          $hello = Receive-OBSMessage $ws
+          $authRequired = $hello.d.authentication
+          if ($authRequired) {
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+            $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+            $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+          } else {
+            $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+          }
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+
+          # Check if streaming, stop if so
+          $getStatus = @{
+            op = 6
+            d = @{
+              requestType = "GetStreamStatus"
+              requestId = "pre-stop-check"
+            }
+          } | ConvertTo-Json -Depth 5
+          Send-OBSMessage $ws $getStatus
+
+          $statusResp = $null
+          for ($r = 0; $r -lt 5; $r++) {
+            $msg = Receive-OBSMessage $ws
+            if ($msg.op -eq 7) { $statusResp = $msg; break }
+          }
+
+          if ($statusResp -and $statusResp.d.responseData.outputActive) {
+            Write-Host "OBS is currently streaming (stale from before deploy). Stopping..."
+            $stopStream = @{
+              op = 6
+              d = @{
+                requestType = "StopStream"
+                requestId = "pre-stop-1"
+              }
+            } | ConvertTo-Json -Depth 5
+            Send-OBSMessage $ws $stopStream
+            # Read response
+            for ($r = 0; $r -lt 5; $r++) {
+              $msg = Receive-OBSMessage $ws
+              if ($msg.op -eq 7) { break }
+            }
+            Write-Host "Stale OBS stream stopped. Will start fresh after setup."
+            Start-Sleep -Seconds 3
+          } else {
+            Write-Host "OBS is not streaming. Clean state."
+          }
+
+          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
       - name: Save original OBS stream settings and switch to Restreamer
         id: obs-setup
         shell: powershell
