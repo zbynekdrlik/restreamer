@@ -103,9 +103,9 @@ test.describe("Operator Dashboard", () => {
     const labels = await page.locator(".pipeline-label").allTextContents();
     expect(labels).toContain("OBS");
     expect(labels).toContain("RTMP");
-    expect(labels).toContain("Chunker");
-    expect(labels).toContain("S3 Upload");
-    expect(labels).toContain("VPS");
+    expect(labels).toContain("Local Buffer");
+    expect(labels).toContain("S3 Queue");
+    expect(labels).toContain("Delivery");
   });
 
   test("pipeline nodes show status dots", async ({ page }) => {
@@ -970,16 +970,16 @@ test.describe("Cache Bar Health Colors", () => {
   });
 });
 
-// --- Chunk Pipeline Breakdown ---
+// --- Pipeline Node Data ---
 
-test.describe("Chunk Pipeline Breakdown", () => {
-  test("pipeline breakdown shows local, S3 queue, and delivered counts", async ({
+test.describe("Pipeline Node Data", () => {
+  test("pipeline shows local buffer and S3 queue counts when delivering", async ({
     page,
   }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    // Broadcast PipelineState with chunk data
+    // Broadcast PipelineState with chunk pipeline data
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -1024,57 +1024,35 @@ test.describe("Chunk Pipeline Breakdown", () => {
       },
     });
 
-    const breakdown = page.locator(".pipeline-breakdown");
-    await expect(breakdown).toBeVisible({ timeout: 5000 });
-
-    // Check segment labels
-    await expect(
-      page.locator(".pipeline-segment.local .segment-label"),
-    ).toHaveText("Local");
-    await expect(
-      page.locator(".pipeline-segment.s3-queue .segment-label"),
-    ).toHaveText("S3 Queue");
-    await expect(
-      page.locator(".pipeline-segment.delivered .segment-label"),
-    ).toHaveText("Delivered");
-
-    // Check counts
-    await expect(
-      page.locator(".pipeline-segment.local .segment-count"),
-    ).toHaveText("5");
-    await expect(
-      page.locator(".pipeline-segment.s3-queue .segment-count"),
-    ).toHaveText("42");
-    await expect(
-      page.locator(".pipeline-segment.delivered .segment-count"),
-    ).toHaveText("1203");
+    // Pipeline nodes should show the chunk pipeline data
+    const metrics = page.locator(".pipeline-metric");
+    await expect(metrics.nth(2)).toHaveText("5 chunks", { timeout: 5000 });
+    await expect(metrics.nth(3)).toHaveText("42 queued");
+    await expect(metrics.nth(4)).toContainText("1203 delivered");
   });
 
-  test("pipeline breakdown hidden when idle", async ({ page }) => {
+  test("pipeline shows chunk stats when idle (not delivering)", async ({
+    page,
+  }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    // Broadcast idle PipelineState
+    // Broadcast chunk stats via EndpointStatus (idle, no delivery)
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
-        type: "PipelineState",
+        type: "EndpointStatus",
         data: {
-          state: "idle",
-          event_id: null,
-          event_name: null,
-          buffer_progress: 0.0,
-          target_delay_secs: 0,
-          current_delay_secs: 0.0,
-          session_start: null,
-          predicted: false,
-          local_buffer_chunks: 0,
-          s3_queue_chunks: 0,
+          state: "uploading",
+          pending_chunks: 8,
+          active_uploads: 1,
+          buffer_duration: "00:00:30",
         },
       },
     });
 
-    const breakdown = page.locator(".pipeline-breakdown");
-    await expect(breakdown).toBeHidden({ timeout: 5000 });
+    // Local Buffer should show pending_chunks from chunk_stats when idle
+    const metrics = page.locator(".pipeline-metric");
+    await expect(metrics.nth(2)).toHaveText("8 chunks", { timeout: 5000 });
   });
 });
 
