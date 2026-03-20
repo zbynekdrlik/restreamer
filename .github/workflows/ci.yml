@@ -1622,24 +1622,87 @@ jobs:
         shell: powershell
         timeout-minutes: 2
         run: |
-          # OBS may report "streaming" before the RTMP connection is fully established.
-          # Verify that Restreamer's inpoint actually sees the connection.
-          $maxRetries = 20
-          for ($i = 1; $i -le $maxRetries; $i++) {
+          # OBS may report "streaming" but if Restreamer was restarted (e.g. by
+          # Configure Hetzner step), OBS's RTMP connection was dropped and OBS
+          # doesn't auto-reconnect. Detect this and restart the OBS stream.
+          function Get-RTMPConnected {
             try {
-              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
-              $connected = $status.inpoint.details.rtmp_connected
-              if ($connected) {
-                Write-Host "RTMP inpoint connected (attempt ${i}/${maxRetries})"
-                return
-              }
-              Write-Host "RTMP not connected yet (attempt ${i}/${maxRetries}), state=$($status.inpoint.state)"
-            } catch {
-              Write-Host "Status check failed (attempt ${i}/${maxRetries}): $_"
+              $s = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+              return $s.inpoint.details.rtmp_connected -eq $true
+            } catch { return $false }
+          }
+
+          function Send-OBSRequest($requestType, $requestId) {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function WS-Send($ws, $msg) {
+              $b = [System.Text.Encoding]::UTF8.GetBytes($msg)
+              $seg = [ArraySegment[byte]]::new($b, 0, $b.Length)
+              $c = New-Object System.Threading.CancellationTokenSource; $c.CancelAfter(10000)
+              $ws.SendAsync($seg, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $c.Token).GetAwaiter().GetResult()
             }
+            function WS-Recv($ws) {
+              $buf = New-Object byte[] 65536; $r = ""
+              do {
+                $seg = [ArraySegment[byte]]::new($buf, 0, $buf.Length)
+                $c = New-Object System.Threading.CancellationTokenSource; $c.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($seg, $c.Token).GetAwaiter().GetResult()
+                $r += [System.Text.Encoding]::UTF8.GetString($buf, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $r | ConvertFrom-Json
+            }
+
+            $hello = WS-Recv $ws
+            $auth = $hello.d.authentication
+            if ($auth) {
+              $sha = [System.Security.Cryptography.SHA256]::Create()
+              $ph = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $auth.salt)))
+              $ah = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($ph + $auth.challenge)))
+              WS-Send $ws (@{ op = 1; d = @{ rpcVersion = 1; authentication = $ah } } | ConvertTo-Json -Depth 5)
+            } else {
+              WS-Send $ws (@{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5)
+            }
+            $null = WS-Recv $ws
+
+            WS-Send $ws (@{ op = 6; d = @{ requestType = $requestType; requestId = $requestId } } | ConvertTo-Json -Depth 5)
+            for ($r = 0; $r -lt 5; $r++) {
+              $msg = WS-Recv $ws
+              if ($msg.op -eq 7) { break }
+            }
+            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          }
+
+          # First check: wait up to 10s for RTMP to connect naturally
+          for ($i = 1; $i -le 4; $i++) {
+            if (Get-RTMPConnected) {
+              Write-Host "RTMP inpoint connected on first check (attempt $i)"
+              return
+            }
+            Write-Host "RTMP not connected (attempt $i/4), waiting..."
             Start-Sleep -Seconds 3
           }
-          throw "FAILED: Restreamer RTMP inpoint never connected after OBS started streaming"
+
+          # OBS stream may be stale from before Restreamer restart — cycle it
+          Write-Host "RTMP not connected after 12s — restarting OBS stream..."
+          try { Send-OBSRequest "StopStream" "rtmp-fix-stop" } catch { Write-Host "StopStream: $_" }
+          Start-Sleep -Seconds 3
+          try { Send-OBSRequest "StartStream" "rtmp-fix-start" } catch { Write-Host "StartStream: $_" }
+          Start-Sleep -Seconds 5
+
+          # Final check: wait up to 30s after stream restart
+          for ($i = 1; $i -le 10; $i++) {
+            if (Get-RTMPConnected) {
+              Write-Host "RTMP inpoint connected after stream restart (attempt $i)"
+              return
+            }
+            Write-Host "RTMP still not connected (attempt $i/10), waiting..."
+            Start-Sleep -Seconds 3
+          }
+          throw "FAILED: Restreamer RTMP inpoint never connected after OBS stream restart"
 
       - name: Wait for chunks and verify upload
         shell: powershell
