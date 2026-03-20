@@ -14,8 +14,10 @@ use crate::s3::S3Client;
 /// Maximum retry attempts per batch cycle for transient S3 failures.
 /// Failed chunks are automatically retried in subsequent batch cycles.
 const MAX_RETRIES: u32 = 10;
-/// Delay between retries (flat 3-second interval per spec).
-const RETRY_DELAY: Duration = Duration::from_secs(3);
+/// Base delay for exponential backoff between retries.
+const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
+/// Maximum delay cap for exponential backoff.
+const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
 /// Watches for unsent chunks and uploads them to S3.
 /// No manager notification needed — delivery VPS probes S3 directly.
@@ -134,11 +136,14 @@ impl ChunkUploader {
                         }
                         Err(e) => {
                             if attempt + 1 < MAX_RETRIES {
+                                let delay = RETRY_BASE_DELAY
+                                    .saturating_mul(1 << attempt.min(5))
+                                    .min(RETRY_MAX_DELAY);
                                 warn!(
-                                    "S3 upload failed for chunk {} (attempt {}/{}): {e}, retrying in {}s",
-                                    chunk.id, attempt + 1, MAX_RETRIES, RETRY_DELAY.as_secs()
+                                    "S3 upload failed for chunk {} (attempt {}/{}): {e}, retrying in {:.0}s",
+                                    chunk.id, attempt + 1, MAX_RETRIES, delay.as_secs_f64()
                                 );
-                                tokio::time::sleep(RETRY_DELAY).await;
+                                tokio::time::sleep(delay).await;
                             } else {
                                 warn!(
                                     "S3 upload failed for chunk {} after {MAX_RETRIES} attempts: {e}",
@@ -259,6 +264,18 @@ mod tests {
     #[test]
     fn retry_constants_are_valid() {
         assert!(MAX_RETRIES > 0);
-        assert!(RETRY_DELAY.as_secs() > 0);
+        assert!(RETRY_BASE_DELAY.as_secs() > 0);
+        assert!(RETRY_MAX_DELAY >= RETRY_BASE_DELAY);
+    }
+
+    #[test]
+    fn exponential_backoff_delays_are_bounded() {
+        for attempt in 0..MAX_RETRIES {
+            let delay = RETRY_BASE_DELAY
+                .saturating_mul(1 << attempt.min(5))
+                .min(RETRY_MAX_DELAY);
+            assert!(delay >= RETRY_BASE_DELAY);
+            assert!(delay <= RETRY_MAX_DELAY);
+        }
     }
 }

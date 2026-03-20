@@ -167,10 +167,8 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
             ..
         } => {
             store.inpoint_connected.set(rtmp_connected);
-            // Update chunk stats with live received data
             store.chunk_stats.update(|stats| {
-                // received_bytes comes from the total on the event
-                let _ = received_bytes;
+                stats.total_bytes = received_bytes as i64;
                 stats.total_chunks = chunk_count as i64;
             });
         }

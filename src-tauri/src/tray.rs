@@ -306,7 +306,8 @@ fn derive_tray_state(status: &TrayStatus, inpoint_connected: bool) -> TrayState 
                     TrayState::Receiving
                 }
             } else {
-                TrayState::Ready
+                // RTMP disconnected while event expects receiving — show idle, not ready
+                TrayState::Idle
             }
         }
         "Paused" => TrayState::Ready,
@@ -477,12 +478,12 @@ mod tests {
     }
 
     #[test]
-    fn derive_state_receiving_not_connected_is_ready() {
+    fn derive_state_receiving_not_connected_is_idle() {
         let status = TrayStatus {
             inpoint: "Receiving".to_string(),
             ..TrayStatus::default()
         };
-        assert_eq!(derive_tray_state(&status, false), TrayState::Ready);
+        assert_eq!(derive_tray_state(&status, false), TrayState::Idle);
     }
 
     #[test]
