@@ -1193,48 +1193,39 @@ jobs:
           if (-not $config.hetzner) {
             $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue @{}
           }
-          # Check if config already has the correct Hetzner token
-          $needsRestart = $true
-          if ($config.hetzner -and $config.hetzner.api_token -eq $env:HETZNER_API_TOKEN) {
-            Write-Host "Hetzner token already configured, skipping restart"
-            $needsRestart = $false
-          } else {
-            $config.hetzner = @{
-              api_token = $env:HETZNER_API_TOKEN
-              location = "fsn1"
-              default_server_type = "cx22"
-              snapshot_label = "rs-delivery"
-              ssh_key_name = "restreamer-ci"
-            }
-            $json = $config | ConvertTo-Json -Depth 5
-            [System.IO.File]::WriteAllText($configPath, $json)
-            Write-Host "Config file updated with Hetzner settings"
+          $config.hetzner = @{
+            api_token = $env:HETZNER_API_TOKEN
+            location = "fsn1"
+            default_server_type = "cx22"
+            snapshot_label = "rs-delivery"
+            ssh_key_name = "restreamer-ci"
           }
+          $json = $config | ConvertTo-Json -Depth 5
+          [System.IO.File]::WriteAllText($configPath, $json)
+          Write-Host "Config file updated with Hetzner settings"
 
-          if ($needsRestart) {
-            # Restart Restreamer via scheduled task to pick up new config
-            Write-Host "Restarting Restreamer via scheduled task..."
-            $TaskName = "RestreamerGUI"
-            $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-            Start-Sleep -Seconds 3
-            schtasks.exe /run /tn $TaskName
-            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
-            Start-Sleep -Seconds 10
+          # Restart Restreamer via scheduled task to pick up new config
+          Write-Host "Restarting Restreamer via scheduled task..."
+          $TaskName = "RestreamerGUI"
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
+          Start-Sleep -Seconds 3
+          schtasks.exe /run /tn $TaskName
+          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+          Start-Sleep -Seconds 10
 
-            # Verify Restreamer is back up
-            $maxRetries = 15
-            for ($i = 1; $i -le $maxRetries; $i++) {
-              try {
-                $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
-                Write-Host "Restreamer restarted with Hetzner API token configured"
-                return
-              } catch {
-                Write-Host "Waiting for Restreamer restart (attempt $i/$maxRetries)..."
-                Start-Sleep -Seconds 3
-              }
+          # Verify Restreamer is back up
+          $maxRetries = 15
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
+              Write-Host "Restreamer restarted with Hetzner API token configured"
+              return
+            } catch {
+              Write-Host "Waiting for Restreamer restart (attempt $i/$maxRetries)..."
+              Start-Sleep -Seconds 3
             }
-            throw "FAILED: Restreamer did not restart after config update"
           }
+          throw "FAILED: Restreamer did not restart after config update"
 
       - name: Seed YouTube OAuth tokens
         shell: powershell
@@ -1289,93 +1280,6 @@ jobs:
             throw "FAILED: OBS in broken state ($([math]::Round($mem))MB) - please restart OBS manually on stream.lan"
           }
           Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
-
-      - name: Stop stale OBS stream
-        shell: powershell
-        run: |
-          # Deploy restarts Restreamer, dropping any active OBS RTMP connection.
-          # OBS enters a broken stream state and won't reconnect cleanly.
-          # Stop the stream now so StartStream later makes a fresh connection.
-          $ws = New-Object System.Net.WebSockets.ClientWebSocket
-          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
-          $cts = New-Object System.Threading.CancellationTokenSource
-          $cts.CancelAfter(10000)
-          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
-
-          function Send-OBSMessage($ws, $message) {
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
-            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
-            $cts2 = New-Object System.Threading.CancellationTokenSource
-            $cts2.CancelAfter(10000)
-            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
-          }
-
-          function Receive-OBSMessage($ws) {
-            $buffer = New-Object byte[] 65536
-            $result = ""
-            do {
-              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
-              $cts3 = New-Object System.Threading.CancellationTokenSource
-              $cts3.CancelAfter(10000)
-              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
-              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
-            } while (-not $recv.EndOfMessage)
-            return $result | ConvertFrom-Json
-          }
-
-          $hello = Receive-OBSMessage $ws
-          $authRequired = $hello.d.authentication
-          if ($authRequired) {
-            $sha256 = [System.Security.Cryptography.SHA256]::Create()
-            $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
-            $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
-            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
-            $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
-            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
-          } else {
-            $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
-          }
-          Send-OBSMessage $ws $identify
-          $identified = Receive-OBSMessage $ws
-
-          # Check if streaming, stop if so
-          $getStatus = @{
-            op = 6
-            d = @{
-              requestType = "GetStreamStatus"
-              requestId = "pre-stop-check"
-            }
-          } | ConvertTo-Json -Depth 5
-          Send-OBSMessage $ws $getStatus
-
-          $statusResp = $null
-          for ($r = 0; $r -lt 5; $r++) {
-            $msg = Receive-OBSMessage $ws
-            if ($msg.op -eq 7) { $statusResp = $msg; break }
-          }
-
-          if ($statusResp -and $statusResp.d.responseData.outputActive) {
-            Write-Host "OBS is currently streaming (stale from before deploy). Stopping..."
-            $stopStream = @{
-              op = 6
-              d = @{
-                requestType = "StopStream"
-                requestId = "pre-stop-1"
-              }
-            } | ConvertTo-Json -Depth 5
-            Send-OBSMessage $ws $stopStream
-            # Read response
-            for ($r = 0; $r -lt 5; $r++) {
-              $msg = Receive-OBSMessage $ws
-              if ($msg.op -eq 7) { break }
-            }
-            Write-Host "Stale OBS stream stopped. Will start fresh after setup."
-            Start-Sleep -Seconds 3
-          } else {
-            Write-Host "OBS is not streaming. Clean state."
-          }
-
-          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
 
       - name: Save original OBS stream settings and switch to Restreamer
         id: obs-setup
@@ -1714,27 +1618,6 @@ jobs:
 
           throw "FAILED: OBS stream did not start after $maxRetries attempts"
 
-      - name: Verify Restreamer RTMP inpoint connected
-        shell: powershell
-        timeout-minutes: 2
-        run: |
-          # Verify Restreamer sees the OBS RTMP connection
-          $maxRetries = 20
-          for ($i = 1; $i -le $maxRetries; $i++) {
-            try {
-              $s = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
-              if ($s.inpoint.details.rtmp_connected) {
-                Write-Host "RTMP inpoint connected (attempt $i/$maxRetries)"
-                return
-              }
-              Write-Host "RTMP not connected (attempt $i/$maxRetries), state=$($s.inpoint.state)"
-            } catch {
-              Write-Host "Status check failed (attempt $i/$maxRetries): $_"
-            }
-            Start-Sleep -Seconds 3
-          }
-          throw "FAILED: Restreamer RTMP inpoint not connected. OBS may need manual restart on stream.lan."
-
       - name: Wait for chunks and verify upload
         shell: powershell
         timeout-minutes: 3
@@ -1749,13 +1632,7 @@ jobs:
           for ($i = 1; $i -le $maxRetries; $i++) {
             $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
             $newChunks = $stats.total_chunks - $initialCount
-            # Log inpoint state periodically for diagnostics
-            if ($i % 5 -eq 1 -or $newChunks -gt 0) {
-              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
-              Write-Host "Attempt ${i}/${maxRetries}: new_chunks=$newChunks, pending=$($stats.pending_chunks), rtmp=$($status.inpoint.details.rtmp_connected), event_active=$($status.streaming_event.receiving_activated)"
-            } else {
-              Write-Host "Attempt ${i}/${maxRetries}: new_chunks=$newChunks, pending=$($stats.pending_chunks)"
-            }
+            Write-Host "Attempt ${i}/${maxRetries}: new_chunks=$newChunks, pending=$($stats.pending_chunks)"
 
             if ($newChunks -ge 8 -and $stats.pending_chunks -eq 0) {
               Write-Host "=== Chunks verified: $newChunks new chunks, 0 pending ==="
@@ -1764,13 +1641,10 @@ jobs:
             Start-Sleep -Seconds 3
           }
 
-          # Final diagnostics before failing
           $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
-          $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5
           $newChunks = $stats.total_chunks - $initialCount
-          Write-Host "Final state: new_chunks=$newChunks, rtmp=$($status.inpoint.details.rtmp_connected), event=$($status.streaming_event.name), active=$($status.streaming_event.receiving_activated)"
           if ($newChunks -lt 8) {
-            throw "FAILED: Only $newChunks new chunks created (need >= 8). RTMP connected: $($status.inpoint.details.rtmp_connected)"
+            throw "FAILED: Only $newChunks new chunks created (need >= 8)"
           }
           if ($stats.pending_chunks -gt 0) {
             throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload"
