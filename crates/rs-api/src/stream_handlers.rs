@@ -196,6 +196,7 @@ pub async fn stop_stream(
     if let Some(orch) = state.delivery_orchestrator.as_ref() {
         if let Err(e) = orch.stop_delivery(id).await {
             error!("Failed to stop delivery for event {id}: {e}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
 

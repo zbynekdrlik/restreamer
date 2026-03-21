@@ -362,25 +362,9 @@ impl DeliveryOrchestrator {
         let first_seq = first_seq
             .ok_or_else(|| anyhow::anyhow!("No chunks found for event {event_id} after 30s"))?;
 
-        // Start from near the live edge: if enough chunks exist, begin at
-        // (latest - delivery_delay_chunks) so the gap is exactly the target delay.
-        // This prevents the VPS from replaying ancient chunks when delivery starts
-        // long after streaming began (fixes the "70s instead of 120s" cache delay bug
-        // and ensures YouTube gets fresh data, not stale chunks).
-        let latest_seq = db::get_latest_sequence_number_for_event(&self.pool, event_id)
-            .await?
-            .unwrap_or(first_seq);
-        let start_chunk_id = if latest_seq - first_seq >= delivery_delay_chunks {
-            // Enough chunks exist — start at offset that gives exact delay gap
-            (latest_seq - delivery_delay_chunks).max(first_seq)
-        } else {
-            // Not enough chunks yet — start from beginning, buffer fill will wait
-            first_seq
-        };
+        let start_chunk_id = first_seq;
         info!(
             event_id,
-            first_seq,
-            latest_seq,
             start_chunk_id,
             delivery_delay_chunks,
             "Starting delivery from sequence"
@@ -405,7 +389,6 @@ impl DeliveryOrchestrator {
             "event_identifier": event_name,
             "start_chunk_id": start_chunk_id,
             "delivery_delay_chunks": delivery_delay_chunks,
-            "chunk_duration_ms": chunk_duration_ms,
         });
 
         let resp = client
@@ -832,63 +815,4 @@ mod tests {
         assert!(status.endpoints.is_empty());
     }
 
-    #[test]
-    fn start_chunk_id_uses_latest_when_enough_chunks() {
-        // When latest - first >= delivery_delay_chunks, start from latest - delay
-        let first_seq: i64 = 0;
-        let latest_seq: i64 = 300;
-        let delivery_delay_chunks: i64 = 120;
-
-        let start = if latest_seq - first_seq >= delivery_delay_chunks {
-            (latest_seq - delivery_delay_chunks).max(first_seq)
-        } else {
-            first_seq
-        };
-        assert_eq!(start, 180, "Should start at 300-120=180");
-    }
-
-    #[test]
-    fn start_chunk_id_uses_first_when_not_enough_chunks() {
-        // When latest - first < delivery_delay_chunks, start from first
-        let first_seq: i64 = 0;
-        let latest_seq: i64 = 50;
-        let delivery_delay_chunks: i64 = 120;
-
-        let start = if latest_seq - first_seq >= delivery_delay_chunks {
-            (latest_seq - delivery_delay_chunks).max(first_seq)
-        } else {
-            first_seq
-        };
-        assert_eq!(start, 0, "Should start from first when not enough chunks");
-    }
-
-    #[test]
-    fn start_chunk_id_exactly_at_delay_threshold() {
-        // When latest - first == delivery_delay_chunks, start from first
-        let first_seq: i64 = 0;
-        let latest_seq: i64 = 120;
-        let delivery_delay_chunks: i64 = 120;
-
-        let start = if latest_seq - first_seq >= delivery_delay_chunks {
-            (latest_seq - delivery_delay_chunks).max(first_seq)
-        } else {
-            first_seq
-        };
-        assert_eq!(start, 0, "At exact threshold, start from first (gap=delay)");
-    }
-
-    #[test]
-    fn start_chunk_id_fresh_stream() {
-        // Fresh start: latest == first, no chunks accumulated
-        let first_seq: i64 = 0;
-        let latest_seq: i64 = 0;
-        let delivery_delay_chunks: i64 = 120;
-
-        let start = if latest_seq - first_seq >= delivery_delay_chunks {
-            (latest_seq - delivery_delay_chunks).max(first_seq)
-        } else {
-            first_seq
-        };
-        assert_eq!(start, 0, "Fresh stream starts from first");
-    }
 }

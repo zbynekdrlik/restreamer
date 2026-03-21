@@ -76,14 +76,6 @@ pub struct InitRequest {
     pub auth_token: Option<String>,
     #[serde(default)]
     pub delivery_delay_chunks: i64,
-    /// Chunk duration in milliseconds (default 1000 = 1 second per chunk).
-    /// Used for real-time pacing so delivery consumes at exactly production rate.
-    #[serde(default = "default_chunk_duration_ms")]
-    pub chunk_duration_ms: u64,
-}
-
-fn default_chunk_duration_ms() -> u64 {
-    1000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -162,7 +154,6 @@ async fn init_endpoints(
             req.event_identifier.clone(),
             req.start_chunk_id,
             req.delivery_delay_chunks,
-            req.chunk_duration_ms,
         );
 
         endpoints.insert(ep_cfg.alias.clone(), handle);

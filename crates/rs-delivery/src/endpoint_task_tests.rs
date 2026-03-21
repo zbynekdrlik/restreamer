@@ -143,14 +143,13 @@ async fn test_processes_sequential_chunks() {
             test_ep_cfg(),
             1,
             0,
-            1000,
             stop_rx,
             stats_clone,
         )
         .await;
     });
 
-    // With 1000ms chunk_duration_ms, 5 chunks need ~5s
+    // With 100ms pacing, 5 chunks need ~500ms
     for _ in 0..12 {
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
@@ -187,7 +186,6 @@ async fn test_stops_on_signal() {
             test_ep_cfg(),
             1,
             0,
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -222,7 +220,6 @@ async fn test_restarts_ffmpeg_on_death() {
             test_ep_cfg(),
             1,
             0,
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -275,7 +272,6 @@ async fn test_tracks_ffmpeg_restart_count() {
             test_ep_cfg(),
             1,
             0,
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -316,7 +312,6 @@ async fn test_tracks_consecutive_chunk_misses() {
             test_ep_cfg(),
             1,
             0,
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -360,7 +355,6 @@ async fn test_tracks_last_error() {
             test_ep_cfg(),
             1,
             0,
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -400,7 +394,6 @@ async fn test_ffmpeg_circuit_breaker_triggers() {
             test_ep_cfg(),
             1,
             0,
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -450,7 +443,6 @@ async fn test_chunk_gap_skip_ahead() {
             test_ep_cfg(),
             1,
             0,
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -497,7 +489,6 @@ async fn test_chunk_gap_detected_when_no_skip_found() {
             test_ep_cfg(),
             1,
             0,
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -542,7 +533,6 @@ async fn test_write_timeout_kills_ffmpeg() {
             test_ep_cfg(),
             1,
             0,
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -590,7 +580,6 @@ async fn test_processes_100_sequential_chunks() {
             test_ep_cfg(),
             1,
             0,
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -705,7 +694,6 @@ async fn test_buffer_fill_waits_for_target_chunk() {
             test_ep_cfg(),
             1, // start_chunk_id
             5, // delivery_delay_chunks
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -759,8 +747,7 @@ async fn test_buffer_fill_waits_for_target_chunk() {
 async fn test_chunk_gap_maintained_at_delay_target() {
     // With delivery_delay_chunks=10, start_chunk_id=1, pre-load chunks 1-30:
     // After buffer fill (chunk 11 available), VPS starts consuming from chunk 1
-    // at real-time rate. The gap between latest_available and current_chunk_id
-    // should stay at approximately delivery_delay_chunks.
+    // at 100ms per chunk (10 chunks/sec). All 30 chunks should be consumed quickly.
     tokio::time::pause();
 
     let all_chunks: Vec<(i64, Vec<u8>)> = (1..=30).map(|i| (i, vec![i as u8; 100])).collect();
@@ -779,7 +766,6 @@ async fn test_chunk_gap_maintained_at_delay_target() {
             test_ep_cfg(),
             1,  // start_chunk_id
             10, // delivery_delay_chunks
-            1000,
             stop_rx,
             stats_clone,
         )
@@ -787,36 +773,17 @@ async fn test_chunk_gap_maintained_at_delay_target() {
     });
 
     // Buffer fill: target_chunk = 1 + 10 = 11 (immediately available)
-    // Processing should start right away at chunk 1
-    // After 15 seconds: should have processed ~15 chunks (paced at 1/sec)
-    // Current chunk_id should be ~15, latest available is 30
-    // Gap = 30 - 15 = 15 (close to delay of 10, because we started from 1)
-    for _ in 0..20 {
+    // Processing at 100ms/chunk: 30 chunks = 3s
+    for _ in 0..10 {
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
     }
 
     let s = stats.lock().await;
-    // After 20s of processing at 1 chunk/sec from chunk 1:
-    // Should be around chunk 20
-    assert!(
-        s.chunks_processed >= 15,
-        "Should have processed at least 15 chunks in 20s, got {}",
+    assert_eq!(
+        s.chunks_processed, 30,
+        "Should have processed all 30 chunks at 100ms pacing, got {}",
         s.chunks_processed
-    );
-    assert!(
-        s.current_chunk_id <= 25,
-        "Pacing should prevent consuming too fast, current_chunk_id={}",
-        s.current_chunk_id
-    );
-
-    // The gap from chunk 30 (latest available) to current should exist
-    let gap = 30 - s.current_chunk_id;
-    assert!(
-        gap >= 5,
-        "Gap should be substantial (delay=10, got gap={}), current={}",
-        gap,
-        s.current_chunk_id
     );
     drop(s);
 
@@ -846,7 +813,6 @@ async fn test_buffer_fill_stops_on_signal() {
             test_ep_cfg(),
             1,
             10, // delivery_delay_chunks
-            1000,
             stop_rx,
             stats_clone,
         )

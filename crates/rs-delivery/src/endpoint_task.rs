@@ -120,7 +120,6 @@ impl EndpointHandle {
         event_identifier: String,
         start_chunk_id: i64,
         delivery_delay_chunks: i64,
-        chunk_duration_ms: u64,
     ) -> Self {
         let (stop_tx, stop_rx) = watch::channel(false);
         let stats: Stats = Arc::new(Mutex::new(EndpointStats {
@@ -158,7 +157,6 @@ impl EndpointHandle {
             ep_cfg,
             start_chunk_id,
             effective_delay,
-            chunk_duration_ms,
             stop_rx,
             stats.clone(),
         ));
@@ -192,7 +190,6 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     ep_cfg: EndpointConfig,
     start_chunk_id: i64,
     delivery_delay_chunks: i64,
-    chunk_duration_ms: u64,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
 ) {
@@ -233,8 +230,6 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     };
 
     let mut chunk_id = start_chunk_id;
-    let playback_start = tokio::time::Instant::now();
-    let base_chunk_id = chunk_id;
     let mut proc: Option<Box<dyn OutputProcess>> = None;
     let mut consecutive_ffmpeg_failures: u32 = 0;
     let mut consecutive_chunk_misses: u32 = 0;
@@ -375,15 +370,8 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
 
                 chunk_id += 1;
-                // Time-anchored pacing: consume chunks at exactly real-time rate
-                // to preserve the buffer gap between inpoint production and delivery consumption.
-                let chunks_done = (chunk_id - base_chunk_id) as u64;
-                let expected_elapsed =
-                    std::time::Duration::from_millis(chunks_done * chunk_duration_ms);
-                let actual_elapsed = playback_start.elapsed();
-                if expected_elapsed > actual_elapsed {
-                    tokio::time::sleep(expected_elapsed - actual_elapsed).await;
-                }
+                // Small delay to match real-time playback
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;
