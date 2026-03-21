@@ -12,7 +12,16 @@ use crate::state::AppState;
 pub struct YouTubeStatusResponse {
     pub authenticated: bool,
     pub stream_receiving: Option<bool>,
+    pub stream_count: usize,
+    pub streams: Vec<YouTubeStreamInfo>,
     pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct YouTubeStreamInfo {
+    pub title: String,
+    pub stream_status: String,
+    pub health_status: Option<String>,
 }
 
 pub async fn youtube_status(
@@ -25,9 +34,32 @@ pub async fn youtube_status(
 
     let status = orch.check_youtube_status().await;
 
+    // Fetch stream details for diagnostics
+    let (stream_count, streams) = if status.authenticated && status.error.is_none() {
+        match orch.list_youtube_streams().await {
+            Ok(list) => {
+                let count = list.len();
+                let infos: Vec<YouTubeStreamInfo> = list
+                    .into_iter()
+                    .map(|s| YouTubeStreamInfo {
+                        title: s.snippet.title,
+                        stream_status: s.status.stream_status,
+                        health_status: s.status.health_status.map(|h| h.status),
+                    })
+                    .collect();
+                (count, infos)
+            }
+            Err(_) => (0, Vec::new()),
+        }
+    } else {
+        (0, Vec::new())
+    };
+
     Ok(Json(YouTubeStatusResponse {
         authenticated: status.authenticated,
         stream_receiving: status.stream_receiving,
+        stream_count,
+        streams,
         error: status.error,
     }))
 }
