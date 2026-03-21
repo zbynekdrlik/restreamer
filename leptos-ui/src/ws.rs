@@ -142,6 +142,7 @@ async fn load_initial_state(store: DashboardStore) {
                     stall_reason: ep.stall_reason,
                     ffmpeg_restart_count: ep.ffmpeg_restart_count,
                     last_error: ep.last_error,
+                    is_fast: ep.is_fast,
                 })
                 .collect();
             store.delivery.set(DeliveryState {
@@ -281,6 +282,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                             stall_reason: ep.stall_reason.clone(),
                             ffmpeg_restart_count: ep.ffmpeg_restart_count,
                             last_error: ep.last_error.clone(),
+                            is_fast: ep.is_fast,
                         }
                     })
                     .collect();

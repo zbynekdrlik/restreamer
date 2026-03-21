@@ -176,6 +176,8 @@ pub struct DeliveryEndpointMetrics {
     pub ffmpeg_restart_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub is_fast: bool,
 }
 
 /// Service status summary returned by the /status endpoint.
@@ -290,6 +292,7 @@ mod tests {
                     stall_reason: None,
                     ffmpeg_restart_count: 0,
                     last_error: None,
+                    is_fast: false,
                 }],
             },
             WsEvent::Error {
@@ -382,12 +385,14 @@ mod tests {
             stall_reason: Some("chunk_gap".to_string()),
             ffmpeg_restart_count: 5,
             last_error: Some("S3 timeout".to_string()),
+            is_fast: true,
         };
         let json = serde_json::to_string(&metrics).unwrap();
         let parsed: DeliveryEndpointMetrics = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.stall_reason, Some("chunk_gap".to_string()));
         assert_eq!(parsed.ffmpeg_restart_count, 5);
         assert_eq!(parsed.last_error, Some("S3 timeout".to_string()));
+        assert!(parsed.is_fast);
     }
 
     #[test]
@@ -423,12 +428,87 @@ mod tests {
                 stall_reason: Some("ffmpeg_crash_loop".to_string()),
                 ffmpeg_restart_count: 10,
                 last_error: Some("Connection refused".to_string()),
+                is_fast: false,
             }],
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: WsEvent = serde_json::from_str(&json).unwrap();
         let json2 = serde_json::to_string(&parsed).unwrap();
         assert_eq!(json, json2);
+    }
+
+    #[test]
+    fn delay_excludes_fast_endpoints() {
+        let endpoints = vec![
+            DeliveryEndpointMetrics {
+                alias: "FastEP".to_string(),
+                alive: true,
+                current_chunk_id: 90,
+                bytes_processed_total: 1000,
+                chunks_processed: 90,
+                chunk_delay_secs: 25.0,
+                stall_reason: None,
+                ffmpeg_restart_count: 0,
+                last_error: None,
+                is_fast: true,
+            },
+            DeliveryEndpointMetrics {
+                alias: "BufferedEP".to_string(),
+                alive: true,
+                current_chunk_id: 10,
+                bytes_processed_total: 500,
+                chunks_processed: 10,
+                chunk_delay_secs: 120.0,
+                stall_reason: None,
+                ffmpeg_restart_count: 0,
+                last_error: None,
+                is_fast: false,
+            },
+        ];
+        let delay = endpoints
+            .iter()
+            .filter(|m| !m.is_fast && m.chunk_delay_secs > 0.0)
+            .map(|m| m.chunk_delay_secs)
+            .fold(f64::MAX, f64::min);
+        let delay = if delay == f64::MAX { 0.0 } else { delay };
+        assert_eq!(delay, 120.0);
+    }
+
+    #[test]
+    fn delay_all_fast_falls_back_to_zero() {
+        let endpoints = vec![DeliveryEndpointMetrics {
+            alias: "FastOnly".to_string(),
+            alive: true,
+            current_chunk_id: 90,
+            bytes_processed_total: 1000,
+            chunks_processed: 90,
+            chunk_delay_secs: 25.0,
+            stall_reason: None,
+            ffmpeg_restart_count: 0,
+            last_error: None,
+            is_fast: true,
+        }];
+        let delay = endpoints
+            .iter()
+            .filter(|m| !m.is_fast && m.chunk_delay_secs > 0.0)
+            .map(|m| m.chunk_delay_secs)
+            .fold(f64::MAX, f64::min);
+        let delay = if delay == f64::MAX { 0.0 } else { delay };
+        assert_eq!(delay, 0.0);
+    }
+
+    #[test]
+    fn delivery_metrics_is_fast_defaults_false() {
+        let json = r#"{
+            "alias": "Test",
+            "alive": true,
+            "current_chunk_id": 1,
+            "bytes_processed_total": 100,
+            "chunks_processed": 5,
+            "chunk_delay_secs": 1.0
+        }"#;
+        let parsed: DeliveryEndpointMetrics = serde_json::from_str(json).unwrap();
+        assert!(!parsed.is_fast);
     }
 
     #[test]

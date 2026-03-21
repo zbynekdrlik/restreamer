@@ -58,6 +58,7 @@ pub struct EndpointDeliveryStatus {
     pub stall_reason: Option<String>,
     pub ffmpeg_restart_count: u32,
     pub last_error: Option<String>,
+    pub is_fast: bool,
 }
 
 /// Result of querying YouTube status.
@@ -403,6 +404,15 @@ impl DeliveryOrchestrator {
             .unwrap_or(0);
         let chunk_duration_secs = self.config.inpoint.chunk_duration_ms as f64 / 1000.0;
 
+        // Build alias→is_fast map from DB endpoint configs
+        let db_endpoints = db::get_event_endpoints(&self.pool, event_id)
+            .await
+            .unwrap_or_default();
+        let fast_map: std::collections::HashMap<String, bool> = db_endpoints
+            .iter()
+            .map(|ep| (ep.alias.clone(), ep.is_fast))
+            .collect();
+
         let (server_ready, endpoints) = match &instance {
             Some(inst) if inst.status == "running" => {
                 // Fetch live status from rs-delivery
@@ -453,7 +463,7 @@ impl DeliveryOrchestrator {
                             }
 
                             statuses.push(EndpointDeliveryStatus {
-                                alias,
+                                alias: alias.clone(),
                                 alive,
                                 current_chunk_id: chunk_id,
                                 bytes_processed_total: bytes_total,
@@ -462,6 +472,7 @@ impl DeliveryOrchestrator {
                                 stall_reason,
                                 ffmpeg_restart_count,
                                 last_error,
+                                is_fast: fast_map.get(&alias).copied().unwrap_or(false),
                             });
                         }
 
@@ -537,6 +548,7 @@ impl DeliveryOrchestrator {
                 stall_reason: ep.stall_reason,
                 ffmpeg_restart_count: ep.ffmpeg_restart_count,
                 last_error: ep.last_error,
+                is_fast: ep.is_fast,
             })
             .collect();
 

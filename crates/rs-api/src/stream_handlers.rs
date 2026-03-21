@@ -129,6 +129,7 @@ pub async fn start_stream(
                         stall_reason: None,
                         ffmpeg_restart_count: 0,
                         last_error: None,
+                        is_fast: ep.is_fast,
                     })
                     .collect();
                 let _ = state.ws_tx.send(WsEvent::DeliveryStatus {

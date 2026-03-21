@@ -64,6 +64,7 @@ pub struct DeliveryEndpointState {
     pub stall_reason: Option<String>,
     pub ffmpeg_restart_count: u32,
     pub last_error: Option<String>,
+    pub is_fast: bool,
 }
 
 /// Central reactive state shared via Leptos context.

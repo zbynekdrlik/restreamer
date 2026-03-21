@@ -425,6 +425,7 @@ wss.on("connection", (ws) => {
           stall_reason: null,
           ffmpeg_restart_count: 0,
           last_error: null,
+          is_fast: false,
         },
         {
           alias: "Facebook Page",
@@ -436,6 +437,7 @@ wss.on("connection", (ws) => {
           stall_reason: "chunk_gap",
           ffmpeg_restart_count: 3,
           last_error: "S3 fetch timeout",
+          is_fast: false,
         },
       ],
     },

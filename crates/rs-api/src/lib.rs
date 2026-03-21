@@ -144,6 +144,7 @@ async fn delivery_broadcast_loop(
                             stall_reason: None,
                             ffmpeg_restart_count: 0,
                             last_error: None,
+                            is_fast: ep.is_fast,
                         })
                         .collect();
                     let count = placeholders.len() as u32;
@@ -199,7 +200,7 @@ async fn delivery_broadcast_loop(
                 } else {
                     let delay = final_endpoints
                         .iter()
-                        .filter(|m| m.chunk_delay_secs > 0.0)
+                        .filter(|m| !m.is_fast && m.chunk_delay_secs > 0.0)
                         .map(|m| m.chunk_delay_secs)
                         .fold(f64::MAX, f64::min);
                     let delay = if delay == f64::MAX { 0.0 } else { delay };
