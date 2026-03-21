@@ -98,6 +98,8 @@ struct WsDeliveryEndpoint {
     ffmpeg_restart_count: u32,
     #[serde(default)]
     last_error: Option<String>,
+    #[serde(default)]
+    is_fast: bool,
 }
 
 /// Compute the WebSocket URL from the current page location.
