@@ -1856,6 +1856,67 @@ jobs:
           Write-Host "  ffmpeg is alive and sending to YouTube via YT_HLS"
           Write-Host "=========================================="
 
+      - name: Verify cache delay meets target
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          # TDD assertion: After delivery is streaming, verify that the
+          # chunk_delay_secs for non-fast endpoints is at least 80% of the
+          # configured target (default 120s). This catches the 70s bug.
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          $eventId = $targetEvent.id
+
+          # Get target delay from config (default 120s if not set on event)
+          $targetDelay = 120
+          if ($targetEvent.cache_delay_secs) {
+            $targetDelay = $targetEvent.cache_delay_secs
+          }
+          $minAcceptable = [math]::Floor($targetDelay * 0.8)
+          Write-Host "Target delay: ${targetDelay}s, minimum acceptable: ${minAcceptable}s"
+
+          # Take 3 readings at 10s intervals to get stable delay measurement
+          $delays = @()
+          for ($r = 1; $r -le 3; $r++) {
+            if ($r -gt 1) { Start-Sleep -Seconds 10 }
+            $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+
+            if ($resp.endpoint_details) {
+              foreach ($ep in $resp.endpoint_details) {
+                if (-not $ep.is_fast) {
+                  $delays += $ep.chunk_delay_secs
+                  Write-Host "Reading ${r}: endpoint=$($ep.alias) chunk_delay_secs=$($ep.chunk_delay_secs) chunk_id=$($ep.current_chunk_id)"
+                }
+              }
+            }
+          }
+
+          if ($delays.Count -eq 0) {
+            throw "FAILED: No non-fast endpoint delay readings found"
+          }
+
+          # Use the median delay reading
+          $sorted = $delays | Sort-Object
+          $median = $sorted[[math]::Floor($sorted.Count / 2)]
+          Write-Host ""
+          Write-Host "Delay readings: $($delays -join ', ')"
+          Write-Host "Median delay: ${median}s (target: ${targetDelay}s, min: ${minAcceptable}s)"
+
+          if ($median -lt $minAcceptable) {
+            Write-Host ""
+            Write-Host "=========================================="
+            Write-Host "  FAIL: Cache delay ${median}s < minimum ${minAcceptable}s"
+            Write-Host "  Target was ${targetDelay}s (80% = ${minAcceptable}s)"
+            Write-Host "  This is the 70s cache delay bug!"
+            Write-Host "=========================================="
+            throw "FAILED: Cache delay ${median}s is below minimum acceptable ${minAcceptable}s (target: ${targetDelay}s)"
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "  CACHE DELAY VERIFIED: ${median}s >= ${minAcceptable}s (target: ${targetDelay}s)"
+          Write-Host "=========================================="
+
       - name: Verify YouTube is receiving stream data
         id: verify_yt_receiving
         shell: powershell
