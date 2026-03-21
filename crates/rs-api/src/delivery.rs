@@ -336,14 +336,16 @@ impl DeliveryOrchestrator {
 
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
 
-        // Cache is_fast per alias for this event (avoids re-querying in get_delivery_status)
-        {
-            let fast_map: HashMap<String, bool> = endpoints
-                .iter()
-                .map(|ep| (ep.alias.clone(), ep.is_fast))
-                .collect();
-            self.endpoint_fast_cache.lock().await.insert(event_id, fast_map);
-        }
+        // Cache is_fast per alias for this event
+        // (avoids re-querying in get_delivery_status)
+        let fast_map: HashMap<String, bool> = endpoints
+            .iter()
+            .map(|ep| (ep.alias.clone(), ep.is_fast))
+            .collect();
+        self.endpoint_fast_cache
+            .lock()
+            .await
+            .insert(event_id, fast_map);
 
         // Resolve effective cache delay
         let event = db::get_streaming_event_by_id(&self.pool, event_id)
