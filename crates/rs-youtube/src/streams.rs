@@ -32,6 +32,7 @@ pub struct HealthStatus {
 
 #[derive(Debug, Deserialize)]
 struct ListResponse<T> {
+    #[serde(default)]
     items: Vec<T>,
 }
 

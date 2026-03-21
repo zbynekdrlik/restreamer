@@ -1407,6 +1407,7 @@ jobs:
         timeout-minutes: 2
         run: |
           Write-Host "Checking for stale delivery instances..."
+          # Step 1: Clean up via local API (uses DB state)
           try {
             $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
             if ($instances -and $instances.Count -gt 0) {
@@ -1423,10 +1424,38 @@ jobs:
               }
               Start-Sleep -Seconds 5
             }
-            Write-Host "No stale delivery instances, proceeding with E2E test"
           } catch {
-            Write-Host "Could not check delivery instances: $_ - proceeding anyway"
+            Write-Host "Could not check delivery instances via API: $_"
           }
+
+          # Step 2: Clean up orphaned Hetzner VPS directly (survives Restreamer restarts)
+          # This catches VPS instances left behind by cancelled CI runs.
+          if ($env:HETZNER_API_TOKEN) {
+            Write-Host "Checking Hetzner API for orphaned rs-delivery VPS instances..."
+            try {
+              $headers = @{ Authorization = "Bearer $($env:HETZNER_API_TOKEN)" }
+              $resp = Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers?label_selector=app=restreamer" `
+                -Headers $headers -TimeoutSec 15
+              if ($resp.servers -and $resp.servers.Count -gt 0) {
+                foreach ($srv in $resp.servers) {
+                  Write-Host "  Deleting orphaned Hetzner VPS: id=$($srv.id) name=$($srv.name) status=$($srv.status) ip=$($srv.public_net.ipv4.ip)"
+                  try {
+                    Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers/$($srv.id)" `
+                      -Method DELETE -Headers $headers -TimeoutSec 15
+                    Write-Host "  Deleted VPS $($srv.id)"
+                  } catch {
+                    Write-Host "  Failed to delete VPS $($srv.id): $_"
+                  }
+                }
+                Start-Sleep -Seconds 3
+              } else {
+                Write-Host "  No orphaned Hetzner VPS found"
+              }
+            } catch {
+              Write-Host "  Hetzner API check failed: $_"
+            }
+          }
+          Write-Host "Pre-flight cleanup complete"
 
       - name: Activate event on local client
         shell: powershell
