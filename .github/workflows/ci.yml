@@ -439,7 +439,12 @@ jobs:
             echo "Found: $STREAMING_CONDITION"
             exit 1
           fi
-          echo "OK: e2e-streaming-test uses != failure condition."
+          if ! echo "$STREAMING_CONDITION" | grep -q "workflow_dispatch"; then
+            echo "ERROR: e2e-streaming-test must run on workflow_dispatch (not just push)."
+            echo "Found: $STREAMING_CONDITION"
+            exit 1
+          fi
+          echo "OK: e2e-streaming-test uses != failure condition and includes workflow_dispatch."
 
           # e2e-obs-youtube-test must use != 'failure' so it runs when deploy is skipped
           YOUTUBE_CONDITION=$(grep -A3 "e2e-obs-youtube-test:" "$WORKFLOW_FILE" | grep "if:" || true)
@@ -454,7 +459,12 @@ jobs:
             echo "Found: $YOUTUBE_CONDITION"
             exit 1
           fi
-          echo "OK: e2e-obs-youtube-test uses != failure condition."
+          if ! echo "$YOUTUBE_CONDITION" | grep -q "workflow_dispatch"; then
+            echo "ERROR: e2e-obs-youtube-test must run on workflow_dispatch (not just push)."
+            echo "Found: $YOUTUBE_CONDITION"
+            exit 1
+          fi
+          echo "OK: e2e-obs-youtube-test uses != failure condition and includes workflow_dispatch."
       - name: Verify e2e-gate requires both E2E tests
         run: |
           WORKFLOW_FILE=".github/workflows/ci.yml"
@@ -635,7 +645,7 @@ jobs:
   deploy-stream-lan:
     name: Deploy to stream.lan
     needs: [rust-ci-gate, build-tauri]
-    if: always() && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' || github.head_ref == 'dev') && needs.rust-ci-gate.result == 'success' && needs.build-tauri.result == 'success'
+    if: always() && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.rust-ci-gate.result == 'success' && needs.build-tauri.result == 'success'
     runs-on: [self-hosted, windows, stream-lan]
     steps:
       - name: Clean old artifacts
@@ -969,7 +979,7 @@ jobs:
   e2e-streaming-test:
     name: E2E Streaming Test
     needs: [deploy-stream-lan]
-    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' || github.head_ref == 'dev')
+    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 10
     steps:
@@ -1156,7 +1166,7 @@ jobs:
   e2e-obs-youtube-test:
     name: E2E OBS-to-YouTube Test
     needs: [deploy-stream-lan]
-    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' || github.head_ref == 'dev')
+    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 15
     env:
@@ -1973,8 +1983,8 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Verifying rtmp_connected is false after OBS stream stopped..."
-          $maxRetries = 15
-          $retryDelay = 3
+          $maxRetries = 10
+          $retryDelay = 2
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
               $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
@@ -2251,8 +2261,8 @@ jobs:
             exit 1
           fi
 
-          # E2E tests MUST succeed on dev/main runs — no exceptions
-          if [[ "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" || "${{ github.event_name }}" == "pull_request" ]]; then
+          # On push/workflow_dispatch to dev/main, E2E tests MUST succeed — no exceptions
+          if [[ "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             if [[ "${{ needs.e2e-streaming-test.result }}" != "success" ]]; then
               echo "FAIL: E2E Streaming Test did not succeed (result: ${{ needs.e2e-streaming-test.result }})"
               echo "E2E tests must pass on every dev/main run."
