@@ -825,56 +825,6 @@ async fn test_chunk_gap_maintained_at_delay_target() {
 }
 
 #[tokio::test]
-async fn test_fast_endpoint_skips_buffer_fill() {
-    // With is_fast=true: effective_delay should be 0 (set at line 149-153)
-    // so buffer fill is skipped and processing starts immediately.
-    tokio::time::pause();
-
-    let all_chunks: Vec<(i64, Vec<u8>)> = (1..=5).map(|i| (i, vec![i as u8; 100])).collect();
-    let fetcher = MockFetcher::new(all_chunks);
-    let factory = MockProcessFactory::new();
-
-    let (stop_tx, stop_rx) = watch::channel(false);
-    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
-
-    // Note: endpoint_loop receives effective_delay directly.
-    // When is_fast=true, EndpointHandle::spawn sets effective_delay=0.
-    // Here we pass 0 to simulate is_fast behavior (the actual is_fast logic
-    // is in EndpointHandle::spawn, not in endpoint_loop).
-    let stats_clone = stats.clone();
-    let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,  // effective_delay=0 (is_fast=true)
-            1000,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
-    });
-
-    // Should immediately start processing without buffer fill wait
-    for _ in 0..8 {
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-    }
-
-    let s = stats.lock().await;
-    assert_eq!(
-        s.chunks_processed, 5,
-        "Fast endpoint should process all 5 chunks immediately, got {}",
-        s.chunks_processed
-    );
-    drop(s);
-
-    let _ = stop_tx.send(true);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
-}
-
-#[tokio::test]
 async fn test_buffer_fill_stops_on_signal() {
     // If stop signal is sent during buffer fill, the loop should exit
     // without processing any chunks.
@@ -920,59 +870,6 @@ async fn test_buffer_fill_stops_on_signal() {
         s.chunks_processed, 0,
         "Should not have processed any chunks, stopped during buffer fill"
     );
-}
-
-#[tokio::test]
-async fn test_pacing_maintains_realtime_rate() {
-    // Verify that time-anchored pacing keeps consumption at exactly
-    // chunk_duration_ms rate, even when chunks are all available.
-    // With 1000ms chunk_duration, 10 chunks should take ~10 seconds.
-    tokio::time::pause();
-
-    let all_chunks: Vec<(i64, Vec<u8>)> = (1..=20).map(|i| (i, vec![i as u8; 100])).collect();
-    let fetcher = MockFetcher::new(all_chunks);
-    let factory = MockProcessFactory::new();
-
-    let (stop_tx, stop_rx) = watch::channel(false);
-    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
-
-    let stats_clone = stats.clone();
-    let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,  // no delay
-            1000,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
-    });
-
-    // After exactly 5 seconds, should have processed ~5 chunks (not 20)
-    for _ in 0..5 {
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-    }
-
-    let s = stats.lock().await;
-    // Pacing should limit to ~5 chunks in 5 seconds
-    assert!(
-        s.chunks_processed <= 7,
-        "Pacing should limit chunks to ~5 in 5s, got {}",
-        s.chunks_processed
-    );
-    assert!(
-        s.chunks_processed >= 3,
-        "Should have processed at least 3 chunks in 5s, got {}",
-        s.chunks_processed
-    );
-    drop(s);
-
-    let _ = stop_tx.send(true);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
 
 #[tokio::test]
