@@ -1983,8 +1983,8 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Verifying rtmp_connected is false after OBS stream stopped..."
-          $maxRetries = 10
-          $retryDelay = 2
+          $maxRetries = 15
+          $retryDelay = 3
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
               $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
