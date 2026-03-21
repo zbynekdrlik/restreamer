@@ -1095,8 +1095,9 @@ jobs:
       - name: Verify chunks created and uploaded to S3
         shell: powershell
         run: |
-          # Wait up to 60s for all chunks to be uploaded (pending -> 0)
-          $maxWait = 12
+          # Wait up to 100s for all chunks to be uploaded (pending -> 0)
+          # After deploy restarts Restreamer, the S3 uploader needs time to initialize
+          $maxWait = 20
           $stats = $null
           for ($w = 1; $w -le $maxWait; $w++) {
             $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
