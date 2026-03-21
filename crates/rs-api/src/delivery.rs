@@ -24,6 +24,9 @@ pub struct DeliveryOrchestrator {
     hetzner: HetznerClient,
     /// Tracks poll_and_init background tasks by instance ID for cancellation on stop.
     poll_handles: Arc<Mutex<HashMap<i64, JoinHandle<()>>>>,
+    /// Cached endpoint configs per event_id, populated at init time.
+    /// Key: event_id, Value: HashMap<alias, is_fast>
+    endpoint_fast_cache: Arc<Mutex<HashMap<i64, HashMap<String, bool>>>>,
 }
 
 /// Result of starting a delivery instance.
@@ -85,6 +88,7 @@ impl DeliveryOrchestrator {
             hetzner: HetznerClient::new(token),
             config,
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
+            endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -95,6 +99,7 @@ impl DeliveryOrchestrator {
             hetzner: HetznerClient::with_base_url(&config.hetzner.api_token, base_url),
             config,
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
+            endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -331,6 +336,15 @@ impl DeliveryOrchestrator {
 
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
 
+        // Cache is_fast per alias for this event (avoids re-querying in get_delivery_status)
+        {
+            let fast_map: HashMap<String, bool> = endpoints
+                .iter()
+                .map(|ep| (ep.alias.clone(), ep.is_fast))
+                .collect();
+            self.endpoint_fast_cache.lock().await.insert(event_id, fast_map);
+        }
+
         // Resolve effective cache delay
         let event = db::get_streaming_event_by_id(&self.pool, event_id)
             .await?
@@ -404,14 +418,11 @@ impl DeliveryOrchestrator {
             .unwrap_or(0);
         let chunk_duration_secs = self.config.inpoint.chunk_duration_ms as f64 / 1000.0;
 
-        // Build alias→is_fast map from DB endpoint configs
-        let db_endpoints = db::get_event_endpoints(&self.pool, event_id)
-            .await
-            .unwrap_or_default();
-        let fast_map: std::collections::HashMap<String, bool> = db_endpoints
-            .iter()
-            .map(|ep| (ep.alias.clone(), ep.is_fast))
-            .collect();
+        // Read cached is_fast map (populated in init_endpoints, empty before init)
+        let fast_map = {
+            let cache = self.endpoint_fast_cache.lock().await;
+            cache.get(&event_id).cloned().unwrap_or_default()
+        };
 
         let (server_ready, endpoints) = match &instance {
             Some(inst) if inst.status == "running" => {
@@ -572,6 +583,9 @@ impl DeliveryOrchestrator {
                 "Aborted poll_and_init background task"
             );
         }
+
+        // Clear cached endpoint configs for this event
+        self.endpoint_fast_cache.lock().await.remove(&event_id);
 
         db::update_delivery_instance_status(&self.pool, instance.id, "stopping").await?;
 
