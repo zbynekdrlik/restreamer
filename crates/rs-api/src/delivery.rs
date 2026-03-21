@@ -365,9 +365,7 @@ impl DeliveryOrchestrator {
         let start_chunk_id = first_seq;
         info!(
             event_id,
-            start_chunk_id,
-            delivery_delay_chunks,
-            "Starting delivery from sequence"
+            start_chunk_id, delivery_delay_chunks, "Starting delivery from sequence"
         );
 
         let init_body = serde_json::json!({
@@ -814,5 +812,4 @@ mod tests {
         assert!(!status.server_ready);
         assert!(status.endpoints.is_empty());
     }
-
 }

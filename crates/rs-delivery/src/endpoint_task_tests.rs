@@ -137,16 +137,7 @@ async fn test_processes_sequential_chunks() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
     // With 100ms pacing, 5 chunks need ~500ms
@@ -180,16 +171,7 @@ async fn test_stops_on_signal() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
     tokio::time::advance(std::time::Duration::from_millis(500)).await;
@@ -214,16 +196,7 @@ async fn test_restarts_ffmpeg_on_death() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
     for _ in 0..40 {
@@ -266,16 +239,7 @@ async fn test_tracks_ffmpeg_restart_count() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
     for _ in 0..30 {
@@ -306,16 +270,7 @@ async fn test_tracks_consecutive_chunk_misses() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
     for _ in 0..20 {
@@ -349,16 +304,7 @@ async fn test_tracks_last_error() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
     for _ in 0..15 {
@@ -388,16 +334,7 @@ async fn test_ffmpeg_circuit_breaker_triggers() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
     for _ in 0..60 {
@@ -437,16 +374,7 @@ async fn test_chunk_gap_skip_ahead() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
     for _ in 0..200 {
@@ -483,16 +411,7 @@ async fn test_chunk_gap_detected_when_no_skip_found() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
     for _ in 0..200 {
@@ -527,16 +446,7 @@ async fn test_write_timeout_kills_ffmpeg() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
     for _ in 0..40 {
@@ -574,16 +484,7 @@ async fn test_processes_100_sequential_chunks() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            0,
-            stop_rx,
-            stats_clone,
-        )
-        .await;
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
     // 1000ms per chunk, 100 chunks = 100s
@@ -773,9 +674,10 @@ async fn test_chunk_gap_maintained_at_delay_target() {
     });
 
     // Buffer fill: target_chunk = 1 + 10 = 11 (immediately available)
-    // Processing at 100ms/chunk: 30 chunks = 3s
-    for _ in 0..10 {
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    // Processing at 100ms/chunk: 30 chunks = 3s, but tokio::time::pause()
+    // requires multiple yields per chunk for async steps to complete.
+    for _ in 0..100 {
+        tokio::time::advance(std::time::Duration::from_millis(200)).await;
         tokio::task::yield_now().await;
     }
 
