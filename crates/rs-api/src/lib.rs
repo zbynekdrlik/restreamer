@@ -172,8 +172,8 @@ async fn delivery_broadcast_loop(
                 });
 
                 // Compute and broadcast PipelineState
-                let any_alive = final_endpoints.iter().any(|m| m.alive);
-                let state_str = if any_alive { "streaming" } else { "buffering" };
+                let any_piping = final_endpoints.iter().any(|m| m.alive && m.chunks_processed > 0);
+                let state_str = if any_piping { "streaming" } else { "buffering" };
 
                 let target_delay = event
                     .cache_delay_secs
