@@ -703,8 +703,8 @@ async fn test_buffer_fill_waits_for_target_chunk() {
             fetcher,
             factory,
             test_ep_cfg(),
-            1,  // start_chunk_id
-            5,  // delivery_delay_chunks
+            1, // start_chunk_id
+            5, // delivery_delay_chunks
             1000,
             stop_rx,
             stats_clone,
@@ -777,8 +777,8 @@ async fn test_chunk_gap_maintained_at_delay_target() {
             fetcher,
             factory,
             test_ep_cfg(),
-            1,   // start_chunk_id
-            10,  // delivery_delay_chunks
+            1,  // start_chunk_id
+            10, // delivery_delay_chunks
             1000,
             stop_rx,
             stats_clone,
@@ -845,7 +845,7 @@ async fn test_buffer_fill_stops_on_signal() {
             factory,
             test_ep_cfg(),
             1,
-            10,  // delivery_delay_chunks
+            10, // delivery_delay_chunks
             1000,
             stop_rx,
             stats_clone,
@@ -863,7 +863,10 @@ async fn test_buffer_fill_stops_on_signal() {
     let _ = stop_tx.send(true);
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
-    assert!(result.is_ok(), "Task should have stopped during buffer fill");
+    assert!(
+        result.is_ok(),
+        "Task should have stopped during buffer fill"
+    );
 
     let s = stats.lock().await;
     assert_eq!(
