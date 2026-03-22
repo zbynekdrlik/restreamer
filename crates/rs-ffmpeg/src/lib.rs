@@ -383,11 +383,20 @@ mod tests {
         // Full passthrough (no audio re-encode)
         assert!(args.contains(&"-c".to_string()));
         assert!(args.contains(&"copy".to_string()));
-        assert!(!args.contains(&"-c:a".to_string()), "should not have separate audio codec");
-        assert!(!args.contains(&"aac".to_string()), "should not re-encode audio");
+        assert!(
+            !args.contains(&"-c:a".to_string()),
+            "should not have separate audio codec"
+        );
+        assert!(
+            !args.contains(&"aac".to_string()),
+            "should not re-encode audio"
+        );
         // Single rate control (no double-throttle)
         assert!(args.contains(&"-readrate".to_string()));
-        assert!(!args.contains(&"-re".to_string()), "should not have -re with -readrate");
+        assert!(
+            !args.contains(&"-re".to_string()),
+            "should not have -re with -readrate"
+        );
     }
 
     #[test]
