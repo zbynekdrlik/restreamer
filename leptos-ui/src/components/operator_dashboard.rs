@@ -212,16 +212,12 @@ fn PipelineFlow() -> impl IntoView {
             <span class="pipeline-arrow">{"\u{2192}"}</span>
             <div class="pipeline-node">
                 <span class={move || {
-                    let p = ps();
-                    if !is_delivering() {
+                    let chunks = local_chunks();
+                    if !rtmp_connected() {
                         "status-dot"
-                    } else if p.state == "buffer_exhausted" {
-                        "status-dot error"
-                    } else if p.predicted {
-                        "status-dot warning"
-                    } else if p.buffer_progress >= 0.75 {
+                    } else if chunks <= 1 {
                         "status-dot active"
-                    } else if p.buffer_progress >= 0.40 {
+                    } else if chunks <= 5 {
                         "status-dot warning"
                     } else {
                         "status-dot error"

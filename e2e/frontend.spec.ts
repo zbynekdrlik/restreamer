@@ -1066,12 +1066,102 @@ test.describe("Pipeline Node Data", () => {
     await expect(bufferDot).not.toHaveClass(/error/);
   });
 
-  test("buffer dots are green when cache bar is healthy (progress >= 75%)", async ({
+  test("local buffer dot uses chunk count: green at 0 chunks even with low buffer_progress", async ({
     page,
   }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
+    // RTMP connected so local buffer dot is not gray
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "InpointStatus",
+        data: {
+          state: "receiving",
+          rtmp_connected: true,
+          received_bytes: 1024,
+          chunk_count: 0,
+        },
+      },
+    });
+
+    // Streaming state with LOW buffer_progress but 0 local_buffer_chunks
+    // Local Buffer dot should be GREEN (chunk count 0) even though bar is critical
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Test",
+          buffer_progress: 0.2,
+          target_delay_secs: 120,
+          current_delay_secs: 24.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 53,
+        },
+      },
+    });
+
+    const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
+    await expect(bufferDot).toHaveClass(/active/, { timeout: 5000 });
+    await expect(bufferDot).not.toHaveClass(/warning/);
+    await expect(bufferDot).not.toHaveClass(/error/);
+  });
+
+  test("local buffer dot uses chunk count: yellow at 3 chunks even with healthy bar", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "InpointStatus",
+        data: {
+          state: "receiving",
+          rtmp_connected: true,
+          received_bytes: 1024,
+          chunk_count: 5,
+        },
+      },
+    });
+
+    // HIGH buffer_progress (bar is green) but 3 local_buffer_chunks
+    // Local Buffer dot should be YELLOW (chunk count 3) even though bar is healthy
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Test",
+          buffer_progress: 0.8,
+          target_delay_secs: 120,
+          current_delay_secs: 96.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 3,
+          s3_queue_chunks: 10,
+        },
+      },
+    });
+
+    const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
+    await expect(bufferDot).toHaveClass(/warning/, { timeout: 5000 });
+    await expect(bufferDot).not.toHaveClass(/active/);
+  });
+
+  test("s3 queue dot matches cache bar: green when bar healthy, regardless of chunk count", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Healthy buffer_progress with 53 s3_queue_chunks
+    // S3 Queue dot should be GREEN (matches bar) even though chunk count is high
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -1090,77 +1180,10 @@ test.describe("Pipeline Node Data", () => {
       },
     });
 
-    const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
     const s3Dot = page.locator(".pipeline-flow .status-dot").nth(3);
-    await expect(bufferDot).toHaveClass(/active/, { timeout: 5000 });
-    await expect(bufferDot).not.toHaveClass(/warning/);
-    await expect(s3Dot).toHaveClass(/active/);
+    await expect(s3Dot).toHaveClass(/active/, { timeout: 5000 });
     await expect(s3Dot).not.toHaveClass(/warning/);
-  });
-
-  test("buffer dots are yellow when cache bar is warning (progress 40-75%)", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    await page.waitForTimeout(1000);
-
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
-      data: {
-        type: "PipelineState",
-        data: {
-          state: "streaming",
-          event_id: 1,
-          event_name: "Test",
-          buffer_progress: 0.5,
-          target_delay_secs: 120,
-          current_delay_secs: 60.0,
-          session_start: null,
-          predicted: false,
-          local_buffer_chunks: 2,
-          s3_queue_chunks: 10,
-        },
-      },
-    });
-
-    const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
-    const s3Dot = page.locator(".pipeline-flow .status-dot").nth(3);
-    await expect(bufferDot).toHaveClass(/warning/, { timeout: 5000 });
-    await expect(bufferDot).not.toHaveClass(/active/);
-    await expect(s3Dot).toHaveClass(/warning/);
-    await expect(s3Dot).not.toHaveClass(/active/);
-  });
-
-  test("buffer dots are red when cache bar is critical (progress < 40%)", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    await page.waitForTimeout(1000);
-
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
-      data: {
-        type: "PipelineState",
-        data: {
-          state: "streaming",
-          event_id: 1,
-          event_name: "Test",
-          buffer_progress: 0.2,
-          target_delay_secs: 120,
-          current_delay_secs: 24.0,
-          session_start: null,
-          predicted: false,
-          local_buffer_chunks: 5,
-          s3_queue_chunks: 3,
-        },
-      },
-    });
-
-    const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
-    const s3Dot = page.locator(".pipeline-flow .status-dot").nth(3);
-    await expect(bufferDot).toHaveClass(/error/, { timeout: 5000 });
-    await expect(bufferDot).not.toHaveClass(/active/);
-    await expect(bufferDot).not.toHaveClass(/warning/);
-    await expect(s3Dot).toHaveClass(/error/);
-    await expect(s3Dot).not.toHaveClass(/active/);
+    await expect(s3Dot).not.toHaveClass(/error/);
   });
 });
 
