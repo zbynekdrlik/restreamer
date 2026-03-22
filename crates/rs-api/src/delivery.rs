@@ -336,21 +336,55 @@ impl DeliveryOrchestrator {
             0
         };
 
-        // Query chunk sequences, retrying briefly in case chunks haven't been committed yet.
-        // Uses per-event sequence_number (not global DB id) to avoid chunk interleaving
-        // when multiple events create chunks concurrently.
+        // Wait for enough LOCAL chunks to exist before initializing the VPS.
+        // This avoids stale S3 chunks (from previous sessions) fooling the
+        // buffer fill on the VPS into starting too early.
+        // We wait until latest_seq - first_seq >= delivery_delay_chunks so the
+        // start_chunk_id calculation gives the exact target delay.
         let mut first_seq = None;
-        for attempt in 0..10 {
+        let mut latest_seq = 0i64;
+        let max_chunk_wait = 300; // 5 minutes max wait
+        for attempt in 0..max_chunk_wait {
             match db::get_first_sequence_number_for_event(&self.pool, event_id).await {
                 Ok(Some(seq)) => {
-                    first_seq = Some(seq);
-                    break;
+                    if first_seq.is_none() {
+                        first_seq = Some(seq);
+                    }
+                    latest_seq = db::get_latest_sequence_number_for_event(&self.pool, event_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or(seq);
+                    let gap = latest_seq - first_seq.unwrap_or(seq);
+                    if gap >= delivery_delay_chunks {
+                        info!(
+                            event_id,
+                            first_seq = first_seq.unwrap_or(seq),
+                            latest_seq,
+                            gap,
+                            delivery_delay_chunks,
+                            "Enough chunks accumulated for target delay"
+                        );
+                        break;
+                    }
+                    if attempt % 10 == 0 {
+                        info!(
+                            event_id,
+                            gap,
+                            delivery_delay_chunks,
+                            attempt,
+                            "Waiting for chunks to reach target delay ({gap}/{delivery_delay_chunks})"
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 Ok(None) => {
-                    info!(
-                        event_id,
-                        attempt, "No chunks found for event yet, retrying..."
-                    );
+                    if attempt % 10 == 0 {
+                        info!(
+                            event_id,
+                            attempt, "No chunks found for event yet, retrying..."
+                        );
+                    }
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
                 Err(e) => {
@@ -360,12 +394,19 @@ impl DeliveryOrchestrator {
             }
         }
         let first_seq = first_seq
-            .ok_or_else(|| anyhow::anyhow!("No chunks found for event {event_id} after 30s"))?;
+            .ok_or_else(|| anyhow::anyhow!("No chunks found for event {event_id} after wait"))?;
 
-        let start_chunk_id = first_seq;
+        // Start from live edge minus delay, so the gap is exactly the target.
+        let start_chunk_id = if latest_seq - first_seq >= delivery_delay_chunks {
+            (latest_seq - delivery_delay_chunks).max(first_seq)
+        } else {
+            // Not enough chunks accumulated in time — start from beginning
+            first_seq
+        };
         info!(
             event_id,
-            start_chunk_id, delivery_delay_chunks, "Starting delivery from sequence"
+            start_chunk_id, first_seq, latest_seq, delivery_delay_chunks,
+            "Starting delivery from sequence"
         );
 
         let init_body = serde_json::json!({
