@@ -370,8 +370,10 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
 
                 chunk_id += 1;
-                // Small delay to match real-time playback
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // Pacing: fast endpoints catch up quickly (100ms),
+                // non-fast endpoints match real-time (1000ms) to maintain cache delay.
+                let pace_ms = if ep_cfg.is_fast { 100 } else { 1000 };
+                tokio::time::sleep(std::time::Duration::from_millis(pace_ms)).await;
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;

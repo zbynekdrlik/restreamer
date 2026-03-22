@@ -140,7 +140,7 @@ async fn test_processes_sequential_chunks() {
         endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
-    // With 100ms pacing, 5 chunks need ~500ms
+    // With 1000ms pacing (non-fast), 5 chunks need ~5s
     for _ in 0..12 {
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
@@ -648,7 +648,7 @@ async fn test_buffer_fill_waits_for_target_chunk() {
 async fn test_chunk_gap_maintained_at_delay_target() {
     // With delivery_delay_chunks=10, start_chunk_id=1, pre-load chunks 1-30:
     // After buffer fill (chunk 11 available), VPS starts consuming from chunk 1
-    // at 100ms per chunk (10 chunks/sec). All 30 chunks should be consumed quickly.
+    // at 1000ms per chunk (non-fast real-time pacing). All 30 chunks take ~30s.
     tokio::time::pause();
 
     let all_chunks: Vec<(i64, Vec<u8>)> = (1..=30).map(|i| (i, vec![i as u8; 100])).collect();
@@ -674,17 +674,17 @@ async fn test_chunk_gap_maintained_at_delay_target() {
     });
 
     // Buffer fill: target_chunk = 1 + 10 = 11 (immediately available)
-    // Processing at 100ms/chunk: 30 chunks = 3s, but tokio::time::pause()
-    // requires multiple yields per chunk for async steps to complete.
-    for _ in 0..100 {
-        tokio::time::advance(std::time::Duration::from_millis(200)).await;
+    // Processing at 1000ms/chunk (non-fast): 30 chunks = 30s.
+    // tokio::time::pause() requires multiple yields per chunk for async steps.
+    for _ in 0..120 {
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
     }
 
     let s = stats.lock().await;
     assert_eq!(
         s.chunks_processed, 30,
-        "Should have processed all 30 chunks at 100ms pacing, got {}",
+        "Should have processed all 30 chunks at 1000ms pacing, got {}",
         s.chunks_processed
     );
     drop(s);
