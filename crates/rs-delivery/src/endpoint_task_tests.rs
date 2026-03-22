@@ -487,9 +487,11 @@ async fn test_processes_100_sequential_chunks() {
         endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
-    // 1000ms per chunk, 100 chunks = 100s
-    for _ in 0..120 {
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    // 1000ms per chunk (non-fast), 100 chunks = 100s.
+    // Each chunk needs multiple async steps (fetch, write, sleep), so advance
+    // in smaller increments with extra yields for the executor.
+    for _ in 0..400 {
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
         tokio::task::yield_now().await;
     }
 
