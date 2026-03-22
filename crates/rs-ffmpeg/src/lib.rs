@@ -156,11 +156,10 @@ fn build_rtmps_args(url: &str) -> Vec<String> {
 fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
     let url = format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}");
     vec![
-        "-re".into(),
-        "-f".into(),
-        "mpegts".into(),
         "-readrate".into(),
         "1.00".into(),
+        "-f".into(),
+        "mpegts".into(),
         "-loglevel".into(),
         "info".into(),
         "-fflags".into(),
@@ -169,16 +168,8 @@ fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
         "pipe:".into(),
         "-f".into(),
         "flv".into(),
-        "-c:v".into(),
+        "-c".into(),
         "copy".into(),
-        "-c:a".into(),
-        "aac".into(),
-        "-b:a".into(),
-        "160k".into(),
-        "-ac".into(),
-        "2".into(),
-        "-ar".into(),
-        "48000".into(),
         url,
     ]
 }
@@ -389,19 +380,14 @@ mod tests {
         assert!(args.iter().any(|a| a.contains("a.rtmp.youtube.com")));
         assert!(args.iter().any(|a| a.contains("yt-key")));
         assert!(args.contains(&"flv".to_string()));
-        // Video: passthrough
-        assert!(args.contains(&"-c:v".to_string()));
+        // Full passthrough (no audio re-encode)
+        assert!(args.contains(&"-c".to_string()));
         assert!(args.contains(&"copy".to_string()));
-        // Audio: transcode to AAC stereo 48kHz 160kbps
-        assert!(args.contains(&"-c:a".to_string()));
-        assert!(args.contains(&"aac".to_string()));
-        assert!(args.contains(&"160k".to_string()));
-        assert!(args.contains(&"2".to_string()));
-        assert!(args.contains(&"48000".to_string()));
-        // Real-time pacing
-        assert!(args.contains(&"-re".to_string()));
-        // No yadif (was dead code in legacy)
-        assert!(!args.iter().any(|a| a.contains("yadif")));
+        assert!(!args.contains(&"-c:a".to_string()), "should not have separate audio codec");
+        assert!(!args.contains(&"aac".to_string()), "should not re-encode audio");
+        // Single rate control (no double-throttle)
+        assert!(args.contains(&"-readrate".to_string()));
+        assert!(!args.contains(&"-re".to_string()), "should not have -re with -readrate");
     }
 
     #[test]

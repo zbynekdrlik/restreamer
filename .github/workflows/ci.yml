@@ -1457,15 +1457,17 @@ jobs:
           }
           Write-Host "Pre-flight cleanup complete"
 
-      - name: Activate event on local client
+      - name: Start stream (activate + delivery VPS)
         shell: powershell
         run: |
-          # Find or create the event on the local client and activate it
+          # Find or create the event, deactivate others, then call start-stream
+          # which sets receiving_activated=true, delivering_activated=true,
+          # clears stale chunks, and starts the Hetzner delivery VPS.
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
 
           # Deactivate ALL other events first so get_streaming_event() returns our event
           foreach ($ev in $events) {
-            if ($ev.name -ne $env:EVENT_NAME -and $ev.receiving_activated) {
+            if ($ev.name -ne $env:EVENT_NAME -and ($ev.receiving_activated -or $ev.delivering_activated)) {
               Write-Host "Deactivating other event: id=$($ev.id) name=$($ev.name)"
               try {
                 Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/deactivate" `
@@ -1483,16 +1485,16 @@ jobs:
           }
           Write-Host "Event id: $($targetEvent.id), name: $($targetEvent.name)"
 
-          # Activate receiving on local client
-          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/activate" `
-            -Method POST -TimeoutSec 10
+          # Start stream: activates receiving + delivering, clears stale chunks, starts VPS
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/start-stream" `
+            -Method POST -TimeoutSec 300
 
-          # Verify
+          # Verify both flags are set
           $event = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" -TimeoutSec 10
-          if (-not $event.receiving_activated) {
-            throw "FAILED: Event not activated on local client"
+          if (-not $event.receiving_activated -or -not $event.delivering_activated) {
+            throw "FAILED: Event not fully activated: receiving=$($event.receiving_activated) delivering=$($event.delivering_activated)"
           }
-          Write-Host "Event activated: receiving_activated=$($event.receiving_activated)"
+          Write-Host "Stream started: receiving=$($event.receiving_activated) delivering=$($event.delivering_activated)"
 
       - name: Start OBS stream
         shell: powershell
@@ -1710,79 +1712,24 @@ jobs:
 
           Write-Host "=== Baseline PASSED: YouTube is NOT receiving stream data ==="
 
-      - name: Attach YouTube endpoint to E2E event
+      - name: Verify E2E event has endpoints configured
         shell: powershell
         run: |
+          # The E2E event must have endpoints pre-configured on stream.lan.
+          # CI does NOT create or manage endpoints — that's the user's job.
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
 
-          # Check if endpoint already exists
-          $endpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -TimeoutSec 10
-          $ytEndpoint = $endpoints | Where-Object { $_.alias -eq "E2E-YouTube" }
-
-          if (-not $ytEndpoint) {
-            # Create a YT_HLS endpoint for e2e testing
-            $body = @{
-              alias = "E2E-YouTube"
-              service_type = "YT_HLS"
-              stream_key = "${{ secrets.YOUTUBE_STREAM_KEY }}"
-              is_fast = $false
-            } | ConvertTo-Json
-            $ytEndpoint = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" `
-              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
-            Write-Host "Created endpoint: id=$($ytEndpoint.id) alias=$($ytEndpoint.alias)"
-          } else {
-            Write-Host "Endpoint already exists: id=$($ytEndpoint.id)"
+          $endpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$eventId/endpoints" -TimeoutSec 10
+          if (-not $endpoints -or $endpoints.Count -eq 0) {
+            throw "FAILED: Event '$($env:EVENT_NAME)' has no endpoints configured. Configure endpoints on stream.lan first."
           }
 
-          # Attach endpoint to event
-          try {
-            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$eventId/endpoints/$($ytEndpoint.id)" `
-              -Method POST -TimeoutSec 10
-            Write-Host "Attached endpoint $($ytEndpoint.id) to event $eventId"
-          } catch {
-            Write-Host "Endpoint may already be attached: $_"
+          Write-Host "Event '$($env:EVENT_NAME)' has $($endpoints.Count) endpoint(s):"
+          foreach ($ep in $endpoints) {
+            Write-Host "  - $($ep.alias) ($($ep.service_type))"
           }
-
-          # Verify
-          $eventEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$eventId/endpoints" -TimeoutSec 10
-          Write-Host "Event $eventId has $($eventEndpoints.Count) endpoint(s)"
-
-      - name: Start delivery (Hetzner VPS)
-        shell: powershell
-        timeout-minutes: 8
-        run: |
-          # Find the active event to get event_id
-          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
-          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
-          if (-not $targetEvent) {
-            throw "FAILED: Event '$($env:EVENT_NAME)' not found"
-          }
-          $eventId = $targetEvent.id
-
-          # Log chunk status for this event before delivery starts
-          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 10
-          Write-Host "Pre-delivery chunk stats: total=$($stats.total_chunks), sent=$($stats.sent_chunks), pending=$($stats.pending_chunks)"
-          Write-Host "Starting delivery for event_id=$eventId (uses per-event sequence numbers)..."
-
-          $body = @{ event_id = $eventId } | ConvertTo-Json
-          $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/start" `
-            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 300
-
-          Write-Host "Delivery start response: $($response | ConvertTo-Json -Depth 3)"
-          if ($response.error) {
-            throw "FAILED: Delivery start error: $($response.error)"
-          }
-          Write-Host "=== Delivery started: server=$($response.server_ip), hetzner_id=$($response.hetzner_id) ==="
-
-          # Diagnostic: check chunks for this event
-          $allEvents = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
-          foreach ($ev in $allEvents) {
-            Write-Host "  Event: id=$($ev.id) name=$($ev.name) receiving=$($ev.receiving_activated) delivering=$($ev.delivering_activated) bytes=$($ev.received_bytes)"
-          }
-          $chunkStats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 10
-          Write-Host "  Chunk stats: total=$($chunkStats.total_chunks) pending=$($chunkStats.pending_chunks) sent=$($chunkStats.sent_chunks)"
 
       - name: Wait for delivery server ready
         shell: powershell
@@ -1839,7 +1786,7 @@ jobs:
         shell: powershell
         timeout-minutes: 3
         run: |
-          # Delivering server sends to YouTube via YT_HLS (HTTPS PUT), not RTMP
+          # Delivering server sends to YouTube via the configured endpoint service type
           # Take 4 readings at 15s intervals to catch stalls that 2-reading check misses
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
@@ -1882,7 +1829,7 @@ jobs:
           Write-Host "=========================================="
           Write-Host "  DELIVERY CONFIRMED: $totalAdvance chunks advanced over 45s"
           Write-Host "  All 4 readings showed continuous progression"
-          Write-Host "  ffmpeg is alive and sending to YouTube via YT_HLS"
+          Write-Host "  ffmpeg is alive and sending to YouTube"
           Write-Host "=========================================="
 
       - name: Verify cache delay meets target
