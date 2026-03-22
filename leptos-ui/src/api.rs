@@ -500,6 +500,8 @@ pub struct CachedDeliveryEndpoint {
     pub ffmpeg_restart_count: u32,
     #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub is_fast: bool,
 }
 
 /// Get cached delivery status (instant, no VPS round-trip).

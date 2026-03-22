@@ -1013,6 +1013,16 @@ input[type="password"]:focus {
 .cache-bar-fill.exhausted {
   background: var(--error);
 }
+.cache-bar-fill.healthy {
+  background: var(--success);
+}
+.cache-bar-fill.warning {
+  background: var(--warning);
+}
+.cache-bar-fill.critical {
+  background: var(--error);
+  animation: pulse-bar 1.5s ease-in-out infinite;
+}
 @keyframes pulse-bar {
   0%,
   100% {

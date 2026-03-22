@@ -1,5 +1,6 @@
 //! Operator-facing single-page dashboard.
 
+use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -73,7 +74,15 @@ fn ControlBar() -> impl IntoView {
         s == "streaming" || s == "buffering" || s == "buffer_exhausted"
     };
 
+    // 1-second tick signal to force session_duration re-evaluation every second
+    let tick = RwSignal::new(0u32);
+    let _interval = Interval::new(1_000, move || {
+        tick.update(|t| *t = t.wrapping_add(1));
+    });
+    std::mem::forget(_interval);
+
     let session_duration = move || {
+        let _ = tick.get(); // subscribe to 1s tick
         let ps = store.pipeline_state.get();
         if let Some(ref start) = ps.session_start {
             let start_ms = js_sys::Date::parse(start);
@@ -170,7 +179,22 @@ fn PipelineFlow() -> impl IntoView {
 
     let rtmp_connected = move || store.inpoint_connected.get();
     let chunk_stats = move || store.chunk_stats.get();
+    let ps = move || store.pipeline_state.get();
+    let is_delivering = move || {
+        let s = ps().state;
+        s == "buffering" || s == "streaming" || s == "buffer_exhausted"
+    };
+    // When delivering: show pipeline_state counts. When idle: show chunk_stats.
+    let local_chunks = move || {
+        if is_delivering() { ps().local_buffer_chunks } else { chunk_stats().pending_chunks }
+    };
+    let s3_chunks = move || {
+        if is_delivering() { ps().s3_queue_chunks } else { chunk_stats().sent_chunks }
+    };
     let delivery_status = move || store.delivery.get().status.clone();
+    let delivered_chunks = move || {
+        store.delivery.get().endpoints.iter().map(|ep| ep.chunks_processed).max().unwrap_or(0)
+    };
 
     view! {
         <div class="pipeline-flow">
@@ -187,15 +211,15 @@ fn PipelineFlow() -> impl IntoView {
             </div>
             <span class="pipeline-arrow">{"\u{2192}"}</span>
             <div class="pipeline-node">
-                <span class={move || if chunk_stats().total_chunks > 0 { "status-dot active" } else { "status-dot" }}></span>
-                <span class="pipeline-label">"Chunker"</span>
-                <span class="pipeline-metric">{move || format!("{} chunks", chunk_stats().total_chunks)}</span>
+                <span class={move || if local_chunks() > 0 { "status-dot active" } else { "status-dot" }}></span>
+                <span class="pipeline-label">"Local Buffer"</span>
+                <span class="pipeline-metric">{move || format!("{} chunks", local_chunks())}</span>
             </div>
             <span class="pipeline-arrow">{"\u{2192}"}</span>
             <div class="pipeline-node">
-                <span class={move || if chunk_stats().sent_chunks > 0 { "status-dot active" } else { "status-dot" }}></span>
-                <span class="pipeline-label">"S3 Upload"</span>
-                <span class="pipeline-metric">{move || format!("{} pending", chunk_stats().pending_chunks)}</span>
+                <span class={move || if s3_chunks() > 0 { "status-dot active" } else { "status-dot" }}></span>
+                <span class="pipeline-label">"S3 Queue"</span>
+                <span class="pipeline-metric">{move || format!("{} queued", s3_chunks())}</span>
             </div>
             <span class="pipeline-arrow">{"\u{2192}"}</span>
             <div class="pipeline-node">
@@ -203,10 +227,14 @@ fn PipelineFlow() -> impl IntoView {
                     let s = delivery_status();
                     if s == "running" { "status-dot active" } else { "status-dot" }
                 }}></span>
-                <span class="pipeline-label">"VPS"</span>
+                <span class="pipeline-label">"Delivery"</span>
                 <span class="pipeline-metric">{move || {
                     let s = delivery_status();
-                    if s.is_empty() || s == "none" { "Idle".to_string() } else { s }
+                    if s.is_empty() || s == "none" {
+                        "Idle".to_string()
+                    } else {
+                        format!("{} delivered", delivered_chunks())
+                    }
                 }}</span>
             </div>
         </div>
@@ -232,8 +260,12 @@ fn CacheBar() -> impl IntoView {
             "cache-bar-fill exhausted"
         } else if is_predicted() {
             "cache-bar-fill predicted"
+        } else if progress() >= 0.75 {
+            "cache-bar-fill healthy"
+        } else if progress() >= 0.40 {
+            "cache-bar-fill warning"
         } else {
-            "cache-bar-fill"
+            "cache-bar-fill critical"
         }
     };
 
@@ -249,7 +281,14 @@ fn CacheBar() -> impl IntoView {
                     } else if is_predicted() {
                         format!("~{}s / {}s target (predicted — VPS unreachable)", current() as u64, target())
                     } else {
-                        format!("Cache: {}s / {}s target", current() as u64, target())
+                        let zone = if progress() >= 0.75 {
+                            "healthy"
+                        } else if progress() >= 0.40 {
+                            "building"
+                        } else {
+                            "low"
+                        };
+                        format!("Cache: {}s / {}s target ({zone})", current() as u64, target())
                     }
                 }}
             </span>

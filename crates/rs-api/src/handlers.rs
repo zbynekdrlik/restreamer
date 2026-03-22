@@ -775,6 +775,7 @@ pub struct DeliveryEndpointEntry {
     pub stall_reason: Option<String>,
     pub ffmpeg_restart_count: u32,
     pub last_error: Option<String>,
+    pub is_fast: bool,
 }
 
 pub async fn delivery_status(
@@ -808,6 +809,7 @@ pub async fn delivery_status(
             stall_reason: ep.stall_reason,
             ffmpeg_restart_count: ep.ffmpeg_restart_count,
             last_error: ep.last_error,
+            is_fast: ep.is_fast,
         })
         .collect();
     let endpoints_alive =

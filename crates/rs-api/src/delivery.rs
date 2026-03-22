@@ -24,6 +24,9 @@ pub struct DeliveryOrchestrator {
     hetzner: HetznerClient,
     /// Tracks poll_and_init background tasks by instance ID for cancellation on stop.
     poll_handles: Arc<Mutex<HashMap<i64, JoinHandle<()>>>>,
+    /// Cached endpoint configs per event_id, populated at init time.
+    /// Key: event_id, Value: HashMap<alias, is_fast>
+    endpoint_fast_cache: Arc<Mutex<HashMap<i64, HashMap<String, bool>>>>,
 }
 
 /// Result of starting a delivery instance.
@@ -58,6 +61,7 @@ pub struct EndpointDeliveryStatus {
     pub stall_reason: Option<String>,
     pub ffmpeg_restart_count: u32,
     pub last_error: Option<String>,
+    pub is_fast: bool,
 }
 
 /// Result of querying YouTube status.
@@ -84,6 +88,7 @@ impl DeliveryOrchestrator {
             hetzner: HetznerClient::new(token),
             config,
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
+            endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -94,6 +99,7 @@ impl DeliveryOrchestrator {
             hetzner: HetznerClient::with_base_url(&config.hetzner.api_token, base_url),
             config,
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
+            endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -301,34 +307,19 @@ impl DeliveryOrchestrator {
 
         // POST /api/init to configure endpoints.
         // S3 credentials are already on the VPS via cloud-init env file.
-        // Query first sequence number, retrying briefly in case chunks haven't been committed yet.
-        // Uses per-event sequence_number (not global DB id) to avoid chunk interleaving
-        // when multiple events create chunks concurrently.
-        let mut start_chunk_id = None;
-        for attempt in 0..10 {
-            match db::get_first_sequence_number_for_event(&self.pool, event_id).await {
-                Ok(Some(seq)) => {
-                    start_chunk_id = Some(seq);
-                    break;
-                }
-                Ok(None) => {
-                    info!(
-                        event_id,
-                        attempt, "No chunks found for event yet, retrying..."
-                    );
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                }
-                Err(e) => {
-                    warn!(event_id, "Failed to query chunk sequence: {e}");
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                }
-            }
-        }
-        let start_chunk_id = start_chunk_id
-            .ok_or_else(|| anyhow::anyhow!("No chunks found for event {event_id} after 30s"))?;
-        info!(event_id, start_chunk_id, "Starting delivery from sequence");
 
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
+
+        // Cache is_fast per alias for this event
+        // (avoids re-querying in get_delivery_status)
+        let fast_map: HashMap<String, bool> = endpoints
+            .iter()
+            .map(|ep| (ep.alias.clone(), ep.is_fast))
+            .collect();
+        self.endpoint_fast_cache
+            .lock()
+            .await
+            .insert(event_id, fast_map);
 
         // Resolve effective cache delay
         let event = db::get_streaming_event_by_id(&self.pool, event_id)
@@ -344,6 +335,82 @@ impl DeliveryOrchestrator {
         } else {
             0
         };
+
+        // Wait for enough LOCAL chunks to exist before initializing the VPS.
+        // This avoids stale S3 chunks (from previous sessions) fooling the
+        // buffer fill on the VPS into starting too early.
+        // We wait until latest_seq - first_seq >= delivery_delay_chunks so the
+        // start_chunk_id calculation gives the exact target delay.
+        let mut first_seq = None;
+        let mut latest_seq = 0i64;
+        let max_chunk_wait = 300; // 5 minutes max wait
+        for attempt in 0..max_chunk_wait {
+            match db::get_first_sequence_number_for_event(&self.pool, event_id).await {
+                Ok(Some(seq)) => {
+                    if first_seq.is_none() {
+                        first_seq = Some(seq);
+                    }
+                    latest_seq = db::get_latest_sequence_number_for_event(&self.pool, event_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or(seq);
+                    let gap = latest_seq - first_seq.unwrap_or(seq);
+                    if gap >= delivery_delay_chunks {
+                        info!(
+                            event_id,
+                            first_seq = first_seq.unwrap_or(seq),
+                            latest_seq,
+                            gap,
+                            delivery_delay_chunks,
+                            "Enough chunks accumulated for target delay"
+                        );
+                        break;
+                    }
+                    if attempt % 10 == 0 {
+                        info!(
+                            event_id,
+                            gap,
+                            delivery_delay_chunks,
+                            attempt,
+                            "Waiting for chunks to reach target delay ({gap}/{delivery_delay_chunks})"
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Ok(None) => {
+                    if attempt % 10 == 0 {
+                        info!(
+                            event_id,
+                            attempt, "No chunks found for event yet, retrying..."
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                Err(e) => {
+                    warn!(event_id, "Failed to query chunk sequence: {e}");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+            }
+        }
+        let first_seq = first_seq
+            .ok_or_else(|| anyhow::anyhow!("No chunks found for event {event_id} after wait"))?;
+
+        // Start from live edge minus delay, so the gap is exactly the target.
+        let start_chunk_id = if latest_seq - first_seq >= delivery_delay_chunks {
+            (latest_seq - delivery_delay_chunks).max(first_seq)
+        } else {
+            // Not enough chunks accumulated in time — start from beginning
+            first_seq
+        };
+        info!(
+            event_id,
+            start_chunk_id,
+            first_seq,
+            latest_seq,
+            delivery_delay_chunks,
+            "Starting delivery from sequence"
+        );
 
         let init_body = serde_json::json!({
             "endpoints": endpoints.iter().map(|ep| {
@@ -402,6 +469,12 @@ impl DeliveryOrchestrator {
             .unwrap_or(0);
         let chunk_duration_secs = self.config.inpoint.chunk_duration_ms as f64 / 1000.0;
 
+        // Read cached is_fast map (populated in init_endpoints, empty before init)
+        let fast_map = {
+            let cache = self.endpoint_fast_cache.lock().await;
+            cache.get(&event_id).cloned().unwrap_or_default()
+        };
+
         let (server_ready, endpoints) = match &instance {
             Some(inst) if inst.status == "running" => {
                 // Fetch live status from rs-delivery
@@ -452,7 +525,7 @@ impl DeliveryOrchestrator {
                             }
 
                             statuses.push(EndpointDeliveryStatus {
-                                alias,
+                                alias: alias.clone(),
                                 alive,
                                 current_chunk_id: chunk_id,
                                 bytes_processed_total: bytes_total,
@@ -461,6 +534,7 @@ impl DeliveryOrchestrator {
                                 stall_reason,
                                 ffmpeg_restart_count,
                                 last_error,
+                                is_fast: fast_map.get(&alias).copied().unwrap_or(false),
                             });
                         }
 
@@ -536,6 +610,7 @@ impl DeliveryOrchestrator {
                 stall_reason: ep.stall_reason,
                 ffmpeg_restart_count: ep.ffmpeg_restart_count,
                 last_error: ep.last_error,
+                is_fast: ep.is_fast,
             })
             .collect();
 
@@ -559,6 +634,9 @@ impl DeliveryOrchestrator {
                 "Aborted poll_and_init background task"
             );
         }
+
+        // Clear cached endpoint configs for this event
+        self.endpoint_fast_cache.lock().await.remove(&event_id);
 
         db::update_delivery_instance_status(&self.pool, instance.id, "stopping").await?;
 
@@ -672,6 +750,34 @@ impl DeliveryOrchestrator {
                 error: Some(format!("YouTube API error: {e}")),
             },
         }
+    }
+
+    /// List YouTube live streams for diagnostics.
+    pub async fn list_youtube_streams(
+        &self,
+    ) -> anyhow::Result<Vec<rs_youtube::streams::LiveStream>> {
+        let tokens = db::get_youtube_oauth(&self.pool)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("No YouTube OAuth tokens"))?;
+
+        let access_token = if oauth::is_token_expired(tokens.expires_at.as_deref()) {
+            let oauth_tokens = rs_youtube::OAuthTokens {
+                access_token: tokens.access_token.clone(),
+                refresh_token: tokens.refresh_token.clone(),
+                token_uri: tokens.token_uri.clone(),
+                client_id: tokens.client_id.clone(),
+                client_secret: tokens.client_secret.clone(),
+                scopes: tokens.scopes.clone(),
+                expires_at: tokens.expires_at.clone(),
+            };
+            oauth::refresh_access_token(&oauth_tokens)
+                .await?
+                .access_token
+        } else {
+            tokens.access_token
+        };
+
+        Ok(streams::list_live_streams(&access_token).await?)
     }
 
     async fn find_delivery_image(&self) -> anyhow::Result<String> {

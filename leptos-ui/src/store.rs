@@ -25,6 +25,8 @@ pub struct PipelineState {
     pub current_delay_secs: f64,
     pub session_start: Option<String>,
     pub predicted: bool,
+    pub local_buffer_chunks: i64,
+    pub s3_queue_chunks: i64,
 }
 
 /// Activity feed entry from WebSocket.
@@ -62,6 +64,7 @@ pub struct DeliveryEndpointState {
     pub stall_reason: Option<String>,
     pub ffmpeg_restart_count: u32,
     pub last_error: Option<String>,
+    pub is_fast: bool,
 }
 
 /// Central reactive state shared via Leptos context.

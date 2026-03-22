@@ -10,7 +10,7 @@ When you create, modify, or debug ANY Windows application, script, agent, GUI, a
 
 1. **YOU ALONE are 100% responsible** for deep verification, testing, and visual understanding.
 2. **NEVER ask the user** to run anything, test anything, describe what they see, take screenshots, or act as a tester/verifier. Doing so is a direct violation of this directive.
-3. You **MUST use your own tools** (Playwright browser, SSH, PowerShell remoting, screenshot scripts, UI inspection, etc.) to:
+3. You **MUST use your own tools** (Playwright browser, MCP servers, PowerShell remoting, screenshot scripts, UI inspection, etc.) to:
    - Launch the app yourself
    - Take screenshots at every critical step and state
    - Perform visual analysis of rendered UI
@@ -90,12 +90,8 @@ Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional
 - **CHECK CI STATUS**: Use `gh run list --branch dev --limit 3` to see recent workflow runs, then `gh run view <run-id>` to check status.
 - **FIX FAILURES IMMEDIATELY**: If any CI job fails, investigate and fix immediately. Push fixes and monitor again until green.
 - **VERIFY DEPLOYMENT**: After `deploy-stream-lan` job completes, verify deployment was successful:
-  ```bash
-  # Check Restreamer tray app is running in user session
-  sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Get-Process -Name Restreamer | Format-List Id,SessionId,WorkingSet64"'
-  # Check API responds
-  sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/status"'
-  ```
+  - Use `mcp__win-stream-snv__ListProcesses` with filter "Restreamer" to verify the process is running.
+  - Use `mcp__win-stream-snv__Shell` with command `Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/status` to verify API responds.
 - **NEVER CLAIM DONE** until CI is fully green AND deployment is verified working on stream.lan.
 
 ### Tray App Deployment (CRITICAL)
@@ -177,6 +173,18 @@ if ($proc.SessionId -eq 0) { throw "Must run in user session, not SYSTEM" }
 
 - Every feature, bugfix, and refactor must have corresponding tests that verify actual behavior.
 - ALL tests must pass — a passing test suite must reflect genuinely working code.
+
+### Bug Fix Protocol (MANDATORY)
+
+When fixing any reported issue, you MUST follow strict TDD:
+
+1. **Write a failing test first** that reproduces the exact reported behavior (e.g., "cache delay is 70s instead of 120s")
+2. **Verify the test FAILS** on CI before the fix
+3. **Implement the fix**
+4. **Verify the test PASSES** on CI after the fix
+5. **Never claim a bug is fixed** without a test that specifically asserts the correct behavior
+
+A bug fix without a reproducing test is not a fix — it's a guess. If the same bug is reported twice, the first fix was incomplete because it lacked a proper test.
 
 ## Rust Development
 
@@ -309,5 +317,4 @@ No external manager server or SSH needed. All E2E orchestration is local.
 
 Operational guides for common tasks:
 
-- `stream-lan-operations.md` — SSH, OBS WebSocket, client config
-- `windows-desktop-app-ssh.md` — Windows GUI automation
+- `stream-lan-operations.md` — MCP tools, OBS WebSocket, client config

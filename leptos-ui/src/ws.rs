@@ -77,6 +77,10 @@ enum WsEvent {
         session_start: Option<String>,
         #[serde(default)]
         predicted: bool,
+        #[serde(default)]
+        local_buffer_chunks: i64,
+        #[serde(default)]
+        s3_queue_chunks: i64,
     },
 }
 
@@ -94,6 +98,8 @@ struct WsDeliveryEndpoint {
     ffmpeg_restart_count: u32,
     #[serde(default)]
     last_error: Option<String>,
+    #[serde(default)]
+    is_fast: bool,
 }
 
 /// Compute the WebSocket URL from the current page location.
@@ -138,6 +144,7 @@ async fn load_initial_state(store: DashboardStore) {
                     stall_reason: ep.stall_reason,
                     ffmpeg_restart_count: ep.ffmpeg_restart_count,
                     last_error: ep.last_error,
+                    is_fast: ep.is_fast,
                 })
                 .collect();
             store.delivery.set(DeliveryState {
@@ -277,6 +284,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                             stall_reason: ep.stall_reason.clone(),
                             ffmpeg_restart_count: ep.ffmpeg_restart_count,
                             last_error: ep.last_error.clone(),
+                            is_fast: ep.is_fast,
                         }
                     })
                     .collect();
@@ -320,6 +328,8 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
             current_delay_secs,
             session_start,
             predicted,
+            local_buffer_chunks,
+            s3_queue_chunks,
         } => {
             store.pipeline_state.set(crate::store::PipelineState {
                 state,
@@ -330,6 +340,8 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                 current_delay_secs,
                 session_start,
                 predicted,
+                local_buffer_chunks,
+                s3_queue_chunks,
             });
         }
     }

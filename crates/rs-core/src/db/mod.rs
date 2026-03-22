@@ -650,6 +650,20 @@ pub async fn get_sent_chunk_count_for_event(
     Ok(row.get::<i32, _>("cnt") as i64)
 }
 
+/// Count chunks on local disk (not yet uploaded to S3) for a specific streaming event.
+pub async fn get_pending_chunk_count_for_event(
+    pool: &SqlitePool,
+    streaming_event_id: i64,
+) -> Result<i64> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) as cnt FROM chunk_records WHERE streaming_event_id = ?1 AND sent = 0 AND in_process = 0",
+    )
+    .bind(streaming_event_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get::<i32, _>("cnt") as i64)
+}
+
 /// Delete all chunks for a specific streaming event.
 /// Used to clear stale chunks when restarting a stream so buffer starts at 0%.
 pub async fn delete_chunks_for_event(pool: &SqlitePool, streaming_event_id: i64) -> Result<u64> {

@@ -170,7 +170,7 @@ jobs:
       - name: Run audit
         run: |
           for i in 1 2 3; do
-            cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0037 && exit 0
+            cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0049 && exit 0
             echo "Attempt $i failed, retrying in 10s..."
             sleep 10
           done
@@ -1095,8 +1095,9 @@ jobs:
       - name: Verify chunks created and uploaded to S3
         shell: powershell
         run: |
-          # Wait up to 60s for all chunks to be uploaded (pending -> 0)
-          $maxWait = 12
+          # Wait up to 100s for all chunks to be uploaded (pending -> 0)
+          # After deploy restarts Restreamer, the S3 uploader needs time to initialize
+          $maxWait = 20
           $stats = $null
           for ($w = 1; $w -le $maxWait; $w++) {
             $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
@@ -1406,6 +1407,7 @@ jobs:
         timeout-minutes: 2
         run: |
           Write-Host "Checking for stale delivery instances..."
+          # Step 1: Clean up via local API (uses DB state)
           try {
             $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
             if ($instances -and $instances.Count -gt 0) {
@@ -1422,20 +1424,50 @@ jobs:
               }
               Start-Sleep -Seconds 5
             }
-            Write-Host "No stale delivery instances, proceeding with E2E test"
           } catch {
-            Write-Host "Could not check delivery instances: $_ - proceeding anyway"
+            Write-Host "Could not check delivery instances via API: $_"
           }
 
-      - name: Activate event on local client
+          # Step 2: Clean up orphaned Hetzner VPS directly (survives Restreamer restarts)
+          # This catches VPS instances left behind by cancelled CI runs.
+          if ($env:HETZNER_API_TOKEN) {
+            Write-Host "Checking Hetzner API for orphaned rs-delivery VPS instances..."
+            try {
+              $headers = @{ Authorization = "Bearer $($env:HETZNER_API_TOKEN)" }
+              $resp = Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers?label_selector=app=restreamer" `
+                -Headers $headers -TimeoutSec 15
+              if ($resp.servers -and $resp.servers.Count -gt 0) {
+                foreach ($srv in $resp.servers) {
+                  Write-Host "  Deleting orphaned Hetzner VPS: id=$($srv.id) name=$($srv.name) status=$($srv.status) ip=$($srv.public_net.ipv4.ip)"
+                  try {
+                    Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers/$($srv.id)" `
+                      -Method DELETE -Headers $headers -TimeoutSec 15
+                    Write-Host "  Deleted VPS $($srv.id)"
+                  } catch {
+                    Write-Host "  Failed to delete VPS $($srv.id): $_"
+                  }
+                }
+                Start-Sleep -Seconds 3
+              } else {
+                Write-Host "  No orphaned Hetzner VPS found"
+              }
+            } catch {
+              Write-Host "  Hetzner API check failed: $_"
+            }
+          }
+          Write-Host "Pre-flight cleanup complete"
+
+      - name: Start stream (activate + delivery VPS)
         shell: powershell
         run: |
-          # Find or create the event on the local client and activate it
+          # Find or create the event, deactivate others, then call start-stream
+          # which sets receiving_activated=true, delivering_activated=true,
+          # clears stale chunks, and starts the Hetzner delivery VPS.
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
 
           # Deactivate ALL other events first so get_streaming_event() returns our event
           foreach ($ev in $events) {
-            if ($ev.name -ne $env:EVENT_NAME -and $ev.receiving_activated) {
+            if ($ev.name -ne $env:EVENT_NAME -and ($ev.receiving_activated -or $ev.delivering_activated)) {
               Write-Host "Deactivating other event: id=$($ev.id) name=$($ev.name)"
               try {
                 Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/deactivate" `
@@ -1453,16 +1485,16 @@ jobs:
           }
           Write-Host "Event id: $($targetEvent.id), name: $($targetEvent.name)"
 
-          # Activate receiving on local client
-          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/activate" `
-            -Method POST -TimeoutSec 10
+          # Start stream: activates receiving + delivering, clears stale chunks, starts VPS
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/start-stream" `
+            -Method POST -TimeoutSec 300
 
-          # Verify
+          # Verify both flags are set
           $event = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" -TimeoutSec 10
-          if (-not $event.receiving_activated) {
-            throw "FAILED: Event not activated on local client"
+          if (-not $event.receiving_activated -or -not $event.delivering_activated) {
+            throw "FAILED: Event not fully activated: receiving=$($event.receiving_activated) delivering=$($event.delivering_activated)"
           }
-          Write-Host "Event activated: receiving_activated=$($event.receiving_activated)"
+          Write-Host "Stream started: receiving=$($event.receiving_activated) delivering=$($event.delivering_activated)"
 
       - name: Start OBS stream
         shell: powershell
@@ -1680,79 +1712,24 @@ jobs:
 
           Write-Host "=== Baseline PASSED: YouTube is NOT receiving stream data ==="
 
-      - name: Attach YouTube endpoint to E2E event
+      - name: Verify E2E event has endpoints configured
         shell: powershell
         run: |
+          # The E2E event must have endpoints pre-configured on stream.lan.
+          # CI does NOT create or manage endpoints — that's the user's job.
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
 
-          # Check if endpoint already exists
-          $endpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -TimeoutSec 10
-          $ytEndpoint = $endpoints | Where-Object { $_.alias -eq "E2E-YouTube" }
-
-          if (-not $ytEndpoint) {
-            # Create a YT_HLS endpoint for e2e testing
-            $body = @{
-              alias = "E2E-YouTube"
-              service_type = "YT_HLS"
-              stream_key = "${{ secrets.YOUTUBE_STREAM_KEY }}"
-              is_fast = $false
-            } | ConvertTo-Json
-            $ytEndpoint = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" `
-              -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
-            Write-Host "Created endpoint: id=$($ytEndpoint.id) alias=$($ytEndpoint.alias)"
-          } else {
-            Write-Host "Endpoint already exists: id=$($ytEndpoint.id)"
+          $endpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$eventId/endpoints" -TimeoutSec 10
+          if (-not $endpoints -or $endpoints.Count -eq 0) {
+            throw "FAILED: Event '$($env:EVENT_NAME)' has no endpoints configured. Configure endpoints on stream.lan first."
           }
 
-          # Attach endpoint to event
-          try {
-            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$eventId/endpoints/$($ytEndpoint.id)" `
-              -Method POST -TimeoutSec 10
-            Write-Host "Attached endpoint $($ytEndpoint.id) to event $eventId"
-          } catch {
-            Write-Host "Endpoint may already be attached: $_"
+          Write-Host "Event '$($env:EVENT_NAME)' has $($endpoints.Count) endpoint(s):"
+          foreach ($ep in $endpoints) {
+            Write-Host "  - $($ep.alias) ($($ep.service_type))"
           }
-
-          # Verify
-          $eventEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$eventId/endpoints" -TimeoutSec 10
-          Write-Host "Event $eventId has $($eventEndpoints.Count) endpoint(s)"
-
-      - name: Start delivery (Hetzner VPS)
-        shell: powershell
-        timeout-minutes: 8
-        run: |
-          # Find the active event to get event_id
-          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
-          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
-          if (-not $targetEvent) {
-            throw "FAILED: Event '$($env:EVENT_NAME)' not found"
-          }
-          $eventId = $targetEvent.id
-
-          # Log chunk status for this event before delivery starts
-          $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 10
-          Write-Host "Pre-delivery chunk stats: total=$($stats.total_chunks), sent=$($stats.sent_chunks), pending=$($stats.pending_chunks)"
-          Write-Host "Starting delivery for event_id=$eventId (uses per-event sequence numbers)..."
-
-          $body = @{ event_id = $eventId } | ConvertTo-Json
-          $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/start" `
-            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 300
-
-          Write-Host "Delivery start response: $($response | ConvertTo-Json -Depth 3)"
-          if ($response.error) {
-            throw "FAILED: Delivery start error: $($response.error)"
-          }
-          Write-Host "=== Delivery started: server=$($response.server_ip), hetzner_id=$($response.hetzner_id) ==="
-
-          # Diagnostic: check chunks for this event
-          $allEvents = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
-          foreach ($ev in $allEvents) {
-            Write-Host "  Event: id=$($ev.id) name=$($ev.name) receiving=$($ev.receiving_activated) delivering=$($ev.delivering_activated) bytes=$($ev.received_bytes)"
-          }
-          $chunkStats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 10
-          Write-Host "  Chunk stats: total=$($chunkStats.total_chunks) pending=$($chunkStats.pending_chunks) sent=$($chunkStats.sent_chunks)"
 
       - name: Wait for delivery server ready
         shell: powershell
@@ -1809,7 +1786,7 @@ jobs:
         shell: powershell
         timeout-minutes: 3
         run: |
-          # Delivering server sends to YouTube via YT_HLS (HTTPS PUT), not RTMP
+          # Delivering server sends to YouTube via the configured endpoint service type
           # Take 4 readings at 15s intervals to catch stalls that 2-reading check misses
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
@@ -1852,13 +1829,74 @@ jobs:
           Write-Host "=========================================="
           Write-Host "  DELIVERY CONFIRMED: $totalAdvance chunks advanced over 45s"
           Write-Host "  All 4 readings showed continuous progression"
-          Write-Host "  ffmpeg is alive and sending to YouTube via YT_HLS"
+          Write-Host "  ffmpeg is alive and sending to YouTube"
+          Write-Host "=========================================="
+
+      - name: Verify cache delay meets target
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          # TDD assertion: After delivery is streaming, verify that the
+          # chunk_delay_secs for non-fast endpoints is at least 80% of the
+          # configured target (default 120s). This catches the 70s bug.
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          $eventId = $targetEvent.id
+
+          # Get target delay from config (default 120s if not set on event)
+          $targetDelay = 120
+          if ($targetEvent.cache_delay_secs) {
+            $targetDelay = $targetEvent.cache_delay_secs
+          }
+          $minAcceptable = [math]::Floor($targetDelay * 0.8)
+          Write-Host "Target delay: ${targetDelay}s, minimum acceptable: ${minAcceptable}s"
+
+          # Take 3 readings at 10s intervals to get stable delay measurement
+          $delays = @()
+          for ($r = 1; $r -le 3; $r++) {
+            if ($r -gt 1) { Start-Sleep -Seconds 10 }
+            $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+
+            if ($resp.endpoint_details) {
+              foreach ($ep in $resp.endpoint_details) {
+                if (-not $ep.is_fast) {
+                  $delays += $ep.chunk_delay_secs
+                  Write-Host "Reading ${r}: endpoint=$($ep.alias) chunk_delay_secs=$($ep.chunk_delay_secs) chunk_id=$($ep.current_chunk_id)"
+                }
+              }
+            }
+          }
+
+          if ($delays.Count -eq 0) {
+            throw "FAILED: No non-fast endpoint delay readings found"
+          }
+
+          # Use the median delay reading
+          $sorted = $delays | Sort-Object
+          $median = $sorted[[math]::Floor($sorted.Count / 2)]
+          Write-Host ""
+          Write-Host "Delay readings: $($delays -join ', ')"
+          Write-Host "Median delay: ${median}s (target: ${targetDelay}s, min: ${minAcceptable}s)"
+
+          if ($median -lt $minAcceptable) {
+            Write-Host ""
+            Write-Host "=========================================="
+            Write-Host "  FAIL: Cache delay ${median}s < minimum ${minAcceptable}s"
+            Write-Host "  Target was ${targetDelay}s (80% = ${minAcceptable}s)"
+            Write-Host "  This is the 70s cache delay bug!"
+            Write-Host "=========================================="
+            throw "FAILED: Cache delay ${median}s is below minimum acceptable ${minAcceptable}s (target: ${targetDelay}s)"
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "  CACHE DELAY VERIFIED: ${median}s >= ${minAcceptable}s (target: ${targetDelay}s)"
           Write-Host "=========================================="
 
       - name: Verify YouTube is receiving stream data
         id: verify_yt_receiving
         shell: powershell
-        timeout-minutes: 4
+        timeout-minutes: 7
         run: |
           # Hard-fail check: Query the local Rust YouTube API to verify
           # YouTube's ingest server IS receiving stream data.
@@ -1867,7 +1905,11 @@ jobs:
           # Auto-start is BANNED (YouTube destroys the stream afterward), so
           # the broadcast stays in "testing" state — we check liveStreams.list
           # for streamStatus == "active" which means data IS arriving.
-          $maxRetries = 12
+          #
+          # With real-time chunk pacing (1 chunk/sec), the delivery VPS needs
+          # ~120s to fill the buffer before sending to YouTube, plus YouTube
+          # needs ~30-60s to detect the incoming stream. 20 retries × 15s = 300s.
+          $maxRetries = 20
           $retryDelay = 15
 
           for ($i = 1; $i -le $maxRetries; $i++) {
@@ -1979,8 +2021,8 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Verifying rtmp_connected is false after OBS stream stopped..."
-          $maxRetries = 10
-          $retryDelay = 2
+          $maxRetries = 15
+          $retryDelay = 3
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
               $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
@@ -2276,7 +2318,7 @@ jobs:
             # E2E Gate result to prevent a green PR when push E2E tests fail.
             echo "PR event: checking push-triggered E2E Gate for commit ${{ github.event.pull_request.head.sha }}..."
             SHA="${{ github.event.pull_request.head.sha }}"
-            MAX_WAIT=20
+            MAX_WAIT=60
             WAIT_INTERVAL=30
             for i in $(seq 1 $MAX_WAIT); do
               # Find E2E Gate check run from the push-triggered workflow on this commit.

@@ -129,6 +129,7 @@ pub async fn start_stream(
                         stall_reason: None,
                         ffmpeg_restart_count: 0,
                         last_error: None,
+                        is_fast: ep.is_fast,
                     })
                     .collect();
                 let _ = state.ws_tx.send(WsEvent::DeliveryStatus {
@@ -151,6 +152,8 @@ pub async fn start_stream(
                     current_delay_secs: 0.0,
                     session_start: Some(chrono::Utc::now().to_rfc3339()),
                     predicted: false,
+                    local_buffer_chunks: 0,
+                    s3_queue_chunks: 0,
                 });
             }
             Err(e) => {
@@ -193,6 +196,7 @@ pub async fn stop_stream(
     if let Some(orch) = state.delivery_orchestrator.as_ref() {
         if let Err(e) = orch.stop_delivery(id).await {
             error!("Failed to stop delivery for event {id}: {e}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
 

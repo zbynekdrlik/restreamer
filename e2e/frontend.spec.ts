@@ -103,9 +103,9 @@ test.describe("Operator Dashboard", () => {
     const labels = await page.locator(".pipeline-label").allTextContents();
     expect(labels).toContain("OBS");
     expect(labels).toContain("RTMP");
-    expect(labels).toContain("Chunker");
-    expect(labels).toContain("S3 Upload");
-    expect(labels).toContain("VPS");
+    expect(labels).toContain("Local Buffer");
+    expect(labels).toContain("S3 Queue");
+    expect(labels).toContain("Delivery");
   });
 
   test("pipeline nodes show status dots", async ({ page }) => {
@@ -653,7 +653,7 @@ test.describe("Predictive Buffer State", () => {
     await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/exhausted/);
     // Label should show normal format
     await expect(page.locator(".cache-bar-label")).toContainText(
-      "Cache: 96s / 120s target",
+      "Cache: 96s / 120s target (healthy)",
     );
   });
 });
@@ -824,6 +824,235 @@ test.describe("Pending Endpoint State", () => {
     expect(text).toContain("—");
     expect(text).not.toContain("0s delay");
     expect(text).not.toContain("0 chunks");
+  });
+});
+
+// --- Cache Bar Health Colors ---
+
+test.describe("Cache Bar Health Colors", () => {
+  test("cache bar shows healthy class when progress >= 75%", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.85,
+          target_delay_secs: 120,
+          current_delay_secs: 102.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 2,
+          s3_queue_chunks: 10,
+        },
+      },
+    });
+
+    const fill = page.locator(".cache-bar-fill");
+    await expect(fill).toHaveClass(/healthy/, { timeout: 5000 });
+    await expect(page.locator(".cache-bar-label")).toContainText("healthy");
+  });
+
+  test("cache bar shows warning class when progress 40-75%", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffering",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.5,
+          target_delay_secs: 120,
+          current_delay_secs: 60.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 5,
+          s3_queue_chunks: 20,
+        },
+      },
+    });
+
+    const fill = page.locator(".cache-bar-fill");
+    await expect(fill).toHaveClass(/warning/, { timeout: 5000 });
+    await expect(page.locator(".cache-bar-label")).toContainText("building");
+  });
+
+  test("cache bar shows critical class when progress < 40%", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffering",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.2,
+          target_delay_secs: 120,
+          current_delay_secs: 24.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 8,
+          s3_queue_chunks: 5,
+        },
+      },
+    });
+
+    const fill = page.locator(".cache-bar-fill");
+    await expect(fill).toHaveClass(/critical/, { timeout: 5000 });
+    await expect(page.locator(".cache-bar-label")).toContainText("low");
+  });
+
+  test("cache bar transitions from critical to healthy as buffer fills", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Start critical
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffering",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.1,
+          target_delay_secs: 120,
+          current_delay_secs: 12.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 10,
+          s3_queue_chunks: 2,
+        },
+      },
+    });
+    await expect(page.locator(".cache-bar-fill")).toHaveClass(/critical/, {
+      timeout: 5000,
+    });
+
+    // Transition to healthy
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.9,
+          target_delay_secs: 120,
+          current_delay_secs: 108.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 1,
+          s3_queue_chunks: 15,
+        },
+      },
+    });
+    await expect(page.locator(".cache-bar-fill")).toHaveClass(/healthy/, {
+      timeout: 5000,
+    });
+    await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/critical/);
+  });
+});
+
+// --- Pipeline Node Data ---
+
+test.describe("Pipeline Node Data", () => {
+  test("pipeline shows local buffer and S3 queue counts when delivering", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast PipelineState with chunk pipeline data
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.8,
+          target_delay_secs: 120,
+          current_delay_secs: 96.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 5,
+          s3_queue_chunks: 42,
+        },
+      },
+    });
+
+    // Also broadcast delivery status so delivered count is available
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "rs-delivery-1",
+          status: "running",
+          server_ip: "1.2.3.4",
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "YouTube Main",
+              alive: true,
+              current_chunk_id: 1200,
+              bytes_processed_total: 5000000,
+              chunks_processed: 1203,
+              chunk_delay_secs: 96.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+            },
+          ],
+        },
+      },
+    });
+
+    // Pipeline nodes should show the chunk pipeline data
+    const metrics = page.locator(".pipeline-metric");
+    await expect(metrics.nth(2)).toHaveText("5 chunks", { timeout: 5000 });
+    await expect(metrics.nth(3)).toHaveText("42 queued");
+    await expect(metrics.nth(4)).toContainText("1203 delivered");
+  });
+
+  test("pipeline shows chunk stats when idle (not delivering)", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast chunk stats via EndpointStatus (idle, no delivery)
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "EndpointStatus",
+        data: {
+          state: "uploading",
+          pending_chunks: 8,
+          active_uploads: 1,
+          buffer_duration: "00:00:30",
+        },
+      },
+    });
+
+    // Local Buffer should show pending_chunks from chunk_stats when idle
+    const metrics = page.locator(".pipeline-metric");
+    await expect(metrics.nth(2)).toHaveText("8 chunks", { timeout: 5000 });
   });
 });
 
