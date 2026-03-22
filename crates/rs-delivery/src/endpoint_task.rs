@@ -222,8 +222,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
         }
     };
 
-    let use_normalizer =
-        service_type == ServiceType::YtHls || service_type == ServiceType::YtRtmp;
+    let use_normalizer = service_type == ServiceType::YtHls || service_type == ServiceType::YtRtmp;
     let mut normalizer = if use_normalizer {
         Some(TSTimestampNormalizer::new())
     } else {
