@@ -1066,26 +1066,12 @@ test.describe("Pipeline Node Data", () => {
     await expect(bufferDot).not.toHaveClass(/error/);
   });
 
-  test("local buffer dot is green when streaming with 0 chunks", async ({
+  test("buffer dots are green when cache bar is healthy (progress >= 75%)", async ({
     page,
   }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    // Connect RTMP (makes rtmp_connected = true)
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
-      data: {
-        type: "InpointStatus",
-        data: {
-          state: "receiving",
-          rtmp_connected: true,
-          received_bytes: 1024,
-          chunk_count: 0,
-        },
-      },
-    });
-
-    // Set delivering state with 0 local buffer chunks
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -1093,42 +1079,31 @@ test.describe("Pipeline Node Data", () => {
           state: "streaming",
           event_id: 1,
           event_name: "Test",
-          buffer_progress: 0.5,
+          buffer_progress: 0.8,
           target_delay_secs: 120,
-          current_delay_secs: 60.0,
+          current_delay_secs: 96.0,
           session_start: null,
           predicted: false,
           local_buffer_chunks: 0,
-          s3_queue_chunks: 0,
+          s3_queue_chunks: 53,
         },
       },
     });
 
     const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
+    const s3Dot = page.locator(".pipeline-flow .status-dot").nth(3);
     await expect(bufferDot).toHaveClass(/active/, { timeout: 5000 });
     await expect(bufferDot).not.toHaveClass(/warning/);
+    await expect(s3Dot).toHaveClass(/active/);
+    await expect(s3Dot).not.toHaveClass(/warning/);
   });
 
-  test("local buffer dot is yellow when chunks pile up (backpressure)", async ({
+  test("buffer dots are yellow when cache bar is warning (progress 40-75%)", async ({
     page,
   }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    // Connect RTMP first
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
-      data: {
-        type: "InpointStatus",
-        data: {
-          state: "receiving",
-          rtmp_connected: true,
-          received_bytes: 1024,
-          chunk_count: 5,
-        },
-      },
-    });
-
-    // Send pipeline state with 3 local buffer chunks (mild backpressure)
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -1141,37 +1116,26 @@ test.describe("Pipeline Node Data", () => {
           current_delay_secs: 60.0,
           session_start: null,
           predicted: false,
-          local_buffer_chunks: 3,
-          s3_queue_chunks: 0,
+          local_buffer_chunks: 2,
+          s3_queue_chunks: 10,
         },
       },
     });
 
     const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
+    const s3Dot = page.locator(".pipeline-flow .status-dot").nth(3);
     await expect(bufferDot).toHaveClass(/warning/, { timeout: 5000 });
     await expect(bufferDot).not.toHaveClass(/active/);
+    await expect(s3Dot).toHaveClass(/warning/);
+    await expect(s3Dot).not.toHaveClass(/active/);
   });
 
-  test("local buffer dot is red when significant backpressure", async ({
+  test("buffer dots are red when cache bar is critical (progress < 40%)", async ({
     page,
   }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    // Connect RTMP first
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
-      data: {
-        type: "InpointStatus",
-        data: {
-          state: "receiving",
-          rtmp_connected: true,
-          received_bytes: 1024,
-          chunk_count: 10,
-        },
-      },
-    });
-
-    // Send pipeline state with 8 local buffer chunks (significant backpressure)
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -1179,21 +1143,24 @@ test.describe("Pipeline Node Data", () => {
           state: "streaming",
           event_id: 1,
           event_name: "Test",
-          buffer_progress: 0.5,
+          buffer_progress: 0.2,
           target_delay_secs: 120,
-          current_delay_secs: 60.0,
+          current_delay_secs: 24.0,
           session_start: null,
           predicted: false,
-          local_buffer_chunks: 8,
-          s3_queue_chunks: 0,
+          local_buffer_chunks: 5,
+          s3_queue_chunks: 3,
         },
       },
     });
 
     const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
+    const s3Dot = page.locator(".pipeline-flow .status-dot").nth(3);
     await expect(bufferDot).toHaveClass(/error/, { timeout: 5000 });
     await expect(bufferDot).not.toHaveClass(/active/);
     await expect(bufferDot).not.toHaveClass(/warning/);
+    await expect(s3Dot).toHaveClass(/error/);
+    await expect(s3Dot).not.toHaveClass(/active/);
   });
 });
 

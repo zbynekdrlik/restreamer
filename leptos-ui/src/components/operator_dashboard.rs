@@ -212,12 +212,16 @@ fn PipelineFlow() -> impl IntoView {
             <span class="pipeline-arrow">{"\u{2192}"}</span>
             <div class="pipeline-node">
                 <span class={move || {
-                    let chunks = local_chunks();
-                    if !rtmp_connected() {
+                    let p = ps();
+                    if !is_delivering() {
                         "status-dot"
-                    } else if chunks <= 1 {
+                    } else if p.state == "buffer_exhausted" {
+                        "status-dot error"
+                    } else if p.predicted {
+                        "status-dot warning"
+                    } else if p.buffer_progress >= 0.75 {
                         "status-dot active"
-                    } else if chunks <= 5 {
+                    } else if p.buffer_progress >= 0.40 {
                         "status-dot warning"
                     } else {
                         "status-dot error"
@@ -229,12 +233,16 @@ fn PipelineFlow() -> impl IntoView {
             <span class="pipeline-arrow">{"\u{2192}"}</span>
             <div class="pipeline-node">
                 <span class={move || {
-                    let chunks = s3_chunks();
-                    if !rtmp_connected() {
+                    let p = ps();
+                    if !is_delivering() {
                         "status-dot"
-                    } else if chunks <= 1 {
+                    } else if p.state == "buffer_exhausted" {
+                        "status-dot error"
+                    } else if p.predicted {
+                        "status-dot warning"
+                    } else if p.buffer_progress >= 0.75 {
                         "status-dot active"
-                    } else if chunks <= 5 {
+                    } else if p.buffer_progress >= 0.40 {
                         "status-dot warning"
                     } else {
                         "status-dot error"
