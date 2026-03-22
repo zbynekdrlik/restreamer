@@ -405,7 +405,10 @@ impl DeliveryOrchestrator {
         };
         info!(
             event_id,
-            start_chunk_id, first_seq, latest_seq, delivery_delay_chunks,
+            start_chunk_id,
+            first_seq,
+            latest_seq,
+            delivery_delay_chunks,
             "Starting delivery from sequence"
         );
 
