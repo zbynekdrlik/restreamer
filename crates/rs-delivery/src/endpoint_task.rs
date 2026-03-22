@@ -370,10 +370,11 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
 
                 chunk_id += 1;
-                // Pacing: fast endpoints catch up quickly (100ms),
-                // non-fast endpoints match real-time (1000ms) to maintain cache delay.
-                let pace_ms = if ep_cfg.is_fast { 100 } else { 1000 };
-                tokio::time::sleep(std::time::Duration::from_millis(pace_ms)).await;
+                // No artificial pacing sleep needed — ffmpeg's -readrate 1.00
+                // rate-limits stdin consumption to real-time, and the streaming
+                // platform won't accept data faster than real-time either.
+                // Adding sleep here causes delivery to be SLOWER than real-time,
+                // making cache delay grow indefinitely.
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;

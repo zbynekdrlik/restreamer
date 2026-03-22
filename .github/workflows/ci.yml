@@ -1893,6 +1893,64 @@ jobs:
           Write-Host "  CACHE DELAY VERIFIED: ${median}s >= ${minAcceptable}s (target: ${targetDelay}s)"
           Write-Host "=========================================="
 
+      - name: Verify cache delay is stable (not growing)
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          # TDD assertion: Cache delay should stabilize, not grow indefinitely.
+          # Take two readings 2 minutes apart. If delta > 15s, delivery is
+          # slower than real-time (the pacing bug).
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          $eventId = $targetEvent.id
+
+          # Reading 1
+          $resp1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          $delay1 = 0
+          if ($resp1.endpoint_details) {
+            foreach ($ep in $resp1.endpoint_details) {
+              if (-not $ep.is_fast) {
+                $delay1 = $ep.chunk_delay_secs
+                Write-Host "Reading 1: endpoint=$($ep.alias) delay=${delay1}s chunk_id=$($ep.current_chunk_id)"
+              }
+            }
+          }
+
+          # Wait 2 minutes
+          Write-Host "Waiting 2 minutes to check cache stability..."
+          Start-Sleep -Seconds 120
+
+          # Reading 2
+          $resp2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          $delay2 = 0
+          if ($resp2.endpoint_details) {
+            foreach ($ep in $resp2.endpoint_details) {
+              if (-not $ep.is_fast) {
+                $delay2 = $ep.chunk_delay_secs
+                Write-Host "Reading 2: endpoint=$($ep.alias) delay=${delay2}s chunk_id=$($ep.current_chunk_id)"
+              }
+            }
+          }
+
+          $delta = [math]::Abs($delay2 - $delay1)
+          Write-Host ""
+          Write-Host "Cache delay: ${delay1}s -> ${delay2}s (delta: ${delta}s over 2 min)"
+
+          if ($delta -gt 15) {
+            Write-Host ""
+            Write-Host "=========================================="
+            Write-Host "  FAIL: Cache delay grew by ${delta}s in 2 minutes"
+            Write-Host "  Expected stable (delta < 15s)"
+            Write-Host "  Delivery is slower than real-time!"
+            Write-Host "=========================================="
+            throw "FAILED: Cache delay not stable - grew by ${delta}s in 2 minutes (${delay1}s -> ${delay2}s)"
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "  CACHE STABILITY VERIFIED: delta ${delta}s < 15s"
+          Write-Host "=========================================="
+
       - name: Verify YouTube is receiving stream data
         id: verify_yt_receiving
         shell: powershell

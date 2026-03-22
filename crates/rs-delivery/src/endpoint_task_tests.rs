@@ -487,11 +487,11 @@ async fn test_processes_100_sequential_chunks() {
         endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
-    // 1000ms per chunk (non-fast), 100 chunks = 100s.
-    // Each chunk needs multiple async steps (fetch, write, sleep), so advance
-    // in smaller increments with extra yields for the executor.
-    for _ in 0..400 {
-        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+    // No pacing sleep — ffmpeg handles rate limiting via -readrate.
+    // With mock fetcher/factory, chunks process instantly. Just yield
+    // enough times for the async executor to process all 100 chunks.
+    for _ in 0..300 {
+        tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
     }
 
@@ -649,8 +649,9 @@ async fn test_buffer_fill_waits_for_target_chunk() {
 #[tokio::test]
 async fn test_chunk_gap_maintained_at_delay_target() {
     // With delivery_delay_chunks=10, start_chunk_id=1, pre-load chunks 1-30:
-    // After buffer fill (chunk 11 available), VPS starts consuming from chunk 1
-    // at 1000ms per chunk (non-fast real-time pacing). All 30 chunks take ~30s.
+    // After buffer fill (chunk 11 available), VPS starts consuming from chunk 1.
+    // No artificial pacing — ffmpeg handles rate-limiting in production.
+    // With mocks, chunks process instantly.
     tokio::time::pause();
 
     let all_chunks: Vec<(i64, Vec<u8>)> = (1..=30).map(|i| (i, vec![i as u8; 100])).collect();
@@ -675,18 +676,16 @@ async fn test_chunk_gap_maintained_at_delay_target() {
         .await;
     });
 
-    // Buffer fill: target_chunk = 1 + 10 = 11 (immediately available)
-    // Processing at 1000ms/chunk (non-fast): 30 chunks = 30s.
-    // tokio::time::pause() requires multiple yields per chunk for async steps.
-    for _ in 0..120 {
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    // No pacing sleep — just yield for async executor to process all chunks.
+    for _ in 0..200 {
+        tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
     }
 
     let s = stats.lock().await;
     assert_eq!(
         s.chunks_processed, 30,
-        "Should have processed all 30 chunks at 1000ms pacing, got {}",
+        "Should have processed all 30 chunks, got {}",
         s.chunks_processed
     );
     drop(s);
