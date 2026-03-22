@@ -1054,6 +1054,128 @@ test.describe("Pipeline Node Data", () => {
     const metrics = page.locator(".pipeline-metric");
     await expect(metrics.nth(2)).toHaveText("8 chunks", { timeout: 5000 });
   });
+
+  test("local buffer dot is gray when not streaming", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".pipeline-flow")).toBeVisible({
+      timeout: 10000,
+    });
+    const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
+    await expect(bufferDot).not.toHaveClass(/active/);
+    await expect(bufferDot).not.toHaveClass(/warning/);
+    await expect(bufferDot).not.toHaveClass(/error/);
+  });
+
+  test("local buffer dot is green when streaming with 0 chunks", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Connect RTMP (makes rtmp_connected = true)
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "InpointStatus",
+        data: {
+          state: "receiving",
+          rtmp_connected: true,
+          received_bytes: 1024,
+          chunk_count: 0,
+        },
+      },
+    });
+
+    const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
+    await expect(bufferDot).toHaveClass(/active/, { timeout: 5000 });
+    await expect(bufferDot).not.toHaveClass(/warning/);
+  });
+
+  test("local buffer dot is yellow when chunks pile up (backpressure)", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Connect RTMP first
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "InpointStatus",
+        data: {
+          state: "receiving",
+          rtmp_connected: true,
+          received_bytes: 1024,
+          chunk_count: 5,
+        },
+      },
+    });
+
+    // Send pipeline state with 3 local buffer chunks (mild backpressure)
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Test",
+          buffer_progress: 0.5,
+          target_delay_secs: 120,
+          current_delay_secs: 60.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 3,
+          s3_queue_chunks: 0,
+        },
+      },
+    });
+
+    const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
+    await expect(bufferDot).toHaveClass(/warning/, { timeout: 5000 });
+    await expect(bufferDot).not.toHaveClass(/active/);
+  });
+
+  test("local buffer dot is red when significant backpressure", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Connect RTMP first
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "InpointStatus",
+        data: {
+          state: "receiving",
+          rtmp_connected: true,
+          received_bytes: 1024,
+          chunk_count: 10,
+        },
+      },
+    });
+
+    // Send pipeline state with 8 local buffer chunks (significant backpressure)
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Test",
+          buffer_progress: 0.5,
+          target_delay_secs: 120,
+          current_delay_secs: 60.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 8,
+          s3_queue_chunks: 0,
+        },
+      },
+    });
+
+    const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
+    await expect(bufferDot).toHaveClass(/error/, { timeout: 5000 });
+    await expect(bufferDot).not.toHaveClass(/active/);
+    await expect(bufferDot).not.toHaveClass(/warning/);
+  });
 });
 
 // --- Navigation ---

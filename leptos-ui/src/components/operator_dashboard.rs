@@ -211,13 +211,35 @@ fn PipelineFlow() -> impl IntoView {
             </div>
             <span class="pipeline-arrow">{"\u{2192}"}</span>
             <div class="pipeline-node">
-                <span class={move || if local_chunks() > 0 { "status-dot active" } else { "status-dot" }}></span>
+                <span class={move || {
+                    let chunks = local_chunks();
+                    if !rtmp_connected() {
+                        "status-dot"
+                    } else if chunks <= 1 {
+                        "status-dot active"
+                    } else if chunks <= 5 {
+                        "status-dot warning"
+                    } else {
+                        "status-dot error"
+                    }
+                }}></span>
                 <span class="pipeline-label">"Local Buffer"</span>
                 <span class="pipeline-metric">{move || format!("{} chunks", local_chunks())}</span>
             </div>
             <span class="pipeline-arrow">{"\u{2192}"}</span>
             <div class="pipeline-node">
-                <span class={move || if s3_chunks() > 0 { "status-dot active" } else { "status-dot" }}></span>
+                <span class={move || {
+                    let chunks = s3_chunks();
+                    if !rtmp_connected() {
+                        "status-dot"
+                    } else if chunks <= 1 {
+                        "status-dot active"
+                    } else if chunks <= 5 {
+                        "status-dot warning"
+                    } else {
+                        "status-dot error"
+                    }
+                }}></span>
                 <span class="pipeline-label">"S3 Queue"</span>
                 <span class="pipeline-metric">{move || format!("{} queued", s3_chunks())}</span>
             </div>

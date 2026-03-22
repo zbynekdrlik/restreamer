@@ -984,6 +984,16 @@ input[type="password"]:focus {
   opacity: 1;
   animation: pulse 2s ease-in-out infinite;
 }
+.status-dot.warning {
+  background: var(--warning);
+  opacity: 1;
+  animation: pulse 2s ease-in-out infinite;
+}
+.status-dot.error {
+  background: var(--error);
+  opacity: 1;
+  animation: pulse 1s ease-in-out infinite;
+}
 
 /* Cache Bar */
 .cache-bar-container {
