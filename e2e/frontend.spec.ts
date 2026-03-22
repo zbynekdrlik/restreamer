@@ -1085,6 +1085,25 @@ test.describe("Pipeline Node Data", () => {
       },
     });
 
+    // Set delivering state with 0 local buffer chunks
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Test",
+          buffer_progress: 0.5,
+          target_delay_secs: 120,
+          current_delay_secs: 60.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 0,
+        },
+      },
+    });
+
     const bufferDot = page.locator(".pipeline-flow .status-dot").nth(2);
     await expect(bufferDot).toHaveClass(/active/, { timeout: 5000 });
     await expect(bufferDot).not.toHaveClass(/warning/);
