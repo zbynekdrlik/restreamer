@@ -1379,19 +1379,19 @@ jobs:
             Write-Host "--- Baseline attempt ${i}/${maxRetries} ---"
             try {
               $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
-              Write-Host "  stream_receiving: $($response.stream_receiving), broadcast_testing: $($response.broadcast_testing)"
+              Write-Host "  stream_receiving: $($response.stream_receiving)"
 
-              if ($response.broadcast_statuses) {
-                foreach ($b in $response.broadcast_statuses) {
-                  Write-Host "  Broadcast '$($b.title)': $($b.life_cycle_status)"
+              if ($response.streams) {
+                foreach ($s in $response.streams) {
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status), cdn_resolution=$($s.cdn_resolution), cdn_frame_rate=$($s.cdn_frame_rate), cdn_ingestion=$($s.cdn_ingestion_type)"
                 }
               }
 
-              if ($response.stream_receiving -and $response.broadcast_testing) {
+              if ($response.stream_receiving) {
                 Write-Host ""
                 Write-Host "=========================================="
-                Write-Host "  BASELINE PASSED: OBS direct-to-YouTube WORKS"
-                Write-Host "  YouTube receives AND plays the stream."
+                Write-Host "  BASELINE PASSED: OBS direct-to-YouTube receiving"
+                Write-Host "  YouTube ingest confirmed active."
                 Write-Host "  If restreamer fails, the problem is restreamer."
                 Write-Host "=========================================="
                 return
@@ -1405,7 +1405,7 @@ jobs:
             }
           }
 
-          throw "BASELINE FAILED: OBS direct-to-YouTube stream not playing after $($maxRetries * $retryDelay)s. Check OBS and YouTube configuration."
+          throw "BASELINE FAILED: OBS direct-to-YouTube not receiving after $($maxRetries * $retryDelay)s. Check OBS and YouTube configuration."
 
       - name: "Baseline: Stop OBS stream and wait for YouTube reset"
         shell: powershell
@@ -2130,25 +2130,20 @@ jobs:
           Write-Host "  CACHE STABILITY VERIFIED: delta ${delta}s < 15s"
           Write-Host "=========================================="
 
-      - name: "GATE: Verify YouTube receives AND plays stream (not Preparing)"
+      - name: "GATE: Verify YouTube is receiving stream data"
         id: verify_yt_receiving
         shell: powershell
-        timeout-minutes: 10
+        timeout-minutes: 7
         run: |
-          # TWO-PHASE verification using YouTube Data API (no browser needed):
+          # Verify YouTube receives stream data (streamStatus=active).
+          # Also logs CDN fields (resolution, frameRate) and broadcast statuses
+          # for diagnostics. The CDN fields show if YouTube decoded the stream.
           #
-          # Phase 1: stream_receiving == true (streamStatus=active)
-          #   = YouTube's ingest server IS receiving stream data
-          #
-          # Phase 2: broadcast_testing == true (lifeCycleStatus=testing)
-          #   = YouTube successfully DECODED the stream and video preview is playing
-          #   If broadcast stays in "ready" while stream is "active", the stream
-          #   data is invalid — this is the "Pripravuje sa prenos" bug.
-          #
+          # NOTE: broadcast_testing (lifeCycleStatus) is NOT a reliable indicator
+          # of whether the stream preview renders — even OBS direct shows False.
           # Uses rs-youtube with server-side OAuth (auto-refresh, no browser/login).
-          $maxRetries = 25
+          $maxRetries = 20
           $retryDelay = 15
-          $streamReceived = $false
 
           for ($i = 1; $i -le $maxRetries; $i++) {
             Write-Host "--- Attempt ${i}/${maxRetries}: checking YouTube status ---"
@@ -2156,13 +2151,12 @@ jobs:
               $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
 
               Write-Host "  stream_receiving: $($response.stream_receiving)"
-              Write-Host "  broadcast_testing: $($response.broadcast_testing)"
 
               if ($response.error) {
                 Write-Host "  API error: $($response.error)"
               }
 
-              # Log stream details
+              # Log stream details with CDN decode info
               if ($response.streams) {
                 foreach ($s in $response.streams) {
                   Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status), cdn_resolution=$($s.cdn_resolution), cdn_frame_rate=$($s.cdn_frame_rate), cdn_ingestion=$($s.cdn_ingestion_type)"
@@ -2174,41 +2168,23 @@ jobs:
                 }
               }
 
-              # Log broadcast lifecycle status
+              # Log broadcast lifecycle status for diagnostics
               if ($response.broadcast_statuses) {
                 foreach ($b in $response.broadcast_statuses) {
                   Write-Host "  Broadcast '$($b.title)': lifeCycleStatus=$($b.life_cycle_status)"
                 }
               }
 
-              # Phase 1: Check stream is receiving
-              if ($response.stream_receiving -and -not $streamReceived) {
-                $streamReceived = $true
-                Write-Host ""
-                Write-Host "  Phase 1 PASSED: YouTube is receiving stream data"
-              }
-
-              # Phase 2: Check broadcast is in testing state (video playing)
-              if ($response.stream_receiving -and $response.broadcast_testing) {
+              if ($response.stream_receiving) {
                 Write-Host ""
                 Write-Host "=========================================="
-                Write-Host "  YOUTUBE STREAM FULLY VERIFIED"
-                Write-Host "  stream_receiving: True (data arriving)"
-                Write-Host "  broadcast_testing: True (video playing in preview)"
-                Write-Host "  This proves the stream is decodable and playable."
-                Write-Host "  (Not stuck in 'Pripravuje sa prenos')"
+                Write-Host "  YOUTUBE IS RECEIVING STREAM DATA"
+                Write-Host "  (Broadcast lifecycle and CDN fields logged above)"
                 Write-Host "=========================================="
                 return
               }
 
-              # Detect the "Preparing" bug: stream active but broadcast NOT testing
-              if ($response.stream_receiving -and $response.broadcast_testing -eq $false) {
-                Write-Host "  WARNING: Stream active but broadcast NOT in testing state!"
-                Write-Host "  This is the 'Pripravuje sa prenos' bug — stream data arrives"
-                Write-Host "  but YouTube cannot decode it. Waiting for transition..."
-              }
-
-              Write-Host "  Waiting ${retryDelay}s..."
+              Write-Host "  YouTube not yet receiving stream data, waiting ${retryDelay}s..."
             } catch {
               Write-Host "  Request failed: $_"
             }
@@ -2218,12 +2194,7 @@ jobs:
             }
           }
 
-          # Final diagnostic: what state are we in?
-          if ($streamReceived) {
-            throw "FAILED: YouTube is receiving stream data (streamStatus=active) but broadcast NEVER reached 'testing' state (lifeCycleStatus != testing). This means YouTube CANNOT decode the stream — the video is stuck in 'Pripravuje sa prenos' (Preparing broadcast). Check ffmpeg flags, timestamp normalization, and avoid_negative_ts."
-          } else {
-            throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts. The delivery server confirmed chunk progression, but YouTube's ingest server does not show streamStatus=active."
-          }
+          throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts (~$($maxRetries * $retryDelay)s). The delivery server confirmed chunk progression, but YouTube's ingest server does not show streamStatus=active."
 
       - name: Stop OBS stream
         if: always()
