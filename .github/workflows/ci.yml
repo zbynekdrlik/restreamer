@@ -2194,7 +2194,7 @@ jobs:
           }
 
           if ($healthValue) {
-            throw "FAILED: YouTube stream health is '${healthValue}' — must be 'good' or 'ok'. Check ffmpeg flags and delivery pacing."
+            throw "FAILED: YouTube stream health is '${healthValue}' - must be 'good' or 'ok'. Check ffmpeg flags and delivery pacing."
           } else {
             throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts."
           }
