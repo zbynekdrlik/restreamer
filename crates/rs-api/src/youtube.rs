@@ -22,6 +22,7 @@ pub struct YouTubeStreamInfo {
     pub title: String,
     pub stream_status: String,
     pub health_status: Option<String>,
+    pub configuration_issues: Vec<String>,
 }
 
 pub async fn youtube_status(
@@ -41,10 +42,26 @@ pub async fn youtube_status(
                 let count = list.len();
                 let infos: Vec<YouTubeStreamInfo> = list
                     .into_iter()
-                    .map(|s| YouTubeStreamInfo {
-                        title: s.snippet.title,
-                        stream_status: s.status.stream_status,
-                        health_status: s.status.health_status.map(|h| h.status),
+                    .map(|s| {
+                        let issues = s
+                            .status
+                            .health_status
+                            .as_ref()
+                            .map(|h| {
+                                h.configuration_issues
+                                    .iter()
+                                    .map(|i| {
+                                        format!("{}: {} ({})", i.issue_type, i.reason, i.severity)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        YouTubeStreamInfo {
+                            title: s.snippet.title,
+                            stream_status: s.status.stream_status,
+                            health_status: s.status.health_status.map(|h| h.status),
+                            configuration_issues: issues,
+                        }
                     })
                     .collect();
                 (count, infos)

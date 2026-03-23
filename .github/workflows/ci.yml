@@ -1986,12 +1986,32 @@ jobs:
               if ($response.streams) {
                 foreach ($s in $response.streams) {
                   Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+                  if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
+                    Write-Host "  Configuration issues:"
+                    foreach ($issue in $s.configuration_issues) {
+                      Write-Host "    - $issue"
+                    }
+                  }
                 }
               }
 
               if ($response.stream_receiving) {
+                # Check for configuration issues that indicate unplayable stream
+                $hasIssues = $false
+                if ($response.streams) {
+                  foreach ($s in $response.streams) {
+                    if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
+                      $hasIssues = $true
+                      Write-Host "WARNING: YouTube reports configuration issues despite active stream"
+                    }
+                  }
+                }
+
                 Write-Host "=========================================="
                 Write-Host "  YOUTUBE IS RECEIVING STREAM DATA"
+                if ($hasIssues) {
+                  Write-Host "  WARNING: Configuration issues detected (see above)"
+                }
                 Write-Host "  (Broadcast in testing state - auto-start banned)"
                 Write-Host "=========================================="
                 return

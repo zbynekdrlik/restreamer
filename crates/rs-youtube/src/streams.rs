@@ -26,8 +26,24 @@ pub struct StreamStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HealthStatus {
     pub status: String,
+    #[serde(default)]
+    pub configuration_issues: Vec<ConfigurationIssue>,
+    #[serde(default)]
+    pub last_update_time_seconds: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigurationIssue {
+    #[serde(rename = "type")]
+    pub issue_type: String,
+    pub severity: String,
+    pub reason: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

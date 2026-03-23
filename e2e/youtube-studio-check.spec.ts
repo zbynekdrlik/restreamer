@@ -552,6 +552,96 @@ test(testName, async () => {
             ).toBe(true);
           }
         }
+
+        // Positive verification: check that YouTube Studio's stream
+        // preview area contains a video/canvas element (only renders
+        // when video is actually decodable and playing).
+        const previewCheck = await page.evaluate(() => {
+          const preview = document.querySelector(
+            "ytcp-live-streaming-stream-preview",
+          );
+          if (!preview) return { found: false, reason: "no preview element" };
+
+          // Search in shadow DOM and regular DOM for video/canvas
+          function findMediaElements(root: Node): {
+            videos: number;
+            canvases: number;
+            iframes: number;
+          } {
+            let videos = 0,
+              canvases = 0,
+              iframes = 0;
+            const search = (node: Node) => {
+              if (node instanceof HTMLVideoElement) videos++;
+              if (node instanceof HTMLCanvasElement) canvases++;
+              if (node instanceof HTMLIFrameElement) iframes++;
+              if (node instanceof HTMLElement && node.shadowRoot) {
+                search(node.shadowRoot);
+              }
+              for (const child of node.childNodes) {
+                search(child);
+              }
+            };
+            search(root);
+            return { videos, canvases, iframes };
+          }
+
+          const media = findMediaElements(preview);
+          const visible =
+            preview instanceof HTMLElement &&
+            preview.offsetParent !== null &&
+            getComputedStyle(preview).display !== "none";
+          const dims = preview.getBoundingClientRect();
+
+          return {
+            found: true,
+            visible,
+            width: Math.round(dims.width),
+            height: Math.round(dims.height),
+            ...media,
+            textContent: (preview.textContent || "").trim().substring(0, 200),
+          };
+        });
+
+        console.log(
+          "Stream preview element check:",
+          JSON.stringify(previewCheck, null, 2),
+        );
+
+        // Screenshot the preview area if found
+        const previewEl = page.locator("ytcp-live-streaming-stream-preview");
+        if ((await previewEl.count()) > 0 && (await previewEl.isVisible())) {
+          await previewEl.screenshot({
+            path: path.join(SCREENSHOT_DIR, "stream-preview.png"),
+          });
+          console.log("Saved stream preview screenshot to stream-preview.png");
+        }
+
+        // Log whether video preview is actually rendering
+        if (
+          previewCheck.found &&
+          previewCheck.visible &&
+          (previewCheck.videos > 0 ||
+            previewCheck.canvases > 0 ||
+            previewCheck.iframes > 0)
+        ) {
+          console.log("==========================================");
+          console.log("  VIDEO PREVIEW IS RENDERING!");
+          console.log(
+            `  Media elements: ${previewCheck.videos} video, ${previewCheck.canvases} canvas, ${previewCheck.iframes} iframe`,
+          );
+          console.log(
+            `  Preview dimensions: ${previewCheck.width}x${previewCheck.height}`,
+          );
+          console.log("==========================================");
+        } else if (previewCheck.found && previewCheck.visible) {
+          console.log(
+            "WARNING: Preview element visible but no video/canvas/iframe found inside it.",
+          );
+          console.log(
+            "This may indicate the stream is not decodable. Check stream-preview.png screenshot.",
+          );
+        }
       }
 
       expect(
