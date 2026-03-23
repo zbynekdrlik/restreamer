@@ -98,7 +98,7 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
         "-loglevel".into(),
         "info".into(),
         "-fflags".into(),
-        "+discardcorrupt".into(),
+        "+genpts".into(),
         "-i".into(),
         "pipe:".into(),
         "-avoid_negative_ts".into(),
@@ -142,7 +142,7 @@ fn build_rtmps_args(url: &str) -> Vec<String> {
         "-loglevel".into(),
         "info".into(),
         "-fflags".into(),
-        "+genpts+discardcorrupt".into(),
+        "+genpts".into(),
         "-i".into(),
         "pipe:".into(),
         "-avoid_negative_ts".into(),
@@ -169,7 +169,7 @@ fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
         "-loglevel".into(),
         "info".into(),
         "-fflags".into(),
-        "+genpts+discardcorrupt".into(),
+        "+genpts".into(),
         "-i".into(),
         "pipe:".into(),
         "-avoid_negative_ts".into(),
@@ -412,8 +412,8 @@ mod tests {
             "needs genpts to fill PTS gaps at chunk boundaries"
         );
         assert!(
-            args.iter().any(|a| a.contains("discardcorrupt")),
-            "should have discardcorrupt"
+            !args.iter().any(|a| a.contains("discardcorrupt")),
+            "discardcorrupt drops valid packets at chunk boundaries"
         );
         assert!(args.contains(&"-avoid_negative_ts".to_string()));
         assert!(
