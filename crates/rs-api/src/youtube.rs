@@ -44,7 +44,9 @@ pub async fn youtube_status(
     let status = orch.check_youtube_status().await;
 
     // Fetch broadcast lifecycle status (testing = video playing in preview)
-    let (broadcast_testing, broadcast_statuses) = if status.authenticated && status.error.is_none() {
+    let (broadcast_testing, broadcast_statuses) = if status.authenticated
+        && status.error.is_none()
+    {
         match orch.get_broadcast_statuses().await {
             Ok(statuses) => {
                 let testing = statuses.iter().any(|(_, s)| s == "testing");
