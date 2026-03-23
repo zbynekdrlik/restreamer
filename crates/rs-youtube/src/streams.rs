@@ -106,10 +106,7 @@ pub async fn list_live_broadcasts(access_token: &str) -> Result<Vec<LiveBroadcas
     let resp = client
         .get(format!("{YOUTUBE_API_BASE}/liveBroadcasts"))
         .bearer_auth(access_token)
-        .query(&[
-            ("part", "id,snippet,status"),
-            ("mine", "true"),
-        ])
+        .query(&[("part", "id,snippet,status"), ("mine", "true")])
         .send()
         .await?;
 
