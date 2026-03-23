@@ -31,6 +31,9 @@ pub struct YouTubeStreamInfo {
     pub stream_status: String,
     pub health_status: Option<String>,
     pub configuration_issues: Vec<String>,
+    pub cdn_resolution: Option<String>,
+    pub cdn_frame_rate: Option<String>,
+    pub cdn_ingestion_type: Option<String>,
 }
 
 pub async fn youtube_status(
@@ -89,11 +92,15 @@ pub async fn youtube_status(
                                     .collect()
                             })
                             .unwrap_or_default();
+                        let cdn = s.cdn.as_ref();
                         YouTubeStreamInfo {
                             title: s.snippet.title,
                             stream_status: s.status.stream_status,
                             health_status: s.status.health_status.map(|h| h.status),
                             configuration_issues: issues,
+                            cdn_resolution: cdn.and_then(|c| c.resolution.clone()),
+                            cdn_frame_rate: cdn.and_then(|c| c.frame_rate.clone()),
+                            cdn_ingestion_type: cdn.and_then(|c| c.ingestion_type.clone()),
                         }
                     })
                     .collect();

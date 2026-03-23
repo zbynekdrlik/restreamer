@@ -10,6 +10,8 @@ pub struct LiveStream {
     pub id: String,
     pub snippet: StreamSnippet,
     pub status: StreamStatus,
+    #[serde(default)]
+    pub cdn: Option<StreamCdn>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +25,19 @@ pub struct StreamStatus {
     pub stream_status: String,
     #[serde(default)]
     pub health_status: Option<HealthStatus>,
+}
+
+/// CDN configuration and actual stream details from YouTube.
+/// If resolution/frameRate are populated, YouTube successfully decoded the stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamCdn {
+    #[serde(default)]
+    pub ingestion_type: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub frame_rate: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +90,7 @@ pub async fn list_live_streams(access_token: &str) -> Result<Vec<LiveStream>> {
     let resp = client
         .get(format!("{YOUTUBE_API_BASE}/liveStreams"))
         .bearer_auth(access_token)
-        .query(&[("part", "id,snippet,status"), ("mine", "true")])
+        .query(&[("part", "id,snippet,status,cdn"), ("mine", "true")])
         .send()
         .await?;
 

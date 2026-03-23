@@ -1881,7 +1881,7 @@ jobs:
 
           if ($response.streams) {
             foreach ($s in $response.streams) {
-              Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+              Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status), cdn_resolution=$($s.cdn_resolution), cdn_frame_rate=$($s.cdn_frame_rate), cdn_ingestion=$($s.cdn_ingestion_type)"
             }
           }
 
@@ -2165,7 +2165,7 @@ jobs:
               # Log stream details
               if ($response.streams) {
                 foreach ($s in $response.streams) {
-                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status), cdn_resolution=$($s.cdn_resolution), cdn_frame_rate=$($s.cdn_frame_rate), cdn_ingestion=$($s.cdn_ingestion_type)"
                   if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                     foreach ($issue in $s.configuration_issues) {
                       Write-Host "    ISSUE: $issue"
@@ -2407,7 +2407,7 @@ jobs:
 
               if ($response.streams) {
                 foreach ($s in $response.streams) {
-                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status), cdn_resolution=$($s.cdn_resolution), cdn_frame_rate=$($s.cdn_frame_rate), cdn_ingestion=$($s.cdn_ingestion_type)"
                 }
               }
 
