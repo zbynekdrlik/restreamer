@@ -1359,7 +1359,7 @@ jobs:
           $startResp = Receive-OBSMessage $ws
           Write-Host "OBS baseline stream started to YouTube RTMP"
 
-          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
 
           # Wait for YouTube to receive and process the stream
           Write-Host "Waiting 60 seconds for YouTube to process direct stream..."
@@ -1455,7 +1455,7 @@ jobs:
           $stopResp = Receive-OBSMessage $ws
           Write-Host "Baseline OBS stream stopped"
 
-          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
 
           # Wait for YouTube to detect stream ended
           Write-Host "Waiting 30 seconds for YouTube to reset..."
@@ -1579,7 +1579,7 @@ jobs:
           $setResp = Receive-OBSMessage $ws
           Write-Host "Switched OBS to Restreamer RTMP: rtmp://127.0.0.1:1234/live/obs-e2e-test"
 
-          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
 
       - name: "Pre-flight: verify no stale delivery instances"
         shell: powershell
@@ -1815,7 +1815,7 @@ jobs:
               Write-Host "Skipping event: op=$($msg.op)"
             }
 
-            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
 
             if ($statusResp -and $statusResp.d.responseData.outputActive) {
               Write-Host "OBS is streaming (attempt ${attempt}/${maxRetries})"
@@ -2258,7 +2258,7 @@ jobs:
             $stopResp = Receive-OBSMessage $ws
             Write-Host "OBS stream stopped"
 
-            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
           } catch {
             Write-Host "Failed to stop OBS stream (may not have been streaming): $_"
           }
@@ -2483,7 +2483,7 @@ jobs:
             $setResp = Receive-OBSMessage $ws
             Write-Host "Restored OBS to original destination"
 
-            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
           } catch {
             Write-Host "WARNING: Failed to restore OBS settings: $_"
             Write-Host "You may need to manually restore OBS stream settings"
