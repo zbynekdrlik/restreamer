@@ -250,6 +250,7 @@ test(testName, async () => {
     let streamReceiving = false;
     let lastError = "";
     let matchedIndicator = "";
+    let lastDeepText = "";
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       console.log(
@@ -398,6 +399,7 @@ test(testName, async () => {
         }
 
         const deepText = domInfo.textSnippet;
+        lastDeepText = deepText;
 
         // Check health patterns in deep text
         const receivingPatterns = [
@@ -524,6 +526,32 @@ test(testName, async () => {
         console.log(`  Indicator: ${matchedIndicator}`);
         console.log("  (Broadcast in testing state — auto-start is banned)");
         console.log("==========================================");
+
+        // Check for "Preparing" state — stream data arrives but video
+        // is NOT playable. This is the bug where YouTube says health
+        // is "Good" but broadcast stays in "Preparing broadcast".
+        const preparingPatterns = [
+          /Pripravuje sa prenos/i,
+          /Preparing broadcast/i,
+          /Pripravuje sa/i,
+          /Getting ready/i,
+        ];
+        for (const pattern of preparingPatterns) {
+          if (pattern.test(lastDeepText)) {
+            console.log("==========================================");
+            console.log("  WARNING: Broadcast stuck in 'Preparing' state!");
+            console.log(`  Matched: ${pattern}`);
+            console.log("  Stream data arrives but video is NOT playable.");
+            console.log("==========================================");
+            expect(
+              false,
+              `YouTube is receiving stream data but broadcast is stuck in "Preparing" state. ` +
+                `Matched: ${pattern}. Stream is unplayable despite healthy status. ` +
+                `This means ffmpeg output is invalid — check timestamp normalization and ffmpeg flags. ` +
+                `Screenshots saved to ${SCREENSHOT_DIR} for debugging.`,
+            ).toBe(true);
+          }
+        }
       }
 
       expect(

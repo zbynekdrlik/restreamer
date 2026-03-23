@@ -98,7 +98,7 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
         "-loglevel".into(),
         "info".into(),
         "-fflags".into(),
-        "+genpts+discardcorrupt".into(),
+        "+discardcorrupt".into(),
         "-i".into(),
         "pipe:".into(),
         "-avoid_negative_ts".into(),
@@ -142,9 +142,11 @@ fn build_rtmps_args(url: &str) -> Vec<String> {
         "-loglevel".into(),
         "info".into(),
         "-fflags".into(),
-        "+genpts+discardcorrupt".into(),
+        "+discardcorrupt".into(),
         "-i".into(),
         "pipe:".into(),
+        "-avoid_negative_ts".into(),
+        "make_zero".into(),
         "-f".into(),
         "flv".into(),
         "-c".into(),
@@ -163,9 +165,11 @@ fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
         "-loglevel".into(),
         "info".into(),
         "-fflags".into(),
-        "+genpts+discardcorrupt".into(),
+        "+discardcorrupt".into(),
         "-i".into(),
         "pipe:".into(),
+        "-avoid_negative_ts".into(),
+        "make_zero".into(),
         "-f".into(),
         "flv".into(),
         "-c".into(),
@@ -397,6 +401,18 @@ mod tests {
             !args.contains(&"-re".to_string()),
             "should not have -re with -readrate"
         );
+        // No genpts (conflicts with TSTimestampNormalizer)
+        assert!(
+            !args.iter().any(|a| a.contains("genpts")),
+            "should not have genpts — normalizer handles timestamps"
+        );
+        assert!(
+            args.iter().any(|a| a.contains("discardcorrupt")),
+            "should have discardcorrupt"
+        );
+        // Negative timestamp protection
+        assert!(args.contains(&"-avoid_negative_ts".to_string()));
+        assert!(args.contains(&"make_zero".to_string()));
     }
 
     #[test]
