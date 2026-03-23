@@ -142,11 +142,15 @@ fn build_rtmps_args(url: &str) -> Vec<String> {
         "-loglevel".into(),
         "info".into(),
         "-fflags".into(),
-        "+discardcorrupt".into(),
+        "+genpts+discardcorrupt".into(),
         "-i".into(),
         "pipe:".into(),
         "-avoid_negative_ts".into(),
-        "make_zero".into(),
+        "disabled".into(),
+        "-copytb".into(),
+        "1".into(),
+        "-bsf:a".into(),
+        "aac_adtstoasc".into(),
         "-f".into(),
         "flv".into(),
         "-c".into(),
@@ -165,11 +169,15 @@ fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
         "-loglevel".into(),
         "info".into(),
         "-fflags".into(),
-        "+discardcorrupt".into(),
+        "+genpts+discardcorrupt".into(),
         "-i".into(),
         "pipe:".into(),
         "-avoid_negative_ts".into(),
-        "make_zero".into(),
+        "disabled".into(),
+        "-copytb".into(),
+        "1".into(),
+        "-bsf:a".into(),
+        "aac_adtstoasc".into(),
         "-f".into(),
         "flv".into(),
         "-c".into(),
@@ -398,18 +406,25 @@ mod tests {
         // Rate control
         assert!(args.contains(&"-readrate".to_string()));
         assert!(!args.contains(&"-re".to_string()), "should not have -re");
-        // No genpts (conflicts with TSTimestampNormalizer)
+        // TS→FLV remux quality flags
         assert!(
-            !args.iter().any(|a| a.contains("genpts")),
-            "should not have genpts — normalizer handles timestamps"
+            args.iter().any(|a| a.contains("genpts")),
+            "needs genpts to fill PTS gaps at chunk boundaries"
         );
         assert!(
             args.iter().any(|a| a.contains("discardcorrupt")),
             "should have discardcorrupt"
         );
-        // Negative timestamp protection
         assert!(args.contains(&"-avoid_negative_ts".to_string()));
-        assert!(args.contains(&"make_zero".to_string()));
+        assert!(
+            args.contains(&"disabled".to_string()),
+            "avoid_negative_ts must be disabled (normalizer handles it)"
+        );
+        assert!(args.contains(&"-copytb".to_string()), "needs copytb 1");
+        assert!(
+            args.contains(&"-bsf:a".to_string()),
+            "needs aac_adtstoasc bitstream filter"
+        );
     }
 
     #[test]

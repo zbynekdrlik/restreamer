@@ -61,6 +61,7 @@ pub struct EndpointDeliveryStatus {
     pub stall_reason: Option<String>,
     pub ffmpeg_restart_count: u32,
     pub last_error: Option<String>,
+    pub ffmpeg_last_stderr: Option<String>,
     pub is_fast: bool,
 }
 
@@ -504,6 +505,8 @@ impl DeliveryOrchestrator {
                             let ffmpeg_restart_count =
                                 entry["ffmpeg_restart_count"].as_u64().unwrap_or(0) as u32;
                             let last_error = entry["last_error"].as_str().map(|s| s.to_string());
+                            let ffmpeg_last_stderr =
+                                entry["ffmpeg_last_stderr"].as_str().map(|s| s.to_string());
 
                             // Compute chunk delay
                             let chunk_gap = (latest_local_chunk - chunk_id).max(0) as f64;
@@ -534,6 +537,7 @@ impl DeliveryOrchestrator {
                                 stall_reason,
                                 ffmpeg_restart_count,
                                 last_error,
+                                ffmpeg_last_stderr,
                                 is_fast: fast_map.get(&alias).copied().unwrap_or(false),
                             });
                         }

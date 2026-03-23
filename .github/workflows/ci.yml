@@ -2168,21 +2168,28 @@ jobs:
                 }
               }
 
-              if ($response.stream_receiving -and ($healthValue -eq "good" -or $healthValue -eq "ok")) {
+              if ($response.stream_receiving -and $healthValue -eq "good") {
                 Write-Host ""
                 Write-Host "=========================================="
-                Write-Host "  YOUTUBE STREAM VERIFIED: health=${healthValue}"
-                if ($healthValue -eq "good") {
-                  Write-Host "  EXCELLENT: Matches OBS direct quality"
-                } else {
-                  Write-Host "  ACCEPTABLE: health=ok (compare with OBS baseline above)"
-                }
+                Write-Host "  YOUTUBE STREAM HEALTH: GOOD"
+                Write-Host "  Matches OBS direct quality."
                 Write-Host "=========================================="
                 return
               }
 
-              if ($response.stream_receiving -and $healthValue -and $healthValue -ne "good" -and $healthValue -ne "ok") {
-                Write-Host "  Stream active but health='${healthValue}' (need 'good' or 'ok'). Waiting..."
+              if ($response.stream_receiving -and $healthValue -and $healthValue -ne "good") {
+                Write-Host "  Stream active but health='${healthValue}' (need 'good'). Waiting..."
+                # Log configurationIssues to diagnose WHY health is not good
+                if ($response.streams) {
+                  foreach ($s in $response.streams) {
+                    if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
+                      Write-Host "  YouTube configurationIssues:"
+                      foreach ($issue in $s.configuration_issues) {
+                        Write-Host "    - $issue"
+                      }
+                    }
+                  }
+                }
               }
             } catch {
               Write-Host "  Request failed: $_"
@@ -2194,7 +2201,7 @@ jobs:
           }
 
           if ($healthValue) {
-            throw "FAILED: YouTube stream health is '${healthValue}' - must be 'good' or 'ok'. Check ffmpeg flags and delivery pacing."
+            throw "FAILED: YouTube stream health is '${healthValue}' - must be 'good'. Restreamer degrades stream quality. Check configurationIssues above."
           } else {
             throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts."
           }
