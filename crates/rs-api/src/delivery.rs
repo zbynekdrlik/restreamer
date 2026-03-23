@@ -780,6 +780,33 @@ impl DeliveryOrchestrator {
         Ok(streams::list_live_streams(&access_token).await?)
     }
 
+    pub async fn get_broadcast_statuses(
+        &self,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let tokens = db::get_youtube_oauth(&self.pool)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("No YouTube OAuth tokens"))?;
+
+        let access_token = if oauth::is_token_expired(tokens.expires_at.as_deref()) {
+            let oauth_tokens = rs_youtube::OAuthTokens {
+                access_token: tokens.access_token.clone(),
+                refresh_token: tokens.refresh_token.clone(),
+                token_uri: tokens.token_uri.clone(),
+                client_id: tokens.client_id.clone(),
+                client_secret: tokens.client_secret.clone(),
+                scopes: tokens.scopes.clone(),
+                expires_at: tokens.expires_at.clone(),
+            };
+            oauth::refresh_access_token(&oauth_tokens)
+                .await?
+                .access_token
+        } else {
+            tokens.access_token
+        };
+
+        Ok(streams::get_broadcast_statuses(&access_token).await?)
+    }
+
     async fn find_delivery_image(&self) -> anyhow::Result<String> {
         let label = &self.config.hetzner.snapshot_label;
         let snapshots = self

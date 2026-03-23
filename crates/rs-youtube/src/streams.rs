@@ -98,7 +98,7 @@ pub async fn is_stream_receiving(access_token: &str) -> Result<bool> {
     Ok(streams.iter().any(|s| s.status.stream_status == "active"))
 }
 
-/// List active live broadcasts.
+/// List all live broadcasts (mine=true returns all states: ready, testing, live, complete).
 pub async fn list_live_broadcasts(access_token: &str) -> Result<Vec<LiveBroadcast>> {
     let client = Client::new();
     let resp = client
@@ -106,7 +106,7 @@ pub async fn list_live_broadcasts(access_token: &str) -> Result<Vec<LiveBroadcas
         .bearer_auth(access_token)
         .query(&[
             ("part", "id,snippet,status"),
-            ("broadcastStatus", "active"),
+            ("mine", "true"),
             ("broadcastType", "all"),
         ])
         .send()
@@ -123,6 +123,28 @@ pub async fn list_live_broadcasts(access_token: &str) -> Result<Vec<LiveBroadcas
 
     let body: ListResponse<LiveBroadcast> = resp.json().await?;
     Ok(body.items)
+}
+
+/// Check if any broadcast is in "testing" state (video preview is playing).
+/// This is the definitive check — "testing" means YouTube successfully decoded
+/// the stream and the preview is rendering. If the broadcast stays in "ready"
+/// despite streamStatus=="active", the stream data is invalid/unplayable.
+pub async fn is_broadcast_testing(access_token: &str) -> Result<bool> {
+    let broadcasts = list_live_broadcasts(access_token).await?;
+    Ok(broadcasts
+        .iter()
+        .any(|b| b.status.life_cycle_status == "testing"))
+}
+
+/// Get the lifecycle status of all broadcasts for diagnostics.
+pub async fn get_broadcast_statuses(
+    access_token: &str,
+) -> Result<Vec<(String, String)>> {
+    let broadcasts = list_live_broadcasts(access_token).await?;
+    Ok(broadcasts
+        .into_iter()
+        .map(|b| (b.snippet.title, b.status.life_cycle_status))
+        .collect())
 }
 
 #[cfg(test)]

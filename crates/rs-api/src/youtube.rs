@@ -12,9 +12,17 @@ use crate::state::AppState;
 pub struct YouTubeStatusResponse {
     pub authenticated: bool,
     pub stream_receiving: Option<bool>,
+    pub broadcast_testing: Option<bool>,
+    pub broadcast_statuses: Vec<BroadcastStatusInfo>,
     pub stream_count: usize,
     pub streams: Vec<YouTubeStreamInfo>,
     pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct BroadcastStatusInfo {
+    pub title: String,
+    pub life_cycle_status: String,
 }
 
 #[derive(Serialize)]
@@ -34,6 +42,30 @@ pub async fn youtube_status(
     })?;
 
     let status = orch.check_youtube_status().await;
+
+    // Fetch broadcast lifecycle status (testing = video playing in preview)
+    let (broadcast_testing, broadcast_statuses) =
+        if status.authenticated && status.error.is_none() {
+            match orch.get_broadcast_statuses().await {
+                Ok(statuses) => {
+                    let testing = statuses.iter().any(|(_, s)| s == "testing");
+                    let infos = statuses
+                        .into_iter()
+                        .map(|(title, status)| BroadcastStatusInfo {
+                            title,
+                            life_cycle_status: status,
+                        })
+                        .collect();
+                    (Some(testing), infos)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch broadcast statuses: {e}");
+                    (None, Vec::new())
+                }
+            }
+        } else {
+            (None, Vec::new())
+        };
 
     // Fetch stream details for diagnostics
     let (stream_count, streams) = if status.authenticated && status.error.is_none() {
@@ -75,6 +107,8 @@ pub async fn youtube_status(
     Ok(Json(YouTubeStatusResponse {
         authenticated: status.authenticated,
         stream_receiving: status.stream_receiving,
+        broadcast_testing,
+        broadcast_statuses,
         stream_count,
         streams,
         error: status.error,
