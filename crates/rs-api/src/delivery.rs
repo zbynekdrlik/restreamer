@@ -780,9 +780,7 @@ impl DeliveryOrchestrator {
         Ok(streams::list_live_streams(&access_token).await?)
     }
 
-    pub async fn get_broadcast_statuses(
-        &self,
-    ) -> anyhow::Result<Vec<(String, String)>> {
+    pub async fn get_broadcast_statuses(&self) -> anyhow::Result<Vec<(String, String)>> {
         let tokens = db::get_youtube_oauth(&self.pool)
             .await?
             .ok_or_else(|| anyhow::anyhow!("No YouTube OAuth tokens"))?;

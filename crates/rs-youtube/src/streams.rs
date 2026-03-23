@@ -137,9 +137,7 @@ pub async fn is_broadcast_testing(access_token: &str) -> Result<bool> {
 }
 
 /// Get the lifecycle status of all broadcasts for diagnostics.
-pub async fn get_broadcast_statuses(
-    access_token: &str,
-) -> Result<Vec<(String, String)>> {
+pub async fn get_broadcast_statuses(access_token: &str) -> Result<Vec<(String, String)>> {
     let broadcasts = list_live_broadcasts(access_token).await?;
     Ok(broadcasts
         .into_iter()
