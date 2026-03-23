@@ -2130,18 +2130,14 @@ jobs:
           Write-Host "  CACHE STABILITY VERIFIED: delta ${delta}s < 15s"
           Write-Host "=========================================="
 
-      - name: "GATE: Verify YouTube is receiving stream data"
+      - name: "GATE: Verify YouTube stream health is 'good'"
         id: verify_yt_receiving
         shell: powershell
         timeout-minutes: 7
         run: |
-          # Verify YouTube receives stream data (streamStatus=active).
-          # Also logs CDN fields (resolution, frameRate) and broadcast statuses
-          # for diagnostics. The CDN fields show if YouTube decoded the stream.
-          #
-          # NOTE: broadcast_testing (lifeCycleStatus) is NOT a reliable indicator
-          # of whether the stream preview renders — even OBS direct shows False.
-          # Uses rs-youtube with server-side OAuth (auto-refresh, no browser/login).
+          # HARD GATE: YouTube health MUST be "good" (same as OBS direct).
+          # "ok" = degraded quality (jittery delivery), "bad"/"noData" = broken.
+          # Restreamer must be invisible middleman — no quality degradation.
           $maxRetries = 20
           $retryDelay = 15
 
@@ -2156,10 +2152,14 @@ jobs:
                 Write-Host "  API error: $($response.error)"
               }
 
-              # Log stream details with CDN decode info
+              # Log stream details
+              $healthValue = ""
               if ($response.streams) {
                 foreach ($s in $response.streams) {
-                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status), cdn_resolution=$($s.cdn_resolution), cdn_frame_rate=$($s.cdn_frame_rate), cdn_ingestion=$($s.cdn_ingestion_type)"
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status), cdn_resolution=$($s.cdn_resolution), cdn_frame_rate=$($s.cdn_frame_rate)"
+                  if ($s.stream_status -eq "active") {
+                    $healthValue = $s.health_status
+                  }
                   if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                     foreach ($issue in $s.configuration_issues) {
                       Write-Host "    ISSUE: $issue"
@@ -2168,23 +2168,19 @@ jobs:
                 }
               }
 
-              # Log broadcast lifecycle status for diagnostics
-              if ($response.broadcast_statuses) {
-                foreach ($b in $response.broadcast_statuses) {
-                  Write-Host "  Broadcast '$($b.title)': lifeCycleStatus=$($b.life_cycle_status)"
-                }
-              }
-
-              if ($response.stream_receiving) {
+              if ($response.stream_receiving -and $healthValue -eq "good") {
                 Write-Host ""
                 Write-Host "=========================================="
-                Write-Host "  YOUTUBE IS RECEIVING STREAM DATA"
-                Write-Host "  (Broadcast lifecycle and CDN fields logged above)"
+                Write-Host "  YOUTUBE STREAM HEALTH: GOOD"
+                Write-Host "  Stream quality matches OBS direct."
+                Write-Host "  Restreamer is invisible middleman."
                 Write-Host "=========================================="
                 return
               }
 
-              Write-Host "  YouTube not yet receiving stream data, waiting ${retryDelay}s..."
+              if ($response.stream_receiving -and $healthValue -and $healthValue -ne "good") {
+                Write-Host "  Stream active but health='${healthValue}' (need 'good'). Waiting..."
+              }
             } catch {
               Write-Host "  Request failed: $_"
             }
@@ -2194,7 +2190,11 @@ jobs:
             }
           }
 
-          throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts (~$($maxRetries * $retryDelay)s). The delivery server confirmed chunk progression, but YouTube's ingest server does not show streamStatus=active."
+          if ($healthValue) {
+            throw "FAILED: YouTube stream health is '${healthValue}' — must be 'good'. Restreamer degrades stream quality. Check ffmpeg flags and delivery pacing."
+          } else {
+            throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts."
+          }
 
       - name: Stop OBS stream
         if: always()

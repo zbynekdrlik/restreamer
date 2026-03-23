@@ -134,9 +134,10 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
 }
 
 fn build_rtmps_args(url: &str) -> Vec<String> {
+    // No -readrate: RTMP protocol handles pacing. With chunked pipe input,
+    // -readrate causes jittery output (micro-gaps between chunks).
+    // ffmpeg buffers internally and RTMP server controls delivery rate.
     vec![
-        "-readrate".into(),
-        "1.00".into(),
         "-f".into(),
         "mpegts".into(),
         "-loglevel".into(),
@@ -157,9 +158,8 @@ fn build_rtmps_args(url: &str) -> Vec<String> {
 
 fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
     let url = format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}");
+    // No -readrate: RTMP protocol handles pacing naturally.
     vec![
-        "-readrate".into(),
-        "1.00".into(),
         "-f".into(),
         "mpegts".into(),
         "-loglevel".into(),
@@ -395,11 +395,14 @@ mod tests {
             !args.contains(&"aac".to_string()),
             "should not re-encode audio"
         );
-        // Single rate control (no double-throttle)
-        assert!(args.contains(&"-readrate".to_string()));
+        // No artificial rate limiting for RTMP (protocol handles pacing)
+        assert!(
+            !args.contains(&"-readrate".to_string()),
+            "RTMP should not have -readrate — causes jittery output with chunked pipe input"
+        );
         assert!(
             !args.contains(&"-re".to_string()),
-            "should not have -re with -readrate"
+            "should not have -re"
         );
         // No genpts (conflicts with TSTimestampNormalizer)
         assert!(
