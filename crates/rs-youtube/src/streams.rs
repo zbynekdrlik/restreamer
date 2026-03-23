@@ -98,16 +98,17 @@ pub async fn is_stream_receiving(access_token: &str) -> Result<bool> {
     Ok(streams.iter().any(|s| s.status.stream_status == "active"))
 }
 
-/// List all live broadcasts (mine=true returns all states: ready, testing, live, complete).
+/// List all live broadcasts (mine=true, all types, all states).
 pub async fn list_live_broadcasts(access_token: &str) -> Result<Vec<LiveBroadcast>> {
     let client = Client::new();
+    // Try mine=true first to get all broadcasts for the authenticated user.
+    // This returns broadcasts in all lifecycle states (ready, testing, live, complete).
     let resp = client
         .get(format!("{YOUTUBE_API_BASE}/liveBroadcasts"))
         .bearer_auth(access_token)
         .query(&[
             ("part", "id,snippet,status"),
             ("mine", "true"),
-            ("broadcastType", "all"),
         ])
         .send()
         .await?;

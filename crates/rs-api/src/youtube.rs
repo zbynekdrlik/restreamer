@@ -49,6 +49,10 @@ pub async fn youtube_status(
     {
         match orch.get_broadcast_statuses().await {
             Ok(statuses) => {
+                tracing::info!(
+                    "Broadcast statuses: {:?}",
+                    statuses
+                );
                 let testing = statuses.iter().any(|(_, s)| s == "testing");
                 let infos = statuses
                     .into_iter()
