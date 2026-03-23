@@ -1282,6 +1282,168 @@ jobs:
           }
           Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
 
+      - name: Install Playwright for YouTube Studio checks
+        shell: powershell
+        working-directory: e2e
+        run: |
+          npm install
+          npx playwright install chromium
+
+      - name: "Baseline: OBS direct-to-YouTube RTMP (prove OBS works)"
+        shell: powershell
+        timeout-minutes: 4
+        run: |
+          # Stream directly from OBS to YouTube RTMP to prove OBS+YouTube
+          # work fine. If this fails, the problem is OBS/YouTube, not restreamer.
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          # Identify with OBS
+          $hello = Receive-OBSMessage $ws
+          $identify = @{
+            op = 1
+            d = @{
+              rpcVersion = 1
+            }
+          } | ConvertTo-Json -Depth 5
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+
+          # Point OBS directly to YouTube RTMP
+          $setSettings = @{
+            op = 6
+            d = @{
+              requestType = "SetStreamServiceSettings"
+              requestId = "baseline-set-yt"
+              requestData = @{
+                streamServiceType = "rtmp_custom"
+                streamServiceSettings = @{
+                  server = "rtmp://a.rtmp.youtube.com/live2"
+                  key = "5jya-pz2d-51x5-mbx4-ddvs"
+                }
+              }
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $setSettings
+          $setResp = Receive-OBSMessage $ws
+          Write-Host "OBS pointed to YouTube RTMP for baseline test"
+
+          # Start streaming
+          $startStream = @{
+            op = 6
+            d = @{
+              requestType = "StartStream"
+              requestId = "baseline-start"
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $startStream
+          $startResp = Receive-OBSMessage $ws
+          Write-Host "OBS baseline stream started to YouTube RTMP"
+
+          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+          # Wait for YouTube to receive and process the stream
+          Write-Host "Waiting 60 seconds for YouTube to process direct stream..."
+          Start-Sleep -Seconds 60
+
+      - name: "Baseline: Verify YouTube shows video (OBS direct)"
+        shell: powershell
+        working-directory: e2e
+        timeout-minutes: 3
+        run: |
+          # This MUST pass — proves OBS+YouTube work fine
+          npx playwright test --config playwright-youtube.config.ts
+          Write-Host "BASELINE PASSED: OBS direct-to-YouTube shows video"
+
+      - name: Upload baseline YouTube Studio screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-studio-baseline-screenshots
+          path: |
+            C:\Users\newlevel\.playwright-yt-screenshots\
+          if-no-files-found: ignore
+
+      - name: "Baseline: Stop OBS stream and wait for YouTube reset"
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          $hello = Receive-OBSMessage $ws
+          $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+
+          $stopStream = @{
+            op = 6
+            d = @{
+              requestType = "StopStream"
+              requestId = "baseline-stop"
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $stopStream
+          $stopResp = Receive-OBSMessage $ws
+          Write-Host "Baseline OBS stream stopped"
+
+          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+          # Wait for YouTube to detect stream ended
+          Write-Host "Waiting 30 seconds for YouTube to reset..."
+          Start-Sleep -Seconds 30
+
       - name: Save original OBS stream settings and switch to Restreamer
         id: obs-setup
         shell: powershell
@@ -2029,6 +2191,27 @@ jobs:
           }
 
           throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts (~$($maxRetries * $retryDelay)s). The delivery server confirmed chunk progression, but YouTube's ingest server does not show streamStatus=active."
+
+      - name: "GATE: Verify YouTube Studio shows video (not Preparing)"
+        shell: powershell
+        working-directory: e2e
+        timeout-minutes: 4
+        run: |
+          # This is the REAL gate: Playwright opens YouTube Studio and verifies
+          # the stream preview shows actual video, not "Pripravuje sa prenos".
+          # If this fails, restreamer's ffmpeg output is invalid.
+          Write-Host "Running Playwright YouTube Studio verification..."
+          npx playwright test --config playwright-youtube.config.ts
+          Write-Host "YOUTUBE STUDIO VERIFICATION PASSED"
+
+      - name: Upload YouTube Studio screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-studio-screenshots
+          path: |
+            C:\Users\newlevel\.playwright-yt-screenshots\
+          if-no-files-found: ignore
 
       - name: Stop OBS stream
         if: always()

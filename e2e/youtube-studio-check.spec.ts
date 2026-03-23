@@ -265,8 +265,93 @@ test(testName, async () => {
 
         console.log(`Page URL: ${page.url()}`);
 
-        // Use Playwright's built-in locators which handle Shadow DOM and
-        // custom web components better than raw querySelectorAll.
+        // ALWAYS capture deep DOM text FIRST (before any break).
+        // This ensures lastDeepText is fresh for the "Preparing" check
+        // regardless of which indicator triggers streamReceiving.
+        const domInfo = await page.evaluate(() => {
+          const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG"]);
+          function getDeepText(node: Node): string {
+            let text = "";
+            if (node.nodeType === Node.TEXT_NODE) {
+              const t = (node.textContent || "").trim();
+              if (t) text += t + " ";
+            }
+            if (node instanceof HTMLElement && SKIP_TAGS.has(node.tagName)) {
+              return text;
+            }
+            if (node instanceof HTMLElement && node.shadowRoot) {
+              text += getDeepText(node.shadowRoot);
+            }
+            for (const child of node.childNodes) {
+              text += getDeepText(child);
+            }
+            return text;
+          }
+
+          const allText = getDeepText(document.body);
+
+          const streamPreview =
+            document.querySelector("ytcp-live-streaming-stream-preview")
+              ?.textContent || "";
+          const healthInfo =
+            document.querySelector("ytcp-live-streaming-stream-health")
+              ?.textContent || "";
+          const streamStatus =
+            document.querySelector("ytcp-live-streaming-stream-status")
+              ?.textContent || "";
+
+          const allClickable = Array.from(
+            document.querySelectorAll(
+              'button, [role="button"], ytcp-button, paper-button, [aria-role="button"]',
+            ),
+          ).map((el) => ({
+            tag: el.tagName.toLowerCase(),
+            text: (el.textContent || "").trim().substring(0, 100),
+            disabled:
+              (el as HTMLButtonElement).disabled ||
+              el.getAttribute("aria-disabled") === "true" ||
+              el.hasAttribute("disabled"),
+            visible:
+              (el as HTMLElement).offsetParent !== null &&
+              getComputedStyle(el as HTMLElement).display !== "none",
+          }));
+
+          return {
+            textLength: allText.length,
+            textSnippet: allText.replace(/\s+/g, " ").substring(0, 10000),
+            streamPreview: streamPreview.trim().substring(0, 500),
+            healthInfo: healthInfo.trim().substring(0, 500),
+            streamStatus: streamStatus.trim().substring(0, 500),
+            clickableElements: allClickable.filter((e) => e.visible),
+          };
+        });
+
+        const deepText = domInfo.textSnippet;
+        lastDeepText = deepText;
+
+        console.log(`Deep text length: ${domInfo.textLength} chars`);
+        console.log(
+          `Visible text (first 3000): ${deepText.substring(0, 3000)}`,
+        );
+        console.log(`Stream preview element: "${domInfo.streamPreview}"`);
+        console.log(`Health info element: "${domInfo.healthInfo}"`);
+        console.log(`Stream status element: "${domInfo.streamStatus}"`);
+        console.log(
+          `Clickable elements (${domInfo.clickableElements.length}):`,
+        );
+        for (const el of domInfo.clickableElements) {
+          if (
+            el.text.toLowerCase().includes("live") ||
+            el.text.toLowerCase().includes("naživo") ||
+            el.text.toLowerCase().includes("vysielať") ||
+            el.text.toLowerCase().includes("stream") ||
+            el.text.toLowerCase().includes("prenos")
+          ) {
+            console.log(
+              `  [${el.disabled ? "DISABLED" : "ENABLED"}] <${el.tag}> "${el.text}"`,
+            );
+          }
+        }
 
         // Check 1: Look for "Go live" / "Vysielať naživo" button using
         // Playwright locator (handles ytcp-button, paper-button, etc.)
@@ -311,97 +396,7 @@ test(testName, async () => {
 
         if (streamReceiving) break;
 
-        // Check 2: Deep DOM text inspection for stream health indicators.
-        // These only appear when YouTube is actually processing stream data.
-        const domInfo = await page.evaluate(() => {
-          const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG"]);
-          function getDeepText(node: Node): string {
-            let text = "";
-            if (node.nodeType === Node.TEXT_NODE) {
-              const t = (node.textContent || "").trim();
-              if (t) text += t + " ";
-            }
-            if (node instanceof HTMLElement && SKIP_TAGS.has(node.tagName)) {
-              return text;
-            }
-            if (node instanceof HTMLElement && node.shadowRoot) {
-              text += getDeepText(node.shadowRoot);
-            }
-            for (const child of node.childNodes) {
-              text += getDeepText(child);
-            }
-            return text;
-          }
-
-          const allText = getDeepText(document.body);
-
-          // Also get innerHTML of specific YouTube Studio elements
-          // that might contain stream health data
-          const streamPreview =
-            document.querySelector("ytcp-live-streaming-stream-preview")
-              ?.textContent || "";
-          const healthInfo =
-            document.querySelector("ytcp-live-streaming-stream-health")
-              ?.textContent || "";
-          const streamStatus =
-            document.querySelector("ytcp-live-streaming-stream-status")
-              ?.textContent || "";
-
-          // Get all clickable/button-like elements
-          const allClickable = Array.from(
-            document.querySelectorAll(
-              'button, [role="button"], ytcp-button, paper-button, [aria-role="button"]',
-            ),
-          ).map((el) => ({
-            tag: el.tagName.toLowerCase(),
-            text: (el.textContent || "").trim().substring(0, 100),
-            disabled:
-              (el as HTMLButtonElement).disabled ||
-              el.getAttribute("aria-disabled") === "true" ||
-              el.hasAttribute("disabled"),
-            visible:
-              (el as HTMLElement).offsetParent !== null &&
-              getComputedStyle(el as HTMLElement).display !== "none",
-          }));
-
-          return {
-            textLength: allText.length,
-            textSnippet: allText.replace(/\s+/g, " ").substring(0, 5000),
-            streamPreview: streamPreview.trim().substring(0, 500),
-            healthInfo: healthInfo.trim().substring(0, 500),
-            streamStatus: streamStatus.trim().substring(0, 500),
-            clickableElements: allClickable.filter((e) => e.visible),
-          };
-        });
-
-        console.log(`Deep text length: ${domInfo.textLength} chars`);
-        console.log(
-          `Visible text (first 3000): ${domInfo.textSnippet.substring(0, 3000)}`,
-        );
-        console.log(`Stream preview element: "${domInfo.streamPreview}"`);
-        console.log(`Health info element: "${domInfo.healthInfo}"`);
-        console.log(`Stream status element: "${domInfo.streamStatus}"`);
-        console.log(
-          `Clickable elements (${domInfo.clickableElements.length}):`,
-        );
-        for (const el of domInfo.clickableElements) {
-          if (
-            el.text.toLowerCase().includes("live") ||
-            el.text.toLowerCase().includes("naživo") ||
-            el.text.toLowerCase().includes("vysielať") ||
-            el.text.toLowerCase().includes("stream") ||
-            el.text.toLowerCase().includes("prenos")
-          ) {
-            console.log(
-              `  [${el.disabled ? "DISABLED" : "ENABLED"}] <${el.tag}> "${el.text}"`,
-            );
-          }
-        }
-
-        const deepText = domInfo.textSnippet;
-        lastDeepText = deepText;
-
-        // Check health patterns in deep text
+        // Check 2: Health patterns in deep text (DOM already captured above)
         const receivingPatterns = [
           /\d+\s*kbps/i, // Bitrate (e.g., "4500 kbps")
           /\d+p\s+\d+\s*fps/i, // "1080p 30 fps"
@@ -520,130 +515,6 @@ test(testName, async () => {
       ).toBe(false);
     } else {
       // NORMAL mode: verify YouTube IS receiving
-      if (streamReceiving) {
-        console.log("==========================================");
-        console.log("  YOUTUBE IS RECEIVING THE STREAM!");
-        console.log(`  Indicator: ${matchedIndicator}`);
-        console.log("  (Broadcast in testing state — auto-start is banned)");
-        console.log("==========================================");
-
-        // Check for "Preparing" state — stream data arrives but video
-        // is NOT playable. This is the bug where YouTube says health
-        // is "Good" but broadcast stays in "Preparing broadcast".
-        const preparingPatterns = [
-          /Pripravuje sa prenos/i,
-          /Preparing broadcast/i,
-          /Pripravuje sa/i,
-          /Getting ready/i,
-        ];
-        for (const pattern of preparingPatterns) {
-          if (pattern.test(lastDeepText)) {
-            console.log("==========================================");
-            console.log("  WARNING: Broadcast stuck in 'Preparing' state!");
-            console.log(`  Matched: ${pattern}`);
-            console.log("  Stream data arrives but video is NOT playable.");
-            console.log("==========================================");
-            expect(
-              false,
-              `YouTube is receiving stream data but broadcast is stuck in "Preparing" state. ` +
-                `Matched: ${pattern}. Stream is unplayable despite healthy status. ` +
-                `This means ffmpeg output is invalid — check timestamp normalization and ffmpeg flags. ` +
-                `Screenshots saved to ${SCREENSHOT_DIR} for debugging.`,
-            ).toBe(true);
-          }
-        }
-
-        // Positive verification: check that YouTube Studio's stream
-        // preview area contains a video/canvas element (only renders
-        // when video is actually decodable and playing).
-        const previewCheck = await page.evaluate(() => {
-          const preview = document.querySelector(
-            "ytcp-live-streaming-stream-preview",
-          );
-          if (!preview) return { found: false, reason: "no preview element" };
-
-          // Search in shadow DOM and regular DOM for video/canvas
-          function findMediaElements(root: Node): {
-            videos: number;
-            canvases: number;
-            iframes: number;
-          } {
-            let videos = 0,
-              canvases = 0,
-              iframes = 0;
-            const search = (node: Node) => {
-              if (node instanceof HTMLVideoElement) videos++;
-              if (node instanceof HTMLCanvasElement) canvases++;
-              if (node instanceof HTMLIFrameElement) iframes++;
-              if (node instanceof HTMLElement && node.shadowRoot) {
-                search(node.shadowRoot);
-              }
-              for (const child of node.childNodes) {
-                search(child);
-              }
-            };
-            search(root);
-            return { videos, canvases, iframes };
-          }
-
-          const media = findMediaElements(preview);
-          const visible =
-            preview instanceof HTMLElement &&
-            preview.offsetParent !== null &&
-            getComputedStyle(preview).display !== "none";
-          const dims = preview.getBoundingClientRect();
-
-          return {
-            found: true,
-            visible,
-            width: Math.round(dims.width),
-            height: Math.round(dims.height),
-            ...media,
-            textContent: (preview.textContent || "").trim().substring(0, 200),
-          };
-        });
-
-        console.log(
-          "Stream preview element check:",
-          JSON.stringify(previewCheck, null, 2),
-        );
-
-        // Screenshot the preview area if found
-        const previewEl = page.locator("ytcp-live-streaming-stream-preview");
-        if ((await previewEl.count()) > 0 && (await previewEl.isVisible())) {
-          await previewEl.screenshot({
-            path: path.join(SCREENSHOT_DIR, "stream-preview.png"),
-          });
-          console.log("Saved stream preview screenshot to stream-preview.png");
-        }
-
-        // Log whether video preview is actually rendering
-        if (
-          previewCheck.found &&
-          previewCheck.visible &&
-          (previewCheck.videos > 0 ||
-            previewCheck.canvases > 0 ||
-            previewCheck.iframes > 0)
-        ) {
-          console.log("==========================================");
-          console.log("  VIDEO PREVIEW IS RENDERING!");
-          console.log(
-            `  Media elements: ${previewCheck.videos} video, ${previewCheck.canvases} canvas, ${previewCheck.iframes} iframe`,
-          );
-          console.log(
-            `  Preview dimensions: ${previewCheck.width}x${previewCheck.height}`,
-          );
-          console.log("==========================================");
-        } else if (previewCheck.found && previewCheck.visible) {
-          console.log(
-            "WARNING: Preview element visible but no video/canvas/iframe found inside it.",
-          );
-          console.log(
-            "This may indicate the stream is not decodable. Check stream-preview.png screenshot.",
-          );
-        }
-      }
-
       expect(
         streamReceiving,
         `FAILED: YouTube Studio does not show stream is being received after ${MAX_RETRIES} attempts. ` +
@@ -652,6 +523,97 @@ test(testName, async () => {
           `but YouTube Studio Live Control Room does not show stream-receiving indicators. ` +
           `Screenshots saved to ${SCREENSHOT_DIR} for debugging.`,
       ).toBe(true);
+
+      console.log("==========================================");
+      console.log("  YOUTUBE IS RECEIVING THE STREAM!");
+      console.log(`  Indicator: ${matchedIndicator}`);
+      console.log("  (Broadcast in testing state — auto-start is banned)");
+      console.log("==========================================");
+
+      // CRITICAL: Check for "Preparing" state — stream data arrives but
+      // video is NOT playable. This catches the bug where YouTube says
+      // health "Good" but broadcast stays in "Preparing broadcast".
+      // Do a FRESH page scrape to get the latest DOM state.
+      console.log("Doing FINAL fresh page scrape for Preparing state check...");
+      await page.waitForTimeout(3_000);
+      await page.screenshot({
+        path: path.join(SCREENSHOT_DIR, "final-preparing-check.png"),
+        fullPage: true,
+      });
+
+      const finalDomText = await page.evaluate(() => {
+        const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG"]);
+        function getDeepText(node: Node): string {
+          let text = "";
+          if (node.nodeType === Node.TEXT_NODE) {
+            const t = (node.textContent || "").trim();
+            if (t) text += t + " ";
+          }
+          if (node instanceof HTMLElement && SKIP_TAGS.has(node.tagName)) {
+            return text;
+          }
+          if (node instanceof HTMLElement && node.shadowRoot) {
+            text += getDeepText(node.shadowRoot);
+          }
+          for (const child of node.childNodes) {
+            text += getDeepText(child);
+          }
+          return text;
+        }
+        return getDeepText(document.body)
+          .replace(/\s+/g, " ")
+          .substring(0, 10000);
+      });
+
+      console.log(
+        `Final DOM text (first 3000): ${finalDomText.substring(0, 3000)}`,
+      );
+
+      const preparingPatterns = [
+        {
+          pattern: /Pripravuje sa prenos/i,
+          label: "Slovak: Pripravuje sa prenos",
+        },
+        {
+          pattern: /Preparing broadcast/i,
+          label: "English: Preparing broadcast",
+        },
+        { pattern: /Pripravuje sa/i, label: "Slovak: Pripravuje sa" },
+        { pattern: /Getting ready/i, label: "English: Getting ready" },
+      ];
+      for (const { pattern, label } of preparingPatterns) {
+        if (pattern.test(finalDomText)) {
+          console.log("==========================================");
+          console.log("  FAIL: Broadcast stuck in 'Preparing' state!");
+          console.log(`  Matched: ${label}`);
+          console.log("  Stream data arrives but video is NOT playable.");
+          console.log("  This means ffmpeg output is invalid or");
+          console.log("  timestamps are broken — YouTube can't decode.");
+          console.log("==========================================");
+          expect(
+            false,
+            `CRITICAL: YouTube receives stream data (${matchedIndicator}) but broadcast is stuck ` +
+              `in "Preparing" state (matched: ${label}). Video is NOT playable. ` +
+              `ffmpeg output is likely invalid — check timestamp normalization, ` +
+              `genpts flag, and avoid_negative_ts. ` +
+              `Screenshots saved to ${SCREENSHOT_DIR}.`,
+          ).toBe(true);
+        }
+      }
+
+      // Screenshot the preview area for visual evidence
+      const previewEl = page.locator("ytcp-live-streaming-stream-preview");
+      if ((await previewEl.count()) > 0 && (await previewEl.isVisible())) {
+        await previewEl.screenshot({
+          path: path.join(SCREENSHOT_DIR, "stream-preview.png"),
+        });
+        console.log("Saved stream preview screenshot to stream-preview.png");
+      }
+
+      console.log("==========================================");
+      console.log("  YOUTUBE STREAM VERIFICATION PASSED");
+      console.log("  Stream receiving + no 'Preparing' state detected");
+      console.log("==========================================");
     }
   } finally {
     await context.close();
