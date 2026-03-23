@@ -400,10 +400,7 @@ mod tests {
             !args.contains(&"-readrate".to_string()),
             "RTMP should not have -readrate — causes jittery output with chunked pipe input"
         );
-        assert!(
-            !args.contains(&"-re".to_string()),
-            "should not have -re"
-        );
+        assert!(!args.contains(&"-re".to_string()), "should not have -re");
         // No genpts (conflicts with TSTimestampNormalizer)
         assert!(
             !args.iter().any(|a| a.contains("genpts")),
