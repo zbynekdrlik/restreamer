@@ -154,7 +154,11 @@ async fn test_processes_sequential_chunks() {
     drop(s);
 
     let w = writes.lock().await;
-    assert!(w.len() >= 5, "Should have multiple writes from smooth_write: {}", w.len());
+    assert!(
+        w.len() >= 5,
+        "Should have multiple writes from smooth_write: {}",
+        w.len()
+    );
     drop(w);
 
     let _ = stop_tx.send(true);
@@ -506,7 +510,11 @@ async fn test_processes_100_sequential_chunks() {
     drop(s);
 
     let w = writes.lock().await;
-    assert!(w.len() >= 100, "Should have many writes from smooth_write: {}", w.len());
+    assert!(
+        w.len() >= 100,
+        "Should have many writes from smooth_write: {}",
+        w.len()
+    );
     drop(w);
 
     let _ = stop_tx.send(true);
