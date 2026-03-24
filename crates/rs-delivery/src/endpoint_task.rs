@@ -515,14 +515,16 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
 
                 if let Some(ref mut p) = proc {
                     // Smooth write: spread bytes evenly over chunk duration.
-                    // For FLV chunks, extract actual duration from embedded timestamps.
+                    // For FLV chunks, use the larger of FLV-embedded duration or
+                    // the configured chunk_duration_ms (prevents delivering faster
+                    // than real-time when FLV timestamps undercount).
                     // For TS chunks, use fixed 1s pace.
                     let pace = if ep_cfg.is_fast {
                         std::time::Duration::from_millis(100)
                     } else if chunk_format == ChunkFormat::Flv {
-                        let dur_ms = flv_chunk_duration_ms(&processed)
-                            .unwrap_or(1000)
-                            .max(MIN_FLV_PACE_MS);
+                        let flv_dur = flv_chunk_duration_ms(&processed).unwrap_or(0);
+                        let config_dur = 1000u64; // chunk_duration_ms default
+                        let dur_ms = flv_dur.max(config_dur).max(MIN_FLV_PACE_MS);
                         std::time::Duration::from_millis(dur_ms)
                     } else {
                         std::time::Duration::from_millis(1000)
