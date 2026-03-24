@@ -102,13 +102,15 @@ impl FlvChunkSink {
 
         let pending = {
             let mut inner = self.inner.lock().await;
-            if inner.null_mode {
-                return;
-            }
 
+            // Always save sequence headers (even in null mode, for state tracking)
             if is_sequence_header {
                 inner.video_sequence_header = Some(data.clone());
                 debug!("FLV video sequence header saved ({} bytes)", data.len());
+                return;
+            }
+
+            if inner.null_mode {
                 return;
             }
 
@@ -163,13 +165,15 @@ impl FlvChunkSink {
 
         let pending = {
             let mut inner = self.inner.lock().await;
-            if inner.null_mode {
-                return;
-            }
 
+            // Always save sequence headers (even in null mode, for state tracking)
             if is_sequence_header {
                 inner.audio_sequence_header = Some(data.clone());
                 debug!("FLV audio sequence header saved ({} bytes)", data.len());
+                return;
+            }
+
+            if inner.null_mode {
                 return;
             }
 
