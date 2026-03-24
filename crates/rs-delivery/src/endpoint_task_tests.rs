@@ -140,9 +140,10 @@ async fn test_processes_sequential_chunks() {
         endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
-    // With 1000ms pacing (non-fast), 5 chunks need ~5s
-    for _ in 0..12 {
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    // smooth_write: 100 intervals of 10ms per chunk (non-fast 1000ms pace).
+    // 5 chunks × 1000ms = 5s. Advance in 10ms steps with yields.
+    for _ in 0..600 {
+        tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
     }
 
@@ -153,7 +154,7 @@ async fn test_processes_sequential_chunks() {
     drop(s);
 
     let w = writes.lock().await;
-    assert_eq!(w.len(), 5);
+    assert!(w.len() >= 5, "Should have multiple writes from smooth_write: {}", w.len());
     drop(w);
 
     let _ = stop_tx.send(true);
@@ -188,7 +189,9 @@ async fn test_restarts_ffmpeg_on_death() {
     let chunks: Vec<(i64, Vec<u8>)> = (1..=6).map(|i| (i, vec![i as u8; 50])).collect();
     let fetcher = MockFetcher::new(chunks);
     let mut factory = MockProcessFactory::new();
-    factory.fail_after_writes = Some(3);
+    // smooth_write splits each 50-byte chunk into ~50 writes (1 byte each).
+    // Fail after ~3 chunks worth of writes = 150 writes.
+    factory.fail_after_writes = Some(150);
     let spawn_count = factory.spawn_count.clone();
 
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -199,8 +202,9 @@ async fn test_restarts_ffmpeg_on_death() {
         endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
-    for _ in 0..40 {
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    // smooth_write needs 10ms advances. 6 chunks × 1000ms = 6s total.
+    for _ in 0..800 {
+        tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
     }
 
@@ -487,11 +491,10 @@ async fn test_processes_100_sequential_chunks() {
         endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
-    // Elapsed-aware pacing: 1000ms per chunk (non-fast), 100 chunks = 100s.
-    // With mock fetcher (instant S3 fetch), most of the 1000ms is sleep.
-    // Advance time in small increments with yields for the async executor.
-    for _ in 0..400 {
-        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+    // smooth_write: 100 intervals of 10ms per chunk. 100 chunks = 100s.
+    // Advance in 10ms steps. Need 100 * 100 = 10000 steps minimum.
+    for _ in 0..12000 {
+        tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
     }
 
@@ -503,7 +506,7 @@ async fn test_processes_100_sequential_chunks() {
     drop(s);
 
     let w = writes.lock().await;
-    assert_eq!(w.len(), 100);
+    assert!(w.len() >= 100, "Should have many writes from smooth_write: {}", w.len());
     drop(w);
 
     let _ = stop_tx.send(true);
@@ -675,9 +678,9 @@ async fn test_chunk_gap_maintained_at_delay_target() {
         .await;
     });
 
-    // Elapsed-aware pacing: 1000ms per chunk (non-fast), 30 chunks = 30s.
-    for _ in 0..120 {
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    // smooth_write: 100 intervals of 10ms per chunk. 30 chunks = 30s.
+    for _ in 0..4000 {
+        tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
     }
 

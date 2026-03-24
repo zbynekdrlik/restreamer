@@ -376,9 +376,8 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     // Smooth write: spread bytes evenly over chunk duration.
                     // This eliminates the burst+gap pattern that causes
                     // YouTube's bitrateLow warning.
-                    let pace = std::time::Duration::from_millis(
-                        if ep_cfg.is_fast { 100 } else { 1000 },
-                    );
+                    let pace =
+                        std::time::Duration::from_millis(if ep_cfg.is_fast { 100 } else { 1000 });
                     let write_result = tokio::time::timeout(
                         std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
                         smooth_write(p.as_mut(), &processed, pace),
