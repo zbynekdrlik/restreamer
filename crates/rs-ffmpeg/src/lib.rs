@@ -78,7 +78,7 @@ pub enum ChunkFormat {
 }
 
 impl ChunkFormat {
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_config(s: &str) -> Self {
         match s {
             "flv" => Self::Flv,
             _ => Self::Ts,

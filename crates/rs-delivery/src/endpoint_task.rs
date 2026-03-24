@@ -272,7 +272,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
         }
     };
 
-    let chunk_format = ChunkFormat::from_str(&ep_cfg.chunk_format);
+    let chunk_format = ChunkFormat::from_config(&ep_cfg.chunk_format);
 
     // TS normalizer only needed for MPEG-TS chunks (fixes cross-chunk timestamp discontinuities).
     // FLV chunks have correct timestamps from xiu — no normalization needed.
