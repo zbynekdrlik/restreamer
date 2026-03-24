@@ -356,8 +356,7 @@ async fn run_inpoint_loop(
         let flv_sink = Arc::clone(&flv_chunk_sink);
         let state = inpoint_state.clone();
         let fmt = chunk_format.clone();
-        let mut handle =
-            tokio::spawn(async move { server.run(sink, flv_sink, state, fmt).await });
+        let mut handle = tokio::spawn(async move { server.run(sink, flv_sink, state, fmt).await });
 
         info!("Inpoint RTMP server started on {bind}:{port}");
 

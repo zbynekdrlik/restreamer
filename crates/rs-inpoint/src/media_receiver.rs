@@ -190,16 +190,14 @@ impl MediaReceiver {
                         }
                     }
                 }
-                FrameData::Audio { timestamp, data } => {
-                    match self.chunk_format {
-                        ChunkFormat::Flv => {
-                            self.flv_chunk_sink.write_audio(timestamp, &data).await;
-                        }
-                        ChunkFormat::Ts => {
-                            processor.process_audio(timestamp, data).await;
-                        }
+                FrameData::Audio { timestamp, data } => match self.chunk_format {
+                    ChunkFormat::Flv => {
+                        self.flv_chunk_sink.write_audio(timestamp, &data).await;
                     }
-                }
+                    ChunkFormat::Ts => {
+                        processor.process_audio(timestamp, data).await;
+                    }
+                },
                 FrameData::MediaInfo { media_info: _ } => {
                     debug!("Received media info");
                 }

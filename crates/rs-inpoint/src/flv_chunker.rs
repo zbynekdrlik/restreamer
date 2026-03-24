@@ -219,19 +219,20 @@ impl FlvChunkSink {
     }
 
     /// Write FLV file header + sequence headers at the start of a new chunk.
-    fn write_chunk_header(inner: &mut FlvChunkSinkInner, timestamp: u32) {
+    fn write_chunk_header(inner: &mut FlvChunkSinkInner, _timestamp: u32) {
         // FLV file header (9 bytes)
         inner.buffer.extend_from_slice(&FLV_HEADER);
         // Previous tag size 0 (4 bytes)
         inner.buffer.extend_from_slice(&[0, 0, 0, 0]);
 
-        // Write video sequence header (codec config) if available
-        if let Some(ref vsh) = inner.video_sequence_header {
+        // Clone sequence headers to avoid borrowing inner immutably while writing
+        let vsh = inner.video_sequence_header.clone();
+        let ash = inner.audio_sequence_header.clone();
+
+        if let Some(ref vsh) = vsh {
             Self::write_tag(inner, FLV_TAG_VIDEO, 0, vsh);
         }
-
-        // Write audio sequence header (codec config) if available
-        if let Some(ref ash) = inner.audio_sequence_header {
+        if let Some(ref ash) = ash {
             Self::write_tag(inner, FLV_TAG_AUDIO, 0, ash);
         }
 
@@ -245,9 +246,11 @@ impl FlvChunkSink {
         // Tag header (11 bytes)
         inner.buffer.push(tag_type);
         // DataSize (3 bytes, big-endian)
-        inner
-            .buffer
-            .extend_from_slice(&[(data_size >> 16) as u8, (data_size >> 8) as u8, data_size as u8]);
+        inner.buffer.extend_from_slice(&[
+            (data_size >> 16) as u8,
+            (data_size >> 8) as u8,
+            data_size as u8,
+        ]);
         // Timestamp (3 bytes lower + 1 byte upper)
         inner.buffer.extend_from_slice(&[
             (timestamp >> 16) as u8,
@@ -490,10 +493,9 @@ mod tests {
 
         assert_eq!(file_data[kf_offset], FLV_TAG_VIDEO); // tag type = video
         // Data size (3 bytes)
-        let data_size =
-            ((file_data[kf_offset + 1] as u32) << 16) |
-            ((file_data[kf_offset + 2] as u32) << 8) |
-            (file_data[kf_offset + 3] as u32);
+        let data_size = ((file_data[kf_offset + 1] as u32) << 16)
+            | ((file_data[kf_offset + 2] as u32) << 8)
+            | (file_data[kf_offset + 3] as u32);
         assert_eq!(data_size, payload.len() as u32);
     }
 }
