@@ -37,8 +37,6 @@ struct FlvChunkSinkInner {
     /// Saved codec sequence headers for writing at chunk start.
     video_sequence_header: Option<BytesMut>,
     audio_sequence_header: Option<BytesMut>,
-    /// Base timestamp for the current chunk (subtracted from absolute timestamps).
-    base_timestamp: Option<u32>,
 }
 
 /// Data extracted from the buffer, ready to be written to disk outside the lock.
@@ -63,7 +61,6 @@ impl FlvChunkSink {
                 null_mode: false,
                 video_sequence_header: None,
                 audio_sequence_header: None,
-                base_timestamp: None,
             }),
             chunk_tx,
         }
@@ -82,7 +79,6 @@ impl FlvChunkSink {
                 null_mode: true,
                 video_sequence_header: None,
                 audio_sequence_header: None,
-                base_timestamp: None,
             }),
             chunk_tx,
         }
@@ -125,20 +121,17 @@ impl FlvChunkSink {
 
             if should_flush && is_keyframe {
                 pending = Self::extract_chunk(&mut inner);
-                // Reset base timestamp for new chunk
-                inner.base_timestamp = Some(timestamp);
                 Self::write_chunk_header(&mut inner, timestamp);
             } else if inner.chunk_start.is_none() {
                 // First chunk — wait for a keyframe to start
                 if !is_keyframe {
                     return;
                 }
-                inner.base_timestamp = Some(timestamp);
                 Self::write_chunk_header(&mut inner, timestamp);
             }
 
-            let relative_ts = timestamp.wrapping_sub(inner.base_timestamp.unwrap_or(0));
-            Self::write_tag(&mut inner, FLV_TAG_VIDEO, relative_ts, data);
+            // Use absolute timestamps — delivery normalizer handles continuity
+            Self::write_tag(&mut inner, FLV_TAG_VIDEO, timestamp, data);
 
             // Force-flush if buffer exceeds max size
             if inner.buffer.len() >= MAX_BUFFER_SIZE {
@@ -182,8 +175,7 @@ impl FlvChunkSink {
                 return;
             }
 
-            let relative_ts = timestamp.wrapping_sub(inner.base_timestamp.unwrap_or(0));
-            Self::write_tag(&mut inner, FLV_TAG_AUDIO, relative_ts, data);
+            Self::write_tag(&mut inner, FLV_TAG_AUDIO, timestamp, data);
             None
         };
 
@@ -213,7 +205,6 @@ impl FlvChunkSink {
         let mut inner = self.inner.lock().await;
         inner.buffer.clear();
         inner.chunk_start = None;
-        inner.base_timestamp = None;
     }
 
     /// Get the total number of chunks produced.

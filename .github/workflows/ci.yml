@@ -1169,7 +1169,7 @@ jobs:
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
