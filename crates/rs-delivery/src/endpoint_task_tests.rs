@@ -487,11 +487,11 @@ async fn test_processes_100_sequential_chunks() {
         endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
-    // No pacing sleep — ffmpeg handles rate limiting via -readrate.
-    // With mock fetcher/factory, chunks process instantly. Just yield
-    // enough times for the async executor to process all 100 chunks.
-    for _ in 0..300 {
-        tokio::time::advance(std::time::Duration::from_millis(10)).await;
+    // Elapsed-aware pacing: 1000ms per chunk (non-fast), 100 chunks = 100s.
+    // With mock fetcher (instant S3 fetch), most of the 1000ms is sleep.
+    // Advance time in small increments with yields for the async executor.
+    for _ in 0..400 {
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
         tokio::task::yield_now().await;
     }
 
@@ -650,8 +650,7 @@ async fn test_buffer_fill_waits_for_target_chunk() {
 async fn test_chunk_gap_maintained_at_delay_target() {
     // With delivery_delay_chunks=10, start_chunk_id=1, pre-load chunks 1-30:
     // After buffer fill (chunk 11 available), VPS starts consuming from chunk 1.
-    // No artificial pacing — ffmpeg handles rate-limiting in production.
-    // With mocks, chunks process instantly.
+    // Elapsed-aware pacing: 1000ms per chunk (non-fast).
     tokio::time::pause();
 
     let all_chunks: Vec<(i64, Vec<u8>)> = (1..=30).map(|i| (i, vec![i as u8; 100])).collect();
@@ -676,9 +675,9 @@ async fn test_chunk_gap_maintained_at_delay_target() {
         .await;
     });
 
-    // No pacing sleep — just yield for async executor to process all chunks.
-    for _ in 0..200 {
-        tokio::time::advance(std::time::Duration::from_millis(10)).await;
+    // Elapsed-aware pacing: 1000ms per chunk (non-fast), 30 chunks = 30s.
+    for _ in 0..120 {
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
     }
 

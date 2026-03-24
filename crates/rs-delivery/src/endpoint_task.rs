@@ -306,6 +306,9 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
             }
         }
 
+        // Track chunk processing time for elapsed-aware pacing
+        let chunk_start = tokio::time::Instant::now();
+
         // Fetch next chunk from S3
         match fetcher.fetch_chunk(chunk_id).await {
             Ok(Some(data)) => {
@@ -370,11 +373,17 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
 
                 chunk_id += 1;
-                // No artificial pacing sleep needed — ffmpeg's -readrate 1.00
-                // rate-limits stdin consumption to real-time, and the streaming
-                // platform won't accept data faster than real-time either.
-                // Adding sleep here causes delivery to be SLOWER than real-time,
-                // making cache delay grow indefinitely.
+                // Elapsed-aware pacing: measure how long S3 fetch + normalize
+                // + write took, sleep only the deficit to hit target pace.
+                // This replaces ffmpeg's -readrate (which causes micro-gaps
+                // between chunks, lowering measured bitrate on YouTube).
+                let target_pace = std::time::Duration::from_millis(
+                    if ep_cfg.is_fast { 100 } else { 1000 },
+                );
+                let elapsed = chunk_start.elapsed();
+                if elapsed < target_pace {
+                    tokio::time::sleep(target_pace - elapsed).await;
+                }
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;

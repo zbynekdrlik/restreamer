@@ -134,9 +134,10 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
 }
 
 fn build_rtmps_args(url: &str) -> Vec<String> {
+    // No -readrate: pacing is handled by the Rust delivery loop
+    // (elapsed-aware sleep). -readrate causes micro-gaps between
+    // chunks that lower YouTube's measured bitrate.
     vec![
-        "-readrate".into(),
-        "1.00".into(),
         "-f".into(),
         "mpegts".into(),
         "-loglevel".into(),
@@ -161,9 +162,8 @@ fn build_rtmps_args(url: &str) -> Vec<String> {
 
 fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
     let url = format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}");
+    // No -readrate: pacing is handled by the Rust delivery loop.
     vec![
-        "-readrate".into(),
-        "1.00".into(),
         "-f".into(),
         "mpegts".into(),
         "-loglevel".into(),
@@ -403,8 +403,11 @@ mod tests {
             !args.contains(&"aac".to_string()),
             "should not re-encode audio"
         );
-        // Rate control
-        assert!(args.contains(&"-readrate".to_string()));
+        // No ffmpeg rate control (Rust delivery loop handles pacing)
+        assert!(
+            !args.contains(&"-readrate".to_string()),
+            "RTMP must not have -readrate (causes micro-gaps that lower bitrate)"
+        );
         assert!(!args.contains(&"-re".to_string()), "should not have -re");
         // TS→FLV remux quality flags
         assert!(
