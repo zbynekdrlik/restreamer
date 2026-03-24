@@ -12,8 +12,6 @@ use crate::s3_fetch::S3Fetcher;
 /// Interval for smooth byte-level writes (10ms = 100 writes per second)
 const SMOOTH_WRITE_INTERVAL_MS: u64 = 10;
 
-/// Minimum pacing duration for FLV chunks (prevent too-fast delivery)
-const MIN_FLV_PACE_MS: u64 = 500;
 
 /// FLV stream normalizer: strips duplicate FLV headers and sequence headers
 /// from concatenated FLV chunks, producing a single continuous FLV stream.
@@ -254,55 +252,6 @@ impl EndpointHandle {
     }
 }
 
-/// Extract the duration of an FLV chunk from its embedded timestamps.
-///
-/// Parses the FLV header and tag timestamps to find the span from
-/// first data tag to last tag. Returns None if the data is not valid FLV
-/// or contains fewer than 2 data tags.
-fn flv_chunk_duration_ms(data: &[u8]) -> Option<u64> {
-    // FLV header: 9 bytes + 4 bytes prev_tag_size_0 = 13 bytes minimum
-    if data.len() < 13 || &data[0..3] != b"FLV" {
-        return None;
-    }
-
-    let mut offset = 9 + 4; // Skip FLV header + first prev_tag_size
-    let mut first_ts: Option<u32> = None;
-    let mut last_ts: u32 = 0;
-
-    while offset + 11 <= data.len() {
-        let tag_type = data[offset];
-        if tag_type != 8 && tag_type != 9 && tag_type != 18 {
-            break; // Invalid tag type
-        }
-
-        let data_size = ((data[offset + 1] as u32) << 16)
-            | ((data[offset + 2] as u32) << 8)
-            | (data[offset + 3] as u32);
-
-        let ts = ((data[offset + 4] as u32) << 16)
-            | ((data[offset + 5] as u32) << 8)
-            | (data[offset + 6] as u32)
-            | ((data[offset + 7] as u32) << 24);
-
-        // Skip sequence headers (video: type 9 + packet_type 0, audio: type 8 + packet_type 0)
-        let is_seq_header = (tag_type == 9 || tag_type == 8)
-            && offset + 12 < data.len()
-            && data[offset + 12] == 0x00;
-
-        if !is_seq_header && (tag_type == 8 || tag_type == 9) {
-            if first_ts.is_none() {
-                first_ts = Some(ts);
-            }
-            last_ts = ts;
-        }
-
-        // Move to next tag: 11 (header) + data_size + 4 (prev_tag_size)
-        offset += 11 + data_size as usize + 4;
-    }
-
-    first_ts.map(|first| (last_ts - first) as u64)
-}
-
 /// Write data to ffmpeg stdin spread evenly over `duration`.
 /// Eliminates burst+gap pattern that causes YouTube's bitrateLow.
 /// At 12 Mbps, a 1.5 MB chunk is written as ~15 KB every 10ms.
@@ -514,21 +463,15 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 };
 
                 if let Some(ref mut p) = proc {
-                    // Smooth write: spread bytes evenly over chunk duration.
-                    // For FLV chunks, use the larger of FLV-embedded duration or
-                    // the configured chunk_duration_ms (prevents delivering faster
-                    // than real-time when FLV timestamps undercount).
-                    // For TS chunks, use fixed 1s pace.
+                    // Pace delivery to match real-time ingest rate.
+                    // Track wall-clock time from start of chunk processing.
+                    let chunk_start = tokio::time::Instant::now();
                     let pace = if ep_cfg.is_fast {
                         std::time::Duration::from_millis(100)
-                    } else if chunk_format == ChunkFormat::Flv {
-                        let flv_dur = flv_chunk_duration_ms(&processed).unwrap_or(0);
-                        let config_dur = 1000u64; // chunk_duration_ms default
-                        let dur_ms = flv_dur.max(config_dur).max(MIN_FLV_PACE_MS);
-                        std::time::Duration::from_millis(dur_ms)
                     } else {
                         std::time::Duration::from_millis(1000)
                     };
+
                     let write_result = tokio::time::timeout(
                         std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
                         smooth_write(p.as_mut(), &processed, pace),
@@ -569,7 +512,13 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
 
                 chunk_id += 1;
-                // No separate sleep — smooth_write inherently paces delivery
+                // Ensure total chunk processing time matches the pace duration.
+                // smooth_write handles data spread, but S3 fetch + normalize time
+                // can cause delivery to outpace ingest without this guard.
+                let elapsed = chunk_start.elapsed();
+                if elapsed < pace {
+                    tokio::time::sleep(pace - elapsed).await;
+                }
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;
