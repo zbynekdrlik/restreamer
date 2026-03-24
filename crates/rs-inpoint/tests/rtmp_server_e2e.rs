@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rs_inpoint::chunker::ChunkSink;
+use rs_inpoint::flv_chunker::FlvChunkSink;
+use rs_inpoint::media_receiver::ChunkFormat;
 use rs_inpoint::rtmp_server::RtmpServer;
 
 /// Find an available TCP port by binding to port 0.
@@ -115,7 +117,12 @@ async fn rtmp_server_receives_ffmpeg_stream_and_produces_chunks() {
     let shutdown = server.shutdown_handle();
     let sink = Arc::clone(&chunk_sink);
     let inpoint_state = rs_core::models::InpointState::new();
-    let server_task = tokio::spawn(async move { server.run(sink, inpoint_state).await });
+    let flv_sink = Arc::new(FlvChunkSink::new_null());
+    let server_task = tokio::spawn(async move {
+        server
+            .run(sink, flv_sink, inpoint_state, ChunkFormat::Ts)
+            .await
+    });
 
     // Wait for RTMP server to be ready (TCP port accepting connections)
     assert!(
@@ -180,7 +187,12 @@ async fn rtmp_server_produces_multiple_chunks_from_stream() {
     let shutdown = server.shutdown_handle();
     let sink = Arc::clone(&chunk_sink);
     let inpoint_state = rs_core::models::InpointState::new();
-    let server_task = tokio::spawn(async move { server.run(sink, inpoint_state).await });
+    let flv_sink = Arc::new(FlvChunkSink::new_null());
+    let server_task = tokio::spawn(async move {
+        server
+            .run(sink, flv_sink, inpoint_state, ChunkFormat::Ts)
+            .await
+    });
 
     assert!(
         wait_for_port(port, Duration::from_secs(5)).await,
@@ -264,7 +276,12 @@ async fn rtmp_server_chunk_md5_matches_file() {
     let shutdown = server.shutdown_handle();
     let sink = Arc::clone(&chunk_sink);
     let inpoint_state = rs_core::models::InpointState::new();
-    let server_task = tokio::spawn(async move { server.run(sink, inpoint_state).await });
+    let flv_sink = Arc::new(FlvChunkSink::new_null());
+    let server_task = tokio::spawn(async move {
+        server
+            .run(sink, flv_sink, inpoint_state, ChunkFormat::Ts)
+            .await
+    });
 
     assert!(
         wait_for_port(port, Duration::from_secs(5)).await,

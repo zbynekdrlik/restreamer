@@ -68,21 +68,58 @@ impl std::str::FromStr for ServiceType {
     }
 }
 
-/// Build the ffmpeg command arguments for a given service type and stream key.
-pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &str) -> Vec<String> {
-    match service_type {
-        ServiceType::YtHls => build_yt_hls_args(stream_key),
-        ServiceType::Facebook => build_rtmps_args(&format!(
+/// Chunk format for selecting ffmpeg input args.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkFormat {
+    /// MPEG-TS input (legacy path with TS→FLV remux).
+    Ts,
+    /// FLV input (direct path, FLV→FLV passthrough, zero overhead).
+    Flv,
+}
+
+impl ChunkFormat {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "flv" => Self::Flv,
+            _ => Self::Ts,
+        }
+    }
+}
+
+/// Build the ffmpeg command arguments for a given service type, stream key, and chunk format.
+pub fn build_ffmpeg_args(
+    service_type: ServiceType,
+    stream_key: &str,
+    alias: &str,
+    chunk_format: ChunkFormat,
+) -> Vec<String> {
+    match (service_type, chunk_format) {
+        // FLV input: minimal args, FLV→FLV passthrough
+        (ServiceType::YtRtmp, ChunkFormat::Flv) => {
+            build_flv_rtmp_args(&format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}"))
+        }
+        (ServiceType::Facebook, ChunkFormat::Flv) => build_flv_rtmp_args(&format!(
             "rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}"
         )),
-        ServiceType::YtRtmp => build_yt_rtmp_args(stream_key),
-        ServiceType::Vimeo => build_rtmps_args(&format!(
+        (ServiceType::Vimeo, ChunkFormat::Flv) => build_flv_rtmp_args(&format!(
             "rtmps://rtmp-global.cloud.vimeo.com:443/live/{stream_key}"
         )),
-        ServiceType::Instagram => build_rtmps_args(&format!(
+        (ServiceType::Instagram, ChunkFormat::Flv) => build_flv_rtmp_args(&format!(
             "rtmps://live-upload.instagram.com:443/rtmp/{stream_key}"
         )),
-        ServiceType::TestFile => build_test_file_args(alias),
+        // TS input: legacy paths
+        (ServiceType::YtHls, _) => build_yt_hls_args(stream_key),
+        (ServiceType::Facebook, ChunkFormat::Ts) => build_rtmps_args(&format!(
+            "rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}"
+        )),
+        (ServiceType::YtRtmp, ChunkFormat::Ts) => build_yt_rtmp_args(stream_key),
+        (ServiceType::Vimeo, ChunkFormat::Ts) => build_rtmps_args(&format!(
+            "rtmps://rtmp-global.cloud.vimeo.com:443/live/{stream_key}"
+        )),
+        (ServiceType::Instagram, ChunkFormat::Ts) => build_rtmps_args(&format!(
+            "rtmps://live-upload.instagram.com:443/rtmp/{stream_key}"
+        )),
+        (ServiceType::TestFile, _) => build_test_file_args(alias),
     }
 }
 
@@ -186,6 +223,25 @@ fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
     ]
 }
 
+/// FLV→FLV passthrough for RTMP/RTMPS endpoints.
+/// Minimal flags: input is already valid FLV, just forward bytes.
+/// No genpts, no avoid_negative_ts, no copytb, no bsf needed.
+fn build_flv_rtmp_args(url: &str) -> Vec<String> {
+    vec![
+        "-f".into(),
+        "flv".into(),
+        "-loglevel".into(),
+        "info".into(),
+        "-i".into(),
+        "pipe:".into(),
+        "-c".into(),
+        "copy".into(),
+        "-f".into(),
+        "flv".into(),
+        url.to_string(),
+    ]
+}
+
 fn build_test_file_args(alias: &str) -> Vec<String> {
     let output_dir = std::env::var("RESTREAMER_TEST_OUTPUT_DIR")
         .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
@@ -227,7 +283,17 @@ impl FfmpegProcess {
         stream_key: &str,
         alias: &str,
     ) -> Result<Self, FfmpegError> {
-        let args = build_ffmpeg_args(service_type, stream_key, alias);
+        Self::spawn_with_format(service_type, stream_key, alias, ChunkFormat::Ts)
+    }
+
+    /// Spawn a new ffmpeg process with explicit chunk format.
+    pub fn spawn_with_format(
+        service_type: ServiceType,
+        stream_key: &str,
+        alias: &str,
+        chunk_format: ChunkFormat,
+    ) -> Result<Self, FfmpegError> {
+        let args = build_ffmpeg_args(service_type, stream_key, alias, chunk_format);
         tracing::info!(
             service_type = %service_type,
             alias = alias,
@@ -368,7 +434,7 @@ mod tests {
 
     #[test]
     fn build_yt_hls_args_correct() {
-        let args = build_ffmpeg_args(ServiceType::YtHls, "test-key", "YouTube");
+        let args = build_ffmpeg_args(ServiceType::YtHls, "test-key", "YouTube", ChunkFormat::Ts);
         assert!(args.iter().any(|a| a.contains("a.upload.youtube.com")));
         assert!(args.iter().any(|a| a.contains("test-key")));
         assert!(args.contains(&"hls".to_string()));
@@ -379,7 +445,7 @@ mod tests {
 
     #[test]
     fn build_facebook_args_correct() {
-        let args = build_ffmpeg_args(ServiceType::Facebook, "fb-key", "Facebook");
+        let args = build_ffmpeg_args(ServiceType::Facebook, "fb-key", "Facebook", ChunkFormat::Ts);
         assert!(args.iter().any(|a| a.contains("live-api-s.facebook.com")));
         assert!(args.iter().any(|a| a.contains("fb-key")));
         assert!(args.contains(&"flv".to_string()));
@@ -388,7 +454,7 @@ mod tests {
 
     #[test]
     fn build_yt_rtmp_args_correct() {
-        let args = build_ffmpeg_args(ServiceType::YtRtmp, "yt-key", "YT RTMP");
+        let args = build_ffmpeg_args(ServiceType::YtRtmp, "yt-key", "YT RTMP", ChunkFormat::Ts);
         assert!(args.iter().any(|a| a.contains("a.rtmp.youtube.com")));
         assert!(args.iter().any(|a| a.contains("yt-key")));
         assert!(args.contains(&"flv".to_string()));
@@ -432,7 +498,7 @@ mod tests {
 
     #[test]
     fn build_vimeo_args_correct() {
-        let args = build_ffmpeg_args(ServiceType::Vimeo, "vimeo-key", "Vimeo");
+        let args = build_ffmpeg_args(ServiceType::Vimeo, "vimeo-key", "Vimeo", ChunkFormat::Ts);
         assert!(
             args.iter()
                 .any(|a| a.contains("rtmp-global.cloud.vimeo.com"))
@@ -442,14 +508,14 @@ mod tests {
 
     #[test]
     fn build_instagram_args_correct() {
-        let args = build_ffmpeg_args(ServiceType::Instagram, "ig-key", "IG");
+        let args = build_ffmpeg_args(ServiceType::Instagram, "ig-key", "IG", ChunkFormat::Ts);
         assert!(args.iter().any(|a| a.contains("live-upload.instagram.com")));
         assert!(args.contains(&"flv".to_string()));
     }
 
     #[test]
     fn build_test_file_args_correct() {
-        let args = build_ffmpeg_args(ServiceType::TestFile, "", "Test Stream");
+        let args = build_ffmpeg_args(ServiceType::TestFile, "", "Test Stream", ChunkFormat::Ts);
         assert!(
             args.iter()
                 .any(|a| a.contains("restreamer_test_Test_Stream.ts"))
@@ -460,12 +526,12 @@ mod tests {
 
     #[test]
     fn build_test_file_sanitizes_alias() {
-        let args = build_ffmpeg_args(ServiceType::TestFile, "", "My/Bad Stream");
+        let args = build_ffmpeg_args(ServiceType::TestFile, "", "My/Bad Stream", ChunkFormat::Ts);
         assert!(args.iter().any(|a| a.contains("My_Bad_Stream")));
     }
 
     #[test]
-    fn all_commands_have_pipe_input() {
+    fn all_ts_commands_have_pipe_input() {
         let types = [
             ServiceType::YtHls,
             ServiceType::Facebook,
@@ -475,16 +541,16 @@ mod tests {
             ServiceType::TestFile,
         ];
         for st in types {
-            let args = build_ffmpeg_args(st, "key", "alias");
+            let args = build_ffmpeg_args(st, "key", "alias", ChunkFormat::Ts);
             assert!(
                 args.contains(&"pipe:".to_string()),
-                "{st} missing pipe: input"
+                "{st} (TS) missing pipe: input"
             );
         }
     }
 
     #[test]
-    fn all_commands_have_mpegts_input() {
+    fn all_ts_commands_have_mpegts_input() {
         let types = [
             ServiceType::YtHls,
             ServiceType::Facebook,
@@ -494,14 +560,57 @@ mod tests {
             ServiceType::TestFile,
         ];
         for st in types {
-            let args = build_ffmpeg_args(st, "key", "alias");
-            // Check -f mpegts appears as input format
+            let args = build_ffmpeg_args(st, "key", "alias", ChunkFormat::Ts);
             let f_idx = args.iter().position(|a| a == "-f").unwrap();
             assert_eq!(
                 args[f_idx + 1],
                 "mpegts",
-                "{st} missing mpegts input format"
+                "{st} (TS) missing mpegts input format"
             );
         }
+    }
+
+    #[test]
+    fn flv_commands_have_flv_input() {
+        let types = [
+            ServiceType::YtRtmp,
+            ServiceType::Facebook,
+            ServiceType::Vimeo,
+            ServiceType::Instagram,
+        ];
+        for st in types {
+            let args = build_ffmpeg_args(st, "key", "alias", ChunkFormat::Flv);
+            let f_idx = args.iter().position(|a| a == "-f").unwrap();
+            assert_eq!(
+                args[f_idx + 1],
+                "flv",
+                "{st} (FLV) missing flv input format"
+            );
+            assert!(
+                args.contains(&"pipe:".to_string()),
+                "{st} (FLV) missing pipe: input"
+            );
+            // FLV path should NOT have genpts, copytb, bsf, avoid_negative_ts
+            assert!(
+                !args.contains(&"+genpts".to_string()),
+                "{st} (FLV) should not have genpts"
+            );
+            assert!(
+                !args.contains(&"-copytb".to_string()),
+                "{st} (FLV) should not have copytb"
+            );
+            assert!(
+                !args.contains(&"-bsf:a".to_string()),
+                "{st} (FLV) should not have bsf"
+            );
+        }
+    }
+
+    #[test]
+    fn yt_hls_always_uses_ts_input() {
+        // YT_HLS uses TS regardless of chunk format
+        let args = build_ffmpeg_args(ServiceType::YtHls, "key", "alias", ChunkFormat::Flv);
+        let f_idx = args.iter().position(|a| a == "-f").unwrap();
+        assert_eq!(args[f_idx + 1], "mpegts", "YT_HLS should always use mpegts");
     }
 }

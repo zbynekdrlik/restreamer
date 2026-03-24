@@ -13,18 +13,40 @@ use xflv::demuxer::{FlvAudioTagDemuxer, FlvVideoTagDemuxer};
 use rs_core::models::InpointState;
 
 use crate::chunker::ChunkSink;
+use crate::flv_chunker::FlvChunkSink;
 use crate::muxer::TsMuxer;
 
-/// Receives media data from the xiu StreamsHub and processes it into MPEG-TS chunks.
+/// Chunk format determines how media data is stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChunkFormat {
+    /// Legacy: demux FLV → mux MPEG-TS → chunk files.
+    Ts,
+    /// Direct: wrap raw FLV tag bodies in FLV envelope → chunk files.
+    /// Zero format conversion overhead — YouTube receives exactly what OBS sends.
+    Flv,
+}
+
+impl ChunkFormat {
+    pub fn from_config(s: &str) -> Self {
+        match s {
+            "ts" => Self::Ts,
+            _ => Self::Flv,
+        }
+    }
+}
+
+/// Receives media data from the xiu StreamsHub and processes it into chunks.
 ///
-/// Listens for RTMP publish events, subscribes to the published stream's frame data,
-/// demuxes FLV audio/video data, muxes to proper MPEG-TS, and feeds the
-/// output to the ChunkSink for time-based file writing.
+/// Supports two modes:
+/// - **TS mode**: Demuxes FLV → muxes to MPEG-TS → ChunkSink (legacy)
+/// - **FLV mode**: Wraps raw FLV tag data directly → FlvChunkSink (zero overhead)
 pub struct MediaReceiver {
     event_rx: BroadcastEventReceiver,
     hub_event_tx: StreamHubEventSender,
     chunk_sink: Arc<ChunkSink>,
+    flv_chunk_sink: Arc<FlvChunkSink>,
     inpoint_state: InpointState,
+    chunk_format: ChunkFormat,
 }
 
 impl MediaReceiver {
@@ -32,19 +54,26 @@ impl MediaReceiver {
         event_rx: BroadcastEventReceiver,
         hub_event_tx: StreamHubEventSender,
         chunk_sink: Arc<ChunkSink>,
+        flv_chunk_sink: Arc<FlvChunkSink>,
         inpoint_state: InpointState,
+        chunk_format: ChunkFormat,
     ) -> Self {
         Self {
             event_rx,
             hub_event_tx,
             chunk_sink,
+            flv_chunk_sink,
             inpoint_state,
+            chunk_format,
         }
     }
 
     /// Run the media receiver loop, processing published streams until shutdown.
     pub async fn run(mut self) {
-        info!("Media receiver started, waiting for RTMP publishers");
+        info!(
+            chunk_format = ?self.chunk_format,
+            "Media receiver started, waiting for RTMP publishers"
+        );
 
         let mut frame_processor = match FrameProcessor::new(self.chunk_sink.clone()) {
             Ok(p) => p,
@@ -68,7 +97,12 @@ impl MediaReceiver {
                     BroadcastEvent::UnPublish { identifier } => {
                         info!("Stream unpublished: {identifier}");
                         self.inpoint_state.set_connected(false);
-                        frame_processor.reset().await.ok();
+                        match self.chunk_format {
+                            ChunkFormat::Flv => self.flv_chunk_sink.flush().await,
+                            ChunkFormat::Ts => {
+                                frame_processor.reset().await.ok();
+                            }
+                        }
                     }
                     BroadcastEvent::Subscribe { identifier, .. } => {
                         debug!("New subscriber for stream: {identifier}");
@@ -145,10 +179,26 @@ impl MediaReceiver {
         while let Some(frame) = frame_rx.recv().await {
             match frame {
                 FrameData::Video { timestamp, data } => {
-                    processor.process_video(timestamp, data).await;
+                    match self.chunk_format {
+                        ChunkFormat::Flv => {
+                            // FLV path: data is already FLV tag body from xiu.
+                            // Pass directly to FlvChunkSink — no demux/remux needed.
+                            self.flv_chunk_sink.write_video(timestamp, &data).await;
+                        }
+                        ChunkFormat::Ts => {
+                            processor.process_video(timestamp, data).await;
+                        }
+                    }
                 }
                 FrameData::Audio { timestamp, data } => {
-                    processor.process_audio(timestamp, data).await;
+                    match self.chunk_format {
+                        ChunkFormat::Flv => {
+                            self.flv_chunk_sink.write_audio(timestamp, &data).await;
+                        }
+                        ChunkFormat::Ts => {
+                            processor.process_audio(timestamp, data).await;
+                        }
+                    }
                 }
                 FrameData::MediaInfo { media_info: _ } => {
                     debug!("Received media info");
@@ -163,7 +213,12 @@ impl MediaReceiver {
         }
 
         info!("Frame channel closed, flushing remaining data");
-        processor.reset().await.ok();
+        match self.chunk_format {
+            ChunkFormat::Flv => self.flv_chunk_sink.flush().await,
+            ChunkFormat::Ts => {
+                processor.reset().await.ok();
+            }
+        }
     }
 }
 

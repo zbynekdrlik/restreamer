@@ -1,6 +1,6 @@
 /// Per-endpoint delivery task: S3 poll -> normalize -> ffmpeg pipe.
 use async_trait::async_trait;
-use rs_ffmpeg::{FfmpegProcess, ServiceType};
+use rs_ffmpeg::{ChunkFormat, FfmpegProcess, ServiceType};
 use rs_ts_normalize::TSTimestampNormalizer;
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
@@ -43,6 +43,7 @@ pub trait OutputProcessFactory: Send + Sync {
         service_type: ServiceType,
         stream_key: &str,
         alias: &str,
+        chunk_format: ChunkFormat,
     ) -> Result<Box<dyn OutputProcess>, String>;
 }
 
@@ -86,8 +87,9 @@ impl OutputProcessFactory for FfmpegProcessFactory {
         service_type: ServiceType,
         stream_key: &str,
         alias: &str,
+        chunk_format: ChunkFormat,
     ) -> Result<Box<dyn OutputProcess>, String> {
-        FfmpegProcess::spawn(service_type, stream_key, alias)
+        FfmpegProcess::spawn_with_format(service_type, stream_key, alias, chunk_format)
             .map(|p| Box::new(p) as Box<dyn OutputProcess>)
             .map_err(|e| e.to_string())
     }
@@ -270,12 +272,24 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
         }
     };
 
-    let use_normalizer = service_type == ServiceType::YtHls || service_type == ServiceType::YtRtmp;
+    let chunk_format = ChunkFormat::from_str(&ep_cfg.chunk_format);
+
+    // TS normalizer only needed for MPEG-TS chunks (fixes cross-chunk timestamp discontinuities).
+    // FLV chunks have correct timestamps from xiu — no normalization needed.
+    let use_normalizer = chunk_format == ChunkFormat::Ts
+        && (service_type == ServiceType::YtHls || service_type == ServiceType::YtRtmp);
     let mut normalizer = if use_normalizer {
         Some(TSTimestampNormalizer::new())
     } else {
         None
     };
+
+    tracing::info!(
+        alias = %alias,
+        chunk_format = ?chunk_format,
+        use_normalizer,
+        "Endpoint delivery configured"
+    );
 
     let mut chunk_id = start_chunk_id;
     let mut proc: Option<Box<dyn OutputProcess>> = None;
@@ -306,7 +320,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
             }
 
-            match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {
+            match factory.spawn(service_type, &ep_cfg.stream_key, &alias, chunk_format) {
                 Ok(new_proc) => {
                     tracing::info!(alias = %alias, "ffmpeg started");
                     proc = Some(new_proc);

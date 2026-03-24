@@ -102,6 +102,7 @@ impl OutputProcessFactory for MockProcessFactory {
         _service_type: ServiceType,
         _stream_key: &str,
         _alias: &str,
+        _chunk_format: ChunkFormat,
     ) -> Result<Box<dyn OutputProcess>, String> {
         self.spawn_count.fetch_add(1, Ordering::Relaxed);
         if self.spawn_fail.load(Ordering::Relaxed) {
@@ -121,6 +122,7 @@ fn test_ep_cfg() -> EndpointConfig {
         service_type: "TEST_FILE".to_string(),
         stream_key: "test-key".to_string(),
         is_fast: false,
+        chunk_format: "ts".to_string(),
     }
 }
 

@@ -97,6 +97,9 @@ pub struct InpointConfig {
     pub chunk_duration_ms: u64,
     #[serde(default = "default_read_buffer_bytes")]
     pub read_buffer_bytes: usize,
+    /// Chunk storage format: "flv" (direct FLV, zero overhead) or "ts" (MPEG-TS legacy).
+    #[serde(default = "default_chunk_format")]
+    pub chunk_format: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +122,9 @@ fn default_chunk_duration_ms() -> u64 {
 fn default_read_buffer_bytes() -> usize {
     102_400
 }
+fn default_chunk_format() -> String {
+    "flv".to_string()
+}
 fn default_api_port() -> u16 {
     8910
 }
@@ -133,6 +139,7 @@ impl Default for InpointConfig {
             rtmp_bind: default_rtmp_bind(),
             chunk_duration_ms: default_chunk_duration_ms(),
             read_buffer_bytes: default_read_buffer_bytes(),
+            chunk_format: default_chunk_format(),
         }
     }
 }
@@ -341,6 +348,7 @@ mod tests {
         assert_eq!(config.api.bind, "127.0.0.1");
         assert_eq!(config.hetzner.default_server_type, "cx23");
         assert_eq!(config.delivery.delivery_delay_secs, 120);
+        assert_eq!(config.inpoint.chunk_format, "flv");
     }
 
     #[test]

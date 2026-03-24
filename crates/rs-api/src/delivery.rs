@@ -413,6 +413,7 @@ impl DeliveryOrchestrator {
             "Starting delivery from sequence"
         );
 
+        let chunk_format = &self.config.inpoint.chunk_format;
         let init_body = serde_json::json!({
             "endpoints": endpoints.iter().map(|ep| {
                 serde_json::json!({
@@ -420,6 +421,7 @@ impl DeliveryOrchestrator {
                     "service_type": ep.service_type,
                     "stream_key": ep.stream_key,
                     "is_fast": ep.is_fast,
+                    "chunk_format": chunk_format,
                 })
             }).collect::<Vec<_>>(),
             "s3_config": {

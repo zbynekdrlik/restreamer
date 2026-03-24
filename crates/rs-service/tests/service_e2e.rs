@@ -16,6 +16,8 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::models::WsEvent;
 use rs_inpoint::chunker::ChunkSink;
+use rs_inpoint::flv_chunker::FlvChunkSink;
+use rs_inpoint::media_receiver::ChunkFormat;
 use rs_inpoint::rtmp_server::RtmpServer;
 use tokio::sync::broadcast;
 
@@ -170,9 +172,12 @@ async fn start_test_service(
     let server = RtmpServer::new("127.0.0.1", rtmp_port);
     let shutdown = server.shutdown_handle();
     let sink = Arc::clone(&chunk_sink);
+    let flv_sink = Arc::new(FlvChunkSink::new_null());
     let inpoint_state = rs_core::models::InpointState::new();
     let rtmp_task = tokio::spawn(async move {
-        let _ = server.run(sink, inpoint_state).await;
+        let _ = server
+            .run(sink, flv_sink, inpoint_state, ChunkFormat::Ts)
+            .await;
     });
 
     (api_base, pool, shutdown, vec![rtmp_task, chunk_fwd_task])

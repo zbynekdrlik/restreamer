@@ -62,6 +62,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (7, MIGRATION_V7_SQL),
         (8, MIGRATION_V8_SQL),
         (9, MIGRATION_V9_SQL),
+        (10, MIGRATION_V10_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -248,6 +249,10 @@ CREATE INDEX idx_chunks_event_sequence ON chunk_records(streaming_event_id, sequ
 
 const MIGRATION_V9_SQL: &str = r#"
 ALTER TABLE streaming_events ADD COLUMN cache_delay_secs INTEGER
+"#;
+
+const MIGRATION_V10_SQL: &str = r#"
+ALTER TABLE chunk_records ADD COLUMN chunk_format TEXT NOT NULL DEFAULT 'ts'
 "#;
 
 // --- Client Profile ---
