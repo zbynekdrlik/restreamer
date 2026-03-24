@@ -9,6 +9,9 @@ use tokio::task::JoinHandle;
 use crate::api::{EndpointConfig, S3Config};
 use crate::s3_fetch::S3Fetcher;
 
+/// Interval for smooth byte-level writes (10ms = 100 writes per second)
+const SMOOTH_WRITE_INTERVAL_MS: u64 = 10;
+
 const MAX_FFMPEG_RESTARTS: u32 = 10;
 const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
 const MAX_CHUNK_MISS_COUNT: u32 = 60; // ~2min at 2s polls
@@ -182,6 +185,51 @@ impl EndpointHandle {
     }
 }
 
+/// Write data to ffmpeg stdin spread evenly over `duration`.
+/// Eliminates burst+gap pattern that causes YouTube's bitrateLow.
+/// At 12 Mbps, a 1.5 MB chunk is written as ~15 KB every 10ms.
+async fn smooth_write(
+    proc: &mut dyn OutputProcess,
+    data: &[u8],
+    duration: std::time::Duration,
+) -> Result<(), String> {
+    let total = data.len();
+    if total == 0 {
+        return Ok(());
+    }
+
+    let interval = std::time::Duration::from_millis(SMOOTH_WRITE_INTERVAL_MS);
+    let num_intervals = (duration.as_millis() / interval.as_millis()).max(1) as usize;
+    let block_size = (total + num_intervals - 1) / num_intervals;
+
+    let start = tokio::time::Instant::now();
+    let mut offset = 0;
+
+    for i in 0..num_intervals {
+        let end = (offset + block_size).min(total);
+        if offset >= total {
+            break;
+        }
+
+        proc.write(&data[offset..end]).await?;
+        offset = end;
+
+        // Sleep until next write slot
+        let target = interval * (i as u32 + 1);
+        let elapsed = start.elapsed();
+        if elapsed < target {
+            tokio::time::sleep(target - elapsed).await;
+        }
+    }
+
+    // Write any remaining bytes
+    if offset < total {
+        proc.write(&data[offset..]).await?;
+    }
+
+    Ok(())
+}
+
 /// Core endpoint loop — generic over ChunkFetcher and OutputProcessFactory for testability.
 #[allow(clippy::too_many_arguments)]
 pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
@@ -306,9 +354,6 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
             }
         }
 
-        // Track chunk processing time for elapsed-aware pacing
-        let chunk_start = tokio::time::Instant::now();
-
         // Fetch next chunk from S3
         match fetcher.fetch_chunk(chunk_id).await {
             Ok(Some(data)) => {
@@ -328,10 +373,15 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 };
 
                 if let Some(ref mut p) = proc {
-                    // Write with timeout
+                    // Smooth write: spread bytes evenly over chunk duration.
+                    // This eliminates the burst+gap pattern that causes
+                    // YouTube's bitrateLow warning.
+                    let pace = std::time::Duration::from_millis(
+                        if ep_cfg.is_fast { 100 } else { 1000 },
+                    );
                     let write_result = tokio::time::timeout(
                         std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
-                        p.write(&processed),
+                        smooth_write(p.as_mut(), &processed, pace),
                     )
                     .await;
 
@@ -354,11 +404,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                             continue;
                         }
                         Err(_) => {
-                            // Write timeout
-                            tracing::error!(
-                                alias = %alias,
-                                "ffmpeg write timed out"
-                            );
+                            tracing::error!(alias = %alias, "ffmpeg write timed out");
                             let mut s = stats.lock().await;
                             s.last_error = Some("write_timeout".to_string());
                             s.stall_reason = Some("write_timeout".to_string());
@@ -373,16 +419,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
 
                 chunk_id += 1;
-                // Elapsed-aware pacing: measure how long S3 fetch + normalize
-                // + write took, sleep only the deficit to hit target pace.
-                // This replaces ffmpeg's -readrate (which causes micro-gaps
-                // between chunks, lowering measured bitrate on YouTube).
-                let target_pace =
-                    std::time::Duration::from_millis(if ep_cfg.is_fast { 100 } else { 1000 });
-                let elapsed = chunk_start.elapsed();
-                if elapsed < target_pace {
-                    tokio::time::sleep(target_pace - elapsed).await;
-                }
+                // No separate sleep — smooth_write inherently paces delivery
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;
