@@ -200,7 +200,7 @@ async fn smooth_write(
 
     let interval = std::time::Duration::from_millis(SMOOTH_WRITE_INTERVAL_MS);
     let num_intervals = (duration.as_millis() / interval.as_millis()).max(1) as usize;
-    let block_size = (total + num_intervals - 1) / num_intervals;
+    let block_size = total.div_ceil(num_intervals);
 
     let start = tokio::time::Instant::now();
     let mut offset = 0;
