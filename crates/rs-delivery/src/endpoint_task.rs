@@ -377,9 +377,8 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 // + write took, sleep only the deficit to hit target pace.
                 // This replaces ffmpeg's -readrate (which causes micro-gaps
                 // between chunks, lowering measured bitrate on YouTube).
-                let target_pace = std::time::Duration::from_millis(
-                    if ep_cfg.is_fast { 100 } else { 1000 },
-                );
+                let target_pace =
+                    std::time::Duration::from_millis(if ep_cfg.is_fast { 100 } else { 1000 });
                 let elapsed = chunk_start.elapsed();
                 if elapsed < target_pace {
                     tokio::time::sleep(target_pace - elapsed).await;
