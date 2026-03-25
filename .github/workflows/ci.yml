@@ -2528,7 +2528,7 @@ jobs:
             try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
           } catch {
             Write-Host "ERROR: Failed to restore OBS settings: $_"
-            Write-Host "OBS may be misconfigured — check stream settings manually"
+            Write-Host "OBS may be misconfigured - check stream settings manually"
             exit 1
           }
 
