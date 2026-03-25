@@ -116,9 +116,8 @@ impl MediaReceiver {
                         // Subscribe and process frames with automatic re-subscribe on stall
                         let mut retry_count = 0u32;
                         loop {
-                            let result = self
-                                .process_stream(&identifier, &mut frame_processor)
-                                .await;
+                            let result =
+                                self.process_stream(&identifier, &mut frame_processor).await;
                             match result {
                                 StreamEnd::ChannelClosed => break,
                                 StreamEnd::Timeout | StreamEnd::SubscriptionFailed => {
@@ -204,25 +203,24 @@ impl MediaReceiver {
         }
 
         // Wait for subscription result with timeout
-        let sub_result =
-            match tokio::time::timeout(SUBSCRIPTION_TIMEOUT, result_rx).await {
-                Ok(Ok(Ok(result))) => result,
-                Ok(Ok(Err(e))) => {
-                    warn!("Hub rejected subscription: {e}");
-                    return StreamEnd::SubscriptionFailed;
-                }
-                Ok(Err(_)) => {
-                    warn!("Hub subscription channel dropped");
-                    return StreamEnd::SubscriptionFailed;
-                }
-                Err(_) => {
-                    warn!(
-                        "Subscription timeout after {}s",
-                        SUBSCRIPTION_TIMEOUT.as_secs()
-                    );
-                    return StreamEnd::SubscriptionFailed;
-                }
-            };
+        let sub_result = match tokio::time::timeout(SUBSCRIPTION_TIMEOUT, result_rx).await {
+            Ok(Ok(Ok(result))) => result,
+            Ok(Ok(Err(e))) => {
+                warn!("Hub rejected subscription: {e}");
+                return StreamEnd::SubscriptionFailed;
+            }
+            Ok(Err(_)) => {
+                warn!("Hub subscription channel dropped");
+                return StreamEnd::SubscriptionFailed;
+            }
+            Err(_) => {
+                warn!(
+                    "Subscription timeout after {}s",
+                    SUBSCRIPTION_TIMEOUT.as_secs()
+                );
+                return StreamEnd::SubscriptionFailed;
+            }
+        };
 
         // Get the frame receiver
         let mut frame_rx = match sub_result.0.frame_receiver {

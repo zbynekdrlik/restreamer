@@ -431,8 +431,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     // Circuit breaker: after MAX_FFMPEG_RESTARTS, enter cooldown
                     if consecutive_ffmpeg_failures >= MAX_FFMPEG_RESTARTS {
                         circuit_trips += 1;
-                        let cooldown =
-                            (30 * 2u64.pow(circuit_trips.min(4) - 1)).min(300);
+                        let cooldown = (30 * 2u64.pow(circuit_trips.min(4) - 1)).min(300);
                         tracing::error!(
                             alias = %alias,
                             failures = consecutive_ffmpeg_failures,
