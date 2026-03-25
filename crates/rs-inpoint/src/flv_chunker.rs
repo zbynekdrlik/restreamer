@@ -1,8 +1,8 @@
 use bytes::BytesMut;
 use md5::{Digest, Md5};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info};
@@ -333,7 +333,10 @@ impl FlvChunkSink {
     }
 
     /// Write chunk to disk and send notification (used by both spawn_write and flush).
-    async fn do_write_and_notify(pending: PendingChunkWrite, chunk_tx: broadcast::Sender<ChunkInfo>) {
+    async fn do_write_and_notify(
+        pending: PendingChunkWrite,
+        chunk_tx: broadcast::Sender<ChunkInfo>,
+    ) {
         if let Some(parent) = pending.path.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
                 tracing::error!("Failed to create chunk dir: {e}");
