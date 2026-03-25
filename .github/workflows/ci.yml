@@ -981,7 +981,7 @@ jobs:
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Verify Restreamer is running
         shell: powershell
@@ -1065,38 +1065,85 @@ jobs:
           }
           Write-Host "Chunks cleared, starting fresh"
 
-      - name: Send test RTMP stream via ffmpeg
+      - name: Start 10-minute stability test stream
         shell: powershell
-        timeout-minutes: 2
+        timeout-minutes: 12
         run: |
           $ErrorActionPreference = 'Continue'
           $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $streamDuration = 600  # 10 minutes
 
-          Write-Host "Starting 45-second test RTMP stream..."
-          $proc = Start-Process -FilePath $ffmpegPath -ArgumentList @(
+          Write-Host "Starting ${streamDuration}s stability test stream..."
+          Write-Host "This test catches freeze bugs that only appear after minutes of streaming."
+
+          # Start ffmpeg in background
+          $ffmpegProc = Start-Process -FilePath $ffmpegPath -ArgumentList @(
             "-y", "-re",
-            "-f", "lavfi", "-i", "testsrc=duration=45:size=320x240:rate=30",
-            "-f", "lavfi", "-i", "sine=frequency=1000:duration=45",
+            "-f", "lavfi", "-i", "testsrc=duration=${streamDuration}:size=320x240:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=1000:duration=${streamDuration}",
             "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-c:a", "aac",
             "-f", "flv", "rtmp://127.0.0.1:1234/live/ci-e2e-test"
-          ) -NoNewWindow -Wait -PassThru
+          ) -NoNewWindow -PassThru
 
-          if ($proc.ExitCode -ne 0) {
-            throw "ffmpeg failed with exit code $($proc.ExitCode)"
+          # Monitor chunk flow every 30s while ffmpeg is running
+          $lastChunkCount = 0
+          $stallCount = 0
+          $checkInterval = 30
+          $maxStalls = 2  # 2 consecutive stalls (60s) = fail
+
+          for ($elapsed = 0; $elapsed -lt $streamDuration; $elapsed += $checkInterval) {
+            Start-Sleep -Seconds $checkInterval
+
+            if ($ffmpegProc.HasExited) {
+              Write-Host "ffmpeg exited at ${elapsed}s with code $($ffmpegProc.ExitCode)"
+              break
+            }
+
+            try {
+              $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 10
+              $currentChunks = $stats.total_chunks
+              $newChunks = $currentChunks - $lastChunkCount
+
+              Write-Host "[$elapsed/$streamDuration s] Chunks: $currentChunks (+$newChunks) Pending: $($stats.pending_chunks)"
+
+              if ($newChunks -eq 0 -and $elapsed -gt 30) {
+                $stallCount++
+                Write-Host "WARNING: No new chunks in ${checkInterval}s (stall $stallCount/$maxStalls)"
+                if ($stallCount -ge $maxStalls) {
+                  # Kill ffmpeg
+                  Stop-Process -Id $ffmpegProc.Id -Force -ErrorAction SilentlyContinue
+
+                  # Dump last log lines for diagnosis
+                  try {
+                    $logLines = Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 20 -Encoding utf8
+                    Write-Host "=== LAST 20 LOG LINES ==="
+                    $logLines | ForEach-Object { Write-Host $_ }
+                    Write-Host "========================="
+                  } catch { Write-Host "Could not read log: $_" }
+
+                  throw "STREAM FREEZE DETECTED: No chunks produced for $($stallCount * $checkInterval)s at ${elapsed}s into stream. The pipeline froze."
+                }
+              } else {
+                $stallCount = 0
+              }
+
+              $lastChunkCount = $currentChunks
+            } catch {
+              if ($_.Exception.Message -match "STREAM FREEZE") { throw }
+              Write-Host "WARNING: Status check failed at ${elapsed}s: $_"
+            }
           }
-          Write-Host "Test stream completed successfully"
 
-      - name: Wait for chunk processing
+          # Wait for ffmpeg to finish if still running
+          if (-not $ffmpegProc.HasExited) {
+            $ffmpegProc.WaitForExit(30000)
+          }
+          Write-Host "Stability test stream completed"
+
+      - name: Wait for final chunk upload
         shell: powershell
         run: |
-          Write-Host "Waiting for chunks to be processed and uploaded..."
-          Start-Sleep -Seconds 20
-
-      - name: Verify chunks created and uploaded to S3
-        shell: powershell
-        run: |
-          # Wait up to 100s for all chunks to be uploaded (pending -> 0)
-          # After deploy restarts Restreamer, the S3 uploader needs time to initialize
+          Write-Host "Waiting for all chunks to upload..."
           $maxWait = 20
           $stats = $null
           for ($w = 1; $w -le $maxWait; $w++) {
@@ -1105,26 +1152,27 @@ jobs:
               Write-Host "All chunks uploaded (attempt $w/$maxWait)"
               break
             }
-            Write-Host "Pending chunks: $($stats.pending_chunks) - waiting for S3 upload (attempt $w/$maxWait)..."
+            Write-Host "Pending chunks: $($stats.pending_chunks) - waiting (attempt $w/$maxWait)..."
             Start-Sleep -Seconds 5
           }
 
-          Write-Host "=== E2E Test Results ==="
+          Write-Host "=== Stability Test Results ==="
           Write-Host "Total chunks:   $($stats.total_chunks)"
           Write-Host "Sent chunks:    $($stats.sent_chunks)"
           Write-Host "Pending:        $($stats.pending_chunks)"
           Write-Host "Total bytes:    $($stats.total_bytes)"
 
-          if ($stats.total_chunks -lt 25) {
-            throw "Expected at least 25 chunks from 45s stream, got $($stats.total_chunks)"
+          # 10 min at ~1 chunk/2s = ~300 chunks minimum
+          if ($stats.total_chunks -lt 250) {
+            throw "Expected at least 250 chunks from 10min stream, got $($stats.total_chunks)"
           }
 
           if ($stats.pending_chunks -gt 0) {
-            throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload after 60s wait"
+            throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload"
           }
 
-          Write-Host "=== E2E Streaming Test PASSED ==="
-          Write-Host "RTMP -> Restreamer -> Chunks -> S3: VERIFIED (all via local Rust APIs, 45s stream, $($stats.total_chunks) chunks)"
+          Write-Host "=== E2E Stability Test PASSED ==="
+          Write-Host "10-minute stream: $($stats.total_chunks) chunks produced and uploaded without freeze"
 
       - name: Verify RTMP disconnected after stream stop
         shell: powershell

@@ -1,6 +1,8 @@
 use bytes::BytesMut;
 use md5::{Digest, Md5};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info};
@@ -9,6 +11,9 @@ use crate::chunker::ChunkInfo;
 
 /// Maximum buffer size before a forced flush (50 MB).
 const MAX_BUFFER_SIZE: usize = 50 * 1024 * 1024;
+
+/// Maximum pending disk writes before dropping chunks.
+const MAX_PENDING_WRITES: u32 = 20;
 
 /// FLV tag type constants.
 const FLV_TAG_AUDIO: u8 = 8;
@@ -25,6 +30,8 @@ const FLV_HEADER: [u8; 9] = [0x46, 0x4C, 0x56, 0x01, 0x05, 0x00, 0x00, 0x00, 0x0
 pub struct FlvChunkSink {
     inner: Mutex<FlvChunkSinkInner>,
     chunk_tx: broadcast::Sender<ChunkInfo>,
+    /// Track pending disk writes to prevent unbounded task spawning.
+    pending_writes: Arc<AtomicU32>,
 }
 
 struct FlvChunkSinkInner {
@@ -63,6 +70,7 @@ impl FlvChunkSink {
                 audio_sequence_header: None,
             }),
             chunk_tx,
+            pending_writes: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -81,6 +89,7 @@ impl FlvChunkSink {
                 audio_sequence_header: None,
             }),
             chunk_tx,
+            pending_writes: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -148,7 +157,7 @@ impl FlvChunkSink {
         };
 
         if let Some(pending) = pending {
-            self.write_and_notify(pending).await;
+            self.spawn_write(pending);
         }
     }
 
@@ -180,11 +189,13 @@ impl FlvChunkSink {
         };
 
         if let Some(pending) = pending {
-            self.write_and_notify(pending).await;
+            self.spawn_write(pending);
         }
     }
 
     /// Force flush any buffered data as a final chunk.
+    /// Unlike write_video/write_audio, this awaits the write to ensure
+    /// all data is on disk before the process exits.
     pub async fn flush(&self) {
         let pending = {
             let mut inner = self.inner.lock().await;
@@ -298,22 +309,57 @@ impl FlvChunkSink {
         })
     }
 
-    /// Write chunk to disk and send notification.
-    async fn write_and_notify(&self, pending: PendingChunkWrite) {
+    /// Spawn a background task to write chunk to disk.
+    /// This decouples disk I/O from frame processing — the calling task
+    /// returns immediately and never blocks on file writes.
+    fn spawn_write(&self, pending: PendingChunkWrite) {
+        let current = self.pending_writes.fetch_add(1, Ordering::Relaxed);
+        if current >= MAX_PENDING_WRITES {
+            self.pending_writes.fetch_sub(1, Ordering::Relaxed);
+            tracing::error!(
+                pending = current,
+                index = pending.index,
+                "Disk too slow: {current} pending writes, dropping chunk"
+            );
+            return;
+        }
+
+        let chunk_tx = self.chunk_tx.clone();
+        let pending_counter = Arc::clone(&self.pending_writes);
+        tokio::spawn(async move {
+            Self::do_write_and_notify(pending, chunk_tx).await;
+            pending_counter.fetch_sub(1, Ordering::Relaxed);
+        });
+    }
+
+    /// Write chunk to disk and send notification (used by both spawn_write and flush).
+    async fn do_write_and_notify(pending: PendingChunkWrite, chunk_tx: broadcast::Sender<ChunkInfo>) {
         if let Some(parent) = pending.path.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
                 tracing::error!("Failed to create chunk dir: {e}");
                 return;
             }
         }
+
+        let write_start = Instant::now();
         if let Err(e) = tokio::fs::write(&pending.path, &pending.data).await {
             tracing::error!("Failed to write FLV chunk file: {e}");
             return;
         }
+        let write_ms = write_start.elapsed().as_millis();
+
+        if write_ms > 500 {
+            tracing::warn!(
+                index = pending.index,
+                size = pending.size,
+                write_ms,
+                "Slow chunk write"
+            );
+        }
 
         info!(
-            "FLV chunk {} written: {} bytes, md5={}",
-            pending.index, pending.size, pending.md5
+            "FLV chunk {} written: {} bytes, md5={}, write_ms={}",
+            pending.index, pending.size, pending.md5, write_ms
         );
 
         let chunk_info = ChunkInfo {
@@ -323,9 +369,15 @@ impl FlvChunkSink {
             index: pending.index,
         };
 
-        if let Err(e) = self.chunk_tx.send(chunk_info) {
+        if let Err(e) = chunk_tx.send(chunk_info) {
             tracing::warn!("Chunk broadcast failed, no subscribers: {e}");
         }
+    }
+
+    /// Write chunk to disk synchronously (used by flush for shutdown correctness).
+    async fn write_and_notify(&self, pending: PendingChunkWrite) {
+        let chunk_tx = self.chunk_tx.clone();
+        Self::do_write_and_notify(pending, chunk_tx).await;
     }
 }
 
