@@ -797,3 +797,67 @@ async fn test_delivery_delay_chunks_calculation() {
     let chunks = (delay_secs * 1000 / chunk_duration_ms) as i64;
     assert_eq!(chunks, 240, "120s / 500ms should = 240 chunks");
 }
+
+#[test]
+fn test_extract_flv_chunk_duration_basic() {
+    // Build a minimal FLV chunk with known timestamps
+    let mut data = Vec::new();
+    // FLV header (9 bytes)
+    data.extend_from_slice(&[0x46, 0x4C, 0x56, 0x01, 0x05, 0x00, 0x00, 0x00, 0x09]);
+    // prev_tag_size_0 (4 bytes)
+    data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+    // Video tag at timestamp 1000ms
+    let ts1: u32 = 1000;
+    let body = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0xAA]; // 6 bytes
+    let data_size: u32 = body.len() as u32;
+    data.push(9); // tag_type = video
+    data.extend_from_slice(&[(data_size >> 16) as u8, (data_size >> 8) as u8, data_size as u8]);
+    data.extend_from_slice(&[(ts1 >> 16) as u8, (ts1 >> 8) as u8, ts1 as u8]);
+    data.push((ts1 >> 24) as u8);
+    data.extend_from_slice(&[0, 0, 0]); // stream_id
+    data.extend_from_slice(&body);
+    let tag_size = 11 + data_size;
+    data.extend_from_slice(&tag_size.to_be_bytes());
+
+    // Video tag at timestamp 3000ms (2 seconds later)
+    let ts2: u32 = 3000;
+    data.push(9); // tag_type = video
+    data.extend_from_slice(&[(data_size >> 16) as u8, (data_size >> 8) as u8, data_size as u8]);
+    data.extend_from_slice(&[(ts2 >> 16) as u8, (ts2 >> 8) as u8, ts2 as u8]);
+    data.push((ts2 >> 24) as u8);
+    data.extend_from_slice(&[0, 0, 0]);
+    data.extend_from_slice(&body);
+    data.extend_from_slice(&tag_size.to_be_bytes());
+
+    let duration = extract_flv_chunk_duration_ms(&data);
+    assert_eq!(duration, Some(2000), "Duration should be 3000 - 1000 = 2000ms");
+}
+
+#[test]
+fn test_extract_flv_chunk_duration_not_flv() {
+    let data = vec![0x00, 0x01, 0x02];
+    assert_eq!(extract_flv_chunk_duration_ms(&data), None);
+}
+
+#[test]
+fn test_extract_flv_chunk_duration_single_tag() {
+    // Single tag → duration = 0 (last_ts == first_ts)
+    let mut data = Vec::new();
+    data.extend_from_slice(&[0x46, 0x4C, 0x56, 0x01, 0x05, 0x00, 0x00, 0x00, 0x09]);
+    data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+    let ts: u32 = 5000;
+    let body = vec![0x17, 0x01, 0x00, 0x00, 0x00];
+    let data_size: u32 = body.len() as u32;
+    data.push(9);
+    data.extend_from_slice(&[(data_size >> 16) as u8, (data_size >> 8) as u8, data_size as u8]);
+    data.extend_from_slice(&[(ts >> 16) as u8, (ts >> 8) as u8, ts as u8]);
+    data.push((ts >> 24) as u8);
+    data.extend_from_slice(&[0, 0, 0]);
+    data.extend_from_slice(&body);
+    let tag_size = 11 + data_size;
+    data.extend_from_slice(&tag_size.to_be_bytes());
+
+    assert_eq!(extract_flv_chunk_duration_ms(&data), Some(0));
+}

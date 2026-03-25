@@ -76,6 +76,53 @@ impl FlvStreamNormalizer {
     }
 }
 
+/// Extract the actual duration of an FLV chunk from its tag timestamps.
+/// Returns the difference between the last and first video/audio tag timestamps.
+/// FLV chunks are keyframe-aligned, so their actual duration depends on the
+/// encoder's keyframe interval (typically 2-3s), NOT the configured chunk_duration_ms.
+fn extract_flv_chunk_duration_ms(data: &[u8]) -> Option<u64> {
+    if data.len() < 13 || &data[0..3] != b"FLV" {
+        return None;
+    }
+
+    let mut offset = 9 + 4; // Skip FLV header + first prev_tag_size
+    let mut first_ts: Option<u32> = None;
+    let mut last_ts: u32 = 0;
+
+    while offset + 11 <= data.len() {
+        let tag_type = data[offset];
+        if tag_type != 8 && tag_type != 9 && tag_type != 18 {
+            break;
+        }
+
+        let data_size = ((data[offset + 1] as u32) << 16)
+            | ((data[offset + 2] as u32) << 8)
+            | (data[offset + 3] as u32);
+
+        // Timestamp: 3 bytes at offset+4..+7 (lower) + 1 byte at offset+7 (upper)
+        let ts = ((data[offset + 7] as u32) << 24)
+            | ((data[offset + 4] as u32) << 16)
+            | ((data[offset + 5] as u32) << 8)
+            | (data[offset + 6] as u32);
+
+        // Only track video/audio tags (not metadata/script)
+        if tag_type == 8 || tag_type == 9 {
+            if first_ts.is_none() {
+                first_ts = Some(ts);
+            }
+            last_ts = ts;
+        }
+
+        let tag_total = 11 + data_size as usize + 4;
+        if offset + tag_total > data.len() {
+            break;
+        }
+        offset += tag_total;
+    }
+
+    first_ts.map(|first| (last_ts.saturating_sub(first)) as u64)
+}
+
 const MAX_FFMPEG_RESTARTS: u32 = 10;
 const MAX_CHUNK_MISS_COUNT: u32 = 60; // ~2min at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
@@ -486,9 +533,16 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 };
 
                 // Pace delivery to match real-time ingest rate.
+                // For FLV chunks (keyframe-aligned), extract actual duration from
+                // timestamps — they contain 2-3s of content, not the configured 1s.
                 let chunk_start = tokio::time::Instant::now();
                 let pace = if ep_cfg.is_fast {
                     std::time::Duration::from_millis(100)
+                } else if chunk_format == ChunkFormat::Flv {
+                    let flv_ms = extract_flv_chunk_duration_ms(&data).unwrap_or(1000);
+                    // Clamp to sane range: 500ms minimum, 10s maximum
+                    let clamped = flv_ms.max(500).min(10_000);
+                    std::time::Duration::from_millis(clamped)
                 } else {
                     std::time::Duration::from_millis(1000)
                 };
