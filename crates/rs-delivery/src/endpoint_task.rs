@@ -12,7 +12,6 @@ use crate::s3_fetch::S3Fetcher;
 /// Interval for smooth byte-level writes (10ms = 100 writes per second)
 const SMOOTH_WRITE_INTERVAL_MS: u64 = 10;
 
-
 /// FLV stream normalizer: strips duplicate FLV headers and sequence headers
 /// from concatenated FLV chunks, producing a single continuous FLV stream.
 struct FlvStreamNormalizer {
@@ -462,16 +461,15 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     data
                 };
 
-                if let Some(ref mut p) = proc {
-                    // Pace delivery to match real-time ingest rate.
-                    // Track wall-clock time from start of chunk processing.
-                    let chunk_start = tokio::time::Instant::now();
-                    let pace = if ep_cfg.is_fast {
-                        std::time::Duration::from_millis(100)
-                    } else {
-                        std::time::Duration::from_millis(1000)
-                    };
+                // Pace delivery to match real-time ingest rate.
+                let chunk_start = tokio::time::Instant::now();
+                let pace = if ep_cfg.is_fast {
+                    std::time::Duration::from_millis(100)
+                } else {
+                    std::time::Duration::from_millis(1000)
+                };
 
+                if let Some(ref mut p) = proc {
                     let write_result = tokio::time::timeout(
                         std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
                         smooth_write(p.as_mut(), &processed, pace),
