@@ -506,9 +506,7 @@ mod tests {
         // the channel open but not sending.
 
         // Call process_stream — it should return Timeout after FRAME_TIMEOUT
-        let result = receiver
-            .process_stream(&identifier, &mut processor)
-            .await;
+        let result = receiver.process_stream(&identifier, &mut processor).await;
 
         // It consumed the one frame, then waited for FRAME_TIMEOUT with no more frames
         assert_eq!(result, StreamEnd::Timeout);
@@ -534,9 +532,7 @@ mod tests {
         // Drop the frame_tx immediately — channel closes
         drop(frame_tx);
 
-        let result = receiver
-            .process_stream(&identifier, &mut processor)
-            .await;
+        let result = receiver.process_stream(&identifier, &mut processor).await;
 
         assert_eq!(result, StreamEnd::ChannelClosed);
     }
@@ -558,9 +554,7 @@ mod tests {
             stream_name: "test".to_string(),
         };
 
-        let result = receiver
-            .process_stream(&identifier, &mut processor)
-            .await;
+        let result = receiver.process_stream(&identifier, &mut processor).await;
 
         assert_eq!(result, StreamEnd::SubscriptionFailed);
     }
@@ -618,9 +612,7 @@ mod tests {
         // Yield so the mock hub can process
         tokio::task::yield_now().await;
 
-        let result = receiver
-            .process_stream(&identifier, &mut processor)
-            .await;
+        let result = receiver.process_stream(&identifier, &mut processor).await;
 
         assert_eq!(result, StreamEnd::Timeout);
 
