@@ -524,6 +524,13 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     }
                 }
 
+                // Extract FLV duration BEFORE normalize (which may consume data)
+                let flv_duration_ms = if chunk_format == ChunkFormat::Flv {
+                    extract_flv_chunk_duration_ms(&data)
+                } else {
+                    None
+                };
+
                 let processed = if let Some(ref mut norm) = normalizer {
                     norm.normalize(&data)
                 } else if let Some(ref mut flv_norm) = flv_normalizer {
@@ -533,13 +540,12 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 };
 
                 // Pace delivery to match real-time ingest rate.
-                // For FLV chunks (keyframe-aligned), extract actual duration from
+                // For FLV chunks (keyframe-aligned), use actual duration from
                 // timestamps — they contain 2-3s of content, not the configured 1s.
                 let chunk_start = tokio::time::Instant::now();
                 let pace = if ep_cfg.is_fast {
                     std::time::Duration::from_millis(100)
-                } else if chunk_format == ChunkFormat::Flv {
-                    let flv_ms = extract_flv_chunk_duration_ms(&data).unwrap_or(1000);
+                } else if let Some(flv_ms) = flv_duration_ms {
                     // Clamp to sane range: 500ms minimum, 10s maximum
                     let clamped = flv_ms.max(500).min(10_000);
                     std::time::Duration::from_millis(clamped)

@@ -812,7 +812,11 @@ fn test_extract_flv_chunk_duration_basic() {
     let body = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0xAA]; // 6 bytes
     let data_size: u32 = body.len() as u32;
     data.push(9); // tag_type = video
-    data.extend_from_slice(&[(data_size >> 16) as u8, (data_size >> 8) as u8, data_size as u8]);
+    data.extend_from_slice(&[
+        (data_size >> 16) as u8,
+        (data_size >> 8) as u8,
+        data_size as u8,
+    ]);
     data.extend_from_slice(&[(ts1 >> 16) as u8, (ts1 >> 8) as u8, ts1 as u8]);
     data.push((ts1 >> 24) as u8);
     data.extend_from_slice(&[0, 0, 0]); // stream_id
@@ -823,7 +827,11 @@ fn test_extract_flv_chunk_duration_basic() {
     // Video tag at timestamp 3000ms (2 seconds later)
     let ts2: u32 = 3000;
     data.push(9); // tag_type = video
-    data.extend_from_slice(&[(data_size >> 16) as u8, (data_size >> 8) as u8, data_size as u8]);
+    data.extend_from_slice(&[
+        (data_size >> 16) as u8,
+        (data_size >> 8) as u8,
+        data_size as u8,
+    ]);
     data.extend_from_slice(&[(ts2 >> 16) as u8, (ts2 >> 8) as u8, ts2 as u8]);
     data.push((ts2 >> 24) as u8);
     data.extend_from_slice(&[0, 0, 0]);
@@ -831,7 +839,11 @@ fn test_extract_flv_chunk_duration_basic() {
     data.extend_from_slice(&tag_size.to_be_bytes());
 
     let duration = extract_flv_chunk_duration_ms(&data);
-    assert_eq!(duration, Some(2000), "Duration should be 3000 - 1000 = 2000ms");
+    assert_eq!(
+        duration,
+        Some(2000),
+        "Duration should be 3000 - 1000 = 2000ms"
+    );
 }
 
 #[test]
@@ -851,7 +863,11 @@ fn test_extract_flv_chunk_duration_single_tag() {
     let body = vec![0x17, 0x01, 0x00, 0x00, 0x00];
     let data_size: u32 = body.len() as u32;
     data.push(9);
-    data.extend_from_slice(&[(data_size >> 16) as u8, (data_size >> 8) as u8, data_size as u8]);
+    data.extend_from_slice(&[
+        (data_size >> 16) as u8,
+        (data_size >> 8) as u8,
+        data_size as u8,
+    ]);
     data.extend_from_slice(&[(ts >> 16) as u8, (ts >> 8) as u8, ts as u8]);
     data.push((ts >> 24) as u8);
     data.extend_from_slice(&[0, 0, 0]);
