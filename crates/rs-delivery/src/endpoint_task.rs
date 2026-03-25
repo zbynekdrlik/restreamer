@@ -546,9 +546,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 let pace = if ep_cfg.is_fast {
                     std::time::Duration::from_millis(100)
                 } else if let Some(flv_ms) = flv_duration_ms {
-                    // Clamp to sane range: 500ms minimum, 10s maximum
-                    let clamped = flv_ms.max(500).min(10_000);
-                    std::time::Duration::from_millis(clamped)
+                    std::time::Duration::from_millis(flv_ms.clamp(500, 10_000))
                 } else {
                     std::time::Duration::from_millis(1000)
                 };
