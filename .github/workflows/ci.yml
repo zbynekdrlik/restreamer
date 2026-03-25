@@ -2504,14 +2504,30 @@ jobs:
 
             Send-OBSMessage $ws $setSettings
             $setResp = Receive-OBSMessage $ws
-            Write-Host "Restored OBS to original destination"
+            Write-Host "Restore command sent"
+
+            # Verify by reading back current settings
+            $getSettings = @{
+              op = 6
+              d = @{
+                requestType = "GetStreamServiceSettings"
+                requestId = "verify-restore-1"
+              }
+            } | ConvertTo-Json -Depth 5
+            Send-OBSMessage $ws $getSettings
+            $verifyResp = Receive-OBSMessage $ws
+            $currentServer = $verifyResp.d.responseData.streamServiceSettings.server
+            if ($currentServer -ne $origServer) {
+              throw "OBS restore FAILED: expected '$origServer', got '$currentServer'"
+            }
+            Write-Host "VERIFIED: OBS restored to $origServer"
 
             try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
           } catch {
-            Write-Host "WARNING: Failed to restore OBS settings: $_"
-            Write-Host "You may need to manually restore OBS stream settings"
+            Write-Host "ERROR: Failed to restore OBS settings: $_"
+            Write-Host "OBS may be misconfigured — check stream settings manually"
+            exit 1
           }
-          exit 0
 
       - name: Verify production config is intact
         if: always()
