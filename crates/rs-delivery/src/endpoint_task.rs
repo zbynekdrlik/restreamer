@@ -77,10 +77,14 @@ impl FlvStreamNormalizer {
 }
 
 const MAX_FFMPEG_RESTARTS: u32 = 10;
-const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
 const MAX_CHUNK_MISS_COUNT: u32 = 60; // ~2min at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
 const WRITE_TIMEOUT_SECS: u64 = 30;
+/// Base S3 backoff (doubles on each error, max 60s, resets on success).
+const S3_BACKOFF_BASE_SECS: u64 = 2;
+const S3_BACKOFF_MAX_SECS: u64 = 60;
+/// Heartbeat interval for endpoint delivery loop.
+const ENDPOINT_HEARTBEAT_SECS: u64 = 60;
 
 /// Trait for fetching chunks (S3 or mock).
 pub trait ChunkFetcher: Send + Sync {
@@ -365,12 +369,26 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     let mut proc: Option<Box<dyn OutputProcess>> = None;
     let mut consecutive_ffmpeg_failures: u32 = 0;
     let mut consecutive_chunk_misses: u32 = 0;
+    let mut circuit_trips: u32 = 0;
+    let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
+    let mut last_heartbeat = std::time::Instant::now();
 
     loop {
         // Check for stop signal
         if *stop_rx.borrow() {
             tracing::info!(alias = %alias, "Stop signal received");
             break;
+        }
+
+        // Periodic heartbeat
+        if last_heartbeat.elapsed() >= std::time::Duration::from_secs(ENDPOINT_HEARTBEAT_SECS) {
+            tracing::info!(
+                alias = %alias,
+                chunk_id,
+                ffmpeg_alive = proc.as_mut().is_some_and(|p| p.is_alive()),
+                "Delivery endpoint heartbeat"
+            );
+            last_heartbeat = std::time::Instant::now();
         }
 
         // Ensure output process is running
@@ -412,16 +430,18 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
 
                     // Circuit breaker: after MAX_FFMPEG_RESTARTS, enter cooldown
                     if consecutive_ffmpeg_failures >= MAX_FFMPEG_RESTARTS {
-                        let cooldown = CIRCUIT_BREAKER_COOLDOWN_SECS;
+                        circuit_trips += 1;
+                        let cooldown =
+                            (30 * 2u64.pow(circuit_trips.min(4) - 1)).min(300);
                         tracing::error!(
                             alias = %alias,
                             failures = consecutive_ffmpeg_failures,
-                            "ffmpeg circuit breaker, cooldown {cooldown}s"
+                            circuit_trip = circuit_trips,
+                            "ffmpeg circuit breaker #{circuit_trips}, cooldown {cooldown}s"
                         );
                         s.stall_reason = Some("ffmpeg_crash_loop".to_string());
                         drop(s);
-                        let sleep_dur =
-                            std::time::Duration::from_secs(CIRCUIT_BREAKER_COOLDOWN_SECS);
+                        let sleep_dur = std::time::Duration::from_secs(cooldown);
                         tokio::select! {
                             _ = tokio::time::sleep(sleep_dur) => {}
                             _ = stop_rx.changed() => {
@@ -445,6 +465,11 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
         match fetcher.fetch_chunk(chunk_id).await {
             Ok(Some(data)) => {
                 consecutive_chunk_misses = 0;
+                s3_backoff_secs = S3_BACKOFF_BASE_SECS;
+                if circuit_trips > 0 {
+                    circuit_trips = 0;
+                    tracing::info!(alias = %alias, "ffmpeg circuit breaker reset after successful chunk");
+                }
                 {
                     let mut s = stats.lock().await;
                     s.consecutive_chunk_misses = 0;
@@ -585,11 +610,17 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
             }
             Err(e) => {
-                tracing::error!(alias = %alias, "S3 fetch error: {e}");
+                tracing::error!(
+                    alias = %alias,
+                    chunk_id,
+                    backoff_secs = s3_backoff_secs,
+                    "S3 fetch error, retrying in {s3_backoff_secs}s: {e}"
+                );
                 let mut s = stats.lock().await;
                 s.last_error = Some(e);
                 drop(s);
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(s3_backoff_secs)).await;
+                s3_backoff_secs = (s3_backoff_secs * 2).min(S3_BACKOFF_MAX_SECS);
             }
         }
     }

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use streamhub::define::{
@@ -7,7 +8,7 @@ use streamhub::define::{
 };
 use streamhub::stream::StreamIdentifier;
 use streamhub::utils::{RandomDigitCount, Uuid};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use xflv::demuxer::{FlvAudioTagDemuxer, FlvVideoTagDemuxer};
 
 use rs_core::models::InpointState;
@@ -15,6 +16,28 @@ use rs_core::models::InpointState;
 use crate::chunker::ChunkSink;
 use crate::flv_chunker::FlvChunkSink;
 use crate::muxer::TsMuxer;
+
+/// If no frames arrive for this long, assume the stream stalled and re-subscribe.
+/// 30s is well above the ~33ms frame interval at 30fps, so this won't trigger
+/// during normal streaming.
+const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Timeout for hub subscription response.
+const SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Interval for frame processing heartbeat log.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How a stream processing session ended.
+#[derive(Debug, PartialEq, Eq)]
+enum StreamEnd {
+    /// Normal: publisher disconnected, frame channel closed.
+    ChannelClosed,
+    /// Stall: no frames received for FRAME_TIMEOUT — will re-subscribe.
+    Timeout,
+    /// Hub rejected subscription or timed out — will retry.
+    SubscriptionFailed,
+}
 
 /// Chunk format determines how media data is stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,9 +112,29 @@ impl MediaReceiver {
                     BroadcastEvent::Publish { identifier } => {
                         info!("Stream published: {identifier}");
                         self.inpoint_state.set_connected(true);
-                        // Subscribe to the stream and process frames
-                        self.process_stream(&identifier, &mut frame_processor).await;
-                        info!("Stream processing ended for: {identifier}");
+
+                        // Subscribe and process frames with automatic re-subscribe on stall
+                        let mut retry_count = 0u32;
+                        loop {
+                            let result = self
+                                .process_stream(&identifier, &mut frame_processor)
+                                .await;
+                            match result {
+                                StreamEnd::ChannelClosed => break,
+                                StreamEnd::Timeout | StreamEnd::SubscriptionFailed => {
+                                    retry_count += 1;
+                                    let delay_secs = (retry_count as u64 * 2).min(10);
+                                    warn!(
+                                        retry = retry_count,
+                                        result = ?result,
+                                        "Re-subscribing to stream in {delay_secs}s: {identifier}"
+                                    );
+                                    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                                }
+                            }
+                        }
+
+                        info!("Stream ended: {identifier}");
                         self.inpoint_state.set_connected(false);
                     }
                     BroadcastEvent::UnPublish { identifier } => {
@@ -112,7 +155,7 @@ impl MediaReceiver {
                     }
                 },
                 Err(e) => {
-                    debug!("Broadcast event channel error: {e}");
+                    error!("Broadcast event channel closed: {e}");
                     break;
                 }
             }
@@ -122,7 +165,16 @@ impl MediaReceiver {
     }
 
     /// Subscribe to a published stream and process its frames until it ends.
-    async fn process_stream(&self, identifier: &StreamIdentifier, processor: &mut FrameProcessor) {
+    ///
+    /// Returns how the stream ended:
+    /// - `ChannelClosed`: normal end (publisher disconnected)
+    /// - `Timeout`: no frames for 30s (stall detected, should re-subscribe)
+    /// - `SubscriptionFailed`: hub rejected or timed out
+    async fn process_stream(
+        &self,
+        identifier: &StreamIdentifier,
+        processor: &mut FrameProcessor,
+    ) -> StreamEnd {
         // Create subscriber info for the hub
         let sub_id = Uuid::new(RandomDigitCount::Six);
         let sub_info = SubscriberInfo {
@@ -148,69 +200,114 @@ impl MediaReceiver {
             .is_err()
         {
             warn!("Failed to send subscribe request to hub");
-            return;
+            return StreamEnd::SubscriptionFailed;
         }
 
-        // Wait for subscription result
-        let (data_receiver, _stat_sender) = match result_rx.await {
-            Ok(Ok(result)) => result,
-            Ok(Err(e)) => {
-                warn!("Hub rejected subscription: {e}");
-                return;
-            }
-            Err(_) => {
-                warn!("Hub subscription channel dropped");
-                return;
-            }
-        };
+        // Wait for subscription result with timeout
+        let sub_result =
+            match tokio::time::timeout(SUBSCRIPTION_TIMEOUT, result_rx).await {
+                Ok(Ok(Ok(result))) => result,
+                Ok(Ok(Err(e))) => {
+                    warn!("Hub rejected subscription: {e}");
+                    return StreamEnd::SubscriptionFailed;
+                }
+                Ok(Err(_)) => {
+                    warn!("Hub subscription channel dropped");
+                    return StreamEnd::SubscriptionFailed;
+                }
+                Err(_) => {
+                    warn!(
+                        "Subscription timeout after {}s",
+                        SUBSCRIPTION_TIMEOUT.as_secs()
+                    );
+                    return StreamEnd::SubscriptionFailed;
+                }
+            };
 
         // Get the frame receiver
-        let mut frame_rx = match data_receiver.frame_receiver {
+        let mut frame_rx = match sub_result.0.frame_receiver {
             Some(rx) => rx,
             None => {
                 warn!("No frame receiver in subscription result");
-                return;
+                return StreamEnd::SubscriptionFailed;
             }
         };
 
         info!("Subscribed to stream, processing frames");
 
-        // Process frames until the channel closes (stream ends)
-        while let Some(frame) = frame_rx.recv().await {
-            match frame {
-                FrameData::Video { timestamp, data } => {
-                    match self.chunk_format {
-                        ChunkFormat::Flv => {
-                            // FLV path: data is already FLV tag body from xiu.
-                            // Pass directly to FlvChunkSink — no demux/remux needed.
-                            self.flv_chunk_sink.write_video(timestamp, &data).await;
+        // Heartbeat tracking
+        let mut frames_since_heartbeat = 0u64;
+        let mut total_frames = 0u64;
+        let mut last_heartbeat = Instant::now();
+
+        // Process frames with timeout — detect stalls and recover
+        loop {
+            match tokio::time::timeout(FRAME_TIMEOUT, frame_rx.recv()).await {
+                Ok(Some(frame)) => {
+                    total_frames += 1;
+                    frames_since_heartbeat += 1;
+
+                    // Periodic heartbeat
+                    if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+                        info!(
+                            frames_last_60s = frames_since_heartbeat,
+                            total_frames,
+                            "Frame processing heartbeat"
+                        );
+                        frames_since_heartbeat = 0;
+                        last_heartbeat = Instant::now();
+                    }
+
+                    match frame {
+                        FrameData::Video { timestamp, data } => match self.chunk_format {
+                            ChunkFormat::Flv => {
+                                self.flv_chunk_sink.write_video(timestamp, &data).await;
+                            }
+                            ChunkFormat::Ts => {
+                                processor.process_video(timestamp, data).await;
+                            }
+                        },
+                        FrameData::Audio { timestamp, data } => match self.chunk_format {
+                            ChunkFormat::Flv => {
+                                self.flv_chunk_sink.write_audio(timestamp, &data).await;
+                            }
+                            ChunkFormat::Ts => {
+                                processor.process_audio(timestamp, data).await;
+                            }
+                        },
+                        FrameData::MediaInfo { .. } => {
+                            debug!("Received media info");
                         }
-                        ChunkFormat::Ts => {
-                            processor.process_video(timestamp, data).await;
+                        FrameData::MetaData { .. } => {
+                            debug!("Received metadata");
                         }
                     }
                 }
-                FrameData::Audio { timestamp, data } => match self.chunk_format {
-                    ChunkFormat::Flv => {
-                        self.flv_chunk_sink.write_audio(timestamp, &data).await;
-                    }
-                    ChunkFormat::Ts => {
-                        processor.process_audio(timestamp, data).await;
-                    }
-                },
-                FrameData::MediaInfo { media_info: _ } => {
-                    debug!("Received media info");
+                Ok(None) => {
+                    // Channel closed — publisher disconnected normally
+                    info!(
+                        total_frames,
+                        "Frame channel closed, flushing remaining data"
+                    );
+                    self.flush_current(processor).await;
+                    return StreamEnd::ChannelClosed;
                 }
-                FrameData::MetaData {
-                    timestamp: _,
-                    data: _,
-                } => {
-                    debug!("Received metadata");
+                Err(_) => {
+                    // Timeout — no frames for FRAME_TIMEOUT
+                    error!(
+                        total_frames,
+                        timeout_secs = FRAME_TIMEOUT.as_secs(),
+                        "No frames received — stream stalled, will re-subscribe"
+                    );
+                    self.flush_current(processor).await;
+                    return StreamEnd::Timeout;
                 }
             }
         }
+    }
 
-        info!("Frame channel closed, flushing remaining data");
+    /// Flush the active chunk sink based on current format.
+    async fn flush_current(&self, processor: &mut FrameProcessor) {
         match self.chunk_format {
             ChunkFormat::Flv => self.flv_chunk_sink.flush().await,
             ChunkFormat::Ts => {

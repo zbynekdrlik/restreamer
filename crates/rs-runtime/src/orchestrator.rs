@@ -232,7 +232,9 @@ impl ServiceCore {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("Chunk event receiver lagged, missed {n} events");
+                        tracing::error!(
+                            "Chunk broadcast lagged, LOST {n} chunks from DB tracking"
+                        );
                         continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -360,30 +362,43 @@ async fn run_inpoint_loop(
 
         info!("Inpoint RTMP server started on {bind}:{port}");
 
-        let restart = tokio::select! {
-            result = &mut handle => {
-                match result {
-                    Ok(Ok(())) => info!("RTMP server stopped"),
-                    Ok(Err(e)) => tracing::error!("RTMP server error: {e}"),
-                    Err(e) => tracing::error!("RTMP task panicked: {e}"),
+        let mut heartbeat =
+            tokio::time::interval(std::time::Duration::from_secs(60));
+        heartbeat.tick().await; // consume the immediate first tick
+
+        let restart = loop {
+            tokio::select! {
+                result = &mut handle => {
+                    match result {
+                        Ok(Ok(())) => info!("RTMP server stopped"),
+                        Ok(Err(e)) => tracing::error!("RTMP server error: {e}"),
+                        Err(e) => tracing::error!("RTMP task panicked: {e}"),
+                    }
+                    break false;
                 }
-                false
-            }
-            msg = restart_rx.recv() => {
-                if msg.is_some() {
-                    info!("Inpoint restart requested");
+                msg = restart_rx.recv() => {
+                    if msg.is_some() {
+                        info!("Inpoint restart requested");
+                        let _ = rtmp_shutdown.send(());
+                        let _ = handle.await;
+                        break true;
+                    } else {
+                        break false; // channel closed
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Inpoint shutting down");
                     let _ = rtmp_shutdown.send(());
                     let _ = handle.await;
-                    true
-                } else {
-                    false // channel closed
+                    break false;
                 }
-            }
-            _ = shutdown_rx.recv() => {
-                info!("Inpoint shutting down");
-                let _ = rtmp_shutdown.send(());
-                let _ = handle.await;
-                false
+                _ = heartbeat.tick() => {
+                    let connected = inpoint_state.is_connected();
+                    info!(
+                        rtmp_connected = connected,
+                        "Inpoint heartbeat: RTMP server alive"
+                    );
+                }
             }
         };
 

@@ -324,7 +324,7 @@ impl FlvChunkSink {
         };
 
         if let Err(e) = self.chunk_tx.send(chunk_info) {
-            tracing::debug!("No FLV chunk subscribers: {e}");
+            tracing::warn!("Chunk broadcast failed, no subscribers: {e}");
         }
     }
 }
