@@ -232,9 +232,7 @@ impl ServiceCore {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::error!(
-                            "Chunk broadcast lagged, LOST {n} chunks from DB tracking"
-                        );
+                        tracing::error!("Chunk broadcast lagged, LOST {n} chunks from DB tracking");
                         continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -362,8 +360,7 @@ async fn run_inpoint_loop(
 
         info!("Inpoint RTMP server started on {bind}:{port}");
 
-        let mut heartbeat =
-            tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(60));
         heartbeat.tick().await; // consume the immediate first tick
 
         let restart = loop {

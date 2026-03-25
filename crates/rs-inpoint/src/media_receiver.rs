@@ -251,8 +251,7 @@ impl MediaReceiver {
                     if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
                         info!(
                             frames_last_60s = frames_since_heartbeat,
-                            total_frames,
-                            "Frame processing heartbeat"
+                            total_frames, "Frame processing heartbeat"
                         );
                         frames_since_heartbeat = 0;
                         last_heartbeat = Instant::now();
