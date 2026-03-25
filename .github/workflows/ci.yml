@@ -1333,6 +1333,66 @@ jobs:
           }
           Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
 
+      - name: Save original OBS settings (before any changes)
+        id: obs-original
+        shell: powershell
+        run: |
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          $hello = Receive-OBSMessage $ws
+          $authRequired = $hello.d.authentication
+          if ($authRequired) {
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+            $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+            $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+          } else {
+            $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+          }
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+
+          $getSettings = @{ op = 6; d = @{ requestType = "GetStreamServiceSettings"; requestId = "save-orig" } } | ConvertTo-Json -Depth 5
+          Send-OBSMessage $ws $getSettings
+          $resp = Receive-OBSMessage $ws
+          $origServer = $resp.d.responseData.streamServiceSettings.server
+          $origKey = $resp.d.responseData.streamServiceSettings.key
+          $origType = $resp.d.responseData.streamServiceType
+
+          Write-Host "Original OBS settings saved: server=$origServer type=$origType"
+          "ORIG_SERVER=$origServer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "ORIG_KEY=$origKey" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "ORIG_TYPE=$origType" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+
       - name: "Baseline: OBS direct-to-YouTube RTMP (prove OBS works)"
         shell: powershell
         timeout-minutes: 4
@@ -2482,9 +2542,9 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          $origServer = "${{ steps.obs-setup.outputs.ORIG_SERVER }}"
-          $origKey = "${{ steps.obs-setup.outputs.ORIG_KEY }}"
-          $origType = "${{ steps.obs-setup.outputs.ORIG_TYPE }}"
+          $origServer = "${{ steps.obs-original.outputs.ORIG_SERVER }}"
+          $origKey = "${{ steps.obs-original.outputs.ORIG_KEY }}"
+          $origType = "${{ steps.obs-original.outputs.ORIG_TYPE }}"
 
           if (-not $origServer -or -not $origKey) {
             Write-Host "No original settings saved - skipping restore"
