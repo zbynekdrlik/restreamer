@@ -860,17 +860,26 @@ jobs:
           Write-Host "OK: Running in user session $($proc.SessionId) - tray icon visible"
 
           Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
-          $listener = netstat -ano | Select-String "LISTENING" | Select-String "\b:8910\b"
+          $maxWait = 15
+          $listener = $null
+          for ($w = 1; $w -le $maxWait; $w++) {
+            $listener = netstat -ano | Select-String "LISTENING" | Select-String "\b:8910\b"
+            if ($listener) {
+              Write-Host "OK: Port 8910 is listening (attempt $w/$maxWait)"
+              Write-Host $listener
+              break
+            }
+            Write-Host "Waiting for port 8910... (attempt $w/$maxWait)"
+            Start-Sleep -Seconds 2
+          }
           if (-not $listener) {
             Write-Host "Current port status:"
             netstat -ano | Select-String "\b:8910\b"
             Write-Host "Recent log file:"
             Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
-            Write-Error "FAIL: Port 8910 is NOT listening - ServiceCore did not start"
+            Write-Error "FAIL: Port 8910 is NOT listening after 30s - ServiceCore did not start"
             exit 1
           }
-          Write-Host "OK: Port 8910 is listening"
-          Write-Host $listener
 
           Write-Host "=== CHECK 3b: RTMP port 1234 is LISTENING ==="
           $rtmpListener = netstat -ano | Select-String "LISTENING" | Select-String "\b:1234\b"
