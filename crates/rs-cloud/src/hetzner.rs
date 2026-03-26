@@ -380,8 +380,8 @@ mod tests {
         // Test that the request body is properly constructed
         let req = CreateServerRequest {
             name: "test-server".to_string(),
-            server_type: "cx23".to_string(),
-            location: "fsn1".to_string(),
+            server_type: "cpx22".to_string(),
+            location: "nbg1".to_string(),
             image: "ubuntu-22.04".to_string(),
             ssh_keys: vec!["restreamer".to_string()],
             user_data: "#cloud-config\n".to_string(),
@@ -391,8 +391,8 @@ mod tests {
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["name"], "test-server");
-        assert_eq!(json["server_type"], "cx23");
-        assert_eq!(json["location"], "fsn1");
+        assert_eq!(json["server_type"], "cpx22");
+        assert_eq!(json["location"], "nbg1");
         assert_eq!(json["ssh_keys"][0], "restreamer");
     }
 

@@ -34,10 +34,10 @@ pub struct HetznerConfig {
 }
 
 fn default_hetzner_location() -> String {
-    "fsn1".to_string()
+    "nbg1".to_string()
 }
 fn default_hetzner_server_type() -> String {
-    "cx23".to_string()
+    "cpx22".to_string()
 }
 fn default_hetzner_snapshot_label() -> String {
     "rs-delivery".to_string()
@@ -325,7 +325,7 @@ mod tests {
         assert_eq!(parsed.s3.bucket, config.s3.bucket);
         assert_eq!(parsed.inpoint.rtmp_port, config.inpoint.rtmp_port);
         assert_eq!(parsed.api.port, config.api.port);
-        assert_eq!(parsed.hetzner.location, "fsn1");
+        assert_eq!(parsed.hetzner.location, "nbg1");
         assert_eq!(parsed.delivery.delivery_delay_secs, 120);
     }
 
@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(config.inpoint.chunk_duration_ms, 1000);
         assert_eq!(config.api.port, 8910);
         assert_eq!(config.api.bind, "127.0.0.1");
-        assert_eq!(config.hetzner.default_server_type, "cx23");
+        assert_eq!(config.hetzner.default_server_type, "cpx22");
         assert_eq!(config.delivery.delivery_delay_secs, 120);
         assert_eq!(config.inpoint.chunk_format, "flv");
     }
