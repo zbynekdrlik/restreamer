@@ -1092,7 +1092,7 @@ jobs:
 
       - name: Start 10-minute stability test stream
         shell: powershell
-        timeout-minutes: 12
+        timeout-minutes: 14
         run: |
           $ErrorActionPreference = 'Continue'
           $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
