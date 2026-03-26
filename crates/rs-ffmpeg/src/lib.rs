@@ -228,6 +228,10 @@ fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
 /// No genpts, no avoid_negative_ts, no copytb, no bsf needed.
 fn build_flv_rtmp_args(url: &str) -> Vec<String> {
     vec![
+        // -re: read input at native frame rate (based on FLV timestamps).
+        // This makes ffmpeg pace output to match the original stream timing.
+        // Without it, ffmpeg would blast all buffered chunks instantly.
+        "-re".into(),
         "-f".into(),
         "flv".into(),
         "-loglevel".into(),
