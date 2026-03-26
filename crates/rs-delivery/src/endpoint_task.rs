@@ -480,10 +480,10 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
 
                 chunk_id += 1;
-                // Simple sleep to prevent runaway delivery.
-                // ffmpeg buffers internally and paces output to RTMP.
-                let sleep_ms: u64 = if ep_cfg.is_fast { 100 } else { 1000 };
-                tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                // No artificial sleep — delivery is naturally paced by S3 chunk
+                // availability. When we catch up to the live edge, fetch_chunk
+                // returns None and the loop waits 2s before retrying.
+                // This keeps the cache delay stable at the configured target.
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;
