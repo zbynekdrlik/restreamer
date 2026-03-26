@@ -876,7 +876,8 @@ jobs:
           Write-Host "OK: Running in user session $($proc.SessionId) - tray icon visible"
 
           Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
-          $maxWait = 15
+          # Large SQLite DB from accumulated CI chunks can make startup slow
+          $maxWait = 30
           $listener = $null
           for ($w = 1; $w -le $maxWait; $w++) {
             $listener = netstat -ano | Select-String "LISTENING" | Select-String "\b:8910\b"
@@ -893,7 +894,7 @@ jobs:
             netstat -ano | Select-String "\b:8910\b"
             Write-Host "Recent log file:"
             Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
-            Write-Error "FAIL: Port 8910 is NOT listening after 30s - ServiceCore did not start"
+            Write-Error "FAIL: Port 8910 is NOT listening after 60s - ServiceCore did not start"
             exit 1
           }
 
