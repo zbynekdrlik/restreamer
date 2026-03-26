@@ -76,6 +76,7 @@ impl FlvStreamNormalizer {
 const MAX_FFMPEG_RESTARTS: u32 = 10;
 const MAX_CHUNK_MISS_COUNT: u32 = 60; // ~2min at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
+const WRITE_TIMEOUT_SECS: u64 = 30;
 /// Base S3 backoff (doubles on each error, max 60s, resets on success).
 const S3_BACKOFF_BASE_SECS: u64 = 2;
 const S3_BACKOFF_MAX_SECS: u64 = 60;
@@ -436,20 +437,38 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     data
                 };
 
-                // Write full chunk directly to ffmpeg. No smooth_write pacing —
+                // Write full chunk directly to ffmpeg with timeout.
                 // ffmpeg handles its own output buffering to RTMP/HLS.
                 if let Some(ref mut p) = proc {
-                    match p.write(&processed).await {
-                        Ok(()) => {
+                    let write_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
+                        p.write(&processed),
+                    )
+                    .await;
+
+                    match write_result {
+                        Ok(Ok(())) => {
                             let mut s = stats.lock().await;
                             s.bytes_processed_total += processed.len() as u64;
                             s.current_chunk_id = chunk_id;
                             s.chunks_processed += 1;
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             tracing::warn!(alias = %alias, "ffmpeg write failed: {e}");
                             let mut s = stats.lock().await;
                             s.last_error = Some(e);
+                            s.ffmpeg_restart_count += 1;
+                            drop(s);
+                            if let Some(mut p) = proc.take() {
+                                p.kill().await;
+                            }
+                            continue;
+                        }
+                        Err(_) => {
+                            tracing::error!(alias = %alias, "ffmpeg write timed out");
+                            let mut s = stats.lock().await;
+                            s.last_error = Some("write_timeout".to_string());
+                            s.stall_reason = Some("write_timeout".to_string());
                             s.ffmpeg_restart_count += 1;
                             drop(s);
                             if let Some(mut p) = proc.take() {

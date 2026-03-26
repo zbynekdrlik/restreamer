@@ -192,7 +192,7 @@ async fn test_restarts_ffmpeg_on_death() {
     let mut factory = MockProcessFactory::new();
     // Direct write: 1 write per chunk.
     // Fail after ~3 chunks worth of writes = 150 writes.
-    factory.fail_after_writes = Some(150);
+    factory.fail_after_writes = Some(3);
     let spawn_count = factory.spawn_count.clone();
 
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -203,8 +203,8 @@ async fn test_restarts_ffmpeg_on_death() {
         endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
-    // Direct write + 1s sleep. 6 chunks × 1s = 6s total.
-    for _ in 0..800 {
+    // Direct write + 1s sleep per chunk. Need enough time for restart cycle.
+    for _ in 0..1500 {
         tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
     }
