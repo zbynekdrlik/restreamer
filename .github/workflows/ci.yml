@@ -1272,8 +1272,8 @@ jobs:
           }
           $config.hetzner = @{
             api_token = $env:HETZNER_API_TOKEN
-            location = "fsn1"
-            default_server_type = "cx22"
+            location = "nbg1"
+            default_server_type = "cpx22"
             snapshot_label = "rs-delivery"
             ssh_key_name = "restreamer-ci"
           }
