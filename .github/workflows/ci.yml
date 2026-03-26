@@ -805,14 +805,30 @@ jobs:
 
           Write-Host "=== Step 1: Stop any existing instances ==="
           $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-          Start-Sleep -Seconds 3
+          # Wait for process to fully exit and release DB locks
+          $elapsed = 0
+          while ($elapsed -lt 10) {
+            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+            if (-not $proc) { break }
+            Start-Sleep -Seconds 1
+            $elapsed++
+            Write-Host "Waiting for process to exit... ($elapsed s)"
+          }
+          Start-Sleep -Seconds 2
 
-          Write-Host "=== Step 1.5: Clean up stale SQLite WAL files ==="
-          # Stale WAL files from previous processes can cause database lock errors
+          Write-Host "=== Step 1.5: Clean up stale SQLite WAL/SHM files ==="
           $DataDir = "C:\ProgramData\Restreamer"
           Remove-Item "$DataDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
           Remove-Item "$DataDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
           Write-Host "Cleaned up SQLite WAL files"
+
+          Write-Host "=== Step 1.6: Clean up stale chunk files ==="
+          $chunksDir = "$DataDir\chunks"
+          if (Test-Path $chunksDir) {
+            $count = (Get-ChildItem $chunksDir -File -ErrorAction SilentlyContinue).Count
+            Remove-Item "$chunksDir\*" -Force -ErrorAction SilentlyContinue
+            Write-Host "Removed $count stale chunk files from $chunksDir"
+          }
 
           Write-Host "=== Step 2: Remove old scheduled tasks ==="
           Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
