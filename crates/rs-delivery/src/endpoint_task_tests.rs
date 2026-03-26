@@ -142,8 +142,7 @@ async fn test_processes_sequential_chunks() {
         endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
-    // smooth_write: 100 intervals of 10ms per chunk (non-fast 1000ms pace).
-    // 5 chunks × 1000ms = 5s. Advance in 10ms steps with yields.
+    // Direct write + 1s sleep per chunk. 5 chunks × 1s = 5s.
     for _ in 0..600 {
         tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
@@ -156,11 +155,7 @@ async fn test_processes_sequential_chunks() {
     drop(s);
 
     let w = writes.lock().await;
-    assert!(
-        w.len() >= 5,
-        "Should have multiple writes from smooth_write: {}",
-        w.len()
-    );
+    assert_eq!(w.len(), 5, "Should have 1 write per chunk: {}", w.len());
     drop(w);
 
     let _ = stop_tx.send(true);
@@ -195,7 +190,7 @@ async fn test_restarts_ffmpeg_on_death() {
     let chunks: Vec<(i64, Vec<u8>)> = (1..=6).map(|i| (i, vec![i as u8; 50])).collect();
     let fetcher = MockFetcher::new(chunks);
     let mut factory = MockProcessFactory::new();
-    // smooth_write splits each 50-byte chunk into ~50 writes (1 byte each).
+    // Direct write: 1 write per chunk.
     // Fail after ~3 chunks worth of writes = 150 writes.
     factory.fail_after_writes = Some(150);
     let spawn_count = factory.spawn_count.clone();
@@ -208,7 +203,7 @@ async fn test_restarts_ffmpeg_on_death() {
         endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
-    // smooth_write needs 10ms advances. 6 chunks × 1000ms = 6s total.
+    // Direct write + 1s sleep. 6 chunks × 1s = 6s total.
     for _ in 0..800 {
         tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
@@ -497,7 +492,7 @@ async fn test_processes_100_sequential_chunks() {
         endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
     });
 
-    // smooth_write: 100 intervals of 10ms per chunk. 100 chunks = 100s.
+    // Direct write + 1s sleep per chunk. 100 chunks = 100s.
     // Advance in 10ms steps. Need 100 * 100 = 10000 steps minimum.
     for _ in 0..12000 {
         tokio::time::advance(std::time::Duration::from_millis(10)).await;
@@ -514,7 +509,7 @@ async fn test_processes_100_sequential_chunks() {
     let w = writes.lock().await;
     assert!(
         w.len() >= 100,
-        "Should have many writes from smooth_write: {}",
+        "Should have writes (1 per chunk): {}",
         w.len()
     );
     drop(w);
@@ -688,7 +683,7 @@ async fn test_chunk_gap_maintained_at_delay_target() {
         .await;
     });
 
-    // smooth_write: 100 intervals of 10ms per chunk. 30 chunks = 30s.
+    // Direct write + 1s sleep per chunk. 30 chunks = 30s.
     for _ in 0..4000 {
         tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
@@ -798,82 +793,3 @@ async fn test_delivery_delay_chunks_calculation() {
     assert_eq!(chunks, 240, "120s / 500ms should = 240 chunks");
 }
 
-#[test]
-fn test_extract_flv_chunk_duration_basic() {
-    // Build a minimal FLV chunk with known timestamps
-    let mut data = Vec::new();
-    // FLV header (9 bytes)
-    data.extend_from_slice(&[0x46, 0x4C, 0x56, 0x01, 0x05, 0x00, 0x00, 0x00, 0x09]);
-    // prev_tag_size_0 (4 bytes)
-    data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-
-    // Video tag at timestamp 1000ms
-    let ts1: u32 = 1000;
-    let body = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0xAA]; // 6 bytes
-    let data_size: u32 = body.len() as u32;
-    data.push(9); // tag_type = video
-    data.extend_from_slice(&[
-        (data_size >> 16) as u8,
-        (data_size >> 8) as u8,
-        data_size as u8,
-    ]);
-    data.extend_from_slice(&[(ts1 >> 16) as u8, (ts1 >> 8) as u8, ts1 as u8]);
-    data.push((ts1 >> 24) as u8);
-    data.extend_from_slice(&[0, 0, 0]); // stream_id
-    data.extend_from_slice(&body);
-    let tag_size = 11 + data_size;
-    data.extend_from_slice(&tag_size.to_be_bytes());
-
-    // Video tag at timestamp 3000ms (2 seconds later)
-    let ts2: u32 = 3000;
-    data.push(9); // tag_type = video
-    data.extend_from_slice(&[
-        (data_size >> 16) as u8,
-        (data_size >> 8) as u8,
-        data_size as u8,
-    ]);
-    data.extend_from_slice(&[(ts2 >> 16) as u8, (ts2 >> 8) as u8, ts2 as u8]);
-    data.push((ts2 >> 24) as u8);
-    data.extend_from_slice(&[0, 0, 0]);
-    data.extend_from_slice(&body);
-    data.extend_from_slice(&tag_size.to_be_bytes());
-
-    let duration = extract_flv_chunk_duration_ms(&data);
-    assert_eq!(
-        duration,
-        Some(2000),
-        "Duration should be 3000 - 1000 = 2000ms"
-    );
-}
-
-#[test]
-fn test_extract_flv_chunk_duration_not_flv() {
-    let data = vec![0x00, 0x01, 0x02];
-    assert_eq!(extract_flv_chunk_duration_ms(&data), None);
-}
-
-#[test]
-fn test_extract_flv_chunk_duration_single_tag() {
-    // Single tag → duration = 0 (last_ts == first_ts)
-    let mut data = Vec::new();
-    data.extend_from_slice(&[0x46, 0x4C, 0x56, 0x01, 0x05, 0x00, 0x00, 0x00, 0x09]);
-    data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-
-    let ts: u32 = 5000;
-    let body = vec![0x17, 0x01, 0x00, 0x00, 0x00];
-    let data_size: u32 = body.len() as u32;
-    data.push(9);
-    data.extend_from_slice(&[
-        (data_size >> 16) as u8,
-        (data_size >> 8) as u8,
-        data_size as u8,
-    ]);
-    data.extend_from_slice(&[(ts >> 16) as u8, (ts >> 8) as u8, ts as u8]);
-    data.push((ts >> 24) as u8);
-    data.extend_from_slice(&[0, 0, 0]);
-    data.extend_from_slice(&body);
-    let tag_size = 11 + data_size;
-    data.extend_from_slice(&tag_size.to_be_bytes());
-
-    assert_eq!(extract_flv_chunk_duration_ms(&data), Some(0));
-}

@@ -9,9 +9,6 @@ use tokio::task::JoinHandle;
 use crate::api::{EndpointConfig, S3Config};
 use crate::s3_fetch::S3Fetcher;
 
-/// Interval for smooth byte-level writes (10ms = 100 writes per second)
-const SMOOTH_WRITE_INTERVAL_MS: u64 = 10;
-
 /// FLV stream normalizer: strips duplicate FLV headers and sequence headers
 /// from concatenated FLV chunks, producing a single continuous FLV stream.
 struct FlvStreamNormalizer {
@@ -76,57 +73,9 @@ impl FlvStreamNormalizer {
     }
 }
 
-/// Extract the actual duration of an FLV chunk from its tag timestamps.
-/// Returns the difference between the last and first video/audio tag timestamps.
-/// FLV chunks are keyframe-aligned, so their actual duration depends on the
-/// encoder's keyframe interval (typically 2-3s), NOT the configured chunk_duration_ms.
-fn extract_flv_chunk_duration_ms(data: &[u8]) -> Option<u64> {
-    if data.len() < 13 || &data[0..3] != b"FLV" {
-        return None;
-    }
-
-    let mut offset = 9 + 4; // Skip FLV header + first prev_tag_size
-    let mut first_ts: Option<u32> = None;
-    let mut last_ts: u32 = 0;
-
-    while offset + 11 <= data.len() {
-        let tag_type = data[offset];
-        if tag_type != 8 && tag_type != 9 && tag_type != 18 {
-            break;
-        }
-
-        let data_size = ((data[offset + 1] as u32) << 16)
-            | ((data[offset + 2] as u32) << 8)
-            | (data[offset + 3] as u32);
-
-        // Timestamp: 3 bytes at offset+4..+7 (lower) + 1 byte at offset+7 (upper)
-        let ts = ((data[offset + 7] as u32) << 24)
-            | ((data[offset + 4] as u32) << 16)
-            | ((data[offset + 5] as u32) << 8)
-            | (data[offset + 6] as u32);
-
-        // Only track video/audio tags (not metadata/script)
-        if tag_type == 8 || tag_type == 9 {
-            if first_ts.is_none() {
-                first_ts = Some(ts);
-            }
-            last_ts = ts;
-        }
-
-        let tag_total = 11 + data_size as usize + 4;
-        if offset + tag_total > data.len() {
-            break;
-        }
-        offset += tag_total;
-    }
-
-    first_ts.map(|first| (last_ts.saturating_sub(first)) as u64)
-}
-
 const MAX_FFMPEG_RESTARTS: u32 = 10;
 const MAX_CHUNK_MISS_COUNT: u32 = 60; // ~2min at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
-const WRITE_TIMEOUT_SECS: u64 = 30;
 /// Base S3 backoff (doubles on each error, max 60s, resets on success).
 const S3_BACKOFF_BASE_SECS: u64 = 2;
 const S3_BACKOFF_MAX_SECS: u64 = 60;
@@ -300,51 +249,6 @@ impl EndpointHandle {
         let _ = self.stop_tx.send(true);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.task).await;
     }
-}
-
-/// Write data to ffmpeg stdin spread evenly over `duration`.
-/// Eliminates burst+gap pattern that causes YouTube's bitrateLow.
-/// At 12 Mbps, a 1.5 MB chunk is written as ~15 KB every 10ms.
-async fn smooth_write(
-    proc: &mut dyn OutputProcess,
-    data: &[u8],
-    duration: std::time::Duration,
-) -> Result<(), String> {
-    let total = data.len();
-    if total == 0 {
-        return Ok(());
-    }
-
-    let interval = std::time::Duration::from_millis(SMOOTH_WRITE_INTERVAL_MS);
-    let num_intervals = (duration.as_millis() / interval.as_millis()).max(1) as usize;
-    let block_size = total.div_ceil(num_intervals);
-
-    let start = tokio::time::Instant::now();
-    let mut offset = 0;
-
-    for i in 0..num_intervals {
-        let end = (offset + block_size).min(total);
-        if offset >= total {
-            break;
-        }
-
-        proc.write(&data[offset..end]).await?;
-        offset = end;
-
-        // Sleep until next write slot
-        let target = interval * (i as u32 + 1);
-        let elapsed = start.elapsed();
-        if elapsed < target {
-            tokio::time::sleep(target - elapsed).await;
-        }
-    }
-
-    // Write any remaining bytes
-    if offset < total {
-        proc.write(&data[offset..]).await?;
-    }
-
-    Ok(())
 }
 
 /// Core endpoint loop — generic over ChunkFetcher and OutputProcessFactory for testability.
@@ -524,13 +428,6 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     }
                 }
 
-                // Extract FLV duration BEFORE normalize (which may consume data)
-                let flv_duration_ms = if chunk_format == ChunkFormat::Flv {
-                    extract_flv_chunk_duration_ms(&data)
-                } else {
-                    None
-                };
-
                 let processed = if let Some(ref mut norm) = normalizer {
                     norm.normalize(&data)
                 } else if let Some(ref mut flv_norm) = flv_normalizer {
@@ -539,48 +436,20 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     data
                 };
 
-                // Pace delivery to match real-time ingest rate.
-                // For FLV chunks (keyframe-aligned), use actual duration from
-                // timestamps — they contain 2-3s of content, not the configured 1s.
-                let chunk_start = tokio::time::Instant::now();
-                let pace = if ep_cfg.is_fast {
-                    std::time::Duration::from_millis(100)
-                } else if let Some(flv_ms) = flv_duration_ms {
-                    std::time::Duration::from_millis(flv_ms.clamp(500, 10_000))
-                } else {
-                    std::time::Duration::from_millis(1000)
-                };
-
+                // Write full chunk directly to ffmpeg. No smooth_write pacing —
+                // ffmpeg handles its own output buffering to RTMP/HLS.
                 if let Some(ref mut p) = proc {
-                    let write_result = tokio::time::timeout(
-                        std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
-                        smooth_write(p.as_mut(), &processed, pace),
-                    )
-                    .await;
-
-                    match write_result {
-                        Ok(Ok(())) => {
+                    match p.write(&processed).await {
+                        Ok(()) => {
                             let mut s = stats.lock().await;
                             s.bytes_processed_total += processed.len() as u64;
                             s.current_chunk_id = chunk_id;
                             s.chunks_processed += 1;
                         }
-                        Ok(Err(e)) => {
+                        Err(e) => {
                             tracing::warn!(alias = %alias, "ffmpeg write failed: {e}");
                             let mut s = stats.lock().await;
                             s.last_error = Some(e);
-                            s.ffmpeg_restart_count += 1;
-                            drop(s);
-                            if let Some(mut p) = proc.take() {
-                                p.kill().await;
-                            }
-                            continue;
-                        }
-                        Err(_) => {
-                            tracing::error!(alias = %alias, "ffmpeg write timed out");
-                            let mut s = stats.lock().await;
-                            s.last_error = Some("write_timeout".to_string());
-                            s.stall_reason = Some("write_timeout".to_string());
                             s.ffmpeg_restart_count += 1;
                             drop(s);
                             if let Some(mut p) = proc.take() {
@@ -592,13 +461,10 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
 
                 chunk_id += 1;
-                // Ensure total chunk processing time matches the pace duration.
-                // smooth_write handles data spread, but S3 fetch + normalize time
-                // can cause delivery to outpace ingest without this guard.
-                let elapsed = chunk_start.elapsed();
-                if elapsed < pace {
-                    tokio::time::sleep(pace - elapsed).await;
-                }
+                // Simple sleep to prevent runaway delivery.
+                // ffmpeg buffers internally and paces output to RTMP.
+                let sleep_ms: u64 = if ep_cfg.is_fast { 100 } else { 1000 };
+                tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;
