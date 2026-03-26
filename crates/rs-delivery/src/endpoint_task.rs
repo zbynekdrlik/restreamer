@@ -480,10 +480,10 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
 
                 chunk_id += 1;
-                // No artificial sleep — delivery is naturally paced by S3 chunk
-                // availability. When we catch up to the live edge, fetch_chunk
-                // returns None and the loop waits 2s before retrying.
-                // This keeps the cache delay stable at the configured target.
+                // Minimal yield to let other tasks run. Delivery is naturally
+                // paced by S3 chunk availability — when we catch up to the live
+                // edge, fetch_chunk returns None and the loop waits 2s.
+                tokio::task::yield_now().await;
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;
