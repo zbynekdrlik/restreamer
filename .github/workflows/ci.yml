@@ -816,18 +816,20 @@ jobs:
           }
           Start-Sleep -Seconds 2
 
-          Write-Host "=== Step 1.5: Clean up stale SQLite WAL/SHM files ==="
+          Write-Host "=== Step 1.5: Reset database and chunks ==="
+          # Delete DB + WAL/SHM so the app starts fresh with migrations.
+          # CI test data accumulates 164K+ chunk records making startup take >30s.
           $DataDir = "C:\ProgramData\Restreamer"
+          Remove-Item "$DataDir\restreamer.db" -Force -ErrorAction SilentlyContinue
           Remove-Item "$DataDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
           Remove-Item "$DataDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
-          Write-Host "Cleaned up SQLite WAL files"
+          Write-Host "Deleted database (will be recreated on startup)"
 
-          Write-Host "=== Step 1.6: Clean up stale chunk files ==="
           $chunksDir = "$DataDir\chunks"
           if (Test-Path $chunksDir) {
             $count = (Get-ChildItem $chunksDir -File -ErrorAction SilentlyContinue).Count
             Remove-Item "$chunksDir\*" -Force -ErrorAction SilentlyContinue
-            Write-Host "Removed $count stale chunk files from $chunksDir"
+            Write-Host "Removed $count stale chunk files"
           }
 
           Write-Host "=== Step 2: Remove old scheduled tasks ==="
