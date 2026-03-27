@@ -2100,8 +2100,18 @@ jobs:
                 } catch { Write-Host "  DIAGNOSTIC: chunk query failed: $_" }
               }
 
-              if ($response.server_ready -and $response.endpoints_alive) {
-                Write-Host "=== Delivery server fully operational with live endpoints ==="
+              # Check ALL endpoints are alive (not just the aggregate flag)
+              $allAlive = $true
+              if ($response.endpoint_details -and $response.endpoint_details.Count -gt 0) {
+                foreach ($ep in $response.endpoint_details) {
+                  if (-not $ep.alive) { $allAlive = $false }
+                }
+              } else {
+                $allAlive = $false
+              }
+
+              if ($response.server_ready -and $allAlive) {
+                Write-Host "=== Delivery server fully operational: ALL $($response.endpoint_details.Count) endpoints alive ==="
                 return
               }
             } catch {
@@ -2121,45 +2131,55 @@ jobs:
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
 
-          Write-Host "Verifying delivery progression with 4 readings at 15s intervals..."
+          Write-Host "Verifying delivery progression for ALL endpoints (4 readings, 15s apart)..."
 
-          $readings = @()
+          # Track per-endpoint chunk progression across 4 readings
+          $epReadings = @{}  # alias -> array of chunk_ids
           for ($r = 1; $r -le 4; $r++) {
             if ($r -gt 1) { Start-Sleep -Seconds 15 }
             $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
-            $chunkId = 0
-            $alive = $false
-            $stall = $null
-            if ($resp.endpoint_details -and $resp.endpoint_details.Count -gt 0) {
-              $chunkId = $resp.endpoint_details[0].current_chunk_id
-              $alive = $resp.endpoint_details[0].alive
-              $stall = $resp.endpoint_details[0].stall_reason
-            }
-            $readings += @{ chunk_id = $chunkId; alive = $alive; stall = $stall }
-            Write-Host "Reading ${r}: chunk_id=$chunkId, alive=$alive, stall=$stall"
-          }
 
-          # Assert EVERY consecutive pair shows chunk advancement
-          for ($i = 0; $i -lt ($readings.Count - 1); $i++) {
-            $prev = $readings[$i].chunk_id
-            $next = $readings[$i + 1].chunk_id
-            if ($next -le $prev) {
-              throw "FAILED: chunks did not advance between reading $($i+1) and $($i+2): $prev -> $next (stall: $($readings[$i+1].stall))"
+            if ($resp.endpoint_details) {
+              foreach ($ep in $resp.endpoint_details) {
+                if (-not $ep.is_fast) {
+                  $alias = $ep.alias
+                  if (-not $epReadings.ContainsKey($alias)) {
+                    $epReadings[$alias] = @()
+                  }
+                  $epReadings[$alias] += $ep.current_chunk_id
+                  Write-Host "Reading ${r}: [$alias] chunk=$($ep.current_chunk_id), alive=$($ep.alive), stall=$($ep.stall_reason)"
+                }
+              }
             }
           }
 
-          # Assert chunks are advancing (delivery is alive and processing)
-          # FLV duration-based pacing = ~2-3s per chunk, so expect >= 3 in 45s
-          $totalAdvance = $readings[3].chunk_id - $readings[0].chunk_id
-          if ($totalAdvance -lt 3) {
-            throw "FAILED: total chunk advancement $totalAdvance < 3 over 45s ($($readings[0].chunk_id) -> $($readings[3].chunk_id))"
+          if ($epReadings.Count -eq 0) {
+            throw "FAILED: No non-fast endpoints found in delivery status"
+          }
+
+          # Assert EACH endpoint advanced >= 3 chunks over 45s
+          $allPassed = $true
+          foreach ($alias in $epReadings.Keys) {
+            $chunks = $epReadings[$alias]
+            if ($chunks.Count -lt 4) {
+              Write-Host "WARNING: endpoint '$alias' only had $($chunks.Count) readings"
+              continue
+            }
+            $advance = $chunks[3] - $chunks[0]
+            Write-Host "  [$alias] advancement: $($chunks[0]) -> $($chunks[3]) = $advance chunks"
+            if ($advance -lt 3) {
+              Write-Host "  FAIL: endpoint '$alias' advanced only $advance chunks (need >= 3)"
+              $allPassed = $false
+            }
+          }
+
+          if (-not $allPassed) {
+            throw "FAILED: One or more endpoints did not advance enough chunks in 45s"
           }
 
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "  DELIVERY CONFIRMED: $totalAdvance chunks advanced over 45s"
-          Write-Host "  All 4 readings showed continuous progression"
-          Write-Host "  ffmpeg is alive and sending to YouTube"
+          Write-Host "  DELIVERY CONFIRMED: All $($epReadings.Count) endpoints progressing"
           Write-Host "=========================================="
 
       - name: Verify cache delay meets target
@@ -2181,8 +2201,8 @@ jobs:
           $minAcceptable = [math]::Floor($targetDelay * 0.8)
           Write-Host "Target delay: ${targetDelay}s, minimum acceptable: ${minAcceptable}s"
 
-          # Take 3 readings at 10s intervals to get stable delay measurement
-          $delays = @()
+          # Take 3 readings at 10s intervals, check EACH endpoint independently
+          $epDelays = @{}  # alias -> array of delay readings
           for ($r = 1; $r -le 3; $r++) {
             if ($r -gt 1) { Start-Sleep -Seconds 10 }
             $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
@@ -2190,37 +2210,40 @@ jobs:
             if ($resp.endpoint_details) {
               foreach ($ep in $resp.endpoint_details) {
                 if (-not $ep.is_fast) {
-                  $delays += $ep.chunk_delay_secs
-                  Write-Host "Reading ${r}: endpoint=$($ep.alias) chunk_delay_secs=$($ep.chunk_delay_secs) chunk_id=$($ep.current_chunk_id)"
+                  $alias = $ep.alias
+                  if (-not $epDelays.ContainsKey($alias)) {
+                    $epDelays[$alias] = @()
+                  }
+                  $epDelays[$alias] += $ep.chunk_delay_secs
+                  Write-Host "Reading ${r}: [$alias] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
                 }
               }
             }
           }
 
-          if ($delays.Count -eq 0) {
+          if ($epDelays.Count -eq 0) {
             throw "FAILED: No non-fast endpoint delay readings found"
           }
 
-          # Use the median delay reading
-          $sorted = $delays | Sort-Object
-          $median = $sorted[[math]::Floor($sorted.Count / 2)]
-          Write-Host ""
-          Write-Host "Delay readings: $($delays -join ', ')"
-          Write-Host "Median delay: ${median}s (target: ${targetDelay}s, min: ${minAcceptable}s)"
+          # Check EACH endpoint's median delay meets target
+          $allPassed = $true
+          foreach ($alias in $epDelays.Keys) {
+            $sorted = $epDelays[$alias] | Sort-Object
+            $median = $sorted[[math]::Floor($sorted.Count / 2)]
+            Write-Host "  [$alias] median delay: ${median}s (min: ${minAcceptable}s)"
+            if ($median -lt $minAcceptable) {
+              Write-Host "  FAIL: [$alias] cache delay ${median}s < minimum ${minAcceptable}s"
+              $allPassed = $false
+            }
+          }
 
-          if ($median -lt $minAcceptable) {
-            Write-Host ""
-            Write-Host "=========================================="
-            Write-Host "  FAIL: Cache delay ${median}s < minimum ${minAcceptable}s"
-            Write-Host "  Target was ${targetDelay}s (80% = ${minAcceptable}s)"
-            Write-Host "  This is the 70s cache delay bug!"
-            Write-Host "=========================================="
-            throw "FAILED: Cache delay ${median}s is below minimum acceptable ${minAcceptable}s (target: ${targetDelay}s)"
+          if (-not $allPassed) {
+            throw "FAILED: One or more endpoints have cache delay below ${minAcceptable}s (target: ${targetDelay}s)"
           }
 
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "  CACHE DELAY VERIFIED: ${median}s >= ${minAcceptable}s (target: ${targetDelay}s)"
+          Write-Host "  CACHE DELAY VERIFIED: All $($epDelays.Count) endpoints >= ${minAcceptable}s"
           Write-Host "=========================================="
 
       - name: Verify cache delay is stable (not growing)
@@ -2234,14 +2257,14 @@ jobs:
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
 
-          # Reading 1
+          # Reading 1 — capture delay per endpoint
           $resp1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
-          $delay1 = 0
+          $delays1 = @{}
           if ($resp1.endpoint_details) {
             foreach ($ep in $resp1.endpoint_details) {
               if (-not $ep.is_fast) {
-                $delay1 = $ep.chunk_delay_secs
-                Write-Host "Reading 1: endpoint=$($ep.alias) delay=${delay1}s chunk_id=$($ep.current_chunk_id)"
+                $delays1[$ep.alias] = $ep.chunk_delay_secs
+                Write-Host "Reading 1: [$($ep.alias)] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
               }
             }
           }
@@ -2250,35 +2273,42 @@ jobs:
           Write-Host "Waiting 2 minutes to check cache stability..."
           Start-Sleep -Seconds 120
 
-          # Reading 2
+          # Reading 2 — capture delay per endpoint
           $resp2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
-          $delay2 = 0
+          $delays2 = @{}
           if ($resp2.endpoint_details) {
             foreach ($ep in $resp2.endpoint_details) {
               if (-not $ep.is_fast) {
-                $delay2 = $ep.chunk_delay_secs
-                Write-Host "Reading 2: endpoint=$($ep.alias) delay=${delay2}s chunk_id=$($ep.current_chunk_id)"
+                $delays2[$ep.alias] = $ep.chunk_delay_secs
+                Write-Host "Reading 2: [$($ep.alias)] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
               }
             }
           }
 
-          $delta = [math]::Abs($delay2 - $delay1)
+          # Check stability for EACH endpoint
           Write-Host ""
-          Write-Host "Cache delay: ${delay1}s -> ${delay2}s (delta: ${delta}s over 2 min)"
 
-          if ($delta -gt 15) {
-            Write-Host ""
-            Write-Host "=========================================="
-            Write-Host "  FAIL: Cache delay grew by ${delta}s in 2 minutes"
-            Write-Host "  Expected stable (delta < 15s)"
-            Write-Host "  Delivery is slower than real-time!"
-            Write-Host "=========================================="
-            throw "FAILED: Cache delay not stable - grew by ${delta}s in 2 minutes (${delay1}s -> ${delay2}s)"
+          $allStable = $true
+          foreach ($alias in $delays1.Keys) {
+            if ($delays2.ContainsKey($alias)) {
+              $d1 = $delays1[$alias]
+              $d2 = $delays2[$alias]
+              $delta = [math]::Abs($d2 - $d1)
+              Write-Host "  [$alias] delay: ${d1}s -> ${d2}s (delta: ${delta}s)"
+              if ($delta -gt 15) {
+                Write-Host "  FAIL: [$alias] cache delay grew by ${delta}s in 2 minutes"
+                $allStable = $false
+              }
+            }
+          }
+
+          if (-not $allStable) {
+            throw "FAILED: One or more endpoints have unstable cache delay (delta > 15s over 2 min)"
           }
 
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "  CACHE STABILITY VERIFIED: delta ${delta}s < 15s"
+          Write-Host "  CACHE STABILITY VERIFIED: All endpoints delta < 15s"
           Write-Host "=========================================="
 
       - name: "GATE: Verify YouTube stream health is 'good'"
