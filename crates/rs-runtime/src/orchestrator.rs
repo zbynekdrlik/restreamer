@@ -16,9 +16,7 @@ use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{InpointState, WsEvent};
 use rs_endpoint::s3::S3Client;
 use rs_endpoint::uploader::ChunkUploader;
-use rs_inpoint::chunker::ChunkSink;
 use rs_inpoint::flv_chunker::FlvChunkSink;
-use rs_inpoint::media_receiver::ChunkFormat;
 use rs_inpoint::rtmp_server::RtmpServer;
 
 use crate::shutdown::ShutdownCoordinator;
@@ -159,26 +157,14 @@ impl ServiceCore {
         // Chunk directory
         tokio::fs::create_dir_all(&self.chunk_dir).await?;
 
-        // RTMP Inpoint server
-        let chunk_sink = Arc::new(ChunkSink::new(
-            self.chunk_dir.clone(),
-            Duration::from_millis(self.config.inpoint.chunk_duration_ms),
-        ));
-
+        // RTMP Inpoint server (FLV-only)
         let flv_chunk_sink = Arc::new(FlvChunkSink::new(
             self.chunk_dir.clone(),
             Duration::from_millis(self.config.inpoint.chunk_duration_ms),
         ));
 
-        let chunk_format = ChunkFormat::from_config(&self.config.inpoint.chunk_format);
-
         // Forward chunk events to the database.
-        // Subscribe to the active chunk sink based on format.
-        let mut chunk_rx = if chunk_format == ChunkFormat::Flv {
-            flv_chunk_sink.subscribe()
-        } else {
-            chunk_sink.subscribe()
-        };
+        let mut chunk_rx = flv_chunk_sink.subscribe();
         let chunk_pool = pool.clone();
         let chunk_ws_tx = ws_tx.clone();
         let chunk_task = tokio::spawn(async move {
@@ -247,18 +233,14 @@ impl ServiceCore {
         let inpoint_shutdown_rx = shutdown.subscribe();
         let inpoint_bind = self.config.inpoint.rtmp_bind.clone();
         let inpoint_port = self.config.inpoint.rtmp_port;
-        let inpoint_sink = Arc::clone(&chunk_sink);
         let inpoint_flv_sink = Arc::clone(&flv_chunk_sink);
-        let inpoint_chunk_format = chunk_format.clone();
         let inpoint_state_clone = inpoint_state.clone();
         let inpoint_task = tokio::spawn(async move {
             run_inpoint_loop(
                 inpoint_bind,
                 inpoint_port,
-                inpoint_sink,
                 inpoint_flv_sink,
                 inpoint_state_clone,
-                inpoint_chunk_format,
                 inpoint_restart_rx,
                 inpoint_shutdown_rx,
             )
@@ -307,7 +289,7 @@ impl ServiceCore {
         shutdown.trigger();
 
         // Flush remaining chunks before uploader stops
-        chunk_sink.flush().await;
+        flv_chunk_sink.flush().await;
 
         // Wait for all tasks
         match inpoint_task.await {
@@ -319,7 +301,7 @@ impl ServiceCore {
             Err(e) => tracing::error!("Endpoint task panicked: {e}"),
         }
         // Drop the chunk channel so the chunk task can exit
-        drop(chunk_sink);
+        drop(flv_chunk_sink);
         match chunk_task.await {
             Ok(()) => info!("Chunk forwarder stopped cleanly"),
             Err(e) => tracing::error!("Chunk forwarder panicked: {e}"),
@@ -338,25 +320,20 @@ impl ServiceCore {
 }
 
 /// Run the RTMP inpoint server with restart support.
-#[allow(clippy::too_many_arguments)]
 async fn run_inpoint_loop(
     bind: String,
     port: u16,
-    chunk_sink: Arc<ChunkSink>,
     flv_chunk_sink: Arc<FlvChunkSink>,
     inpoint_state: InpointState,
-    chunk_format: ChunkFormat,
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
     loop {
         let server = RtmpServer::new(&bind, port);
         let rtmp_shutdown = server.shutdown_handle();
-        let sink = Arc::clone(&chunk_sink);
         let flv_sink = Arc::clone(&flv_chunk_sink);
         let state = inpoint_state.clone();
-        let fmt = chunk_format.clone();
-        let mut handle = tokio::spawn(async move { server.run(sink, flv_sink, state, fmt).await });
+        let mut handle = tokio::spawn(async move { server.run(flv_sink, state).await });
 
         info!("Inpoint RTMP server started on {bind}:{port}");
 
@@ -399,7 +376,7 @@ async fn run_inpoint_loop(
             }
         };
 
-        chunk_sink.flush().await;
+        flv_chunk_sink.flush().await;
 
         if !restart {
             break;

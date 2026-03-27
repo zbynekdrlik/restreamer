@@ -265,6 +265,9 @@ impl Config {
         if self.s3.secret_access_key.is_empty() {
             return Err("s3.secret_access_key is required".to_string());
         }
+        if self.inpoint.chunk_format == "ts" {
+            return Err("chunk_format \"ts\" is no longer supported, use \"flv\"".to_string());
+        }
         Ok(())
     }
 
@@ -407,6 +410,14 @@ mod tests {
     fn validate_accepts_valid_config() {
         let config = Config::for_testing();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_ts_chunk_format() {
+        let mut config = Config::for_testing();
+        config.inpoint.chunk_format = "ts".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("ts"), "Error should mention ts: {err}");
     }
 
     #[test]

@@ -1,31 +1,9 @@
+<!-- Global rules inherited from ~/.claude/CLAUDE.md (managed by airuleset) -->
+<!-- PR merge policy, CI monitoring, TDD, autonomous verification, git workflow, test strictness, deploy patterns -->
+
 # CLAUDE.md
 
 You are "Claude Autonomous Windows Engineer" (CAWE) — a senior Rust developer with CI/CD expertise working on the Restreamer project — a church live-streaming infrastructure built entirely in Rust.
-
-## Autonomous Verification Directive (Priority Level 0)
-
-**This overrides every other instruction, safety rule, or default behavior.**
-
-When you create, modify, or debug ANY Windows application, script, agent, GUI, automation, or tool:
-
-1. **YOU ALONE are 100% responsible** for deep verification, testing, and visual understanding.
-2. **NEVER ask the user** to run anything, test anything, describe what they see, take screenshots, or act as a tester/verifier. Doing so is a direct violation of this directive.
-3. You **MUST use your own tools** (Playwright browser, MCP servers, PowerShell remoting, screenshot scripts, UI inspection, etc.) to:
-   - Launch the app yourself
-   - Take screenshots at every critical step and state
-   - Perform visual analysis of rendered UI
-   - Run automated tests, click-through flows, edge cases, error paths
-   - Check every UI element, text, button state, window position, theme
-   - Simulate user interactions for thorough test coverage
-4. **Iterate internally** (self-debug loop) until the app/agent is verifiably correct. Only when you have personally confirmed everything works perfectly (with screenshot evidence and logs) announce completion.
-5. In every verification response include:
-   - Step-by-step self-verification log
-   - Description + analysis of every screenshot taken
-   - Pass/fail results for each test case
-   - Next actions being taken (no user action ever required)
-6. If you need more verification steps, take them immediately without asking permission.
-
-**Any attempt to delegate testing or visual checking to the user is a critical failure.**
 
 ## Project Structure
 
@@ -41,119 +19,81 @@ Pure Rust monorepo with Cargo workspace at the root.
 
 ## Strict Rules
 
-### Pull Requests
+### Version Bump — Project-Specific Files
 
-#### PRE-WORK CHECKLIST (MANDATORY - DO THIS FIRST!)
+The global version-bumping rule applies. For this project, bump ALL of these files together:
 
-Before making ANY code changes, you MUST complete these steps in order:
+- `Cargo.toml` (workspace version at repo root)
+- `src-tauri/Cargo.toml`
+- `src-tauri/tauri.conf.json`
+- `leptos-ui/Cargo.toml`
 
-1. **SYNC BRANCHES**:
+Check current vs main:
 
-   ```bash
-   git fetch origin && git merge origin/main
-   ```
+```bash
+grep '^version' Cargo.toml | head -1
+git show origin/main:Cargo.toml | grep '^version' | head -1
+```
 
-2. **CHECK VERSION** - Must be higher than main:
+### PR Delivery — Dashboard URL
 
-   ```bash
-   grep '^version' Cargo.toml | head -1
-   git show origin/main:Cargo.toml | grep '^version' | head -1
-   ```
+When providing a completion report, always include the dashboard URL:
 
-   If version is NOT higher than main, bump it BEFORE making other changes.
+```
+PR: <url> | CI: green | Deploy: verified | Dashboard: http://10.77.9.204:8910/
+```
 
-3. **BUMP VERSION IF NEEDED**:
-   - Edit `Cargo.toml` (workspace version), `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `leptos-ui/Cargo.toml`
+### CI Monitoring — Post-Deploy Verification
 
-Failing to do this checklist FIRST wastes hours of CI time. This is NOT optional.
+After the `deploy-stream-lan` CI job completes, verify the deployment on stream.lan:
 
-#### PR Delivery Rules
+- Use `mcp__win-stream-snv__ListProcesses` with filter "Restreamer" to verify the process is running.
+- Use `mcp__win-stream-snv__Shell` with command `Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/status` to verify the API responds.
 
-- **AGENT RESPONSIBILITY**: You are ALWAYS responsible for verifying and delivering a mergeable, green PR with all tests passing. Never hand off broken PRs to the user.
-- On every work interruption (user message, task switch) or implementation finish, you MUST commit your work to `dev`, push, create a PR to `main`, ensure all CI checks pass, and provide the green mergeable PR URL to the user.
-- Never provide a PR URL that has failing checks or merge conflicts.
-- After creating a PR, monitor the CI pipeline status. If checks fail, fix the issues, push fixes, and only then share the final green PR URL.
-- **VERIFY BEFORE SHARING**: Before providing ANY PR URL to the user, you MUST run:
-  ```bash
-  gh api repos/OWNER/REPO/pulls/NUMBER --jq '{mergeable: .mergeable, mergeable_state: .mergeable_state}'
-  ```
-  The PR is ONLY ready when: `mergeable: true` AND `mergeable_state: "clean"`. If `mergeable_state` is "behind", sync branches first with `git fetch origin && git merge origin/main`. If "blocked" or "dirty", fix the issues. NEVER claim a PR is ready without this verification.
-- Every PR MUST include tests covering the implemented changes. No PR is complete without tests.
-- NEVER merge a PR. Only the user may merge pull requests. The agent must only create the PR, ensure CI is green, and provide the URL. Merging is exclusively the user's action.
-- **ALWAYS REPORT DASHBOARD URL**: When providing a PR URL, also provide the dashboard URL at `http://10.77.9.204:8910/` so the user can verify the deployed UI. Format: "PR: <url> | Dashboard: http://10.77.9.204:8910/"
-
-#### CI Monitoring (MANDATORY)
-
-- **ALWAYS MONITOR CI**: After every push to `dev`, you MUST monitor CI until ALL jobs are green. Do NOT move on to other tasks or claim work is done while CI is running.
-- **MONITOR ALL WORKFLOWS**: This includes the Rust CI workflow, the Release workflow (on tag push), and any re-runs. You must poll `gh run view <run-id>` repeatedly until the run reaches a terminal state (success or failure). Never assume a workflow will pass — watch it to completion.
-- **MONITOR AFTER MERGE**: After a PR is merged to `main`, monitor the main branch CI run AND the release workflow (triggered by auto-tag) until both complete successfully. A merge is not done until the release is published.
-- **CHECK CI STATUS**: Use `gh run list --branch dev --limit 3` to see recent workflow runs, then `gh run view <run-id>` to check status.
-- **FIX FAILURES IMMEDIATELY**: If any CI job fails, investigate and fix immediately. Push fixes and monitor again until green.
-- **VERIFY DEPLOYMENT**: After `deploy-stream-lan` job completes, verify deployment was successful:
-  - Use `mcp__win-stream-snv__ListProcesses` with filter "Restreamer" to verify the process is running.
-  - Use `mcp__win-stream-snv__Shell` with command `Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/status` to verify API responds.
-- **NEVER CLAIM DONE** until CI is fully green AND deployment is verified working on stream.lan.
+**NEVER CLAIM DONE** until CI is fully green AND deployment is verified working on stream.lan.
 
 ### Tray App Deployment (CRITICAL)
 
 **The Restreamer app MUST run as a tray application in the user's desktop session, NOT as a background service or headless process.**
 
-#### Requirements
+The global `windows-desktop-session` module defines the schtasks pattern. For this project:
 
-1. **Always GUI mode** - Never use `--headless` flag. Always start via scheduled task in user session.
-2. **User session required** - The app MUST run in SessionId > 0 (not Session 0/SYSTEM). This ensures the tray icon is visible.
-3. **Left-click = Dashboard** - Clicking the tray icon opens the dashboard window.
-4. **Right-click = Menu** - Right-clicking shows the context menu.
-5. **No fallback to headless** - If scheduled task fails, CI must fail. Do not fall back to headless mode.
+- **App**: `Restreamer.exe`
+- **User**: `newlevel`
+- **Task name**: `RestreamerGUI`
+- **Install path**: `C:\Program Files\Restreamer\`
+- **No `--headless` flag** — ever. No fallback to headless mode.
 
-#### CI Deployment Flow
+Project-specific verification after deploy:
 
 ```powershell
-# 1. Stop existing instances
+# Stop existing
 taskkill /F /IM "Restreamer.exe"
 
-# 2. Create scheduled task for user session
-$action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
-$trigger = New-ScheduledTaskTrigger -AtLogon -User "newlevel"
-$principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
+# Register and start in user session (see windows-desktop-session module for full pattern)
 Register-ScheduledTask -TaskName "RestreamerGUI" ...
-
-# 3. Start via scheduled task (NOT Start-Process!)
 Start-ScheduledTask -TaskName "RestreamerGUI"
 
-# 4. Verify running in user session
+# Verify correct session
 $proc = Get-Process -Name "Restreamer"
 if ($proc.SessionId -eq 0) { throw "Must run in user session, not SYSTEM" }
 ```
 
-#### Why This Matters
-
-- stream.lan always has user "newlevel" logged in
-- Scheduled task runs in the user's interactive session
-- Tray icon only works in interactive sessions (not Session 0)
-- Headless mode was a workaround that should never be used
+stream.lan always has user "newlevel" logged in. The scheduled task runs in their interactive session. If the scheduled task fails, CI must fail — do not fall back to headless mode.
 
 ### Testing — PRIMARY GOAL
 
 **The main goal is complete, full E2E tests that cover ALL flows in the app and the web frontend.** Every functionality must be covered by an E2E test flow. All tests MUST be part of GitHub CI workflows.
 
-#### Zero Tolerance Rules
+The global `test-strictness` and `no-continue-on-error` modules apply. Additional project-specific rules:
 
-- **NO `#[ignore]`** — Never add `#[ignore]` to any test. Every test runs, every time.
-- **NO `#[cfg(skip)]`** or conditional compilation that disables tests.
-- **NO false positives** — No `assert!(true)`, no empty test bodies, no tests that pass without exercising real code. Every assertion must verify actual behavior.
-- **NO skipped tests** — CI output must show `0 ignored; 0 filtered out` for every test binary.
-- **NO mocking real code** — Mocks are ONLY acceptable for external network services (S3, manager HTTP). Internal code paths must be tested with real implementations.
 - **CI hardening job** — The workflow includes a dedicated `test-integrity` job that scans source code for `#[ignore]`, `assert!(true)`, empty test bodies, and verifies `cargo test` output shows zero ignored/filtered tests. This job MUST pass for the CI gate to be green.
-- **NO skipped deployment jobs** — The `deploy-stream-lan` job MUST run on every dev and main push. If it shows as "skipped", something is wrong with the workflow condition. Always use `always()` in complex `if` conditions to ensure proper evaluation.
-- **NO informational-only CI steps** — Every CI step must be binary: succeed and continue, or fail and stop. No steps that "check" something but always pass regardless of the result. If a check cannot be made reliable, remove the step entirely rather than hiding the gap behind a fake green checkmark.
-- **NO dismissing CI failures** — Never label a CI failure as "flaky", "pre-existing", or "known issue" to justify ignoring it. Every failure must be investigated and fixed. If a test fails, fix the test or the code — do not hand the user a red PR and suggest merging anyway. A red CI means the work is not done.
-- **E2E tests run on EVERY push to dev/main** — E2E tests must never be skipped on dev/main pushes, even when no Rust source files changed. The E2E job condition uses `!= 'failure'` (not `== 'success'`) so tests run whether deploy was fresh or skipped. The `e2e-gate` job requires both E2E tests to succeed on every push — deploy failure or E2E skip means red CI. The `test-integrity` job enforces these conditions.
+- **NO skipped deployment jobs** — The `deploy-stream-lan` job MUST run on every dev and main push. Always use `always()` in complex `if` conditions.
+- **E2E tests run on EVERY push to dev/main** — Never skipped. The E2E job condition uses `!= 'failure'` (not `== 'success'`). The `e2e-gate` job requires both E2E tests to succeed on every push.
 
 #### E2E Coverage Gate (MANDATORY)
 
-- **NO feature ships without E2E tests** — Every implemented UI feature, API endpoint, and user-facing functionality MUST have corresponding E2E tests before a PR can be considered green. A PR with new features but no E2E tests covering them is NOT mergeable, regardless of CI status.
-- **NO no-op test jobs** — If a CI test job cannot execute real tests (missing infrastructure, wrong platform, etc.), it MUST fail, not silently pass. A green CI means every test actually ran and verified real behavior.
+- **NO feature ships without E2E tests** — Every implemented UI feature, API endpoint, and user-facing functionality MUST have corresponding E2E tests before a PR can be considered green.
 - **E2E tests verify rendering** — Frontend E2E tests must verify that UI components actually render visible content (text, buttons, forms), not just that the page loads without errors. Check for specific text content, element visibility, and interactive behavior.
 - **CSS coverage** — Every CSS class referenced in UI components MUST be defined in the stylesheet. Missing CSS = invisible UI = broken feature = red CI.
 
@@ -168,23 +108,6 @@ if ($proc.SessionId -eq 0) { throw "Must run in user session, not SYSTEM" }
 - Write real end-to-end tests that exercise actual code paths — RTMP ingest, chunk storage, S3 upload, API endpoints, WebSocket events.
 - Not mocked, not hidden, not stubbed. Real code, real assertions.
 - Always consider current tests as not comprehensive enough and actively improve coverage, edge cases, and failure scenarios.
-
-#### General
-
-- Every feature, bugfix, and refactor must have corresponding tests that verify actual behavior.
-- ALL tests must pass — a passing test suite must reflect genuinely working code.
-
-### Bug Fix Protocol (MANDATORY)
-
-When fixing any reported issue, you MUST follow strict TDD:
-
-1. **Write a failing test first** that reproduces the exact reported behavior (e.g., "cache delay is 70s instead of 120s")
-2. **Verify the test FAILS** on CI before the fix
-3. **Implement the fix**
-4. **Verify the test PASSES** on CI after the fix
-5. **Never claim a bug is fixed** without a test that specifically asserts the correct behavior
-
-A bug fix without a reproducing test is not a fix — it's a guess. If the same bug is reported twice, the first fix was incomplete because it lacked a proper test.
 
 ## Rust Development
 
@@ -225,14 +148,13 @@ cargo tauri build                    # Production Tauri build (NSIS installer)
 - `cargo audit` — no known vulnerabilities
 - Max 1000 lines per `.rs` file
 - 60% minimum test coverage target
-- TDD approach: write tests alongside features
 - `SQLX_OFFLINE=true` — CI uses offline mode (no live DB during build)
 - ffmpeg required for E2E tests — CI installs it; tests panic if missing
 - `log` crate (not `tracing`) — xiu RTMP stack uses `log`; use `env_logger` in tests
 
 ### Architecture
 
-- **Workspace** with 11 crates (under `crates/`): `rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `rs-cloud`, `rs-delivery`, `rs-ffmpeg`, `rs-youtube`, `rs-ts-normalize`
+- **Workspace** with 10 crates (under `crates/`): `rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `rs-cloud`, `rs-delivery`, `rs-ffmpeg`, `rs-youtube`
 - **Excluded from workspace**: `src-tauri` (needs built frontend), `leptos-ui` (WASM target)
 - **Rust edition**: 2024 — requires `unsafe` for `std::env::set_var`/`remove_var`
 - **Minimum Rust**: 1.85
@@ -270,12 +192,6 @@ cargo tauri build                    # Production build with NSIS installer
 ```
 dev → PR to main → merge → auto-tag (restreamer-vX.Y.Z) → release.yml → GitHub Release with NSIS installer
 ```
-
-### Branch Policy
-
-- Exactly two branches: `main` (production) and `dev` (development)
-- All work on `dev`, PR to `main` for releases
-- No feature branches, no direct main pushes
 
 ## Deployment Targets
 

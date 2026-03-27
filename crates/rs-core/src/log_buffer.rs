@@ -113,7 +113,7 @@ mod tests {
         let buf = LogBuffer::new(100);
         buf.push(LogEntry {
             level: "INFO".into(),
-            target: "rs_inpoint::chunker".into(),
+            target: "rs_inpoint::flv_chunker".into(),
             message: "chunk".into(),
         });
         buf.push(LogEntry {

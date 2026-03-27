@@ -85,13 +85,13 @@ pub struct EndpointConfig {
     pub stream_key: String,
     #[serde(default)]
     pub is_fast: bool,
-    /// Chunk storage format: "flv" or "ts". Defaults to "ts" for backward compatibility.
+    /// Chunk storage format. Only "flv" is supported.
     #[serde(default = "default_chunk_format")]
     pub chunk_format: String,
 }
 
 fn default_chunk_format() -> String {
-    "ts".to_string()
+    "flv".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

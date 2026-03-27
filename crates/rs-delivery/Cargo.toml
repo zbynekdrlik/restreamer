@@ -20,7 +20,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 rust-s3.workspace = true
 async-trait = "0.1"
-rs-ts-normalize = { path = "../rs-ts-normalize" }
 rs-ffmpeg = { path = "../rs-ffmpeg" }
 
 [dev-dependencies]

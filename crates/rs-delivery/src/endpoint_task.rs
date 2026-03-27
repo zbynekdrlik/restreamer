@@ -1,7 +1,6 @@
 /// Per-endpoint delivery task: S3 poll -> normalize -> ffmpeg pipe.
 use async_trait::async_trait;
-use rs_ffmpeg::{ChunkFormat, FfmpegProcess, ServiceType};
-use rs_ts_normalize::TSTimestampNormalizer;
+use rs_ffmpeg::{FfmpegProcess, ServiceType};
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
@@ -11,12 +10,12 @@ use crate::s3_fetch::S3Fetcher;
 
 /// FLV stream normalizer: strips duplicate FLV headers and sequence headers
 /// from concatenated FLV chunks, producing a single continuous FLV stream.
-struct FlvStreamNormalizer {
+pub struct FlvStreamNormalizer {
     sent_header: bool,
 }
 
 impl FlvStreamNormalizer {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self { sent_header: false }
     }
 
@@ -24,8 +23,8 @@ impl FlvStreamNormalizer {
     /// First chunk: pass through as-is (has FLV header + sequence headers).
     /// Subsequent chunks: strip FLV header (9+4 bytes) and sequence header tags,
     /// keeping only data tags.
-    fn normalize(&mut self, data: &[u8]) -> Vec<u8> {
-        // Not valid FLV — pass through raw
+    pub fn normalize(&mut self, data: &[u8]) -> Vec<u8> {
+        // Not valid FLV -- pass through raw
         if data.len() < 13 || &data[0..3] != b"FLV" {
             return data.to_vec();
         }
@@ -56,7 +55,7 @@ impl FlvStreamNormalizer {
                 break;
             }
 
-            // Check if this is a sequence header (skip it — already sent in first chunk)
+            // Check if this is a sequence header (skip it -- already sent in first chunk)
             let is_seq_header = (tag_type == 9 || tag_type == 8)
                 && offset + 12 < data.len()
                 && data[offset + 12] == 0x00;
@@ -108,7 +107,6 @@ pub trait OutputProcessFactory: Send + Sync {
         service_type: ServiceType,
         stream_key: &str,
         alias: &str,
-        chunk_format: ChunkFormat,
     ) -> Result<Box<dyn OutputProcess>, String>;
 }
 
@@ -152,9 +150,8 @@ impl OutputProcessFactory for FfmpegProcessFactory {
         service_type: ServiceType,
         stream_key: &str,
         alias: &str,
-        chunk_format: ChunkFormat,
     ) -> Result<Box<dyn OutputProcess>, String> {
-        FfmpegProcess::spawn_with_format(service_type, stream_key, alias, chunk_format)
+        FfmpegProcess::spawn(service_type, stream_key, alias)
             .map(|p| Box::new(p) as Box<dyn OutputProcess>)
             .map_err(|e| e.to_string())
     }
@@ -252,7 +249,7 @@ impl EndpointHandle {
     }
 }
 
-/// Core endpoint loop — generic over ChunkFetcher and OutputProcessFactory for testability.
+/// Core endpoint loop -- generic over ChunkFetcher and OutputProcessFactory for testability.
 #[allow(clippy::too_many_arguments)]
 pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     fetcher: F,
@@ -292,29 +289,12 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
         }
     };
 
-    let chunk_format = ChunkFormat::from_config(&ep_cfg.chunk_format);
-
-    // TS normalizer only needed for MPEG-TS chunks (fixes cross-chunk timestamp discontinuities).
-    let use_ts_normalizer = chunk_format == ChunkFormat::Ts
-        && (service_type == ServiceType::YtHls || service_type == ServiceType::YtRtmp);
-    let mut normalizer = if use_ts_normalizer {
-        Some(TSTimestampNormalizer::new())
-    } else {
-        None
-    };
-
     // FLV stream normalizer: strips duplicate FLV headers from concatenated chunks.
-    let mut flv_normalizer = if chunk_format == ChunkFormat::Flv {
-        Some(FlvStreamNormalizer::new())
-    } else {
-        None
-    };
+    let mut flv_normalizer = FlvStreamNormalizer::new();
 
     tracing::info!(
         alias = %alias,
-        chunk_format = ?chunk_format,
-        use_ts_normalizer,
-        "Endpoint delivery configured"
+        "Endpoint delivery configured (FLV-only)"
     );
 
     let mut chunk_id = start_chunk_id;
@@ -355,15 +335,10 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 drop(s);
                 tracing::warn!(alias = %alias, "ffmpeg died, restarting in 3s");
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                if use_ts_normalizer {
-                    normalizer = Some(TSTimestampNormalizer::new());
-                }
-                if chunk_format == ChunkFormat::Flv {
-                    flv_normalizer = Some(FlvStreamNormalizer::new());
-                }
+                flv_normalizer = FlvStreamNormalizer::new();
             }
 
-            match factory.spawn(service_type, &ep_cfg.stream_key, &alias, chunk_format) {
+            match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {
                 Ok(new_proc) => {
                     tracing::info!(alias = %alias, "ffmpeg started");
                     proc = Some(new_proc);
@@ -429,13 +404,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     }
                 }
 
-                let processed = if let Some(ref mut norm) = normalizer {
-                    norm.normalize(&data)
-                } else if let Some(ref mut flv_norm) = flv_normalizer {
-                    flv_norm.normalize(&data)
-                } else {
-                    data
-                };
+                let processed = flv_normalizer.normalize(&data);
 
                 // Write full chunk directly to ffmpeg with timeout.
                 // ffmpeg handles its own output buffering to RTMP/HLS.
@@ -481,7 +450,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
 
                 chunk_id += 1;
                 // Minimal yield to let other tasks run. Delivery is naturally
-                // paced by S3 chunk availability — when we catch up to the live
+                // paced by S3 chunk availability -- when we catch up to the live
                 // edge, fetch_chunk returns None and the loop waits 2s.
                 tokio::task::yield_now().await;
             }
@@ -509,13 +478,8 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                             );
                             chunk_id = probe_id;
                             consecutive_chunk_misses = 0;
-                            // Reset normalizers on skip
-                            if use_ts_normalizer {
-                                normalizer = Some(TSTimestampNormalizer::new());
-                            }
-                            if chunk_format == ChunkFormat::Flv {
-                                flv_normalizer = Some(FlvStreamNormalizer::new());
-                            }
+                            // Reset normalizer on skip
+                            flv_normalizer = FlvStreamNormalizer::new();
                             let mut s = stats.lock().await;
                             s.consecutive_chunk_misses = 0;
                             s.stall_reason = None;

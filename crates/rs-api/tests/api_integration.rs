@@ -344,8 +344,8 @@ async fn logs_endpoints_filter_correctly() {
     });
     buffer.push(rs_core::log_buffer::LogEntry {
         level: "ERROR".into(),
-        target: "rs_inpoint::muxer".into(),
-        message: "Muxer failed".into(),
+        target: "rs_inpoint::flv_chunker".into(),
+        message: "Chunker failed".into(),
     });
     state.log_buffer = buffer;
 

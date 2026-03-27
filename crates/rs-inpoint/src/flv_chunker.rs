@@ -7,7 +7,14 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info};
 
-use crate::chunker::ChunkInfo;
+/// Information about a completed chunk.
+#[derive(Debug, Clone)]
+pub struct ChunkInfo {
+    pub path: PathBuf,
+    pub size: usize,
+    pub md5: String,
+    pub index: u64,
+}
 
 /// Maximum buffer size before a forced flush (50 MB).
 const MAX_BUFFER_SIZE: usize = 50 * 1024 * 1024;
@@ -24,9 +31,8 @@ const FLV_HEADER: [u8; 9] = [0x46, 0x4C, 0x56, 0x01, 0x05, 0x00, 0x00, 0x00, 0x0
 
 /// Receives raw FLV tag bodies from xiu and produces FLV chunk files.
 ///
-/// Unlike ChunkSink which receives pre-muxed MPEG-TS, this writes valid
-/// FLV files directly. Each chunk starts with an FLV header and codec
-/// sequence headers, making it independently playable.
+/// Writes valid FLV files directly. Each chunk starts with an FLV header
+/// and codec sequence headers, making it independently playable.
 pub struct FlvChunkSink {
     inner: Mutex<FlvChunkSinkInner>,
     chunk_tx: broadcast::Sender<ChunkInfo>,
@@ -157,7 +163,11 @@ impl FlvChunkSink {
         };
 
         if let Some(pending) = pending {
-            self.spawn_write(pending);
+            if self.spawn_write(pending) {
+                // Commit the chunk_index advance now that the write is accepted
+                let mut inner = self.inner.lock().await;
+                inner.chunk_index += 1;
+            }
         }
     }
 
@@ -202,7 +212,11 @@ impl FlvChunkSink {
             if inner.null_mode || inner.buffer.is_empty() {
                 None
             } else {
-                Self::extract_chunk(&mut inner)
+                let p = Self::extract_chunk(&mut inner);
+                if p.is_some() {
+                    inner.chunk_index += 1;
+                }
+                p
             }
         };
 
@@ -276,13 +290,14 @@ impl FlvChunkSink {
     }
 
     /// Extract chunk data from the buffer without performing I/O.
+    /// Does NOT increment chunk_index -- the caller must do so only after
+    /// confirming the chunk will actually be written (not dropped by backpressure).
     fn extract_chunk(inner: &mut FlvChunkSinkInner) -> Option<PendingChunkWrite> {
         if inner.buffer.is_empty() {
             return None;
         }
 
         let index = inner.chunk_index;
-        inner.chunk_index += 1;
 
         let mut hasher = Md5::new();
         hasher.update(&inner.buffer);
@@ -310,9 +325,11 @@ impl FlvChunkSink {
     }
 
     /// Spawn a background task to write chunk to disk.
-    /// This decouples disk I/O from frame processing — the calling task
+    /// This decouples disk I/O from frame processing -- the calling task
     /// returns immediately and never blocks on file writes.
-    fn spawn_write(&self, pending: PendingChunkWrite) {
+    /// Returns true if the chunk was accepted for writing, false if dropped
+    /// due to backpressure. The caller must increment chunk_index only on true.
+    fn spawn_write(&self, pending: PendingChunkWrite) -> bool {
         let current = self.pending_writes.fetch_add(1, Ordering::Relaxed);
         if current >= MAX_PENDING_WRITES {
             self.pending_writes.fetch_sub(1, Ordering::Relaxed);
@@ -321,7 +338,7 @@ impl FlvChunkSink {
                 index = pending.index,
                 "Disk too slow: {current} pending writes, dropping chunk"
             );
-            return;
+            return false;
         }
 
         let chunk_tx = self.chunk_tx.clone();
@@ -330,6 +347,7 @@ impl FlvChunkSink {
             Self::do_write_and_notify(pending, chunk_tx).await;
             pending_counter.fetch_sub(1, Ordering::Relaxed);
         });
+        true
     }
 
     /// Write chunk to disk and send notification (used by both spawn_write and flush).

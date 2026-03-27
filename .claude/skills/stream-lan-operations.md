@@ -1,6 +1,6 @@
 ---
 name: stream-lan-operations
-description: Operations guide for stream.lan Windows PC - SSH, OBS WebSocket API, Restreamer client, and full-flow testing
+description: Operations guide for stream.lan Windows PC - MCP tools, OBS WebSocket API, Restreamer client, and full-flow testing
 ---
 
 # stream.lan Operations Guide
@@ -11,36 +11,35 @@ This skill documents ALL operations for the stream.lan Windows PC. **USE THIS SK
 
 | Service         | URL/Port                            | Credentials                                      |
 | --------------- | ----------------------------------- | ------------------------------------------------ |
-| SSH             | `stream.lan:22`                     | user: `newlevel`, pass: `newlevel`               |
+| MCP Server      | `win-stream-snv` (stream.lan:8090)  | Bearer token (configured in ~/.claude.json)      |
 | OBS WebSocket   | `ws://stream.lan:4455`              | password: `JhRfqdTmuifYq60y` (auth not required) |
 | Restreamer API  | `http://127.0.0.1:8910`             | (local only)                                     |
 | Restreamer RTMP | `rtmp://stream.lan:1234/live/{app}` | (no auth)                                        |
 
-## SSH Access
+## MCP Access
 
-Always use sshpass for automated SSH access:
+The `win-stream-snv` MCP server provides full Windows desktop control for stream.lan. It runs in the user's desktop session (Session 1+), so GUI apps started via MCP are immediately visible — no Task Scheduler workaround needed.
 
-```bash
-# Execute command
-sshpass -p 'newlevel' ssh newlevel@stream.lan "command here"
+**Key tools:**
 
-# PowerShell command (for Windows-specific tasks)
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"Your-Command\""
-```
+| Tool                                  | Purpose                     |
+| ------------------------------------- | --------------------------- |
+| `mcp__win-stream-snv__Shell`          | Run PowerShell/cmd commands |
+| `mcp__win-stream-snv__ListProcesses`  | List running processes      |
+| `mcp__win-stream-snv__KillProcess`    | Kill a process by name      |
+| `mcp__win-stream-snv__ServiceList`    | List Windows services       |
+| `mcp__win-stream-snv__ServiceStart`   | Start a Windows service     |
+| `mcp__win-stream-snv__ServiceStop`    | Stop a Windows service      |
+| `mcp__win-stream-snv__FileRead`       | Read a file                 |
+| `mcp__win-stream-snv__FileWrite`      | Write a file                |
+| `mcp__win-stream-snv__PortCheck`      | Check if a port is open     |
+| `mcp__win-stream-snv__Snapshot`       | Take desktop screenshot     |
+| `mcp__win-stream-snv__OCR`            | Extract text from screen    |
+| `mcp__win-stream-snv__NetConnections` | List network connections    |
 
 ## OBS WebSocket API
 
 OBS has WebSocket enabled at `ws://stream.lan:4455`. Use this to control OBS remotely.
-
-### Check OBS Status
-
-```bash
-# Using websocat (if available) or Python
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"
-\$ws = New-Object System.Net.WebSockets.ClientWebSocket
-# ... WebSocket operations
-\""
-```
 
 ### OBS Configuration Files
 
@@ -56,31 +55,20 @@ To switch OBS from YouTube to Restreamer (or vice versa):
 
 **Option 1: Edit service.json directly**
 
-```bash
+```
 # Backup current config
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"
-Copy-Item 'C:\\Users\\newlevel\\AppData\\Roaming\\obs-studio\\basic\\profiles\\Stream_Obs\\service.json' 'C:\\Users\\newlevel\\AppData\\Roaming\\obs-studio\\basic\\profiles\\Stream_Obs\\service.json.bak'
-\""
+mcp__win-stream-snv__Shell command="Copy-Item 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json' 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json.bak'"
 
 # Set to Restreamer
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"
-@{
-    type = 'rtmp_custom'
-    settings = @{
-        server = 'rtmp://127.0.0.1:1234/live'
-        key = 'test'
-    }
-} | ConvertTo-Json -Depth 5 | Set-Content 'C:\\Users\\newlevel\\AppData\\Roaming\\obs-studio\\basic\\profiles\\Stream_Obs\\service.json'
-\""
+mcp__win-stream-snv__Shell command="@{ type = 'rtmp_custom'; settings = @{ server = 'rtmp://127.0.0.1:1234/live'; key = 'test' } } | ConvertTo-Json -Depth 5 | Set-Content 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json'"
 
-# Restart OBS for changes to take effect
-sshpass -p 'newlevel' ssh newlevel@stream.lan "taskkill /F /IM obs64.exe; Start-Sleep 2; Start-Process 'C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe'"
+# Restart OBS for changes to take effect (see "Starting OBS Correctly" below)
 ```
 
 **Option 2: Use OBS WebSocket API (preferred - no restart needed)**
 
 ```python
-# Python example using obs-websocket-py
+# Python example using obs-websocket-py (run from Linux)
 import obsws
 ws = obsws.obsws("stream.lan", 4455, "JhRfqdTmuifYq60y")
 ws.connect()
@@ -110,26 +98,25 @@ As of last check:
 
 ### Service Status
 
-```bash
+```
 # Check if running
-sshpass -p 'newlevel' ssh newlevel@stream.lan "tasklist | findstr -i restreamer"
+mcp__win-stream-snv__ListProcesses filter="restreamer"
 
-# Expected output:
-# restreamer-service.exe    PID  Services  0  ~22MB
-# restreamer-tray.exe       PID  Console   1  ~30MB
+# Or via Shell
+mcp__win-stream-snv__Shell command="Get-Process -Name Restreamer | Format-List Id,SessionId,WorkingSet64"
 ```
 
 ### Restreamer API (local)
 
-```bash
-# Get chunk status
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/chunks' | ConvertTo-Json -Depth 3\""
-
+```
 # Get status
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/status' | ConvertTo-Json\""
+mcp__win-stream-snv__Shell command="Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/status' | ConvertTo-Json"
+
+# Get chunk status
+mcp__win-stream-snv__Shell command="Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/chunks' | ConvertTo-Json -Depth 3"
 
 # Get streaming events
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/streaming-events' | ConvertTo-Json -Depth 3\""
+mcp__win-stream-snv__Shell command="Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/streaming-events' | ConvertTo-Json -Depth 3"
 ```
 
 ### Restreamer Config
@@ -155,24 +142,38 @@ Location: `C:\ProgramData\Restreamer\config.json`
 }
 ```
 
-### Restart Restreamer Service
+### Restart Restreamer
 
-```bash
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"
-Stop-Service -Name 'restreamer-service' -Force -ErrorAction SilentlyContinue
-taskkill /F /IM restreamer-service.exe 2>&1 | Out-Null
-taskkill /F /IM restreamer-tray.exe 2>&1 | Out-Null
-Start-Sleep -Seconds 2
-Start-Service -Name 'restreamer-service'
-Start-ScheduledTask -TaskName 'RestreamerTray'
-\""
 ```
+# Kill existing process
+mcp__win-stream-snv__KillProcess name="Restreamer"
+
+# Wait a moment, then start via Shell (MCP runs in user session, so GUI works directly)
+mcp__win-stream-snv__Shell command="Start-Process 'C:\Program Files\Restreamer\Restreamer.exe'" cwd="C:\Program Files\Restreamer"
+
+# Verify it's running
+mcp__win-stream-snv__ListProcesses filter="restreamer"
+```
+
+## Visual Verification
+
+MCP provides visual inspection capabilities that were not possible with SSH:
+
+```
+# Take a desktop screenshot to verify UI state
+mcp__win-stream-snv__Snapshot
+
+# Extract text from the screen (useful for verifying dialog content)
+mcp__win-stream-snv__OCR
+```
+
+Use `Snapshot` after starting apps, changing configs, or any operation where visual confirmation is valuable.
 
 ## Full-Flow Testing Procedure
 
 ### Prerequisites Checklist
 
-1. [ ] Restreamer service running on stream.lan
+1. [ ] Restreamer running on stream.lan
 2. [ ] OBS running on stream.lan
 3. [ ] Manager server accessible (restreamer.newlevel.media)
 4. [ ] S3 credentials configured
@@ -181,38 +182,24 @@ Start-ScheduledTask -TaskName 'RestreamerTray'
 
 ### Step 1: Verify Restreamer is Ready
 
-```bash
-# Check service running
-sshpass -p 'newlevel' ssh newlevel@stream.lan "tasklist | findstr -i restreamer"
+```
+# Check process running
+mcp__win-stream-snv__ListProcesses filter="restreamer"
 
 # Check no existing chunks (fresh test)
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"(Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/chunks').Count\""
+mcp__win-stream-snv__Shell command="(Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/chunks').Count"
 ```
 
 ### Step 2: Switch OBS to Restreamer
 
-```bash
-# Backup and change OBS stream destination
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"
-# Backup
-Copy-Item 'C:\\Users\\newlevel\\AppData\\Roaming\\obs-studio\\basic\\profiles\\Stream_Obs\\service.json' 'C:\\Users\\newlevel\\AppData\\Roaming\\obs-studio\\basic\\profiles\\Stream_Obs\\service.json.youtube-backup'
+```
+# Backup OBS config
+mcp__win-stream-snv__Shell command="Copy-Item 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json' 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json.youtube-backup'"
 
 # Set to Restreamer
-@{
-    type = 'rtmp_custom'
-    settings = @{
-        server = 'rtmp://127.0.0.1:1234/live'
-        key = 'test'
-    }
-} | ConvertTo-Json -Depth 5 | Set-Content 'C:\\Users\\newlevel\\AppData\\Roaming\\obs-studio\\basic\\profiles\\Stream_Obs\\service.json'
-\""
+mcp__win-stream-snv__Shell command="@{ type = 'rtmp_custom'; settings = @{ server = 'rtmp://127.0.0.1:1234/live'; key = 'test' } } | ConvertTo-Json -Depth 5 | Set-Content 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json'"
 
-# Restart OBS
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"
-taskkill /F /IM obs64.exe 2>&1 | Out-Null
-Start-Sleep -Seconds 3
-Start-Process 'C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe'
-\""
+# Restart OBS (see "Starting OBS Correctly" section below)
 ```
 
 ### Step 3: Start Streaming via OBS WebSocket API
@@ -270,41 +257,18 @@ asyncio.run(get_status())
 
 ### Step 4: Verify Chunks Being Created
 
-```bash
-# Watch for new chunks (run every few seconds)
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"
-\$chunks = Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/chunks'
-Write-Host 'Total chunks:' \$chunks.Count
-\$chunks.value | Select-Object -Last 3 | ForEach-Object {
-    Write-Host 'ID:' \$_.id 'Created:' \$_.created_at 'Sent:' \$_.sent
-}
-\""
+```
+# Watch for new chunks
+mcp__win-stream-snv__Shell command="$chunks = Invoke-RestMethod -Uri 'http://127.0.0.1:8910/api/v1/chunks'; Write-Host 'Total chunks:' $chunks.Count; $chunks | Select-Object -Last 3 | ForEach-Object { Write-Host 'ID:' $_.id 'Created:' $_.created_at 'Sent:' $_.sent }"
 ```
 
-### Step 5: Verify Chunks in Manager
+### Step 5: Restore OBS to YouTube (after test)
 
-```bash
-# Check manager server
-sshpass -p 'lm-wC\0d..1)87oQ' ssh root@172.105.95.118 "cd /root/kristian/manager-server/restreamer-manager && /root/.virtualenvs/venv/bin/python manage.py shell -c \"
-from restreamer.models import ChunkRecord
-from django.utils import timezone
-from datetime import timedelta
-
-recent = timezone.now() - timedelta(minutes=5)
-count = ChunkRecord.objects.filter(created_at__gte=recent).count()
-print(f'Chunks received in last 5 minutes: {count}')
-\""
 ```
+# Restore YouTube config
+mcp__win-stream-snv__Shell command="Copy-Item 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json.youtube-backup' 'C:\Users\newlevel\AppData\Roaming\obs-studio\basic\profiles\Stream_Obs\service.json' -Force"
 
-### Step 6: Restore OBS to YouTube (after test)
-
-```bash
-sshpass -p 'newlevel' ssh newlevel@stream.lan "powershell -Command \"
-Copy-Item 'C:\\Users\\newlevel\\AppData\\Roaming\\obs-studio\\basic\\profiles\\Stream_Obs\\service.json.youtube-backup' 'C:\\Users\\newlevel\\AppData\\Roaming\\obs-studio\\basic\\profiles\\Stream_Obs\\service.json' -Force
-taskkill /F /IM obs64.exe 2>&1 | Out-Null
-Start-Sleep -Seconds 3
-Start-Process 'C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe'
-\""
+# Restart OBS (see "Starting OBS Correctly" below)
 ```
 
 ## Troubleshooting
@@ -317,36 +281,37 @@ Start-Process 'C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe'
 
 **Diagnosis:**
 
-```bash
+```
 # Check what owns port 1234
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'netstat -ano | findstr ":1234"'
+mcp__win-stream-snv__PortCheck host="127.0.0.1" port=1234
+
+# Check network connections for port 1234
+mcp__win-stream-snv__NetConnections
 
 # Check if ffmpeg is from old client
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Get-Process ffmpeg | Select-Object Id, Path"'
+mcp__win-stream-snv__Shell command="Get-Process ffmpeg -ErrorAction SilentlyContinue | Select-Object Id, Path"
 # BAD: Path = C:\Users\newlevel\restreamer\local-client\ffmpeg.exe
 # GOOD: No ffmpeg, Rust service handles RTMP directly
 ```
 
 **Fix:**
 
-```bash
+```
 # Kill old Python client and ffmpeg
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "
-Get-Process ffmpeg -ErrorAction SilentlyContinue | Stop-Process -Force
-Get-Process python*, python3* -ErrorAction SilentlyContinue | Stop-Process -Force
-"'
+mcp__win-stream-snv__KillProcess name="ffmpeg"
+mcp__win-stream-snv__Shell command="Get-Process python*, python3* -ErrorAction SilentlyContinue | Stop-Process -Force"
 
-# Restart Rust service to bind port 1234
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Restart-Service -Name restreamer-service -Force"'
+# Restart Restreamer to bind port 1234
+mcp__win-stream-snv__KillProcess name="Restreamer"
+mcp__win-stream-snv__Shell command="Start-Process 'C:\Program Files\Restreamer\Restreamer.exe'" cwd="C:\Program Files\Restreamer"
 
-# Verify Rust service owns port
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'netstat -ano | findstr ":1234"'
-# Should show restreamer-service.exe PID in LISTENING state
+# Verify Restreamer owns port
+mcp__win-stream-snv__PortCheck host="127.0.0.1" port=1234
 ```
 
 ### OBS Not Connecting to Restreamer RTMP
 
-1. Check Restreamer service is running
+1. Check Restreamer is running: `mcp__win-stream-snv__ListProcesses filter="restreamer"`
 2. Check NO ffmpeg is blocking port 1234 (see above)
 3. Check firewall allows port 1234
 4. Check RTMP URL format: `rtmp://127.0.0.1:1234/live/test`
@@ -355,20 +320,20 @@ sshpass -p 'newlevel' ssh newlevel@stream.lan 'netstat -ano | findstr ":1234"'
 
 1. Verify RTMP stream is actually being sent
 2. **Check port 1234 is owned by Rust service, not old Python ffmpeg**
-3. Check Restreamer logs: `C:\ProgramData\Restreamer\logs\`
+3. Check Restreamer logs: `mcp__win-stream-snv__FileRead path="C:\ProgramData\Restreamer\logs\"`
 4. Verify config.json has correct settings
 
 ### Chunks Not Uploading to S3
 
 1. Check S3 credentials in config.json
-2. Check internet connectivity
+2. Check internet connectivity: `mcp__win-stream-snv__Ping host="eu-central-1.linodeobjects.com"`
 3. Check manager API is accessible
 
 ## OBS Management Rules
 
 ### NEVER Kill OBS Abruptly
 
-**DO NOT** use `taskkill /F /IM obs64.exe` - this causes:
+**DO NOT** use `KillProcess name="obs64"` — this causes:
 
 1. Recovery dialog on next start
 2. Duplicate OBS processes
@@ -377,19 +342,19 @@ sshpass -p 'newlevel' ssh newlevel@stream.lan 'netstat -ano | findstr ":1234"'
 
 ### Proper OBS Restart (if absolutely necessary)
 
-```bash
-# CORRECT: Graceful shutdown via WebSocket
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'python -c "
+```
+# CORRECT: Graceful shutdown via WebSocket (from Linux)
+python3 -c "
 import asyncio, json, websockets
 async def quit_obs():
-    async with websockets.connect(\"ws://127.0.0.1:4455\") as ws:
+    async with websockets.connect('ws://stream.lan:4455') as ws:
         await ws.recv()
-        await ws.send(json.dumps({\"op\":1,\"d\":{\"rpcVersion\":1}}))
+        await ws.send(json.dumps({'op':1,'d':{'rpcVersion':1}}))
         await ws.recv()
-        await ws.send(json.dumps({\"op\":6,\"d\":{\"requestType\":\"ExitOBS\",\"requestId\":\"1\"}}))
+        await ws.send(json.dumps({'op':6,'d':{'requestType':'ExitOBS','requestId':'1'}}))
         print(await ws.recv())
 asyncio.run(quit_obs())
-" > C:\temp\obs_quit.txt 2>&1'
+"
 ```
 
 ### Prefer WebSocket Over Config Changes
@@ -402,35 +367,30 @@ Instead of editing service.json and restarting OBS, use WebSocket API:
 
 ### Starting OBS Correctly
 
-**ALWAYS use the scheduled task** with the correct configuration:
+Since MCP runs in the user's desktop session, OBS can be started directly without Task Scheduler:
 
-**CRITICAL**: The scheduled task MUST have `-WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"`. Without this, OBS starts in a broken state (~37MB memory, no WebSocket server, error dialogs). A healthy OBS uses ~1GB+ memory.
-
-```powershell
-# Register the task with correct settings (idempotent - safe to run every time)
-$action = New-ScheduledTaskAction `
-  -Execute "C:\Program Files\obs-studio\bin\64bit\obs64.exe" `
-  -Argument "--disable-shutdown-check" `
-  -WorkingDirectory "C:\Program Files\obs-studio\bin\64bit"
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(1)
-$principal = New-ScheduledTaskPrincipal -UserId "newlevel" -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 24)
-
-Unregister-ScheduledTask -TaskName "Start OBS Studio" -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName "Start OBS Studio" -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-Start-ScheduledTask -TaskName "Start OBS Studio"
+```
+# Start OBS with correct working directory (CRITICAL for proper initialization)
+mcp__win-stream-snv__Shell command="Start-Process 'C:\Program Files\obs-studio\bin\64bit\obs64.exe' -ArgumentList '--disable-shutdown-check'" cwd="C:\Program Files\obs-studio\bin\64bit"
 ```
 
-```bash
-# From Linux via SSH:
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'powershell -Command "Start-ScheduledTask -TaskName \"Start OBS Studio\""'
+**CRITICAL**: The working directory MUST be `C:\Program Files\obs-studio\bin\64bit`. Without this, OBS starts in a broken state (~37MB memory, no WebSocket server, error dialogs). A healthy OBS uses ~1GB+ memory.
+
+**Verify OBS started correctly:**
+
 ```
+# Check process and memory usage
+mcp__win-stream-snv__Shell command="Get-Process obs64 | Format-List Id, WorkingSet64"
+# WorkingSet64 should be > 100MB (healthy) not ~37MB (broken)
 
-**NEVER start OBS directly** without the flag or working directory:
+# Verify single OBS process
+mcp__win-stream-snv__ListProcesses filter="obs64"
 
-```bash
-# WRONG - causes recovery dialogs on next improper shutdown
-Start-Process 'C:\Program Files\obs-studio\bin\64bit\obs64.exe'
+# Verify WebSocket is listening
+mcp__win-stream-snv__PortCheck host="127.0.0.1" port=4455
+
+# Take screenshot to visually verify OBS is running
+mcp__win-stream-snv__Snapshot
 ```
 
 ### Recovery From Bad State (duplicate OBS processes)
@@ -438,26 +398,29 @@ Start-Process 'C:\Program Files\obs-studio\bin\64bit\obs64.exe'
 If OBS is in bad state with recovery dialog:
 
 1. **Ask the user** to manually close OBS and dismiss dialogs
-2. Then use scheduled task to start fresh: `Start-ScheduledTask -TaskName "Start OBS Studio"`
-3. **NEVER try to kill OBS processes remotely** - this makes things worse
+2. Then start fresh using the Shell command above
+3. **NEVER try to kill OBS processes remotely** — this makes things worse
 
 ### Checking OBS Health
 
-```bash
+```
 # Verify single OBS process
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'tasklist | findstr obs'
+mcp__win-stream-snv__ListProcesses filter="obs64"
 # Should show exactly ONE obs64.exe process
 
-# Verify WebSocket is listening (TCP, not UDP!)
-sshpass -p 'newlevel' ssh newlevel@stream.lan 'netstat -an | findstr "4455.*LISTENING"'
-# Should show TCP listener on 4455
+# Verify WebSocket is listening
+mcp__win-stream-snv__PortCheck host="127.0.0.1" port=4455
+
+# Visual check
+mcp__win-stream-snv__Snapshot
 ```
 
 ## Important Notes
 
-- **NEVER** give manual instructions when these automated commands exist
-- **NEVER** kill OBS with taskkill - use WebSocket ExitOBS or ask user
+- **NEVER** give manual instructions when these automated MCP tools exist
+- **NEVER** kill OBS with KillProcess — use WebSocket ExitOBS or ask user
 - **ALWAYS** verify current state before making changes
-- **ALWAYS** backup configs before modifying
+- **ALWAYS** backup configs before modifying (use FileRead + FileWrite or Shell Copy-Item)
 - The last chunk timestamp tells you if streaming is active
 - OBS requires restart after service.json changes (unless using WebSocket API)
+- MCP runs in user desktop session — no Task Scheduler needed for GUI apps
