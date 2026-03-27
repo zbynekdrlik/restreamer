@@ -1255,9 +1255,9 @@ test.describe("YouTube Health Badge", () => {
     );
     await expect(ytCard).toBeVisible({ timeout: 10000 });
     const badge = ytCard.locator(".yt-health-badge");
-    // Badge should appear after initial poll (5s check + fetch)
-    await expect(badge).toBeVisible({ timeout: 15000 });
-    await expect(badge).toHaveClass(/good/);
+    // Badge renders immediately as "unknown", then updates after poll fetches YouTube status
+    // The 5s interval fires, detects endpoints, fetches /youtube/status, updates store
+    await expect(badge).toHaveClass(/good/, { timeout: 15000 });
     await expect(badge).toHaveText("good");
   });
 
