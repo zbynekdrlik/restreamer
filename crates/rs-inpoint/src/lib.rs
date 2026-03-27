@@ -1,6 +1,5 @@
-pub mod chunker;
+pub mod flv_chunker;
 pub mod media_receiver;
-pub mod muxer;
 pub mod rtmp_server;
 
 use thiserror::Error;
@@ -12,7 +11,4 @@ pub enum InpointError {
 
     #[error("protocol error: {0}")]
     Protocol(String),
-
-    #[error("muxer error: {0}")]
-    Muxer(String),
 }

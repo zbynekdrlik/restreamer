@@ -10,6 +10,8 @@ pub struct LiveStream {
     pub id: String,
     pub snippet: StreamSnippet,
     pub status: StreamStatus,
+    #[serde(default)]
+    pub cdn: Option<StreamCdn>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,9 +27,38 @@ pub struct StreamStatus {
     pub health_status: Option<HealthStatus>,
 }
 
+/// CDN configuration and actual stream details from YouTube.
+/// If resolution/frameRate are populated, YouTube successfully decoded the stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamCdn {
+    #[serde(default)]
+    pub ingestion_type: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub frame_rate: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HealthStatus {
     pub status: String,
+    #[serde(default)]
+    pub configuration_issues: Vec<ConfigurationIssue>,
+    #[serde(default)]
+    pub last_update_time_seconds: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigurationIssue {
+    #[serde(rename = "type")]
+    pub issue_type: String,
+    pub severity: String,
+    pub reason: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,7 +90,7 @@ pub async fn list_live_streams(access_token: &str) -> Result<Vec<LiveStream>> {
     let resp = client
         .get(format!("{YOUTUBE_API_BASE}/liveStreams"))
         .bearer_auth(access_token)
-        .query(&[("part", "id,snippet,status"), ("mine", "true")])
+        .query(&[("part", "id,snippet,status,cdn"), ("mine", "true")])
         .send()
         .await?;
 
@@ -82,17 +113,15 @@ pub async fn is_stream_receiving(access_token: &str) -> Result<bool> {
     Ok(streams.iter().any(|s| s.status.stream_status == "active"))
 }
 
-/// List active live broadcasts.
+/// List all live broadcasts (mine=true, all types, all states).
 pub async fn list_live_broadcasts(access_token: &str) -> Result<Vec<LiveBroadcast>> {
     let client = Client::new();
+    // Try mine=true first to get all broadcasts for the authenticated user.
+    // This returns broadcasts in all lifecycle states (ready, testing, live, complete).
     let resp = client
         .get(format!("{YOUTUBE_API_BASE}/liveBroadcasts"))
         .bearer_auth(access_token)
-        .query(&[
-            ("part", "id,snippet,status"),
-            ("broadcastStatus", "active"),
-            ("broadcastType", "all"),
-        ])
+        .query(&[("part", "id,snippet,status"), ("mine", "true")])
         .send()
         .await?;
 
@@ -107,6 +136,26 @@ pub async fn list_live_broadcasts(access_token: &str) -> Result<Vec<LiveBroadcas
 
     let body: ListResponse<LiveBroadcast> = resp.json().await?;
     Ok(body.items)
+}
+
+/// Check if any broadcast is in "testing" state (video preview is playing).
+/// This is the definitive check — "testing" means YouTube successfully decoded
+/// the stream and the preview is rendering. If the broadcast stays in "ready"
+/// despite streamStatus=="active", the stream data is invalid/unplayable.
+pub async fn is_broadcast_testing(access_token: &str) -> Result<bool> {
+    let broadcasts = list_live_broadcasts(access_token).await?;
+    Ok(broadcasts
+        .iter()
+        .any(|b| b.status.life_cycle_status == "testing"))
+}
+
+/// Get the lifecycle status of all broadcasts for diagnostics.
+pub async fn get_broadcast_statuses(access_token: &str) -> Result<Vec<(String, String)>> {
+    let broadcasts = list_live_broadcasts(access_token).await?;
+    Ok(broadcasts
+        .into_iter()
+        .map(|b| (b.snippet.title, b.status.life_cycle_status))
+        .collect())
 }
 
 #[cfg(test)]

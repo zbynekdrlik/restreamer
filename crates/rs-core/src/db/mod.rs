@@ -62,6 +62,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (7, MIGRATION_V7_SQL),
         (8, MIGRATION_V8_SQL),
         (9, MIGRATION_V9_SQL),
+        (10, MIGRATION_V10_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -79,6 +80,19 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
                 .await?;
             tx.commit().await?;
         }
+    }
+
+    // Startup cleanup: delete old sent chunk records to keep the DB fast.
+    // Without this, CI runs accumulate 100K+ rows making startup take >30s.
+    let deleted: i64 = sqlx::query(
+        "DELETE FROM chunk_records WHERE sent = 1 AND created_at < datetime('now', '-1 hour')",
+    )
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected() as i64)
+    .unwrap_or(0);
+    if deleted > 0 {
+        tracing::info!("Cleaned {deleted} old chunk records from database");
     }
 
     Ok(())
@@ -248,6 +262,10 @@ CREATE INDEX idx_chunks_event_sequence ON chunk_records(streaming_event_id, sequ
 
 const MIGRATION_V9_SQL: &str = r#"
 ALTER TABLE streaming_events ADD COLUMN cache_delay_secs INTEGER
+"#;
+
+const MIGRATION_V10_SQL: &str = r#"
+ALTER TABLE chunk_records ADD COLUMN chunk_format TEXT NOT NULL DEFAULT 'ts'
 "#;
 
 // --- Client Profile ---

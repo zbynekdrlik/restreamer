@@ -16,7 +16,7 @@ use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{InpointState, WsEvent};
 use rs_endpoint::s3::S3Client;
 use rs_endpoint::uploader::ChunkUploader;
-use rs_inpoint::chunker::ChunkSink;
+use rs_inpoint::flv_chunker::FlvChunkSink;
 use rs_inpoint::rtmp_server::RtmpServer;
 
 use crate::shutdown::ShutdownCoordinator;
@@ -157,14 +157,14 @@ impl ServiceCore {
         // Chunk directory
         tokio::fs::create_dir_all(&self.chunk_dir).await?;
 
-        // RTMP Inpoint server
-        let chunk_sink = Arc::new(ChunkSink::new(
+        // RTMP Inpoint server (FLV-only)
+        let flv_chunk_sink = Arc::new(FlvChunkSink::new(
             self.chunk_dir.clone(),
             Duration::from_millis(self.config.inpoint.chunk_duration_ms),
         ));
 
-        // Forward chunk events to the database
-        let mut chunk_rx = chunk_sink.subscribe();
+        // Forward chunk events to the database.
+        let mut chunk_rx = flv_chunk_sink.subscribe();
         let chunk_pool = pool.clone();
         let chunk_ws_tx = ws_tx.clone();
         let chunk_task = tokio::spawn(async move {
@@ -218,7 +218,7 @@ impl ServiceCore {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("Chunk event receiver lagged, missed {n} events");
+                        tracing::error!("Chunk broadcast lagged, LOST {n} chunks from DB tracking");
                         continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -233,13 +233,13 @@ impl ServiceCore {
         let inpoint_shutdown_rx = shutdown.subscribe();
         let inpoint_bind = self.config.inpoint.rtmp_bind.clone();
         let inpoint_port = self.config.inpoint.rtmp_port;
-        let inpoint_sink = Arc::clone(&chunk_sink);
+        let inpoint_flv_sink = Arc::clone(&flv_chunk_sink);
         let inpoint_state_clone = inpoint_state.clone();
         let inpoint_task = tokio::spawn(async move {
             run_inpoint_loop(
                 inpoint_bind,
                 inpoint_port,
-                inpoint_sink,
+                inpoint_flv_sink,
                 inpoint_state_clone,
                 inpoint_restart_rx,
                 inpoint_shutdown_rx,
@@ -289,7 +289,7 @@ impl ServiceCore {
         shutdown.trigger();
 
         // Flush remaining chunks before uploader stops
-        chunk_sink.flush().await;
+        flv_chunk_sink.flush().await;
 
         // Wait for all tasks
         match inpoint_task.await {
@@ -301,7 +301,7 @@ impl ServiceCore {
             Err(e) => tracing::error!("Endpoint task panicked: {e}"),
         }
         // Drop the chunk channel so the chunk task can exit
-        drop(chunk_sink);
+        drop(flv_chunk_sink);
         match chunk_task.await {
             Ok(()) => info!("Chunk forwarder stopped cleanly"),
             Err(e) => tracing::error!("Chunk forwarder panicked: {e}"),
@@ -323,7 +323,7 @@ impl ServiceCore {
 async fn run_inpoint_loop(
     bind: String,
     port: u16,
-    chunk_sink: Arc<ChunkSink>,
+    flv_chunk_sink: Arc<FlvChunkSink>,
     inpoint_state: InpointState,
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
@@ -331,40 +331,52 @@ async fn run_inpoint_loop(
     loop {
         let server = RtmpServer::new(&bind, port);
         let rtmp_shutdown = server.shutdown_handle();
-        let sink = Arc::clone(&chunk_sink);
+        let flv_sink = Arc::clone(&flv_chunk_sink);
         let state = inpoint_state.clone();
-        let mut handle = tokio::spawn(async move { server.run(sink, state).await });
+        let mut handle = tokio::spawn(async move { server.run(flv_sink, state).await });
 
         info!("Inpoint RTMP server started on {bind}:{port}");
 
-        let restart = tokio::select! {
-            result = &mut handle => {
-                match result {
-                    Ok(Ok(())) => info!("RTMP server stopped"),
-                    Ok(Err(e)) => tracing::error!("RTMP server error: {e}"),
-                    Err(e) => tracing::error!("RTMP task panicked: {e}"),
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(60));
+        heartbeat.tick().await; // consume the immediate first tick
+
+        let restart = loop {
+            tokio::select! {
+                result = &mut handle => {
+                    match result {
+                        Ok(Ok(())) => info!("RTMP server stopped"),
+                        Ok(Err(e)) => tracing::error!("RTMP server error: {e}"),
+                        Err(e) => tracing::error!("RTMP task panicked: {e}"),
+                    }
+                    break false;
                 }
-                false
-            }
-            msg = restart_rx.recv() => {
-                if msg.is_some() {
-                    info!("Inpoint restart requested");
+                msg = restart_rx.recv() => {
+                    if msg.is_some() {
+                        info!("Inpoint restart requested");
+                        let _ = rtmp_shutdown.send(());
+                        let _ = handle.await;
+                        break true;
+                    } else {
+                        break false; // channel closed
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Inpoint shutting down");
                     let _ = rtmp_shutdown.send(());
                     let _ = handle.await;
-                    true
-                } else {
-                    false // channel closed
+                    break false;
                 }
-            }
-            _ = shutdown_rx.recv() => {
-                info!("Inpoint shutting down");
-                let _ = rtmp_shutdown.send(());
-                let _ = handle.await;
-                false
+                _ = heartbeat.tick() => {
+                    let connected = inpoint_state.is_connected();
+                    info!(
+                        rtmp_connected = connected,
+                        "Inpoint heartbeat: RTMP server alive"
+                    );
+                }
             }
         };
 
-        chunk_sink.flush().await;
+        flv_chunk_sink.flush().await;
 
         if !restart {
             break;

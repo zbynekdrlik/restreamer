@@ -32,8 +32,12 @@ fn data_dir() -> PathBuf {
     }
 }
 
-/// Initialize tracing with log capture and file logging.
-fn init_tracing(log_buffer: &LogBuffer) {
+/// Initialize tracing with log capture and non-blocking file logging.
+///
+/// Returns a guard that keeps the non-blocking file writer alive.
+/// The guard MUST be held for the lifetime of the process — dropping it
+/// stops the background writer thread and loses buffered log lines.
+fn init_tracing(log_buffer: &LogBuffer) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Log file path
@@ -49,18 +53,29 @@ fn init_tracing(log_buffer: &LogBuffer) {
         }
     }
 
-    // File layer (best-effort — don't crash if file can't be opened)
-    let file_layer = std::fs::OpenOptions::new()
+    // File layer with non-blocking writer.
+    // Previously used std::sync::Mutex<File> which blocked ALL tokio tasks
+    // when the file write stalled (Windows Defender, disk flush, etc.).
+    // tracing_appender::non_blocking writes on a dedicated background thread
+    // so logging never blocks the calling async task.
+    let (file_layer, guard) = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)
-        .ok()
-        .map(|file| {
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::sync::Mutex::new(file))
+    {
+        Ok(file) => {
+            let (non_blocking, guard) = tracing_appender::non_blocking(file);
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
                 .with_ansi(false)
-                .with_target(false)
-        });
+                .with_target(false);
+            (Some(layer), Some(guard))
+        }
+        Err(e) => {
+            eprintln!("Failed to open log file {}: {e}", log_path.display());
+            (None, None)
+        }
+    };
 
     tracing_subscriber::registry()
         .with(env_filter)
@@ -68,6 +83,8 @@ fn init_tracing(log_buffer: &LogBuffer) {
         .with(LogCaptureLayer::new(log_buffer.clone()))
         .with(file_layer)
         .init();
+
+    guard
 }
 
 /// Load configuration from the default path.
@@ -88,7 +105,7 @@ fn load_config() -> anyhow::Result<Config> {
 pub fn run() {
     // Initialize logging early
     let log_buffer = LogBuffer::new(1000);
-    init_tracing(&log_buffer);
+    let _log_guard = init_tracing(&log_buffer);
 
     // Load configuration
     let config = match load_config() {
@@ -248,7 +265,7 @@ pub fn run() {
 pub fn run_headless() {
     // Initialize logging early
     let log_buffer = LogBuffer::new(1000);
-    init_tracing(&log_buffer);
+    let _log_guard = init_tracing(&log_buffer);
 
     tracing::info!("Starting Restreamer in headless mode");
 

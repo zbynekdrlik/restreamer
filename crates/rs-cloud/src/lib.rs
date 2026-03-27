@@ -39,8 +39,8 @@ impl Default for HetznerConfig {
     fn default() -> Self {
         Self {
             api_token: String::new(),
-            location: "fsn1".to_string(),
-            default_server_type: "cx23".to_string(),
+            location: "nbg1".to_string(),
+            default_server_type: "cpx22".to_string(),
             snapshot_label: "rs-delivery".to_string(),
             ssh_key_name: "restreamer".to_string(),
         }
@@ -101,9 +101,9 @@ pub struct DeliveryInstance {
 /// Select server type based on endpoint count.
 pub fn select_server_type(endpoint_count: usize) -> &'static str {
     match endpoint_count {
-        0..=2 => "cx23",
-        3..=7 => "cx33",
-        _ => "cx43",
+        0..=2 => "cpx22",
+        3..=7 => "cpx32",
+        _ => "cpx42",
     }
 }
 

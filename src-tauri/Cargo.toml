@@ -1,6 +1,6 @@
 [package]
 name = "restreamer"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/restreamer"
@@ -32,6 +32,7 @@ tokio = { version = "1", features = ["full", "signal"] }
 tracing = "0.1"
 clap = { version = "4", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 anyhow = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 

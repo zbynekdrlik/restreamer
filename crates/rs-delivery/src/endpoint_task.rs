@@ -1,7 +1,6 @@
 /// Per-endpoint delivery task: S3 poll -> normalize -> ffmpeg pipe.
 use async_trait::async_trait;
 use rs_ffmpeg::{FfmpegProcess, ServiceType};
-use rs_ts_normalize::TSTimestampNormalizer;
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
@@ -9,11 +8,79 @@ use tokio::task::JoinHandle;
 use crate::api::{EndpointConfig, S3Config};
 use crate::s3_fetch::S3Fetcher;
 
+/// FLV stream normalizer: strips duplicate FLV headers and sequence headers
+/// from concatenated FLV chunks, producing a single continuous FLV stream.
+pub struct FlvStreamNormalizer {
+    sent_header: bool,
+}
+
+impl FlvStreamNormalizer {
+    pub fn new() -> Self {
+        Self { sent_header: false }
+    }
+
+    /// Normalize an FLV chunk for continuous streaming.
+    /// First chunk: pass through as-is (has FLV header + sequence headers).
+    /// Subsequent chunks: strip FLV header (9+4 bytes) and sequence header tags,
+    /// keeping only data tags.
+    pub fn normalize(&mut self, data: &[u8]) -> Vec<u8> {
+        // Not valid FLV -- pass through raw
+        if data.len() < 13 || &data[0..3] != b"FLV" {
+            return data.to_vec();
+        }
+
+        if !self.sent_header {
+            // First chunk: send everything as-is
+            self.sent_header = true;
+            return data.to_vec();
+        }
+
+        // Subsequent chunks: skip FLV header and sequence header tags
+        let mut offset = 9 + 4; // Skip FLV header + first prev_tag_size
+        let mut result = Vec::with_capacity(data.len());
+
+        while offset + 11 <= data.len() {
+            let tag_type = data[offset];
+            if tag_type != 8 && tag_type != 9 && tag_type != 18 {
+                break;
+            }
+
+            let data_size = ((data[offset + 1] as u32) << 16)
+                | ((data[offset + 2] as u32) << 8)
+                | (data[offset + 3] as u32);
+
+            let tag_total = 11 + data_size as usize + 4; // header + body + prev_tag_size
+
+            if offset + tag_total > data.len() {
+                break;
+            }
+
+            // Check if this is a sequence header (skip it -- already sent in first chunk)
+            let is_seq_header = (tag_type == 9 || tag_type == 8)
+                && offset + 12 < data.len()
+                && data[offset + 12] == 0x00;
+
+            if !is_seq_header {
+                // Copy data tag as-is (with absolute timestamps from xiu)
+                result.extend_from_slice(&data[offset..offset + tag_total]);
+            }
+
+            offset += tag_total;
+        }
+
+        result
+    }
+}
+
 const MAX_FFMPEG_RESTARTS: u32 = 10;
-const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
 const MAX_CHUNK_MISS_COUNT: u32 = 60; // ~2min at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
 const WRITE_TIMEOUT_SECS: u64 = 30;
+/// Base S3 backoff (doubles on each error, max 60s, resets on success).
+const S3_BACKOFF_BASE_SECS: u64 = 2;
+const S3_BACKOFF_MAX_SECS: u64 = 60;
+/// Heartbeat interval for endpoint delivery loop.
+const ENDPOINT_HEARTBEAT_SECS: u64 = 60;
 
 /// Trait for fetching chunks (S3 or mock).
 pub trait ChunkFetcher: Send + Sync {
@@ -182,7 +249,7 @@ impl EndpointHandle {
     }
 }
 
-/// Core endpoint loop — generic over ChunkFetcher and OutputProcessFactory for testability.
+/// Core endpoint loop -- generic over ChunkFetcher and OutputProcessFactory for testability.
 #[allow(clippy::too_many_arguments)]
 pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     fetcher: F,
@@ -222,23 +289,38 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
         }
     };
 
-    let use_normalizer = service_type == ServiceType::YtHls || service_type == ServiceType::YtRtmp;
-    let mut normalizer = if use_normalizer {
-        Some(TSTimestampNormalizer::new())
-    } else {
-        None
-    };
+    // FLV stream normalizer: strips duplicate FLV headers from concatenated chunks.
+    let mut flv_normalizer = FlvStreamNormalizer::new();
+
+    tracing::info!(
+        alias = %alias,
+        "Endpoint delivery configured (FLV-only)"
+    );
 
     let mut chunk_id = start_chunk_id;
     let mut proc: Option<Box<dyn OutputProcess>> = None;
     let mut consecutive_ffmpeg_failures: u32 = 0;
     let mut consecutive_chunk_misses: u32 = 0;
+    let mut circuit_trips: u32 = 0;
+    let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
+    let mut last_heartbeat = std::time::Instant::now();
 
     loop {
         // Check for stop signal
         if *stop_rx.borrow() {
             tracing::info!(alias = %alias, "Stop signal received");
             break;
+        }
+
+        // Periodic heartbeat
+        if last_heartbeat.elapsed() >= std::time::Duration::from_secs(ENDPOINT_HEARTBEAT_SECS) {
+            tracing::info!(
+                alias = %alias,
+                chunk_id,
+                ffmpeg_alive = proc.as_mut().is_some_and(|p| p.is_alive()),
+                "Delivery endpoint heartbeat"
+            );
+            last_heartbeat = std::time::Instant::now();
         }
 
         // Ensure output process is running
@@ -253,9 +335,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 drop(s);
                 tracing::warn!(alias = %alias, "ffmpeg died, restarting in 3s");
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                if use_normalizer {
-                    normalizer = Some(TSTimestampNormalizer::new());
-                }
+                flv_normalizer = FlvStreamNormalizer::new();
             }
 
             match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {
@@ -277,16 +357,17 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
 
                     // Circuit breaker: after MAX_FFMPEG_RESTARTS, enter cooldown
                     if consecutive_ffmpeg_failures >= MAX_FFMPEG_RESTARTS {
-                        let cooldown = CIRCUIT_BREAKER_COOLDOWN_SECS;
+                        circuit_trips += 1;
+                        let cooldown = (30 * 2u64.pow(circuit_trips.min(4) - 1)).min(300);
                         tracing::error!(
                             alias = %alias,
                             failures = consecutive_ffmpeg_failures,
-                            "ffmpeg circuit breaker, cooldown {cooldown}s"
+                            circuit_trip = circuit_trips,
+                            "ffmpeg circuit breaker #{circuit_trips}, cooldown {cooldown}s"
                         );
                         s.stall_reason = Some("ffmpeg_crash_loop".to_string());
                         drop(s);
-                        let sleep_dur =
-                            std::time::Duration::from_secs(CIRCUIT_BREAKER_COOLDOWN_SECS);
+                        let sleep_dur = std::time::Duration::from_secs(cooldown);
                         tokio::select! {
                             _ = tokio::time::sleep(sleep_dur) => {}
                             _ = stop_rx.changed() => {
@@ -310,6 +391,11 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
         match fetcher.fetch_chunk(chunk_id).await {
             Ok(Some(data)) => {
                 consecutive_chunk_misses = 0;
+                s3_backoff_secs = S3_BACKOFF_BASE_SECS;
+                if circuit_trips > 0 {
+                    circuit_trips = 0;
+                    tracing::info!(alias = %alias, "ffmpeg circuit breaker reset after successful chunk");
+                }
                 {
                     let mut s = stats.lock().await;
                     s.consecutive_chunk_misses = 0;
@@ -318,14 +404,11 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     }
                 }
 
-                let processed = if let Some(ref mut norm) = normalizer {
-                    norm.normalize(&data)
-                } else {
-                    data
-                };
+                let processed = flv_normalizer.normalize(&data);
 
+                // Write full chunk directly to ffmpeg with timeout.
+                // ffmpeg handles its own output buffering to RTMP/HLS.
                 if let Some(ref mut p) = proc {
-                    // Write with timeout
                     let write_result = tokio::time::timeout(
                         std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
                         p.write(&processed),
@@ -351,11 +434,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                             continue;
                         }
                         Err(_) => {
-                            // Write timeout
-                            tracing::error!(
-                                alias = %alias,
-                                "ffmpeg write timed out"
-                            );
+                            tracing::error!(alias = %alias, "ffmpeg write timed out");
                             let mut s = stats.lock().await;
                             s.last_error = Some("write_timeout".to_string());
                             s.stall_reason = Some("write_timeout".to_string());
@@ -370,10 +449,10 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
 
                 chunk_id += 1;
-                // Pacing: fast endpoints catch up quickly (100ms),
-                // non-fast endpoints match real-time (1000ms) to maintain cache delay.
-                let pace_ms = if ep_cfg.is_fast { 100 } else { 1000 };
-                tokio::time::sleep(std::time::Duration::from_millis(pace_ms)).await;
+                // Minimal yield to let other tasks run. Delivery is naturally
+                // paced by S3 chunk availability -- when we catch up to the live
+                // edge, fetch_chunk returns None and the loop waits 2s.
+                tokio::task::yield_now().await;
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;
@@ -400,9 +479,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                             chunk_id = probe_id;
                             consecutive_chunk_misses = 0;
                             // Reset normalizer on skip
-                            if use_normalizer {
-                                normalizer = Some(TSTimestampNormalizer::new());
-                            }
+                            flv_normalizer = FlvStreamNormalizer::new();
                             let mut s = stats.lock().await;
                             s.consecutive_chunk_misses = 0;
                             s.stall_reason = None;
@@ -439,11 +516,17 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 }
             }
             Err(e) => {
-                tracing::error!(alias = %alias, "S3 fetch error: {e}");
+                tracing::error!(
+                    alias = %alias,
+                    chunk_id,
+                    backoff_secs = s3_backoff_secs,
+                    "S3 fetch error, retrying in {s3_backoff_secs}s: {e}"
+                );
                 let mut s = stats.lock().await;
                 s.last_error = Some(e);
                 drop(s);
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(s3_backoff_secs)).await;
+                s3_backoff_secs = (s3_backoff_secs * 2).min(S3_BACKOFF_MAX_SECS);
             }
         }
     }

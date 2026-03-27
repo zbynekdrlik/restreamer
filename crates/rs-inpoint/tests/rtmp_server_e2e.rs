@@ -2,15 +2,15 @@
 //!
 //! These tests start the actual RtmpServer (which uses xiu's RTMP implementation),
 //! then use ffmpeg to publish a real H.264/AAC stream over RTMP. The pipeline
-//! exercises: TCP → RTMP protocol → StreamsHub → MediaReceiver → FLV demux →
-//! MPEG-TS mux → ChunkSink → chunk files on disk.
+//! exercises: TCP -> RTMP protocol -> StreamsHub -> MediaReceiver -> FlvChunkSink
+//! -> chunk files on disk.
 //!
 //! Requires: ffmpeg with libx264 and aac encoder support.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use rs_inpoint::chunker::ChunkSink;
+use rs_inpoint::flv_chunker::FlvChunkSink;
 use rs_inpoint::rtmp_server::RtmpServer;
 
 /// Find an available TCP port by binding to port 0.
@@ -93,29 +93,29 @@ fn spawn_ffmpeg_publisher(port: u16, duration_secs: u32) -> std::process::Child 
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("Failed to spawn ffmpeg — is ffmpeg installed?")
+        .expect("Failed to spawn ffmpeg -- is ffmpeg installed?")
 }
 
 #[tokio::test]
-async fn rtmp_server_receives_ffmpeg_stream_and_produces_chunks() {
+async fn rtmp_server_receives_ffmpeg_stream_and_produces_flv_chunks() {
     if !ffmpeg_available() {
         panic!("ffmpeg is required for RTMP E2E tests but was not found in PATH");
     }
 
     let port = find_available_port();
     let dir = tempfile::tempdir().unwrap();
-    let chunk_sink = Arc::new(ChunkSink::new(
+    let flv_chunk_sink = Arc::new(FlvChunkSink::new(
         dir.path().to_path_buf(),
         Duration::from_millis(500), // 500ms chunks for fast testing
     ));
-    let mut chunk_rx = chunk_sink.subscribe();
+    let mut chunk_rx = flv_chunk_sink.subscribe();
 
     // Start the real RTMP server
     let server = RtmpServer::new("127.0.0.1", port);
     let shutdown = server.shutdown_handle();
-    let sink = Arc::clone(&chunk_sink);
+    let flv_sink = Arc::clone(&flv_chunk_sink);
     let inpoint_state = rs_core::models::InpointState::new();
-    let server_task = tokio::spawn(async move { server.run(sink, inpoint_state).await });
+    let server_task = tokio::spawn(async move { server.run(flv_sink, inpoint_state).await });
 
     // Wait for RTMP server to be ready (TCP port accepting connections)
     assert!(
@@ -136,19 +136,15 @@ async fn rtmp_server_receives_ffmpeg_stream_and_produces_chunks() {
     assert!(chunk.size > 0, "Chunk must have non-zero size");
     assert!(!chunk.md5.is_empty(), "Chunk must have MD5");
 
-    // Verify the chunk contains valid MPEG-TS data
+    // Verify the chunk contains valid FLV data
     let file_data = std::fs::read(&chunk.path).unwrap();
     assert_eq!(
-        file_data.len() % 188,
-        0,
-        "Output must be 188-byte aligned MPEG-TS"
+        &file_data[0..3],
+        b"FLV",
+        "First 3 bytes must be FLV signature"
     );
-    assert_eq!(file_data[0], 0x47, "First byte must be TS sync byte 0x47");
-
-    // Verify all packets have sync byte
-    for (i, pkt) in file_data.chunks(188).enumerate() {
-        assert_eq!(pkt[0], 0x47, "TS packet {i} missing sync byte");
-    }
+    assert_eq!(file_data[3], 0x01, "FLV version must be 1");
+    assert_eq!(file_data[4] & 0x05, 0x05, "FLV must have audio+video flags");
 
     // Wait for ffmpeg to finish (or kill it)
     let _ = ffmpeg.kill();
@@ -160,7 +156,7 @@ async fn rtmp_server_receives_ffmpeg_stream_and_produces_chunks() {
 }
 
 #[tokio::test]
-async fn rtmp_server_produces_multiple_chunks_from_stream() {
+async fn rtmp_server_produces_multiple_flv_chunks_from_stream() {
     if !ffmpeg_available() {
         panic!("ffmpeg is required for RTMP E2E tests but was not found in PATH");
     }
@@ -170,17 +166,17 @@ async fn rtmp_server_produces_multiple_chunks_from_stream() {
 
     let port = find_available_port();
     let dir = tempfile::tempdir().unwrap();
-    let chunk_sink = Arc::new(ChunkSink::new(
+    let flv_chunk_sink = Arc::new(FlvChunkSink::new(
         dir.path().to_path_buf(),
         Duration::from_secs(2), // 2-second chunks (resilient to slow CI)
     ));
-    let mut chunk_rx = chunk_sink.subscribe();
+    let mut chunk_rx = flv_chunk_sink.subscribe();
 
     let server = RtmpServer::new("127.0.0.1", port);
     let shutdown = server.shutdown_handle();
-    let sink = Arc::clone(&chunk_sink);
+    let flv_sink = Arc::clone(&flv_chunk_sink);
     let inpoint_state = rs_core::models::InpointState::new();
-    let server_task = tokio::spawn(async move { server.run(sink, inpoint_state).await });
+    let server_task = tokio::spawn(async move { server.run(flv_sink, inpoint_state).await });
 
     assert!(
         wait_for_port(port, Duration::from_secs(5)).await,
@@ -221,7 +217,7 @@ async fn rtmp_server_produces_multiple_chunks_from_stream() {
         chunks.len()
     );
 
-    // Verify each chunk is a valid, distinct MPEG-TS file
+    // Verify each chunk is a valid, distinct FLV file
     let mut seen_paths = std::collections::HashSet::new();
     for (i, chunk) in chunks.iter().enumerate() {
         assert!(chunk.path.exists(), "Chunk {i} file must exist");
@@ -232,8 +228,11 @@ async fn rtmp_server_produces_multiple_chunks_from_stream() {
         );
 
         let data = std::fs::read(&chunk.path).unwrap();
-        assert_eq!(data.len() % 188, 0, "Chunk {i} must be TS-aligned");
-        assert_eq!(data[0], 0x47, "Chunk {i} must start with TS sync byte");
+        assert_eq!(
+            &data[0..3],
+            b"FLV",
+            "Chunk {i} must start with FLV signature"
+        );
     }
 
     // Chunks should have sequential indices
@@ -254,17 +253,17 @@ async fn rtmp_server_chunk_md5_matches_file() {
 
     let port = find_available_port();
     let dir = tempfile::tempdir().unwrap();
-    let chunk_sink = Arc::new(ChunkSink::new(
+    let flv_chunk_sink = Arc::new(FlvChunkSink::new(
         dir.path().to_path_buf(),
         Duration::from_millis(500),
     ));
-    let mut chunk_rx = chunk_sink.subscribe();
+    let mut chunk_rx = flv_chunk_sink.subscribe();
 
     let server = RtmpServer::new("127.0.0.1", port);
     let shutdown = server.shutdown_handle();
-    let sink = Arc::clone(&chunk_sink);
+    let flv_sink = Arc::clone(&flv_chunk_sink);
     let inpoint_state = rs_core::models::InpointState::new();
-    let server_task = tokio::spawn(async move { server.run(sink, inpoint_state).await });
+    let server_task = tokio::spawn(async move { server.run(flv_sink, inpoint_state).await });
 
     assert!(
         wait_for_port(port, Duration::from_secs(5)).await,

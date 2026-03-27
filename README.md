@@ -11,19 +11,18 @@ OBS/vMix → RTMP → Restreamer (Windows) → S3 → Hetzner VPS (rs-delivery) 
 
 ## Workspace Crates
 
-| Crate           | Purpose                                          |
-| --------------- | ------------------------------------------------ |
-| rs-core         | Config, database (SQLite), models                |
-| rs-inpoint      | RTMP server, MPEG-TS chunking                    |
-| rs-endpoint     | S3 upload                                        |
-| rs-api          | Axum HTTP API, WebSocket, delivery orchestration |
-| rs-runtime      | Service orchestration                            |
-| rs-service      | Standalone Windows Service binary                |
-| rs-delivery     | Delivery relay binary (deployed to Hetzner VPS)  |
-| rs-ffmpeg       | FFmpeg process wrapper                           |
-| rs-ts-normalize | MPEG-TS timestamp normalization                  |
-| rs-cloud        | Hetzner Cloud API client                         |
-| rs-youtube      | YouTube OAuth & stream verification              |
+| Crate       | Purpose                                          |
+| ----------- | ------------------------------------------------ |
+| rs-core     | Config, database (SQLite), models                |
+| rs-inpoint  | RTMP server, FLV chunking                        |
+| rs-endpoint | S3 upload                                        |
+| rs-api      | Axum HTTP API, WebSocket, delivery orchestration |
+| rs-runtime  | Service orchestration                            |
+| rs-service  | Standalone Windows Service binary                |
+| rs-delivery | Delivery relay binary (deployed to Hetzner VPS)  |
+| rs-ffmpeg   | FFmpeg process wrapper                           |
+| rs-cloud    | Hetzner Cloud API client                         |
+| rs-youtube  | YouTube OAuth & stream verification              |
 
 ## Additional Components
 

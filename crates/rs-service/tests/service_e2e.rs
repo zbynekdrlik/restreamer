@@ -1,9 +1,9 @@
-//! Full service E2E tests: RTMP → chunks → DB → API verification.
+//! Full service E2E tests: RTMP -> chunks -> DB -> API verification.
 //!
 //! These tests start the core service components (RTMP server, API server, database),
 //! publish a real RTMP stream via ffmpeg, and verify the entire pipeline:
 //! 1. RTMP stream is accepted
-//! 2. MPEG-TS chunks are produced and stored on disk
+//! 2. FLV chunks are produced and stored on disk
 //! 3. Chunks are recorded in the SQLite database
 //! 4. API endpoints reflect the correct state
 
@@ -15,7 +15,7 @@ use rs_api::state::AppState;
 use rs_core::config::Config;
 use rs_core::db;
 use rs_core::models::WsEvent;
-use rs_inpoint::chunker::ChunkSink;
+use rs_inpoint::flv_chunker::FlvChunkSink;
 use rs_inpoint::rtmp_server::RtmpServer;
 use tokio::sync::broadcast;
 
@@ -121,14 +121,14 @@ async fn start_test_service(
     let (actual_addr, _api_handle) = rs_api::serve(api_state, api_addr).await.unwrap();
     let api_base = format!("http://{actual_addr}/api/v1");
 
-    // Chunk sink
-    let chunk_sink = Arc::new(ChunkSink::new(
+    // FLV chunk sink
+    let flv_chunk_sink = Arc::new(FlvChunkSink::new(
         chunk_dir.to_path_buf(),
         Duration::from_millis(500),
     ));
 
-    // Chunk → DB forwarding (mirrors service.rs logic)
-    let mut chunk_rx = chunk_sink.subscribe();
+    // Chunk -> DB forwarding (mirrors service.rs logic)
+    let mut chunk_rx = flv_chunk_sink.subscribe();
     let fwd_pool = pool.clone();
     let fwd_ws_tx = ws_tx.clone();
     let chunk_fwd_task = tokio::spawn(async move {
@@ -169,10 +169,10 @@ async fn start_test_service(
     // RTMP server
     let server = RtmpServer::new("127.0.0.1", rtmp_port);
     let shutdown = server.shutdown_handle();
-    let sink = Arc::clone(&chunk_sink);
+    let flv_sink = Arc::clone(&flv_chunk_sink);
     let inpoint_state = rs_core::models::InpointState::new();
     let rtmp_task = tokio::spawn(async move {
-        let _ = server.run(sink, inpoint_state).await;
+        let _ = server.run(flv_sink, inpoint_state).await;
     });
 
     (api_base, pool, shutdown, vec![rtmp_task, chunk_fwd_task])
@@ -285,19 +285,13 @@ async fn full_pipeline_rtmp_to_db_chunks() {
         "Chunk .bin files should exist on disk"
     );
 
-    // Verify each chunk file is valid MPEG-TS
+    // Verify each chunk file is valid FLV
     for entry in &chunk_files {
         let data = std::fs::read(entry.path()).unwrap();
         assert_eq!(
-            data.len() % 188,
-            0,
-            "File {} must be 188-byte aligned",
-            entry.path().display()
-        );
-        assert_eq!(
-            data[0],
-            0x47,
-            "File {} must start with TS sync byte",
+            &data[0..3],
+            b"FLV",
+            "File {} must start with FLV signature",
             entry.path().display()
         );
     }

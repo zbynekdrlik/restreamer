@@ -98,7 +98,13 @@ pub async fn start_stream(
                         {
                             tracing::error!("Failed to mark instance {instance_id} as failed: {e}");
                         }
+                        orch.poll_handles().lock().await.remove(&instance_id);
+                        return;
                     }
+
+                    // Transition to health monitoring loop
+                    tracing::info!(event_id = id, "Delivery health monitor started");
+                    orch.monitor_delivery_health(id, instance_id).await;
                     orch.poll_handles().lock().await.remove(&instance_id);
                 });
                 poll_handles.lock().await.insert(instance_id, handle);

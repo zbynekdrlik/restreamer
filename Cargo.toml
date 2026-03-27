@@ -7,7 +7,6 @@ members = [
     "crates/rs-api",
     "crates/rs-runtime",
     "crates/rs-service",
-    "crates/rs-ts-normalize",
     "crates/rs-ffmpeg",
     "crates/rs-cloud",
     "crates/rs-delivery",
@@ -22,7 +21,7 @@ members = [
 exclude = ["src-tauri", "leptos-ui"]
 
 [workspace.package]
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/restreamer"
@@ -61,11 +60,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Hashing
 md-5 = "0.10"
 
-# RTMP / MPEG-TS (xiu ecosystem)
-xflv = "0.4"
+# RTMP (xiu ecosystem)
 streamhub = "0.2"
 rtmp = "0.6"
-xmpegts = "0.2"
 
 # Logging bridge (xiu crates use `log`, we use `tracing`)
 log = "0.4"
@@ -84,7 +81,6 @@ rs-endpoint = { path = "crates/rs-endpoint" }
 rs-api = { path = "crates/rs-api" }
 rs-runtime = { path = "crates/rs-runtime" }
 rs-service = { path = "crates/rs-service" }
-rs-ts-normalize = { path = "crates/rs-ts-normalize" }
 rs-ffmpeg = { path = "crates/rs-ffmpeg" }
 rs-cloud = { path = "crates/rs-cloud" }
 rs-delivery = { path = "crates/rs-delivery" }

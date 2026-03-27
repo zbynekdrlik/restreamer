@@ -34,10 +34,10 @@ pub struct HetznerConfig {
 }
 
 fn default_hetzner_location() -> String {
-    "fsn1".to_string()
+    "nbg1".to_string()
 }
 fn default_hetzner_server_type() -> String {
-    "cx23".to_string()
+    "cpx22".to_string()
 }
 fn default_hetzner_snapshot_label() -> String {
     "rs-delivery".to_string()
@@ -97,6 +97,9 @@ pub struct InpointConfig {
     pub chunk_duration_ms: u64,
     #[serde(default = "default_read_buffer_bytes")]
     pub read_buffer_bytes: usize,
+    /// Chunk storage format: "flv" (direct FLV, zero overhead) or "ts" (MPEG-TS legacy).
+    #[serde(default = "default_chunk_format")]
+    pub chunk_format: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +122,9 @@ fn default_chunk_duration_ms() -> u64 {
 fn default_read_buffer_bytes() -> usize {
     102_400
 }
+fn default_chunk_format() -> String {
+    "flv".to_string()
+}
 fn default_api_port() -> u16 {
     8910
 }
@@ -133,6 +139,7 @@ impl Default for InpointConfig {
             rtmp_bind: default_rtmp_bind(),
             chunk_duration_ms: default_chunk_duration_ms(),
             read_buffer_bytes: default_read_buffer_bytes(),
+            chunk_format: default_chunk_format(),
         }
     }
 }
@@ -258,6 +265,9 @@ impl Config {
         if self.s3.secret_access_key.is_empty() {
             return Err("s3.secret_access_key is required".to_string());
         }
+        if self.inpoint.chunk_format == "ts" {
+            return Err("chunk_format \"ts\" is no longer supported, use \"flv\"".to_string());
+        }
         Ok(())
     }
 
@@ -318,7 +328,7 @@ mod tests {
         assert_eq!(parsed.s3.bucket, config.s3.bucket);
         assert_eq!(parsed.inpoint.rtmp_port, config.inpoint.rtmp_port);
         assert_eq!(parsed.api.port, config.api.port);
-        assert_eq!(parsed.hetzner.location, "fsn1");
+        assert_eq!(parsed.hetzner.location, "nbg1");
         assert_eq!(parsed.delivery.delivery_delay_secs, 120);
     }
 
@@ -339,8 +349,9 @@ mod tests {
         assert_eq!(config.inpoint.chunk_duration_ms, 1000);
         assert_eq!(config.api.port, 8910);
         assert_eq!(config.api.bind, "127.0.0.1");
-        assert_eq!(config.hetzner.default_server_type, "cx23");
+        assert_eq!(config.hetzner.default_server_type, "cpx22");
         assert_eq!(config.delivery.delivery_delay_secs, 120);
+        assert_eq!(config.inpoint.chunk_format, "flv");
     }
 
     #[test]
@@ -399,6 +410,14 @@ mod tests {
     fn validate_accepts_valid_config() {
         let config = Config::for_testing();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_ts_chunk_format() {
+        let mut config = Config::for_testing();
+        config.inpoint.chunk_format = "ts".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("ts"), "Error should mention ts: {err}");
     }
 
     #[test]

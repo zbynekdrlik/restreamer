@@ -69,36 +69,38 @@ impl std::str::FromStr for ServiceType {
 }
 
 /// Build the ffmpeg command arguments for a given service type and stream key.
+/// All endpoints use FLV input from pipe.
 pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &str) -> Vec<String> {
     match service_type {
         ServiceType::YtHls => build_yt_hls_args(stream_key),
-        ServiceType::Facebook => build_rtmps_args(&format!(
+        ServiceType::YtRtmp => {
+            build_flv_rtmp_args(&format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}"))
+        }
+        ServiceType::Facebook => build_flv_rtmp_args(&format!(
             "rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}"
         )),
-        ServiceType::YtRtmp => build_yt_rtmp_args(stream_key),
-        ServiceType::Vimeo => build_rtmps_args(&format!(
+        ServiceType::Vimeo => build_flv_rtmp_args(&format!(
             "rtmps://rtmp-global.cloud.vimeo.com:443/live/{stream_key}"
         )),
-        ServiceType::Instagram => build_rtmps_args(&format!(
+        ServiceType::Instagram => build_flv_rtmp_args(&format!(
             "rtmps://live-upload.instagram.com:443/rtmp/{stream_key}"
         )),
         ServiceType::TestFile => build_test_file_args(alias),
     }
 }
 
+/// YT_HLS: FLV input, HLS output via HTTPS PUT.
+/// Uses -re for pacing (same as other FLV paths).
 fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
     let output_url = format!(
         "https://a.upload.youtube.com/http_upload_hls?cid={stream_key}&copy=0&file=out1248.ts"
     );
     vec![
-        "-readrate".into(),
-        "1.00".into(),
+        "-re".into(),
         "-f".into(),
-        "mpegts".into(),
+        "flv".into(),
         "-loglevel".into(),
         "info".into(),
-        "-fflags".into(),
-        "+genpts+discardcorrupt".into(),
         "-i".into(),
         "pipe:".into(),
         "-avoid_negative_ts".into(),
@@ -133,44 +135,26 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
     ]
 }
 
-fn build_rtmps_args(url: &str) -> Vec<String> {
+/// FLV->FLV passthrough for RTMP/RTMPS endpoints.
+/// Minimal flags: input is already valid FLV, just forward bytes.
+/// No genpts, no avoid_negative_ts, no copytb, no bsf needed.
+fn build_flv_rtmp_args(url: &str) -> Vec<String> {
     vec![
-        "-readrate".into(),
-        "1.00".into(),
-        "-f".into(),
-        "mpegts".into(),
-        "-loglevel".into(),
-        "info".into(),
-        "-fflags".into(),
-        "+genpts+discardcorrupt".into(),
-        "-i".into(),
-        "pipe:".into(),
+        // -re: read input at native frame rate (based on FLV timestamps).
+        // This makes ffmpeg pace output to match the original stream timing.
+        // Without it, ffmpeg would blast all buffered chunks instantly.
+        "-re".into(),
         "-f".into(),
         "flv".into(),
+        "-loglevel".into(),
+        "info".into(),
+        "-i".into(),
+        "pipe:".into(),
         "-c".into(),
         "copy".into(),
+        "-f".into(),
+        "flv".into(),
         url.to_string(),
-    ]
-}
-
-fn build_yt_rtmp_args(stream_key: &str) -> Vec<String> {
-    let url = format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}");
-    vec![
-        "-readrate".into(),
-        "1.00".into(),
-        "-f".into(),
-        "mpegts".into(),
-        "-loglevel".into(),
-        "info".into(),
-        "-fflags".into(),
-        "+genpts+discardcorrupt".into(),
-        "-i".into(),
-        "pipe:".into(),
-        "-f".into(),
-        "flv".into(),
-        "-c".into(),
-        "copy".into(),
-        url,
     ]
 }
 
@@ -179,18 +163,19 @@ fn build_test_file_args(alias: &str) -> Vec<String> {
         .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
     let safe_alias = alias.replace([' ', '/'], "_");
     let output_path = PathBuf::from(&output_dir)
-        .join(format!("restreamer_test_{safe_alias}.ts"))
+        .join(format!("restreamer_test_{safe_alias}.flv"))
         .to_string_lossy()
         .to_string();
     vec![
+        "-re".into(),
         "-f".into(),
-        "mpegts".into(),
+        "flv".into(),
         "-loglevel".into(),
         "info".into(),
         "-i".into(),
         "pipe:".into(),
         "-f".into(),
-        "mpegts".into(),
+        "flv".into(),
         "-c".into(),
         "copy".into(),
         output_path,
@@ -363,6 +348,11 @@ mod tests {
         assert!(args.contains(&"PUT".to_string()));
         assert!(args.contains(&"1".to_string())); // reset_timestamps
         assert!(args.contains(&"+cgop".to_string()));
+        // YT_HLS now uses FLV input
+        let f_idx = args.iter().position(|a| a == "-f").unwrap();
+        assert_eq!(args[f_idx + 1], "flv", "YT_HLS should use FLV input");
+        // Should use -re for pacing
+        assert!(args.contains(&"-re".to_string()));
     }
 
     #[test]
@@ -391,11 +381,18 @@ mod tests {
             !args.contains(&"aac".to_string()),
             "should not re-encode audio"
         );
-        // Single rate control (no double-throttle)
-        assert!(args.contains(&"-readrate".to_string()));
+        // FLV path should NOT have genpts, copytb, bsf, avoid_negative_ts
         assert!(
-            !args.contains(&"-re".to_string()),
-            "should not have -re with -readrate"
+            !args.contains(&"+genpts".to_string()),
+            "FLV path should not have genpts"
+        );
+        assert!(
+            !args.contains(&"-copytb".to_string()),
+            "FLV path should not have copytb"
+        );
+        assert!(
+            !args.contains(&"-bsf:a".to_string()),
+            "FLV path should not have bsf"
         );
     }
 
@@ -421,9 +418,9 @@ mod tests {
         let args = build_ffmpeg_args(ServiceType::TestFile, "", "Test Stream");
         assert!(
             args.iter()
-                .any(|a| a.contains("restreamer_test_Test_Stream.ts"))
+                .any(|a| a.contains("restreamer_test_Test_Stream.flv"))
         );
-        assert!(args.contains(&"mpegts".to_string()));
+        assert!(args.contains(&"flv".to_string()));
         assert!(args.contains(&"copy".to_string()));
     }
 
@@ -453,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn all_commands_have_mpegts_input() {
+    fn all_commands_have_flv_input() {
         let types = [
             ServiceType::YtHls,
             ServiceType::Facebook,
@@ -464,12 +461,33 @@ mod tests {
         ];
         for st in types {
             let args = build_ffmpeg_args(st, "key", "alias");
-            // Check -f mpegts appears as input format
             let f_idx = args.iter().position(|a| a == "-f").unwrap();
-            assert_eq!(
-                args[f_idx + 1],
-                "mpegts",
-                "{st} missing mpegts input format"
+            assert_eq!(args[f_idx + 1], "flv", "{st} missing flv input format");
+        }
+    }
+
+    #[test]
+    fn flv_rtmp_commands_have_no_ts_artifacts() {
+        let types = [
+            ServiceType::YtRtmp,
+            ServiceType::Facebook,
+            ServiceType::Vimeo,
+            ServiceType::Instagram,
+        ];
+        for st in types {
+            let args = build_ffmpeg_args(st, "key", "alias");
+            // FLV path should NOT have genpts, copytb, bsf, avoid_negative_ts
+            assert!(
+                !args.contains(&"+genpts".to_string()),
+                "{st} should not have genpts"
+            );
+            assert!(
+                !args.contains(&"-copytb".to_string()),
+                "{st} should not have copytb"
+            );
+            assert!(
+                !args.contains(&"-bsf:a".to_string()),
+                "{st} should not have bsf"
             );
         }
     }

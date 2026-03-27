@@ -6,7 +6,7 @@ use tracing::{error, info};
 
 use rs_core::models::InpointState;
 
-use crate::chunker::ChunkSink;
+use crate::flv_chunker::FlvChunkSink;
 use crate::media_receiver::MediaReceiver;
 
 /// RTMP server that accepts connections from OBS/vMix on a configurable port.
@@ -14,8 +14,7 @@ use crate::media_receiver::MediaReceiver;
 /// Uses the xiu RTMP implementation for proper protocol handling including
 /// full handshake, AMF command parsing, and H.264/AAC media extraction.
 /// Media data flows through the StreamsHub to the MediaReceiver which
-/// subscribes to the published stream, demuxes FLV, muxes to MPEG-TS,
-/// and feeds the ChunkSink.
+/// subscribes to the published stream and feeds the FlvChunkSink.
 pub struct RtmpServer {
     address: String,
     shutdown_tx: broadcast::Sender<()>,
@@ -38,7 +37,7 @@ impl RtmpServer {
     /// Run the RTMP server, accepting connections until shutdown.
     pub async fn run(
         self,
-        chunk_sink: Arc<ChunkSink>,
+        flv_chunk_sink: Arc<FlvChunkSink>,
         inpoint_state: InpointState,
     ) -> Result<(), crate::InpointError> {
         // Create the StreamsHub for media data routing
@@ -60,11 +59,11 @@ impl RtmpServer {
         );
 
         // Create media receiver that subscribes to published streams and
-        // processes frame data into MPEG-TS chunks
+        // processes frame data into FLV chunks
         let media_receiver = MediaReceiver::new(
             event_consumer,
             event_sender,
-            Arc::clone(&chunk_sink),
+            Arc::clone(&flv_chunk_sink),
             inpoint_state,
         );
 
@@ -95,7 +94,7 @@ impl RtmpServer {
         }
 
         // Flush remaining data
-        chunk_sink.flush().await;
+        flv_chunk_sink.flush().await;
 
         Ok(())
     }
@@ -109,10 +108,10 @@ mod tests {
     async fn server_binds_and_shuts_down() {
         let server = RtmpServer::new("127.0.0.1", 0);
         let shutdown = server.shutdown_handle();
-        let sink = Arc::new(ChunkSink::new_null());
+        let flv_sink = Arc::new(FlvChunkSink::new_null());
         let inpoint_state = InpointState::new();
 
-        let handle = tokio::spawn(async move { server.run(sink, inpoint_state).await });
+        let handle = tokio::spawn(async move { server.run(flv_sink, inpoint_state).await });
 
         // Give it a moment to bind
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

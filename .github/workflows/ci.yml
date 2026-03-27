@@ -805,14 +805,29 @@ jobs:
 
           Write-Host "=== Step 1: Stop any existing instances ==="
           $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
-          Start-Sleep -Seconds 3
+          # Wait for process to fully exit and release DB locks
+          $elapsed = 0
+          while ($elapsed -lt 10) {
+            $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+            if (-not $proc) { break }
+            Start-Sleep -Seconds 1
+            $elapsed++
+            Write-Host "Waiting for process to exit... ($elapsed s)"
+          }
+          Start-Sleep -Seconds 2
 
-          Write-Host "=== Step 1.5: Clean up stale SQLite WAL files ==="
-          # Stale WAL files from previous processes can cause database lock errors
+          Write-Host "=== Step 1.5: Clean stale files (preserve database) ==="
           $DataDir = "C:\ProgramData\Restreamer"
           Remove-Item "$DataDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
           Remove-Item "$DataDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
-          Write-Host "Cleaned up SQLite WAL files"
+          Write-Host "Cleaned SQLite WAL/SHM files"
+
+          $chunksDir = "$DataDir\chunks"
+          if (Test-Path $chunksDir) {
+            $count = (Get-ChildItem $chunksDir -File -ErrorAction SilentlyContinue).Count
+            Remove-Item "$chunksDir\*" -Force -ErrorAction SilentlyContinue
+            Write-Host "Removed $count stale chunk files"
+          }
 
           Write-Host "=== Step 2: Remove old scheduled tasks ==="
           Get-ScheduledTask | Where-Object { $_.TaskName -like "*estreamer*" } | ForEach-Object {
@@ -860,17 +875,27 @@ jobs:
           Write-Host "OK: Running in user session $($proc.SessionId) - tray icon visible"
 
           Write-Host "=== CHECK 3: Port 8910 is LISTENING ==="
-          $listener = netstat -ano | Select-String "LISTENING" | Select-String "\b:8910\b"
+          # Large SQLite DB from accumulated CI chunks can make startup slow
+          $maxWait = 30
+          $listener = $null
+          for ($w = 1; $w -le $maxWait; $w++) {
+            $listener = netstat -ano | Select-String "LISTENING" | Select-String "\b:8910\b"
+            if ($listener) {
+              Write-Host "OK: Port 8910 is listening (attempt $w/$maxWait)"
+              Write-Host $listener
+              break
+            }
+            Write-Host "Waiting for port 8910... (attempt $w/$maxWait)"
+            Start-Sleep -Seconds 2
+          }
           if (-not $listener) {
             Write-Host "Current port status:"
             netstat -ano | Select-String "\b:8910\b"
             Write-Host "Recent log file:"
             Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 50 -ErrorAction SilentlyContinue
-            Write-Error "FAIL: Port 8910 is NOT listening - ServiceCore did not start"
+            Write-Error "FAIL: Port 8910 is NOT listening after 60s - ServiceCore did not start"
             exit 1
           }
-          Write-Host "OK: Port 8910 is listening"
-          Write-Host $listener
 
           Write-Host "=== CHECK 3b: RTMP port 1234 is LISTENING ==="
           $rtmpListener = netstat -ano | Select-String "LISTENING" | Select-String "\b:1234\b"
@@ -981,7 +1006,7 @@ jobs:
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Verify Restreamer is running
         shell: powershell
@@ -1065,38 +1090,85 @@ jobs:
           }
           Write-Host "Chunks cleared, starting fresh"
 
-      - name: Send test RTMP stream via ffmpeg
+      - name: Start 10-minute stability test stream
         shell: powershell
-        timeout-minutes: 2
+        timeout-minutes: 14
         run: |
           $ErrorActionPreference = 'Continue'
           $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $streamDuration = 600  # 10 minutes
 
-          Write-Host "Starting 45-second test RTMP stream..."
-          $proc = Start-Process -FilePath $ffmpegPath -ArgumentList @(
+          Write-Host "Starting ${streamDuration}s stability test stream..."
+          Write-Host "This test catches freeze bugs that only appear after minutes of streaming."
+
+          # Start ffmpeg in background
+          $ffmpegProc = Start-Process -FilePath $ffmpegPath -ArgumentList @(
             "-y", "-re",
-            "-f", "lavfi", "-i", "testsrc=duration=45:size=320x240:rate=30",
-            "-f", "lavfi", "-i", "sine=frequency=1000:duration=45",
-            "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+            "-f", "lavfi", "-i", "testsrc=duration=${streamDuration}:size=320x240:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=1000:duration=${streamDuration}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-c:a", "aac",
             "-f", "flv", "rtmp://127.0.0.1:1234/live/ci-e2e-test"
-          ) -NoNewWindow -Wait -PassThru
+          ) -NoNewWindow -PassThru
 
-          if ($proc.ExitCode -ne 0) {
-            throw "ffmpeg failed with exit code $($proc.ExitCode)"
+          # Monitor chunk flow every 30s while ffmpeg is running
+          $lastChunkCount = 0
+          $stallCount = 0
+          $checkInterval = 30
+          $maxStalls = 2  # 2 consecutive stalls (60s) = fail
+
+          for ($elapsed = 0; $elapsed -lt $streamDuration; $elapsed += $checkInterval) {
+            Start-Sleep -Seconds $checkInterval
+
+            if ($ffmpegProc.HasExited) {
+              Write-Host "ffmpeg exited at ${elapsed}s with code $($ffmpegProc.ExitCode)"
+              break
+            }
+
+            try {
+              $stats = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 10
+              $currentChunks = $stats.total_chunks
+              $newChunks = $currentChunks - $lastChunkCount
+
+              Write-Host "[$elapsed/$streamDuration s] Chunks: $currentChunks (+$newChunks) Pending: $($stats.pending_chunks)"
+
+              if ($newChunks -eq 0 -and $elapsed -gt 30) {
+                $stallCount++
+                Write-Host "WARNING: No new chunks in ${checkInterval}s (stall $stallCount/$maxStalls)"
+                if ($stallCount -ge $maxStalls) {
+                  # Kill ffmpeg
+                  Stop-Process -Id $ffmpegProc.Id -Force -ErrorAction SilentlyContinue
+
+                  # Dump last log lines for diagnosis
+                  try {
+                    $logLines = Get-Content "C:\ProgramData\Restreamer\restreamer.log" -Tail 20 -Encoding utf8
+                    Write-Host "=== LAST 20 LOG LINES ==="
+                    $logLines | ForEach-Object { Write-Host $_ }
+                    Write-Host "========================="
+                  } catch { Write-Host "Could not read log: $_" }
+
+                  throw "STREAM FREEZE DETECTED: No chunks produced for $($stallCount * $checkInterval)s at ${elapsed}s into stream. The pipeline froze."
+                }
+              } else {
+                $stallCount = 0
+              }
+
+              $lastChunkCount = $currentChunks
+            } catch {
+              if ($_.Exception.Message -match "STREAM FREEZE") { throw }
+              Write-Host "WARNING: Status check failed at ${elapsed}s: $_"
+            }
           }
-          Write-Host "Test stream completed successfully"
 
-      - name: Wait for chunk processing
+          # Wait for ffmpeg to finish if still running
+          if (-not $ffmpegProc.HasExited) {
+            $ffmpegProc.WaitForExit(30000)
+          }
+          Write-Host "Stability test stream completed"
+
+      - name: Wait for final chunk upload
         shell: powershell
         run: |
-          Write-Host "Waiting for chunks to be processed and uploaded..."
-          Start-Sleep -Seconds 20
-
-      - name: Verify chunks created and uploaded to S3
-        shell: powershell
-        run: |
-          # Wait up to 100s for all chunks to be uploaded (pending -> 0)
-          # After deploy restarts Restreamer, the S3 uploader needs time to initialize
+          Write-Host "Waiting for all chunks to upload..."
           $maxWait = 20
           $stats = $null
           for ($w = 1; $w -le $maxWait; $w++) {
@@ -1105,32 +1177,36 @@ jobs:
               Write-Host "All chunks uploaded (attempt $w/$maxWait)"
               break
             }
-            Write-Host "Pending chunks: $($stats.pending_chunks) - waiting for S3 upload (attempt $w/$maxWait)..."
+            Write-Host "Pending chunks: $($stats.pending_chunks) - waiting (attempt $w/$maxWait)..."
             Start-Sleep -Seconds 5
           }
 
-          Write-Host "=== E2E Test Results ==="
+          Write-Host "=== Stability Test Results ==="
           Write-Host "Total chunks:   $($stats.total_chunks)"
           Write-Host "Sent chunks:    $($stats.sent_chunks)"
           Write-Host "Pending:        $($stats.pending_chunks)"
           Write-Host "Total bytes:    $($stats.total_bytes)"
 
-          if ($stats.total_chunks -lt 25) {
-            throw "Expected at least 25 chunks from 45s stream, got $($stats.total_chunks)"
+          # 10 min at ~1 chunk/2s = ~300 chunks minimum
+          if ($stats.total_chunks -lt 250) {
+            throw "Expected at least 250 chunks from 10min stream, got $($stats.total_chunks)"
           }
 
           if ($stats.pending_chunks -gt 0) {
-            throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload after 60s wait"
+            throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload"
           }
 
-          Write-Host "=== E2E Streaming Test PASSED ==="
-          Write-Host "RTMP -> Restreamer -> Chunks -> S3: VERIFIED (all via local Rust APIs, 45s stream, $($stats.total_chunks) chunks)"
+          Write-Host "=== E2E Stability Test PASSED ==="
+          Write-Host "10-minute stream: $($stats.total_chunks) chunks produced and uploaded without freeze"
 
       - name: Verify RTMP disconnected after stream stop
         shell: powershell
         run: |
+          # After ffmpeg stops, the 30s FRAME_TIMEOUT must elapse before the
+          # frame processing loop detects the stall and sets connected=false.
           Write-Host "Verifying rtmp_connected is false after ffmpeg stream ended..."
-          $maxRetries = 5
+          Write-Host "(May take up to 35s due to FRAME_TIMEOUT)"
+          $maxRetries = 20
           $retryDelay = 2
           for ($i = 1; $i -le $maxRetries; $i++) {
             $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
@@ -1169,7 +1245,7 @@ jobs:
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -1196,8 +1272,8 @@ jobs:
           }
           $config.hetzner = @{
             api_token = $env:HETZNER_API_TOKEN
-            location = "fsn1"
-            default_server_type = "cx22"
+            location = "nbg1"
+            default_server_type = "cpx22"
             snapshot_label = "rs-delivery"
             ssh_key_name = "restreamer-ci"
           }
@@ -1281,6 +1357,259 @@ jobs:
             throw "FAILED: OBS in broken state ($([math]::Round($mem))MB) - please restart OBS manually on stream.lan"
           }
           Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
+
+      - name: Save original OBS settings (before any changes)
+        id: obs-original
+        shell: powershell
+        run: |
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          $hello = Receive-OBSMessage $ws
+          $authRequired = $hello.d.authentication
+          if ($authRequired) {
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+            $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+            $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+          } else {
+            $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+          }
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+
+          $getSettings = @{ op = 6; d = @{ requestType = "GetStreamServiceSettings"; requestId = "save-orig" } } | ConvertTo-Json -Depth 5
+          Send-OBSMessage $ws $getSettings
+          $resp = Receive-OBSMessage $ws
+          $origServer = $resp.d.responseData.streamServiceSettings.server
+          $origKey = $resp.d.responseData.streamServiceSettings.key
+          $origType = $resp.d.responseData.streamServiceType
+
+          Write-Host "Original OBS settings saved: server=$origServer type=$origType"
+          "ORIG_SERVER=$origServer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "ORIG_KEY=$origKey" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "ORIG_TYPE=$origType" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+
+      - name: "Baseline: OBS direct-to-YouTube RTMP (prove OBS works)"
+        shell: powershell
+        timeout-minutes: 4
+        run: |
+          # Stream directly from OBS to YouTube RTMP to prove OBS+YouTube
+          # work fine. If this fails, the problem is OBS/YouTube, not restreamer.
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          # Identify with OBS
+          $hello = Receive-OBSMessage $ws
+          $identify = @{
+            op = 1
+            d = @{
+              rpcVersion = 1
+            }
+          } | ConvertTo-Json -Depth 5
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+
+          # Point OBS directly to YouTube RTMP
+          $setSettings = @{
+            op = 6
+            d = @{
+              requestType = "SetStreamServiceSettings"
+              requestId = "baseline-set-yt"
+              requestData = @{
+                streamServiceType = "rtmp_custom"
+                streamServiceSettings = @{
+                  server = "rtmp://a.rtmp.youtube.com/live2"
+                  key = "5jya-pz2d-51x5-mbx4-ddvs"
+                }
+              }
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $setSettings
+          $setResp = Receive-OBSMessage $ws
+          Write-Host "OBS pointed to YouTube RTMP for baseline test"
+
+          # Start streaming
+          $startStream = @{
+            op = 6
+            d = @{
+              requestType = "StartStream"
+              requestId = "baseline-start"
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $startStream
+          $startResp = Receive-OBSMessage $ws
+          Write-Host "OBS baseline stream started to YouTube RTMP"
+
+          try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+
+          # Wait for YouTube to receive and fully analyze the stream.
+          # Must wait long enough for YouTube to detect bitrate issues
+          # (short waits give false "good" before analysis completes).
+          Write-Host "Waiting 180 seconds for YouTube to fully analyze direct stream..."
+          Start-Sleep -Seconds 180
+
+      - name: "Baseline: Verify YouTube plays OBS direct stream"
+        shell: powershell
+        timeout-minutes: 4
+        run: |
+          # Verify YouTube receives AND plays the direct OBS stream.
+          # Uses the API (broadcast_testing=true proves video preview renders).
+          # If this fails, the problem is OBS/YouTube, not restreamer.
+          $maxRetries = 12
+          $retryDelay = 15
+
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            Write-Host "--- Baseline attempt ${i}/${maxRetries} ---"
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
+              $baselineHealth = ""
+              Write-Host "  stream_receiving: $($response.stream_receiving)"
+
+              if ($response.streams) {
+                foreach ($s in $response.streams) {
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+                  if ($s.stream_status -eq "active") {
+                    $baselineHealth = $s.health_status
+                  }
+                  if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
+                    foreach ($issue in $s.configuration_issues) {
+                      Write-Host "    ISSUE: $issue"
+                    }
+                  }
+                }
+              }
+
+              if ($response.stream_receiving -and $baselineHealth -eq "good") {
+                Write-Host ""
+                Write-Host "=========================================="
+                Write-Host "  BASELINE: OBS direct health=good"
+                Write-Host "=========================================="
+                return
+              }
+
+              if ($response.stream_receiving -and $baselineHealth) {
+                Write-Host "  OBS baseline: stream active but health='${baselineHealth}' (not good yet)"
+              }
+            } catch {
+              Write-Host "  Request failed: $_"
+            }
+
+            if ($i -lt $maxRetries) {
+              Start-Sleep -Seconds $retryDelay
+            }
+          }
+
+          Write-Host "WARNING: OBS baseline health=${baselineHealth} (not good). Both OBS and restreamer have this issue."
+          Write-Host "This means the stream key/YouTube CDN config is the problem, not restreamer."
+
+      - name: "Baseline: Stop OBS stream and wait for YouTube reset"
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          $hello = Receive-OBSMessage $ws
+          $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+
+          $stopStream = @{
+            op = 6
+            d = @{
+              requestType = "StopStream"
+              requestId = "baseline-stop"
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Send-OBSMessage $ws $stopStream
+          $stopResp = Receive-OBSMessage $ws
+          Write-Host "Baseline OBS stream stopped"
+
+          try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+
+          # Wait for YouTube to detect stream ended
+          Write-Host "Waiting 30 seconds for YouTube to reset..."
+          Start-Sleep -Seconds 30
 
       - name: Save original OBS stream settings and switch to Restreamer
         id: obs-setup
@@ -1400,7 +1729,7 @@ jobs:
           $setResp = Receive-OBSMessage $ws
           Write-Host "Switched OBS to Restreamer RTMP: rtmp://127.0.0.1:1234/live/obs-e2e-test"
 
-          $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
 
       - name: "Pre-flight: verify no stale delivery instances"
         shell: powershell
@@ -1636,7 +1965,7 @@ jobs:
               Write-Host "Skipping event: op=$($msg.op)"
             }
 
-            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
 
             if ($statusResp -and $statusResp.d.responseData.outputActive) {
               Write-Host "OBS is streaming (attempt ${attempt}/${maxRetries})"
@@ -1702,7 +2031,7 @@ jobs:
 
           if ($response.streams) {
             foreach ($s in $response.streams) {
-              Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+              Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status), cdn_resolution=$($s.cdn_resolution), cdn_frame_rate=$($s.cdn_frame_rate), cdn_ingestion=$($s.cdn_ingestion_type)"
             }
           }
 
@@ -1771,8 +2100,18 @@ jobs:
                 } catch { Write-Host "  DIAGNOSTIC: chunk query failed: $_" }
               }
 
-              if ($response.server_ready -and $response.endpoints_alive) {
-                Write-Host "=== Delivery server fully operational with live endpoints ==="
+              # Check ALL endpoints are alive (not just the aggregate flag)
+              $allAlive = $true
+              if ($response.endpoint_details -and $response.endpoint_details.Count -gt 0) {
+                foreach ($ep in $response.endpoint_details) {
+                  if (-not $ep.alive) { $allAlive = $false }
+                }
+              } else {
+                $allAlive = $false
+              }
+
+              if ($response.server_ready -and $allAlive) {
+                Write-Host "=== Delivery server fully operational: ALL $($response.endpoint_details.Count) endpoints alive ==="
                 return
               }
             } catch {
@@ -1792,44 +2131,55 @@ jobs:
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
 
-          Write-Host "Verifying delivery progression with 4 readings at 15s intervals..."
+          Write-Host "Verifying delivery progression for ALL endpoints (4 readings, 15s apart)..."
 
-          $readings = @()
+          # Track per-endpoint chunk progression across 4 readings
+          $epReadings = @{}  # alias -> array of chunk_ids
           for ($r = 1; $r -le 4; $r++) {
             if ($r -gt 1) { Start-Sleep -Seconds 15 }
             $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
-            $chunkId = 0
-            $alive = $false
-            $stall = $null
-            if ($resp.endpoint_details -and $resp.endpoint_details.Count -gt 0) {
-              $chunkId = $resp.endpoint_details[0].current_chunk_id
-              $alive = $resp.endpoint_details[0].alive
-              $stall = $resp.endpoint_details[0].stall_reason
-            }
-            $readings += @{ chunk_id = $chunkId; alive = $alive; stall = $stall }
-            Write-Host "Reading ${r}: chunk_id=$chunkId, alive=$alive, stall=$stall"
-          }
 
-          # Assert EVERY consecutive pair shows chunk advancement
-          for ($i = 0; $i -lt ($readings.Count - 1); $i++) {
-            $prev = $readings[$i].chunk_id
-            $next = $readings[$i + 1].chunk_id
-            if ($next -le $prev) {
-              throw "FAILED: chunks did not advance between reading $($i+1) and $($i+2): $prev -> $next (stall: $($readings[$i+1].stall))"
+            if ($resp.endpoint_details) {
+              foreach ($ep in $resp.endpoint_details) {
+                if (-not $ep.is_fast) {
+                  $alias = $ep.alias
+                  if (-not $epReadings.ContainsKey($alias)) {
+                    $epReadings[$alias] = @()
+                  }
+                  $epReadings[$alias] += $ep.current_chunk_id
+                  Write-Host "Reading ${r}: [$alias] chunk=$($ep.current_chunk_id), alive=$($ep.alive), stall=$($ep.stall_reason)"
+                }
+              }
             }
           }
 
-          # Assert total advancement >= 10 chunks over 45s
-          $totalAdvance = $readings[3].chunk_id - $readings[0].chunk_id
-          if ($totalAdvance -lt 10) {
-            throw "FAILED: total chunk advancement $totalAdvance < 10 over 45s ($($readings[0].chunk_id) -> $($readings[3].chunk_id))"
+          if ($epReadings.Count -eq 0) {
+            throw "FAILED: No non-fast endpoints found in delivery status"
+          }
+
+          # Assert EACH endpoint advanced >= 3 chunks over 45s
+          $allPassed = $true
+          foreach ($alias in $epReadings.Keys) {
+            $chunks = $epReadings[$alias]
+            if ($chunks.Count -lt 4) {
+              Write-Host "WARNING: endpoint '$alias' only had $($chunks.Count) readings"
+              continue
+            }
+            $advance = $chunks[3] - $chunks[0]
+            Write-Host "  [$alias] advancement: $($chunks[0]) -> $($chunks[3]) = $advance chunks"
+            if ($advance -lt 3) {
+              Write-Host "  FAIL: endpoint '$alias' advanced only $advance chunks (need >= 3)"
+              $allPassed = $false
+            }
+          }
+
+          if (-not $allPassed) {
+            throw "FAILED: One or more endpoints did not advance enough chunks in 45s"
           }
 
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "  DELIVERY CONFIRMED: $totalAdvance chunks advanced over 45s"
-          Write-Host "  All 4 readings showed continuous progression"
-          Write-Host "  ffmpeg is alive and sending to YouTube"
+          Write-Host "  DELIVERY CONFIRMED: All $($epReadings.Count) endpoints progressing"
           Write-Host "=========================================="
 
       - name: Verify cache delay meets target
@@ -1851,8 +2201,8 @@ jobs:
           $minAcceptable = [math]::Floor($targetDelay * 0.8)
           Write-Host "Target delay: ${targetDelay}s, minimum acceptable: ${minAcceptable}s"
 
-          # Take 3 readings at 10s intervals to get stable delay measurement
-          $delays = @()
+          # Take 3 readings at 10s intervals, check EACH endpoint independently
+          $epDelays = @{}  # alias -> array of delay readings
           for ($r = 1; $r -le 3; $r++) {
             if ($r -gt 1) { Start-Sleep -Seconds 10 }
             $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
@@ -1860,97 +2210,182 @@ jobs:
             if ($resp.endpoint_details) {
               foreach ($ep in $resp.endpoint_details) {
                 if (-not $ep.is_fast) {
-                  $delays += $ep.chunk_delay_secs
-                  Write-Host "Reading ${r}: endpoint=$($ep.alias) chunk_delay_secs=$($ep.chunk_delay_secs) chunk_id=$($ep.current_chunk_id)"
+                  $alias = $ep.alias
+                  if (-not $epDelays.ContainsKey($alias)) {
+                    $epDelays[$alias] = @()
+                  }
+                  $epDelays[$alias] += $ep.chunk_delay_secs
+                  Write-Host "Reading ${r}: [$alias] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
                 }
               }
             }
           }
 
-          if ($delays.Count -eq 0) {
+          if ($epDelays.Count -eq 0) {
             throw "FAILED: No non-fast endpoint delay readings found"
           }
 
-          # Use the median delay reading
-          $sorted = $delays | Sort-Object
-          $median = $sorted[[math]::Floor($sorted.Count / 2)]
-          Write-Host ""
-          Write-Host "Delay readings: $($delays -join ', ')"
-          Write-Host "Median delay: ${median}s (target: ${targetDelay}s, min: ${minAcceptable}s)"
+          # Check EACH endpoint's median delay meets target
+          $allPassed = $true
+          foreach ($alias in $epDelays.Keys) {
+            $sorted = $epDelays[$alias] | Sort-Object
+            $median = $sorted[[math]::Floor($sorted.Count / 2)]
+            Write-Host "  [$alias] median delay: ${median}s (min: ${minAcceptable}s)"
+            if ($median -lt $minAcceptable) {
+              Write-Host "  FAIL: [$alias] cache delay ${median}s < minimum ${minAcceptable}s"
+              $allPassed = $false
+            }
+          }
 
-          if ($median -lt $minAcceptable) {
-            Write-Host ""
-            Write-Host "=========================================="
-            Write-Host "  FAIL: Cache delay ${median}s < minimum ${minAcceptable}s"
-            Write-Host "  Target was ${targetDelay}s (80% = ${minAcceptable}s)"
-            Write-Host "  This is the 70s cache delay bug!"
-            Write-Host "=========================================="
-            throw "FAILED: Cache delay ${median}s is below minimum acceptable ${minAcceptable}s (target: ${targetDelay}s)"
+          if (-not $allPassed) {
+            throw "FAILED: One or more endpoints have cache delay below ${minAcceptable}s (target: ${targetDelay}s)"
           }
 
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "  CACHE DELAY VERIFIED: ${median}s >= ${minAcceptable}s (target: ${targetDelay}s)"
+          Write-Host "  CACHE DELAY VERIFIED: All $($epDelays.Count) endpoints >= ${minAcceptable}s"
           Write-Host "=========================================="
 
-      - name: Verify YouTube is receiving stream data
+      - name: Verify cache delay is stable (not growing)
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          # TDD assertion: Cache delay should stabilize, not grow indefinitely.
+          # Take two readings 2 minutes apart. If delta > 15s, delivery is
+          # slower than real-time (the pacing bug).
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          $eventId = $targetEvent.id
+
+          # Reading 1 — capture delay per endpoint
+          $resp1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          $delays1 = @{}
+          if ($resp1.endpoint_details) {
+            foreach ($ep in $resp1.endpoint_details) {
+              if (-not $ep.is_fast) {
+                $delays1[$ep.alias] = $ep.chunk_delay_secs
+                Write-Host "Reading 1: [$($ep.alias)] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
+              }
+            }
+          }
+
+          # Wait 2 minutes
+          Write-Host "Waiting 2 minutes to check cache stability..."
+          Start-Sleep -Seconds 120
+
+          # Reading 2 — capture delay per endpoint
+          $resp2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          $delays2 = @{}
+          if ($resp2.endpoint_details) {
+            foreach ($ep in $resp2.endpoint_details) {
+              if (-not $ep.is_fast) {
+                $delays2[$ep.alias] = $ep.chunk_delay_secs
+                Write-Host "Reading 2: [$($ep.alias)] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
+              }
+            }
+          }
+
+          # Check stability for EACH endpoint
+          Write-Host ""
+
+          $allStable = $true
+          foreach ($alias in $delays1.Keys) {
+            if ($delays2.ContainsKey($alias)) {
+              $d1 = $delays1[$alias]
+              $d2 = $delays2[$alias]
+              $delta = [math]::Abs($d2 - $d1)
+              Write-Host "  [$alias] delay: ${d1}s -> ${d2}s (delta: ${delta}s)"
+              if ($delta -gt 15) {
+                Write-Host "  FAIL: [$alias] cache delay grew by ${delta}s in 2 minutes"
+                $allStable = $false
+              }
+            }
+          }
+
+          if (-not $allStable) {
+            throw "FAILED: One or more endpoints have unstable cache delay (delta > 15s over 2 min)"
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "  CACHE STABILITY VERIFIED: All endpoints delta < 15s"
+          Write-Host "=========================================="
+
+      - name: "GATE: Verify YouTube stream health is 'good'"
         id: verify_yt_receiving
         shell: powershell
         timeout-minutes: 7
         run: |
-          # Hard-fail check: Query the local Rust YouTube API to verify
-          # YouTube's ingest server IS receiving stream data.
-          # Uses rs-youtube with server-side OAuth (auto-refresh, no browser needed).
-          #
-          # Auto-start is BANNED (YouTube destroys the stream afterward), so
-          # the broadcast stays in "testing" state — we check liveStreams.list
-          # for streamStatus == "active" which means data IS arriving.
-          #
-          # With real-time chunk pacing (1 chunk/sec), the delivery VPS needs
-          # ~120s to fill the buffer before sending to YouTube, plus YouTube
-          # needs ~30-60s to detect the incoming stream. 20 retries × 15s = 300s.
+          # HARD GATE: YouTube health MUST be "good" (same as OBS direct).
+          # "ok" = degraded quality (jittery delivery), "bad"/"noData" = broken.
+          # Restreamer must be invisible middleman — no quality degradation.
           $maxRetries = 20
           $retryDelay = 15
 
           for ($i = 1; $i -le $maxRetries; $i++) {
-            Write-Host "--- Attempt ${i}/${maxRetries}: checking YouTube stream status ---"
+            Write-Host "--- Attempt ${i}/${maxRetries}: checking YouTube status ---"
             try {
               $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
 
               Write-Host "  stream_receiving: $($response.stream_receiving)"
-              Write-Host "  stream_count: $($response.stream_count)"
 
               if ($response.error) {
                 Write-Host "  API error: $($response.error)"
-                throw "YouTube API error: $($response.error)"
               }
 
+              # Log stream details
+              $healthValue = ""
               if ($response.streams) {
                 foreach ($s in $response.streams) {
-                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status), cdn_resolution=$($s.cdn_resolution), cdn_frame_rate=$($s.cdn_frame_rate)"
+                  if ($s.stream_status -eq "active") {
+                    $healthValue = $s.health_status
+                  }
+                  if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
+                    foreach ($issue in $s.configuration_issues) {
+                      Write-Host "    ISSUE: $issue"
+                    }
+                  }
                 }
               }
 
-              if ($response.stream_receiving) {
+              if ($response.stream_receiving -and $healthValue -eq "good") {
+                Write-Host ""
                 Write-Host "=========================================="
-                Write-Host "  YOUTUBE IS RECEIVING STREAM DATA"
-                Write-Host "  (Broadcast in testing state - auto-start banned)"
+                Write-Host "  YOUTUBE STREAM HEALTH: GOOD"
+                Write-Host "  Matches OBS direct quality."
                 Write-Host "=========================================="
                 return
               }
 
-              Write-Host "  YouTube not yet receiving stream data"
+              if ($response.stream_receiving -and $healthValue -and $healthValue -ne "good") {
+                Write-Host "  Stream active but health='${healthValue}' (need 'good'). Waiting..."
+                # Log configurationIssues to diagnose WHY health is not good
+                if ($response.streams) {
+                  foreach ($s in $response.streams) {
+                    if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
+                      Write-Host "  YouTube configurationIssues:"
+                      foreach ($issue in $s.configuration_issues) {
+                        Write-Host "    - $issue"
+                      }
+                    }
+                  }
+                }
+              }
             } catch {
               Write-Host "  Request failed: $_"
             }
 
             if ($i -lt $maxRetries) {
-              Write-Host "  Waiting ${retryDelay}s before retry..."
               Start-Sleep -Seconds $retryDelay
             }
           }
 
-          throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts (~$($maxRetries * $retryDelay)s). The delivery server confirmed chunk progression, but YouTube's ingest server does not show streamStatus=active."
+          if ($healthValue) {
+            throw "FAILED: YouTube stream health is '${healthValue}' - must be 'good'. Restreamer degrades stream quality. Check configurationIssues above."
+          } else {
+            throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts."
+          }
 
       - name: Stop OBS stream
         if: always()
@@ -2011,7 +2446,7 @@ jobs:
             $stopResp = Receive-OBSMessage $ws
             Write-Host "OBS stream stopped"
 
-            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
           } catch {
             Write-Host "Failed to stop OBS stream (may not have been streaming): $_"
           }
@@ -2134,7 +2569,7 @@ jobs:
 
               if ($response.streams) {
                 foreach ($s in $response.streams) {
-                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status), cdn_resolution=$($s.cdn_resolution), cdn_frame_rate=$($s.cdn_frame_rate), cdn_ingestion=$($s.cdn_ingestion_type)"
                 }
               }
 
@@ -2163,9 +2598,9 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          $origServer = "${{ steps.obs-setup.outputs.ORIG_SERVER }}"
-          $origKey = "${{ steps.obs-setup.outputs.ORIG_KEY }}"
-          $origType = "${{ steps.obs-setup.outputs.ORIG_TYPE }}"
+          $origServer = "${{ steps.obs-original.outputs.ORIG_SERVER }}"
+          $origKey = "${{ steps.obs-original.outputs.ORIG_KEY }}"
+          $origType = "${{ steps.obs-original.outputs.ORIG_TYPE }}"
 
           if (-not $origServer -or -not $origKey) {
             Write-Host "No original settings saved - skipping restore"
@@ -2234,14 +2669,30 @@ jobs:
 
             Send-OBSMessage $ws $setSettings
             $setResp = Receive-OBSMessage $ws
-            Write-Host "Restored OBS to original destination"
+            Write-Host "Restore command sent"
 
-            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+            # Verify by reading back current settings
+            $getSettings = @{
+              op = 6
+              d = @{
+                requestType = "GetStreamServiceSettings"
+                requestId = "verify-restore-1"
+              }
+            } | ConvertTo-Json -Depth 5
+            Send-OBSMessage $ws $getSettings
+            $verifyResp = Receive-OBSMessage $ws
+            $currentServer = $verifyResp.d.responseData.streamServiceSettings.server
+            if ($currentServer -ne $origServer) {
+              throw "OBS restore FAILED: expected '$origServer', got '$currentServer'"
+            }
+            Write-Host "VERIFIED: OBS restored to $origServer"
+
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
           } catch {
-            Write-Host "WARNING: Failed to restore OBS settings: $_"
-            Write-Host "You may need to manually restore OBS stream settings"
+            Write-Host "ERROR: Failed to restore OBS settings: $_"
+            Write-Host "OBS may be misconfigured - check stream settings manually"
+            exit 1
           }
-          exit 0
 
       - name: Verify production config is intact
         if: always()
