@@ -2244,7 +2244,7 @@ dependencies = [
 
 [[package]]
 name = "rs-api"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -2269,7 +2269,7 @@ dependencies = [
 
 [[package]]
 name = "rs-cloud"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "rs-core"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "chrono",
  "serde",
@@ -2297,13 +2297,12 @@ dependencies = [
 
 [[package]]
 name = "rs-delivery"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "async-trait",
  "axum",
  "reqwest 0.12.28",
  "rs-ffmpeg",
- "rs-ts-normalize",
  "rust-s3",
  "serde",
  "serde_json",
@@ -2317,7 +2316,7 @@ dependencies = [
 
 [[package]]
 name = "rs-endpoint"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "axum",
  "md-5",
@@ -2337,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "rs-ffmpeg"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -2349,32 +2348,25 @@ dependencies = [
 
 [[package]]
 name = "rs-inpoint"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "bytes",
- "chrono",
  "env_logger 0.11.8",
- "futures",
  "log",
  "md-5",
  "rs-core",
  "rtmp",
- "serde_json",
- "sqlx",
  "streamhub",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-util 0.7.18",
  "tracing",
  "tracing-subscriber",
- "xflv",
- "xmpegts",
 ]
 
 [[package]]
 name = "rs-runtime"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -2393,7 +2385,7 @@ dependencies = [
 
 [[package]]
 name = "rs-service"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -2411,12 +2403,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "rs-ts-normalize"
-version = "0.3.8"
-
-[[package]]
 name = "rs-youtube"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",
@@ -4285,18 +4273,6 @@ dependencies = [
  "indexmap 1.9.3",
  "log",
  "serde",
-]
-
-[[package]]
-name = "xmpegts"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9d75f4efc5e9d204167dfa9e7037084b18de4dc728b1b72c3f60e83618a3487"
-dependencies = [
- "byteorder",
- "bytes",
- "bytesio",
- "failure",
 ]
 
 [[package]]

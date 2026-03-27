@@ -340,7 +340,7 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let parsed: StreamingEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, event.name);
-        assert_eq!(parsed.receiving_activated, true);
+        assert!(parsed.receiving_activated);
         assert_eq!(parsed.cache_delay_secs, None);
     }
 
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn delay_all_fast_falls_back_to_zero() {
-        let endpoints = vec![DeliveryEndpointMetrics {
+        let endpoints = [DeliveryEndpointMetrics {
             alias: "FastOnly".to_string(),
             alive: true,
             current_chunk_id: 90,

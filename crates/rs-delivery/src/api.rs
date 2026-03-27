@@ -284,10 +284,10 @@ mod tests {
     const TEST_TOKEN: &str = "test-secret-token";
 
     fn test_state() -> Arc<AppState> {
-        let mut state = AppState::default();
-        // Pre-set auth token for tests
-        state.auth_token = RwLock::new(Some(TEST_TOKEN.to_string()));
-        Arc::new(state)
+        Arc::new(AppState {
+            auth_token: RwLock::new(Some(TEST_TOKEN.to_string())),
+            ..AppState::default()
+        })
     }
 
     #[tokio::test]
