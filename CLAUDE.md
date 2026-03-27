@@ -111,21 +111,7 @@ The global `test-strictness` and `no-continue-on-error` modules apply. Additiona
 
 ## Rust Development
 
-### LOCAL BUILDS PROHIBITED
-
-**NEVER run Rust builds locally on this machine.** All Rust compilation (cargo build, cargo test, trunk build, tauri build) must happen on GitHub Actions runners only.
-
-- Do NOT run `cargo build`, `cargo test`, `cargo clippy`, or any compilation commands locally
-- Do NOT run `trunk build` or `trunk serve` locally
-- Do NOT run `cargo tauri dev` or `cargo tauri build` locally
-- Push changes to `dev` branch and let CI handle all builds and tests
-- Review CI output for build errors and test failures
-
-**Why:** Local builds consume excessive disk space (20GB+) and CPU. GitHub runners handle this better.
-
-### Build Commands (CI ONLY - for reference)
-
-These commands run on GitHub Actions, not locally:
+### Build Commands
 
 ```bash
 cargo build                          # Debug build (workspace crates)

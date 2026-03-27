@@ -5,7 +5,7 @@
 
 use leptos::prelude::*;
 
-use crate::api::{ChunkStats, EndpointConfig, LogEntry, StreamingEvent};
+use crate::api::{ChunkStats, EndpointConfig, LogEntry, StreamingEvent, YouTubeStatusResponse};
 
 /// A timestamped error for the error list.
 #[derive(Debug, Clone)]
@@ -92,6 +92,9 @@ pub struct DashboardStore {
     pub pipeline_state: RwSignal<PipelineState>,
     pub activity_feed: RwSignal<Vec<ActivityEntry>>,
     pub selected_event_id: RwSignal<Option<i64>>,
+
+    // YouTube health (polled every 30s)
+    pub youtube_health: RwSignal<Option<YouTubeStatusResponse>>,
 }
 
 impl DashboardStore {
@@ -110,6 +113,7 @@ impl DashboardStore {
             pipeline_state: RwSignal::new(PipelineState::default()),
             activity_feed: RwSignal::new(Vec::new()),
             selected_event_id: RwSignal::new(None),
+            youtube_health: RwSignal::new(None),
         }
     }
 

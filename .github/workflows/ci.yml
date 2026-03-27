@@ -2827,6 +2827,8 @@ jobs:
         with:
           fetch-depth: 0
       - name: Create release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           TAG="restreamer-v${VERSION}"
@@ -2837,3 +2839,6 @@ jobs:
           git tag "$TAG"
           git push origin "$TAG"
           echo "Created and pushed tag: $TAG"
+          echo "Triggering release workflow..."
+          gh workflow run release.yml -f tag="$TAG"
+          echo "Release workflow triggered for $TAG"

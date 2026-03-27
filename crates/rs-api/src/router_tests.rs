@@ -36,7 +36,7 @@ mod stream_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/v1/events/{event_id}/start-stream"))
+                    .uri(format!("/api/v1/events/{event_id}/start-stream"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -76,7 +76,7 @@ mod stream_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/v1/events/{id2}/start-stream"))
+                    .uri(format!("/api/v1/events/{id2}/start-stream"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -105,7 +105,7 @@ mod stream_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/v1/events/{event_id}/stop-stream"))
+                    .uri(format!("/api/v1/events/{event_id}/stop-stream"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -137,7 +137,7 @@ mod stream_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/v1/events/{event_id}/start-stream"))
+                    .uri(format!("/api/v1/events/{event_id}/start-stream"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -156,7 +156,7 @@ mod stream_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/v1/events/{event_id}/stop-stream"))
+                    .uri(format!("/api/v1/events/{event_id}/stop-stream"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -187,7 +187,7 @@ mod stream_tests {
             .oneshot(
                 Request::builder()
                     .method("PATCH")
-                    .uri(&format!("/api/v1/events/{event_id}"))
+                    .uri(format!("/api/v1/events/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({ "cache_delay_secs": 300 }).to_string(),
@@ -220,7 +220,7 @@ mod stream_tests {
             .oneshot(
                 Request::builder()
                     .method("PATCH")
-                    .uri(&format!("/api/v1/events/{event_id}"))
+                    .uri(format!("/api/v1/events/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({ "cache_delay_secs": 180 }).to_string(),
@@ -236,7 +236,7 @@ mod stream_tests {
             .oneshot(
                 Request::builder()
                     .method("PATCH")
-                    .uri(&format!("/api/v1/events/{event_id}"))
+                    .uri(format!("/api/v1/events/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({ "name": "Renamed Event" }).to_string(),

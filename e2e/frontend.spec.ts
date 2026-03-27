@@ -1203,3 +1203,73 @@ test.describe("Navigation", () => {
     await expect(page.locator(".empty")).toContainText("Page not found");
   });
 });
+
+test.describe("Activity Feed Timezone", () => {
+  test("activity feed shows local timezone time, not UTC", async ({ page }) => {
+    // Browser timezone is set to America/New_York (UTC-4 or UTC-5)
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+
+    // Send an ActivityFeed event with a known UTC timestamp
+    const utcTimestamp = "2026-06-15T18:30:45.000Z";
+    // In America/New_York (EDT, UTC-4), this should display as 14:30:45
+    await page.evaluate(async (ts) => {
+      await fetch("/api/v1/_test/ws-broadcast", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "ActivityFeed",
+          data: {
+            timestamp: ts,
+            severity: "info",
+            message: "Timezone test event",
+            source: "test",
+          },
+        }),
+      });
+    }, utcTimestamp);
+
+    await page.waitForTimeout(1000);
+    const feedEntry = page.locator(
+      '.activity-entry:has-text("Timezone test event")',
+    );
+    await expect(feedEntry).toBeVisible({ timeout: 5000 });
+
+    const timeText = await feedEntry.locator(".activity-time").textContent();
+    // Should show local time (14:30:45 EDT), NOT UTC (18:30:45)
+    expect(timeText).toBe("14:30:45");
+    expect(timeText).not.toBe("18:30:45");
+  });
+});
+
+test.describe("YouTube Health Badge", () => {
+  test("YouTube endpoint card shows health badge after polling", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    // Wait for WebSocket delivery status (includes "YouTube Main" endpoint)
+    // and for the initial YouTube health poll to fire (5s interval detects endpoints, then fetches)
+    const ytCard = page.locator(
+      '.endpoint-card:has(.endpoint-alias:has-text("YouTube Main"))',
+    );
+    await expect(ytCard).toBeVisible({ timeout: 10000 });
+    const badge = ytCard.locator(".yt-health-badge");
+    // Badge renders immediately as "unknown", then updates after poll fetches YouTube status
+    // The 5s interval fires, detects endpoints, fetches /youtube/status, updates store
+    await expect(badge).toHaveClass(/good/, { timeout: 15000 });
+    await expect(badge).toHaveText("good");
+  });
+
+  test("non-YouTube endpoint does not show health badge", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(2000);
+
+    const fbCard = page.locator(
+      '.endpoint-card:has(.endpoint-alias:has-text("Facebook Page"))',
+    );
+    await expect(fbCard).toBeVisible({ timeout: 5000 });
+    const badge = fbCard.locator(".yt-health-badge");
+    await expect(badge).toHaveCount(0);
+  });
+});

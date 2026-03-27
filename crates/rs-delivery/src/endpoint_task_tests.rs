@@ -329,7 +329,7 @@ async fn test_ffmpeg_circuit_breaker_triggers() {
     tokio::time::pause();
     let chunks: Vec<(i64, Vec<u8>)> = (1..=5).map(|i| (i, vec![i as u8; 10])).collect();
     let fetcher = MockFetcher::new(chunks);
-    let mut factory = MockProcessFactory::new();
+    let factory = MockProcessFactory::new();
     factory.spawn_fail.store(true, Ordering::Relaxed);
     let spawn_count = factory.spawn_count.clone();
 

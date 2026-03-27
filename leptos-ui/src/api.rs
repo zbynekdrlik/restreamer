@@ -508,3 +508,30 @@ pub struct CachedDeliveryEndpoint {
 pub async fn get_delivery_status_cached() -> Result<CachedDeliveryStatus, String> {
     http_get("/delivery/status/cached").await
 }
+
+// YouTube health API
+
+/// YouTube stream health info for dashboard display.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct YouTubeStatusResponse {
+    pub authenticated: bool,
+    #[serde(default)]
+    pub stream_receiving: Option<bool>,
+    #[serde(default)]
+    pub streams: Vec<YouTubeStreamHealth>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct YouTubeStreamHealth {
+    #[serde(default)]
+    pub health_status: Option<String>,
+    #[serde(default)]
+    pub stream_status: String,
+}
+
+/// Fetch YouTube health status. Returns None on any error (non-critical polling).
+pub async fn get_youtube_health() -> Option<YouTubeStatusResponse> {
+    http_get::<YouTubeStatusResponse>("/youtube/status").await.ok()
+}

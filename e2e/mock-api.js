@@ -372,6 +372,29 @@ app.get("/api/v1/logs", (_req, res) => {
   ]);
 });
 
+// --- YouTube status endpoint ---
+app.get("/api/v1/youtube/status", (_req, res) => {
+  res.json({
+    authenticated: true,
+    stream_receiving: true,
+    broadcast_testing: false,
+    broadcast_statuses: [],
+    stream_count: 1,
+    streams: [
+      {
+        title: "Live Stream",
+        stream_status: "active",
+        health_status: "good",
+        configuration_issues: [],
+        cdn_resolution: "1080p",
+        cdn_frame_rate: "30fps",
+        cdn_ingestion_type: "hls",
+      },
+    ],
+    error: null,
+  });
+});
+
 // Test-only: broadcast arbitrary WebSocket events for E2E pipeline state tests
 app.post("/api/v1/_test/ws-broadcast", (req, res) => {
   broadcastWs(req.body);

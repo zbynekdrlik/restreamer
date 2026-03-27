@@ -80,8 +80,6 @@ impl S3Fetcher {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn chunk_key_format() {
         let key = format!("{}/{}_{}.bin", "evt-123", 42, "evt-123");

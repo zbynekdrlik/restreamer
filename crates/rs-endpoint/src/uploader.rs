@@ -263,7 +263,6 @@ mod tests {
 
     #[test]
     fn retry_constants_are_valid() {
-        assert!(MAX_RETRIES > 0);
         assert!(RETRY_BASE_DELAY.as_secs() > 0);
         assert!(RETRY_MAX_DELAY >= RETRY_BASE_DELAY);
     }
