@@ -327,6 +327,18 @@ fn CacheBar() -> impl IntoView {
 fn EndpointGroups() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
 
+    // Poll YouTube health every 30 seconds when delivery is active
+    let _yt_poll = Interval::new(30_000, move || {
+        let delivery_active = !store.delivery.get().endpoints.is_empty();
+        if delivery_active {
+            spawn_local(async move {
+                let health = api::get_youtube_health().await;
+                store.youtube_health.set(health);
+            });
+        }
+    });
+    std::mem::forget(_yt_poll);
+
     let has_endpoints = move || !store.delivery.get().endpoints.is_empty();
     let has_monitor_eps = move || {
         store.delivery.get().endpoints.iter()
@@ -421,6 +433,10 @@ fn EndpointGroups() -> impl IntoView {
                                 "Dead"
                             };
                             let alias = ep.alias.clone();
+                            let is_youtube = {
+                                let a = alias.to_lowercase();
+                                a.contains("youtube") || a.contains("yt")
+                            };
                             let delay = ep.chunk_delay_secs;
                             let chunks = ep.chunks_processed;
                             let bytes = ep.bytes_processed_total;
@@ -431,6 +447,30 @@ fn EndpointGroups() -> impl IntoView {
                                 <div class={card_class}>
                                     <div class="endpoint-header">
                                         <span class="endpoint-alias">{alias}</span>
+                                        {if is_youtube {
+                                            Some(view! {
+                                                <span class=move || {
+                                                    let health = store.youtube_health.get()
+                                                        .and_then(|r| r.streams.first()
+                                                            .and_then(|s| s.health_status.clone()));
+                                                    match health.as_deref() {
+                                                        Some("good") => "yt-health-badge good",
+                                                        Some("ok") => "yt-health-badge ok",
+                                                        Some("bad") => "yt-health-badge bad",
+                                                        _ => "yt-health-badge unknown",
+                                                    }
+                                                }>
+                                                    {move || {
+                                                        store.youtube_health.get()
+                                                            .and_then(|r| r.streams.first()
+                                                                .and_then(|s| s.health_status.clone()))
+                                                            .unwrap_or_else(|| "—".to_string())
+                                                    }}
+                                                </span>
+                                            })
+                                        } else {
+                                            None
+                                        }}
                                     </div>
                                     <div class="endpoint-metrics">
                                         <span class={status_class}>{status_text}</span>
@@ -493,7 +533,14 @@ fn ActivityFeed() -> impl IntoView {
                     } else {
                         feed.iter().rev().take(50).map(|entry| {
                             let severity_class = format!("activity-entry {}", entry.severity);
-                            let ts: String = entry.timestamp.chars().skip(11).take(8).collect();
+                            let ts = {
+                                let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(&entry.timestamp));
+                                if date.get_time().is_nan() {
+                                    entry.timestamp.chars().skip(11).take(8).collect::<String>()
+                                } else {
+                                    format!("{:02}:{:02}:{:02}", date.get_hours(), date.get_minutes(), date.get_seconds())
+                                }
+                            };
                             let source = entry.source.clone();
                             let message = entry.message.clone();
                             view! {
