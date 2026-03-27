@@ -1249,22 +1249,14 @@ test.describe("YouTube Health Badge", () => {
   }) => {
     await page.goto("/");
     // Wait for WebSocket delivery status (includes "YouTube Main" endpoint)
-    await page.waitForTimeout(2000);
-
-    // The mock API returns YouTube health as "good"
-    // Trigger a YouTube health poll by waiting or manually fetching
-    await page.evaluate(async () => {
-      await fetch("/api/v1/youtube/status");
-    });
-    await page.waitForTimeout(1000);
-
-    // The YouTube Main endpoint card should have a health badge
+    // and for the initial YouTube health poll to fire (5s interval detects endpoints, then fetches)
     const ytCard = page.locator(
       '.endpoint-card:has(.endpoint-alias:has-text("YouTube Main"))',
     );
-    await expect(ytCard).toBeVisible({ timeout: 5000 });
+    await expect(ytCard).toBeVisible({ timeout: 10000 });
     const badge = ytCard.locator(".yt-health-badge");
-    await expect(badge).toBeVisible({ timeout: 35000 }); // wait for 30s poll cycle
+    // Badge should appear after initial poll (5s check + fetch)
+    await expect(badge).toBeVisible({ timeout: 15000 });
     await expect(badge).toHaveClass(/good/);
     await expect(badge).toHaveText("good");
   });

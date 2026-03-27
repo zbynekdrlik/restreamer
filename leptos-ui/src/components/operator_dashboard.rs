@@ -327,8 +327,24 @@ fn CacheBar() -> impl IntoView {
 fn EndpointGroups() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
 
-    // Poll YouTube health every 30 seconds when delivery is active
-    let _yt_poll = Interval::new(30_000, move || {
+    // Poll YouTube health: immediately on first endpoint data, then every 30s
+    let yt_has_polled = RwSignal::new(false);
+    let _yt_poll = Interval::new(5_000, move || {
+        let delivery_active = !store.delivery.get().endpoints.is_empty();
+        if delivery_active {
+            let has_polled = yt_has_polled.get_untracked();
+            if !has_polled {
+                yt_has_polled.set(true);
+                spawn_local(async move {
+                    let health = api::get_youtube_health().await;
+                    store.youtube_health.set(health);
+                });
+            }
+        }
+    });
+    std::mem::forget(_yt_poll);
+    // Separate 30-second refresh for ongoing updates
+    let _yt_refresh = Interval::new(30_000, move || {
         let delivery_active = !store.delivery.get().endpoints.is_empty();
         if delivery_active {
             spawn_local(async move {
@@ -337,7 +353,7 @@ fn EndpointGroups() -> impl IntoView {
             });
         }
     });
-    std::mem::forget(_yt_poll);
+    std::mem::forget(_yt_refresh);
 
     let has_endpoints = move || !store.delivery.get().endpoints.is_empty();
     let has_monitor_eps = move || {
@@ -361,6 +377,10 @@ fn EndpointGroups() -> impl IntoView {
                                     .collect();
                                 monitor_eps.into_iter().map(|ep| {
                                     let alias = ep.alias.clone();
+                                    let is_youtube = {
+                                        let a = alias.to_lowercase();
+                                        a.contains("youtube") || a.contains("yt")
+                                    };
                                     let alive = ep.alive;
                                     let delay = ep.chunk_delay_secs;
                                     let chunks = ep.chunks_processed;
@@ -369,6 +389,30 @@ fn EndpointGroups() -> impl IntoView {
                                             <div class="endpoint-header">
                                                 <span class="monitor-badge">{"\u{26A1}"}</span>
                                                 <span class="endpoint-alias">{alias}</span>
+                                                {if is_youtube {
+                                                    Some(view! {
+                                                        <span class=move || {
+                                                            let health = store.youtube_health.get()
+                                                                .and_then(|r| r.streams.first()
+                                                                    .and_then(|s| s.health_status.clone()));
+                                                            match health.as_deref() {
+                                                                Some("good") => "yt-health-badge good",
+                                                                Some("ok") => "yt-health-badge ok",
+                                                                Some("bad") => "yt-health-badge bad",
+                                                                _ => "yt-health-badge unknown",
+                                                            }
+                                                        }>
+                                                            {move || {
+                                                                store.youtube_health.get()
+                                                                    .and_then(|r| r.streams.first()
+                                                                        .and_then(|s| s.health_status.clone()))
+                                                                    .unwrap_or_else(|| "\u{2014}".to_string())
+                                                            }}
+                                                        </span>
+                                                    })
+                                                } else {
+                                                    None
+                                                }}
                                             </div>
                                             <div class="endpoint-metrics">
                                                 <span class={if alive { "status-indicator alive" } else { "status-indicator dead" }}>
