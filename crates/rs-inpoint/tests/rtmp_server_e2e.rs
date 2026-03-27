@@ -138,7 +138,11 @@ async fn rtmp_server_receives_ffmpeg_stream_and_produces_flv_chunks() {
 
     // Verify the chunk contains valid FLV data
     let file_data = std::fs::read(&chunk.path).unwrap();
-    assert_eq!(&file_data[0..3], b"FLV", "First 3 bytes must be FLV signature");
+    assert_eq!(
+        &file_data[0..3],
+        b"FLV",
+        "First 3 bytes must be FLV signature"
+    );
     assert_eq!(file_data[3], 0x01, "FLV version must be 1");
     assert_eq!(file_data[4] & 0x05, 0x05, "FLV must have audio+video flags");
 
@@ -224,7 +228,11 @@ async fn rtmp_server_produces_multiple_flv_chunks_from_stream() {
         );
 
         let data = std::fs::read(&chunk.path).unwrap();
-        assert_eq!(&data[0..3], b"FLV", "Chunk {i} must start with FLV signature");
+        assert_eq!(
+            &data[0..3],
+            b"FLV",
+            "Chunk {i} must start with FLV signature"
+        );
     }
 
     // Chunks should have sequential indices

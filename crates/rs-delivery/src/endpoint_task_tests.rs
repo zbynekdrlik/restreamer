@@ -862,7 +862,10 @@ fn flv_normalizer_strips_header_and_seq_from_subsequent_chunks() {
     let result = norm.normalize(&chunk2);
 
     // Result should NOT contain FLV header
-    assert!(result.len() < chunk2.len(), "Subsequent chunk should be smaller");
+    assert!(
+        result.len() < chunk2.len(),
+        "Subsequent chunk should be smaller"
+    );
     assert!(
         result.is_empty() || result[0] != 0x46,
         "Should not start with FLV header"
@@ -892,9 +895,15 @@ fn flv_normalizer_passes_through_short_data() {
 #[test]
 fn flv_normalizer_reset_after_new() {
     let mut norm = FlvStreamNormalizer::new();
-    assert!(!norm.sent_header, "New normalizer should not have sent header");
+    assert!(
+        !norm.sent_header,
+        "New normalizer should not have sent header"
+    );
 
     let chunk = build_test_flv_chunk(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA], 100);
     let _ = norm.normalize(&chunk);
-    assert!(norm.sent_header, "After first chunk, sent_header should be true");
+    assert!(
+        norm.sent_header,
+        "After first chunk, sent_header should be true"
+    );
 }

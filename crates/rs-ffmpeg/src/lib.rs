@@ -70,11 +70,7 @@ impl std::str::FromStr for ServiceType {
 
 /// Build the ffmpeg command arguments for a given service type and stream key.
 /// All endpoints use FLV input from pipe.
-pub fn build_ffmpeg_args(
-    service_type: ServiceType,
-    stream_key: &str,
-    alias: &str,
-) -> Vec<String> {
+pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &str) -> Vec<String> {
     match service_type {
         ServiceType::YtHls => build_yt_hls_args(stream_key),
         ServiceType::YtRtmp => {
@@ -466,11 +462,7 @@ mod tests {
         for st in types {
             let args = build_ffmpeg_args(st, "key", "alias");
             let f_idx = args.iter().position(|a| a == "-f").unwrap();
-            assert_eq!(
-                args[f_idx + 1],
-                "flv",
-                "{st} missing flv input format"
-            );
+            assert_eq!(args[f_idx + 1], "flv", "{st} missing flv input format");
         }
     }
 
