@@ -17,6 +17,18 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use crate::state::AppState;
 use crate::tray_icons::{self, TrayState};
 
+/// Detect the LAN IP address by asking the OS which interface routes to the internet.
+/// No actual UDP traffic is sent — the socket is never used for data.
+fn get_lan_ip() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("8.8.8.8:80")?;
+            s.local_addr()
+        })
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
 /// Status polling interval for static states (3 seconds).
 const POLL_INTERVAL_STATIC: Duration = Duration::from_secs(3);
 
@@ -58,8 +70,8 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         MenuItem::with_id(app, "open_dashboard", "Open Dashboard", true, None::<&str>)?;
     let copy_rtmp =
         MenuItem::with_id(app, "copy_rtmp_url", "Copy RTMP URL", true, None::<&str>)?;
-    let copy_api =
-        MenuItem::with_id(app, "copy_api_url", "Copy API URL", true, None::<&str>)?;
+    let copy_dashboard =
+        MenuItem::with_id(app, "copy_dashboard_url", "Copy Dashboard URL", true, None::<&str>)?;
     let view_logs = MenuItem::with_id(app, "view_logs", "View Live Log", true, None::<&str>)?;
     let clear_chunks = MenuItem::with_id(
         app,
@@ -83,7 +95,7 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .separator()
         .item(&open_dashboard)
         .item(&copy_rtmp)
-        .item(&copy_api)
+        .item(&copy_dashboard)
         .item(&view_logs)
         .item(&clear_chunks)
         .separator()
@@ -186,16 +198,24 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
             }
         }
         "copy_rtmp_url" => {
-            let url = "rtmp://localhost:1234/live";
-            match app.clipboard().write_text(url) {
+            let port = app
+                .try_state::<Arc<AppState>>()
+                .map(|s| s.config().inpoint.rtmp_port)
+                .unwrap_or(1234);
+            let url = format!("rtmp://{}:{port}/live", get_lan_ip());
+            match app.clipboard().write_text(&url) {
                 Ok(()) => tracing::info!("Copied RTMP URL to clipboard: {url}"),
                 Err(e) => tracing::error!("Failed to copy to clipboard: {e}"),
             }
         }
-        "copy_api_url" => {
-            let url = "http://127.0.0.1:8910/api/v1/status";
-            match app.clipboard().write_text(url) {
-                Ok(()) => tracing::info!("Copied API URL to clipboard: {url}"),
+        "copy_dashboard_url" => {
+            let port = app
+                .try_state::<Arc<AppState>>()
+                .map(|s| s.config().api.port)
+                .unwrap_or(8910);
+            let url = format!("http://{}:{port}/", get_lan_ip());
+            match app.clipboard().write_text(&url) {
+                Ok(()) => tracing::info!("Copied Dashboard URL to clipboard: {url}"),
                 Err(e) => tracing::error!("Failed to copy to clipboard: {e}"),
             }
         }
@@ -587,5 +607,22 @@ mod tests {
         };
         let tip = build_tooltip(&s);
         assert!(tip.starts_with("Restreamer \u{2014} Wednesday Prayer\n"));
+    }
+
+    // --- LAN IP detection tests ---
+
+    #[test]
+    fn get_lan_ip_returns_valid_ip() {
+        let ip = get_lan_ip();
+        assert!(
+            ip.parse::<std::net::IpAddr>().is_ok(),
+            "get_lan_ip() returned '{ip}' which is not a valid IP address"
+        );
+    }
+
+    #[test]
+    fn get_lan_ip_returns_non_empty() {
+        let ip = get_lan_ip();
+        assert!(!ip.is_empty());
     }
 }
