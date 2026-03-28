@@ -571,6 +571,6 @@ pub async fn get_config() -> Result<serde_json::Value, String> {
 }
 
 /// Patch the config with a partial JSON update.
-pub async fn patch_config(body: &serde_json::Value) -> Result<serde_json::Value, String> {
+pub async fn patch_config(body: &serde_json::Value) -> Result<(), String> {
     http_patch_json("/config", body).await
 }
