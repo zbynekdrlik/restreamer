@@ -17,6 +17,29 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use crate::state::AppState;
 use crate::tray_icons::{self, TrayState};
 
+/// Return all non-loopback IPv4 LAN addresses, sorted for determinism.
+fn get_lan_ips() -> Vec<String> {
+    let mut ips: Vec<String> = local_ip_address::list_afinet_netifas()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, ip)| ip.is_ipv4() && !ip.is_loopback())
+        .map(|(_, ip)| ip.to_string())
+        .collect();
+    ips.sort();
+    ips.dedup();
+    ips
+}
+
+/// Pick the best LAN IP for URLs: prefer 10.x or 192.168.x, fall back to first available.
+fn best_lan_ip() -> String {
+    let ips = get_lan_ips();
+    ips.iter()
+        .find(|ip| ip.starts_with("10.") || ip.starts_with("192.168."))
+        .or_else(|| ips.first())
+        .cloned()
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
 /// Status polling interval for static states (3 seconds).
 const POLL_INTERVAL_STATIC: Duration = Duration::from_secs(3);
 
@@ -53,13 +76,24 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let uploader_item = MenuItem::new(app, "Uploader: Starting...", false, None::<&str>)?;
     let chunks_item = MenuItem::new(app, "Chunks: 0 sent, 0 pending", false, None::<&str>)?;
 
-    // Action items
+    // Action items — show IPs in labels so the user can see them at a glance
+    let lan_ip = best_lan_ip();
     let open_dashboard =
         MenuItem::with_id(app, "open_dashboard", "Open Dashboard", true, None::<&str>)?;
-    let copy_rtmp =
-        MenuItem::with_id(app, "copy_rtmp_url", "Copy RTMP URL", true, None::<&str>)?;
-    let copy_api =
-        MenuItem::with_id(app, "copy_api_url", "Copy API URL", true, None::<&str>)?;
+    let copy_rtmp = MenuItem::with_id(
+        app,
+        "copy_rtmp_url",
+        format!("Copy RTMP URL (rtmp://{lan_ip}:1234/live)"),
+        true,
+        None::<&str>,
+    )?;
+    let copy_dashboard = MenuItem::with_id(
+        app,
+        "copy_dashboard_url",
+        format!("Copy Web URL ({lan_ip}:8910)"),
+        true,
+        None::<&str>,
+    )?;
     let view_logs = MenuItem::with_id(app, "view_logs", "View Live Log", true, None::<&str>)?;
     let clear_chunks = MenuItem::with_id(
         app,
@@ -83,7 +117,7 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .separator()
         .item(&open_dashboard)
         .item(&copy_rtmp)
-        .item(&copy_api)
+        .item(&copy_dashboard)
         .item(&view_logs)
         .item(&clear_chunks)
         .separator()
@@ -186,16 +220,24 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
             }
         }
         "copy_rtmp_url" => {
-            let url = "rtmp://localhost:1234/live";
-            match app.clipboard().write_text(url) {
+            let port = app
+                .try_state::<Arc<AppState>>()
+                .map(|s| s.config().inpoint.rtmp_port)
+                .unwrap_or(1234);
+            let url = format!("rtmp://{}:{port}/live", best_lan_ip());
+            match app.clipboard().write_text(&url) {
                 Ok(()) => tracing::info!("Copied RTMP URL to clipboard: {url}"),
                 Err(e) => tracing::error!("Failed to copy to clipboard: {e}"),
             }
         }
-        "copy_api_url" => {
-            let url = "http://127.0.0.1:8910/api/v1/status";
-            match app.clipboard().write_text(url) {
-                Ok(()) => tracing::info!("Copied API URL to clipboard: {url}"),
+        "copy_dashboard_url" => {
+            let port = app
+                .try_state::<Arc<AppState>>()
+                .map(|s| s.config().api.port)
+                .unwrap_or(8910);
+            let url = format!("http://{}:{port}/", best_lan_ip());
+            match app.clipboard().write_text(&url) {
+                Ok(()) => tracing::info!("Copied Dashboard URL to clipboard: {url}"),
                 Err(e) => tracing::error!("Failed to copy to clipboard: {e}"),
             }
         }
@@ -587,5 +629,25 @@ mod tests {
         };
         let tip = build_tooltip(&s);
         assert!(tip.starts_with("Restreamer \u{2014} Wednesday Prayer\n"));
+    }
+
+    // --- LAN IP detection tests ---
+
+    #[test]
+    fn best_lan_ip_returns_valid_ip() {
+        let ip = best_lan_ip();
+        assert!(
+            ip.parse::<std::net::IpAddr>().is_ok(),
+            "best_lan_ip() returned '{ip}' which is not a valid IP address"
+        );
+    }
+
+    #[test]
+    fn get_lan_ips_returns_only_ipv4_non_loopback() {
+        for ip in get_lan_ips() {
+            let parsed: std::net::IpAddr = ip.parse().unwrap();
+            assert!(parsed.is_ipv4(), "expected IPv4, got {ip}");
+            assert!(!parsed.is_loopback(), "got loopback {ip}");
+        }
     }
 }
