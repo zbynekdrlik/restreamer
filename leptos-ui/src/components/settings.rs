@@ -12,8 +12,150 @@ pub fn SettingsView() -> impl IntoView {
     view! {
         <div class="settings-page">
             <h2>"Settings"</h2>
+            <ObsSettingsSection />
             <EventsSection />
             <crate::components::EndpointsView />
+        </div>
+    }
+}
+
+/// OBS WebSocket configuration section.
+#[component]
+fn ObsSettingsSection() -> impl IntoView {
+    let store = use_context::<DashboardStore>().expect("DashboardStore");
+    let enabled = RwSignal::new(true);
+    let ws_url = RwSignal::new(String::new());
+    let ws_password = RwSignal::new(String::new());
+    let show_password = RwSignal::new(false);
+    let saving = RwSignal::new(false);
+    let status_msg = RwSignal::new(Option::<String>::None);
+    let loaded = RwSignal::new(false);
+
+    // Load current config on mount
+    Effect::new(move || {
+        if !loaded.get() {
+            spawn_local(async move {
+                if let Ok(config) = api::get_config().await {
+                    if let Some(obs) = config.get("obs") {
+                        enabled.set(obs.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true));
+                        ws_url.set(
+                            obs.get("ws_url")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("ws://127.0.0.1:4455")
+                                .to_string(),
+                        );
+                        ws_password.set(
+                            obs.get("ws_password")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        );
+                    }
+                    loaded.set(true);
+                }
+            });
+        }
+    });
+
+    let on_save = move |_| {
+        saving.set(true);
+        status_msg.set(None);
+        let patch = serde_json::json!({
+            "obs": {
+                "enabled": enabled.get(),
+                "ws_url": ws_url.get(),
+                "ws_password": ws_password.get(),
+            }
+        });
+        spawn_local(async move {
+            match api::patch_config(&patch).await {
+                Ok(_) => {
+                    status_msg.set(Some("Saved".to_string()));
+                    // Reload password field (will show "***" if changed)
+                    if let Ok(config) = api::get_config().await {
+                        if let Some(obs) = config.get("obs") {
+                            ws_password.set(
+                                obs.get("ws_password")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                Err(e) => status_msg.set(Some(format!("Error: {e}"))),
+            }
+            saving.set(false);
+        });
+    };
+
+    view! {
+        <div class="settings-section">
+            <h3>
+                "OBS WebSocket"
+                <span class="obs-connection-badge">
+                    {move || {
+                        let obs = store.obs_status.get();
+                        if obs.streaming {
+                            "Streaming"
+                        } else if obs.connected {
+                            "Connected"
+                        } else {
+                            "Disconnected"
+                        }
+                    }}
+                </span>
+            </h3>
+            <div class="obs-settings-form">
+                <div class="edit-row checkboxes">
+                    <label class="checkbox-label">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || enabled.get()
+                            on:change=move |ev| {
+                                enabled.set(event_target_checked(&ev));
+                            }
+                        />
+                        " Enabled"
+                    </label>
+                </div>
+                <div class="edit-row">
+                    <label>"WebSocket URL"</label>
+                    <input
+                        type="text"
+                        placeholder="ws://127.0.0.1:4455"
+                        prop:value=move || ws_url.get()
+                        on:input=move |ev| ws_url.set(event_target_value(&ev))
+                    />
+                </div>
+                <div class="edit-row">
+                    <label>"Password"</label>
+                    <div class="key-input-wrapper">
+                        <input
+                            type=move || if show_password.get() { "text" } else { "password" }
+                            placeholder="(optional)"
+                            prop:value=move || ws_password.get()
+                            on:input=move |ev| ws_password.set(event_target_value(&ev))
+                        />
+                        <button
+                            class="toggle-key-btn"
+                            on:click=move |_| show_password.update(|v| *v = !*v)
+                        >
+                            {move || if show_password.get() { "Hide" } else { "Show" }}
+                        </button>
+                    </div>
+                </div>
+                <div class="obs-settings-actions">
+                    <button
+                        class="btn-small"
+                        on:click=on_save
+                        disabled=move || saving.get()
+                    >
+                        {move || if saving.get() { "Saving..." } else { "Save" }}
+                    </button>
+                    {move || status_msg.get().map(|msg| view! { <span class="status-hint">{msg}</span> })}
+                </div>
+            </div>
         </div>
     }
 }

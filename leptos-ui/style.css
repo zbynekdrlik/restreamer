@@ -1273,6 +1273,36 @@ input[type="password"]:focus {
 }
 .settings-section h3 {
   margin: 0 0 12px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.obs-connection-badge {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--bg-elevated, #333);
+  color: var(--text-dim, #999);
+  font-weight: normal;
+}
+
+.obs-settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.obs-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.status-hint {
+  font-size: 0.85rem;
+  color: var(--accent-green, #4caf50);
 }
 
 .items-list {

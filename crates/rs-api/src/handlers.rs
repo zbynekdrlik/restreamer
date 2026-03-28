@@ -227,6 +227,7 @@ pub async fn get_config(State(state): State<AppState>) -> Json<Config> {
     config.s3.secret_access_key = REDACTED.to_string();
     config.hetzner.api_token = REDACTED.to_string();
     config.youtube.client_secret = REDACTED.to_string();
+    config.obs.ws_password = REDACTED.to_string();
     Json(config)
 }
 
@@ -265,6 +266,9 @@ pub async fn patch_config(
     if new_config.youtube.client_secret == REDACTED {
         new_config.youtube.client_secret = current_config.youtube.client_secret.clone();
     }
+    if new_config.obs.ws_password == REDACTED {
+        new_config.obs.ws_password = current_config.obs.ws_password.clone();
+    }
 
     new_config.validate().map_err(|e| {
         tracing::warn!("Config validation failed: {e}");
@@ -289,10 +293,20 @@ pub async fn patch_config(
         }
     }
 
+    // Restart OBS client if OBS config changed
+    if new_config.obs.enabled != current_config.obs.enabled
+        || new_config.obs.ws_url != current_config.obs.ws_url
+        || new_config.obs.ws_password != current_config.obs.ws_password
+    {
+        state.restart_obs_client(&new_config.obs).await;
+        tracing::info!("OBS client restarted due to config change");
+    }
+
     new_config.s3.access_key_id = REDACTED.to_string();
     new_config.s3.secret_access_key = REDACTED.to_string();
     new_config.hetzner.api_token = REDACTED.to_string();
     new_config.youtube.client_secret = REDACTED.to_string();
+    new_config.obs.ws_password = REDACTED.to_string();
 
     Ok(Json(new_config))
 }
@@ -882,7 +896,8 @@ pub async fn list_delivery_instances(
 pub async fn obs_status(
     State(state): State<AppState>,
 ) -> Result<Json<crate::obs::ObsState>, StatusCode> {
-    match &state.obs_client {
+    let guard = state.obs_client.read().await;
+    match guard.as_ref() {
         Some(client) => Ok(Json(client.get_status().await)),
         None => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
@@ -891,7 +906,8 @@ pub async fn obs_status(
 pub async fn obs_start_stream(
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    match &state.obs_client {
+    let guard = state.obs_client.read().await;
+    match guard.as_ref() {
         Some(client) => {
             client
                 .start_stream()
@@ -909,7 +925,8 @@ pub async fn obs_start_stream(
 pub async fn obs_stop_stream(
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    match &state.obs_client {
+    let guard = state.obs_client.read().await;
+    match guard.as_ref() {
         Some(client) => {
             client
                 .stop_stream()

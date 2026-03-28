@@ -190,7 +190,7 @@ fn default_obs_ws_url() -> String {
 impl Default for ObsConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             ws_url: default_obs_ws_url(),
             ws_password: String::new(),
         }
@@ -325,7 +325,10 @@ impl Config {
                 bind: "127.0.0.1".to_string(),
             },
             delivery: DeliveryConfig::default(),
-            obs: ObsConfig::default(),
+            obs: ObsConfig {
+                enabled: false, // Disable in tests to avoid background connection attempts
+                ..ObsConfig::default()
+            },
         }
     }
 }
@@ -389,7 +392,7 @@ mod tests {
         assert_eq!(config.hetzner.default_server_type, "cpx22");
         assert_eq!(config.delivery.delivery_delay_secs, 120);
         assert_eq!(config.inpoint.chunk_format, "flv");
-        assert!(!config.obs.enabled);
+        assert!(config.obs.enabled);
         assert_eq!(config.obs.ws_url, "ws://127.0.0.1:4455");
         assert!(config.obs.ws_password.is_empty());
     }

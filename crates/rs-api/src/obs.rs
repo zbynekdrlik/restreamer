@@ -121,7 +121,9 @@ async fn obs_connection_loop(
 
         match connect_and_run(&config, &state, &ws_tx, &mut cmd_rx).await {
             Ok(()) => {
-                info!("OBS WebSocket: connection closed gracefully");
+                // cmd channel closed = client dropped = stop reconnecting
+                info!("OBS WebSocket: client stopped, exiting connection loop");
+                break;
             }
             Err(e) => {
                 warn!("OBS WebSocket: connection error: {e}");

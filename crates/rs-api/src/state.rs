@@ -4,7 +4,7 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 use tokio::sync::{broadcast, mpsc};
 
-use rs_core::config::Config;
+use rs_core::config::{Config, ObsConfig};
 use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{InpointState, WsEvent};
 
@@ -46,8 +46,8 @@ pub struct AppState {
     /// Cached delivery status from the last broadcast loop poll.
     /// Allows instant initial load without hitting the VPS.
     pub cached_delivery: Arc<std::sync::RwLock<CachedDeliveryStatus>>,
-    /// OBS WebSocket client, only present when obs.enabled is true in config.
-    pub obs_client: Option<Arc<ObsClient>>,
+    /// OBS WebSocket client. Wrapped in RwLock to allow dynamic restart on config change.
+    pub obs_client: Arc<tokio::sync::RwLock<Option<Arc<ObsClient>>>>,
 }
 
 impl AppState {
@@ -75,7 +75,7 @@ impl AppState {
             inpoint_state: InpointState::new(),
             delivery_orchestrator: delivery.map(Arc::new),
             cached_delivery: Arc::new(std::sync::RwLock::new(CachedDeliveryStatus::default())),
-            obs_client,
+            obs_client: Arc::new(tokio::sync::RwLock::new(obs_client)),
         }
     }
 
@@ -97,6 +97,21 @@ impl AppState {
     pub fn with_inpoint_state(mut self, state: InpointState) -> Self {
         self.inpoint_state = state;
         self
+    }
+
+    /// Restart or stop the OBS WebSocket client based on new config.
+    /// Dropping the old client closes the command channel, which causes
+    /// the connection loop to exit cleanly.
+    pub async fn restart_obs_client(&self, obs_config: &ObsConfig) {
+        let mut guard = self.obs_client.write().await;
+        // Drop old client first (closes cmd channel → loop exits)
+        *guard = None;
+        if obs_config.enabled {
+            *guard = Some(Arc::new(ObsClient::spawn(
+                obs_config.clone(),
+                self.ws_tx.clone(),
+            )));
+        }
     }
 
     pub fn with_restart_channels(

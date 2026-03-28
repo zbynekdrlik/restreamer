@@ -562,3 +562,15 @@ pub async fn obs_start_stream() -> Result<(), String> {
 pub async fn obs_stop_stream() -> Result<(), String> {
     http_post("/obs/stop-stream").await
 }
+
+// --- Config API ---
+
+/// Fetch the current config (credentials redacted).
+pub async fn get_config() -> Result<serde_json::Value, String> {
+    http_get("/config").await
+}
+
+/// Patch the config with a partial JSON update.
+pub async fn patch_config(body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    http_patch_json("/config", body).await
+}
