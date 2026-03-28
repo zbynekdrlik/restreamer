@@ -333,9 +333,10 @@ test.describe("Settings page", () => {
   test("events section shows event list", async ({ page }) => {
     await page.goto("/settings");
     await page.waitForTimeout(1000);
+    // Events section is the second .settings-section (OBS section is first)
     const cards = page
       .locator(".settings-section")
-      .first()
+      .nth(1)
       .locator(".settings-card");
     await expect(cards.first()).toBeVisible({ timeout: 10000 });
   });
