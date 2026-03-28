@@ -170,6 +170,16 @@ async fn load_initial_state(store: DashboardStore) {
     if let Ok(endpoints) = api::list_endpoints().await {
         store.endpoints_list.set(endpoints);
     }
+    // Fetch initial OBS status (WebSocket only sends changes, not current state)
+    if let Some(obs) = api::get_obs_status().await {
+        store.obs_status.set(crate::store::ObsStatus {
+            connected: obs.connected,
+            streaming: obs.streaming,
+            recording: obs.recording,
+            stream_timecode: obs.stream_timecode,
+            summary: String::new(),
+        });
+    }
 }
 
 /// Dispatch a single WebSocket event to the store.
