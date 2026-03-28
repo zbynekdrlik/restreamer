@@ -21,7 +21,7 @@ members = [
 exclude = ["src-tauri", "leptos-ui"]
 
 [workspace.package]
-version = "0.3.12"
+version = "0.3.13"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/restreamer"
@@ -66,6 +66,11 @@ rtmp = "0.6"
 
 # Logging bridge (xiu crates use `log`, we use `tracing`)
 log = "0.4"
+
+# WebSocket client
+tokio-tungstenite = "0.26"
+sha2 = "0.10"
+base64 = "0.22"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }

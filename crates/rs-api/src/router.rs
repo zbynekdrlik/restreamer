@@ -93,6 +93,10 @@ pub fn build_router(state: AppState) -> Router {
             "/delivery/instances",
             get(handlers::list_delivery_instances),
         )
+        // OBS WebSocket
+        .route("/obs/status", get(handlers::obs_status))
+        .route("/obs/start-stream", post(handlers::obs_start_stream))
+        .route("/obs/stop-stream", post(handlers::obs_stop_stream))
         // YouTube
         .route("/youtube/status", get(youtube::youtube_status))
         .route("/youtube/oauth/seed", post(youtube::youtube_oauth_seed))
@@ -965,5 +969,82 @@ mod youtube_oauth_tests {
             .unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("Authorization Failed"));
+    }
+}
+
+#[cfg(test)]
+mod obs_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::db;
+    use rs_core::models::WsEvent;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn obs_status_returns_503_when_disabled() {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/obs/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn obs_start_stream_returns_503_when_disabled() {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/obs/start-stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn obs_stop_stream_returns_503_when_disabled() {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/obs/stop-stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

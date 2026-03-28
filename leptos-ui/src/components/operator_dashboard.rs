@@ -178,6 +178,7 @@ fn PipelineFlow() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
 
     let rtmp_connected = move || store.inpoint_connected.get();
+    let obs = move || store.obs_status.get();
     let chunk_stats = move || store.chunk_stats.get();
     let ps = move || store.pipeline_state.get();
     let is_delivering = move || {
@@ -196,12 +197,63 @@ fn PipelineFlow() -> impl IntoView {
         store.delivery.get().endpoints.iter().map(|ep| ep.chunks_processed).max().unwrap_or(0)
     };
 
+    let obs_toggle_loading = RwSignal::new(false);
+    let on_obs_toggle = move |_| {
+        let currently_streaming = obs().streaming;
+        obs_toggle_loading.set(true);
+        spawn_local(async move {
+            let result = if currently_streaming {
+                api::obs_stop_stream().await
+            } else {
+                api::obs_start_stream().await
+            };
+            if let Err(e) = result {
+                let store = use_context::<DashboardStore>().expect("DashboardStore");
+                store.push_error("obs".to_string(), format!("OBS control failed: {e}"));
+            }
+            obs_toggle_loading.set(false);
+        });
+    };
+
     view! {
         <div class="pipeline-flow">
-            <div class="pipeline-node">
-                <span class={move || if rtmp_connected() { "status-dot active" } else { "status-dot" }}></span>
+            <div class="pipeline-node obs-node">
+                <span class={move || {
+                    let o = obs();
+                    if o.streaming { "status-dot active" }
+                    else if o.connected { "status-dot warning" }
+                    else if rtmp_connected() { "status-dot warning" }
+                    else { "status-dot" }
+                }}></span>
                 <span class="pipeline-label">"OBS"</span>
-                <span class="pipeline-metric">{move || if rtmp_connected() { "Connected" } else { "Disconnected" }}</span>
+                <span class="pipeline-metric">{move || {
+                    let o = obs();
+                    if o.streaming {
+                        "Streaming".to_string()
+                    } else if o.connected {
+                        "Connected".to_string()
+                    } else if rtmp_connected() {
+                        "RTMP Only".to_string()
+                    } else {
+                        "Disconnected".to_string()
+                    }
+                }}</span>
+                {move || {
+                    let o = obs();
+                    if o.connected {
+                        Some(view! {
+                            <button
+                                class="obs-toggle-btn"
+                                on:click=on_obs_toggle
+                                disabled=move || obs_toggle_loading.get()
+                            >
+                                {move || if obs().streaming { "Stop" } else { "Start" }}
+                            </button>
+                        })
+                    } else {
+                        None
+                    }
+                }}
             </div>
             <span class="pipeline-arrow">{"\u{2192}"}</span>
             <div class="pipeline-node">

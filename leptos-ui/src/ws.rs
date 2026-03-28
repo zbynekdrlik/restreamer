@@ -82,6 +82,14 @@ enum WsEvent {
         #[serde(default)]
         s3_queue_chunks: i64,
     },
+    ObsStatus {
+        connected: bool,
+        streaming: bool,
+        recording: bool,
+        #[serde(default)]
+        stream_timecode: Option<String>,
+        summary: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -342,6 +350,21 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                 predicted,
                 local_buffer_chunks,
                 s3_queue_chunks,
+            });
+        }
+        WsEvent::ObsStatus {
+            connected,
+            streaming,
+            recording,
+            stream_timecode,
+            summary,
+        } => {
+            store.obs_status.set(crate::store::ObsStatus {
+                connected,
+                streaming,
+                recording,
+                stream_timecode,
+                summary,
             });
         }
     }

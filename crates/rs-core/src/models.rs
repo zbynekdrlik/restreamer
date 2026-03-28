@@ -159,6 +159,14 @@ pub enum WsEvent {
         #[serde(default)]
         s3_queue_chunks: i64,
     },
+    ObsStatus {
+        connected: bool,
+        streaming: bool,
+        recording: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_timecode: Option<String>,
+        summary: String,
+    },
 }
 
 /// Per-endpoint delivery metrics broadcast via WebSocket.
@@ -316,6 +324,13 @@ mod tests {
                 predicted: false,
                 local_buffer_chunks: 3,
                 s3_queue_chunks: 15,
+            },
+            WsEvent::ObsStatus {
+                connected: true,
+                streaming: true,
+                recording: false,
+                stream_timecode: Some("00:05:23".to_string()),
+                summary: "streaming".to_string(),
             },
         ];
 

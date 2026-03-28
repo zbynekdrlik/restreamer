@@ -67,6 +67,16 @@ pub struct DeliveryEndpointState {
     pub is_fast: bool,
 }
 
+/// OBS status from WebSocket.
+#[derive(Debug, Clone, Default)]
+pub struct ObsStatus {
+    pub connected: bool,
+    pub streaming: bool,
+    pub recording: bool,
+    pub stream_timecode: Option<String>,
+    pub summary: String,
+}
+
 /// Central reactive state shared via Leptos context.
 #[derive(Debug, Clone, Copy)]
 pub struct DashboardStore {
@@ -95,6 +105,9 @@ pub struct DashboardStore {
 
     // YouTube health (polled every 30s)
     pub youtube_health: RwSignal<Option<YouTubeStatusResponse>>,
+
+    // OBS status (from WebSocket)
+    pub obs_status: RwSignal<ObsStatus>,
 }
 
 impl DashboardStore {
@@ -114,6 +127,7 @@ impl DashboardStore {
             activity_feed: RwSignal::new(Vec::new()),
             selected_event_id: RwSignal::new(None),
             youtube_health: RwSignal::new(None),
+            obs_status: RwSignal::new(ObsStatus::default()),
         }
     }
 

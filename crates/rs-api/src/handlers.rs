@@ -877,6 +877,53 @@ pub async fn list_delivery_instances(
     Ok(Json(instances))
 }
 
+// --- OBS WebSocket handlers ---
+
+pub async fn obs_status(
+    State(state): State<AppState>,
+) -> Result<Json<crate::obs::ObsState>, StatusCode> {
+    match &state.obs_client {
+        Some(client) => Ok(Json(client.get_status().await)),
+        None => Err(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+pub async fn obs_start_stream(
+    State(state): State<AppState>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    match &state.obs_client {
+        Some(client) => {
+            client
+                .start_stream()
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            Ok(StatusCode::OK)
+        }
+        None => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OBS integration not enabled".to_string(),
+        )),
+    }
+}
+
+pub async fn obs_stop_stream(
+    State(state): State<AppState>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    match &state.obs_client {
+        Some(client) => {
+            client
+                .stop_stream()
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            Ok(StatusCode::OK)
+        }
+        None => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OBS integration not enabled".to_string(),
+        )),
+    }
+}
+
 // Stream control handlers (start_stream, stop_stream, update_event) are in stream_handlers.rs
 
 #[cfg(test)]

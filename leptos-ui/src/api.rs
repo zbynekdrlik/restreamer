@@ -535,3 +535,30 @@ pub struct YouTubeStreamHealth {
 pub async fn get_youtube_health() -> Option<YouTubeStatusResponse> {
     http_get::<YouTubeStatusResponse>("/youtube/status").await.ok()
 }
+
+// OBS API
+
+/// OBS status response from the HTTP API.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ObsStatusResponse {
+    pub connected: bool,
+    pub streaming: bool,
+    pub recording: bool,
+    #[serde(default)]
+    pub stream_timecode: Option<String>,
+}
+
+/// Fetch OBS status. Returns None if OBS integration is disabled (503).
+pub async fn get_obs_status() -> Option<ObsStatusResponse> {
+    http_get::<ObsStatusResponse>("/obs/status").await.ok()
+}
+
+/// Tell OBS to start streaming.
+pub async fn obs_start_stream() -> Result<(), String> {
+    http_post("/obs/start-stream").await
+}
+
+/// Tell OBS to stop streaming.
+pub async fn obs_stop_stream() -> Result<(), String> {
+    http_post("/obs/stop-stream").await
+}

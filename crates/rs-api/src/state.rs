@@ -9,6 +9,7 @@ use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{InpointState, WsEvent};
 
 use crate::delivery::DeliveryOrchestrator;
+use crate::obs::ObsClient;
 
 /// Cached delivery metrics from the last broadcast loop poll.
 /// Updated every 2 seconds by the delivery broadcast loop.
@@ -45,11 +46,21 @@ pub struct AppState {
     /// Cached delivery status from the last broadcast loop poll.
     /// Allows instant initial load without hitting the VPS.
     pub cached_delivery: Arc<std::sync::RwLock<CachedDeliveryStatus>>,
+    /// OBS WebSocket client, only present when obs.enabled is true in config.
+    pub obs_client: Option<Arc<ObsClient>>,
 }
 
 impl AppState {
     pub fn new(pool: SqlitePool, config: Config, ws_tx: broadcast::Sender<WsEvent>) -> Self {
         let delivery = DeliveryOrchestrator::new(pool.clone(), config.clone());
+        let obs_client = if config.obs.enabled {
+            Some(Arc::new(ObsClient::spawn(
+                config.obs.clone(),
+                ws_tx.clone(),
+            )))
+        } else {
+            None
+        };
         let config = Arc::new(config);
         Self {
             pool,
@@ -64,6 +75,7 @@ impl AppState {
             inpoint_state: InpointState::new(),
             delivery_orchestrator: delivery.map(Arc::new),
             cached_delivery: Arc::new(std::sync::RwLock::new(CachedDeliveryStatus::default())),
+            obs_client,
         }
     }
 

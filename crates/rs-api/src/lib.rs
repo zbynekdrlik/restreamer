@@ -1,5 +1,6 @@
 pub mod delivery;
 pub mod handlers;
+pub mod obs;
 pub mod router;
 #[cfg(test)]
 mod router_tests;
