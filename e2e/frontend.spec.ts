@@ -232,7 +232,7 @@ test.describe("Operator Dashboard", () => {
     await expect(dots.nth(1)).not.toHaveClass(/active/);
   });
 
-  test("pipeline shows Connected after InpointStatus WebSocket event", async ({
+  test("pipeline shows RTMP Only after InpointStatus WebSocket event", async ({
     page,
   }) => {
     await page.goto("/");
@@ -253,15 +253,16 @@ test.describe("Operator Dashboard", () => {
       },
     });
 
+    // Without OBS WebSocket connected, OBS node shows "RTMP Only" with warning dot
     await expect(page.locator(".pipeline-metric").nth(0)).toHaveText(
-      "Connected",
+      "RTMP Only",
       { timeout: 5000 },
     );
     await expect(page.locator(".pipeline-metric").nth(1)).toHaveText(
       "Receiving",
     );
     await expect(page.locator(".pipeline-flow .status-dot").nth(0)).toHaveClass(
-      /active/,
+      /warning/,
     );
   });
 
@@ -273,7 +274,7 @@ test.describe("Operator Dashboard", () => {
       timeout: 10000,
     });
 
-    // Connect
+    // Connect RTMP (without OBS WebSocket, shows "RTMP Only")
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "InpointStatus",
@@ -286,7 +287,7 @@ test.describe("Operator Dashboard", () => {
       },
     });
     await expect(page.locator(".pipeline-metric").nth(0)).toHaveText(
-      "Connected",
+      "RTMP Only",
       { timeout: 5000 },
     );
 
