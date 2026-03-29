@@ -110,6 +110,16 @@ pub struct ApiConfig {
     pub port: u16,
     #[serde(default = "default_api_bind")]
     pub bind: String,
+    #[serde(default)]
+    pub tls: bool,
+    #[serde(default = "default_https_port")]
+    pub https_port: u16,
+    #[serde(default = "default_tls_cert")]
+    pub tls_cert: String,
+    #[serde(default = "default_tls_key")]
+    pub tls_key: String,
+    #[serde(default)]
+    pub https_domain: Option<String>,
 }
 
 fn default_rtmp_port() -> u16 {
@@ -133,6 +143,15 @@ fn default_api_port() -> u16 {
 fn default_api_bind() -> String {
     "127.0.0.1".to_string()
 }
+fn default_https_port() -> u16 {
+    443
+}
+fn default_tls_cert() -> String {
+    "cert.pem".to_string()
+}
+fn default_tls_key() -> String {
+    "key.pem".to_string()
+}
 
 impl Default for InpointConfig {
     fn default() -> Self {
@@ -151,6 +170,11 @@ impl Default for ApiConfig {
         Self {
             port: default_api_port(),
             bind: default_api_bind(),
+            tls: false,
+            https_port: default_https_port(),
+            tls_cert: default_tls_cert(),
+            tls_key: default_tls_key(),
+            https_domain: None,
         }
     }
 }
@@ -323,6 +347,7 @@ impl Config {
             api: ApiConfig {
                 port: 0, // random port for tests
                 bind: "127.0.0.1".to_string(),
+                ..ApiConfig::default()
             },
             delivery: DeliveryConfig::default(),
             obs: ObsConfig {
@@ -461,6 +486,47 @@ mod tests {
         config.inpoint.chunk_format = "ts".to_string();
         let err = config.validate().unwrap_err();
         assert!(err.contains("ts"), "Error should mention ts: {err}");
+    }
+
+    #[test]
+    fn tls_config_defaults() {
+        let json = r#"{
+            "client_uuid": "test",
+            "s3": { "bucket": "b", "region": "r", "endpoint": "e", "access_key_id": "a", "secret_access_key": "s" },
+            "delivery": { "snapshot_label": "test" },
+            "api": {}
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(!config.api.tls);
+        assert_eq!(config.api.https_port, 443);
+        assert_eq!(config.api.tls_cert, "cert.pem");
+        assert_eq!(config.api.tls_key, "key.pem");
+        assert!(config.api.https_domain.is_none());
+    }
+
+    #[test]
+    fn tls_config_explicit() {
+        let json = r#"{
+            "client_uuid": "test",
+            "s3": { "bucket": "b", "region": "r", "endpoint": "e", "access_key_id": "a", "secret_access_key": "s" },
+            "delivery": { "snapshot_label": "test" },
+            "api": {
+                "tls": true,
+                "https_port": 8443,
+                "tls_cert": "my-cert.pem",
+                "tls_key": "my-key.pem",
+                "https_domain": "streamsnv.newlevel.media"
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.api.tls);
+        assert_eq!(config.api.https_port, 8443);
+        assert_eq!(config.api.tls_cert, "my-cert.pem");
+        assert_eq!(config.api.tls_key, "my-key.pem");
+        assert_eq!(
+            config.api.https_domain.as_deref(),
+            Some("streamsnv.newlevel.media")
+        );
     }
 
     #[test]
