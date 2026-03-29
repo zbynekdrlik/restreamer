@@ -748,6 +748,42 @@ input[type="password"]:focus {
   color: var(--text-secondary);
 }
 
+.btn-remove-endpoint {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--danger, #f87171);
+  color: var(--danger, #f87171);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  line-height: 1.4;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+.btn-remove-endpoint:hover {
+  opacity: 1;
+}
+
+.add-endpoint-control {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  align-items: center;
+}
+.add-endpoint-select,
+.start-position-select {
+  background: var(--bg-secondary);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+}
+.start-position-select {
+  max-width: 150px;
+}
+
 .endpoint-metrics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
@@ -995,6 +1031,28 @@ input[type="password"]:focus {
   font-size: 20px;
   color: var(--text-secondary);
   font-weight: 300;
+}
+
+.obs-toggle-btn {
+  margin-top: 4px;
+  padding: 2px 10px;
+  font-size: 11px;
+  border: 1px solid var(--text-secondary);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition:
+    background 0.2s,
+    border-color 0.2s;
+}
+.obs-toggle-btn:hover {
+  background: var(--bg-card);
+  border-color: var(--accent);
+}
+.obs-toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .status-dot {
@@ -1251,6 +1309,36 @@ input[type="password"]:focus {
 }
 .settings-section h3 {
   margin: 0 0 12px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.obs-connection-badge {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--bg-elevated, #333);
+  color: var(--text-dim, #999);
+  font-weight: normal;
+}
+
+.obs-settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.obs-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.status-hint {
+  font-size: 0.85rem;
+  color: var(--accent-green, #4caf50);
 }
 
 .items-list {

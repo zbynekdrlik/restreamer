@@ -17,6 +17,8 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default)]
     pub delivery: DeliveryConfig,
+    #[serde(default)]
+    pub obs: ObsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +173,30 @@ impl Default for DeliveryConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_obs_ws_url")]
+    pub ws_url: String,
+    #[serde(default)]
+    pub ws_password: String,
+}
+
+fn default_obs_ws_url() -> String {
+    "ws://127.0.0.1:4455".to_string()
+}
+
+impl Default for ObsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ws_url: default_obs_ws_url(),
+            ws_password: String::new(),
+        }
+    }
+}
+
 impl Config {
     /// Load config from file, with env var overrides.
     pub fn load(path: &Path) -> Result<Self> {
@@ -249,6 +275,15 @@ impl Config {
                 Err(e) => tracing::warn!("Invalid RESTREAMER_DELIVERY_DELAY_SECS '{v}': {e}"),
             }
         }
+        if let Ok(v) = std::env::var("RESTREAMER_OBS_ENABLED") {
+            self.obs.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("RESTREAMER_OBS_WS_URL") {
+            self.obs.ws_url = v;
+        }
+        if let Ok(v) = std::env::var("RESTREAMER_OBS_WS_PASSWORD") {
+            self.obs.ws_password = v;
+        }
     }
 
     /// Validate that required configuration fields are present.
@@ -290,6 +325,10 @@ impl Config {
                 bind: "127.0.0.1".to_string(),
             },
             delivery: DeliveryConfig::default(),
+            obs: ObsConfig {
+                enabled: false, // Disable in tests to avoid background connection attempts
+                ..ObsConfig::default()
+            },
         }
     }
 }
@@ -310,6 +349,7 @@ impl Default for Config {
             inpoint: InpointConfig::default(),
             api: ApiConfig::default(),
             delivery: DeliveryConfig::default(),
+            obs: ObsConfig::default(),
         }
     }
 }
@@ -352,6 +392,9 @@ mod tests {
         assert_eq!(config.hetzner.default_server_type, "cpx22");
         assert_eq!(config.delivery.delivery_delay_secs, 120);
         assert_eq!(config.inpoint.chunk_format, "flv");
+        assert!(config.obs.enabled);
+        assert_eq!(config.obs.ws_url, "ws://127.0.0.1:4455");
+        assert!(config.obs.ws_password.is_empty());
     }
 
     #[test]

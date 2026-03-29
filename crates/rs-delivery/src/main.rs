@@ -19,6 +19,12 @@ pub struct AppState {
     /// Bearer token for authenticating API requests. Set via DELIVERY_AUTH_TOKEN
     /// env var or via the /api/init endpoint.
     pub auth_token: RwLock<Option<String>>,
+    /// S3 config stored after /api/init for use by /api/endpoints/add.
+    pub s3_config: RwLock<Option<api::S3Config>>,
+    /// Event identifier stored after /api/init for use by /api/endpoints/add.
+    pub event_identifier: RwLock<Option<String>>,
+    /// Delivery delay in chunks, stored after /api/init.
+    pub delivery_delay_chunks: RwLock<i64>,
 }
 
 impl Default for AppState {
@@ -29,6 +35,9 @@ impl Default for AppState {
             version: env!("CARGO_PKG_VERSION"),
             ready: RwLock::new(true),
             auth_token: RwLock::new(auth_token),
+            s3_config: RwLock::new(None),
+            event_identifier: RwLock::new(None),
+            delivery_delay_chunks: RwLock::new(0),
         }
     }
 }

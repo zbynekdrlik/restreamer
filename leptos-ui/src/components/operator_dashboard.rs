@@ -178,6 +178,7 @@ fn PipelineFlow() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
 
     let rtmp_connected = move || store.inpoint_connected.get();
+    let obs = move || store.obs_status.get();
     let chunk_stats = move || store.chunk_stats.get();
     let ps = move || store.pipeline_state.get();
     let is_delivering = move || {
@@ -196,12 +197,63 @@ fn PipelineFlow() -> impl IntoView {
         store.delivery.get().endpoints.iter().map(|ep| ep.chunks_processed).max().unwrap_or(0)
     };
 
+    let obs_toggle_loading = RwSignal::new(false);
+    let on_obs_toggle = move |_| {
+        let currently_streaming = obs().streaming;
+        obs_toggle_loading.set(true);
+        spawn_local(async move {
+            let result = if currently_streaming {
+                api::obs_stop_stream().await
+            } else {
+                api::obs_start_stream().await
+            };
+            if let Err(e) = result {
+                let store = use_context::<DashboardStore>().expect("DashboardStore");
+                store.push_error("obs".to_string(), format!("OBS control failed: {e}"));
+            }
+            obs_toggle_loading.set(false);
+        });
+    };
+
     view! {
         <div class="pipeline-flow">
-            <div class="pipeline-node">
-                <span class={move || if rtmp_connected() { "status-dot active" } else { "status-dot" }}></span>
+            <div class="pipeline-node obs-node">
+                <span class={move || {
+                    let o = obs();
+                    if o.streaming { "status-dot active" }
+                    else if o.connected { "status-dot warning" }
+                    else if rtmp_connected() { "status-dot warning" }
+                    else { "status-dot" }
+                }}></span>
                 <span class="pipeline-label">"OBS"</span>
-                <span class="pipeline-metric">{move || if rtmp_connected() { "Connected" } else { "Disconnected" }}</span>
+                <span class="pipeline-metric">{move || {
+                    let o = obs();
+                    if o.streaming {
+                        "Streaming".to_string()
+                    } else if o.connected {
+                        "Connected".to_string()
+                    } else if rtmp_connected() {
+                        "RTMP Only".to_string()
+                    } else {
+                        "Disconnected".to_string()
+                    }
+                }}</span>
+                {move || {
+                    let o = obs();
+                    if o.connected {
+                        Some(view! {
+                            <button
+                                class="obs-toggle-btn"
+                                on:click=on_obs_toggle
+                                disabled=move || obs_toggle_loading.get()
+                            >
+                                {move || if obs().streaming { "Stop" } else { "Start" }}
+                            </button>
+                        })
+                    } else {
+                        None
+                    }
+                }}
             </div>
             <span class="pipeline-arrow">{"\u{2192}"}</span>
             <div class="pipeline-node">
@@ -490,7 +542,30 @@ fn EndpointGroups() -> impl IntoView {
                             view! {
                                 <div class={card_class}>
                                     <div class="endpoint-header">
-                                        <span class="endpoint-alias">{alias}</span>
+                                        <span class="endpoint-alias">{alias.clone()}</span>
+                                        {
+                                            let remove_alias = alias.clone();
+                                            let delivery_status = delivery.status.clone();
+                                            let is_running = delivery_status == "running" || delivery_status == "delivering";
+                                            is_running.then(move || {
+                                                let remove_alias = remove_alias.clone();
+                                                view! {
+                                                    <button
+                                                        class="btn-remove-endpoint"
+                                                        title="Remove endpoint"
+                                                        on:click=move |_| {
+                                                            let alias = remove_alias.clone();
+                                                            let event_id = store.pipeline_state.get().event_id.unwrap_or(0);
+                                                            wasm_bindgen_futures::spawn_local(async move {
+                                                                let _ = crate::api::delivery_remove_endpoint(event_id, &alias).await;
+                                                            });
+                                                        }
+                                                    >
+                                                        {"\u{00D7}"}
+                                                    </button>
+                                                }
+                                            })
+                                        }
                                         {if is_youtube {
                                             Some(view! {
                                                 <span class=move || {
@@ -556,7 +631,60 @@ fn EndpointGroups() -> impl IntoView {
                         }).collect::<Vec<_>>().into_any()
                     }
                 }}
+                {move || {
+                    let delivery = store.delivery.get();
+                    let is_running = delivery.status == "running" || delivery.status == "delivering";
+                    is_running.then(|| view! { <AddEndpointControl /> })
+                }}
             </div>
+        </div>
+    }
+}
+
+/// Control to add an unattached endpoint to the running delivery.
+#[component]
+fn AddEndpointControl() -> impl IntoView {
+    let store = use_context::<DashboardStore>().expect("DashboardStore");
+    let start_position = RwSignal::new("Live".to_string());
+
+    view! {
+        <div class="add-endpoint-control">
+            <select
+                class="add-endpoint-select"
+                on:change=move |ev| {
+                    let val = event_target_value(&ev);
+                    if let Ok(ep_id) = val.parse::<i64>() {
+                        let pos = start_position.get();
+                        let event_id = store.pipeline_state.get().event_id.unwrap_or(0);
+                        wasm_bindgen_futures::spawn_local(async move {
+                            let _ = crate::api::delivery_add_endpoint(event_id, ep_id, &pos).await;
+                        });
+                    }
+                }
+            >
+                <option value="">"+ Add endpoint"</option>
+                {move || {
+                    let all = store.endpoints_list.get();
+                    let active_aliases: Vec<String> = store.delivery.get()
+                        .endpoints.iter().map(|e| e.alias.clone()).collect();
+                    all.iter()
+                        .filter(|ep| !active_aliases.contains(&ep.alias))
+                        .map(|ep| {
+                            let id_str = ep.id.to_string();
+                            let alias = ep.alias.clone();
+                            view! { <option value={id_str}>{alias}</option> }
+                        })
+                        .collect::<Vec<_>>()
+                }}
+            </select>
+            <select
+                class="start-position-select"
+                prop:value=move || start_position.get()
+                on:change=move |ev| start_position.set(event_target_value(&ev))
+            >
+                <option value="Live">"Live"</option>
+                <option value="Beginning">"From Beginning"</option>
+            </select>
         </div>
     }
 }

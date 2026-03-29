@@ -11,8 +11,6 @@ use rs_cloud::hetzner::HetznerClient;
 use rs_core::config::Config;
 use rs_core::db;
 use rs_core::models::{DeliveryEndpointMetrics, DeliveryInstance};
-use rs_youtube::oauth;
-use rs_youtube::streams;
 
 /// Orchestrates Hetzner VPS delivery instances and YouTube status checks.
 ///
@@ -27,6 +25,9 @@ pub struct DeliveryOrchestrator {
     /// Cached endpoint configs per event_id, populated at init time.
     /// Key: event_id, Value: HashMap<alias, is_fast>
     endpoint_fast_cache: Arc<Mutex<HashMap<i64, HashMap<String, bool>>>>,
+    /// Resume positions for auto-restart after VPS crash.
+    /// Key: event_id, Value: HashMap<alias, last_known_chunk_id>
+    resume_positions: Arc<Mutex<HashMap<i64, HashMap<String, i64>>>>,
 }
 
 /// Result of starting a delivery instance.
@@ -90,6 +91,7 @@ impl DeliveryOrchestrator {
             config,
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
             endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
+            resume_positions: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -101,12 +103,35 @@ impl DeliveryOrchestrator {
             config,
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
             endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
+            resume_positions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Returns the poll_handles map for tracking background tasks.
     pub fn poll_handles(&self) -> Arc<Mutex<HashMap<i64, JoinHandle<()>>>> {
         Arc::clone(&self.poll_handles)
+    }
+
+    /// Update fast cache for a single endpoint (used by mid-stream add).
+    pub async fn update_endpoint_fast_cache(&self, event_id: i64, alias: &str, is_fast: bool) {
+        let mut cache = self.endpoint_fast_cache.lock().await;
+        cache
+            .entry(event_id)
+            .or_default()
+            .insert(alias.to_string(), is_fast);
+    }
+
+    /// Remove an endpoint from the fast cache (used by mid-stream remove).
+    pub async fn remove_endpoint_from_fast_cache(&self, event_id: i64, alias: &str) {
+        let mut cache = self.endpoint_fast_cache.lock().await;
+        if let Some(map) = cache.get_mut(&event_id) {
+            map.remove(alias);
+        }
+    }
+
+    /// Returns a reference to the config.
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     /// Start a delivery instance for the given event.
@@ -337,91 +362,114 @@ impl DeliveryOrchestrator {
             0
         };
 
-        // Wait for enough LOCAL chunks to exist before initializing the VPS.
-        // This avoids stale S3 chunks (from previous sessions) fooling the
-        // buffer fill on the VPS into starting too early.
-        // We wait until latest_seq - first_seq >= delivery_delay_chunks so the
-        // start_chunk_id calculation gives the exact target delay.
-        let mut first_seq = None;
-        let mut latest_seq = 0i64;
-        let max_chunk_wait = 300; // 5 minutes max wait
-        for attempt in 0..max_chunk_wait {
-            match db::get_first_sequence_number_for_event(&self.pool, event_id).await {
-                Ok(Some(seq)) => {
-                    if first_seq.is_none() {
-                        first_seq = Some(seq);
+        // Check if we have resume positions from a crash recovery
+        let resume_pos = self.resume_positions.lock().await.remove(&event_id);
+        let is_resume = resume_pos.is_some();
+
+        let start_chunk_id;
+        if is_resume {
+            // For resume: skip chunk-wait phase, chunks already exist from prior session
+            let first_seq = db::get_first_sequence_number_for_event(&self.pool, event_id)
+                .await?
+                .unwrap_or(1);
+            let latest_seq = db::get_latest_sequence_number_for_event(&self.pool, event_id)
+                .await?
+                .unwrap_or(first_seq);
+            start_chunk_id = if latest_seq - first_seq >= delivery_delay_chunks {
+                (latest_seq - delivery_delay_chunks).max(first_seq)
+            } else {
+                first_seq
+            };
+            info!(
+                event_id,
+                start_chunk_id, "Resuming delivery after crash recovery"
+            );
+        } else {
+            // Wait for enough LOCAL chunks to exist before initializing the VPS.
+            let mut first_seq = None;
+            let mut latest_seq = 0i64;
+            let max_chunk_wait = 300; // 5 minutes max wait
+            for attempt in 0..max_chunk_wait {
+                match db::get_first_sequence_number_for_event(&self.pool, event_id).await {
+                    Ok(Some(seq)) => {
+                        if first_seq.is_none() {
+                            first_seq = Some(seq);
+                        }
+                        latest_seq = db::get_latest_sequence_number_for_event(&self.pool, event_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or(seq);
+                        let gap = latest_seq - first_seq.unwrap_or(seq);
+                        if gap >= delivery_delay_chunks {
+                            info!(
+                                event_id,
+                                first_seq = first_seq.unwrap_or(seq),
+                                latest_seq,
+                                gap,
+                                delivery_delay_chunks,
+                                "Enough chunks accumulated for target delay"
+                            );
+                            break;
+                        }
+                        if attempt % 10 == 0 {
+                            info!(
+                                event_id,
+                                gap,
+                                delivery_delay_chunks,
+                                attempt,
+                                "Waiting for chunks to reach target delay ({gap}/{delivery_delay_chunks})"
+                            );
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
-                    latest_seq = db::get_latest_sequence_number_for_event(&self.pool, event_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or(seq);
-                    let gap = latest_seq - first_seq.unwrap_or(seq);
-                    if gap >= delivery_delay_chunks {
-                        info!(
-                            event_id,
-                            first_seq = first_seq.unwrap_or(seq),
-                            latest_seq,
-                            gap,
-                            delivery_delay_chunks,
-                            "Enough chunks accumulated for target delay"
-                        );
-                        break;
+                    Ok(None) => {
+                        if attempt % 10 == 0 {
+                            info!(
+                                event_id,
+                                attempt, "No chunks found for event yet, retrying..."
+                            );
+                        }
+                        tokio::time::sleep(Duration::from_secs(3)).await;
                     }
-                    if attempt % 10 == 0 {
-                        info!(
-                            event_id,
-                            gap,
-                            delivery_delay_chunks,
-                            attempt,
-                            "Waiting for chunks to reach target delay ({gap}/{delivery_delay_chunks})"
-                        );
+                    Err(e) => {
+                        warn!(event_id, "Failed to query chunk sequence: {e}");
+                        tokio::time::sleep(Duration::from_secs(3)).await;
                     }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-                Ok(None) => {
-                    if attempt % 10 == 0 {
-                        info!(
-                            event_id,
-                            attempt, "No chunks found for event yet, retrying..."
-                        );
-                    }
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                }
-                Err(e) => {
-                    warn!(event_id, "Failed to query chunk sequence: {e}");
-                    tokio::time::sleep(Duration::from_secs(3)).await;
                 }
             }
+            let first_seq_val = first_seq.ok_or_else(|| {
+                anyhow::anyhow!("No chunks found for event {event_id} after wait")
+            })?;
+            start_chunk_id = if latest_seq - first_seq_val >= delivery_delay_chunks {
+                (latest_seq - delivery_delay_chunks).max(first_seq_val)
+            } else {
+                first_seq_val
+            };
+            info!(
+                event_id,
+                start_chunk_id,
+                first_seq = first_seq_val,
+                latest_seq,
+                delivery_delay_chunks,
+                "Starting delivery from sequence"
+            );
         }
-        let first_seq = first_seq
-            .ok_or_else(|| anyhow::anyhow!("No chunks found for event {event_id} after wait"))?;
-
-        // Start from live edge minus delay, so the gap is exactly the target.
-        let start_chunk_id = if latest_seq - first_seq >= delivery_delay_chunks {
-            (latest_seq - delivery_delay_chunks).max(first_seq)
-        } else {
-            // Not enough chunks accumulated in time — start from beginning
-            first_seq
-        };
-        info!(
-            event_id,
-            start_chunk_id,
-            first_seq,
-            latest_seq,
-            delivery_delay_chunks,
-            "Starting delivery from sequence"
-        );
 
         let chunk_format = &self.config.inpoint.chunk_format;
         let init_body = serde_json::json!({
             "endpoints": endpoints.iter().map(|ep| {
+                // Use per-endpoint resume position if available
+                let ep_start = resume_pos.as_ref()
+                    .and_then(|rp| rp.get(&ep.alias).copied())
+                    .unwrap_or(start_chunk_id);
                 serde_json::json!({
                     "alias": ep.alias,
                     "service_type": ep.service_type,
                     "stream_key": ep.stream_key,
                     "is_fast": ep.is_fast,
                     "chunk_format": chunk_format,
+                    "start_chunk_id": ep_start,
                 })
             }).collect::<Vec<_>>(),
             "s3_config": {
@@ -677,17 +725,44 @@ impl DeliveryOrchestrator {
 
     /// Monitor delivery VPS health continuously. Auto-restart on persistent failure.
     ///
-    /// Runs every 30s. After 3 consecutive failures (90s), stops and recreates the
-    /// delivery VPS. This ensures YouTube delivery resumes even if the VPS crashes.
-    pub async fn monitor_delivery_health(&self, event_id: i64, instance_id: i64) {
+    /// Runs every 30s. After 3 consecutive failures (90s), stops the dead VPS and
+    /// creates a new one, resuming endpoints from their last known chunk positions.
+    /// Retries indefinitely — the 90s detection window provides natural throttling.
+    pub async fn monitor_delivery_health(
+        self: &Arc<Self>,
+        event_id: i64,
+        mut instance_id: i64,
+        cached_delivery: std::sync::Arc<std::sync::RwLock<crate::state::CachedDeliveryStatus>>,
+        ws_tx: tokio::sync::broadcast::Sender<rs_core::models::WsEvent>,
+    ) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         interval.tick().await; // skip immediate tick
 
         let mut consecutive_failures = 0u32;
+        let mut restart_count = 0u32;
         let client = reqwest::Client::new();
 
         loop {
             interval.tick().await;
+
+            // Check if event is still delivering (operator may have stopped)
+            match db::get_streaming_event_by_id(&self.pool, event_id).await {
+                Ok(Some(evt)) if !evt.delivering_activated => {
+                    info!(
+                        event_id,
+                        "Health monitor stopping: event no longer delivering"
+                    );
+                    return;
+                }
+                Ok(None) => {
+                    info!(event_id, "Health monitor stopping: event deleted");
+                    return;
+                }
+                Err(e) => {
+                    warn!(event_id, "Health monitor DB error (event): {e}");
+                }
+                _ => {}
+            }
 
             // Check if instance still exists and is running
             let instance = match db::get_delivery_instance(&self.pool, instance_id).await {
@@ -742,7 +817,6 @@ impl DeliveryOrchestrator {
                     );
                 }
                 consecutive_failures = 0;
-                // Update health timestamp in DB
                 db::update_delivery_instance_health(&self.pool, instance_id)
                     .await
                     .ok();
@@ -755,166 +829,114 @@ impl DeliveryOrchestrator {
                 );
 
                 if consecutive_failures >= 3 {
+                    restart_count += 1;
                     error!(
                         event_id,
-                        "Delivery VPS unreachable for 90s — auto-restarting delivery"
+                        restart_count,
+                        "Delivery VPS unreachable for 90s — auto-restarting (attempt {restart_count})"
                     );
+
+                    // Capture last-known endpoint positions from cached status
+                    let resume_pos: HashMap<String, i64> = cached_delivery
+                        .read()
+                        .map(|c| {
+                            c.endpoints
+                                .iter()
+                                .filter(|ep| ep.current_chunk_id > 0)
+                                .map(|ep| (ep.alias.clone(), ep.current_chunk_id))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    // Emit activity feed
+                    let _ = ws_tx.send(rs_core::models::WsEvent::ActivityFeed {
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        severity: "warning".to_string(),
+                        message: format!("Delivery VPS auto-restarting (attempt {restart_count})"),
+                        source: "delivery".to_string(),
+                    });
 
                     // Stop the dead VPS
                     if let Err(e) = self.stop_delivery(event_id).await {
                         error!(event_id, "Auto-restart: failed to stop delivery: {e}");
                     }
 
-                    // Note: we can't restart here because we'd need to re-enter
-                    // the full start_delivery + poll_and_init flow, which requires
-                    // event details. Just stop and log — the status broadcast will
-                    // show delivery as stopped, alerting the operator.
-                    // Future: could trigger start_delivery from here if we store
-                    // enough state.
-                    info!(
-                        event_id,
-                        "Auto-restart: delivery stopped. Use API to restart."
-                    );
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Check YouTube stream receiving status using stored OAuth tokens.
-    pub async fn check_youtube_status(&self) -> YouTubeStatus {
-        let tokens = match db::get_youtube_oauth(&self.pool).await {
-            Ok(Some(t)) => t,
-            Ok(None) => {
-                return YouTubeStatus {
-                    authenticated: false,
-                    stream_receiving: None,
-                    error: Some("No YouTube OAuth tokens configured".to_string()),
-                };
-            }
-            Err(e) => {
-                return YouTubeStatus {
-                    authenticated: false,
-                    stream_receiving: None,
-                    error: Some(format!("DB error: {e}")),
-                };
-            }
-        };
-
-        // Check if token needs refresh
-        let access_token = if oauth::is_token_expired(tokens.expires_at.as_deref()) {
-            let oauth_tokens = rs_youtube::OAuthTokens {
-                access_token: tokens.access_token.clone(),
-                refresh_token: tokens.refresh_token.clone(),
-                token_uri: tokens.token_uri.clone(),
-                client_id: tokens.client_id.clone(),
-                client_secret: tokens.client_secret.clone(),
-                scopes: tokens.scopes.clone(),
-                expires_at: tokens.expires_at.clone(),
-            };
-
-            match oauth::refresh_access_token(&oauth_tokens).await {
-                Ok(resp) => {
-                    let new_expires = resp.expires_in.map(|secs| {
-                        (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339()
-                    });
-
-                    if let Err(e) = db::upsert_youtube_oauth(
-                        &self.pool,
-                        &resp.access_token,
-                        resp.refresh_token
-                            .as_deref()
-                            .unwrap_or(&tokens.refresh_token),
-                        &tokens.token_uri,
-                        &tokens.client_id,
-                        &tokens.client_secret,
-                        &tokens.scopes,
-                        new_expires.as_deref(),
-                    )
-                    .await
-                    {
-                        warn!("Failed to save refreshed token: {e}");
+                    // Store resume positions for poll_and_init
+                    if !resume_pos.is_empty() {
+                        self.resume_positions
+                            .lock()
+                            .await
+                            .insert(event_id, resume_pos);
                     }
 
-                    resp.access_token
-                }
-                Err(e) => {
-                    return YouTubeStatus {
-                        authenticated: true,
-                        stream_receiving: None,
-                        error: Some(format!("Token refresh failed: {e}")),
-                    };
+                    // Create a new VPS
+                    match self.start_delivery(event_id).await {
+                        Ok(result) => {
+                            let new_instance_id = result.instance_id;
+                            let auth_token = result.auth_token.clone();
+                            instance_id = new_instance_id;
+
+                            // Look up event name for poll_and_init
+                            let event_name = db::get_streaming_event_by_id(&self.pool, event_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|e| e.name)
+                                .unwrap_or_default();
+
+                            let orch = Arc::clone(self);
+
+                            // Spawn poll_and_init in background
+                            // Health monitoring continues in this loop with the new instance_id
+                            let handle = tokio::spawn(async move {
+                                if let Err(e) = orch
+                                    .poll_and_init(
+                                        new_instance_id,
+                                        event_id,
+                                        &event_name,
+                                        &auth_token,
+                                    )
+                                    .await
+                                {
+                                    tracing::error!("Auto-restart poll_and_init failed: {e}");
+                                    if let Err(e) = db::update_delivery_instance_status(
+                                        orch.pool(),
+                                        new_instance_id,
+                                        "failed",
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!("Failed to mark instance as failed: {e}");
+                                    }
+                                }
+                            });
+
+                            self.poll_handles
+                                .lock()
+                                .await
+                                .insert(new_instance_id, handle);
+
+                            info!(
+                                event_id,
+                                new_instance_id, "Auto-restart: new VPS creation started"
+                            );
+                        }
+                        Err(e) => {
+                            error!(event_id, "Auto-restart: failed to create new VPS: {e}");
+                            let _ = ws_tx.send(rs_core::models::WsEvent::ActivityFeed {
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                severity: "error".to_string(),
+                                message: format!("Auto-restart failed: {e}. Will retry in 90s."),
+                                source: "delivery".to_string(),
+                            });
+                        }
+                    }
+
+                    // Reset failures — next 3 failures will trigger another restart
+                    consecutive_failures = 0;
                 }
             }
-        } else {
-            tokens.access_token.clone()
-        };
-
-        match streams::is_stream_receiving(&access_token).await {
-            Ok(receiving) => YouTubeStatus {
-                authenticated: true,
-                stream_receiving: Some(receiving),
-                error: None,
-            },
-            Err(e) => YouTubeStatus {
-                authenticated: true,
-                stream_receiving: None,
-                error: Some(format!("YouTube API error: {e}")),
-            },
         }
-    }
-
-    /// List YouTube live streams for diagnostics.
-    pub async fn list_youtube_streams(
-        &self,
-    ) -> anyhow::Result<Vec<rs_youtube::streams::LiveStream>> {
-        let tokens = db::get_youtube_oauth(&self.pool)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("No YouTube OAuth tokens"))?;
-
-        let access_token = if oauth::is_token_expired(tokens.expires_at.as_deref()) {
-            let oauth_tokens = rs_youtube::OAuthTokens {
-                access_token: tokens.access_token.clone(),
-                refresh_token: tokens.refresh_token.clone(),
-                token_uri: tokens.token_uri.clone(),
-                client_id: tokens.client_id.clone(),
-                client_secret: tokens.client_secret.clone(),
-                scopes: tokens.scopes.clone(),
-                expires_at: tokens.expires_at.clone(),
-            };
-            oauth::refresh_access_token(&oauth_tokens)
-                .await?
-                .access_token
-        } else {
-            tokens.access_token
-        };
-
-        Ok(streams::list_live_streams(&access_token).await?)
-    }
-
-    pub async fn get_broadcast_statuses(&self) -> anyhow::Result<Vec<(String, String)>> {
-        let tokens = db::get_youtube_oauth(&self.pool)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("No YouTube OAuth tokens"))?;
-
-        let access_token = if oauth::is_token_expired(tokens.expires_at.as_deref()) {
-            let oauth_tokens = rs_youtube::OAuthTokens {
-                access_token: tokens.access_token.clone(),
-                refresh_token: tokens.refresh_token.clone(),
-                token_uri: tokens.token_uri.clone(),
-                client_id: tokens.client_id.clone(),
-                client_secret: tokens.client_secret.clone(),
-                scopes: tokens.scopes.clone(),
-                expires_at: tokens.expires_at.clone(),
-            };
-            oauth::refresh_access_token(&oauth_tokens)
-                .await?
-                .access_token
-        } else {
-            tokens.access_token
-        };
-
-        Ok(streams::get_broadcast_statuses(&access_token).await?)
     }
 
     async fn find_delivery_image(&self) -> anyhow::Result<String> {
@@ -934,63 +956,4 @@ impl DeliveryOrchestrator {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn orchestrator_none_without_token() {
-        let pool = db::create_memory_pool().await.unwrap();
-        db::run_migrations(&pool).await.unwrap();
-        let config = Config::for_testing();
-        assert!(DeliveryOrchestrator::new(pool, config).is_none());
-    }
-
-    #[tokio::test]
-    async fn orchestrator_some_with_token() {
-        let pool = db::create_memory_pool().await.unwrap();
-        db::run_migrations(&pool).await.unwrap();
-        let mut config = Config::for_testing();
-        config.hetzner.api_token = "test-token".to_string();
-        assert!(DeliveryOrchestrator::new(pool, config).is_some());
-    }
-
-    #[tokio::test]
-    async fn youtube_status_no_tokens() {
-        let pool = db::create_memory_pool().await.unwrap();
-        db::run_migrations(&pool).await.unwrap();
-        let mut config = Config::for_testing();
-        config.hetzner.api_token = "test-token".to_string();
-        let orch = DeliveryOrchestrator::new(pool, config).unwrap();
-
-        let status = orch.check_youtube_status().await;
-        assert!(!status.authenticated);
-        assert!(status.error.is_some());
-    }
-
-    #[tokio::test]
-    async fn stop_delivery_noop_when_no_instance() {
-        let pool = db::create_memory_pool().await.unwrap();
-        db::run_migrations(&pool).await.unwrap();
-        let mut config = Config::for_testing();
-        config.hetzner.api_token = "test-token".to_string();
-        let orch = DeliveryOrchestrator::new(pool, config).unwrap();
-
-        // Should not error when no instance exists
-        orch.stop_delivery(999).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn get_delivery_status_no_instance() {
-        let pool = db::create_memory_pool().await.unwrap();
-        db::run_migrations(&pool).await.unwrap();
-        let mut config = Config::for_testing();
-        config.hetzner.api_token = "test-token".to_string();
-        let orch = DeliveryOrchestrator::new(pool, config).unwrap();
-
-        let status = orch.get_delivery_status(999).await.unwrap();
-        assert!(status.instance.is_none());
-        assert!(!status.server_ready);
-        assert!(status.endpoints.is_empty());
-    }
-}
+// Tests are in delivery_tests.rs

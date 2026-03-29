@@ -84,6 +84,8 @@ pub async fn start_stream(
                     orch.poll_handles(),
                     Arc::clone(orch),
                 );
+                let cached_delivery = state.cached_delivery.clone();
+                let ws_tx_clone = state.ws_tx.clone();
                 let handle = tokio::spawn(async move {
                     if let Err(e) = orch
                         .poll_and_init(instance_id, id, &event_name, &auth_token)
@@ -102,9 +104,10 @@ pub async fn start_stream(
                         return;
                     }
 
-                    // Transition to health monitoring loop
+                    // Transition to health monitoring loop with auto-restart
                     tracing::info!(event_id = id, "Delivery health monitor started");
-                    orch.monitor_delivery_health(id, instance_id).await;
+                    orch.monitor_delivery_health(id, instance_id, cached_delivery, ws_tx_clone)
+                        .await;
                     orch.poll_handles().lock().await.remove(&instance_id);
                 });
                 poll_handles.lock().await.insert(instance_id, handle);

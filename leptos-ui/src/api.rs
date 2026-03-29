@@ -535,3 +535,65 @@ pub struct YouTubeStreamHealth {
 pub async fn get_youtube_health() -> Option<YouTubeStatusResponse> {
     http_get::<YouTubeStatusResponse>("/youtube/status").await.ok()
 }
+
+// OBS API
+
+/// OBS status response from the HTTP API.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ObsStatusResponse {
+    pub connected: bool,
+    pub streaming: bool,
+    pub recording: bool,
+    #[serde(default)]
+    pub stream_timecode: Option<String>,
+}
+
+/// Fetch OBS status. Returns None if OBS integration is disabled (503).
+pub async fn get_obs_status() -> Option<ObsStatusResponse> {
+    http_get::<ObsStatusResponse>("/obs/status").await.ok()
+}
+
+/// Tell OBS to start streaming.
+pub async fn obs_start_stream() -> Result<(), String> {
+    http_post("/obs/start-stream").await
+}
+
+/// Tell OBS to stop streaming.
+pub async fn obs_stop_stream() -> Result<(), String> {
+    http_post("/obs/stop-stream").await
+}
+
+// --- Config API ---
+
+/// Fetch the current config (credentials redacted).
+pub async fn get_config() -> Result<serde_json::Value, String> {
+    http_get("/config").await
+}
+
+/// Patch the config with a partial JSON update.
+pub async fn patch_config(body: &serde_json::Value) -> Result<(), String> {
+    http_patch_json("/config", body).await
+}
+
+/// Add an endpoint to a running delivery VPS mid-stream.
+pub async fn delivery_add_endpoint(
+    event_id: i64,
+    endpoint_id: i64,
+    start_position: &str,
+) -> Result<(), String> {
+    let body = serde_json::json!({
+        "event_id": event_id,
+        "endpoint_id": endpoint_id,
+        "start_position": { "strategy": start_position },
+    });
+    http_post_json("/delivery/endpoints/add", &body).await.map(|_| ())
+}
+
+/// Remove an endpoint from a running delivery VPS mid-stream.
+pub async fn delivery_remove_endpoint(event_id: i64, alias: &str) -> Result<(), String> {
+    let body = serde_json::json!({
+        "event_id": event_id,
+        "alias": alias,
+    });
+    http_post_json("/delivery/endpoints/remove", &body).await.map(|_| ())
+}

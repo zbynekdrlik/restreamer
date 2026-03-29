@@ -82,6 +82,14 @@ enum WsEvent {
         #[serde(default)]
         s3_queue_chunks: i64,
     },
+    ObsStatus {
+        connected: bool,
+        streaming: bool,
+        recording: bool,
+        #[serde(default)]
+        stream_timecode: Option<String>,
+        summary: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -161,6 +169,16 @@ async fn load_initial_state(store: DashboardStore) {
     }
     if let Ok(endpoints) = api::list_endpoints().await {
         store.endpoints_list.set(endpoints);
+    }
+    // Fetch initial OBS status (WebSocket only sends changes, not current state)
+    if let Some(obs) = api::get_obs_status().await {
+        store.obs_status.set(crate::store::ObsStatus {
+            connected: obs.connected,
+            streaming: obs.streaming,
+            recording: obs.recording,
+            stream_timecode: obs.stream_timecode,
+            summary: String::new(),
+        });
     }
 }
 
@@ -342,6 +360,21 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                 predicted,
                 local_buffer_chunks,
                 s3_queue_chunks,
+            });
+        }
+        WsEvent::ObsStatus {
+            connected,
+            streaming,
+            recording,
+            stream_timecode,
+            summary,
+        } => {
+            store.obs_status.set(crate::store::ObsStatus {
+                connected,
+                streaming,
+                recording,
+                stream_timecode,
+                summary,
             });
         }
     }

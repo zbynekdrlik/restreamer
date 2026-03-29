@@ -232,7 +232,7 @@ test.describe("Operator Dashboard", () => {
     await expect(dots.nth(1)).not.toHaveClass(/active/);
   });
 
-  test("pipeline shows Connected after InpointStatus WebSocket event", async ({
+  test("pipeline shows RTMP Only after InpointStatus WebSocket event", async ({
     page,
   }) => {
     await page.goto("/");
@@ -253,15 +253,16 @@ test.describe("Operator Dashboard", () => {
       },
     });
 
+    // Without OBS WebSocket connected, OBS node shows "RTMP Only" with warning dot
     await expect(page.locator(".pipeline-metric").nth(0)).toHaveText(
-      "Connected",
+      "RTMP Only",
       { timeout: 5000 },
     );
     await expect(page.locator(".pipeline-metric").nth(1)).toHaveText(
       "Receiving",
     );
     await expect(page.locator(".pipeline-flow .status-dot").nth(0)).toHaveClass(
-      /active/,
+      /warning/,
     );
   });
 
@@ -273,7 +274,7 @@ test.describe("Operator Dashboard", () => {
       timeout: 10000,
     });
 
-    // Connect
+    // Connect RTMP (without OBS WebSocket, shows "RTMP Only")
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "InpointStatus",
@@ -286,7 +287,7 @@ test.describe("Operator Dashboard", () => {
       },
     });
     await expect(page.locator(".pipeline-metric").nth(0)).toHaveText(
-      "Connected",
+      "RTMP Only",
       { timeout: 5000 },
     );
 
@@ -332,9 +333,10 @@ test.describe("Settings page", () => {
   test("events section shows event list", async ({ page }) => {
     await page.goto("/settings");
     await page.waitForTimeout(1000);
+    // Events section is the second .settings-section (OBS section is first)
     const cards = page
       .locator(".settings-section")
-      .first()
+      .nth(1)
       .locator(".settings-card");
     await expect(cards.first()).toBeVisible({ timeout: 10000 });
   });
@@ -824,6 +826,123 @@ test.describe("Pending Endpoint State", () => {
     expect(text).toContain("—");
     expect(text).not.toContain("0s delay");
     expect(text).not.toContain("0 chunks");
+  });
+});
+
+// --- Delivery Endpoint Add/Remove Controls ---
+
+test.describe("Delivery Endpoint Add/Remove Controls", () => {
+  test("add endpoint dropdown appears when delivery is running", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast running delivery status
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "rs-delivery-1",
+            status: "running",
+            server_ip: "1.2.3.4",
+            endpoint_count: 1,
+            endpoints: [
+              {
+                alias: "YouTube Main",
+                alive: true,
+                current_chunk_id: 42,
+                bytes_processed_total: 1000000,
+                chunks_processed: 40,
+                chunk_delay_secs: 15.0,
+                stall_reason: null,
+                ffmpeg_restart_count: 0,
+                last_error: null,
+                is_fast: false,
+              },
+            ],
+          },
+        },
+      },
+    );
+
+    // Add endpoint dropdown should be visible
+    await expect(page.locator(".add-endpoint-select")).toBeVisible({
+      timeout: 5000,
+    });
+    await expect(page.locator(".start-position-select")).toBeVisible();
+  });
+
+  test("remove button appears on endpoint cards when delivering", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast running delivery status
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "rs-delivery-1",
+            status: "running",
+            server_ip: "1.2.3.4",
+            endpoint_count: 1,
+            endpoints: [
+              {
+                alias: "YouTube Main",
+                alive: true,
+                current_chunk_id: 42,
+                bytes_processed_total: 1000000,
+                chunks_processed: 40,
+                chunk_delay_secs: 15.0,
+                stall_reason: null,
+                ffmpeg_restart_count: 0,
+                last_error: null,
+                is_fast: false,
+              },
+            ],
+          },
+        },
+      },
+    );
+
+    // Remove button (×) should appear on the endpoint card
+    const removeBtn = page.locator(".btn-remove-endpoint");
+    await expect(removeBtn).toBeVisible({ timeout: 5000 });
+  });
+
+  test("add/remove controls hidden when delivery is idle", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast idle delivery status to clear any leftover state from previous tests
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "",
+            status: "none",
+            server_ip: null,
+            endpoint_count: 0,
+            endpoints: [],
+          },
+        },
+      },
+    );
+    await page.waitForTimeout(500);
+
+    // Idle state — no add/remove controls
+    await expect(page.locator(".add-endpoint-select")).not.toBeVisible();
+    await expect(page.locator(".btn-remove-endpoint")).not.toBeVisible();
   });
 });
 
