@@ -333,22 +333,6 @@ fn Pipeline() -> impl IntoView {
             format!("{} pending", local_chunks())
         }
     };
-    let buffer_progress = move || store.pipeline_state.get().buffer_progress;
-    let buffer_bar_class = move || {
-        let p = ps();
-        if p.state == "buffer_exhausted" {
-            "cache-bar-fill exhausted"
-        } else if p.predicted {
-            "cache-bar-fill predicted"
-        } else if buffer_progress() >= 0.75 {
-            "cache-bar-fill healthy"
-        } else if buffer_progress() >= 0.40 {
-            "cache-bar-fill warning"
-        } else {
-            "cache-bar-fill critical"
-        }
-    };
-
     // S3/VPS node
     let vps_dot = move || {
         let s = delivery_status();
@@ -415,13 +399,6 @@ fn Pipeline() -> impl IntoView {
                     <span class="pipeline-node-label">"BUFFER"</span>
                 </div>
                 <span class="pipeline-node-metric">{buffer_metric}</span>
-                <div class="pipeline-buffer-bar"
-                    style:display=move || if is_delivering() { "block" } else { "none" }
-                >
-                    <div class={buffer_bar_class}
-                        style:width=move || format!("{}%", (buffer_progress() * 100.0).min(100.0))
-                    ></div>
-                </div>
             </div>
             <div class="pipeline-connector">{"\u{2502}"}</div>
 
