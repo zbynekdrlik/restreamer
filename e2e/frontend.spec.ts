@@ -1367,6 +1367,6 @@ test.describe("PWA Manifest", () => {
     const manifest = await response?.json();
     expect(manifest.name).toBe("Restreamer");
     expect(manifest.display).toBe("standalone");
-    expect(manifest.theme_color).toBe("#0a0a0a");
+    expect(manifest.theme_color).toBe("#0f172a");
   });
 });
