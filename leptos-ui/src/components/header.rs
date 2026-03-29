@@ -31,7 +31,7 @@ pub fn Header() -> impl IntoView {
     let is_settings = move || location.pathname.get().contains("/settings");
 
     view! {
-        <header class="header">
+        <header class="app-header">
             <div class="header-left">
                 {move || {
                     if is_settings() {
