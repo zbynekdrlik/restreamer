@@ -922,7 +922,25 @@ test.describe("Delivery Endpoint Add/Remove Controls", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    // No delivery status — idle state
+    // Broadcast idle delivery status to clear any leftover state from previous tests
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "",
+            status: "none",
+            server_ip: null,
+            endpoint_count: 0,
+            endpoints: [],
+          },
+        },
+      },
+    );
+    await page.waitForTimeout(500);
+
+    // Idle state — no add/remove controls
     await expect(page.locator(".add-endpoint-select")).not.toBeVisible();
     await expect(page.locator(".btn-remove-endpoint")).not.toBeVisible();
   });
