@@ -15,7 +15,66 @@ pub fn OperatorDashboard() -> impl IntoView {
     view! {
         <div class="operator-dashboard">
             <ControlBar />
+            <CacheBar />
             <Pipeline />
+        </div>
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CacheBar — prominent buffer fill progress bar
+// ---------------------------------------------------------------------------
+
+#[component]
+fn CacheBar() -> impl IntoView {
+    let store = use_context::<DashboardStore>().expect("DashboardStore");
+
+    let progress = move || store.pipeline_state.get().buffer_progress;
+    let target = move || store.pipeline_state.get().target_delay_secs;
+    let current = move || store.pipeline_state.get().current_delay_secs;
+    let is_predicted = move || store.pipeline_state.get().predicted;
+    let is_exhausted = move || store.pipeline_state.get().state == "buffer_exhausted";
+    let is_visible = move || {
+        let ps = store.pipeline_state.get();
+        ps.state == "buffering" || ps.state == "streaming" || ps.state == "buffer_exhausted"
+    };
+    let bar_class = move || {
+        if is_exhausted() {
+            "cache-bar-fill exhausted"
+        } else if is_predicted() {
+            "cache-bar-fill predicted"
+        } else if progress() >= 0.75 {
+            "cache-bar-fill healthy"
+        } else if progress() >= 0.40 {
+            "cache-bar-fill warning"
+        } else {
+            "cache-bar-fill critical"
+        }
+    };
+
+    view! {
+        <div class="cache-bar-container" style:display=move || if is_visible() { "block" } else { "none" }>
+            <div class="cache-bar">
+                <div class={bar_class} style:width=move || format!("{}%", (progress() * 100.0).min(100.0))></div>
+            </div>
+            <span class="cache-bar-label">
+                {move || {
+                    if is_exhausted() {
+                        "Buffer Exhausted \u{2014} delivery VPS has no remaining cache".to_string()
+                    } else if is_predicted() {
+                        format!("~{}s / {}s target (predicted \u{2014} VPS unreachable)", current() as u64, target())
+                    } else {
+                        let zone = if progress() >= 0.75 {
+                            "healthy"
+                        } else if progress() >= 0.40 {
+                            "building"
+                        } else {
+                            "low"
+                        };
+                        format!("Cache: {}s / {}s target ({zone})", current() as u64, target())
+                    }
+                }}
+            </span>
         </div>
     }
 }
