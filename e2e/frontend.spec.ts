@@ -8,8 +8,29 @@ const tauriMockScript = fs.readFileSync(
   "utf-8",
 );
 
+// Chromium-level warnings that are not application bugs
+const ALLOWED_CONSOLE = [
+  /integrity.*attribute.*currently ignored.*subresource integrity/i, // Chromium bug crbug.com/981419
+];
+
+// Collect console errors/warnings per-test and assert clean console in afterEach
+let consoleMessages: string[] = [];
+
 test.beforeEach(async ({ page }) => {
+  consoleMessages = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error" || msg.type() === "warning") {
+      consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
+    }
+  });
   await page.addInitScript(tauriMockScript);
+});
+
+test.afterEach(async () => {
+  const real = consoleMessages.filter(
+    (m) => !ALLOWED_CONSOLE.some((r) => r.test(m)),
+  );
+  expect(real).toEqual([]);
 });
 
 // --- Operator Dashboard (/) ---
@@ -94,12 +115,6 @@ test.describe("Operator Dashboard", () => {
   });
 
   test("pipeline nodes render in vertical flow", async ({ page }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     const nodes = page.locator(".pipeline-node");
     await expect(nodes).toHaveCount(4);
@@ -117,7 +132,6 @@ test.describe("Operator Dashboard", () => {
     );
     const connectors = page.locator(".pipeline-connector");
     await expect(connectors).toHaveCount(3);
-    expect(consoleMessages).toEqual([]);
   });
 
   test("pipeline nodes show status dots", async ({ page }) => {
@@ -506,12 +520,6 @@ test.describe("Predictive Buffer State", () => {
   test("cache bar shows predicted state with warning style", async ({
     page,
   }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -537,16 +545,9 @@ test.describe("Predictive Buffer State", () => {
     await expect(fill).toHaveClass(/predicted/, { timeout: 5000 });
     // Control bar cache display should show predicted prefix (~)
     await expect(page.locator(".cache-display")).toContainText("~60s / 120s");
-    expect(consoleMessages).toEqual([]);
   });
 
   test("cache bar shows buffer exhausted state", async ({ page }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -572,16 +573,9 @@ test.describe("Predictive Buffer State", () => {
     await expect(fill).toHaveClass(/exhausted/, { timeout: 5000 });
     // State badge should show "Exhausted"
     await expect(page.locator(".state-badge")).toContainText("Exhausted");
-    expect(consoleMessages).toEqual([]);
   });
 
   test("transitions from predicted back to live data", async ({ page }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -629,7 +623,6 @@ test.describe("Predictive Buffer State", () => {
     await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/exhausted/);
     // Cache display should show normal (no ~ prefix)
     await expect(page.locator(".cache-display")).toContainText("96s / 120s");
-    expect(consoleMessages).toEqual([]);
   });
 });
 
@@ -637,12 +630,6 @@ test.describe("Predictive Buffer State", () => {
 
 test.describe("Pending Endpoint State", () => {
   test("pending endpoints show with pending CSS class", async ({ page }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -686,16 +673,9 @@ test.describe("Pending Endpoint State", () => {
     // Endpoint nodes should appear with pending class
     const pendingNodes = page.locator(".endpoint-node.pending");
     await expect(pendingNodes).toHaveCount(2, { timeout: 5000 });
-    expect(consoleMessages).toEqual([]);
   });
 
   test("pending endpoints transition to alive state", async ({ page }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -759,7 +739,6 @@ test.describe("Pending Endpoint State", () => {
       timeout: 5000,
     });
     await expect(page.locator(".endpoint-node.healthy")).toBeVisible();
-    expect(consoleMessages).toEqual([]);
   });
 });
 
@@ -1026,12 +1005,6 @@ test.describe("Pipeline Node Data", () => {
   test("pipeline shows buffer metric and VPS metric when delivering", async ({
     page,
   }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -1085,18 +1058,11 @@ test.describe("Pipeline Node Data", () => {
     await expect(metrics.nth(2)).toContainText("96s / 120s", { timeout: 5000 });
     // VPS node (index 3) shows queued + endpoints count
     await expect(metrics.nth(3)).toContainText("42 queued");
-    expect(consoleMessages).toEqual([]);
   });
 
   test("pipeline shows pending chunks when idle (not delivering)", async ({
     page,
   }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -1116,16 +1082,9 @@ test.describe("Pipeline Node Data", () => {
     // Buffer node should show pending_chunks when idle
     const metrics = page.locator(".pipeline-node-metric");
     await expect(metrics.nth(2)).toContainText("8 pending", { timeout: 5000 });
-    expect(consoleMessages).toEqual([]);
   });
 
   test("buffer dot is gray when not delivering", async ({ page }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await expect(page.locator(".pipeline")).toBeVisible({
       timeout: 10000,
@@ -1134,18 +1093,11 @@ test.describe("Pipeline Node Data", () => {
     await expect(bufferDot).not.toHaveClass(/active/);
     await expect(bufferDot).not.toHaveClass(/warning/);
     await expect(bufferDot).not.toHaveClass(/error/);
-    expect(consoleMessages).toEqual([]);
   });
 
   test("buffer dot shows healthy when delivering with good progress", async ({
     page,
   }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -1170,16 +1122,9 @@ test.describe("Pipeline Node Data", () => {
 
     const bufferDot = page.locator(".pipeline .status-dot").nth(2);
     await expect(bufferDot).toHaveClass(/active/, { timeout: 5000 });
-    expect(consoleMessages).toEqual([]);
   });
 
   test("buffer dot shows warning when progress 40-75%", async ({ page }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -1203,16 +1148,9 @@ test.describe("Pipeline Node Data", () => {
 
     const bufferDot = page.locator(".pipeline .status-dot").nth(2);
     await expect(bufferDot).toHaveClass(/warning/, { timeout: 5000 });
-    expect(consoleMessages).toEqual([]);
   });
 
   test("VPS dot is active when delivery running", async ({ page }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -1243,7 +1181,6 @@ test.describe("Pipeline Node Data", () => {
 
     const vpsDot = page.locator(".pipeline .status-dot").nth(3);
     await expect(vpsDot).toHaveClass(/active/, { timeout: 5000 });
-    expect(consoleMessages).toEqual([]);
   });
 });
 
@@ -1268,12 +1205,6 @@ test.describe("YouTube Health Badge", () => {
   test("YouTube endpoint node shows health badge after polling", async ({
     page,
   }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     // Wait for WebSocket delivery status (includes "YouTube Main" endpoint)
     // and for the initial YouTube health poll to fire (5s interval detects endpoints, then fetches)
@@ -1285,16 +1216,9 @@ test.describe("YouTube Health Badge", () => {
     // Badge renders immediately as "unknown", then updates after poll fetches YouTube status
     await expect(badge).toHaveClass(/good/, { timeout: 15000 });
     await expect(badge).toHaveText("good");
-    expect(consoleMessages).toEqual([]);
   });
 
   test("non-YouTube endpoint does not show health badge", async ({ page }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(2000);
 
@@ -1304,7 +1228,6 @@ test.describe("YouTube Health Badge", () => {
     await expect(fbNode).toBeVisible({ timeout: 5000 });
     const badge = fbNode.locator(".yt-health-badge");
     await expect(badge).toHaveCount(0);
-    expect(consoleMessages).toEqual([]);
   });
 });
 
@@ -1312,12 +1235,6 @@ test.describe("YouTube Health Badge", () => {
 
 test.describe("Endpoint Tree", () => {
   test("endpoint tree shows branches when delivering", async ({ page }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -1359,24 +1276,18 @@ test.describe("Endpoint Tree", () => {
       },
     });
 
+    // 2 endpoint branches + 1 AddEndpointControl branch (visible when delivering)
     const branches = page.locator(".endpoint-branch");
-    await expect(branches).toHaveCount(2, { timeout: 5000 });
+    await expect(branches).toHaveCount(3, { timeout: 5000 });
     await expect(page.locator(".endpoint-alias").nth(0)).toContainText(
       "YT-Main",
     );
     await expect(page.locator(".endpoint-alias").nth(1)).toContainText(
       "FB-Stream",
     );
-    expect(consoleMessages).toEqual([]);
   });
 
   test("endpoint shows anomaly only when unhealthy", async ({ page }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -1425,7 +1336,6 @@ test.describe("Endpoint Tree", () => {
     // Unhealthy endpoint: shows anomaly
     const unhealthyNode = page.locator(".endpoint-node").nth(1);
     await expect(unhealthyNode.locator(".endpoint-anomaly")).toBeVisible();
-    expect(consoleMessages).toEqual([]);
   });
 });
 
@@ -1435,12 +1345,6 @@ test.describe("Mobile Viewport", () => {
   test("mobile viewport renders without horizontal scroll", async ({
     page,
   }) => {
-    const consoleMessages: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") {
-        consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-      }
-    });
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto("/");
     const scrollWidth = await page.evaluate(
@@ -1451,7 +1355,6 @@ test.describe("Mobile Viewport", () => {
     );
     expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
     await expect(page.locator(".pipeline-node").first()).toBeVisible();
-    expect(consoleMessages).toEqual([]);
   });
 });
 
