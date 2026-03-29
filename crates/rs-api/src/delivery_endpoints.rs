@@ -1,0 +1,253 @@
+//! Mid-stream endpoint management: add/remove endpoints to running delivery VPS,
+//! start position resolution for per-endpoint positioning.
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use tracing::info;
+
+use rs_core::config::Config;
+use rs_core::db;
+
+use crate::delivery::DeliveryOrchestrator;
+
+/// Start position strategy for an endpoint joining a delivery session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(tag = "strategy")]
+pub enum StartPosition {
+    /// Start from live edge minus buffer delay (default behavior).
+    #[default]
+    Live,
+    /// Start from the first chunk of the event (full replay).
+    Beginning,
+    /// Resume from a specific chunk ID (used for crash recovery).
+    Resume { chunk_id: i64 },
+}
+
+/// Resolve a StartPosition into a concrete start_chunk_id for an event.
+///
+/// For `Live`, queries the DB for current chunk positions and computes
+/// `latest_seq - delivery_delay_chunks`. For `Beginning`, returns the first
+/// sequence number. For `Resume`, passes through the chunk_id directly.
+pub async fn resolve_start_chunk_id(
+    pool: &SqlitePool,
+    event_id: i64,
+    config: &Config,
+    position: &StartPosition,
+    event_cache_delay_secs: Option<i64>,
+) -> anyhow::Result<i64> {
+    match position {
+        StartPosition::Resume { chunk_id } => Ok(*chunk_id),
+        StartPosition::Beginning => {
+            let first = db::get_first_sequence_number_for_event(pool, event_id)
+                .await?
+                .unwrap_or(1);
+            Ok(first)
+        }
+        StartPosition::Live => {
+            let delay_secs = event_cache_delay_secs
+                .map(|s| s as u64)
+                .unwrap_or(config.delivery.delivery_delay_secs);
+            let chunk_duration_ms = config.inpoint.chunk_duration_ms;
+            let delivery_delay_chunks = if chunk_duration_ms > 0 {
+                (delay_secs * 1000 / chunk_duration_ms) as i64
+            } else {
+                0
+            };
+
+            let first_seq = db::get_first_sequence_number_for_event(pool, event_id)
+                .await?
+                .unwrap_or(1);
+            let latest_seq = db::get_latest_sequence_number_for_event(pool, event_id)
+                .await?
+                .unwrap_or(first_seq);
+
+            let start = if latest_seq - first_seq >= delivery_delay_chunks {
+                (latest_seq - delivery_delay_chunks).max(first_seq)
+            } else {
+                first_seq
+            };
+            Ok(start)
+        }
+    }
+}
+
+/// Compute delivery_delay_chunks from config and optional per-event override.
+pub fn compute_delivery_delay_chunks(config: &Config, event_cache_delay_secs: Option<i64>) -> i64 {
+    let delay_secs = event_cache_delay_secs
+        .map(|s| s as u64)
+        .unwrap_or(config.delivery.delivery_delay_secs);
+    let chunk_duration_ms = config.inpoint.chunk_duration_ms;
+    if chunk_duration_ms > 0 {
+        (delay_secs * 1000 / chunk_duration_ms) as i64
+    } else {
+        0
+    }
+}
+
+/// Add a single endpoint to a running delivery VPS mid-stream.
+pub async fn add_endpoint_to_delivery(
+    orch: &DeliveryOrchestrator,
+    pool: &SqlitePool,
+    config: &Config,
+    event_id: i64,
+    endpoint_id: i64,
+    start_position: StartPosition,
+) -> anyhow::Result<()> {
+    // Look up the endpoint config from DB
+    let ep = db::get_endpoint_config(pool, endpoint_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Endpoint {endpoint_id} not found"))?;
+
+    // Get running delivery instance for this event
+    let instance = db::get_delivery_instance_by_event(pool, event_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("No active delivery instance for event {event_id}"))?;
+
+    if instance.status != "running" {
+        return Err(anyhow::anyhow!(
+            "Delivery instance is '{}', not 'running'",
+            instance.status
+        ));
+    }
+
+    // Resolve event cache delay
+    let event = db::get_streaming_event_by_id(pool, event_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Event {event_id} not found"))?;
+
+    let start_chunk_id = resolve_start_chunk_id(
+        pool,
+        event_id,
+        config,
+        &start_position,
+        event.cache_delay_secs,
+    )
+    .await?;
+
+    let chunk_format = &config.inpoint.chunk_format;
+
+    let body = serde_json::json!({
+        "endpoint": {
+            "alias": ep.alias,
+            "service_type": ep.service_type,
+            "stream_key": ep.stream_key,
+            "is_fast": ep.is_fast,
+            "chunk_format": chunk_format,
+            "start_chunk_id": start_chunk_id,
+        }
+    });
+
+    let delivery_url = format!("http://{}:8000", instance.ipv4);
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{delivery_url}/api/endpoints/add"))
+        .bearer_auth(&instance.auth_token)
+        .json(&body)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "rs-delivery /api/endpoints/add returned {status}: {text}"
+        ));
+    }
+
+    // Update fast cache
+    orch.update_endpoint_fast_cache(event_id, &ep.alias, ep.is_fast)
+        .await;
+
+    info!(
+        event_id,
+        endpoint = %ep.alias,
+        start_chunk_id,
+        "Added endpoint to running delivery"
+    );
+
+    Ok(())
+}
+
+/// Remove a single endpoint from a running delivery VPS mid-stream.
+pub async fn remove_endpoint_from_delivery(
+    orch: &DeliveryOrchestrator,
+    pool: &SqlitePool,
+    event_id: i64,
+    alias: &str,
+) -> anyhow::Result<()> {
+    let instance = db::get_delivery_instance_by_event(pool, event_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("No active delivery instance for event {event_id}"))?;
+
+    if instance.status != "running" {
+        return Err(anyhow::anyhow!(
+            "Delivery instance is '{}', not 'running'",
+            instance.status
+        ));
+    }
+
+    let delivery_url = format!("http://{}:8000", instance.ipv4);
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({ "alias": alias });
+    let resp = client
+        .post(format!("{delivery_url}/api/endpoints/remove"))
+        .bearer_auth(&instance.auth_token)
+        .json(&body)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "rs-delivery /api/endpoints/remove returned {status}: {text}"
+        ));
+    }
+
+    // Remove from fast cache
+    orch.remove_endpoint_from_fast_cache(event_id, alias).await;
+
+    info!(
+        event_id,
+        endpoint = %alias,
+        "Removed endpoint from running delivery"
+    );
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_position_default_is_live() {
+        let pos = StartPosition::default();
+        assert!(matches!(pos, StartPosition::Live));
+    }
+
+    #[test]
+    fn start_position_serde_roundtrip() {
+        let positions = vec![
+            StartPosition::Live,
+            StartPosition::Beginning,
+            StartPosition::Resume { chunk_id: 42 },
+        ];
+        for pos in positions {
+            let json = serde_json::to_string(&pos).unwrap();
+            let back: StartPosition = serde_json::from_str(&json).unwrap();
+            match (&pos, &back) {
+                (StartPosition::Live, StartPosition::Live) => {}
+                (StartPosition::Beginning, StartPosition::Beginning) => {}
+                (StartPosition::Resume { chunk_id: a }, StartPosition::Resume { chunk_id: b }) => {
+                    assert_eq!(a, b);
+                }
+                _ => panic!("Mismatch: {pos:?} vs {back:?}"),
+            }
+        }
+    }
+}

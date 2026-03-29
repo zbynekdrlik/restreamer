@@ -245,14 +245,16 @@ fn DeliverySection() -> impl IntoView {
                         </div>
                     }.into_any()
                 } else {
+                    let is_running = status == "running" || status == "delivering";
                     view! {
                         <div>
                             <DeliveryLifecycle status=status.clone() />
                             <div class="delivery-endpoints">
                                 {endpoints.into_iter().map(|ep| {
-                                    view! { <DeliveryEndpointCard endpoint=ep /> }
+                                    view! { <DeliveryEndpointCard endpoint=ep is_running=is_running /> }
                                 }).collect::<Vec<_>>()}
                             </div>
+                            {is_running.then(|| view! { <AddEndpointControl /> })}
                         </div>
                     }.into_any()
                 }
@@ -316,7 +318,7 @@ fn format_stall_reason(reason: &str, restart_count: u32) -> String {
 
 /// Per-endpoint delivery metrics card.
 #[component]
-fn DeliveryEndpointCard(endpoint: DeliveryEndpointState) -> impl IntoView {
+fn DeliveryEndpointCard(endpoint: DeliveryEndpointState, is_running: bool) -> impl IntoView {
     let is_stalled = endpoint.stall_count >= 3 || endpoint.stall_reason.is_some();
 
     let alive_class = if is_stalled {
@@ -361,12 +363,32 @@ fn DeliveryEndpointCard(endpoint: DeliveryEndpointState) -> impl IntoView {
     let last_error_text = endpoint.last_error.clone();
 
     let alias = endpoint.alias.clone();
+    let remove_alias = alias.clone();
+    let store = use_context::<DashboardStore>().expect("DashboardStore");
     view! {
         <div class="delivery-endpoint-card">
             <div class="endpoint-card-header">
                 <span class="endpoint-alias">{alias}</span>
                 <span class=alive_class></span>
                 <span class="endpoint-alive-text">{alive_text}</span>
+                {is_running.then(|| {
+                    let remove_alias = remove_alias.clone();
+                    view! {
+                        <button
+                            class="btn-remove-endpoint"
+                            title="Remove endpoint from delivery"
+                            on:click=move |_| {
+                                let alias = remove_alias.clone();
+                                let event_id = store.pipeline_state.get().event_id.unwrap_or(0);
+                                wasm_bindgen_futures::spawn_local(async move {
+                                    let _ = crate::api::delivery_remove_endpoint(event_id, &alias).await;
+                                });
+                            }
+                        >
+                            {"\u{00D7}"}
+                        </button>
+                    }
+                })}
             </div>
             {stall_reason_text.map(|reason| view! {
                 <div class="stall-reason">{reason}</div>
@@ -389,6 +411,54 @@ fn DeliveryEndpointCard(endpoint: DeliveryEndpointState) -> impl IntoView {
                     <span class=speed_class>{speed_text}</span>
                 </div>
             </div>
+        </div>
+    }
+}
+
+/// Control to add an unattached endpoint to the running delivery.
+#[component]
+fn AddEndpointControl() -> impl IntoView {
+    let store = use_context::<DashboardStore>().expect("DashboardStore");
+    let start_position = RwSignal::new("Live".to_string());
+
+    view! {
+        <div class="add-endpoint-control">
+            <select
+                class="add-endpoint-select"
+                on:change=move |ev| {
+                    let val = event_target_value(&ev);
+                    if let Ok(ep_id) = val.parse::<i64>() {
+                        let pos = start_position.get();
+                        let event_id = store.pipeline_state.get().event_id.unwrap_or(0);
+                        wasm_bindgen_futures::spawn_local(async move {
+                            let _ = crate::api::delivery_add_endpoint(event_id, ep_id, &pos).await;
+                        });
+                    }
+                }
+            >
+                <option value="">"+ Add endpoint"</option>
+                {move || {
+                    let all = store.endpoints_list.get();
+                    let active_aliases: Vec<String> = store.delivery.get()
+                        .endpoints.iter().map(|e| e.alias.clone()).collect();
+                    all.iter()
+                        .filter(|ep| !active_aliases.contains(&ep.alias))
+                        .map(|ep| {
+                            let id_str = ep.id.to_string();
+                            let alias = ep.alias.clone();
+                            view! { <option value={id_str}>{alias}</option> }
+                        })
+                        .collect::<Vec<_>>()
+                }}
+            </select>
+            <select
+                class="start-position-select"
+                prop:value=move || start_position.get()
+                on:change=move |ev| start_position.set(event_target_value(&ev))
+            >
+                <option value="Live">"Live"</option>
+                <option value="Beginning">"From Beginning"</option>
+            </select>
         </div>
     }
 }

@@ -122,6 +122,7 @@ fn test_ep_cfg() -> EndpointConfig {
         stream_key: "test-key".to_string(),
         is_fast: false,
         chunk_format: "flv".to_string(),
+        start_chunk_id: None,
     }
 }
 

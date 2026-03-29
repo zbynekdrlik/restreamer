@@ -829,6 +829,105 @@ test.describe("Pending Endpoint State", () => {
   });
 });
 
+// --- Delivery Endpoint Add/Remove Controls ---
+
+test.describe("Delivery Endpoint Add/Remove Controls", () => {
+  test("add endpoint dropdown appears when delivery is running", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast running delivery status
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "rs-delivery-1",
+            status: "running",
+            server_ip: "1.2.3.4",
+            endpoint_count: 1,
+            endpoints: [
+              {
+                alias: "YouTube Main",
+                alive: true,
+                current_chunk_id: 42,
+                bytes_processed_total: 1000000,
+                chunks_processed: 40,
+                chunk_delay_secs: 15.0,
+                stall_reason: null,
+                ffmpeg_restart_count: 0,
+                last_error: null,
+                is_fast: false,
+              },
+            ],
+          },
+        },
+      },
+    );
+
+    // Add endpoint dropdown should be visible
+    await expect(page.locator(".add-endpoint-select")).toBeVisible({
+      timeout: 5000,
+    });
+    await expect(page.locator(".start-position-select")).toBeVisible();
+  });
+
+  test("remove button appears on endpoint cards when delivering", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast running delivery status
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "rs-delivery-1",
+            status: "running",
+            server_ip: "1.2.3.4",
+            endpoint_count: 1,
+            endpoints: [
+              {
+                alias: "YouTube Main",
+                alive: true,
+                current_chunk_id: 42,
+                bytes_processed_total: 1000000,
+                chunks_processed: 40,
+                chunk_delay_secs: 15.0,
+                stall_reason: null,
+                ffmpeg_restart_count: 0,
+                last_error: null,
+                is_fast: false,
+              },
+            ],
+          },
+        },
+      },
+    );
+
+    // Remove button (×) should appear on the endpoint card
+    const removeBtn = page.locator(".btn-remove-endpoint");
+    await expect(removeBtn).toBeVisible({ timeout: 5000 });
+  });
+
+  test("add/remove controls hidden when delivery is idle", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // No delivery status — idle state
+    await expect(page.locator(".add-endpoint-select")).not.toBeVisible();
+    await expect(page.locator(".btn-remove-endpoint")).not.toBeVisible();
+  });
+});
+
 // --- Cache Bar Health Colors ---
 
 test.describe("Cache Bar Health Colors", () => {

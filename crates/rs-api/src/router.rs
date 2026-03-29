@@ -4,6 +4,7 @@ use axum::routing::{delete, get, patch, post, put};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use crate::delivery_handlers;
 use crate::handlers;
 use crate::state::AppState;
 use crate::stream_handlers;
@@ -82,16 +83,24 @@ pub fn build_router(state: AppState) -> Router {
         .route("/endpoints/{id}", put(handlers::update_endpoint))
         .route("/endpoints/{id}", delete(handlers::delete_endpoint))
         // Delivery orchestration
-        .route("/delivery/start", post(handlers::delivery_start))
-        .route("/delivery/status", get(handlers::delivery_status))
+        .route("/delivery/start", post(delivery_handlers::delivery_start))
+        .route("/delivery/status", get(delivery_handlers::delivery_status))
         .route(
             "/delivery/status/cached",
-            get(handlers::delivery_status_cached),
+            get(delivery_handlers::delivery_status_cached),
         )
-        .route("/delivery/stop", post(handlers::delivery_stop))
+        .route("/delivery/stop", post(delivery_handlers::delivery_stop))
         .route(
             "/delivery/instances",
-            get(handlers::list_delivery_instances),
+            get(delivery_handlers::list_delivery_instances),
+        )
+        .route(
+            "/delivery/endpoints/add",
+            post(delivery_handlers::delivery_add_endpoint),
+        )
+        .route(
+            "/delivery/endpoints/remove",
+            post(delivery_handlers::delivery_remove_endpoint),
         )
         // OBS WebSocket
         .route("/obs/status", get(handlers::obs_status))

@@ -748,6 +748,42 @@ input[type="password"]:focus {
   color: var(--text-secondary);
 }
 
+.btn-remove-endpoint {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--danger, #f87171);
+  color: var(--danger, #f87171);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  line-height: 1.4;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+.btn-remove-endpoint:hover {
+  opacity: 1;
+}
+
+.add-endpoint-control {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  align-items: center;
+}
+.add-endpoint-select,
+.start-position-select {
+  background: var(--bg-secondary);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+}
+.start-position-select {
+  max-width: 150px;
+}
+
 .endpoint-metrics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));

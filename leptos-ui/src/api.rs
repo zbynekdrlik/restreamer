@@ -574,3 +574,26 @@ pub async fn get_config() -> Result<serde_json::Value, String> {
 pub async fn patch_config(body: &serde_json::Value) -> Result<(), String> {
     http_patch_json("/config", body).await
 }
+
+/// Add an endpoint to a running delivery VPS mid-stream.
+pub async fn delivery_add_endpoint(
+    event_id: i64,
+    endpoint_id: i64,
+    start_position: &str,
+) -> Result<(), String> {
+    let body = serde_json::json!({
+        "event_id": event_id,
+        "endpoint_id": endpoint_id,
+        "start_position": { "strategy": start_position },
+    });
+    http_post_json("/delivery/endpoints/add", &body).await.map(|_| ())
+}
+
+/// Remove an endpoint from a running delivery VPS mid-stream.
+pub async fn delivery_remove_endpoint(event_id: i64, alias: &str) -> Result<(), String> {
+    let body = serde_json::json!({
+        "event_id": event_id,
+        "alias": alias,
+    });
+    http_post_json("/delivery/endpoints/remove", &body).await.map(|_| ())
+}

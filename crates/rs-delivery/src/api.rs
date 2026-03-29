@@ -19,6 +19,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/init", post(init_endpoints))
         .route("/api/status", get(endpoint_status))
         .route("/api/stop", post(stop_endpoints))
+        .route("/api/endpoints/add", post(add_endpoint))
+        .route("/api/endpoints/remove", post(remove_endpoint))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     public.merge(protected).with_state(state)
@@ -88,6 +90,9 @@ pub struct EndpointConfig {
     /// Chunk storage format. Only "flv" is supported.
     #[serde(default = "default_chunk_format")]
     pub chunk_format: String,
+    /// Per-endpoint start chunk ID. Overrides the top-level `start_chunk_id` if set.
+    #[serde(default)]
+    pub start_chunk_id: Option<i64>,
 }
 
 fn default_chunk_format() -> String {
@@ -147,6 +152,11 @@ async fn init_endpoints(
     // Apply environment variable overrides to S3 config (credentials come via cloud-init)
     let s3_config = req.s3_config.clone().with_env_overrides();
 
+    // Store S3 config and event identifier for later use by /api/endpoints/add
+    *state.s3_config.write().await = Some(s3_config.clone());
+    *state.event_identifier.write().await = Some(req.event_identifier.clone());
+    *state.delivery_delay_chunks.write().await = req.delivery_delay_chunks;
+
     let mut endpoints = state.endpoints.write().await;
     let mut started = 0usize;
 
@@ -155,11 +165,14 @@ async fn init_endpoints(
             continue;
         }
 
+        // Use per-endpoint start_chunk_id if set, otherwise fall back to top-level
+        let start_id = ep_cfg.start_chunk_id.unwrap_or(req.start_chunk_id);
+
         let handle = EndpointHandle::spawn(
             ep_cfg.clone(),
             s3_config.clone(),
             req.event_identifier.clone(),
-            req.start_chunk_id,
+            start_id,
             req.delivery_delay_chunks,
         );
 
@@ -273,6 +286,107 @@ async fn stop_endpoints(
     })
 }
 
+// --- Mid-stream endpoint add/remove ---
+
+#[derive(Debug, Deserialize)]
+struct AddEndpointRequest {
+    endpoint: EndpointConfig,
+}
+
+#[derive(Serialize)]
+struct AddEndpointResponse {
+    status: String,
+    alias: String,
+    started: bool,
+}
+
+async fn add_endpoint(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddEndpointRequest>,
+) -> Result<Json<AddEndpointResponse>, (StatusCode, String)> {
+    // Read stored S3 config and event identifier (set during /api/init)
+    let s3_config = state.s3_config.read().await.clone().ok_or_else(|| {
+        (
+            StatusCode::CONFLICT,
+            "Delivery not initialized — call /api/init first".to_string(),
+        )
+    })?;
+    let event_identifier = state.event_identifier.read().await.clone().ok_or_else(|| {
+        (
+            StatusCode::CONFLICT,
+            "Delivery not initialized — call /api/init first".to_string(),
+        )
+    })?;
+    let delivery_delay_chunks = *state.delivery_delay_chunks.read().await;
+
+    let mut endpoints = state.endpoints.write().await;
+
+    // Check for duplicate alias
+    if endpoints.contains_key(&req.endpoint.alias) {
+        return Ok(Json(AddEndpointResponse {
+            status: "ok".to_string(),
+            alias: req.endpoint.alias.clone(),
+            started: false,
+        }));
+    }
+
+    let start_id = req.endpoint.start_chunk_id.unwrap_or(0);
+
+    let handle = EndpointHandle::spawn(
+        req.endpoint.clone(),
+        s3_config,
+        event_identifier,
+        start_id,
+        delivery_delay_chunks,
+    );
+
+    let alias = req.endpoint.alias.clone();
+    endpoints.insert(alias.clone(), handle);
+
+    tracing::info!(alias = %alias, start_chunk_id = start_id, "Added endpoint mid-stream");
+
+    Ok(Json(AddEndpointResponse {
+        status: "ok".to_string(),
+        alias,
+        started: true,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoveEndpointRequest {
+    alias: String,
+}
+
+#[derive(Serialize)]
+struct RemoveEndpointResponse {
+    status: String,
+    alias: String,
+    removed: bool,
+}
+
+async fn remove_endpoint(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RemoveEndpointRequest>,
+) -> Result<Json<RemoveEndpointResponse>, StatusCode> {
+    let mut endpoints = state.endpoints.write().await;
+
+    if let Some(handle) = endpoints.remove(&req.alias) {
+        handle.stop().await;
+        tracing::info!(alias = %req.alias, "Removed endpoint mid-stream");
+        Ok(Json(RemoveEndpointResponse {
+            status: "ok".to_string(),
+            alias: req.alias,
+            removed: true,
+        }))
+    } else {
+        Ok(Json(RemoveEndpointResponse {
+            status: "ok".to_string(),
+            alias: req.alias,
+            removed: false,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +483,46 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn add_endpoint_returns_conflict_before_init() {
+        let app = router(test_state());
+        let body = serde_json::json!({
+            "endpoint": {
+                "alias": "test-yt",
+                "service_type": "YT_HLS",
+                "stream_key": "fake-key"
+            }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/endpoints/add")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {TEST_TOKEN}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn remove_endpoint_not_found() {
+        let app = router(test_state());
+        let body = serde_json::json!({ "alias": "nonexistent" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/endpoints/remove")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {TEST_TOKEN}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["removed"], false);
     }
 }
