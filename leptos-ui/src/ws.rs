@@ -319,23 +319,8 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
         WsEvent::Error { service, message } => {
             store.push_error(service, message);
         }
-        WsEvent::ActivityFeed {
-            timestamp,
-            severity,
-            message,
-            source,
-        } => {
-            store.activity_feed.update(|feed| {
-                feed.push(crate::store::ActivityEntry {
-                    timestamp,
-                    severity,
-                    message,
-                    source,
-                });
-                if feed.len() > 200 {
-                    feed.remove(0);
-                }
-            });
+        WsEvent::ActivityFeed { .. } => {
+            // Backend still sends these events; we just ignore them now.
         }
         WsEvent::PipelineState {
             state,
