@@ -217,12 +217,60 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
     min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center;
 }
 .btn-remove-endpoint:hover { opacity: 1; }
-.add-endpoint-control { display: flex; gap: var(--spacing-sm); margin-top: var(--spacing-sm); align-items: center; }
-.add-endpoint-select, .start-position-select {
+/* Add Endpoint Button */
+.btn-add-endpoint {
+    padding: 6px 14px; font-size: 12px; font-family: var(--font-mono);
+    border: 1px dashed var(--border-active); border-radius: var(--radius);
+    background: transparent; color: var(--status-ok); cursor: pointer;
+    text-transform: uppercase; letter-spacing: 1px; flex: 1;
+}
+.btn-add-endpoint:hover { background: rgba(0,255,136,0.08); }
+
+/* Modal Overlay */
+.modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+.add-endpoint-modal {
+    background: var(--bg-card); border: var(--border-w) solid var(--border);
+    border-radius: var(--radius); padding: var(--spacing-lg);
+    min-width: 320px; max-width: 90vw; max-height: 80vh;
+}
+.add-endpoint-modal h3 {
+    margin: 0 0 var(--spacing-md) 0; color: var(--text-primary);
+    font-size: 16px; font-weight: 600;
+}
+.modal-endpoint-list {
+    display: flex; flex-direction: column; gap: var(--spacing-xs);
+    max-height: 300px; overflow-y: auto; margin-bottom: var(--spacing-md);
+}
+.modal-endpoint-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius);
+    cursor: pointer; background: var(--bg-primary);
+}
+.modal-endpoint-row:hover { border-color: var(--border-active); }
+.modal-endpoint-row.selected { border-color: var(--status-ok); background: rgba(0,255,136,0.05); }
+.modal-ep-alias { font-weight: 600; color: var(--text-primary); }
+.modal-ep-type { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; }
+.modal-position {
+    display: flex; align-items: center; gap: var(--spacing-sm);
+    margin-bottom: var(--spacing-md);
+}
+.modal-position label { color: var(--text-secondary); font-size: 13px; }
+.modal-actions { display: flex; gap: var(--spacing-sm); justify-content: flex-end; }
+.modal-cancel-btn {
+    padding: var(--spacing-xs) var(--spacing-sm); border: 1px solid var(--border);
+    border-radius: var(--radius); background: transparent; color: var(--text-secondary);
+    cursor: pointer; font-family: var(--font-mono); font-size: 12px;
+}
+
+/* Start position select (used in modal) */
+.start-position-select {
     background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border);
     border-radius: var(--radius); padding: 6px 10px; font-family: var(--font-mono); font-size: 12px;
+    max-width: 150px;
 }
-.start-position-select { max-width: 150px; }
 
 /* Endpoint Tree — NEW (Task 5) */
 .endpoint-tree { display: flex; flex-direction: column; gap: var(--spacing-xs); }
