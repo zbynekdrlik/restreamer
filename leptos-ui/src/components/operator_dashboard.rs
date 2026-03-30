@@ -355,18 +355,25 @@ fn Pipeline() -> impl IntoView {
     };
     let s3_dot = move || {
         let p = ps();
-        if !is_delivering() {
-            "status-dot"
-        } else if p.state == "buffer_exhausted" {
-            "status-dot error"
-        } else if p.predicted {
-            "status-dot warning"
-        } else if p.buffer_progress >= 0.75 {
-            "status-dot active"
-        } else if p.buffer_progress >= 0.40 {
+        let s = delivery_status();
+        // Active if delivery VPS is running (even before pipeline enters buffering)
+        if s == "running" || s == "delivering" {
+            if p.state == "buffer_exhausted" {
+                "status-dot error"
+            } else if p.predicted {
+                "status-dot warning"
+            } else if p.buffer_progress >= 0.75 || !is_delivering() {
+                "status-dot active"
+            } else if p.buffer_progress >= 0.40 {
+                "status-dot warning"
+            } else {
+                "status-dot error"
+            }
+        } else if is_delivering() {
+            // Pipeline is buffering but VPS not yet started
             "status-dot warning"
         } else {
-            "status-dot error"
+            "status-dot"
         }
     };
     let s3_metric = move || {
