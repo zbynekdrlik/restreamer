@@ -31,23 +31,19 @@ pub fn Header() -> impl IntoView {
     let is_settings = move || location.pathname.get().contains("/settings");
 
     view! {
-        <header class="header">
-            <div class="header-left">
-                {move || {
-                    if is_settings() {
-                        view! { <A href="/" attr:class="header-nav-btn">{"\u{2190} Dashboard"}</A> }.into_any()
-                    } else {
-                        view! { <A href="/settings" attr:class="header-nav-btn">{"\u{2699} Settings"}</A> }.into_any()
-                    }
-                }}
-                <h1 class="app-title">"Restreamer"</h1>
-            </div>
-            <div class="header-right">
-                <span class={ws_class}>{ws_text}</span>
-                <span class="version-info">
-                    {option_env!("BUILD_VERSION").unwrap_or("dev")}
-                </span>
-            </div>
+        <header class="app-header">
+            {move || {
+                if is_settings() {
+                    view! { <A href="/" attr:class="header-nav-btn">{"\u{2190} Dashboard"}</A> }.into_any()
+                } else {
+                    view! { <A href="/settings" attr:class="header-nav-btn">{"\u{2699} Settings"}</A> }.into_any()
+                }
+            }}
+            <h1 class="app-title">"Restreamer"</h1>
+            <span class={ws_class}>{ws_text}</span>
+            <span class="version-info">
+                {option_env!("BUILD_VERSION").unwrap_or("dev")}
+            </span>
         </header>
     }
 }

@@ -795,6 +795,24 @@ jobs:
           New-NetFirewallRule -DisplayName "Restreamer API" -Direction Inbound -Protocol TCP -LocalPort 8910 -Action Allow | Out-Null
           Write-Host "=== Firewall rule created for port 8910 ==="
 
+          # Allow HTTPS access through Windows Firewall
+          Remove-NetFirewallRule -DisplayName "Restreamer HTTPS" -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "Restreamer HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow | Out-Null
+          Write-Host "=== Firewall rule created for port 443 ==="
+
+      - name: Deploy TLS certificates
+        if: env.TLS_CERT_PEM != ''
+        shell: powershell
+        env:
+          TLS_CERT_PEM: ${{ secrets.TLS_CERT_PEM }}
+          TLS_KEY_PEM: ${{ secrets.TLS_KEY_PEM }}
+        run: |
+          $configDir = "C:\ProgramData\Restreamer"
+          New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+          [System.IO.File]::WriteAllText("$configDir\cert.pem", $env:TLS_CERT_PEM)
+          [System.IO.File]::WriteAllText("$configDir\key.pem", $env:TLS_KEY_PEM)
+          Write-Host "TLS certificates deployed to $configDir"
+
       - name: Deploy and start Restreamer
         shell: powershell
         run: |

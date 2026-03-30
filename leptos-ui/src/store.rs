@@ -98,9 +98,8 @@ pub struct DashboardStore {
     // Delivery monitoring
     pub delivery: RwSignal<DeliveryState>,
 
-    // Pipeline state and activity feed
+    // Pipeline state
     pub pipeline_state: RwSignal<PipelineState>,
-    pub activity_feed: RwSignal<Vec<ActivityEntry>>,
     pub selected_event_id: RwSignal<Option<i64>>,
 
     // YouTube health (polled every 30s)
@@ -124,7 +123,6 @@ impl DashboardStore {
             log_component: RwSignal::new("rs_inpoint".to_string()),
             delivery: RwSignal::new(DeliveryState::default()),
             pipeline_state: RwSignal::new(PipelineState::default()),
-            activity_feed: RwSignal::new(Vec::new()),
             selected_event_id: RwSignal::new(None),
             youtube_health: RwSignal::new(None),
             obs_status: RwSignal::new(ObsStatus::default()),

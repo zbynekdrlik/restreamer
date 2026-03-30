@@ -31,3 +31,4 @@ test-results/
 
 # Git worktrees
 .worktrees/
+.superpowers/

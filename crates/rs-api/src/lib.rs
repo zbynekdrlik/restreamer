@@ -26,6 +26,43 @@ use rs_core::models::{DeliveryEndpointMetrics, WsEvent};
 
 use crate::state::AppState;
 
+/// Middleware that redirects HTTP requests for the configured domain to HTTPS.
+/// Requests via IP address or with `x-forwarded-proto: https` pass through.
+async fn https_redirect(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+    domain: String,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let forwarded_proto = req
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    if forwarded_proto == "https" {
+        return next.run(req).await;
+    }
+
+    let host = req
+        .headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let host_name = host.split(':').next().unwrap_or("");
+    if host_name == domain {
+        let path = req
+            .uri()
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+        let location = format!("https://{domain}{path}");
+        axum::response::Redirect::permanent(&location).into_response()
+    } else {
+        next.run(req).await
+    }
+}
+
 /// Start the API server on the given address.
 /// Returns the actual bound address and a JoinHandle for shutdown coordination.
 pub async fn serve(
@@ -44,7 +81,55 @@ pub async fn serve(
         });
     }
 
-    let app = router::build_router(state);
+    let app = router::build_router(state.clone());
+
+    // Wrap with HTTPS redirect middleware if TLS + domain configured
+    let app = if state.config.api.tls {
+        if let Some(ref domain) = state.config.api.https_domain {
+            let domain = domain.clone();
+            app.layer(axum::middleware::from_fn(move |req, next| {
+                https_redirect(req, next, domain.clone())
+            }))
+        } else {
+            app
+        }
+    } else {
+        app
+    };
+
+    // Spawn HTTPS listener if TLS enabled and cert/key files exist
+    if state.config.api.tls {
+        let cert_path = resolve_tls_path(&state.config.api.tls_cert);
+        let key_path = resolve_tls_path(&state.config.api.tls_key);
+
+        if cert_path.exists() && key_path.exists() {
+            // Install rustls crypto provider (ring)
+            let _ = rustls::crypto::ring::default_provider().install_default();
+
+            let tls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
+
+            let https_addr = SocketAddr::from(([0, 0, 0, 0], state.config.api.https_port));
+            info!("HTTPS server listening on {https_addr}");
+
+            let https_app = app.clone();
+            tokio::spawn(async move {
+                if let Err(e) = axum_server::bind_rustls(https_addr, tls_config)
+                    .serve(https_app.into_make_service())
+                    .await
+                {
+                    tracing::error!("HTTPS server error: {e}");
+                }
+            });
+        } else {
+            tracing::warn!(
+                "TLS enabled but cert/key files not found: {:?} / {:?}",
+                cert_path,
+                key_path
+            );
+        }
+    }
+
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
     info!("API server listening on {local_addr}");
@@ -56,6 +141,18 @@ pub async fn serve(
     });
 
     Ok((local_addr, handle))
+}
+
+/// Resolve a TLS file path. If relative, resolve relative to the config directory.
+fn resolve_tls_path(path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else if let Some(parent) = rs_core::config::Config::default_path().parent() {
+        parent.join(p)
+    } else {
+        p.to_path_buf()
+    }
 }
 
 /// Background loop that polls delivery metrics every 2 seconds and broadcasts
@@ -329,5 +426,66 @@ async fn delivery_broadcast_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::util::ServiceExt;
+
+    #[tokio::test]
+    async fn https_redirect_skips_when_forwarded_proto_https() {
+        let app = axum::Router::new()
+            .route("/test", axum::routing::get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                https_redirect(req, next, "streamsnv.newlevel.media".to_string())
+            }));
+        let req = Request::builder()
+            .uri("/test")
+            .header("host", "streamsnv.newlevel.media")
+            .header("x-forwarded-proto", "https")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn https_redirect_redirects_http_domain_request() {
+        let app = axum::Router::new()
+            .route("/test", axum::routing::get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                https_redirect(req, next, "streamsnv.newlevel.media".to_string())
+            }));
+        let req = Request::builder()
+            .uri("/test")
+            .header("host", "streamsnv.newlevel.media")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(
+            resp.headers().get("location").unwrap(),
+            "https://streamsnv.newlevel.media/test"
+        );
+    }
+
+    #[tokio::test]
+    async fn https_redirect_passes_through_ip_requests() {
+        let app = axum::Router::new()
+            .route("/test", axum::routing::get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                https_redirect(req, next, "streamsnv.newlevel.media".to_string())
+            }));
+        let req = Request::builder()
+            .uri("/test")
+            .header("host", "10.77.9.204:8910")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
