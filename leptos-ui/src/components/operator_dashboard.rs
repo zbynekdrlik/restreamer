@@ -210,11 +210,10 @@ fn ControlBar() -> impl IntoView {
                 <span class={state_class}>{state_label}</span>
                 <span class="session-timer">{session_duration}</span>
                 <span class="cache-display">
-                    "Cache: "
                     {move || {
                         let ps = store.pipeline_state.get();
                         let prefix = if ps.predicted { "~" } else { "" };
-                        format!("{prefix}{}s / {}s", ps.current_delay_secs as u64, ps.target_delay_secs)
+                        format!("{prefix}{}s/{}s", ps.current_delay_secs as u64, ps.target_delay_secs)
                     }}
                 </span>
             </div>
@@ -317,10 +316,12 @@ fn Pipeline() -> impl IntoView {
     let rtmp_metric = move || {
         if rtmp_connected() {
             let mbps = bitrate_mbps.get();
+            let total = store.chunk_stats.get().total_bytes;
+            let total_str = api::format_bytes(total);
             if mbps > 0.1 {
-                format!("{:.1} Mbps", mbps)
+                format!("{:.1} Mbps | {total_str}", mbps)
             } else {
-                "Receiving".to_string()
+                format!("Receiving | {total_str}")
             }
         } else {
             "Idle".to_string()
@@ -341,11 +342,12 @@ fn Pipeline() -> impl IntoView {
         }
     };
     let local_buffer_metric = move || {
-        let p = ps();
-        if is_delivering() {
-            format!("{} local | {}s / {}s cache", local_chunks(), p.current_delay_secs as u64, p.target_delay_secs)
+        let chunks = local_chunks();
+        if chunks > 0 {
+            // ~5s per chunk
+            format!("{} chunks (~{}s)", chunks, chunks * 5)
         } else {
-            format!("{} chunks", local_chunks())
+            "0 chunks".to_string()
         }
     };
 
@@ -523,15 +525,23 @@ fn EndpointTree() -> impl IntoView {
                     let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
                     let delay = ep.chunk_delay_secs;
                     let chunks = ep.chunks_processed;
-                    let bytes = ep.bytes_processed_total;
+                    let alive = ep.alive;
                     let stall_reason = ep.stall_reason.clone();
                     let last_error = ep.last_error.clone();
                     let ffmpeg_restart_count = ep.ffmpeg_restart_count;
+                    let dot_class = if is_pending {
+                        "status-dot"
+                    } else if alive {
+                        "status-dot active"
+                    } else {
+                        "status-dot error"
+                    };
 
                     view! {
                         <div class="endpoint-branch">
                             <span class="branch-connector">{connector}</span>
                             <div class={status_class}>
+                                <div class={dot_class}></div>
                                 <span class="endpoint-alias">{alias}</span>
                                 {if is_youtube {
                                     Some(view! {
@@ -557,12 +567,11 @@ fn EndpointTree() -> impl IntoView {
                                 } else {
                                     None
                                 }}
-                                // Always show metrics (not anomaly-only)
                                 <span class="endpoint-metrics">
                                     {if is_pending {
                                         "\u{2014}".to_string()
                                     } else {
-                                        format!("{} chunks | {:.0}s delay | {}", chunks, delay, api::format_bytes(bytes))
+                                        format!("{} chunks | {:.0}s delay", chunks, delay)
                                     }}
                                 </span>
                                 {stall_reason.map(|r| view! {
@@ -627,11 +636,25 @@ fn EndpointTree() -> impl IntoView {
 // ---------------------------------------------------------------------------
 
 /// Select endpoint + position, then press Add button.
+/// Options are snapshot on open to prevent reactive re-renders from resetting the dropdown.
 #[component]
 fn AddEndpointControl() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let selected_ep = RwSignal::new(String::new());
     let start_position = RwSignal::new("Live".to_string());
+    // Snapshot available endpoints (non-reactive to prevent dropdown refresh)
+    let available_eps = RwSignal::new(Vec::<(String, String)>::new());
+
+    let refresh_options = move || {
+        let all = store.endpoints_list.get_untracked();
+        let active_aliases: Vec<String> = store.delivery.get_untracked()
+            .endpoints.iter().map(|e| e.alias.clone()).collect();
+        let opts: Vec<(String, String)> = all.iter()
+            .filter(|ep| !active_aliases.contains(&ep.alias))
+            .map(|ep| (ep.id.to_string(), ep.alias.clone()))
+            .collect();
+        available_eps.set(opts);
+    };
 
     let on_add = move |_| {
         let val = selected_ep.get();
@@ -649,27 +672,20 @@ fn AddEndpointControl() -> impl IntoView {
         <div class="add-endpoint-control">
             <select
                 class="add-endpoint-select"
-                prop:value=move || selected_ep.get()
+                on:focus=move |_| refresh_options()
                 on:change=move |ev| selected_ep.set(event_target_value(&ev))
             >
                 <option value="">"Choose endpoint..."</option>
                 {move || {
-                    let all = store.endpoints_list.get();
-                    let active_aliases: Vec<String> = store.delivery.get()
-                        .endpoints.iter().map(|e| e.alias.clone()).collect();
-                    all.iter()
-                        .filter(|ep| !active_aliases.contains(&ep.alias))
-                        .map(|ep| {
-                            let id_str = ep.id.to_string();
-                            let alias = ep.alias.clone();
-                            view! { <option value={id_str}>{alias}</option> }
-                        })
-                        .collect::<Vec<_>>()
+                    available_eps.get().iter().map(|(id, alias)| {
+                        let id = id.clone();
+                        let alias = alias.clone();
+                        view! { <option value={id}>{alias}</option> }
+                    }).collect::<Vec<_>>()
                 }}
             </select>
             <select
                 class="start-position-select"
-                prop:value=move || start_position.get()
                 on:change=move |ev| start_position.set(event_target_value(&ev))
             >
                 <option value="Live">"Live"</option>
