@@ -92,33 +92,13 @@ fn ControlBar() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let loading = RwSignal::new(false);
 
-    // Lock event selector when pipeline is active OR events list shows delivery
-    let is_delivering_active = move || {
-        let ps = store.pipeline_state.get().state.clone();
-        if ps == "buffering" || ps == "streaming" || ps == "buffer_exhausted" {
-            return true;
-        }
-        // Also check events list (fetched via HTTP on mount, available before WS reconnects)
-        store
-            .events_list
-            .get()
-            .iter()
-            .any(|e| e.delivering_activated)
-    };
+    // Lock event selector when pipeline is active
+    let is_delivering_active = move || is_active();
 
-    // Auto-select the active event on mount (from pipeline state or events list)
+    // Auto-select the active event on mount
     Effect::new(move |_| {
         let events = store.events_list.get();
         if store.selected_event_id.get_untracked().is_none() {
-            // First try pipeline state (set by WebSocket PipelineState event)
-            if let Some(event_id) = store.pipeline_state.get_untracked().event_id {
-                let ps = store.pipeline_state.get_untracked().state;
-                if ps == "buffering" || ps == "streaming" || ps == "buffer_exhausted" {
-                    store.selected_event_id.set(Some(event_id));
-                    return;
-                }
-            }
-            // Fall back to events list
             if let Some(active) = events.iter().find(|e| e.delivering_activated) {
                 store.selected_event_id.set(Some(active.id));
             }

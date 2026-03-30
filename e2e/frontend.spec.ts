@@ -469,12 +469,17 @@ test.describe("Operator Dashboard", () => {
 
     // Reload the page
     await page.reload();
-    await page.waitForTimeout(2000);
+
+    // Wait for WebSocket to reconnect and pipeline state to arrive
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 10000 },
+    );
 
     // Event selector should auto-select the delivering event
     const selectedValue = await page.locator(".event-selector").inputValue();
     expect(selectedValue).not.toBe("");
-    // Should be disabled because delivery is active
+    // Should be disabled because pipeline is active
     await expect(page.locator(".event-selector")).toBeDisabled();
   });
 });
