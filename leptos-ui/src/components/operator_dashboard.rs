@@ -355,15 +355,18 @@ fn Pipeline() -> impl IntoView {
     };
     let s3_dot = move || {
         let p = ps();
-        let s = delivery_status();
-        if !is_delivering() && (s.is_empty() || s == "none") {
+        if !is_delivering() {
             "status-dot"
         } else if p.state == "buffer_exhausted" {
             "status-dot error"
-        } else if s == "running" || s == "delivering" {
-            "status-dot active"
-        } else {
+        } else if p.predicted {
             "status-dot warning"
+        } else if p.buffer_progress >= 0.75 {
+            "status-dot active"
+        } else if p.buffer_progress >= 0.40 {
+            "status-dot warning"
+        } else {
+            "status-dot error"
         }
     };
     let s3_metric = move || {
