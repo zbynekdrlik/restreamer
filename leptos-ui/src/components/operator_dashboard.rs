@@ -296,13 +296,32 @@ fn Pipeline() -> impl IntoView {
         }
     };
 
-    // RTMP node
+    // RTMP node — with bitrate computation
     let rtmp_dot = move || {
         if rtmp_connected() { "status-dot active" } else { "status-dot" }
     };
+    let prev_bytes = RwSignal::new(0i64);
+    let bitrate_mbps = RwSignal::new(0.0f64);
+    // Update bitrate every 2s (matching WS InpointStatus interval)
+    let _bitrate_interval = Interval::new(2_000, move || {
+        let current = store.chunk_stats.get().total_bytes;
+        let prev = prev_bytes.get_untracked();
+        if prev > 0 && current > prev {
+            let delta_bytes = (current - prev) as f64;
+            let mbps = (delta_bytes * 8.0) / (2.0 * 1_000_000.0); // bits/sec -> Mbps
+            bitrate_mbps.set(mbps);
+        }
+        prev_bytes.set(current);
+    });
+    std::mem::forget(_bitrate_interval);
     let rtmp_metric = move || {
         if rtmp_connected() {
-            format!("{} chunks", store.chunk_stats.get().total_chunks)
+            let mbps = bitrate_mbps.get();
+            if mbps > 0.1 {
+                format!("{:.1} Mbps", mbps)
+            } else {
+                format!("{} chunks", store.chunk_stats.get().total_chunks)
+            }
         } else {
             "Idle".to_string()
         }
