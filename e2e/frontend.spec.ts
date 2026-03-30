@@ -1120,11 +1120,12 @@ test.describe("Pipeline Node Data", () => {
       },
     });
 
-    const bufferDot = page.locator(".pipeline .status-dot").nth(2);
-    await expect(bufferDot).toHaveClass(/active/, { timeout: 5000 });
+    // S3 dot is at index 3 (OBS=0, RTMP=1, Local Buffer=2, S3/VPS=3)
+    const s3Dot = page.locator(".pipeline .status-dot").nth(3);
+    await expect(s3Dot).toHaveClass(/active/, { timeout: 5000 });
   });
 
-  test("buffer dot shows warning when progress 40-75%", async ({ page }) => {
+  test("S3 dot shows warning when progress 40-75%", async ({ page }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -1146,8 +1147,8 @@ test.describe("Pipeline Node Data", () => {
       },
     });
 
-    const bufferDot = page.locator(".pipeline .status-dot").nth(2);
-    await expect(bufferDot).toHaveClass(/warning/, { timeout: 5000 });
+    const s3Dot = page.locator(".pipeline .status-dot").nth(3);
+    await expect(s3Dot).toHaveClass(/warning/, { timeout: 5000 });
   });
 
   test("VPS dot is active when delivery running", async ({ page }) => {
@@ -1333,9 +1334,12 @@ test.describe("Endpoint Tree", () => {
     const healthyNode = page.locator(".endpoint-node").nth(0);
     await expect(healthyNode).toBeVisible({ timeout: 5000 });
     await expect(healthyNode.locator(".endpoint-anomaly")).toHaveCount(0);
-    // Unhealthy endpoint: shows anomaly
+    // Unhealthy endpoint: shows anomaly (stall + ffmpeg restarts = 2 spans)
     const unhealthyNode = page.locator(".endpoint-node").nth(1);
-    await expect(unhealthyNode.locator(".endpoint-anomaly")).toBeVisible();
+    const anomalies = unhealthyNode.locator(".endpoint-anomaly");
+    await expect(anomalies).toHaveCount(2);
+    await expect(anomalies.nth(0)).toContainText("stall");
+    await expect(anomalies.nth(1)).toContainText("ffmpeg");
   });
 });
 
