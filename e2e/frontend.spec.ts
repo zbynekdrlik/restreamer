@@ -125,10 +125,10 @@ test.describe("Operator Dashboard", () => {
       "RTMP",
     );
     await expect(page.locator(".pipeline-node-label").nth(2)).toContainText(
-      "BUFFER",
+      "Local Buffer",
     );
     await expect(page.locator(".pipeline-node-label").nth(3)).toContainText(
-      "VPS",
+      "S3",
     );
     const connectors = page.locator(".pipeline-connector");
     await expect(connectors).toHaveCount(3);
@@ -228,8 +228,8 @@ test.describe("Operator Dashboard", () => {
       "RTMP Only",
       { timeout: 5000 },
     );
-    await expect(page.locator(".pipeline-node-metric").nth(1)).toContainText(
-      "chunks",
+    await expect(page.locator(".pipeline-node-metric").nth(1)).toHaveText(
+      "Receiving",
     );
     await expect(page.locator(".pipeline .status-dot").nth(0)).toHaveClass(
       /warning/,
@@ -1081,7 +1081,7 @@ test.describe("Pipeline Node Data", () => {
 
     // Buffer node should show pending_chunks when idle
     const metrics = page.locator(".pipeline-node-metric");
-    await expect(metrics.nth(2)).toContainText("8 pending", { timeout: 5000 });
+    await expect(metrics.nth(2)).toContainText("8 chunks", { timeout: 5000 });
   });
 
   test("buffer dot is gray when not delivering", async ({ page }) => {
