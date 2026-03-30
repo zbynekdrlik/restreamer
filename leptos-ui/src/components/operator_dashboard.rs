@@ -320,54 +320,58 @@ fn Pipeline() -> impl IntoView {
             if mbps > 0.1 {
                 format!("{:.1} Mbps", mbps)
             } else {
-                format!("{} chunks", store.chunk_stats.get().total_chunks)
+                "Receiving".to_string()
             }
         } else {
             "Idle".to_string()
         }
     };
 
-    // Buffer node
-    let buffer_dot = move || {
+    // Local Buffer node — chunks waiting to be uploaded to S3
+    let local_buffer_dot = move || {
+        let chunks = local_chunks();
+        if !rtmp_connected() {
+            "status-dot"
+        } else if chunks <= 1 {
+            "status-dot active"
+        } else if chunks <= 5 {
+            "status-dot warning"
+        } else {
+            "status-dot error"
+        }
+    };
+    let local_buffer_metric = move || {
         let p = ps();
-        if !is_delivering() {
+        if is_delivering() {
+            format!("{} local | {}s / {}s cache", local_chunks(), p.current_delay_secs as u64, p.target_delay_secs)
+        } else {
+            format!("{} chunks", local_chunks())
+        }
+    };
+
+    // S3 → Delivery node — chunks on S3 + delivered by VPS
+    let delivered_chunks = move || {
+        store.delivery.get().endpoints.iter().map(|ep| ep.chunks_processed).max().unwrap_or(0)
+    };
+    let s3_dot = move || {
+        let p = ps();
+        let s = delivery_status();
+        if !is_delivering() && (s.is_empty() || s == "none") {
             "status-dot"
         } else if p.state == "buffer_exhausted" {
             "status-dot error"
-        } else if p.predicted {
-            "status-dot warning"
-        } else if p.buffer_progress >= 0.75 {
-            "status-dot active"
-        } else if p.buffer_progress >= 0.40 {
-            "status-dot warning"
-        } else {
-            "status-dot error"
-        }
-    };
-    let buffer_metric = move || {
-        let p = ps();
-        if is_delivering() {
-            format!("{}s / {}s", p.current_delay_secs as u64, p.target_delay_secs)
-        } else {
-            format!("{} pending", local_chunks())
-        }
-    };
-    // S3/VPS node
-    let vps_dot = move || {
-        let s = delivery_status();
-        if s == "running" || s == "delivering" {
+        } else if s == "running" || s == "delivering" {
             "status-dot active"
         } else {
-            "status-dot"
+            "status-dot warning"
         }
     };
-    let vps_metric = move || {
+    let s3_metric = move || {
         let s = delivery_status();
-        let ep_count = store.delivery.get().endpoints.len();
         if s == "running" || s == "delivering" {
-            format!("{} queued \u{2192} {} endpoints", s3_chunks(), ep_count)
+            format!("{} queued \u{2192} {} delivered", s3_chunks(), delivered_chunks())
         } else if s.is_empty() || s == "none" {
-            "Idle".to_string()
+            format!("{} on S3", s3_chunks())
         } else {
             s
         }
@@ -411,26 +415,26 @@ fn Pipeline() -> impl IntoView {
             </div>
             <div class="pipeline-connector">{"\u{2502}"}</div>
 
-            // --- BUFFER node ---
-            <div class="pipeline-node" class:active=move || is_delivering()>
+            // --- Local Buffer node ---
+            <div class="pipeline-node" class:active=move || rtmp_connected()>
                 <div class="pipeline-node-left">
-                    <div class={buffer_dot}></div>
-                    <span class="pipeline-node-label">"BUFFER"</span>
+                    <div class={local_buffer_dot}></div>
+                    <span class="pipeline-node-label">"Local Buffer"</span>
                 </div>
-                <span class="pipeline-node-metric">{buffer_metric}</span>
+                <span class="pipeline-node-metric">{local_buffer_metric}</span>
             </div>
             <div class="pipeline-connector">{"\u{2502}"}</div>
 
-            // --- S3 -> VPS node ---
+            // --- S3 / Delivery node ---
             <div class="pipeline-node" class:active=move || {
                 let s = delivery_status();
                 s == "running" || s == "delivering"
             }>
                 <div class="pipeline-node-left">
-                    <div class={vps_dot}></div>
+                    <div class={s3_dot}></div>
                     <span class="pipeline-node-label">"S3 \u{2192} VPS"</span>
                 </div>
-                <span class="pipeline-node-metric">{vps_metric}</span>
+                <span class="pipeline-node-metric">{s3_metric}</span>
             </div>
 
             // --- Endpoint tree (branching from VPS) ---
@@ -490,10 +494,6 @@ fn EndpointTree() -> impl IntoView {
                     } else {
                         "\u{251C}\u{2500}\u{2500}"
                     };
-                    let has_anomaly = ep.chunk_delay_secs > 30.0
-                        || ep.stall_reason.is_some()
-                        || ep.ffmpeg_restart_count > 0
-                        || !ep.alive;
                     let status_class = if !ep.alive && ep.chunks_processed == 0 {
                         "endpoint-node pending"
                     } else if !ep.alive {
@@ -509,6 +509,14 @@ fn EndpointTree() -> impl IntoView {
                         a.contains("youtube") || a.contains("yt")
                     };
                     let remove_alias = alias.clone();
+
+                    let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
+                    let delay = ep.chunk_delay_secs;
+                    let chunks = ep.chunks_processed;
+                    let bytes = ep.bytes_processed_total;
+                    let stall_reason = ep.stall_reason.clone();
+                    let last_error = ep.last_error.clone();
+                    let ffmpeg_restart_count = ep.ffmpeg_restart_count;
 
                     view! {
                         <div class="endpoint-branch">
@@ -539,34 +547,23 @@ fn EndpointTree() -> impl IntoView {
                                 } else {
                                     None
                                 }}
-                                {if has_anomaly {
-                                    let delay_text = format!("{:.0}s delay", ep.chunk_delay_secs);
-                                    let stall_text = ep.stall_reason.clone();
-                                    let error_text = ep.last_error.clone();
-                                    let restarts = ep.ffmpeg_restart_count;
+                                // Always show metrics (not anomaly-only)
+                                <span class="endpoint-metrics">
+                                    {if is_pending {
+                                        "\u{2014}".to_string()
+                                    } else {
+                                        format!("{} chunks | {:.0}s delay | {}", chunks, delay, api::format_bytes(bytes))
+                                    }}
+                                </span>
+                                {stall_reason.map(|r| view! {
+                                    <span class="endpoint-anomaly">{format!("stall: {r}")}</span>
+                                })}
+                                {last_error.map(|e| view! {
+                                    <span class="endpoint-anomaly">{e}</span>
+                                })}
+                                {if ffmpeg_restart_count > 0 {
                                     Some(view! {
-                                        <span class="endpoint-anomaly">
-                                            {if ep.chunk_delay_secs > 30.0 {
-                                                Some(view! { <span class="anomaly-delay">{delay_text}</span> })
-                                            } else {
-                                                None
-                                            }}
-                                            {stall_text.map(|r| view! {
-                                                <span class="anomaly-stall">{format!("stall: {r}")}</span>
-                                            })}
-                                            {error_text.map(|e| view! {
-                                                <span class="anomaly-error">{e}</span>
-                                            })}
-                                            {if restarts > 0 {
-                                                Some(view! {
-                                                    <span class="anomaly-restart">
-                                                        {format!("ffmpeg restarts: {restarts}")}
-                                                    </span>
-                                                })
-                                            } else {
-                                                None
-                                            }}
-                                        </span>
+                                        <span class="endpoint-anomaly">{format!("ffmpeg x{ffmpeg_restart_count}")}</span>
                                     })
                                 } else {
                                     None
@@ -581,6 +578,11 @@ fn EndpointTree() -> impl IntoView {
                                                 title="Remove endpoint"
                                                 on:click=move |_| {
                                                     let alias = remove_alias.clone();
+                                                    let window = web_sys::window().unwrap();
+                                                    let confirmed = window.confirm_with_message(
+                                                        &format!("Remove endpoint '{}'?", alias)
+                                                    ).unwrap_or(false);
+                                                    if !confirmed { return; }
                                                     let event_id = store.pipeline_state.get()
                                                         .event_id.unwrap_or(0);
                                                     spawn_local(async move {
@@ -614,28 +616,33 @@ fn EndpointTree() -> impl IntoView {
 // AddEndpointControl
 // ---------------------------------------------------------------------------
 
-/// Dropdown to add an unattached endpoint to the running delivery.
+/// Select endpoint + position, then press Add button.
 #[component]
 fn AddEndpointControl() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
+    let selected_ep = RwSignal::new(String::new());
     let start_position = RwSignal::new("Live".to_string());
+
+    let on_add = move |_| {
+        let val = selected_ep.get();
+        if let Ok(ep_id) = val.parse::<i64>() {
+            let pos = start_position.get();
+            let event_id = store.pipeline_state.get().event_id.unwrap_or(0);
+            spawn_local(async move {
+                let _ = api::delivery_add_endpoint(event_id, ep_id, &pos).await;
+            });
+            selected_ep.set(String::new());
+        }
+    };
 
     view! {
         <div class="add-endpoint-control">
             <select
                 class="add-endpoint-select"
-                on:change=move |ev| {
-                    let val = event_target_value(&ev);
-                    if let Ok(ep_id) = val.parse::<i64>() {
-                        let pos = start_position.get();
-                        let event_id = store.pipeline_state.get().event_id.unwrap_or(0);
-                        spawn_local(async move {
-                            let _ = api::delivery_add_endpoint(event_id, ep_id, &pos).await;
-                        });
-                    }
-                }
+                prop:value=move || selected_ep.get()
+                on:change=move |ev| selected_ep.set(event_target_value(&ev))
             >
-                <option value="">"+ Add endpoint"</option>
+                <option value="">"Choose endpoint..."</option>
                 {move || {
                     let all = store.endpoints_list.get();
                     let active_aliases: Vec<String> = store.delivery.get()
@@ -658,6 +665,13 @@ fn AddEndpointControl() -> impl IntoView {
                 <option value="Live">"Live"</option>
                 <option value="Beginning">"From Beginning"</option>
             </select>
+            <button
+                class="btn-small"
+                on:click=on_add
+                disabled=move || selected_ep.get().is_empty()
+            >
+                "Add"
+            </button>
         </div>
     }
 }
