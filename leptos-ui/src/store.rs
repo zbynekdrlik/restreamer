@@ -49,7 +49,7 @@ pub struct DeliveryState {
 }
 
 /// Per-endpoint delivery metrics.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeliveryEndpointState {
     pub alias: String,
     pub alive: bool,

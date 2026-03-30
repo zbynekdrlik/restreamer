@@ -517,7 +517,7 @@ fn EndpointTree() -> impl IntoView {
     });
 
     view! {
-        <div class="endpoint-tree" style:display=move || if has_endpoints() || is_running() { "block" } else { "none" }>
+        <div class="endpoint-tree" style:display=move || if has_endpoints.get() || is_running.get() { "block" } else { "none" }>
             <For
                 each=move || store.delivery.get().endpoints.clone()
                 key=|ep| ep.alias.clone()
@@ -674,7 +674,7 @@ fn EndpointTree() -> impl IntoView {
                     }
                 }
             />
-            <Show when=move || is_running() fallback=|| ()>
+            <Show when=move || is_running.get() fallback=|| ()>
                 <div class="endpoint-branch">
                     <span class="branch-connector">{"\u{2514}\u{2500}\u{2500}"}</span>
                     <button
