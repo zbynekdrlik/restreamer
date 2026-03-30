@@ -92,6 +92,12 @@ fn ControlBar() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let loading = RwSignal::new(false);
 
+    let pipeline_state = move || store.pipeline_state.get().state.clone();
+    let is_active = move || {
+        let s = pipeline_state();
+        s == "streaming" || s == "buffering" || s == "buffer_exhausted"
+    };
+
     // Lock event selector when pipeline is active
     let is_delivering_active = move || is_active();
 
@@ -135,12 +141,6 @@ fn ControlBar() -> impl IntoView {
                 }
             });
         }
-    };
-
-    let pipeline_state = move || store.pipeline_state.get().state.clone();
-    let is_active = move || {
-        let s = pipeline_state();
-        s == "streaming" || s == "buffering" || s == "buffer_exhausted"
     };
 
     // 1-second tick for session timer
