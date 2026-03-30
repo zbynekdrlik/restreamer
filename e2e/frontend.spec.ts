@@ -941,7 +941,7 @@ test.describe("Pending Endpoint State", () => {
 // --- Delivery Endpoint Add/Remove Controls ---
 
 test.describe("Delivery Endpoint Add/Remove Controls", () => {
-  test("add endpoint dropdown appears when delivery is running", async ({
+  test("add endpoint button appears when delivery is running", async ({
     page,
   }) => {
     await page.goto("/");
@@ -977,11 +977,10 @@ test.describe("Delivery Endpoint Add/Remove Controls", () => {
       },
     );
 
-    // Add endpoint dropdown should be visible
-    await expect(page.locator(".add-endpoint-select")).toBeVisible({
+    // Add endpoint button should be visible (opens modal on click)
+    await expect(page.locator(".btn-add-endpoint")).toBeVisible({
       timeout: 5000,
     });
-    await expect(page.locator(".start-position-select")).toBeVisible();
   });
 
   test("remove button appears on endpoint nodes when delivering", async ({
@@ -1050,7 +1049,7 @@ test.describe("Delivery Endpoint Add/Remove Controls", () => {
     await page.waitForTimeout(500);
 
     // Idle state — no add/remove controls
-    await expect(page.locator(".add-endpoint-select")).not.toBeVisible();
+    await expect(page.locator(".btn-add-endpoint")).not.toBeVisible();
     await expect(page.locator(".btn-remove-endpoint")).not.toBeVisible();
   });
 });

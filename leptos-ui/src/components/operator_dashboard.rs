@@ -92,19 +92,25 @@ fn ControlBar() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let loading = RwSignal::new(false);
 
-    // Lock event selector when any event is actively delivering
+    // Lock event selector when pipeline is active (buffering/streaming/exhausted)
     let is_delivering_active = move || {
-        store
-            .streaming_event
-            .get()
-            .map_or(false, |e| e.delivering_activated)
+        let s = store.pipeline_state.get().state.clone();
+        s == "buffering" || s == "streaming" || s == "buffer_exhausted"
     };
 
-    // Auto-select the active event on mount
+    // Auto-select the active event on mount (from pipeline state or events list)
     Effect::new(move |_| {
         let events = store.events_list.get();
-        // If no event is selected and one is actively delivering, auto-select it
         if store.selected_event_id.get_untracked().is_none() {
+            // First try pipeline state (set by WebSocket PipelineState event)
+            if let Some(event_id) = store.pipeline_state.get_untracked().event_id {
+                let ps = store.pipeline_state.get_untracked().state;
+                if ps == "buffering" || ps == "streaming" || ps == "buffer_exhausted" {
+                    store.selected_event_id.set(Some(event_id));
+                    return;
+                }
+            }
+            // Fall back to events list
             if let Some(active) = events.iter().find(|e| e.delivering_activated) {
                 store.selected_event_id.set(Some(active.id));
             }
@@ -485,6 +491,7 @@ fn Pipeline() -> impl IntoView {
 #[component]
 fn EndpointTree() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
+    let show_add_modal = use_context::<RwSignal<bool>>().expect("show_add_modal");
 
     // YouTube health polling: fast initial poll, then every 30s
     let yt_has_polled = RwSignal::new(false);
@@ -679,10 +686,7 @@ fn EndpointTree() -> impl IntoView {
                     <span class="branch-connector">{"\u{2514}\u{2500}\u{2500}"}</span>
                     <button
                         class="btn-add-endpoint"
-                        on:click=move |_| {
-                            let show = use_context::<RwSignal<bool>>().expect("show_add_modal");
-                            show.set(true);
-                        }
+                        on:click=move |_| show_add_modal.set(true)
                     >
                         "+ Add"
                     </button>
