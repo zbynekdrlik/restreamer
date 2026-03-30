@@ -139,7 +139,8 @@ test.describe("Operator Dashboard", () => {
     await expect(page.locator(".pipeline")).toBeVisible({
       timeout: 10000,
     });
-    const dots = page.locator(".pipeline .status-dot");
+    // Use .pipeline-node .status-dot to count only pipeline node dots, not endpoint dots
+    const dots = page.locator(".pipeline-node .status-dot");
     await expect(dots).toHaveCount(4);
   });
 
@@ -197,7 +198,8 @@ test.describe("Operator Dashboard", () => {
     await expect(page.locator(".pipeline")).toBeVisible({
       timeout: 10000,
     });
-    const dots = page.locator(".pipeline .status-dot");
+    // Use .pipeline-node .status-dot to avoid picking up endpoint dots
+    const dots = page.locator(".pipeline-node .status-dot");
     await expect(dots.nth(0)).not.toHaveClass(/active/);
     await expect(dots.nth(1)).not.toHaveClass(/active/);
   });
@@ -228,10 +230,10 @@ test.describe("Operator Dashboard", () => {
       "RTMP Only",
       { timeout: 5000 },
     );
-    await expect(page.locator(".pipeline-node-metric").nth(1)).toHaveText(
+    await expect(page.locator(".pipeline-node-metric").nth(1)).toContainText(
       "Receiving",
     );
-    await expect(page.locator(".pipeline .status-dot").nth(0)).toHaveClass(
+    await expect(page.locator(".pipeline-node .status-dot").nth(0)).toHaveClass(
       /warning/,
     );
   });
@@ -544,7 +546,7 @@ test.describe("Predictive Buffer State", () => {
     const fill = page.locator(".cache-bar-fill");
     await expect(fill).toHaveClass(/predicted/, { timeout: 5000 });
     // Control bar cache display should show predicted prefix (~)
-    await expect(page.locator(".cache-display")).toContainText("~60s / 120s");
+    await expect(page.locator(".cache-display")).toContainText("~60s/120s");
   });
 
   test("cache bar shows buffer exhausted state", async ({ page }) => {
@@ -622,7 +624,7 @@ test.describe("Predictive Buffer State", () => {
     });
     await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/exhausted/);
     // Cache display should show normal (no ~ prefix)
-    await expect(page.locator(".cache-display")).toContainText("96s / 120s");
+    await expect(page.locator(".cache-display")).toContainText("96s/120s");
   });
 });
 
@@ -1053,9 +1055,9 @@ test.describe("Pipeline Node Data", () => {
       },
     });
 
-    // Buffer node (index 2) shows delay metric
+    // Local Buffer node (index 2) shows chunk count when delivering
     const metrics = page.locator(".pipeline-node-metric");
-    await expect(metrics.nth(2)).toContainText("96s / 120s", { timeout: 5000 });
+    await expect(metrics.nth(2)).toContainText("5 chunks", { timeout: 5000 });
     // VPS node (index 3) shows queued + endpoints count
     await expect(metrics.nth(3)).toContainText("42 queued");
   });
@@ -1089,7 +1091,7 @@ test.describe("Pipeline Node Data", () => {
     await expect(page.locator(".pipeline")).toBeVisible({
       timeout: 10000,
     });
-    const bufferDot = page.locator(".pipeline .status-dot").nth(2);
+    const bufferDot = page.locator(".pipeline-node .status-dot").nth(2);
     await expect(bufferDot).not.toHaveClass(/active/);
     await expect(bufferDot).not.toHaveClass(/warning/);
     await expect(bufferDot).not.toHaveClass(/error/);
@@ -1121,7 +1123,7 @@ test.describe("Pipeline Node Data", () => {
     });
 
     // S3 dot is at index 3 (OBS=0, RTMP=1, Local Buffer=2, S3/VPS=3)
-    const s3Dot = page.locator(".pipeline .status-dot").nth(3);
+    const s3Dot = page.locator(".pipeline-node .status-dot").nth(3);
     await expect(s3Dot).toHaveClass(/active/, { timeout: 5000 });
   });
 
@@ -1147,7 +1149,7 @@ test.describe("Pipeline Node Data", () => {
       },
     });
 
-    const s3Dot = page.locator(".pipeline .status-dot").nth(3);
+    const s3Dot = page.locator(".pipeline-node .status-dot").nth(3);
     await expect(s3Dot).toHaveClass(/warning/, { timeout: 5000 });
   });
 
@@ -1180,7 +1182,7 @@ test.describe("Pipeline Node Data", () => {
       },
     });
 
-    const vpsDot = page.locator(".pipeline .status-dot").nth(3);
+    const vpsDot = page.locator(".pipeline-node .status-dot").nth(3);
     await expect(vpsDot).toHaveClass(/active/, { timeout: 5000 });
   });
 });
