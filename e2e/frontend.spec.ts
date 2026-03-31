@@ -815,6 +815,118 @@ test.describe("Predictive Buffer State", () => {
     });
     await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/exhausted/);
   });
+
+  test("prediction mode shows local chunk counts from pipeline", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Simulate prediction mode with non-zero chunk counts
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.6,
+          target_delay_secs: 120,
+          current_delay_secs: 72.0,
+          session_start: null,
+          predicted: true,
+          local_buffer_chunks: 8,
+          s3_queue_chunks: 45,
+        },
+      },
+    });
+
+    // Cache bar should show predicted state
+    await expect(page.locator(".cache-bar-fill")).toHaveClass(/predicted/, {
+      timeout: 5000,
+    });
+
+    // Pipeline should show the chunk counts
+    const pipelineText = await page.locator(".pipeline").textContent();
+    expect(pipelineText).toContain("8");
+    expect(pipelineText).toContain("45");
+  });
+
+  test("cache bar drains during prediction then recovers", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Phase 1: Normal streaming
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 1.0,
+          target_delay_secs: 120,
+          current_delay_secs: 120.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 20,
+        },
+      },
+    });
+    await expect(page.locator(".cache-bar-fill")).toHaveClass(/healthy/, {
+      timeout: 5000,
+    });
+
+    // Phase 2: Network drops — prediction with draining buffer, chunks piling up
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.4,
+          target_delay_secs: 120,
+          current_delay_secs: 48.0,
+          session_start: null,
+          predicted: true,
+          local_buffer_chunks: 12,
+          s3_queue_chunks: 20,
+        },
+      },
+    });
+    await expect(page.locator(".cache-bar-fill")).toHaveClass(/predicted/, {
+      timeout: 5000,
+    });
+
+    // Phase 3: Recovery — back to live data
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.85,
+          target_delay_secs: 120,
+          current_delay_secs: 102.0,
+          session_start: null,
+          predicted: false,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 18,
+        },
+      },
+    });
+    await expect(page.locator(".cache-bar-fill")).toHaveClass(/healthy/, {
+      timeout: 5000,
+    });
+    await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/predicted/, {
+      timeout: 5000,
+    });
+  });
 });
 
 // --- Pending Endpoint State ---
