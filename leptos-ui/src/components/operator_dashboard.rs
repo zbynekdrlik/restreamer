@@ -226,13 +226,6 @@ fn ControlBar() -> impl IntoView {
             <div class="control-bar-right">
                 <span class={state_class}>{state_label}</span>
                 <span class="session-timer">{session_duration}</span>
-                <span class="cache-display">
-                    {move || {
-                        let ps = store.pipeline_state.get();
-                        let prefix = if ps.predicted { "~" } else { "" };
-                        format!("{prefix}{}s/{}s", ps.current_delay_secs as u64, ps.target_delay_secs)
-                    }}
-                </span>
             </div>
         </div>
     }

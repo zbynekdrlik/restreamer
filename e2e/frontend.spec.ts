@@ -738,8 +738,6 @@ test.describe("Predictive Buffer State", () => {
     // Cache bar fill should have predicted class
     const fill = page.locator(".cache-bar-fill");
     await expect(fill).toHaveClass(/predicted/, { timeout: 5000 });
-    // Control bar cache display should show predicted prefix (~)
-    await expect(page.locator(".cache-display")).toContainText("~60s/120s");
   });
 
   test("cache bar shows buffer exhausted state", async ({ page }) => {
@@ -816,8 +814,6 @@ test.describe("Predictive Buffer State", () => {
       timeout: 5000,
     });
     await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/exhausted/);
-    // Cache display should show normal (no ~ prefix)
-    await expect(page.locator(".cache-display")).toContainText("96s/120s");
   });
 });
 
