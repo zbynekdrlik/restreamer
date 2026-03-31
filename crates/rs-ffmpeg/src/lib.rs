@@ -154,6 +154,8 @@ fn build_flv_rtmp_args(url: &str) -> Vec<String> {
         "copy".into(),
         "-f".into(),
         "flv".into(),
+        "-flvflags".into(),
+        "no_duration_filesize".into(),
         url.to_string(),
     ]
 }

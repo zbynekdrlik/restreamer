@@ -73,7 +73,7 @@ impl FlvStreamNormalizer {
 }
 
 const MAX_FFMPEG_RESTARTS: u32 = 10;
-const MAX_CHUNK_MISS_COUNT: u32 = 60; // ~2min at 2s polls
+const MAX_CHUNK_MISS_COUNT: u32 = 40; // ~80s at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
 const WRITE_TIMEOUT_SECS: u64 = 30;
 /// Base S3 backoff (doubles on each error, max 60s, resets on success).
@@ -304,6 +304,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     let mut circuit_trips: u32 = 0;
     let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
     let mut last_heartbeat = std::time::Instant::now();
+    let mut drought_mode = false;
 
     loop {
         // Check for stop signal
@@ -323,8 +324,8 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
             last_heartbeat = std::time::Instant::now();
         }
 
-        // Ensure output process is running
-        if !proc.as_mut().is_some_and(|p| p.is_alive()) {
+        // Ensure output process is running (skip during drought mode)
+        if !drought_mode && !proc.as_mut().is_some_and(|p| p.is_alive()) {
             if proc.is_some() {
                 let mut s = stats.lock().await;
                 s.ffmpeg_restart_count += 1;
@@ -333,8 +334,13 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     s.ffmpeg_last_stderr = p.last_stderr_line();
                 }
                 drop(s);
-                tracing::warn!(alias = %alias, "ffmpeg died, restarting in 3s");
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let delay = match consecutive_ffmpeg_failures {
+                    0 => 1,
+                    1 => 3,
+                    _ => 5,
+                };
+                tracing::warn!(alias = %alias, delay, "ffmpeg died, restarting");
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 flv_normalizer = FlvStreamNormalizer::new();
             }
 
@@ -395,6 +401,18 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                 if circuit_trips > 0 {
                     circuit_trips = 0;
                     tracing::info!(alias = %alias, "ffmpeg circuit breaker reset after successful chunk");
+                }
+                if drought_mode {
+                    tracing::info!(alias = %alias, chunk_id, "Exiting drought mode — chunks available");
+                    drought_mode = false;
+                    flv_normalizer = FlvStreamNormalizer::new();
+                    {
+                        let mut s = stats.lock().await;
+                        s.stall_reason = None;
+                        s.consecutive_chunk_misses = 0;
+                    }
+                    // Don't process this chunk yet — let "ensure ffmpeg alive" spawn ffmpeg first
+                    continue;
                 }
                 {
                     let mut s = stats.lock().await;
@@ -489,6 +507,13 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     }
 
                     if !found_ahead {
+                        if !drought_mode {
+                            tracing::warn!(alias = %alias, chunk_id, "Entering drought mode — killing ffmpeg until chunks resume");
+                            if let Some(mut p) = proc.take() {
+                                p.kill().await;
+                            }
+                            drought_mode = true;
+                        }
                         let mut s = stats.lock().await;
                         s.stall_reason = Some("chunk_gap".to_string());
                         s.consecutive_chunk_misses = consecutive_chunk_misses;
@@ -496,7 +521,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                         tracing::warn!(
                             alias = %alias,
                             chunk_id,
-                            "No chunks found in probe range, marking chunk_gap stall"
+                            "No chunks found in probe range, still in drought mode"
                         );
                         // Reset counter so we probe again after another cycle
                         consecutive_chunk_misses = 0;
