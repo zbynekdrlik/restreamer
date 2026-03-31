@@ -720,10 +720,11 @@ fn AddEndpointModal(show: RwSignal<bool>) -> impl IntoView {
     let on_add = move |_| {
         if let Some(ep_id) = selected_ep_id.get() {
             let pos = start_position.get();
-            let event_id = store.pipeline_state.get().event_id.unwrap_or(0);
-            spawn_local(async move {
-                let _ = api::delivery_add_endpoint(event_id, ep_id, &pos).await;
-            });
+            if let Some(event_id) = store.selected_event_id.get() {
+                spawn_local(async move {
+                    let _ = api::delivery_add_endpoint(event_id, ep_id, &pos).await;
+                });
+            }
             show.set(false);
         }
     };
