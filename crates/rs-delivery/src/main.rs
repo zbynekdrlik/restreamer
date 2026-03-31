@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use rs_core::log_buffer::LogBuffer;
+use tracing_subscriber::prelude::*;
+
 mod api;
 mod endpoint_task;
 mod s3_fetch;
@@ -25,6 +28,8 @@ pub struct AppState {
     pub event_identifier: RwLock<Option<String>>,
     /// Delivery delay in chunks, stored after /api/init.
     pub delivery_delay_chunks: RwLock<i64>,
+    /// In-memory log buffer for /api/logs endpoint.
+    pub log_buffer: LogBuffer,
 }
 
 impl Default for AppState {
@@ -38,20 +43,25 @@ impl Default for AppState {
             s3_config: RwLock::new(None),
             event_identifier: RwLock::new(None),
             delivery_delay_chunks: RwLock::new(0),
+            log_buffer: LogBuffer::new(1000),
         }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+    let state = Arc::new(AppState::default());
+
+    let capture_layer = rs_core::log_capture::LogCaptureLayer::new(state.log_buffer.clone());
+    let fmt_layer = tracing_subscriber::fmt::layer().with_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    );
+    tracing_subscriber::registry()
+        .with(capture_layer)
+        .with(fmt_layer)
         .init();
 
-    let state = Arc::new(AppState::default());
     let app = api::router(state);
 
     let addr = "0.0.0.0:8000";
