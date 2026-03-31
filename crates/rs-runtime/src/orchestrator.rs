@@ -320,6 +320,10 @@ impl ServiceCore {
 }
 
 /// Run the RTMP inpoint server with restart support.
+///
+/// Auto-restarts on crash with exponential backoff (2s, 4s, 8s, 16s, max 30s).
+/// Crash counter resets when a publisher connects. Gives up after 10 consecutive
+/// crashes without any successful connection.
 async fn run_inpoint_loop(
     bind: String,
     port: u16,
@@ -328,6 +332,10 @@ async fn run_inpoint_loop(
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
+    let mut consecutive_crashes: u32 = 0;
+    let mut last_connected = false;
+    const MAX_CONSECUTIVE_CRASHES: u32 = 10;
+
     loop {
         let server = RtmpServer::new(&bind, port);
         let rtmp_shutdown = server.shutdown_handle();
@@ -344,11 +352,34 @@ async fn run_inpoint_loop(
             tokio::select! {
                 result = &mut handle => {
                     match result {
-                        Ok(Ok(())) => info!("RTMP server stopped"),
-                        Ok(Err(e)) => tracing::error!("RTMP server error: {e}"),
-                        Err(e) => tracing::error!("RTMP task panicked: {e}"),
+                        Ok(Ok(())) => {
+                            info!("RTMP server stopped cleanly");
+                            break false; // Clean stop, don't restart
+                        }
+                        Ok(Err(e)) => {
+                            tracing::error!("RTMP server error: {e}");
+                            consecutive_crashes += 1;
+                        }
+                        Err(e) => {
+                            tracing::error!("RTMP task panicked: {e}");
+                            consecutive_crashes += 1;
+                        }
                     }
-                    break false;
+                    if consecutive_crashes >= MAX_CONSECUTIVE_CRASHES {
+                        tracing::error!(
+                            crashes = consecutive_crashes,
+                            "RTMP server exceeded max consecutive crashes, giving up"
+                        );
+                        break false;
+                    }
+                    let backoff = (1u64 << consecutive_crashes.min(4)).min(30);
+                    tracing::warn!(
+                        crashes = consecutive_crashes,
+                        backoff_secs = backoff,
+                        "RTMP server crashed, auto-restarting in {backoff}s"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                    break true; // Restart
                 }
                 msg = restart_rx.recv() => {
                     if msg.is_some() {
@@ -368,6 +399,11 @@ async fn run_inpoint_loop(
                 }
                 _ = heartbeat.tick() => {
                     let connected = inpoint_state.is_connected();
+                    if connected && !last_connected {
+                        consecutive_crashes = 0;
+                        info!("RTMP publisher connected, crash counter reset");
+                    }
+                    last_connected = connected;
                     info!(
                         rtmp_connected = connected,
                         "Inpoint heartbeat: RTMP server alive"
