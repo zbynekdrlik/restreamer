@@ -439,14 +439,7 @@ async fn test_chunk_gap_detected_when_no_skip_found() {
 
 #[tokio::test]
 async fn test_drought_mode_stops_ffmpeg_and_recovers() {
-    // Tests that when no chunks are available for an extended period (drought),
-    // the endpoint loop kills the idle ffmpeg process and enters drought mode.
-    // When chunks resume, it restarts ffmpeg and continues processing.
-    //
-    // Current behavior (FAILING): ffmpeg stays alive during drought, wasting
-    // resources. The loop keeps polling with ffmpeg running idle.
-    // Desired behavior: after detecting drought (chunk_gap stall), ffmpeg
-    // should be killed. On recovery, it should be restarted automatically.
+    // Verify ffmpeg is killed during chunk drought and recovers when chunks resume.
     tokio::time::pause();
 
     // 30 chunks total. Initially only 1-5 available.
@@ -488,16 +481,12 @@ async fn test_drought_mode_stops_ffmpeg_and_recovers() {
         tokio::task::yield_now().await;
     }
 
-    // KEY ASSERTION: During drought, ffmpeg should be KILLED (not left running idle).
-    // Currently the code keeps ffmpeg alive during drought, which wastes resources.
-    // Drought mode should kill ffmpeg when chunk_gap stall is detected.
+    // ffmpeg should be killed during drought (chunk_gap stall)
     assert!(
         !alive.load(Ordering::Relaxed),
         "ffmpeg should be killed during drought (chunk_gap), but it is still alive"
     );
-
     let spawns_after_initial = spawn_count.load(Ordering::Relaxed);
-
     // Continue drought for another 60s — ffmpeg should NOT be respawned
     for _ in 0..30 {
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
