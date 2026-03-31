@@ -326,12 +326,10 @@ fn Pipeline() -> impl IntoView {
     let rtmp_metric = move || {
         if rtmp_connected() {
             let mbps = bitrate_mbps.get();
-            let total = store.chunk_stats.get().total_bytes;
-            let total_str = api::format_bytes(total);
             if mbps > 0.1 {
-                format!("{:.1} Mbps | {total_str}", mbps)
+                format!("{:.1} Mbps", mbps)
             } else {
-                format!("Receiving | {total_str}")
+                "Receiving".to_string()
             }
         } else {
             "Idle".to_string()
