@@ -305,16 +305,21 @@ fn Pipeline() -> impl IntoView {
         }
     };
 
-    // RTMP node — with bitrate computation
+    // RTMP node — with bitrate computation and session bytes
     let rtmp_dot = move || {
         if rtmp_connected() { "status-dot active" } else { "status-dot" }
     };
     let prev_bytes = RwSignal::new(0i64);
+    let session_start_bytes = RwSignal::new(0i64);
     let bitrate_mbps = RwSignal::new(0.0f64);
     // Update bitrate every 2s (matching WS InpointStatus interval)
     let _bitrate_interval = Interval::new(2_000, move || {
         let current = store.chunk_stats.get().total_bytes;
         let prev = prev_bytes.get_untracked();
+        // Record session start bytes on first non-zero reading
+        if session_start_bytes.get_untracked() == 0 && current > 0 {
+            session_start_bytes.set(current);
+        }
         if prev > 0 && current > prev {
             let delta_bytes = (current - prev) as f64;
             let mbps = (delta_bytes * 8.0) / (2.0 * 1_000_000.0); // bits/sec -> Mbps
@@ -326,12 +331,17 @@ fn Pipeline() -> impl IntoView {
     let rtmp_metric = move || {
         if rtmp_connected() {
             let mbps = bitrate_mbps.get();
+            let current = store.chunk_stats.get().total_bytes;
+            let session_bytes = (current - session_start_bytes.get()).max(0);
+            let session_str = api::format_bytes(session_bytes);
             if mbps > 0.1 {
-                format!("{:.1} Mbps", mbps)
+                format!("{:.1} Mbps | {session_str}", mbps)
             } else {
-                "Receiving".to_string()
+                format!("Receiving | {session_str}")
             }
         } else {
+            // Reset session start when disconnected
+            session_start_bytes.set(0);
             "Idle".to_string()
         }
     };
