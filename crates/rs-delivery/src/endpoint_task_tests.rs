@@ -438,6 +438,107 @@ async fn test_chunk_gap_detected_when_no_skip_found() {
 }
 
 #[tokio::test]
+async fn test_drought_mode_stops_ffmpeg_and_recovers() {
+    // Tests that when no chunks are available for an extended period (drought),
+    // the endpoint loop kills the idle ffmpeg process and enters drought mode.
+    // When chunks resume, it restarts ffmpeg and continues processing.
+    //
+    // Current behavior (FAILING): ffmpeg stays alive during drought, wasting
+    // resources. The loop keeps polling with ffmpeg running idle.
+    // Desired behavior: after detecting drought (chunk_gap stall), ffmpeg
+    // should be killed. On recovery, it should be restarted automatically.
+    tokio::time::pause();
+
+    // 30 chunks total. Initially only 1-5 available.
+    let chunks: Vec<(i64, Vec<u8>)> = (1..=30).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = TimedMockFetcher::new(chunks, 5);
+    let available = fetcher.available_up_to();
+
+    let factory = MockProcessFactory::new();
+    let spawn_count = factory.spawn_count.clone();
+    let alive = factory.alive.clone();
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let stats_clone = stats.clone();
+
+    let task = tokio::spawn(async move {
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+    });
+
+    // Process first 5 chunks
+    for _ in 0..20 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let s = stats.lock().await;
+    assert!(
+        s.chunks_processed >= 5,
+        "Should process available chunks, got {}",
+        s.chunks_processed
+    );
+    drop(s);
+
+    // Simulate drought: no new chunks. Advance time past MAX_CHUNK_MISS_COUNT
+    // (60 misses at 2s = 120s) plus extra margin.
+    // After this, the endpoint should have detected drought via chunk_gap stall.
+    for _ in 0..80 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+
+    // KEY ASSERTION: During drought, ffmpeg should be KILLED (not left running idle).
+    // Currently the code keeps ffmpeg alive during drought, which wastes resources.
+    // Drought mode should kill ffmpeg when chunk_gap stall is detected.
+    assert!(
+        !alive.load(Ordering::Relaxed),
+        "ffmpeg should be killed during drought (chunk_gap), but it is still alive"
+    );
+
+    let spawns_after_initial = spawn_count.load(Ordering::Relaxed);
+
+    // Continue drought for another 60s — ffmpeg should NOT be respawned
+    for _ in 0..30 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let spawns_during_extended_drought = spawn_count.load(Ordering::Relaxed) - spawns_after_initial;
+    assert!(
+        spawns_during_extended_drought == 0,
+        "ffmpeg should not be respawned during drought, got {} spawns",
+        spawns_during_extended_drought
+    );
+
+    // Resume chunks — make 6-30 available
+    available.store(30, Ordering::Relaxed);
+
+    // Advance time for recovery — ffmpeg should restart and process chunks
+    for _ in 0..80 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let s = stats.lock().await;
+    assert!(
+        s.chunks_processed >= 20,
+        "Should recover and process more chunks after drought, got {}",
+        s.chunks_processed
+    );
+    // Stall reason should clear after recovery
+    assert!(
+        s.stall_reason.is_none() || s.stall_reason.as_deref() != Some("chunk_gap"),
+        "Stall reason should clear after recovery, got {:?}",
+        s.stall_reason
+    );
+    drop(s);
+
+    stop_tx.send(true).ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+}
+
+#[tokio::test]
 async fn test_write_timeout_kills_ffmpeg() {
     tokio::time::pause();
     let chunks: Vec<(i64, Vec<u8>)> = (1..=2).map(|i| (i, vec![i as u8; 10])).collect();
