@@ -11,12 +11,15 @@ use crate::store::DashboardStore;
 #[component]
 pub fn OperatorDashboard() -> impl IntoView {
     let _store = use_context::<DashboardStore>().expect("DashboardStore");
+    let show_add_modal = RwSignal::new(false);
+    provide_context(show_add_modal);
 
     view! {
         <div class="operator-dashboard">
             <ControlBar />
             <CacheBar />
             <Pipeline />
+            <AddEndpointModal show=show_add_modal />
         </div>
     }
 }
@@ -89,6 +92,25 @@ fn ControlBar() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let loading = RwSignal::new(false);
 
+    let pipeline_state = move || store.pipeline_state.get().state.clone();
+    let is_active = move || {
+        let s = pipeline_state();
+        s == "streaming" || s == "buffering" || s == "buffer_exhausted"
+    };
+
+    // Lock event selector when pipeline is active
+    let is_delivering_active = move || is_active();
+
+    // Auto-select the active event on mount
+    Effect::new(move |_| {
+        let events = store.events_list.get();
+        if store.selected_event_id.get_untracked().is_none() {
+            if let Some(active) = events.iter().find(|e| e.delivering_activated) {
+                store.selected_event_id.set(Some(active.id));
+            }
+        }
+    });
+
     let on_start = move |_| {
         let selected = store.selected_event_id.get();
         if let Some(event_id) = selected {
@@ -119,12 +141,6 @@ fn ControlBar() -> impl IntoView {
                 }
             });
         }
-    };
-
-    let pipeline_state = move || store.pipeline_state.get().state.clone();
-    let is_active = move || {
-        let s = pipeline_state();
-        s == "streaming" || s == "buffering" || s == "buffer_exhausted"
     };
 
     // 1-second tick for session timer
@@ -173,6 +189,7 @@ fn ControlBar() -> impl IntoView {
                 <label class="event-selector-label">"Event:"</label>
                 <select
                     class="event-selector"
+                    disabled=move || is_delivering_active()
                     on:change=move |ev| {
                         let val = event_target_value(&ev);
                         let id: Option<i64> = val.parse().ok();
@@ -201,7 +218,7 @@ fn ControlBar() -> impl IntoView {
                 <button
                     class="stop-btn"
                     on:click=on_stop
-                    disabled=move || loading.get() || !is_active()
+                    disabled=move || loading.get() || !(is_active() || is_delivering_active())
                 >
                     "Stop Delivering"
                 </button>
@@ -209,13 +226,6 @@ fn ControlBar() -> impl IntoView {
             <div class="control-bar-right">
                 <span class={state_class}>{state_label}</span>
                 <span class="session-timer">{session_duration}</span>
-                <span class="cache-display">
-                    {move || {
-                        let ps = store.pipeline_state.get();
-                        let prefix = if ps.predicted { "~" } else { "" };
-                        format!("{prefix}{}s/{}s", ps.current_delay_secs as u64, ps.target_delay_secs)
-                    }}
-                </span>
             </div>
         </div>
     }
@@ -462,6 +472,7 @@ fn Pipeline() -> impl IntoView {
 #[component]
 fn EndpointTree() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
+    let show_add_modal = use_context::<RwSignal<bool>>().expect("show_add_modal");
 
     // YouTube health polling: fast initial poll, then every 30s
     let yt_has_polled = RwSignal::new(false);
@@ -487,62 +498,81 @@ fn EndpointTree() -> impl IntoView {
     });
     std::mem::forget(_yt_refresh);
 
-    let has_endpoints = move || !store.delivery.get().endpoints.is_empty();
-    let is_running = move || {
+    let has_endpoints = Memo::new(move |_| !store.delivery.get().endpoints.is_empty());
+    let is_running = Memo::new(move |_| {
         let s = store.delivery.get().status.clone();
         s == "running" || s == "delivering"
-    };
+    });
 
     view! {
-        <div class="endpoint-tree" style:display=move || if has_endpoints() || is_running() { "block" } else { "none" }>
-            {move || {
-                let delivery = store.delivery.get();
-                let eps = delivery.endpoints.clone();
-                let len = eps.len();
-                eps.into_iter().enumerate().map(|(i, ep)| {
-                    let is_last = i == len - 1 && !is_running();
-                    let connector = if is_last {
-                        "\u{2514}\u{2500}\u{2500}"
-                    } else {
-                        "\u{251C}\u{2500}\u{2500}"
-                    };
-                    let status_class = if !ep.alive && ep.chunks_processed == 0 {
-                        "endpoint-node pending"
-                    } else if !ep.alive {
-                        "endpoint-node dead"
-                    } else if ep.stall_count >= 3 || ep.stall_reason.is_some() {
-                        "endpoint-node stalled"
-                    } else {
-                        "endpoint-node healthy"
-                    };
+        <div class="endpoint-tree" style:display=move || if has_endpoints.get() || is_running.get() { "block" } else { "none" }>
+            <For
+                each=move || store.delivery.get().endpoints.clone()
+                key=|ep| ep.alias.clone()
+                children=move |ep| {
+                    let store = use_context::<DashboardStore>().expect("DashboardStore");
                     let alias = ep.alias.clone();
                     let is_youtube = {
                         let a = alias.to_lowercase();
                         a.contains("youtube") || a.contains("yt")
                     };
                     let remove_alias = alias.clone();
+                    let ep_alias_key = alias.clone();
 
-                    let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
-                    let delay = ep.chunk_delay_secs;
-                    let chunks = ep.chunks_processed;
-                    let alive = ep.alive;
-                    let stall_reason = ep.stall_reason.clone();
-                    let last_error = ep.last_error.clone();
-                    let ffmpeg_restart_count = ep.ffmpeg_restart_count;
-                    let dot_class = if is_pending {
-                        "status-dot"
-                    } else if alive {
-                        "status-dot active"
-                    } else {
-                        "status-dot error"
+                    // Derive per-endpoint reactive data from the delivery signal
+                    let ep_data = Memo::new(move |_| {
+                        store.delivery.get().endpoints.iter()
+                            .find(|e| e.alias == ep_alias_key)
+                            .cloned()
+                            .unwrap_or_default()
+                    });
+
+                    let connector = {
+                        let alias = alias.clone();
+                        move || {
+                            let delivery = store.delivery.get();
+                            let is_running = delivery.status == "running" || delivery.status == "delivering";
+                            let is_last = delivery.endpoints.last().map_or(false, |last| last.alias == alias) && !is_running;
+                            if is_last { "\u{2514}\u{2500}\u{2500}" } else { "\u{251C}\u{2500}\u{2500}" }
+                        }
                     };
+
+                    let status_class = move || {
+                        let ep = ep_data.get();
+                        if !ep.alive && ep.chunks_processed == 0 {
+                            "endpoint-node pending"
+                        } else if !ep.alive {
+                            "endpoint-node dead"
+                        } else if ep.stall_count >= 3 || ep.stall_reason.is_some() {
+                            "endpoint-node stalled"
+                        } else {
+                            "endpoint-node healthy"
+                        }
+                    };
+
+                    let dot_class = move || {
+                        let ep = ep_data.get();
+                        let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
+                        if is_pending {
+                            "status-dot"
+                        } else if ep.alive {
+                            "status-dot active"
+                        } else {
+                            "status-dot error"
+                        }
+                    };
+
+                    let is_running_memo = Memo::new(move |_| {
+                        let s = store.delivery.get().status.clone();
+                        s == "running" || s == "delivering"
+                    });
 
                     view! {
                         <div class="endpoint-branch">
                             <span class="branch-connector">{connector}</span>
-                            <div class={status_class}>
-                                <div class={dot_class}></div>
-                                <span class="endpoint-alias">{alias}</span>
+                            <div class=status_class>
+                                <div class=dot_class></div>
+                                <span class="endpoint-alias">{ep.alias.clone()}</span>
                                 {if is_youtube {
                                     Some(view! {
                                         <span class=move || {
@@ -568,28 +598,39 @@ fn EndpointTree() -> impl IntoView {
                                     None
                                 }}
                                 <span class="endpoint-metrics">
-                                    {if is_pending {
-                                        "\u{2014}".to_string()
-                                    } else {
-                                        format!("{} chunks | {:.0}s delay", chunks, delay)
+                                    {move || {
+                                        let ep = ep_data.get();
+                                        let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
+                                        if is_pending {
+                                            "\u{2014}".to_string()
+                                        } else {
+                                            format!("{} chunks | {:.0}s delay", ep.chunks_processed, ep.chunk_delay_secs)
+                                        }
                                     }}
                                 </span>
-                                {stall_reason.map(|r| view! {
-                                    <span class="endpoint-anomaly">{format!("stall: {r}")}</span>
-                                })}
-                                {last_error.map(|e| view! {
-                                    <span class="endpoint-anomaly">{e}</span>
-                                })}
-                                {if ffmpeg_restart_count > 0 {
-                                    Some(view! {
-                                        <span class="endpoint-anomaly">{format!("ffmpeg x{ffmpeg_restart_count}")}</span>
+                                {move || {
+                                    ep_data.get().stall_reason.clone().map(|r| view! {
+                                        <span class="endpoint-anomaly">{format!("stall: {r}")}</span>
                                     })
-                                } else {
-                                    None
+                                }}
+                                {move || {
+                                    ep_data.get().last_error.clone().map(|e| view! {
+                                        <span class="endpoint-anomaly">{e}</span>
+                                    })
+                                }}
+                                {move || {
+                                    let count = ep_data.get().ffmpeg_restart_count;
+                                    if count > 0 {
+                                        Some(view! {
+                                            <span class="endpoint-anomaly">{format!("ffmpeg x{count}")}</span>
+                                        })
+                                    } else {
+                                        None
+                                    }
                                 }}
                                 {move || {
                                     let remove_alias = remove_alias.clone();
-                                    is_running().then(move || {
+                                    is_running_memo.get().then(move || {
                                         let remove_alias = remove_alias.clone();
                                         view! {
                                             <button
@@ -619,85 +660,125 @@ fn EndpointTree() -> impl IntoView {
                             </div>
                         </div>
                     }
-                }).collect::<Vec<_>>()
-            }}
-            {move || is_running().then(|| view! {
+                }
+            />
+            <Show when=move || is_running.get() fallback=|| ()>
                 <div class="endpoint-branch">
                     <span class="branch-connector">{"\u{2514}\u{2500}\u{2500}"}</span>
-                    <AddEndpointControl />
+                    <button
+                        class="btn-add-endpoint"
+                        on:click=move |_| show_add_modal.set(true)
+                    >
+                        "+ Add"
+                    </button>
                 </div>
-            })}
+            </Show>
         </div>
     }
 }
 
 // ---------------------------------------------------------------------------
-// AddEndpointControl
+// AddEndpointModal — mounted at dashboard root, immune to endpoint tree re-renders
 // ---------------------------------------------------------------------------
 
-/// Select endpoint + position, then press Add button.
-/// Options are snapshot on open to prevent reactive re-renders from resetting the dropdown.
 #[component]
-fn AddEndpointControl() -> impl IntoView {
+fn AddEndpointModal(show: RwSignal<bool>) -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
-    let selected_ep = RwSignal::new(String::new());
+    let selected_ep_id = RwSignal::new(Option::<i64>::None);
     let start_position = RwSignal::new("Live".to_string());
-    // Snapshot available endpoints (non-reactive to prevent dropdown refresh)
-    let available_eps = RwSignal::new(Vec::<(String, String)>::new());
+    let available_eps = RwSignal::new(Vec::<(i64, String, String)>::new());
 
-    let refresh_options = move || {
-        let all = store.endpoints_list.get_untracked();
-        let active_aliases: Vec<String> = store.delivery.get_untracked()
-            .endpoints.iter().map(|e| e.alias.clone()).collect();
-        let opts: Vec<(String, String)> = all.iter()
-            .filter(|ep| !active_aliases.contains(&ep.alias))
-            .map(|ep| (ep.id.to_string(), ep.alias.clone()))
-            .collect();
-        available_eps.set(opts);
-    };
+    // Snapshot available endpoints when modal opens (non-reactive)
+    Effect::new(move |_| {
+        if show.get() {
+            let all = store.endpoints_list.get_untracked();
+            let active_aliases: Vec<String> = store
+                .delivery
+                .get_untracked()
+                .endpoints
+                .iter()
+                .map(|e| e.alias.clone())
+                .collect();
+            let opts: Vec<(i64, String, String)> = all
+                .iter()
+                .filter(|ep| !active_aliases.contains(&ep.alias))
+                .map(|ep| (ep.id, ep.alias.clone(), ep.service_type.clone()))
+                .collect();
+            available_eps.set(opts);
+            selected_ep_id.set(None);
+            start_position.set("Live".to_string());
+        }
+    });
 
     let on_add = move |_| {
-        let val = selected_ep.get();
-        if let Ok(ep_id) = val.parse::<i64>() {
+        if let Some(ep_id) = selected_ep_id.get() {
             let pos = start_position.get();
-            let event_id = store.pipeline_state.get().event_id.unwrap_or(0);
-            spawn_local(async move {
-                let _ = api::delivery_add_endpoint(event_id, ep_id, &pos).await;
-            });
-            selected_ep.set(String::new());
+            if let Some(event_id) = store.selected_event_id.get() {
+                spawn_local(async move {
+                    let _ = api::delivery_add_endpoint(event_id, ep_id, &pos).await;
+                });
+            }
+            show.set(false);
         }
     };
 
+    let on_cancel = move |_| {
+        show.set(false);
+    };
+
+    let on_overlay_click = move |_| {
+        show.set(false);
+    };
+
     view! {
-        <div class="add-endpoint-control">
-            <select
-                class="add-endpoint-select"
-                on:focus=move |_| refresh_options()
-                on:change=move |ev| selected_ep.set(event_target_value(&ev))
-            >
-                <option value="">"Choose endpoint..."</option>
-                {move || {
-                    available_eps.get().iter().map(|(id, alias)| {
-                        let id = id.clone();
-                        let alias = alias.clone();
-                        view! { <option value={id}>{alias}</option> }
-                    }).collect::<Vec<_>>()
-                }}
-            </select>
-            <select
-                class="start-position-select"
-                on:change=move |ev| start_position.set(event_target_value(&ev))
-            >
-                <option value="Live">"Live"</option>
-                <option value="Beginning">"From Beginning"</option>
-            </select>
-            <button
-                class="btn-small"
-                on:click=on_add
-                disabled=move || selected_ep.get().is_empty()
-            >
-                "Add"
-            </button>
-        </div>
+        <Show when=move || show.get() fallback=|| ()>
+            <div class="modal-overlay" on:click=on_overlay_click>
+                <div class="add-endpoint-modal" on:click=move |ev| ev.stop_propagation()>
+                    <h3>"Add Endpoint"</h3>
+                    <div class="modal-endpoint-list">
+                        {move || {
+                            available_eps.get().iter().map(|(id, alias, stype)| {
+                                let ep_id = *id;
+                                let is_selected = move || selected_ep_id.get() == Some(ep_id);
+                                let alias = alias.clone();
+                                let stype = stype.clone();
+                                view! {
+                                    <div
+                                        class="modal-endpoint-row"
+                                        class:selected=is_selected
+                                        on:click=move |_| selected_ep_id.set(Some(ep_id))
+                                    >
+                                        <span class="modal-ep-alias">{alias}</span>
+                                        <span class="modal-ep-type">{stype}</span>
+                                    </div>
+                                }
+                            }).collect::<Vec<_>>()
+                        }}
+                    </div>
+                    <div class="modal-position">
+                        <label>"Start position:"</label>
+                        <select
+                            class="start-position-select"
+                            on:change=move |ev| start_position.set(event_target_value(&ev))
+                        >
+                            <option value="Live">"Live"</option>
+                            <option value="Beginning">"From Beginning"</option>
+                        </select>
+                    </div>
+                    <div class="modal-actions">
+                        <button
+                            class="modal-add-btn btn-small"
+                            on:click=on_add
+                            disabled=move || selected_ep_id.get().is_none()
+                        >
+                            "Add"
+                        </button>
+                        <button class="modal-cancel-btn" on:click=on_cancel>
+                            "Cancel"
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </Show>
     }
 }

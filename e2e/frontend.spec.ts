@@ -283,6 +283,199 @@ test.describe("Operator Dashboard", () => {
       "Idle",
     );
   });
+
+  // --- Add Endpoint Modal ---
+
+  test("add endpoint button opens modal when delivering", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    // Select first event and start delivering
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    // Simulate delivery status via WebSocket so endpoint tree appears
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "test-vps",
+            status: "running",
+            server_ip: "1.2.3.4",
+            endpoint_count: 1,
+            endpoints: [
+              {
+                alias: "YouTube Main",
+                alive: true,
+                current_chunk_id: 10,
+                bytes_processed_total: 1000,
+                chunks_processed: 10,
+                chunk_delay_secs: 5.0,
+                stall_reason: null,
+                ffmpeg_restart_count: 0,
+                last_error: null,
+                is_fast: false,
+              },
+            ],
+          },
+        },
+      },
+    );
+
+    // Wait for endpoint tree to render
+    await expect(page.locator(".endpoint-tree")).toBeVisible({ timeout: 5000 });
+
+    // Click Add button
+    await page.locator(".btn-add-endpoint").click();
+
+    // Modal should be visible
+    await expect(page.locator(".modal-overlay")).toBeVisible();
+    await expect(page.locator(".add-endpoint-modal")).toBeVisible();
+    // Should show available endpoints (those not already active)
+    await expect(page.locator(".modal-endpoint-row")).toHaveCount(1); // Facebook Page (YouTube Main is already active)
+  });
+
+  test("add endpoint modal calls delivery add API", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    // Simulate delivery running
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "test-vps",
+            status: "running",
+            server_ip: "1.2.3.4",
+            endpoint_count: 0,
+            endpoints: [],
+          },
+        },
+      },
+    );
+
+    await expect(page.locator(".endpoint-tree")).toBeVisible({ timeout: 5000 });
+    await page.locator(".btn-add-endpoint").click();
+    await expect(page.locator(".add-endpoint-modal")).toBeVisible();
+
+    // Click on first available endpoint row
+    await page.locator(".modal-endpoint-row").first().click();
+
+    // Intercept the API call and click Add
+    const [request] = await Promise.all([
+      page.waitForRequest(
+        (req) =>
+          req.url().includes("/delivery/endpoints/add") &&
+          req.method() === "POST",
+      ),
+      page.locator(".modal-add-btn").click(),
+    ]);
+
+    const body = request.postDataJSON();
+    expect(body.endpoint_id).toBeDefined();
+    expect(body.start_position).toBeDefined();
+
+    // Modal should close after adding
+    await expect(page.locator(".modal-overlay")).not.toBeVisible();
+  });
+
+  test("add endpoint modal closes on cancel", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "test-vps",
+            status: "running",
+            server_ip: "1.2.3.4",
+            endpoint_count: 0,
+            endpoints: [],
+          },
+        },
+      },
+    );
+
+    await expect(page.locator(".endpoint-tree")).toBeVisible({ timeout: 5000 });
+    await page.locator(".btn-add-endpoint").click();
+    await expect(page.locator(".add-endpoint-modal")).toBeVisible();
+
+    // Click cancel
+    await page.locator(".modal-cancel-btn").click();
+    await expect(page.locator(".modal-overlay")).not.toBeVisible();
+  });
+
+  // --- Event Selector Lock ---
+
+  test("event selector is disabled during active delivery", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    // Event selector should be disabled while delivering
+    await expect(page.locator(".event-selector")).toBeDisabled();
+
+    // Stop delivering
+    await page.locator(".stop-btn").click();
+    await expect(page.locator(".state-badge")).toContainText("Idle", {
+      timeout: 5000,
+    });
+
+    // Event selector should be enabled again
+    await expect(page.locator(".event-selector")).toBeEnabled();
+  });
+
+  test("auto-selects actively delivering event on page load", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    // Select first event and start
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    // Reload the page — events_list is fetched via HTTP on mount
+    await page.reload();
+    await page.waitForTimeout(2000);
+
+    // Event selector should auto-select the delivering event
+    // (Effect reads events_list and finds delivering_activated=true)
+    const selectedValue = await page.locator(".event-selector").inputValue();
+    expect(selectedValue).not.toBe("");
+  });
 });
 
 // --- Settings Page (/settings) ---
@@ -545,8 +738,6 @@ test.describe("Predictive Buffer State", () => {
     // Cache bar fill should have predicted class
     const fill = page.locator(".cache-bar-fill");
     await expect(fill).toHaveClass(/predicted/, { timeout: 5000 });
-    // Control bar cache display should show predicted prefix (~)
-    await expect(page.locator(".cache-display")).toContainText("~60s/120s");
   });
 
   test("cache bar shows buffer exhausted state", async ({ page }) => {
@@ -623,8 +814,6 @@ test.describe("Predictive Buffer State", () => {
       timeout: 5000,
     });
     await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/exhausted/);
-    // Cache display should show normal (no ~ prefix)
-    await expect(page.locator(".cache-display")).toContainText("96s/120s");
   });
 });
 
@@ -747,7 +936,7 @@ test.describe("Pending Endpoint State", () => {
 // --- Delivery Endpoint Add/Remove Controls ---
 
 test.describe("Delivery Endpoint Add/Remove Controls", () => {
-  test("add endpoint dropdown appears when delivery is running", async ({
+  test("add endpoint button appears when delivery is running", async ({
     page,
   }) => {
     await page.goto("/");
@@ -783,11 +972,10 @@ test.describe("Delivery Endpoint Add/Remove Controls", () => {
       },
     );
 
-    // Add endpoint dropdown should be visible
-    await expect(page.locator(".add-endpoint-select")).toBeVisible({
+    // Add endpoint button should be visible (opens modal on click)
+    await expect(page.locator(".btn-add-endpoint")).toBeVisible({
       timeout: 5000,
     });
-    await expect(page.locator(".start-position-select")).toBeVisible();
   });
 
   test("remove button appears on endpoint nodes when delivering", async ({
@@ -856,7 +1044,7 @@ test.describe("Delivery Endpoint Add/Remove Controls", () => {
     await page.waitForTimeout(500);
 
     // Idle state — no add/remove controls
-    await expect(page.locator(".add-endpoint-select")).not.toBeVisible();
+    await expect(page.locator(".btn-add-endpoint")).not.toBeVisible();
     await expect(page.locator(".btn-remove-endpoint")).not.toBeVisible();
   });
 });
