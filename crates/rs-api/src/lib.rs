@@ -407,8 +407,20 @@ async fn delivery_broadcast_loop(
                         current_delay_secs: predicted_delay,
                         session_start: session_start_time.clone(),
                         predicted: true,
-                        local_buffer_chunks: 0,
-                        s3_queue_chunks: 0,
+                        local_buffer_chunks: if let Some(eid) = last_event_id {
+                            db::get_pending_chunk_count_for_event(&pool, eid)
+                                .await
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        },
+                        s3_queue_chunks: if let Some(eid) = last_event_id {
+                            db::get_sent_chunk_count_for_event(&pool, eid)
+                                .await
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        },
                     });
                     // Emit disconnect notice once (within first poll after failure)
                     if elapsed < 3.0 {
