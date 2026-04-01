@@ -2567,10 +2567,15 @@ jobs:
           $delayBefore = ($deliveryBefore.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1).chunk_delay_secs
           Write-Host "Cache delay before disconnect: ${delayBefore}s"
 
+          # Enable firewall temporarily for blocking rules (normally disabled on this machine)
+          Write-Host "Enabling firewall for disconnect simulation..."
+          Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True
+
           # Block outbound to S3 and VPS (simulate cable disconnect)
           $s3Host = "eu-central-1.linodeobjects.com"
-          Write-Host "Blocking outbound to S3 ($s3Host) and VPS ($vpsIp)..."
-          New-NetFirewallRule -DisplayName "E2E-Block-S3" -Direction Outbound -RemoteAddress (Resolve-DnsName $s3Host -Type A).IPAddress -Action Block -ErrorAction Stop | Out-Null
+          $s3Ips = (Resolve-DnsName $s3Host -Type A -ErrorAction SilentlyContinue).IPAddress
+          Write-Host "Blocking outbound to S3 ($($s3Ips.Count) IPs) and VPS ($vpsIp)..."
+          New-NetFirewallRule -DisplayName "E2E-Block-S3" -Direction Outbound -RemoteAddress $s3Ips -Action Block -ErrorAction Stop | Out-Null
           New-NetFirewallRule -DisplayName "E2E-Block-VPS" -Direction Outbound -RemoteAddress $vpsIp -Action Block -ErrorAction Stop | Out-Null
           Write-Host "Firewall rules active - S3 and VPS blocked"
 
@@ -2597,11 +2602,12 @@ jobs:
               throw "FAILED: delivering_activated went false during disconnect - delivery was stopped"
             }
           } finally {
-            # ALWAYS remove firewall rules (even on failure)
-            Write-Host "Removing firewall rules..."
+            # ALWAYS remove firewall rules and disable firewall (even on failure)
+            Write-Host "Removing firewall rules and disabling firewall..."
             Remove-NetFirewallRule -DisplayName "E2E-Block-S3" -ErrorAction SilentlyContinue
             Remove-NetFirewallRule -DisplayName "E2E-Block-VPS" -ErrorAction SilentlyContinue
-            Write-Host "Firewall rules removed - connectivity restored"
+            Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled False
+            Write-Host "Firewall disabled, connectivity restored"
           }
 
           # Wait for recovery
