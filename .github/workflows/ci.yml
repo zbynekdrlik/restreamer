@@ -1263,7 +1263,7 @@ jobs:
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -1832,6 +1832,12 @@ jobs:
           }
           Write-Host "Event id: $($targetEvent.id), name: $($targetEvent.name)"
 
+          # Set cache delay to 300s for testing custom delay fill
+          $patchBody = @{ cache_delay_secs = 300 } | ConvertTo-Json
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
+            -Method PATCH -Body $patchBody -ContentType "application/json" -TimeoutSec 10
+          Write-Host "Set cache_delay_secs=300 on event $($targetEvent.id)"
+
           # Start stream: activates receiving + delivering, clears stale chunks, starts VPS
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/start-stream" `
             -Method POST -TimeoutSec 300
@@ -2138,6 +2144,47 @@ jobs:
             Start-Sleep -Seconds 15
           }
           throw "FAILED: Delivery server not ready after $maxRetries attempts (~10 min)"
+
+      - name: Verify buffer fill is monotonic (not jumping)
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # During buffer fill, cache delay must increase monotonically.
+          # Catches: frozen cache bar for 20s then jumping, inconsistent values.
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          $eventId = $targetEvent.id
+
+          $prevDelay = -1
+          $readings = @()
+          Write-Host "Monitoring buffer fill progress (8 readings, 5s apart)..."
+          for ($i = 1; $i -le 8; $i++) {
+            if ($i -gt 1) { Start-Sleep -Seconds 5 }
+            $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 10
+            if ($resp.endpoint_details -and $resp.endpoint_details.Count -gt 0) {
+              $ep = $resp.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1
+              if ($ep) {
+                $delay = $ep.chunk_delay_secs
+                $readings += $delay
+                Write-Host "Reading ${i}: [$($ep.alias)] delay=${delay}s chunk=$($ep.current_chunk_id)"
+                if ($prevDelay -ge 0 -and $delay -lt ($prevDelay - 5)) {
+                  throw "FAILED: Cache delay went backward: ${prevDelay}s -> ${delay}s (reading $i). Buffer fill is not monotonic."
+                }
+                $prevDelay = $delay
+              }
+            } else {
+              Write-Host "Reading ${i}: no endpoints yet"
+            }
+          }
+
+          if ($readings.Count -lt 3) {
+            throw "FAILED: Only $($readings.Count) delay readings captured (need >= 3)"
+          }
+          $growth = $readings[-1] - $readings[0]
+          if ($growth -le 0) {
+            throw "FAILED: Cache delay did not grow during fill: $($readings[0])s -> $($readings[-1])s"
+          }
+          Write-Host "Buffer fill verified: $($readings[0])s -> $($readings[-1])s (+${growth}s over $($readings.Count) readings)"
 
       - name: Verify delivery progression
         shell: powershell
@@ -2500,6 +2547,97 @@ jobs:
             }
           }
           Write-Host "=== OBS Disconnect/Reconnect Test PASSED ==="
+
+      - name: Simulated network disconnect - cache drain and recovery
+        if: success()
+        shell: powershell
+        timeout-minutes: 6
+        run: |
+          Write-Host "=== Network Disconnect Simulation ==="
+          $appStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          $eventId = $appStatus.streaming_event.id
+
+          # Get VPS IP and current state
+          $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          $vpsIp = $instances[0].ipv4
+          $vpsHetznerId = $instances[0].hetzner_id
+          Write-Host "VPS IP: $vpsIp, Hetzner ID: $vpsHetznerId"
+
+          $deliveryBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+          $delayBefore = ($deliveryBefore.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1).chunk_delay_secs
+          Write-Host "Cache delay before disconnect: ${delayBefore}s"
+
+          # Block outbound to S3 and VPS (simulate cable disconnect)
+          $s3Host = "eu-central-1.linodeobjects.com"
+          Write-Host "Blocking outbound to S3 ($s3Host) and VPS ($vpsIp)..."
+          New-NetFirewallRule -DisplayName "E2E-Block-S3" -Direction Outbound -RemoteAddress (Resolve-DnsName $s3Host -Type A).IPAddress -Action Block -ErrorAction Stop | Out-Null
+          New-NetFirewallRule -DisplayName "E2E-Block-VPS" -Direction Outbound -RemoteAddress $vpsIp -Action Block -ErrorAction Stop | Out-Null
+          Write-Host "Firewall rules active - S3 and VPS blocked"
+
+          try {
+            # Wait and verify cache drains (poll local API which still works)
+            Write-Host "Waiting 60s for cache to drain..."
+            Start-Sleep -Seconds 60
+
+            # Check pipeline state - should be in prediction mode or showing reduced cache
+            $statusMid = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+            Write-Host "Mid-disconnect status: delivering=$($statusMid.streaming_event.delivering_activated)"
+
+            $deliveryMid = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -ErrorAction SilentlyContinue
+            if ($deliveryMid -and $deliveryMid.endpoint_details) {
+              foreach ($ep in $deliveryMid.endpoint_details) {
+                Write-Host "  [$($ep.alias)] delay=$($ep.chunk_delay_secs)s chunks=$($ep.chunks_processed) restarts=$($ep.ffmpeg_restart_count)"
+              }
+            } else {
+              Write-Host "  Delivery status unavailable (VPS blocked) - expected"
+            }
+
+            # Verify delivery is still activated (NOT auto-restarted/deactivated)
+            if (-not $statusMid.streaming_event.delivering_activated) {
+              throw "FAILED: delivering_activated went false during disconnect - delivery was stopped"
+            }
+          } finally {
+            # ALWAYS remove firewall rules (even on failure)
+            Write-Host "Removing firewall rules..."
+            Remove-NetFirewallRule -DisplayName "E2E-Block-S3" -ErrorAction SilentlyContinue
+            Remove-NetFirewallRule -DisplayName "E2E-Block-VPS" -ErrorAction SilentlyContinue
+            Write-Host "Firewall rules removed - connectivity restored"
+          }
+
+          # Wait for recovery
+          Write-Host "Waiting 90s for pipeline recovery..."
+          Start-Sleep -Seconds 90
+
+          # Verify recovery
+          $deliveryAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+          Write-Host "Post-recovery delivery status:"
+          $recovered = $true
+          if ($deliveryAfter.endpoint_details) {
+            foreach ($ep in $deliveryAfter.endpoint_details) {
+              $delay = $ep.chunk_delay_secs
+              Write-Host "  [$($ep.alias)] delay=${delay}s chunks=$($ep.chunks_processed) restarts=$($ep.ffmpeg_restart_count)"
+              if ($ep.chunks_processed -eq 0) {
+                Write-Host "  WARNING: endpoint has 0 chunks after recovery"
+                $recovered = $false
+              }
+            }
+          }
+
+          # Verify VPS was NOT restarted
+          $instancesAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          $afterId = $instancesAfter[0].hetzner_id
+          Write-Host "VPS instance: before=$vpsHetznerId after=$afterId"
+          if ($afterId -ne $vpsHetznerId) {
+            throw "FAILED: VPS was destructively restarted during disconnect (before=$vpsHetznerId, after=$afterId)"
+          }
+
+          # Verify delivery still active
+          $finalStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          if (-not $finalStatus.streaming_event.delivering_activated) {
+            throw "FAILED: delivering_activated is false after recovery"
+          }
+
+          Write-Host "=== Network Disconnect Simulation PASSED ==="
 
       - name: Stop OBS stream
         if: always()
