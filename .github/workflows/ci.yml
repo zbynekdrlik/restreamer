@@ -2405,6 +2405,85 @@ jobs:
             throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts."
           }
 
+      - name: OBS disconnect/reconnect resilience test
+        if: success()
+        shell: powershell
+        run: |
+          Write-Host "=== OBS Disconnect/Reconnect Resilience Test ==="
+          # Record delivery status before disconnect
+          $statusBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($env:EVENT_ID)"
+          Write-Host "Before disconnect: endpoints=$($statusBefore.endpoints.Count)"
+
+          # Connect to OBS WebSocket
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $ws.Options.KeepAliveInterval = [TimeSpan]::FromSeconds(5)
+          $cts = New-Object System.Threading.CancellationTokenSource(30000)
+          $ws.ConnectAsync("ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)", $cts.Token).Wait()
+          $buf = [byte[]]::new(8192)
+          $seg = [ArraySegment[byte]]$buf
+          $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+          $hello = [System.Text.Encoding]::UTF8.GetString($buf, 0, $recv.Count) | ConvertFrom-Json
+          if ($hello.d.authentication) {
+            $salt = $hello.d.authentication.salt
+            $challenge = $hello.d.authentication.challenge
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            $b64secret = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($env:OBS_WS_PASSWORD)$salt")))
+            $auth = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$b64secret$challenge")))
+            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $auth } } | ConvertTo-Json -Depth 5
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($identify)
+            $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
+            $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+          }
+
+          # Stop OBS stream
+          Write-Host "Stopping OBS stream..."
+          $stop = @{ op = 6; d = @{ requestType = "StopStream"; requestId = "disconnect-test-stop" } } | ConvertTo-Json -Depth 5
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($stop)
+          $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
+          $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+          Write-Host "OBS stream stopped"
+
+          # Wait 10 seconds (simulate brief outage)
+          Write-Host "Waiting 10 seconds with OBS disconnected..."
+          Start-Sleep -Seconds 10
+
+          # Restart OBS stream
+          Write-Host "Restarting OBS stream..."
+          $start = @{ op = 6; d = @{ requestType = "StartStream"; requestId = "disconnect-test-start" } } | ConvertTo-Json -Depth 5
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($start)
+          $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
+          $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+          Write-Host "OBS stream restarted"
+          $ws.CloseAsync('NormalClosure', '', [System.Threading.CancellationToken]::None).Wait()
+
+          # Wait for RTMP to reconnect
+          Write-Host "Waiting for RTMP reconnect..."
+          for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Seconds 2
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+            if ($status.inpoint.details.rtmp_connected) {
+              Write-Host "RTMP reconnected after $($i * 2) seconds"
+              break
+            }
+          }
+          if (-not $status.inpoint.details.rtmp_connected) {
+            throw "FAILED: RTMP did not reconnect within 30 seconds"
+          }
+
+          # Wait 60 seconds for pipeline to stabilize
+          Write-Host "Waiting 60s for chunk pipeline to stabilize..."
+          Start-Sleep -Seconds 60
+
+          # Verify delivery endpoints are advancing
+          $statusAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($env:EVENT_ID)"
+          foreach ($ep in $statusAfter.endpoints) {
+            Write-Host "Endpoint '$($ep.alias)': chunks=$($ep.chunks_processed), delay=$($ep.chunk_delay_secs)s, restarts=$($ep.ffmpeg_restart_count)"
+            if ($ep.ffmpeg_restart_count -gt 20) {
+              throw "FAILED: Endpoint '$($ep.alias)' has $($ep.ffmpeg_restart_count) ffmpeg restarts - crash loop detected"
+            }
+          }
+          Write-Host "=== OBS Disconnect/Reconnect Test PASSED ==="
+
       - name: Stop OBS stream
         if: always()
         shell: powershell
