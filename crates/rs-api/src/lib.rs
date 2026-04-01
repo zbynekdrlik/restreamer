@@ -293,7 +293,9 @@ async fn delivery_broadcast_loop(
                         .await
                         .unwrap_or(0);
                     let chunk_dur = config.inpoint.chunk_duration_ms as f64 / 1000.0;
-                    let local_buf = sent as f64 * chunk_dur;
+                    // Cap at 2x target to prevent absurd values from counting
+                    // chunks from previous delivery sessions
+                    let local_buf = (sent as f64 * chunk_dur).min(target_delay as f64 * 2.0);
                     let progress = if target_delay > 0 {
                         (local_buf / target_delay as f64).min(1.0)
                     } else {
