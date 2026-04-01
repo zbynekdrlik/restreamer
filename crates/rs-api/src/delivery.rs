@@ -642,6 +642,15 @@ impl DeliveryOrchestrator {
     )> {
         let status = self.get_delivery_status(event_id).await?;
 
+        // If VPS exists but is unreachable (empty endpoints + not ready), return Err
+        // so the broadcast loop enters prediction mode instead of the S3 fallback
+        // which incorrectly counts ALL chunks ever sent (producing 2000+ second values).
+        if status.instance.is_some() && !status.server_ready && status.endpoints.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Delivery VPS unreachable — empty endpoints"
+            ));
+        }
+
         let (name, inst_status, server_ip) = match &status.instance {
             Some(inst) => (
                 inst.name.clone(),
