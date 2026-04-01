@@ -96,7 +96,11 @@ mod tests {
             tracing::info!(target: "rs_delivery::endpoint_task", "ffmpeg started");
         });
         let all = buffer.recent("", 100);
-        assert_eq!(all.len(), 1, "Should only capture INFO, not hyper TRACE/DEBUG");
+        assert_eq!(
+            all.len(),
+            1,
+            "Should only capture INFO, not hyper TRACE/DEBUG"
+        );
         assert!(all[0].message.contains("ffmpeg started"));
     }
 }
