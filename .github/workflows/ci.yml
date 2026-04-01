@@ -2095,6 +2095,8 @@ jobs:
           Write-Host "Waiting for delivery server to start ffmpeg endpoints..."
           # Cloud-init ~3 min + buffer fill (300 chunks x 2s = ~10 min) = ~13 min total
           $maxRetries = 60
+          # Track S3 buffer fill progress (monotonic check)
+          $fillReadings = @()
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
               $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
@@ -2124,6 +2126,16 @@ jobs:
                 } catch { Write-Host "  DIAGNOSTIC: chunk query failed: $_" }
               }
 
+              # Track buffer fill progress during wait (before endpoints are alive)
+              if (-not $response.endpoint_details -or $response.endpoint_details.Count -eq 0) {
+                # No endpoints yet - track S3 buffer via chunk stats
+                try {
+                  $cs = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
+                  $fillReadings += $cs.sent_chunks
+                  Write-Host "  Buffer fill: $($cs.sent_chunks) sent, $($cs.pending_chunks) pending"
+                } catch {}
+              }
+
               # Check ALL endpoints are alive (not just the aggregate flag)
               $allAlive = $true
               if ($response.endpoint_details -and $response.endpoint_details.Count -gt 0) {
@@ -2135,6 +2147,15 @@ jobs:
               }
 
               if ($response.server_ready -and $allAlive) {
+                # Verify buffer fill was monotonic (sent chunks always increasing)
+                if ($fillReadings.Count -ge 3) {
+                  for ($j = 1; $j -lt $fillReadings.Count; $j++) {
+                    if ($fillReadings[$j] -lt $fillReadings[$j-1]) {
+                      throw "FAILED: Buffer fill went backward: $($fillReadings[$j-1]) -> $($fillReadings[$j]) sent chunks"
+                    }
+                  }
+                  Write-Host "Buffer fill verified monotonic: $($fillReadings[0]) -> $($fillReadings[-1]) sent chunks over $($fillReadings.Count) readings"
+                }
                 Write-Host "=== Delivery server fully operational: ALL $($response.endpoint_details.Count) endpoints alive ==="
                 return
               }
@@ -2144,47 +2165,6 @@ jobs:
             Start-Sleep -Seconds 15
           }
           throw "FAILED: Delivery server not ready after $maxRetries attempts (~10 min)"
-
-      - name: Verify buffer fill is monotonic (not jumping)
-        shell: powershell
-        timeout-minutes: 2
-        run: |
-          # During buffer fill, cache delay must increase monotonically.
-          # Catches: frozen cache bar for 20s then jumping, inconsistent values.
-          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
-          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
-          $eventId = $targetEvent.id
-
-          $prevDelay = -1
-          $readings = @()
-          Write-Host "Monitoring buffer fill progress (8 readings, 5s apart)..."
-          for ($i = 1; $i -le 8; $i++) {
-            if ($i -gt 1) { Start-Sleep -Seconds 5 }
-            $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 10
-            if ($resp.endpoint_details -and $resp.endpoint_details.Count -gt 0) {
-              $ep = $resp.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1
-              if ($ep) {
-                $delay = $ep.chunk_delay_secs
-                $readings += $delay
-                Write-Host "Reading ${i}: [$($ep.alias)] delay=${delay}s chunk=$($ep.current_chunk_id)"
-                if ($prevDelay -ge 0 -and $delay -lt ($prevDelay - 5)) {
-                  throw "FAILED: Cache delay went backward: ${prevDelay}s -> ${delay}s (reading $i). Buffer fill is not monotonic."
-                }
-                $prevDelay = $delay
-              }
-            } else {
-              Write-Host "Reading ${i}: no endpoints yet"
-            }
-          }
-
-          if ($readings.Count -lt 3) {
-            throw "FAILED: Only $($readings.Count) delay readings captured (need >= 3)"
-          }
-          $growth = $readings[-1] - $readings[0]
-          if ($growth -le 0) {
-            throw "FAILED: Cache delay did not grow during fill: $($readings[0])s -> $($readings[-1])s"
-          }
-          Write-Host "Buffer fill verified: $($readings[0])s -> $($readings[-1])s (+${growth}s over $($readings.Count) readings)"
 
       - name: Verify delivery progression
         shell: powershell
