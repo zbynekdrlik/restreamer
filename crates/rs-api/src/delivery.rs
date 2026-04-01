@@ -731,15 +731,14 @@ impl DeliveryOrchestrator {
     pub async fn monitor_delivery_health(
         self: &Arc<Self>,
         event_id: i64,
-        mut instance_id: i64,
-        cached_delivery: std::sync::Arc<std::sync::RwLock<crate::state::CachedDeliveryStatus>>,
+        instance_id: i64,
+        _cached_delivery: std::sync::Arc<std::sync::RwLock<crate::state::CachedDeliveryStatus>>,
         ws_tx: tokio::sync::broadcast::Sender<rs_core::models::WsEvent>,
     ) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         interval.tick().await; // skip immediate tick
 
         let mut consecutive_failures = 0u32;
-        let mut restart_count = 0u32;
         let client = reqwest::Client::new();
 
         loop {
