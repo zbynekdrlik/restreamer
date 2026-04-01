@@ -632,13 +632,7 @@ async fn test_stats_struct_serializes() {
     assert!(json.contains("\"ffmpeg_restart_count\":2"));
 }
 
-// ============================================================
-// TimedMockFetcher: simulates chunks arriving over real time
-// ============================================================
-
-/// A fetcher where chunks become available at a configured rate.
-/// `available_up_to` is an AtomicI64 that external code advances to simulate
-/// new chunks arriving from S3.
+// TimedMockFetcher: chunks available at configured rate
 struct TimedMockFetcher {
     chunks: Arc<TokioMutex<std::collections::HashMap<i64, Vec<u8>>>>,
     available_up_to: Arc<AtomicI64>,
@@ -671,17 +665,10 @@ impl ChunkFetcher for TimedMockFetcher {
     }
 }
 
-// ============================================================
-// Buffer fill tests (TDD for cache delay bug)
-// ============================================================
+// Buffer fill tests
 
 #[tokio::test]
 async fn test_buffer_fill_waits_for_target_chunk() {
-    // With delivery_delay_chunks=5, start_chunk_id=1:
-    // target_chunk = 1 + 5 = 6
-    // Buffer fill must NOT complete before chunk 6 is available.
-    // Buffer fill DOES complete once chunk 6 is available.
-    // chunks_processed == 0 during buffer fill.
     tokio::time::pause();
 
     let all_chunks: Vec<(i64, Vec<u8>)> = (1..=10).map(|i| (i, vec![i as u8; 100])).collect();
@@ -889,11 +876,8 @@ async fn test_delivery_delay_chunks_calculation() {
     assert_eq!(chunks, 240, "120s / 500ms should = 240 chunks");
 }
 
-// ============================================================
 // FlvStreamNormalizer unit tests
-// ============================================================
 
-/// Build a minimal valid FLV chunk with header, sequence headers, and data tags.
 fn build_test_flv_chunk(video_data: &[u8], timestamp: u32) -> Vec<u8> {
     let mut buf = Vec::new();
     // FLV header (9 bytes)
@@ -986,15 +970,30 @@ fn flv_normalizer_passes_through_short_data() {
 #[test]
 fn flv_normalizer_reset_after_new() {
     let mut norm = FlvStreamNormalizer::new();
-    assert!(
-        !norm.sent_header,
-        "New normalizer should not have sent header"
-    );
-
+    assert!(!norm.sent_header, "New normalizer should not have sent header");
     let chunk = build_test_flv_chunk(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA], 100);
     let _ = norm.normalize(&chunk);
-    assert!(
-        norm.sent_header,
-        "After first chunk, sent_header should be true"
-    );
+    assert!(norm.sent_header, "After first chunk, sent_header should be true");
+}
+
+#[tokio::test]
+async fn test_write_failure_skips_chunk_after_retries() {
+    tokio::time::pause();
+    let chunks: Vec<(i64, Vec<u8>)> = (1..=10).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = MockFetcher::new(chunks);
+    let mut factory = MockProcessFactory::new();
+    factory.fail_after_writes = Some(0);
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(TokioMutex::new(EndpointStats::default()));
+    let sc = stats.clone();
+    let task = tokio::spawn(endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, sc));
+    for _ in 0..80 {
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    let s = stats.lock().await;
+    assert!(s.current_chunk_id > 1, "Should skip failed chunks, stuck at {}", s.current_chunk_id);
+    drop(s);
+    stop_tx.send(true).ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
 }

@@ -76,6 +76,7 @@ const MAX_FFMPEG_RESTARTS: u32 = 10;
 const MAX_CHUNK_MISS_COUNT: u32 = 40; // ~80s at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
 const WRITE_TIMEOUT_SECS: u64 = 30;
+const MAX_WRITE_FAILURES_PER_CHUNK: u32 = 3;
 /// Base S3 backoff (doubles on each error, max 60s, resets on success).
 const S3_BACKOFF_BASE_SECS: u64 = 2;
 const S3_BACKOFF_MAX_SECS: u64 = 60;
@@ -305,6 +306,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
     let mut last_heartbeat = std::time::Instant::now();
     let mut drought_mode = false;
+    let mut consecutive_write_failures: u32 = 0;
 
     loop {
         // Check for stop signal
@@ -435,13 +437,15 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
 
                     match write_result {
                         Ok(Ok(())) => {
+                            consecutive_write_failures = 0;
                             let mut s = stats.lock().await;
                             s.bytes_processed_total += processed.len() as u64;
                             s.current_chunk_id = chunk_id;
                             s.chunks_processed += 1;
                         }
                         Ok(Err(e)) => {
-                            tracing::warn!(alias = %alias, "ffmpeg write failed: {e}");
+                            consecutive_write_failures += 1;
+                            tracing::warn!(alias = %alias, chunk_id, failures = consecutive_write_failures, "ffmpeg write failed: {e}");
                             let mut s = stats.lock().await;
                             s.last_error = Some(e);
                             s.ffmpeg_restart_count += 1;
@@ -449,10 +453,19 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                             if let Some(mut p) = proc.take() {
                                 p.kill().await;
                             }
+                            if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
+                                tracing::error!(alias = %alias, chunk_id, "Skipping chunk after {consecutive_write_failures} write failures");
+                                chunk_id += 1;
+                                consecutive_write_failures = 0;
+                                flv_normalizer = FlvStreamNormalizer::new();
+                                let mut s = stats.lock().await;
+                                s.current_chunk_id = chunk_id;
+                            }
                             continue;
                         }
                         Err(_) => {
-                            tracing::error!(alias = %alias, "ffmpeg write timed out");
+                            consecutive_write_failures += 1;
+                            tracing::error!(alias = %alias, chunk_id, failures = consecutive_write_failures, "ffmpeg write timed out");
                             let mut s = stats.lock().await;
                             s.last_error = Some("write_timeout".to_string());
                             s.stall_reason = Some("write_timeout".to_string());
@@ -460,6 +473,14 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                             drop(s);
                             if let Some(mut p) = proc.take() {
                                 p.kill().await;
+                            }
+                            if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
+                                tracing::error!(alias = %alias, chunk_id, "Skipping chunk after {consecutive_write_failures} write timeouts");
+                                chunk_id += 1;
+                                consecutive_write_failures = 0;
+                                flv_normalizer = FlvStreamNormalizer::new();
+                                let mut s = stats.lock().await;
+                                s.current_chunk_id = chunk_id;
                             }
                             continue;
                         }
