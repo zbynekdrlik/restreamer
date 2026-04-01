@@ -43,7 +43,7 @@ impl Default for AppState {
             s3_config: RwLock::new(None),
             event_identifier: RwLock::new(None),
             delivery_delay_chunks: RwLock::new(0),
-            log_buffer: LogBuffer::new(1000),
+            log_buffer: LogBuffer::new(5000),
         }
     }
 }

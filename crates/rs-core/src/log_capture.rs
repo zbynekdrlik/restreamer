@@ -17,12 +17,24 @@ impl LogCaptureLayer {
 
 impl<S: Subscriber> Layer<S> for LogCaptureLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        // Skip DEBUG/TRACE from noisy HTTP crates to prevent buffer overflow
+        let level = *event.metadata().level();
+        let target = event.metadata().target();
+        if level > tracing::Level::INFO
+            && (target.starts_with("hyper")
+                || target.starts_with("h2")
+                || target.starts_with("rustls")
+                || target.starts_with("reqwest"))
+        {
+            return;
+        }
+
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
 
         self.buffer.push(LogEntry {
-            level: event.metadata().level().to_string(),
-            target: event.metadata().target().to_string(),
+            level: level.to_string(),
+            target: target.to_string(),
             message: visitor.message,
         });
     }
@@ -71,5 +83,20 @@ mod tests {
         let endpoint = buffer.recent("rs_endpoint", 10);
         assert_eq!(endpoint.len(), 1);
         assert!(endpoint[0].message.contains("upload retry"));
+    }
+
+    #[test]
+    fn filters_hyper_trace_events() {
+        let buffer = LogBuffer::new(100);
+        let layer = LogCaptureLayer::new(buffer.clone());
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(target: "hyper::proto::h1", "received bytes");
+            tracing::debug!(target: "h2::codec", "frame decoded");
+            tracing::info!(target: "rs_delivery::endpoint_task", "ffmpeg started");
+        });
+        let all = buffer.recent("", 100);
+        assert_eq!(all.len(), 1, "Should only capture INFO, not hyper TRACE/DEBUG");
+        assert!(all[0].message.contains("ffmpeg started"));
     }
 }
