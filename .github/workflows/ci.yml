@@ -2410,8 +2410,12 @@ jobs:
         shell: powershell
         run: |
           Write-Host "=== OBS Disconnect/Reconnect Resilience Test ==="
+          # Get active event ID from status API
+          $appStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          $eventId = $appStatus.streaming_event.id
+          Write-Host "Active event ID: $eventId"
           # Record delivery status before disconnect
-          $statusBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($env:EVENT_ID)"
+          $statusBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
           Write-Host "Before disconnect: endpoints=$($statusBefore.endpoints.Count)"
 
           # Connect to OBS WebSocket
@@ -2475,7 +2479,7 @@ jobs:
           Start-Sleep -Seconds 60
 
           # Verify delivery endpoints are advancing
-          $statusAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($env:EVENT_ID)"
+          $statusAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
           foreach ($ep in $statusAfter.endpoints) {
             Write-Host "Endpoint '$($ep.alias)': chunks=$($ep.chunks_processed), delay=$($ep.chunk_delay_secs)s, restarts=$($ep.ffmpeg_restart_count)"
             if ($ep.ffmpeg_restart_count -gt 20) {
