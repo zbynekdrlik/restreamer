@@ -927,6 +927,79 @@ test.describe("Predictive Buffer State", () => {
       timeout: 5000,
     });
   });
+
+  test("cache bar drains in real-time during simulated disconnect", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Start with healthy streaming state
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Test",
+          buffer_progress: 1.0,
+          target_delay_secs: 120,
+          current_delay_secs: 120.0,
+          predicted: false,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 20,
+        },
+      },
+    });
+    await expect(page.locator(".cache-bar-fill")).toHaveClass(/healthy/, {
+      timeout: 5000,
+    });
+
+    // Simulate disconnect — starts draining at 2s/tick from 120s
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/simulate-disconnect",
+      { data: { start_delay: 120, target_delay: 120, drain_rate: 2 } },
+    );
+
+    // After ~5 seconds (2-3 ticks), cache should be predicted and decreasing
+    await page.waitForTimeout(5000);
+    await expect(page.locator(".cache-bar-fill")).toHaveClass(/predicted/, {
+      timeout: 3000,
+    });
+
+    // Read the current delay from the cache bar label
+    const labelText = await page.locator(".cache-bar-label").textContent();
+    const match = labelText?.match(/~?(\d+)s/);
+    expect(match).toBeTruthy();
+    const displayedDelay = parseInt(match![1]);
+    // Must be LESS than 120 (draining), not jumping to 200+
+    expect(displayedDelay).toBeLessThan(120);
+    expect(displayedDelay).toBeGreaterThan(100);
+
+    // Simulate reconnect — restore to live
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/simulate-reconnect",
+    );
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Test",
+          buffer_progress: 0.9,
+          target_delay_secs: 120,
+          current_delay_secs: 108.0,
+          predicted: false,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 18,
+        },
+      },
+    });
+    await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/predicted/, {
+      timeout: 5000,
+    });
+  });
 });
 
 // --- Pending Endpoint State ---

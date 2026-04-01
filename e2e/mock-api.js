@@ -401,6 +401,48 @@ app.post("/api/v1/_test/ws-broadcast", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// Test-only: simulate VPS disconnect — cache bar drains at real-time rate
+let disconnectTimer = null;
+app.post("/api/v1/_test/simulate-disconnect", (req, res) => {
+  const { start_delay = 120, target_delay = 120, drain_rate = 2 } = req.body;
+  let currentDelay = start_delay;
+  if (disconnectTimer) clearInterval(disconnectTimer);
+  disconnectTimer = setInterval(() => {
+    currentDelay = Math.max(0, currentDelay - drain_rate);
+    const progress =
+      target_delay > 0 ? Math.min(1.0, currentDelay / target_delay) : 0;
+    const state = currentDelay <= 0 ? "buffer_exhausted" : "streaming";
+    broadcastWs({
+      type: "PipelineState",
+      data: {
+        state,
+        event_id: 1,
+        event_name: "Test Event",
+        buffer_progress: progress,
+        target_delay_secs: target_delay,
+        current_delay_secs: currentDelay,
+        session_start: null,
+        predicted: true,
+        local_buffer_chunks: Math.floor(currentDelay / 2),
+        s3_queue_chunks: 0,
+      },
+    });
+    if (currentDelay <= 0) {
+      clearInterval(disconnectTimer);
+      disconnectTimer = null;
+    }
+  }, 2000);
+  res.json({ status: "ok", start_delay: currentDelay });
+});
+
+app.post("/api/v1/_test/simulate-reconnect", (req, res) => {
+  if (disconnectTimer) {
+    clearInterval(disconnectTimer);
+    disconnectTimer = null;
+  }
+  res.json({ status: "ok" });
+});
+
 // SPA fallback: serve index.html for any non-API route that wasn't matched by static
 app.get("*", (req, res) => {
   res.sendFile(path.join(distDir, "index.html"));
