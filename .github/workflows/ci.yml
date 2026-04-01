@@ -2410,9 +2410,12 @@ jobs:
         shell: powershell
         run: |
           Write-Host "=== OBS Disconnect/Reconnect Resilience Test ==="
-          # Get active event ID from status API
+          # Get active event ID and VPS instance from status API
           $appStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
           $eventId = $appStatus.streaming_event.id
+          $instancesBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          $beforeHetznerId = $instancesBefore[0].hetzner_id
+          Write-Host "VPS instance before disconnect: hetzner_id=$beforeHetznerId"
           Write-Host "Active event ID: $eventId"
           # Record delivery status before disconnect
           $statusBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
@@ -2484,6 +2487,16 @@ jobs:
             Write-Host "Endpoint '$($ep.alias)': chunks=$($ep.chunks_processed), delay=$($ep.chunk_delay_secs)s, restarts=$($ep.ffmpeg_restart_count)"
             if ($ep.ffmpeg_restart_count -gt 20) {
               throw "FAILED: Endpoint '$($ep.alias)' has $($ep.ffmpeg_restart_count) ffmpeg restarts - crash loop detected"
+            }
+          }
+
+          # Verify VPS was NOT restarted (same instance)
+          $instancesAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          if ($instancesAfter.Count -gt 0) {
+            $afterId = $instancesAfter[0].hetzner_id
+            Write-Host "Instance before: $beforeHetznerId, after: $afterId"
+            if ($afterId -ne $beforeHetznerId) {
+              throw "FAILED: VPS was restarted during OBS disconnect (before=$beforeHetznerId, after=$afterId)"
             }
           }
           Write-Host "=== OBS Disconnect/Reconnect Test PASSED ==="

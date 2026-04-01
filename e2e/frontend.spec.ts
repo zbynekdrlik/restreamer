@@ -1000,6 +1000,59 @@ test.describe("Predictive Buffer State", () => {
       timeout: 5000,
     });
   });
+
+  test("cache bar shows S3 buffer accumulation during buffer fill", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Simulate buffer fill phase: S3 buffer growing, not yet at target
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffering",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.3,
+          target_delay_secs: 120,
+          current_delay_secs: 36.0,
+          session_start: new Date().toISOString(),
+          predicted: false,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 18,
+        },
+      },
+    });
+
+    const fill = page.locator(".cache-bar-fill");
+    await expect(fill).toBeVisible({ timeout: 5000 });
+    await expect(fill).not.toHaveClass(/exhausted/);
+    await expect(fill).not.toHaveClass(/predicted/);
+    const label = await page.locator(".cache-bar-label").textContent();
+    expect(label).toContain("36s");
+
+    // Buffer grows to 80%
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffering",
+          event_id: 1,
+          event_name: "Sunday Service",
+          buffer_progress: 0.8,
+          target_delay_secs: 120,
+          current_delay_secs: 96.0,
+          session_start: new Date().toISOString(),
+          predicted: false,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 48,
+        },
+      },
+    });
+    await expect(fill).toHaveClass(/healthy/, { timeout: 5000 });
+  });
 });
 
 // --- Pending Endpoint State ---
