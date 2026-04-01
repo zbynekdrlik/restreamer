@@ -2086,15 +2086,15 @@ jobs:
 
       - name: Wait for delivery server ready
         shell: powershell
-        timeout-minutes: 5
+        timeout-minutes: 15
         run: |
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
 
           Write-Host "Waiting for delivery server to start ffmpeg endpoints..."
-          # Cloud-init can take 5-7 minutes: apt update + install ffmpeg + download binary + start
-          $maxRetries = 40
+          # Cloud-init ~3 min + buffer fill (300 chunks x 2s = ~10 min) = ~13 min total
+          $maxRetries = 60
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
               $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
