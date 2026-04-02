@@ -405,13 +405,39 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     tracing::info!(alias = %alias, "ffmpeg circuit breaker reset after successful chunk");
                 }
                 if drought_mode {
-                    tracing::info!(alias = %alias, chunk_id, "Exiting drought mode — chunks available");
+                    tracing::info!(alias = %alias, chunk_id, "Exiting drought mode — re-buffering before resume");
                     drought_mode = false;
                     flv_normalizer = FlvStreamNormalizer::new();
                     {
                         let mut s = stats.lock().await;
-                        s.stall_reason = None;
+                        s.stall_reason = Some("re-buffering".to_string());
                         s.consecutive_chunk_misses = 0;
+                    }
+                    // Re-buffer: wait for delivery_delay_chunks to accumulate
+                    // before restarting ffmpeg (same as initial buffer fill)
+                    if delivery_delay_chunks > 0 {
+                        let rebuffer_target = chunk_id + delivery_delay_chunks;
+                        tracing::info!(
+                            alias = %alias,
+                            chunk_id,
+                            rebuffer_target,
+                            "Re-buffering: waiting for chunk {rebuffer_target}"
+                        );
+                        loop {
+                            if *stop_rx.borrow() {
+                                return;
+                            }
+                            if let Ok(Some(_)) = fetcher.fetch_chunk(rebuffer_target).await {
+                                tracing::info!(alias = %alias, rebuffer_target, "Re-buffer complete");
+                                break;
+                            }
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                                _ = stop_rx.changed() => { if *stop_rx.borrow() { return; } }
+                            }
+                        }
+                        let mut s = stats.lock().await;
+                        s.stall_reason = None;
                     }
                     // Don't process this chunk yet — let "ensure ffmpeg alive" spawn ffmpeg first
                     continue;
