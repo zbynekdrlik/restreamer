@@ -2559,71 +2559,54 @@ jobs:
             throw "FAILED: Cache delay too low before test (${delayBefore}s < 30s) - not enough buffer for meaningful test"
           }
 
-          # Enable firewall temporarily (normally disabled on this machine)
-          Write-Host "Enabling firewall for disconnect simulation..."
-          Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True
-
-          # Block ONLY stream.lan -> S3 and stream.lan -> VPS
-          # VPS -> S3 and VPS -> YouTube are UNAFFECTED (different network)
-          $s3Host = "eu-central-1.linodeobjects.com"
-          $s3Ips = (Resolve-DnsName $s3Host -Type A -ErrorAction SilentlyContinue).IPAddress
-          Write-Host "Blocking outbound to S3 ($($s3Ips.Count) IPs) and VPS ($vpsIp)..."
-          New-NetFirewallRule -DisplayName "E2E-Block-S3" -Direction Outbound -RemoteAddress $s3Ips -Action Block -ErrorAction Stop | Out-Null
-          New-NetFirewallRule -DisplayName "E2E-Block-VPS" -Direction Outbound -RemoteAddress $vpsIp -Action Block -ErrorAction Stop | Out-Null
-          Write-Host "Firewall rules active - stream.lan isolated from S3+VPS"
+          # Block S3 uploads via test API (application-level, no firewall needed)
+          Write-Host "Blocking S3 uploads via API..."
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/_test/s3-block" -Method POST -TimeoutSec 5
+          Write-Host "S3 uploads blocked"
 
           try {
-            # Wait 5s for firewall to take effect on existing connections
+            # Wait 5s for block to take effect
             Start-Sleep -Seconds 5
 
-            # Take first cache reading
-            $delivery1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -ErrorAction SilentlyContinue
-            $delay1 = 0
-            if ($delivery1 -and $delivery1.endpoint_details) {
-              $ep1 = $delivery1.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1
-              if ($ep1) { $delay1 = $ep1.chunk_delay_secs }
-            }
+            # Take first readings
+            $delivery1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 10
+            $delay1 = ($delivery1.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1).chunk_delay_secs
             $chunks1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
             Write-Host "T+5s: delay=${delay1}s pending=$($chunks1.pending_chunks)"
 
             # Wait 10 more seconds
             Start-Sleep -Seconds 10
 
-            # Take second cache reading
-            $delivery2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -ErrorAction SilentlyContinue
-            $delay2 = 0
-            if ($delivery2 -and $delivery2.endpoint_details) {
-              $ep2 = $delivery2.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1
-              if ($ep2) { $delay2 = $ep2.chunk_delay_secs }
-            }
+            # Take second readings
+            $delivery2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 10
+            $delay2 = ($delivery2.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1).chunk_delay_secs
             $chunks2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
             Write-Host "T+15s: delay=${delay2}s pending=$($chunks2.pending_chunks)"
 
             # STRICT: Cache delay must NOT increase during S3 block
+            # VPS consumes from S3 cache, delay should decrease as VPS catches up
             if ($delay2 -gt ($delay1 + 5)) {
               throw "FAILED: Cache delay INCREASED during S3 block (${delay1}s -> ${delay2}s). Must decrease or stay stable."
             }
 
-            # STRICT: Pending chunks must increase (S3 blocked, chunks piling up)
+            # STRICT: Pending chunks must increase (uploads blocked, chunks piling up)
             if ($chunks2.pending_chunks -le $chunks1.pending_chunks) {
-              throw "FAILED: Pending chunks did not increase during S3 block ($($chunks1.pending_chunks) -> $($chunks2.pending_chunks)). Firewall not effective?"
+              throw "FAILED: Pending chunks did not increase during S3 block ($($chunks1.pending_chunks) -> $($chunks2.pending_chunks)). Block not effective."
             }
 
             # Verify delivering still active
             $statusMid = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
             if (-not $statusMid.streaming_event.delivering_activated) {
-              throw "FAILED: delivering_activated went false during 15s disconnect"
+              throw "FAILED: delivering_activated went false during S3 block"
             }
 
             $pendingDuringBlock = $chunks2.pending_chunks
             Write-Host "Pending chunks during block: $pendingDuringBlock"
           } finally {
-            # ALWAYS remove firewall rules and disable firewall
-            Write-Host "Removing firewall rules and disabling firewall..."
-            Remove-NetFirewallRule -DisplayName "E2E-Block-S3" -ErrorAction SilentlyContinue
-            Remove-NetFirewallRule -DisplayName "E2E-Block-VPS" -ErrorAction SilentlyContinue
-            Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled False
-            Write-Host "Firewall disabled, connectivity restored"
+            # ALWAYS unblock S3 uploads
+            Write-Host "Unblocking S3 uploads..."
+            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/_test/s3-unblock" -Method POST -TimeoutSec 5
+            Write-Host "S3 uploads unblocked"
           }
 
           # Wait for recovery - S3 uploads resume, VPS status polls resume

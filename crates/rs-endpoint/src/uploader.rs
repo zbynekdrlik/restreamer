@@ -26,6 +26,8 @@ pub struct ChunkUploader {
     s3: Arc<S3Client>,
     max_concurrent: usize,
     ws_tx: broadcast::Sender<WsEvent>,
+    /// When true, upload_batch skips all uploads (simulates S3 outage for testing).
+    upload_blocked: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ChunkUploader {
@@ -35,7 +37,14 @@ impl ChunkUploader {
             s3: Arc::new(s3),
             max_concurrent: 4,
             ws_tx,
+            upload_blocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Set a shared upload-blocked flag (for test API control).
+    pub fn with_upload_blocked(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.upload_blocked = flag;
+        self
     }
 
     /// Run the upload loop until shutdown signal.
@@ -60,6 +69,13 @@ impl ChunkUploader {
     /// Process one batch of unsent chunks.
     /// Public for integration testing; normally called internally via `run()`.
     pub async fn upload_batch(&self) {
+        // Test hook: skip uploads when blocked (simulates S3 outage)
+        if self
+            .upload_blocked
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
         let chunks = match db::get_unsent_chunks(&self.pool, 20).await {
             Ok(c) => c,
             Err(e) => {

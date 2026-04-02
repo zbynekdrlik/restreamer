@@ -131,6 +131,9 @@ impl ServiceCore {
         // Shared RTMP connection state
         let inpoint_state = self.inpoint_state.clone();
 
+        // Shared S3 upload blocked flag (test hook for simulating outages)
+        let s3_upload_blocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         // API server
         let api_addr: SocketAddr =
             format!("{}:{}", self.config.api.bind, self.config.api.port).parse()?;
@@ -138,7 +141,8 @@ impl ServiceCore {
             .with_config_path(self.config_path)
             .with_log_buffer(self.log_buffer)
             .with_inpoint_state(inpoint_state.clone())
-            .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx);
+            .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx)
+            .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked));
 
         // Serve the WASM frontend from a "www" directory next to the binary,
         // so LAN browsers can access the dashboard at http://<host>:8910/
@@ -442,7 +446,8 @@ async fn run_endpoint_loop(
         let (component_shutdown_tx, _) = broadcast::channel::<()>(1);
         let component_rx = component_shutdown_tx.subscribe();
 
-        let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx.clone());
+        let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx.clone())
+            .with_upload_blocked(Arc::clone(&s3_upload_blocked));
         let mut handle = tokio::spawn(async move { uploader.run(component_rx).await });
 
         info!("Endpoint uploader started");

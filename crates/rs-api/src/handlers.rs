@@ -797,3 +797,21 @@ mod tests {
         assert_eq!(result, serde_json::json!({"a": "flat"}));
     }
 }
+
+// --- Test hooks for CI E2E ---
+
+pub async fn test_s3_block(State(state): State<AppState>) -> StatusCode {
+    state
+        .s3_upload_blocked
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    tracing::warn!("S3 uploads BLOCKED (test hook)");
+    StatusCode::OK
+}
+
+pub async fn test_s3_unblock(State(state): State<AppState>) -> StatusCode {
+    state
+        .s3_upload_blocked
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    tracing::warn!("S3 uploads UNBLOCKED (test hook)");
+    StatusCode::OK
+}
