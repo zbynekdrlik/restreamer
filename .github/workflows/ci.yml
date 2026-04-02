@@ -2625,6 +2625,113 @@ jobs:
 
           Write-Host "=== Network Disconnect Simulation PASSED ==="
 
+      - name: Restreamer crash recovery test
+        if: success()
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          Write-Host "=== Restreamer Crash Recovery Test ==="
+          # Verify current state: OBS streaming, delivery active
+          $statusBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          $eventId = $statusBefore.streaming_event.id
+          Write-Host "Before crash: event=$eventId delivering=$($statusBefore.streaming_event.delivering_activated)"
+
+          # Record delivery instance
+          $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          $vpsId = $instances[0].hetzner_id
+          Write-Host "VPS hetzner_id: $vpsId"
+
+          # Record chunk count before crash
+          $chunksBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          Write-Host "Chunks before: total=$($chunksBefore.total_chunks) sent=$($chunksBefore.sent_chunks)"
+
+          # CRASH: kill Restreamer process
+          Write-Host "Killing Restreamer process (simulating crash)..."
+          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          Start-Sleep -Seconds 3
+
+          # Verify Restreamer is dead
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if ($proc) { throw "FAILED: Restreamer still running after taskkill" }
+          Write-Host "Restreamer killed successfully"
+
+          # RESTART: via scheduled task (same as CI deploy)
+          Write-Host "Restarting Restreamer via scheduled task..."
+          Start-ScheduledTask -TaskName "RestreamerGUI"
+          Start-Sleep -Seconds 10
+
+          # Wait for API to respond
+          $apiUp = $false
+          for ($i = 0; $i -lt 15; $i++) {
+            try {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 3
+              $apiUp = $true
+              break
+            } catch {
+              Write-Host "Waiting for API... ($i)"
+              Start-Sleep -Seconds 2
+            }
+          }
+          if (-not $apiUp) { throw "FAILED: Restreamer API not responding after restart" }
+
+          # Verify event still active (persisted in SQLite)
+          $statusAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          Write-Host "After restart: delivering=$($statusAfter.streaming_event.delivering_activated) receiving=$($statusAfter.streaming_event.receiving_activated)"
+          if (-not $statusAfter.streaming_event.delivering_activated) {
+            throw "FAILED: delivering_activated is false after restart"
+          }
+          if (-not $statusAfter.streaming_event.receiving_activated) {
+            throw "FAILED: receiving_activated is false after restart"
+          }
+
+          # Wait for OBS to reconnect (OBS auto-reconnects)
+          Write-Host "Waiting for OBS RTMP reconnect..."
+          $reconnected = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 2
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+            if ($status.inpoint.details.rtmp_connected) {
+              Write-Host "OBS reconnected after $($i * 2) seconds"
+              $reconnected = $true
+              break
+            }
+          }
+          if (-not $reconnected) {
+            throw "FAILED: OBS did not reconnect within 60 seconds"
+          }
+
+          # Wait for chunks to flow
+          Write-Host "Waiting 30s for chunks to flow after restart..."
+          Start-Sleep -Seconds 30
+
+          $chunksAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          Write-Host "Chunks after: total=$($chunksAfter.total_chunks) sent=$($chunksAfter.sent_chunks)"
+          $newChunks = $chunksAfter.total_chunks - $chunksBefore.total_chunks
+          Write-Host "New chunks since restart: $newChunks"
+          if ($newChunks -lt 5) {
+            throw "FAILED: Only $newChunks new chunks after restart (expected >= 5)"
+          }
+
+          # Verify VPS instance unchanged (not recreated)
+          $instancesAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          if ($instancesAfter.Count -gt 0) {
+            $vpsIdAfter = $instancesAfter[0].hetzner_id
+            Write-Host "VPS after restart: $vpsIdAfter (before: $vpsId)"
+            if ($vpsIdAfter -ne $vpsId) {
+              throw "FAILED: VPS was recreated after crash (before=$vpsId, after=$vpsIdAfter)"
+            }
+          }
+
+          # Verify delivery broadcast loop picks up the VPS
+          $delivery = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -ErrorAction SilentlyContinue
+          if ($delivery -and $delivery.instance) {
+            Write-Host "Delivery instance found: $($delivery.instance.name) status=$($delivery.instance.status)"
+          } else {
+            Write-Host "WARNING: Delivery instance not found in status (broadcast loop may not have polled yet)"
+          }
+
+          Write-Host "=== Restreamer Crash Recovery Test PASSED ==="
+
       - name: Stop OBS stream
         if: always()
         shell: powershell
