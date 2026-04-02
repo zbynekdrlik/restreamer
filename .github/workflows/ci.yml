@@ -2543,62 +2543,54 @@ jobs:
           $vpsHetznerId = $instances[0].hetzner_id
           Write-Host "VPS IP: $vpsIp, Hetzner ID: $vpsHetznerId"
 
+          # Record EXACT state before disconnect
           $deliveryBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+          $restartsBefore = @{}
+          $chunksBefore = @{}
+          foreach ($ep in $deliveryBefore.endpoint_details) {
+            $restartsBefore[$ep.alias] = $ep.ffmpeg_restart_count
+            $chunksBefore[$ep.alias] = $ep.chunks_processed
+            Write-Host "BEFORE: [$($ep.alias)] chunks=$($ep.chunks_processed) delay=$($ep.chunk_delay_secs)s restarts=$($ep.ffmpeg_restart_count) stall=$($ep.stall_reason)"
+          }
           $delayBefore = ($deliveryBefore.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1).chunk_delay_secs
           Write-Host "Cache delay before disconnect: ${delayBefore}s"
 
-          # Enable firewall temporarily for blocking rules (normally disabled on this machine)
+          if ($delayBefore -lt 30) {
+            throw "FAILED: Cache delay too low before test (${delayBefore}s < 30s) - not enough buffer for meaningful test"
+          }
+
+          # Enable firewall temporarily (normally disabled on this machine)
           Write-Host "Enabling firewall for disconnect simulation..."
           Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True
 
-          # Block outbound to S3 and VPS (simulate cable disconnect)
+          # Block ONLY stream.lan -> S3 and stream.lan -> VPS
+          # VPS -> S3 and VPS -> YouTube are UNAFFECTED (different network)
           $s3Host = "eu-central-1.linodeobjects.com"
           $s3Ips = (Resolve-DnsName $s3Host -Type A -ErrorAction SilentlyContinue).IPAddress
           Write-Host "Blocking outbound to S3 ($($s3Ips.Count) IPs) and VPS ($vpsIp)..."
           New-NetFirewallRule -DisplayName "E2E-Block-S3" -Direction Outbound -RemoteAddress $s3Ips -Action Block -ErrorAction Stop | Out-Null
           New-NetFirewallRule -DisplayName "E2E-Block-VPS" -Direction Outbound -RemoteAddress $vpsIp -Action Block -ErrorAction Stop | Out-Null
-          Write-Host "Firewall rules active - S3 and VPS blocked"
+          Write-Host "Firewall rules active - stream.lan isolated from S3+VPS"
 
           try {
-            # DURING DISCONNECT: verify dashboard shows correct state
-            Write-Host "Waiting 15s then checking dashboard state during disconnect..."
+            # Block for 15 seconds - VPS has cache, should have ZERO issues
+            Write-Host "S3+VPS blocked for 15s - VPS should be unaffected (has cache)..."
             Start-Sleep -Seconds 15
 
-            # Dashboard MUST show prediction mode, NOT 0s cache, NOT all-green endpoints
-            # Use WebSocket status endpoint which reflects what the dashboard sees
-            $wsStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/ws/latest-state" -ErrorAction SilentlyContinue
+            # Verify delivering still active
             $statusMid = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
-            Write-Host "Mid-disconnect: delivering=$($statusMid.streaming_event.delivering_activated)"
-
-            # Verify delivering is still active
             if (-not $statusMid.streaming_event.delivering_activated) {
-              throw "FAILED: delivering_activated went false during disconnect"
+              throw "FAILED: delivering_activated went false during 15s disconnect"
             }
 
-            # Check delivery status - VPS should be unreachable
-            $deliveryMid = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -ErrorAction SilentlyContinue
-            if ($deliveryMid -and $deliveryMid.endpoint_details -and $deliveryMid.endpoint_details.Count -gt 0) {
-              foreach ($ep in $deliveryMid.endpoint_details) {
-                Write-Host "  [$($ep.alias)] delay=$($ep.chunk_delay_secs)s chunks=$($ep.chunks_processed)"
-              }
-              # If we got endpoint data, VPS is somehow still reachable - firewall may not work
-              Write-Host "WARNING: VPS still returning endpoint data during firewall block"
-            } else {
-              Write-Host "  VPS unreachable (expected during disconnect)"
-            }
-
-            # Wait longer for cache drain effect
-            Write-Host "Waiting 30s more..."
-            Start-Sleep -Seconds 30
-
-            # Verify local buffer has pending chunks (OBS still streaming, S3 blocked)
-            $chunks = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
-            Write-Host "Chunks during disconnect: pending=$($chunks.pending_chunks) sent=$($chunks.sent_chunks)"
-            if ($chunks.pending_chunks -eq 0) {
+            # Verify local chunks are piling up (S3 blocked)
+            $chunksMid = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
+            Write-Host "During disconnect: pending=$($chunksMid.pending_chunks) sent=$($chunksMid.sent_chunks)"
+            if ($chunksMid.pending_chunks -eq 0) {
               Write-Host "WARNING: 0 pending chunks - S3 block may not be effective"
             }
           } finally {
-            # ALWAYS remove firewall rules and disable firewall (even on failure)
+            # ALWAYS remove firewall rules and disable firewall
             Write-Host "Removing firewall rules and disabling firewall..."
             Remove-NetFirewallRule -DisplayName "E2E-Block-S3" -ErrorAction SilentlyContinue
             Remove-NetFirewallRule -DisplayName "E2E-Block-VPS" -ErrorAction SilentlyContinue
@@ -2606,37 +2598,46 @@ jobs:
             Write-Host "Firewall disabled, connectivity restored"
           }
 
-          # AFTER RECOVERY: verify dashboard returns to correct state
-          Write-Host "Waiting 90s for pipeline recovery..."
-          Start-Sleep -Seconds 90
+          # Wait for recovery - S3 uploads resume, VPS status polls resume
+          Write-Host "Waiting 60s for pipeline recovery..."
+          Start-Sleep -Seconds 60
 
+          # === STRICT POST-RECOVERY ASSERTIONS ===
           $deliveryAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
-          Write-Host "Post-recovery delivery status:"
-          $allEndpointsAdvancing = $true
-          if ($deliveryAfter.endpoint_details) {
-            foreach ($ep in $deliveryAfter.endpoint_details) {
-              $delay = $ep.chunk_delay_secs
-              Write-Host "  [$($ep.alias)] delay=${delay}s chunks=$($ep.chunks_processed) restarts=$($ep.ffmpeg_restart_count) stall=$($ep.stall_reason)"
-
-              # Cache delay must NOT be 0 after recovery (buffer should be rebuilding)
-              # Unless VPS caught up which means delay=0 is correct
-              if ($ep.chunks_processed -eq 0) {
-                throw "FAILED: [$($ep.alias)] has 0 chunks after recovery - endpoint never started"
-              }
-              # ffmpeg restarts must stay reasonable
-              if ($ep.ffmpeg_restart_count -gt 20) {
-                throw "FAILED: [$($ep.alias)] has $($ep.ffmpeg_restart_count) ffmpeg restarts - crash loop"
-              }
-            }
-          } else {
+          if (-not $deliveryAfter.endpoint_details -or $deliveryAfter.endpoint_details.Count -eq 0) {
             throw "FAILED: No endpoint data after recovery"
           }
 
+          foreach ($ep in $deliveryAfter.endpoint_details) {
+            $alias = $ep.alias
+            $restartsAfter = $ep.ffmpeg_restart_count
+            $restartsDelta = $restartsAfter - $restartsBefore[$alias]
+            $chunksAfter = $ep.chunks_processed
+            $chunksDelta = $chunksAfter - $chunksBefore[$alias]
+
+            Write-Host "AFTER: [$alias] chunks=$chunksAfter (+$chunksDelta) delay=$($ep.chunk_delay_secs)s restarts=$restartsAfter (+$restartsDelta) stall=$($ep.stall_reason)"
+
+            # STRICT: VPS had cache - 15s outage on stream.lan should cause ZERO ffmpeg restarts on VPS
+            if ($restartsDelta -gt 0) {
+              throw "FAILED: [$alias] had $restartsDelta NEW ffmpeg restarts during 15s S3 block. VPS had cache and should have been completely unaffected."
+            }
+
+            # STRICT: Endpoint must have processed new chunks since before the test
+            if ($chunksDelta -lt 5) {
+              throw "FAILED: [$alias] only processed $chunksDelta new chunks. VPS should keep processing from S3 cache."
+            }
+
+            # STRICT: No stall_reason should be set from a 15s outage
+            if ($ep.stall_reason) {
+              throw "FAILED: [$alias] has stall_reason='$($ep.stall_reason)' after 15s S3 block. VPS should be unaffected."
+            }
+          }
+
           # Verify pending chunks drained (S3 uploads resumed)
-          $chunksAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
-          Write-Host "Chunks after recovery: pending=$($chunksAfter.pending_chunks) sent=$($chunksAfter.sent_chunks)"
-          if ($chunksAfter.pending_chunks -gt 10) {
-            throw "FAILED: $($chunksAfter.pending_chunks) chunks still pending after 90s recovery - S3 upload not resuming"
+          $chunksRecovery = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
+          Write-Host "Recovery chunks: pending=$($chunksRecovery.pending_chunks) sent=$($chunksRecovery.sent_chunks)"
+          if ($chunksRecovery.pending_chunks -gt 10) {
+            throw "FAILED: $($chunksRecovery.pending_chunks) chunks still pending after 60s recovery - S3 upload not resuming"
           }
 
           # Verify VPS was NOT restarted
