@@ -303,12 +303,27 @@ async fn delivery_broadcast_loop(
                     };
                     (local_buf, progress)
                 } else {
-                    let delay = final_endpoints
+                    let vps_delay = final_endpoints
                         .iter()
                         .filter(|m| !m.is_fast && m.chunk_delay_secs > 0.0)
                         .map(|m| m.chunk_delay_secs)
                         .fold(f64::MAX, f64::min);
-                    let delay = if delay == f64::MAX { 0.0 } else { delay };
+                    let vps_delay = if vps_delay == f64::MAX {
+                        0.0
+                    } else {
+                        vps_delay
+                    };
+
+                    // Include local pending chunks in the buffer calculation.
+                    // When VPS is at live edge (delay=0) but chunks are pending
+                    // locally, those chunks represent buffer that will reach S3.
+                    let pending = db::get_pending_chunk_count_for_event(&pool, event.id)
+                        .await
+                        .unwrap_or(0);
+                    let chunk_dur = config.inpoint.chunk_duration_ms as f64 / 1000.0;
+                    let local_buf = pending as f64 * chunk_dur;
+                    let delay = vps_delay + local_buf;
+
                     let progress = if target_delay > 0 {
                         (delay / target_delay as f64).min(1.0)
                     } else {
