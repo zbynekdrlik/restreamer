@@ -388,7 +388,9 @@ impl DeliveryOrchestrator {
             // Wait for enough LOCAL chunks to exist before initializing the VPS.
             let mut first_seq = None;
             let mut latest_seq = 0i64;
-            let max_chunk_wait = 300; // 5 minutes max wait
+            // Wait up to 15 min: 4K@1s chunks take ~2s each to encode+upload,
+            // so 300 chunks (for 300s cache) needs ~600s real time.
+            let max_chunk_wait = 900;
             for attempt in 0..max_chunk_wait {
                 match db::get_first_sequence_number_for_event(&self.pool, event_id).await {
                     Ok(Some(seq)) => {
@@ -441,9 +443,16 @@ impl DeliveryOrchestrator {
             let first_seq_val = first_seq.ok_or_else(|| {
                 anyhow::anyhow!("No chunks found for event {event_id} after wait")
             })?;
-            start_chunk_id = if latest_seq - first_seq_val >= delivery_delay_chunks {
+            let gap = latest_seq - first_seq_val;
+            start_chunk_id = if gap >= delivery_delay_chunks {
                 (latest_seq - delivery_delay_chunks).max(first_seq_val)
             } else {
+                warn!(
+                    event_id,
+                    gap,
+                    delivery_delay_chunks,
+                    "Buffer fill incomplete after max wait — starting with {gap}/{delivery_delay_chunks} chunks"
+                );
                 first_seq_val
             };
             info!(
