@@ -293,13 +293,14 @@ async fn delivery_broadcast_loop(
                 let had_real_endpoints = !endpoints.is_empty();
 
                 // Compute buffer: depends on VPS state
-                let (current_delay, buffer_progress) = if endpoints.is_empty()
-                    && last_had_real_endpoints
-                    && last_success_time.is_some()
-                {
+                let (current_delay, buffer_progress) = if let (true, true, Some(last_time)) = (
+                    endpoints.is_empty(),
+                    last_had_real_endpoints,
+                    last_success_time,
+                ) {
                     // VPS was previously responding WITH endpoints but now unreachable.
                     // Use prediction: last known delay drains at real-time rate.
-                    let elapsed = last_success_time.unwrap().elapsed().as_secs_f64();
+                    let elapsed = last_time.elapsed().as_secs_f64();
                     let predicted = (last_delay_secs - elapsed).max(0.0);
                     let progress = if target_delay > 0 {
                         (predicted / target_delay as f64).min(1.0)
