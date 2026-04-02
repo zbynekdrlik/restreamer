@@ -263,6 +263,7 @@ impl ServiceCore {
                 endpoint_ws_tx,
                 endpoint_restart_rx,
                 endpoint_shutdown_rx,
+                s3_upload_blocked,
             )
             .await;
         });
@@ -433,6 +434,7 @@ async fn run_endpoint_loop(
     ws_tx: broadcast::Sender<WsEvent>,
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
+    s3_upload_blocked: Arc<std::sync::atomic::AtomicBool>,
 ) {
     loop {
         let s3 = match S3Client::new(&s3_config) {
