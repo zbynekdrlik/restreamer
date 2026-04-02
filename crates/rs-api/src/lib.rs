@@ -288,11 +288,10 @@ async fn delivery_broadcast_loop(
 
                 // Compute buffer: depends on VPS state
                 let (current_delay, buffer_progress) =
-                    if endpoints.is_empty() && last_success_time.is_some() {
+                    if let (true, Some(last_time)) = (endpoints.is_empty(), last_success_time) {
                         // VPS was previously responding but now unreachable (network outage).
                         // Use prediction: last known delay drains at real-time rate.
-                        // This is the correct behavior during cable disconnect.
-                        let elapsed = last_success_time.unwrap().elapsed().as_secs_f64();
+                        let elapsed = last_time.elapsed().as_secs_f64();
                         let predicted = (last_delay_secs - elapsed).max(0.0);
                         let progress = if target_delay > 0 {
                             (predicted / target_delay as f64).min(1.0)
