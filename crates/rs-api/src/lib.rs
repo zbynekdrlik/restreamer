@@ -176,6 +176,8 @@ async fn delivery_broadcast_loop(
     let mut last_event_name: Option<String> = None;
     let mut last_state_str = String::from("idle");
     let mut was_predicted = false;
+    // True only after we've seen real (non-empty) endpoint data from VPS
+    let mut last_had_real_endpoints = false;
 
     // Track session start time for display in dashboard
     let mut session_start_time: Option<String> = None;
@@ -286,57 +288,63 @@ async fn delivery_broadcast_loop(
                     .map(|s| s as u64)
                     .unwrap_or(config.delivery.delivery_delay_secs);
 
-                // Compute buffer: depends on VPS state
-                let (current_delay, buffer_progress) =
-                    if let (true, Some(last_time)) = (endpoints.is_empty(), last_success_time) {
-                        // VPS was previously responding but now unreachable (network outage).
-                        // Use prediction: last known delay drains at real-time rate.
-                        let elapsed = last_time.elapsed().as_secs_f64();
-                        let predicted = (last_delay_secs - elapsed).max(0.0);
-                        let progress = if target_delay > 0 {
-                            (predicted / target_delay as f64).min(1.0)
-                        } else {
-                            0.0
-                        };
-                        was_predicted = true;
-                        (predicted, progress)
-                    } else if endpoints.is_empty() {
-                        // VPS not yet responding (initial buffer fill phase).
-                        // Use S3 sent chunk count as progress indicator.
-                        let sent = db::get_sent_chunk_count_for_event(&pool, event.id)
-                            .await
-                            .unwrap_or(0);
-                        let chunk_dur = config.inpoint.chunk_duration_ms as f64 / 1000.0;
-                        let local_buf = (sent as f64 * chunk_dur).min(target_delay as f64 * 2.0);
-                        let progress = if target_delay > 0 {
-                            (local_buf / target_delay as f64).min(1.0)
-                        } else {
-                            0.0
-                        };
-                        (local_buf, progress)
-                    } else {
-                        // VPS is responding with real endpoint data.
-                        // Cache bar shows ONLY the VPS delay (chunks on S3 ahead of VPS).
-                        // Do NOT add local pending chunks — they're not on S3 yet
-                        // and adding them makes cache bar INCREASE during S3 outage.
-                        let vps_delay = final_endpoints
-                            .iter()
-                            .filter(|m| !m.is_fast && m.chunk_delay_secs > 0.0)
-                            .map(|m| m.chunk_delay_secs)
-                            .fold(f64::MAX, f64::min);
-                        let delay = if vps_delay == f64::MAX {
-                            0.0
-                        } else {
-                            vps_delay
-                        };
+                // Track whether we've ever had real (non-empty) endpoints
+                // to distinguish "VPS not started yet" from "VPS was working but lost"
+                let had_real_endpoints = !endpoints.is_empty();
 
-                        let progress = if target_delay > 0 {
-                            (delay / target_delay as f64).min(1.0)
-                        } else {
-                            1.0
-                        };
-                        (delay, progress)
+                // Compute buffer: depends on VPS state
+                let (current_delay, buffer_progress) = if endpoints.is_empty()
+                    && last_had_real_endpoints
+                    && last_success_time.is_some()
+                {
+                    // VPS was previously responding WITH endpoints but now unreachable.
+                    // Use prediction: last known delay drains at real-time rate.
+                    let elapsed = last_success_time.unwrap().elapsed().as_secs_f64();
+                    let predicted = (last_delay_secs - elapsed).max(0.0);
+                    let progress = if target_delay > 0 {
+                        (predicted / target_delay as f64).min(1.0)
+                    } else {
+                        0.0
                     };
+                    was_predicted = true;
+                    (predicted, progress)
+                } else if endpoints.is_empty() {
+                    // VPS not yet responding (initial buffer fill phase).
+                    // Use S3 sent chunk count as progress indicator.
+                    let sent = db::get_sent_chunk_count_for_event(&pool, event.id)
+                        .await
+                        .unwrap_or(0);
+                    let chunk_dur = config.inpoint.chunk_duration_ms as f64 / 1000.0;
+                    let local_buf = (sent as f64 * chunk_dur).min(target_delay as f64 * 2.0);
+                    let progress = if target_delay > 0 {
+                        (local_buf / target_delay as f64).min(1.0)
+                    } else {
+                        0.0
+                    };
+                    (local_buf, progress)
+                } else {
+                    // VPS is responding with real endpoint data.
+                    // Cache bar shows ONLY the VPS delay (chunks on S3 ahead of VPS).
+                    // Do NOT add local pending chunks — they're not on S3 yet
+                    // and adding them makes cache bar INCREASE during S3 outage.
+                    let vps_delay = final_endpoints
+                        .iter()
+                        .filter(|m| !m.is_fast && m.chunk_delay_secs > 0.0)
+                        .map(|m| m.chunk_delay_secs)
+                        .fold(f64::MAX, f64::min);
+                    let delay = if vps_delay == f64::MAX {
+                        0.0
+                    } else {
+                        vps_delay
+                    };
+
+                    let progress = if target_delay > 0 {
+                        (delay / target_delay as f64).min(1.0)
+                    } else {
+                        1.0
+                    };
+                    (delay, progress)
+                };
 
                 // Emit restoration event if recovering from prediction
                 if was_predicted {
@@ -350,6 +358,9 @@ async fn delivery_broadcast_loop(
                 }
 
                 // Save last-known state for predictive drain
+                if had_real_endpoints {
+                    last_had_real_endpoints = true;
+                }
                 last_success_time = Some(std::time::Instant::now());
                 last_delay_secs = current_delay;
                 last_target_delay = target_delay;
@@ -371,8 +382,9 @@ async fn delivery_broadcast_loop(
                     .unwrap_or(0);
                 let s3_queue = (sent_chunks - max_delivery_chunk).max(0);
 
-                // Prediction flag: true when VPS was previously healthy but now unreachable
-                let is_predicted = endpoints.is_empty() && last_success_time.is_some();
+                // Prediction flag: true only when VPS previously had real endpoints but now unreachable
+                let is_predicted =
+                    endpoints.is_empty() && last_had_real_endpoints && last_success_time.is_some();
 
                 let _ = ws_tx.send(WsEvent::PipelineState {
                     state: state_str.to_string(),
