@@ -2154,7 +2154,22 @@ jobs:
                       throw "FAILED: Buffer fill went backward: $($fillReadings[$j-1]) -> $($fillReadings[$j]) sent chunks"
                     }
                   }
-                  Write-Host "Buffer fill verified monotonic: $($fillReadings[0]) -> $($fillReadings[-1]) sent chunks over $($fillReadings.Count) readings"
+                  # STRICT: After multiple readings, sent chunks MUST be > 0
+                  if ($fillReadings[-1] -eq 0) {
+                    throw "FAILED: Buffer fill stuck at 0 sent chunks after $($fillReadings.Count) readings. Cache bar would show 0."
+                  }
+                  # STRICT: Sent chunks must have grown (not stayed at same value)
+                  if ($fillReadings[-1] -le $fillReadings[0]) {
+                    throw "FAILED: Buffer fill did not grow: $($fillReadings[0]) -> $($fillReadings[-1]) sent chunks. Cache bar stuck."
+                  }
+                  Write-Host "Buffer fill verified: $($fillReadings[0]) -> $($fillReadings[-1]) sent chunks over $($fillReadings.Count) readings"
+                }
+                # STRICT: First delay reading after VPS starts should not be 0 or wildly different from fill
+                $firstDelay = ($response.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1).chunk_delay_secs
+                $lastFillChunks = if ($fillReadings.Count -gt 0) { $fillReadings[-1] } else { 0 }
+                Write-Host "First VPS delay: ${firstDelay}s (fill had $lastFillChunks sent chunks)"
+                if ($firstDelay -eq 0 -and $lastFillChunks -gt 10) {
+                  throw "FAILED: VPS delay is 0 but $lastFillChunks chunks were sent during fill. Cache bar jumped from fill value to 0."
                 }
                 Write-Host "=== Delivery server fully operational: ALL $($response.endpoint_details.Count) endpoints alive ==="
                 return
