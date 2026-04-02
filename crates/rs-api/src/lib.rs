@@ -286,51 +286,64 @@ async fn delivery_broadcast_loop(
                     .map(|s| s as u64)
                     .unwrap_or(config.delivery.delivery_delay_secs);
 
-                // Compute buffer: local S3 count if VPS not yet responding, else real VPS delay
-                let (current_delay, buffer_progress) = if endpoints.is_empty() {
-                    // VPS not responding — use local S3 buffer as progress indicator
-                    let sent = db::get_sent_chunk_count_for_event(&pool, event.id)
-                        .await
-                        .unwrap_or(0);
-                    let chunk_dur = config.inpoint.chunk_duration_ms as f64 / 1000.0;
-                    // Cap at 2x target to prevent absurd values from counting
-                    // chunks from previous delivery sessions
-                    let local_buf = (sent as f64 * chunk_dur).min(target_delay as f64 * 2.0);
-                    let progress = if target_delay > 0 {
-                        (local_buf / target_delay as f64).min(1.0)
+                // Compute buffer: depends on VPS state
+                let (current_delay, buffer_progress) =
+                    if endpoints.is_empty() && last_success_time.is_some() {
+                        // VPS was previously responding but now unreachable (network outage).
+                        // Use prediction: last known delay drains at real-time rate.
+                        // This is the correct behavior during cable disconnect.
+                        let elapsed = last_success_time.unwrap().elapsed().as_secs_f64();
+                        let predicted = (last_delay_secs - elapsed).max(0.0);
+                        let progress = if target_delay > 0 {
+                            (predicted / target_delay as f64).min(1.0)
+                        } else {
+                            0.0
+                        };
+                        was_predicted = true;
+                        (predicted, progress)
+                    } else if endpoints.is_empty() {
+                        // VPS not yet responding (initial buffer fill phase).
+                        // Use S3 sent chunk count as progress indicator.
+                        let sent = db::get_sent_chunk_count_for_event(&pool, event.id)
+                            .await
+                            .unwrap_or(0);
+                        let chunk_dur = config.inpoint.chunk_duration_ms as f64 / 1000.0;
+                        let local_buf = (sent as f64 * chunk_dur).min(target_delay as f64 * 2.0);
+                        let progress = if target_delay > 0 {
+                            (local_buf / target_delay as f64).min(1.0)
+                        } else {
+                            0.0
+                        };
+                        (local_buf, progress)
                     } else {
-                        0.0
-                    };
-                    (local_buf, progress)
-                } else {
-                    let vps_delay = final_endpoints
-                        .iter()
-                        .filter(|m| !m.is_fast && m.chunk_delay_secs > 0.0)
-                        .map(|m| m.chunk_delay_secs)
-                        .fold(f64::MAX, f64::min);
-                    let vps_delay = if vps_delay == f64::MAX {
-                        0.0
-                    } else {
-                        vps_delay
-                    };
+                        let vps_delay = final_endpoints
+                            .iter()
+                            .filter(|m| !m.is_fast && m.chunk_delay_secs > 0.0)
+                            .map(|m| m.chunk_delay_secs)
+                            .fold(f64::MAX, f64::min);
+                        let vps_delay = if vps_delay == f64::MAX {
+                            0.0
+                        } else {
+                            vps_delay
+                        };
 
-                    // Include local pending chunks in the buffer calculation.
-                    // When VPS is at live edge (delay=0) but chunks are pending
-                    // locally, those chunks represent buffer that will reach S3.
-                    let pending = db::get_pending_chunk_count_for_event(&pool, event.id)
-                        .await
-                        .unwrap_or(0);
-                    let chunk_dur = config.inpoint.chunk_duration_ms as f64 / 1000.0;
-                    let local_buf = pending as f64 * chunk_dur;
-                    let delay = vps_delay + local_buf;
+                        // Include local pending chunks in the buffer calculation.
+                        // When VPS is at live edge (delay=0) but chunks are pending
+                        // locally, those chunks represent buffer that will reach S3.
+                        let pending = db::get_pending_chunk_count_for_event(&pool, event.id)
+                            .await
+                            .unwrap_or(0);
+                        let chunk_dur = config.inpoint.chunk_duration_ms as f64 / 1000.0;
+                        let local_buf = pending as f64 * chunk_dur;
+                        let delay = vps_delay + local_buf;
 
-                    let progress = if target_delay > 0 {
-                        (delay / target_delay as f64).min(1.0)
-                    } else {
-                        1.0
+                        let progress = if target_delay > 0 {
+                            (delay / target_delay as f64).min(1.0)
+                        } else {
+                            1.0
+                        };
+                        (delay, progress)
                     };
-                    (delay, progress)
-                };
 
                 // Emit restoration event if recovering from prediction
                 if was_predicted {
@@ -365,6 +378,9 @@ async fn delivery_broadcast_loop(
                     .unwrap_or(0);
                 let s3_queue = (sent_chunks - max_delivery_chunk).max(0);
 
+                // Prediction flag: true when VPS was previously healthy but now unreachable
+                let is_predicted = endpoints.is_empty() && last_success_time.is_some();
+
                 let _ = ws_tx.send(WsEvent::PipelineState {
                     state: state_str.to_string(),
                     event_id: Some(event.id),
@@ -373,7 +389,7 @@ async fn delivery_broadcast_loop(
                     target_delay_secs: target_delay,
                     current_delay_secs: current_delay,
                     session_start: session_start_time.clone(),
-                    predicted: false,
+                    predicted: is_predicted,
                     local_buffer_chunks: pending_chunks,
                     s3_queue_chunks: s3_queue,
                 });
