@@ -2573,9 +2573,41 @@ jobs:
           Write-Host "Firewall rules active - stream.lan isolated from S3+VPS"
 
           try {
-            # Block for 15 seconds - VPS has cache, should have ZERO issues
-            Write-Host "S3+VPS blocked for 15s - VPS should be unaffected (has cache)..."
-            Start-Sleep -Seconds 15
+            # Wait 5s for firewall to take effect on existing connections
+            Start-Sleep -Seconds 5
+
+            # Take first cache reading
+            $delivery1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -ErrorAction SilentlyContinue
+            $delay1 = 0
+            if ($delivery1 -and $delivery1.endpoint_details) {
+              $ep1 = $delivery1.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1
+              if ($ep1) { $delay1 = $ep1.chunk_delay_secs }
+            }
+            $chunks1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
+            Write-Host "T+5s: delay=${delay1}s pending=$($chunks1.pending_chunks)"
+
+            # Wait 10 more seconds
+            Start-Sleep -Seconds 10
+
+            # Take second cache reading
+            $delivery2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -ErrorAction SilentlyContinue
+            $delay2 = 0
+            if ($delivery2 -and $delivery2.endpoint_details) {
+              $ep2 = $delivery2.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1
+              if ($ep2) { $delay2 = $ep2.chunk_delay_secs }
+            }
+            $chunks2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
+            Write-Host "T+15s: delay=${delay2}s pending=$($chunks2.pending_chunks)"
+
+            # STRICT: Cache delay must NOT increase during S3 block
+            if ($delay2 -gt ($delay1 + 5)) {
+              throw "FAILED: Cache delay INCREASED during S3 block (${delay1}s -> ${delay2}s). Must decrease or stay stable."
+            }
+
+            # STRICT: Pending chunks must increase (S3 blocked, chunks piling up)
+            if ($chunks2.pending_chunks -le $chunks1.pending_chunks) {
+              throw "FAILED: Pending chunks did not increase during S3 block ($($chunks1.pending_chunks) -> $($chunks2.pending_chunks)). Firewall not effective?"
+            }
 
             # Verify delivering still active
             $statusMid = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
@@ -2583,12 +2615,8 @@ jobs:
               throw "FAILED: delivering_activated went false during 15s disconnect"
             }
 
-            # Verify local chunks are piling up (S3 blocked)
-            $chunksMid = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
-            Write-Host "During disconnect: pending=$($chunksMid.pending_chunks) sent=$($chunksMid.sent_chunks)"
-            if ($chunksMid.pending_chunks -eq 0) {
-              Write-Host "WARNING: 0 pending chunks - S3 block may not be effective"
-            }
+            $pendingDuringBlock = $chunks2.pending_chunks
+            Write-Host "Pending chunks during block: $pendingDuringBlock"
           } finally {
             # ALWAYS remove firewall rules and disable firewall
             Write-Host "Removing firewall rules and disabling firewall..."
@@ -2634,10 +2662,14 @@ jobs:
           }
 
           # Verify pending chunks drained (S3 uploads resumed)
+          # STRICT: Pending chunks must have DECREASED from during-block level
           $chunksRecovery = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
-          Write-Host "Recovery chunks: pending=$($chunksRecovery.pending_chunks) sent=$($chunksRecovery.sent_chunks)"
+          Write-Host "Recovery chunks: pending=$($chunksRecovery.pending_chunks) sent=$($chunksRecovery.sent_chunks) (was $pendingDuringBlock during block)"
           if ($chunksRecovery.pending_chunks -gt 10) {
             throw "FAILED: $($chunksRecovery.pending_chunks) chunks still pending after 60s recovery - S3 upload not resuming"
+          }
+          if ($chunksRecovery.pending_chunks -ge $pendingDuringBlock) {
+            throw "FAILED: Pending chunks did not decrease after S3 unblock ($pendingDuringBlock -> $($chunksRecovery.pending_chunks)) - chunks not draining to S3"
           }
 
           # Verify VPS was NOT restarted
