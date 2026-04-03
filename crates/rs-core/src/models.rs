@@ -148,12 +148,8 @@ pub enum WsEvent {
         state: String,
         event_id: Option<i64>,
         event_name: Option<String>,
-        buffer_progress: f64,
         target_delay_secs: u64,
-        current_delay_secs: f64,
         session_start: Option<String>,
-        #[serde(default)]
-        predicted: bool,
         #[serde(default)]
         local_buffer_chunks: i64,
         #[serde(default)]
@@ -317,11 +313,8 @@ mod tests {
                 state: "buffering".to_string(),
                 event_id: Some(1),
                 event_name: Some("Sunday Service".to_string()),
-                buffer_progress: 0.75,
                 target_delay_secs: 120,
-                current_delay_secs: 90.5,
                 session_start: Some("2026-01-01T10:00:00Z".to_string()),
-                predicted: false,
                 local_buffer_chunks: 3,
                 s3_queue_chunks: 15,
             },

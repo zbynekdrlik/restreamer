@@ -168,16 +168,9 @@ async fn delivery_broadcast_loop(
     // Track previous endpoint alive state for ActivityFeed transitions
     let mut prev_alive: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
 
-    // Track last-known state for predictive buffer drain
-    let mut last_success_time: Option<std::time::Instant> = None;
-    let mut last_delay_secs: f64 = 0.0;
-    let mut last_target_delay: u64 = 0;
     let mut last_event_id: Option<i64> = None;
     let mut last_event_name: Option<String> = None;
     let mut last_state_str = String::from("idle");
-    let mut was_predicted = false;
-    // True only after we've seen real (non-empty) endpoint data from VPS
-    let mut last_had_real_endpoints = false;
 
     // Track session start time for display in dashboard
     let mut session_start_time: Option<String> = None;
@@ -208,18 +201,12 @@ async fn delivery_broadcast_loop(
                     state: "idle".to_string(),
                     event_id: None,
                     event_name: None,
-                    buffer_progress: 0.0,
                     target_delay_secs: 0,
-                    current_delay_secs: 0.0,
                     session_start: None,
-                    predicted: false,
                     local_buffer_chunks: 0,
                     s3_queue_chunks: 0,
                 });
                 prev_alive.clear();
-                // Reset prediction state when not delivering
-                last_success_time = None;
-                was_predicted = false;
                 session_start_time = None;
                 continue;
             }
@@ -288,83 +275,6 @@ async fn delivery_broadcast_loop(
                     .map(|s| s as u64)
                     .unwrap_or(config.delivery.delivery_delay_secs);
 
-                // Track whether we've ever had real (non-empty) endpoints
-                // to distinguish "VPS not started yet" from "VPS was working but lost"
-                let had_real_endpoints = !endpoints.is_empty();
-
-                // Compute buffer: depends on VPS state
-                let (current_delay, buffer_progress) = if let (true, true, Some(last_time)) = (
-                    endpoints.is_empty(),
-                    last_had_real_endpoints,
-                    last_success_time,
-                ) {
-                    // VPS was previously responding WITH endpoints but now unreachable.
-                    // Use prediction: last known delay drains at real-time rate.
-                    let elapsed = last_time.elapsed().as_secs_f64();
-                    let predicted = (last_delay_secs - elapsed).max(0.0);
-                    let progress = if target_delay > 0 {
-                        (predicted / target_delay as f64).min(1.0)
-                    } else {
-                        0.0
-                    };
-                    was_predicted = true;
-                    (predicted, progress)
-                } else if endpoints.is_empty() {
-                    // VPS not yet responding (initial buffer fill phase).
-                    // Use S3 sent chunk count as progress indicator.
-                    let sent = db::get_sent_chunk_count_for_event(&pool, event.id)
-                        .await
-                        .unwrap_or(0);
-                    let chunk_dur = config.inpoint.chunk_duration_ms as f64 / 1000.0;
-                    let local_buf = (sent as f64 * chunk_dur).min(target_delay as f64 * 2.0);
-                    let progress = if target_delay > 0 {
-                        (local_buf / target_delay as f64).min(1.0)
-                    } else {
-                        0.0
-                    };
-                    (local_buf, progress)
-                } else {
-                    // VPS is responding with real endpoint data.
-                    // Cache bar shows ONLY the VPS delay (chunks on S3 ahead of VPS).
-                    // Do NOT add local pending chunks — they're not on S3 yet
-                    // and adding them makes cache bar INCREASE during S3 outage.
-                    let vps_delay = final_endpoints
-                        .iter()
-                        .filter(|m| !m.is_fast && m.chunk_delay_secs > 0.0)
-                        .map(|m| m.chunk_delay_secs)
-                        .fold(f64::MAX, f64::min);
-                    let delay = if vps_delay == f64::MAX {
-                        0.0
-                    } else {
-                        vps_delay
-                    };
-
-                    let progress = if target_delay > 0 {
-                        (delay / target_delay as f64).min(1.0)
-                    } else {
-                        1.0
-                    };
-                    (delay, progress)
-                };
-
-                // Emit restoration event if recovering from prediction
-                if was_predicted {
-                    let _ = ws_tx.send(WsEvent::ActivityFeed {
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        severity: "info".to_string(),
-                        message: "Delivery VPS connection restored".to_string(),
-                        source: "delivery".to_string(),
-                    });
-                    was_predicted = false;
-                }
-
-                // Save last-known state for predictive drain
-                if had_real_endpoints {
-                    last_had_real_endpoints = true;
-                }
-                last_success_time = Some(std::time::Instant::now());
-                last_delay_secs = current_delay;
-                last_target_delay = target_delay;
                 last_event_id = Some(event.id);
                 last_event_name = Some(event.name.clone());
                 last_state_str = state_str.to_string();
@@ -383,19 +293,12 @@ async fn delivery_broadcast_loop(
                     .unwrap_or(0);
                 let s3_queue = (sent_chunks - max_delivery_chunk).max(0);
 
-                // Prediction flag: true only when VPS previously had real endpoints but now unreachable
-                let is_predicted =
-                    endpoints.is_empty() && last_had_real_endpoints && last_success_time.is_some();
-
                 let _ = ws_tx.send(WsEvent::PipelineState {
                     state: state_str.to_string(),
                     event_id: Some(event.id),
                     event_name: Some(event.name.clone()),
-                    buffer_progress,
                     target_delay_secs: target_delay,
-                    current_delay_secs: current_delay,
                     session_start: session_start_time.clone(),
-                    predicted: is_predicted,
                     local_buffer_chunks: pending_chunks,
                     s3_queue_chunks: s3_queue,
                 });
@@ -424,56 +327,22 @@ async fn delivery_broadcast_loop(
             }
             Err(e) => {
                 tracing::debug!("Delivery metrics poll failed: {e}");
-                if let Some(last_time) = last_success_time {
-                    let elapsed = last_time.elapsed().as_secs_f64();
-                    let predicted_delay = (last_delay_secs - elapsed).max(0.0);
-                    let predicted_progress = if last_target_delay > 0 {
-                        (predicted_delay / last_target_delay as f64).min(1.0)
-                    } else {
-                        0.0
-                    };
-                    let predicted_state = if predicted_delay <= 0.0 {
-                        "buffer_exhausted"
-                    } else {
-                        &last_state_str
-                    };
+                if let (Some(eid), Some(ename)) = (last_event_id, last_event_name.as_ref()) {
+                    let pending = db::get_pending_chunk_count_for_event(&pool, eid)
+                        .await
+                        .unwrap_or(0);
+                    let sent = db::get_sent_chunk_count_for_event(&pool, eid)
+                        .await
+                        .unwrap_or(0);
                     let _ = ws_tx.send(WsEvent::PipelineState {
-                        state: predicted_state.to_string(),
-                        event_id: last_event_id,
-                        event_name: last_event_name.clone(),
-                        buffer_progress: predicted_progress,
-                        target_delay_secs: last_target_delay,
-                        current_delay_secs: predicted_delay,
+                        state: last_state_str.clone(),
+                        event_id: Some(eid),
+                        event_name: Some(ename.clone()),
+                        target_delay_secs: config.delivery.delivery_delay_secs,
                         session_start: session_start_time.clone(),
-                        predicted: true,
-                        local_buffer_chunks: if let Some(eid) = last_event_id {
-                            db::get_pending_chunk_count_for_event(&pool, eid)
-                                .await
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        },
-                        s3_queue_chunks: if let Some(eid) = last_event_id {
-                            db::get_sent_chunk_count_for_event(&pool, eid)
-                                .await
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        },
+                        local_buffer_chunks: pending,
+                        s3_queue_chunks: sent,
                     });
-                    // Emit disconnect notice once (within first poll after failure)
-                    if elapsed < 3.0 {
-                        let _ = ws_tx.send(WsEvent::ActivityFeed {
-                            timestamp: chrono::Utc::now().to_rfc3339(),
-                            severity: "warning".to_string(),
-                            message: format!(
-                                "Delivery VPS unreachable — predicted buffer: {:.0}s",
-                                predicted_delay
-                            ),
-                            source: "delivery".to_string(),
-                        });
-                    }
-                    was_predicted = true;
                 }
             }
         }

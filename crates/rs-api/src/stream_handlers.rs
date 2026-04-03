@@ -156,11 +156,8 @@ pub async fn start_stream(
                     state: "buffering".to_string(),
                     event_id: Some(id),
                     event_name: Some(event.name.clone()),
-                    buffer_progress: 0.0,
                     target_delay_secs: target_delay,
-                    current_delay_secs: 0.0,
                     session_start: Some(chrono::Utc::now().to_rfc3339()),
-                    predicted: false,
                     local_buffer_chunks: 0,
                     s3_queue_chunks: 0,
                 });
