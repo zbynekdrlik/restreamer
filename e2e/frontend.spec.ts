@@ -838,9 +838,25 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await expect(criticalBar).toBeVisible({ timeout: 5000 });
   });
 
-  test("pending endpoint shows no cache bar", async ({ page }) => {
+  test("pending endpoint shows S3 cache from first second", async ({ page }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
+
+    // Broadcast PipelineState with S3 chunks buffered
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "buffering",
+          event_id: 1,
+          event_name: "Test Event",
+          target_delay_secs: 120,
+          session_start: null,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 20,
+        },
+      },
+    });
 
     // Broadcast endpoint with alive=false, chunks_processed=0
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
@@ -870,8 +886,11 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await expect(page.locator(".endpoint-node")).toHaveCount(1, {
       timeout: 5000,
     });
-    // Cache bar should NOT be visible on pending endpoint
-    await expect(page.locator(".endpoint-cache")).toHaveCount(0);
+    // Pending endpoint should show cache bar using S3 chunks (20 * 5s = 100s)
+    const cacheLabel = page.locator(".endpoint-cache-label");
+    await expect(cacheLabel).toContainText("100s / 120s cache", { timeout: 5000 });
+    // 100/120 = 83% -> healthy
+    await expect(page.locator(".buffer-bar-fill.healthy")).toBeVisible();
   });
 
   test("buffering indicator shows S3 chunk count", async ({ page }) => {

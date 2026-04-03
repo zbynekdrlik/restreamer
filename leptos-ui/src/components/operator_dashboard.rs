@@ -566,30 +566,36 @@ fn EndpointTree() -> impl IntoView {
                                 </span>
                                 {move || {
                                     let ep = ep_data.get();
-                                    let target = store.pipeline_state.get().target_delay_secs;
-                                    let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
-                                    if is_pending || target == 0 {
-                                        None
-                                    } else {
-                                        let progress = (ep.chunk_delay_secs / target as f64).min(1.0);
-                                        let bar_class = if progress >= 0.75 {
-                                            "buffer-bar-fill healthy"
-                                        } else if progress >= 0.40 {
-                                            "buffer-bar-fill warning"
-                                        } else {
-                                            "buffer-bar-fill critical"
-                                        };
-                                        Some(view! {
-                                            <div class="endpoint-cache">
-                                                <div class="buffer-bar">
-                                                    <div class=bar_class style:width=format!("{}%", (progress * 100.0).min(100.0))></div>
-                                                </div>
-                                                <span class="endpoint-cache-label">
-                                                    {format!("{}s / {}s cache", ep.chunk_delay_secs as u64, target)}
-                                                </span>
-                                            </div>
-                                        })
+                                    let ps = store.pipeline_state.get();
+                                    let target = ps.target_delay_secs;
+                                    if target == 0 {
+                                        return None;
                                     }
+                                    // Pending endpoint: all S3 chunks are cache (endpoint at position 0)
+                                    let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
+                                    let cache_secs = if is_pending {
+                                        ps.s3_queue_chunks as f64 * 5.0
+                                    } else {
+                                        ep.chunk_delay_secs
+                                    };
+                                    let progress = (cache_secs / target as f64).min(1.0);
+                                    let bar_class = if progress >= 0.75 {
+                                        "buffer-bar-fill healthy"
+                                    } else if progress >= 0.40 {
+                                        "buffer-bar-fill warning"
+                                    } else {
+                                        "buffer-bar-fill critical"
+                                    };
+                                    Some(view! {
+                                        <div class="endpoint-cache">
+                                            <div class="buffer-bar">
+                                                <div class=bar_class style:width=format!("{}%", (progress * 100.0).min(100.0))></div>
+                                            </div>
+                                            <span class="endpoint-cache-label">
+                                                {format!("{}s / {}s cache", cache_secs as u64, target)}
+                                            </span>
+                                        </div>
+                                    })
                                 }}
                                 {move || {
                                     ep_data.get().stall_reason.clone().map(|r| view! {
