@@ -48,6 +48,8 @@ pub struct AppState {
     pub cached_delivery: Arc<std::sync::RwLock<CachedDeliveryStatus>>,
     /// OBS WebSocket client. Wrapped in RwLock to allow dynamic restart on config change.
     pub obs_client: Arc<tokio::sync::RwLock<Option<Arc<ObsClient>>>>,
+    /// Test hook: when true, S3 uploads are paused (simulates network outage).
+    pub s3_upload_blocked: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -76,7 +78,14 @@ impl AppState {
             delivery_orchestrator: delivery.map(Arc::new),
             cached_delivery: Arc::new(std::sync::RwLock::new(CachedDeliveryStatus::default())),
             obs_client: Arc::new(tokio::sync::RwLock::new(obs_client)),
+            s3_upload_blocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Set the S3 upload blocked flag (shared with ChunkUploader).
+    pub fn with_s3_upload_blocked(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.s3_upload_blocked = flag;
+        self
     }
 
     pub fn with_config_path(mut self, path: PathBuf) -> Self {

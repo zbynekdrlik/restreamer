@@ -113,7 +113,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/youtube/oauth/callback",
             get(youtube::youtube_oauth_callback),
-        );
+        )
+        // Test hooks for CI E2E testing
+        .route("/_test/s3-block", post(handlers::test_s3_block))
+        .route("/_test/s3-unblock", post(handlers::test_s3_unblock));
 
     // Allow any origin so the dashboard is accessible from LAN devices
     let cors = CorsLayer::new()

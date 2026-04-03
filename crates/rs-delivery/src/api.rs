@@ -1,4 +1,4 @@
-/// Delivery API routes: /api/health, /api/init, /api/status, /api/stop
+/// Delivery API routes: /api/health, /api/init, /api/status, /api/stop, /api/logs
 use crate::{AppState, EndpointHandle};
 use axum::{
     Json, Router,
@@ -7,6 +7,7 @@ use axum::{
     middleware,
     routing::{get, post},
 };
+use rs_core::log_buffer::LogEntry;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/stop", post(stop_endpoints))
         .route("/api/endpoints/add", post(add_endpoint))
         .route("/api/endpoints/remove", post(remove_endpoint))
+        .route("/api/logs", get(get_logs))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     public.merge(protected).with_state(state)
@@ -387,6 +389,30 @@ async fn remove_endpoint(
     }
 }
 
+// --- Log retrieval ---
+
+#[derive(Deserialize)]
+struct LogQueryParams {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LogsResponse {
+    pub entries: Vec<LogEntry>,
+}
+
+const MAX_LOG_ENTRIES: usize = 1000;
+
+async fn get_logs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<LogQueryParams>,
+) -> Json<LogsResponse> {
+    let limit = params.limit.unwrap_or(100).min(MAX_LOG_ENTRIES);
+    let entries = state.log_buffer.recent("", limit);
+    Json(LogsResponse { entries })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,5 +550,52 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["removed"], false);
+    }
+
+    #[tokio::test]
+    async fn get_logs_requires_auth() {
+        let state = Arc::new(AppState::default());
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/logs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_logs_returns_entries() {
+        let state = Arc::new(AppState::default());
+        state.log_buffer.push(rs_core::log_buffer::LogEntry {
+            level: "WARN".into(),
+            target: "rs_delivery::endpoint_task".into(),
+            message: "ffmpeg died".into(),
+        });
+        *state.auth_token.write().await = Some("test-token".to_string());
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/logs?limit=10")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let logs: LogsResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(logs.entries.len(), 1);
+        assert!(logs.entries[0].message.contains("ffmpeg died"));
     }
 }

@@ -388,7 +388,9 @@ impl DeliveryOrchestrator {
             // Wait for enough LOCAL chunks to exist before initializing the VPS.
             let mut first_seq = None;
             let mut latest_seq = 0i64;
-            let max_chunk_wait = 300; // 5 minutes max wait
+            // Wait up to 15 min: 4K@1s chunks take ~2s each to encode+upload,
+            // so 300 chunks (for 300s cache) needs ~600s real time.
+            let max_chunk_wait = 900;
             for attempt in 0..max_chunk_wait {
                 match db::get_first_sequence_number_for_event(&self.pool, event_id).await {
                     Ok(Some(seq)) => {
@@ -441,9 +443,16 @@ impl DeliveryOrchestrator {
             let first_seq_val = first_seq.ok_or_else(|| {
                 anyhow::anyhow!("No chunks found for event {event_id} after wait")
             })?;
-            start_chunk_id = if latest_seq - first_seq_val >= delivery_delay_chunks {
+            let gap = latest_seq - first_seq_val;
+            start_chunk_id = if gap >= delivery_delay_chunks {
                 (latest_seq - delivery_delay_chunks).max(first_seq_val)
             } else {
+                warn!(
+                    event_id,
+                    gap,
+                    delivery_delay_chunks,
+                    "Buffer fill incomplete after max wait — starting with {gap}/{delivery_delay_chunks} chunks"
+                );
                 first_seq_val
             };
             info!(
@@ -731,15 +740,14 @@ impl DeliveryOrchestrator {
     pub async fn monitor_delivery_health(
         self: &Arc<Self>,
         event_id: i64,
-        mut instance_id: i64,
-        cached_delivery: std::sync::Arc<std::sync::RwLock<crate::state::CachedDeliveryStatus>>,
+        instance_id: i64,
+        _cached_delivery: std::sync::Arc<std::sync::RwLock<crate::state::CachedDeliveryStatus>>,
         ws_tx: tokio::sync::broadcast::Sender<rs_core::models::WsEvent>,
     ) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         interval.tick().await; // skip immediate tick
 
         let mut consecutive_failures = 0u32;
-        let mut restart_count = 0u32;
         let client = reqwest::Client::new();
 
         loop {
@@ -829,111 +837,21 @@ impl DeliveryOrchestrator {
                 );
 
                 if consecutive_failures >= 3 {
-                    restart_count += 1;
+                    // DO NOT restart VPS — "unreachable" usually means stream.lan
+                    // lost internet, not that the VPS crashed. The VPS keeps running
+                    // and self-recovers when internet returns.
                     error!(
                         event_id,
-                        restart_count,
-                        "Delivery VPS unreachable for 90s — auto-restarting (attempt {restart_count})"
+                        consecutive_failures,
+                        "Delivery VPS unreachable for 90s — monitoring continues, VPS NOT restarted"
                     );
-
-                    // Capture last-known endpoint positions from cached status
-                    let resume_pos: HashMap<String, i64> = cached_delivery
-                        .read()
-                        .map(|c| {
-                            c.endpoints
-                                .iter()
-                                .filter(|ep| ep.current_chunk_id > 0)
-                                .map(|ep| (ep.alias.clone(), ep.current_chunk_id))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-
-                    // Emit activity feed
                     let _ = ws_tx.send(rs_core::models::WsEvent::ActivityFeed {
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         severity: "warning".to_string(),
-                        message: format!("Delivery VPS auto-restarting (attempt {restart_count})"),
+                        message: "Delivery VPS unreachable — waiting for network recovery"
+                            .to_string(),
                         source: "delivery".to_string(),
                     });
-
-                    // Stop the dead VPS
-                    if let Err(e) = self.stop_delivery(event_id).await {
-                        error!(event_id, "Auto-restart: failed to stop delivery: {e}");
-                    }
-
-                    // Store resume positions for poll_and_init
-                    if !resume_pos.is_empty() {
-                        self.resume_positions
-                            .lock()
-                            .await
-                            .insert(event_id, resume_pos);
-                    }
-
-                    // Create a new VPS
-                    match self.start_delivery(event_id).await {
-                        Ok(result) => {
-                            let new_instance_id = result.instance_id;
-                            let auth_token = result.auth_token.clone();
-                            instance_id = new_instance_id;
-
-                            // Look up event name for poll_and_init
-                            let event_name = db::get_streaming_event_by_id(&self.pool, event_id)
-                                .await
-                                .ok()
-                                .flatten()
-                                .map(|e| e.name)
-                                .unwrap_or_default();
-
-                            let orch = Arc::clone(self);
-
-                            // Spawn poll_and_init in background
-                            // Health monitoring continues in this loop with the new instance_id
-                            let handle = tokio::spawn(async move {
-                                if let Err(e) = orch
-                                    .poll_and_init(
-                                        new_instance_id,
-                                        event_id,
-                                        &event_name,
-                                        &auth_token,
-                                    )
-                                    .await
-                                {
-                                    tracing::error!("Auto-restart poll_and_init failed: {e}");
-                                    if let Err(e) = db::update_delivery_instance_status(
-                                        orch.pool(),
-                                        new_instance_id,
-                                        "failed",
-                                    )
-                                    .await
-                                    {
-                                        tracing::error!("Failed to mark instance as failed: {e}");
-                                    }
-                                }
-                            });
-
-                            self.poll_handles
-                                .lock()
-                                .await
-                                .insert(new_instance_id, handle);
-
-                            info!(
-                                event_id,
-                                new_instance_id, "Auto-restart: new VPS creation started"
-                            );
-                        }
-                        Err(e) => {
-                            error!(event_id, "Auto-restart: failed to create new VPS: {e}");
-                            let _ = ws_tx.send(rs_core::models::WsEvent::ActivityFeed {
-                                timestamp: chrono::Utc::now().to_rfc3339(),
-                                severity: "error".to_string(),
-                                message: format!("Auto-restart failed: {e}. Will retry in 90s."),
-                                source: "delivery".to_string(),
-                            });
-                        }
-                    }
-
-                    // Reset failures — next 3 failures will trigger another restart
-                    consecutive_failures = 0;
                 }
             }
         }

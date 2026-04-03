@@ -73,9 +73,10 @@ impl FlvStreamNormalizer {
 }
 
 const MAX_FFMPEG_RESTARTS: u32 = 10;
-const MAX_CHUNK_MISS_COUNT: u32 = 60; // ~2min at 2s polls
+const MAX_CHUNK_MISS_COUNT: u32 = 40; // ~80s at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
 const WRITE_TIMEOUT_SECS: u64 = 30;
+const MAX_WRITE_FAILURES_PER_CHUNK: u32 = 3;
 /// Base S3 backoff (doubles on each error, max 60s, resets on success).
 const S3_BACKOFF_BASE_SECS: u64 = 2;
 const S3_BACKOFF_MAX_SECS: u64 = 60;
@@ -304,6 +305,8 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     let mut circuit_trips: u32 = 0;
     let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
     let mut last_heartbeat = std::time::Instant::now();
+    let mut drought_mode = false;
+    let mut consecutive_write_failures: u32 = 0;
 
     loop {
         // Check for stop signal
@@ -323,8 +326,8 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
             last_heartbeat = std::time::Instant::now();
         }
 
-        // Ensure output process is running
-        if !proc.as_mut().is_some_and(|p| p.is_alive()) {
+        // Ensure output process is running (skip during drought mode)
+        if !drought_mode && !proc.as_mut().is_some_and(|p| p.is_alive()) {
             if proc.is_some() {
                 let mut s = stats.lock().await;
                 s.ffmpeg_restart_count += 1;
@@ -333,8 +336,13 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     s.ffmpeg_last_stderr = p.last_stderr_line();
                 }
                 drop(s);
-                tracing::warn!(alias = %alias, "ffmpeg died, restarting in 3s");
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let delay = match consecutive_ffmpeg_failures {
+                    0 => 1,
+                    1 => 3,
+                    _ => 5,
+                };
+                tracing::warn!(alias = %alias, delay, "ffmpeg died, restarting");
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 flv_normalizer = FlvStreamNormalizer::new();
             }
 
@@ -396,6 +404,44 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     circuit_trips = 0;
                     tracing::info!(alias = %alias, "ffmpeg circuit breaker reset after successful chunk");
                 }
+                if drought_mode {
+                    tracing::info!(alias = %alias, chunk_id, "Exiting drought mode — re-buffering before resume");
+                    drought_mode = false;
+                    flv_normalizer = FlvStreamNormalizer::new();
+                    {
+                        let mut s = stats.lock().await;
+                        s.stall_reason = Some("re-buffering".to_string());
+                        s.consecutive_chunk_misses = 0;
+                    }
+                    // Re-buffer: wait for delivery_delay_chunks to accumulate
+                    // before restarting ffmpeg (same as initial buffer fill)
+                    if delivery_delay_chunks > 0 {
+                        let rebuffer_target = chunk_id + delivery_delay_chunks;
+                        tracing::info!(
+                            alias = %alias,
+                            chunk_id,
+                            rebuffer_target,
+                            "Re-buffering: waiting for chunk {rebuffer_target}"
+                        );
+                        loop {
+                            if *stop_rx.borrow() {
+                                return;
+                            }
+                            if let Ok(Some(_)) = fetcher.fetch_chunk(rebuffer_target).await {
+                                tracing::info!(alias = %alias, rebuffer_target, "Re-buffer complete");
+                                break;
+                            }
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                                _ = stop_rx.changed() => { if *stop_rx.borrow() { return; } }
+                            }
+                        }
+                        let mut s = stats.lock().await;
+                        s.stall_reason = None;
+                    }
+                    // Don't process this chunk yet — let "ensure ffmpeg alive" spawn ffmpeg first
+                    continue;
+                }
                 {
                     let mut s = stats.lock().await;
                     s.consecutive_chunk_misses = 0;
@@ -417,13 +463,15 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
 
                     match write_result {
                         Ok(Ok(())) => {
+                            consecutive_write_failures = 0;
                             let mut s = stats.lock().await;
                             s.bytes_processed_total += processed.len() as u64;
                             s.current_chunk_id = chunk_id;
                             s.chunks_processed += 1;
                         }
                         Ok(Err(e)) => {
-                            tracing::warn!(alias = %alias, "ffmpeg write failed: {e}");
+                            consecutive_write_failures += 1;
+                            tracing::warn!(alias = %alias, chunk_id, failures = consecutive_write_failures, "ffmpeg write failed: {e}");
                             let mut s = stats.lock().await;
                             s.last_error = Some(e);
                             s.ffmpeg_restart_count += 1;
@@ -431,10 +479,19 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                             if let Some(mut p) = proc.take() {
                                 p.kill().await;
                             }
+                            if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
+                                tracing::error!(alias = %alias, chunk_id, "Skipping chunk after {consecutive_write_failures} write failures");
+                                chunk_id += 1;
+                                consecutive_write_failures = 0;
+                                flv_normalizer = FlvStreamNormalizer::new();
+                                let mut s = stats.lock().await;
+                                s.current_chunk_id = chunk_id;
+                            }
                             continue;
                         }
                         Err(_) => {
-                            tracing::error!(alias = %alias, "ffmpeg write timed out");
+                            consecutive_write_failures += 1;
+                            tracing::error!(alias = %alias, chunk_id, failures = consecutive_write_failures, "ffmpeg write timed out");
                             let mut s = stats.lock().await;
                             s.last_error = Some("write_timeout".to_string());
                             s.stall_reason = Some("write_timeout".to_string());
@@ -442,6 +499,14 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                             drop(s);
                             if let Some(mut p) = proc.take() {
                                 p.kill().await;
+                            }
+                            if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
+                                tracing::error!(alias = %alias, chunk_id, "Skipping chunk after {consecutive_write_failures} write timeouts");
+                                chunk_id += 1;
+                                consecutive_write_failures = 0;
+                                flv_normalizer = FlvStreamNormalizer::new();
+                                let mut s = stats.lock().await;
+                                s.current_chunk_id = chunk_id;
                             }
                             continue;
                         }
@@ -489,6 +554,13 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                     }
 
                     if !found_ahead {
+                        if !drought_mode {
+                            tracing::warn!(alias = %alias, chunk_id, "Entering drought mode — killing ffmpeg until chunks resume");
+                            if let Some(mut p) = proc.take() {
+                                p.kill().await;
+                            }
+                            drought_mode = true;
+                        }
                         let mut s = stats.lock().await;
                         s.stall_reason = Some("chunk_gap".to_string());
                         s.consecutive_chunk_misses = consecutive_chunk_misses;
@@ -496,7 +568,7 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                         tracing::warn!(
                             alias = %alias,
                             chunk_id,
-                            "No chunks found in probe range, marking chunk_gap stall"
+                            "No chunks found in probe range, still in drought mode"
                         );
                         // Reset counter so we probe again after another cycle
                         consecutive_chunk_misses = 0;

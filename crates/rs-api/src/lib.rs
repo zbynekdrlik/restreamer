@@ -176,6 +176,8 @@ async fn delivery_broadcast_loop(
     let mut last_event_name: Option<String> = None;
     let mut last_state_str = String::from("idle");
     let mut was_predicted = false;
+    // True only after we've seen real (non-empty) endpoint data from VPS
+    let mut last_had_real_endpoints = false;
 
     // Track session start time for display in dashboard
     let mut session_start_time: Option<String> = None;
@@ -286,14 +288,35 @@ async fn delivery_broadcast_loop(
                     .map(|s| s as u64)
                     .unwrap_or(config.delivery.delivery_delay_secs);
 
-                // Compute buffer: local S3 count if VPS not yet responding, else real VPS delay
-                let (current_delay, buffer_progress) = if endpoints.is_empty() {
-                    // VPS not responding — use local S3 buffer as progress indicator
+                // Track whether we've ever had real (non-empty) endpoints
+                // to distinguish "VPS not started yet" from "VPS was working but lost"
+                let had_real_endpoints = !endpoints.is_empty();
+
+                // Compute buffer: depends on VPS state
+                let (current_delay, buffer_progress) = if let (true, true, Some(last_time)) = (
+                    endpoints.is_empty(),
+                    last_had_real_endpoints,
+                    last_success_time,
+                ) {
+                    // VPS was previously responding WITH endpoints but now unreachable.
+                    // Use prediction: last known delay drains at real-time rate.
+                    let elapsed = last_time.elapsed().as_secs_f64();
+                    let predicted = (last_delay_secs - elapsed).max(0.0);
+                    let progress = if target_delay > 0 {
+                        (predicted / target_delay as f64).min(1.0)
+                    } else {
+                        0.0
+                    };
+                    was_predicted = true;
+                    (predicted, progress)
+                } else if endpoints.is_empty() {
+                    // VPS not yet responding (initial buffer fill phase).
+                    // Use S3 sent chunk count as progress indicator.
                     let sent = db::get_sent_chunk_count_for_event(&pool, event.id)
                         .await
                         .unwrap_or(0);
                     let chunk_dur = config.inpoint.chunk_duration_ms as f64 / 1000.0;
-                    let local_buf = sent as f64 * chunk_dur;
+                    let local_buf = (sent as f64 * chunk_dur).min(target_delay as f64 * 2.0);
                     let progress = if target_delay > 0 {
                         (local_buf / target_delay as f64).min(1.0)
                     } else {
@@ -301,12 +324,21 @@ async fn delivery_broadcast_loop(
                     };
                     (local_buf, progress)
                 } else {
-                    let delay = final_endpoints
+                    // VPS is responding with real endpoint data.
+                    // Cache bar shows ONLY the VPS delay (chunks on S3 ahead of VPS).
+                    // Do NOT add local pending chunks — they're not on S3 yet
+                    // and adding them makes cache bar INCREASE during S3 outage.
+                    let vps_delay = final_endpoints
                         .iter()
                         .filter(|m| !m.is_fast && m.chunk_delay_secs > 0.0)
                         .map(|m| m.chunk_delay_secs)
                         .fold(f64::MAX, f64::min);
-                    let delay = if delay == f64::MAX { 0.0 } else { delay };
+                    let delay = if vps_delay == f64::MAX {
+                        0.0
+                    } else {
+                        vps_delay
+                    };
+
                     let progress = if target_delay > 0 {
                         (delay / target_delay as f64).min(1.0)
                     } else {
@@ -327,6 +359,9 @@ async fn delivery_broadcast_loop(
                 }
 
                 // Save last-known state for predictive drain
+                if had_real_endpoints {
+                    last_had_real_endpoints = true;
+                }
                 last_success_time = Some(std::time::Instant::now());
                 last_delay_secs = current_delay;
                 last_target_delay = target_delay;
@@ -348,6 +383,10 @@ async fn delivery_broadcast_loop(
                     .unwrap_or(0);
                 let s3_queue = (sent_chunks - max_delivery_chunk).max(0);
 
+                // Prediction flag: true only when VPS previously had real endpoints but now unreachable
+                let is_predicted =
+                    endpoints.is_empty() && last_had_real_endpoints && last_success_time.is_some();
+
                 let _ = ws_tx.send(WsEvent::PipelineState {
                     state: state_str.to_string(),
                     event_id: Some(event.id),
@@ -356,7 +395,7 @@ async fn delivery_broadcast_loop(
                     target_delay_secs: target_delay,
                     current_delay_secs: current_delay,
                     session_start: session_start_time.clone(),
-                    predicted: false,
+                    predicted: is_predicted,
                     local_buffer_chunks: pending_chunks,
                     s3_queue_chunks: s3_queue,
                 });
@@ -407,8 +446,20 @@ async fn delivery_broadcast_loop(
                         current_delay_secs: predicted_delay,
                         session_start: session_start_time.clone(),
                         predicted: true,
-                        local_buffer_chunks: 0,
-                        s3_queue_chunks: 0,
+                        local_buffer_chunks: if let Some(eid) = last_event_id {
+                            db::get_pending_chunk_count_for_event(&pool, eid)
+                                .await
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        },
+                        s3_queue_chunks: if let Some(eid) = last_event_id {
+                            db::get_sent_chunk_count_for_event(&pool, eid)
+                                .await
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        },
                     });
                     // Emit disconnect notice once (within first poll after failure)
                     if elapsed < 3.0 {

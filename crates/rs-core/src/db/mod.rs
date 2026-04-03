@@ -674,7 +674,7 @@ pub async fn get_pending_chunk_count_for_event(
     streaming_event_id: i64,
 ) -> Result<i64> {
     let row = sqlx::query(
-        "SELECT COUNT(*) as cnt FROM chunk_records WHERE streaming_event_id = ?1 AND sent = 0 AND in_process = 0",
+        "SELECT COUNT(*) as cnt FROM chunk_records WHERE streaming_event_id = ?1 AND sent = 0",
     )
     .bind(streaming_event_id)
     .fetch_one(pool)

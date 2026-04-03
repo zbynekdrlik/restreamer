@@ -1263,7 +1263,7 @@ jobs:
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -1435,6 +1435,72 @@ jobs:
           "ORIG_TYPE=$origType" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
           try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+
+      - name: Set OBS encoder bitrate to 12000 for CI
+        id: obs-bitrate
+        shell: powershell
+        run: |
+          # OBS Advanced mode stores encoder bitrate in streamEncoder.json
+          # CI requires 12000 kbps for YouTube 'good' health verdict
+          # CI runner runs as SYSTEM — use newlevel user's AppData explicitly
+          $userAppData = "C:\Users\newlevel\AppData\Roaming"
+          $profileDir = "$userAppData\obs-studio\basic\profiles"
+          $globalIni = "$userAppData\obs-studio\global.ini"
+
+          # Detect active profile from OBS global config
+          $profileMatch = Select-String -Path $globalIni -Pattern "^Profile=" -ErrorAction SilentlyContinue
+          if ($profileMatch) {
+            $activeProfile = $profileMatch.Line.Split("=", 2)[1].Trim()
+          }
+          if (-not $activeProfile) {
+            # Fallback: use first profile directory that has streamEncoder.json
+            $activeProfile = (Get-ChildItem $profileDir -Directory | Where-Object {
+              Test-Path "$($_.FullName)\streamEncoder.json"
+            } | Select-Object -First 1).Name
+          }
+          if (-not $activeProfile) {
+            throw "Cannot detect active OBS profile"
+          }
+
+          $encoderFile = "$profileDir\$activeProfile\streamEncoder.json"
+          Write-Host "Active profile: $activeProfile"
+          Write-Host "Encoder config: $encoderFile"
+
+          if (Test-Path $encoderFile) {
+            $encoder = Get-Content $encoderFile -Raw | ConvertFrom-Json
+            $origBitrate = $encoder.bitrate
+            Write-Host "Original bitrate: $origBitrate"
+            "ORIG_BITRATE=$origBitrate" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "ENCODER_FILE=$encoderFile" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+            if ($origBitrate -ne 12000) {
+              $encoder.bitrate = 12000
+              $encoder | ConvertTo-Json | Set-Content $encoderFile -Encoding UTF8
+              Write-Host "Bitrate set to 12000 for CI (was $origBitrate)"
+
+              # OBS reads streamEncoder.json on stream start, so restart OBS
+              # to ensure the new bitrate takes effect
+              Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 5
+              schtasks.exe /run /tn "Start OBS Studio"
+              if ($LASTEXITCODE -ne 0) { throw "Failed to restart OBS after bitrate change" }
+              Start-Sleep -Seconds 20
+
+              $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+              if (-not $obs) { throw "OBS did not restart after bitrate change" }
+              $mem = $obs.WorkingSet64 / 1MB
+              if ($mem -lt 50) { throw "OBS in broken state after restart ($([math]::Round($mem))MB)" }
+              Write-Host "OBS restarted with 12000 kbps bitrate (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
+            } else {
+              Write-Host "Bitrate already 12000, no change needed"
+              "ORIG_BITRATE=12000" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+              "ENCODER_FILE=$encoderFile" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            }
+          } else {
+            Write-Host "WARNING: streamEncoder.json not found at $encoderFile - cannot set bitrate"
+            "ORIG_BITRATE=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "ENCODER_FILE=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
 
       - name: "Baseline: OBS direct-to-YouTube RTMP (prove OBS works)"
         shell: powershell
@@ -1832,6 +1898,16 @@ jobs:
           }
           Write-Host "Event id: $($targetEvent.id), name: $($targetEvent.name)"
 
+          # Save original cache_delay_secs before changing (restore at end)
+          $origCacheDelay = $targetEvent.cache_delay_secs
+          Write-Host "Original cache_delay_secs: $origCacheDelay"
+
+          # Set cache delay to 300s for testing custom delay fill
+          $patchBody = @{ cache_delay_secs = 300 } | ConvertTo-Json
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
+            -Method PATCH -Body $patchBody -ContentType "application/json" -TimeoutSec 10
+          Write-Host "Set cache_delay_secs=300 on event $($targetEvent.id)"
+
           # Start stream: activates receiving + delivering, clears stale chunks, starts VPS
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/start-stream" `
             -Method POST -TimeoutSec 300
@@ -2080,15 +2156,17 @@ jobs:
 
       - name: Wait for delivery server ready
         shell: powershell
-        timeout-minutes: 5
+        timeout-minutes: 15
         run: |
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
 
           Write-Host "Waiting for delivery server to start ffmpeg endpoints..."
-          # Cloud-init can take 5-7 minutes: apt update + install ffmpeg + download binary + start
-          $maxRetries = 40
+          # Cloud-init ~3 min + buffer fill (300 chunks x 2s = ~10 min) = ~13 min total
+          $maxRetries = 60
+          # Track S3 buffer fill progress (monotonic check)
+          $fillReadings = @()
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
               $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
@@ -2118,6 +2196,16 @@ jobs:
                 } catch { Write-Host "  DIAGNOSTIC: chunk query failed: $_" }
               }
 
+              # Track buffer fill progress during wait (before endpoints are alive)
+              if (-not $response.endpoint_details -or $response.endpoint_details.Count -eq 0) {
+                # No endpoints yet - track S3 buffer via chunk stats
+                try {
+                  $cs = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
+                  $fillReadings += $cs.sent_chunks
+                  Write-Host "  Buffer fill: $($cs.sent_chunks) sent, $($cs.pending_chunks) pending"
+                } catch {}
+              }
+
               # Check ALL endpoints are alive (not just the aggregate flag)
               $allAlive = $true
               if ($response.endpoint_details -and $response.endpoint_details.Count -gt 0) {
@@ -2129,6 +2217,33 @@ jobs:
               }
 
               if ($response.server_ready -and $allAlive) {
+                # Verify buffer fill was monotonic (sent chunks always increasing)
+                if ($fillReadings.Count -lt 3) {
+                  throw "FAILED: Only $($fillReadings.Count) buffer fill readings captured (need >= 3). VPS started too fast or fill monitoring broken."
+                }
+                if ($fillReadings.Count -ge 3) {
+                  for ($j = 1; $j -lt $fillReadings.Count; $j++) {
+                    if ($fillReadings[$j] -lt $fillReadings[$j-1]) {
+                      throw "FAILED: Buffer fill went backward: $($fillReadings[$j-1]) -> $($fillReadings[$j]) sent chunks"
+                    }
+                  }
+                  # STRICT: After multiple readings, sent chunks MUST be > 0
+                  if ($fillReadings[-1] -eq 0) {
+                    throw "FAILED: Buffer fill stuck at 0 sent chunks after $($fillReadings.Count) readings. Cache bar would show 0."
+                  }
+                  # STRICT: Sent chunks must have grown (not stayed at same value)
+                  if ($fillReadings[-1] -le $fillReadings[0]) {
+                    throw "FAILED: Buffer fill did not grow: $($fillReadings[0]) -> $($fillReadings[-1]) sent chunks. Cache bar stuck."
+                  }
+                  Write-Host "Buffer fill verified: $($fillReadings[0]) -> $($fillReadings[-1]) sent chunks over $($fillReadings.Count) readings"
+                }
+                # STRICT: First delay reading after VPS starts should not be 0 or wildly different from fill
+                $firstDelay = ($response.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1).chunk_delay_secs
+                $lastFillChunks = if ($fillReadings.Count -gt 0) { $fillReadings[-1] } else { 0 }
+                Write-Host "First VPS delay: ${firstDelay}s (fill had $lastFillChunks sent chunks)"
+                if ($firstDelay -eq 0 -and $lastFillChunks -gt 10) {
+                  throw "FAILED: VPS delay is 0 but $lastFillChunks chunks were sent during fill. Cache bar jumped from fill value to 0."
+                }
                 Write-Host "=== Delivery server fully operational: ALL $($response.endpoint_details.Count) endpoints alive ==="
                 return
               }
@@ -2199,6 +2314,87 @@ jobs:
           Write-Host "=========================================="
           Write-Host "  DELIVERY CONFIRMED: All $($epReadings.Count) endpoints progressing"
           Write-Host "=========================================="
+
+      - name: Verify dashboard cache bar via Playwright
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          Write-Host "Installing Playwright and verifying dashboard..."
+          Set-Location "$env:GITHUB_WORKSPACE\e2e"
+          # Install playwright package and browser
+          cmd /c "npm install playwright 2>&1" | Out-Null
+          cmd /c "npx playwright install chromium 2>&1" | Out-Null
+
+          # Write inline Playwright test
+          $testScript = @'
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage();
+
+            // Collect console errors
+            const consoleErrors = [];
+            page.on('console', msg => {
+              if (msg.type() === 'error' || msg.type() === 'warning') {
+                consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
+              }
+            });
+
+            await page.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
+            await page.waitForTimeout(5000); // Wait for WebSocket data
+
+            // Check cache bar is visible and shows a value > 0
+            const cacheLabel = await page.locator('.cache-bar-label').textContent().catch(() => null);
+            console.log('Cache bar label:', cacheLabel);
+
+            if (!cacheLabel) {
+              console.error('FAILED: Cache bar label not found on dashboard');
+              process.exit(1);
+            }
+
+            // Extract delay value from label (e.g., "Cache: 120s / 300s target (healthy)")
+            const match = cacheLabel.match(/(\d+)s/);
+            if (!match) {
+              console.error('FAILED: Could not parse delay from cache bar label:', cacheLabel);
+              process.exit(1);
+            }
+
+            const delayValue = parseInt(match[1]);
+            console.log('Cache delay on dashboard:', delayValue, 's');
+
+            if (delayValue === 0) {
+              console.error('FAILED: Dashboard shows 0s cache delay — cache bar stuck at zero');
+              process.exit(1);
+            }
+
+            // Check cache bar fill element exists and has a class (not empty)
+            const fillClass = await page.locator('.cache-bar-fill').getAttribute('class').catch(() => null);
+            console.log('Cache bar fill class:', fillClass);
+
+            if (!fillClass || fillClass.includes('exhausted')) {
+              console.error('FAILED: Cache bar shows exhausted state');
+              process.exit(1);
+            }
+
+            // Check for console errors (filter allowed ones)
+            const allowed = [/favicon/i, /Autofill/i, /integrity.*preload/i, /subresource integrity/i];
+            const real = consoleErrors.filter(e => !allowed.some(r => r.test(e)));
+            if (real.length > 0) {
+              console.error('FAILED: Browser console errors:', real);
+              process.exit(1);
+            }
+
+            console.log('Dashboard verification PASSED: cache bar shows', delayValue, 's, class:', fillClass);
+            await browser.close();
+          })();
+          '@
+
+          $testScript | Out-File -FilePath "dashboard-check.cjs" -Encoding UTF8
+          node dashboard-check.cjs
+          if ($LASTEXITCODE -ne 0) {
+            throw "FAILED: Dashboard cache bar verification failed"
+          }
+          Remove-Item "dashboard-check.cjs" -ErrorAction SilentlyContinue
 
       - name: Verify cache delay meets target
         shell: powershell
@@ -2404,6 +2600,352 @@ jobs:
           } else {
             throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts."
           }
+
+      - name: OBS disconnect/reconnect resilience test
+        if: success()
+        shell: powershell
+        run: |
+          Write-Host "=== OBS Disconnect/Reconnect Resilience Test ==="
+          # Get active event ID and VPS instance from status API
+          $appStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          $eventId = $appStatus.streaming_event.id
+          $instancesBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          $beforeHetznerId = $instancesBefore[0].hetzner_id
+          Write-Host "VPS instance before disconnect: hetzner_id=$beforeHetznerId"
+          Write-Host "Active event ID: $eventId"
+          # Record delivery status before disconnect
+          $statusBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+          Write-Host "Before disconnect: endpoints=$($statusBefore.endpoints.Count)"
+
+          # Connect to OBS WebSocket
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $ws.Options.KeepAliveInterval = [TimeSpan]::FromSeconds(5)
+          $cts = New-Object System.Threading.CancellationTokenSource(30000)
+          $ws.ConnectAsync("ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)", $cts.Token).Wait()
+          $buf = [byte[]]::new(8192)
+          $seg = [ArraySegment[byte]]$buf
+          $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+          $hello = [System.Text.Encoding]::UTF8.GetString($buf, 0, $recv.Count) | ConvertFrom-Json
+          if ($hello.d.authentication) {
+            $salt = $hello.d.authentication.salt
+            $challenge = $hello.d.authentication.challenge
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            $b64secret = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($env:OBS_WS_PASSWORD)$salt")))
+            $auth = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$b64secret$challenge")))
+            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $auth } } | ConvertTo-Json -Depth 5
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($identify)
+            $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
+            $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+          }
+
+          # Stop OBS stream
+          Write-Host "Stopping OBS stream..."
+          $stop = @{ op = 6; d = @{ requestType = "StopStream"; requestId = "disconnect-test-stop" } } | ConvertTo-Json -Depth 5
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($stop)
+          $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
+          $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+          Write-Host "OBS stream stopped"
+
+          # Wait 10 seconds (simulate brief outage)
+          Write-Host "Waiting 10 seconds with OBS disconnected..."
+          Start-Sleep -Seconds 10
+
+          # Restart OBS stream
+          Write-Host "Restarting OBS stream..."
+          $start = @{ op = 6; d = @{ requestType = "StartStream"; requestId = "disconnect-test-start" } } | ConvertTo-Json -Depth 5
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($start)
+          $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
+          $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+          Write-Host "OBS stream restarted"
+          $ws.CloseAsync('NormalClosure', '', [System.Threading.CancellationToken]::None).Wait()
+
+          # Wait for RTMP to reconnect
+          Write-Host "Waiting for RTMP reconnect..."
+          for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Seconds 2
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+            if ($status.inpoint.details.rtmp_connected) {
+              Write-Host "RTMP reconnected after $($i * 2) seconds"
+              break
+            }
+          }
+          if (-not $status.inpoint.details.rtmp_connected) {
+            throw "FAILED: RTMP did not reconnect within 30 seconds"
+          }
+
+          # Wait 60 seconds for pipeline to stabilize
+          Write-Host "Waiting 60s for chunk pipeline to stabilize..."
+          Start-Sleep -Seconds 60
+
+          # Verify delivery endpoints are advancing
+          $statusAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+          foreach ($ep in $statusAfter.endpoints) {
+            Write-Host "Endpoint '$($ep.alias)': chunks=$($ep.chunks_processed), delay=$($ep.chunk_delay_secs)s, restarts=$($ep.ffmpeg_restart_count)"
+            if ($ep.ffmpeg_restart_count -gt 20) {
+              throw "FAILED: Endpoint '$($ep.alias)' has $($ep.ffmpeg_restart_count) ffmpeg restarts - crash loop detected"
+            }
+          }
+
+          # Verify VPS was NOT restarted (same instance)
+          $instancesAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          if ($instancesAfter.Count -gt 0) {
+            $afterId = $instancesAfter[0].hetzner_id
+            Write-Host "Instance before: $beforeHetznerId, after: $afterId"
+            if ($afterId -ne $beforeHetznerId) {
+              throw "FAILED: VPS was restarted during OBS disconnect (before=$beforeHetznerId, after=$afterId)"
+            }
+          }
+          Write-Host "=== OBS Disconnect/Reconnect Test PASSED ==="
+
+      - name: Simulated network disconnect - cache drain and recovery
+        if: success()
+        shell: powershell
+        timeout-minutes: 6
+        run: |
+          Write-Host "=== Network Disconnect Simulation ==="
+          $appStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          $eventId = $appStatus.streaming_event.id
+
+          # Get VPS IP and current state
+          $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          $vpsIp = $instances[0].ipv4
+          $vpsHetznerId = $instances[0].hetzner_id
+          Write-Host "VPS IP: $vpsIp, Hetzner ID: $vpsHetznerId"
+
+          # Record EXACT state before disconnect
+          $deliveryBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+          $restartsBefore = @{}
+          $chunksBefore = @{}
+          foreach ($ep in $deliveryBefore.endpoint_details) {
+            $restartsBefore[$ep.alias] = $ep.ffmpeg_restart_count
+            $chunksBefore[$ep.alias] = $ep.chunks_processed
+            Write-Host "BEFORE: [$($ep.alias)] chunks=$($ep.chunks_processed) delay=$($ep.chunk_delay_secs)s restarts=$($ep.ffmpeg_restart_count) stall=$($ep.stall_reason)"
+          }
+          $delayBefore = ($deliveryBefore.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1).chunk_delay_secs
+          Write-Host "Cache delay before disconnect: ${delayBefore}s"
+
+          if ($delayBefore -lt 30) {
+            throw "FAILED: Cache delay too low before test (${delayBefore}s < 30s) - not enough buffer for meaningful test"
+          }
+
+          # Block S3 uploads via test API (application-level, no firewall needed)
+          Write-Host "Blocking S3 uploads via API..."
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/_test/s3-block" -Method POST -TimeoutSec 5
+          Write-Host "S3 uploads blocked"
+
+          try {
+            # Wait 5s for block to take effect
+            Start-Sleep -Seconds 5
+
+            # Take first readings
+            $delivery1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 10
+            $delay1 = ($delivery1.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1).chunk_delay_secs
+            $chunks1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
+            Write-Host "T+5s: delay=${delay1}s pending=$($chunks1.pending_chunks)"
+
+            # Wait 10 more seconds
+            Start-Sleep -Seconds 10
+
+            # Take second readings
+            $delivery2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 10
+            $delay2 = ($delivery2.endpoint_details | Where-Object { -not $_.is_fast } | Select-Object -First 1).chunk_delay_secs
+            $chunks2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
+            Write-Host "T+15s: delay=${delay2}s pending=$($chunks2.pending_chunks)"
+
+            # STRICT: Cache delay must NOT increase during S3 block
+            # VPS consumes from S3 cache, delay should decrease as VPS catches up
+            if ($delay2 -gt ($delay1 + 5)) {
+              throw "FAILED: Cache delay INCREASED during S3 block (${delay1}s -> ${delay2}s). Must decrease or stay stable."
+            }
+
+            # STRICT: Pending chunks must increase (uploads blocked, chunks piling up)
+            if ($chunks2.pending_chunks -le $chunks1.pending_chunks) {
+              throw "FAILED: Pending chunks did not increase during S3 block ($($chunks1.pending_chunks) -> $($chunks2.pending_chunks)). Block not effective."
+            }
+
+            # Verify delivering still active
+            $statusMid = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+            if (-not $statusMid.streaming_event.delivering_activated) {
+              throw "FAILED: delivering_activated went false during S3 block"
+            }
+
+            $pendingDuringBlock = $chunks2.pending_chunks
+            Write-Host "Pending chunks during block: $pendingDuringBlock"
+          } finally {
+            # ALWAYS unblock S3 uploads
+            Write-Host "Unblocking S3 uploads..."
+            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/_test/s3-unblock" -Method POST -TimeoutSec 5
+            Write-Host "S3 uploads unblocked"
+          }
+
+          # Wait for recovery - S3 uploads resume, VPS status polls resume
+          Write-Host "Waiting 60s for pipeline recovery..."
+          Start-Sleep -Seconds 60
+
+          # === STRICT POST-RECOVERY ASSERTIONS ===
+          $deliveryAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+          if (-not $deliveryAfter.endpoint_details -or $deliveryAfter.endpoint_details.Count -eq 0) {
+            throw "FAILED: No endpoint data after recovery"
+          }
+
+          foreach ($ep in $deliveryAfter.endpoint_details) {
+            $alias = $ep.alias
+            $restartsAfter = $ep.ffmpeg_restart_count
+            $restartsDelta = $restartsAfter - $restartsBefore[$alias]
+            $chunksAfter = $ep.chunks_processed
+            $chunksDelta = $chunksAfter - $chunksBefore[$alias]
+
+            Write-Host "AFTER: [$alias] chunks=$chunksAfter (+$chunksDelta) delay=$($ep.chunk_delay_secs)s restarts=$restartsAfter (+$restartsDelta) stall=$($ep.stall_reason)"
+
+            # STRICT: VPS had cache - 15s outage on stream.lan should cause ZERO ffmpeg restarts on VPS
+            if ($restartsDelta -gt 0) {
+              throw "FAILED: [$alias] had $restartsDelta NEW ffmpeg restarts during 15s S3 block. VPS had cache and should have been completely unaffected."
+            }
+
+            # STRICT: Endpoint must have processed new chunks since before the test
+            if ($chunksDelta -lt 5) {
+              throw "FAILED: [$alias] only processed $chunksDelta new chunks. VPS should keep processing from S3 cache."
+            }
+
+            # STRICT: No stall_reason should be set from a 15s outage
+            if ($ep.stall_reason) {
+              throw "FAILED: [$alias] has stall_reason='$($ep.stall_reason)' after 15s S3 block. VPS should be unaffected."
+            }
+          }
+
+          # Verify pending chunks drained (S3 uploads resumed)
+          # STRICT: Pending chunks must have DECREASED from during-block level
+          $chunksRecovery = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
+          Write-Host "Recovery chunks: pending=$($chunksRecovery.pending_chunks) sent=$($chunksRecovery.sent_chunks) (was $pendingDuringBlock during block)"
+          if ($chunksRecovery.pending_chunks -gt 10) {
+            throw "FAILED: $($chunksRecovery.pending_chunks) chunks still pending after 60s recovery - S3 upload not resuming"
+          }
+          if ($chunksRecovery.pending_chunks -ge $pendingDuringBlock) {
+            throw "FAILED: Pending chunks did not decrease after S3 unblock ($pendingDuringBlock -> $($chunksRecovery.pending_chunks)) - chunks not draining to S3"
+          }
+
+          # Verify VPS was NOT restarted
+          $instancesAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          $afterId = $instancesAfter[0].hetzner_id
+          Write-Host "VPS instance: before=$vpsHetznerId after=$afterId"
+          if ($afterId -ne $vpsHetznerId) {
+            throw "FAILED: VPS was destructively restarted (before=$vpsHetznerId, after=$afterId)"
+          }
+
+          # Verify delivery still active
+          $finalStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          if (-not $finalStatus.streaming_event.delivering_activated) {
+            throw "FAILED: delivering_activated is false after recovery"
+          }
+
+          Write-Host "=== Network Disconnect Simulation PASSED ==="
+
+      - name: Restreamer crash recovery test
+        if: success()
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          Write-Host "=== Restreamer Crash Recovery Test ==="
+          # Verify current state: OBS streaming, delivery active
+          $statusBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          $eventId = $statusBefore.streaming_event.id
+          Write-Host "Before crash: event=$eventId delivering=$($statusBefore.streaming_event.delivering_activated)"
+
+          # Record delivery instance
+          $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          $vpsId = $instances[0].hetzner_id
+          Write-Host "VPS hetzner_id: $vpsId"
+
+          # Record chunk count before crash
+          $chunksBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          Write-Host "Chunks before: total=$($chunksBefore.total_chunks) sent=$($chunksBefore.sent_chunks)"
+
+          # CRASH: kill Restreamer process
+          Write-Host "Killing Restreamer process (simulating crash)..."
+          taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
+          Start-Sleep -Seconds 3
+
+          # Verify Restreamer is dead
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if ($proc) { throw "FAILED: Restreamer still running after taskkill" }
+          Write-Host "Restreamer killed successfully"
+
+          # RESTART: via scheduled task (same as CI deploy)
+          Write-Host "Restarting Restreamer via scheduled task..."
+          Start-ScheduledTask -TaskName "RestreamerGUI"
+          Start-Sleep -Seconds 10
+
+          # Wait for API to respond
+          $apiUp = $false
+          for ($i = 0; $i -lt 15; $i++) {
+            try {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 3
+              $apiUp = $true
+              break
+            } catch {
+              Write-Host "Waiting for API... ($i)"
+              Start-Sleep -Seconds 2
+            }
+          }
+          if (-not $apiUp) { throw "FAILED: Restreamer API not responding after restart" }
+
+          # Verify event still active (persisted in SQLite)
+          $statusAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          Write-Host "After restart: delivering=$($statusAfter.streaming_event.delivering_activated) receiving=$($statusAfter.streaming_event.receiving_activated)"
+          if (-not $statusAfter.streaming_event.delivering_activated) {
+            throw "FAILED: delivering_activated is false after restart"
+          }
+          if (-not $statusAfter.streaming_event.receiving_activated) {
+            throw "FAILED: receiving_activated is false after restart"
+          }
+
+          # Wait for OBS to reconnect (OBS auto-reconnects)
+          Write-Host "Waiting for OBS RTMP reconnect..."
+          $reconnected = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 2
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+            if ($status.inpoint.details.rtmp_connected) {
+              Write-Host "OBS reconnected after $($i * 2) seconds"
+              $reconnected = $true
+              break
+            }
+          }
+          if (-not $reconnected) {
+            throw "FAILED: OBS did not reconnect within 60 seconds"
+          }
+
+          # Wait for chunks to flow
+          Write-Host "Waiting 30s for chunks to flow after restart..."
+          Start-Sleep -Seconds 30
+
+          $chunksAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          Write-Host "Chunks after: total=$($chunksAfter.total_chunks) sent=$($chunksAfter.sent_chunks)"
+          $newChunks = $chunksAfter.total_chunks - $chunksBefore.total_chunks
+          Write-Host "New chunks since restart: $newChunks"
+          if ($newChunks -lt 5) {
+            throw "FAILED: Only $newChunks new chunks after restart (expected >= 5)"
+          }
+
+          # Verify VPS instance unchanged (not recreated)
+          $instancesAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances"
+          if ($instancesAfter.Count -gt 0) {
+            $vpsIdAfter = $instancesAfter[0].hetzner_id
+            Write-Host "VPS after restart: $vpsIdAfter (before: $vpsId)"
+            if ($vpsIdAfter -ne $vpsId) {
+              throw "FAILED: VPS was recreated after crash (before=$vpsId, after=$vpsIdAfter)"
+            }
+          }
+
+          # Verify delivery broadcast loop picks up the VPS
+          $delivery = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -ErrorAction SilentlyContinue
+          if ($delivery -and $delivery.instance) {
+            Write-Host "Delivery instance found: $($delivery.instance.name) status=$($delivery.instance.status)"
+          } else {
+            Write-Host "WARNING: Delivery instance not found in status (broadcast loop may not have polled yet)"
+          }
+
+          Write-Host "=== Restreamer Crash Recovery Test PASSED ==="
 
       - name: Stop OBS stream
         if: always()
@@ -2612,6 +3154,45 @@ jobs:
 
           throw "FAILED: YouTube is still receiving stream data after deactivation ($maxRetries attempts, ~$($maxRetries * $retryDelay)s). Deactivation did not stop delivery to YouTube."
 
+      - name: Restore OBS encoder bitrate
+        if: always()
+        shell: powershell
+        run: |
+          $origBitrate = "${{ steps.obs-bitrate.outputs.ORIG_BITRATE }}"
+          $encoderFile = "${{ steps.obs-bitrate.outputs.ENCODER_FILE }}"
+
+          if (-not $origBitrate -or -not $encoderFile) {
+            Write-Host "No original bitrate saved - skipping restore"
+            exit 0
+          }
+
+          $origBitrateInt = [int]$origBitrate
+          if (Test-Path $encoderFile) {
+            $encoder = Get-Content $encoderFile -Raw | ConvertFrom-Json
+            if ($encoder.bitrate -ne $origBitrateInt) {
+              $ciBitrate = $encoder.bitrate
+              $encoder.bitrate = $origBitrateInt
+              $encoder | ConvertTo-Json | Set-Content $encoderFile -Encoding UTF8
+              Write-Host "Restored bitrate to $origBitrateInt (was $ciBitrate)"
+
+              # Restart OBS to pick up restored bitrate
+              Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 5
+              schtasks.exe /run /tn "Start OBS Studio"
+              Start-Sleep -Seconds 20
+              $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+              if ($obs) {
+                Write-Host "OBS restarted with restored bitrate $origBitrateInt (PID: $($obs.Id))"
+              } else {
+                Write-Host "WARNING: OBS did not restart after bitrate restore"
+              }
+            } else {
+              Write-Host "Bitrate already at $origBitrateInt, no restore needed"
+            }
+          } else {
+            Write-Host "WARNING: Encoder file not found at $encoderFile"
+          }
+
       - name: Restore OBS stream settings
         if: always()
         shell: powershell
@@ -2712,6 +3293,31 @@ jobs:
             exit 1
           }
 
+      - name: Restore original cache_delay_secs
+        if: always()
+        shell: powershell
+        env:
+          EVENT_NAME: "E2E-Test"
+        run: |
+          try {
+            $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+            $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+            if ($targetEvent) {
+              # Restore to config default (120s) — CI set it to 300
+              $patchBody = @{ cache_delay_secs = 120 } | ConvertTo-Json
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
+                -Method PATCH -Body $patchBody -ContentType "application/json" -TimeoutSec 10
+              $verify = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" -TimeoutSec 5
+              if ($verify.cache_delay_secs -ne 120) {
+                throw "FAILED: cache_delay_secs restore failed - expected 120, got $($verify.cache_delay_secs)"
+              }
+              Write-Host "Restored cache_delay_secs=120 (config default)"
+            }
+          } catch {
+            Write-Host "ERROR: Failed to restore cache_delay_secs: $_"
+            exit 1
+          }
+
       - name: Verify production config is intact
         if: always()
         shell: powershell
@@ -2787,7 +3393,7 @@ jobs:
             # E2E Gate result to prevent a green PR when push E2E tests fail.
             echo "PR event: checking push-triggered E2E Gate for commit ${{ github.event.pull_request.head.sha }}..."
             SHA="${{ github.event.pull_request.head.sha }}"
-            MAX_WAIT=60
+            MAX_WAIT=100
             WAIT_INTERVAL=30
             for i in $(seq 1 $MAX_WAIT); do
               # Find E2E Gate check run from the push-triggered workflow on this commit.

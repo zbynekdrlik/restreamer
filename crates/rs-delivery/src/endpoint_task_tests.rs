@@ -125,7 +125,6 @@ fn test_ep_cfg() -> EndpointConfig {
         start_chunk_id: None,
     }
 }
-
 #[tokio::test]
 async fn test_processes_sequential_chunks() {
     tokio::time::pause();
@@ -161,7 +160,6 @@ async fn test_processes_sequential_chunks() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
-
 #[tokio::test]
 async fn test_stops_on_signal() {
     tokio::time::pause();
@@ -183,7 +181,6 @@ async fn test_stops_on_signal() {
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
     assert!(result.is_ok(), "Task should have stopped cleanly");
 }
-
 #[tokio::test]
 async fn test_restarts_ffmpeg_on_death() {
     tokio::time::pause();
@@ -230,7 +227,6 @@ async fn test_restarts_ffmpeg_on_death() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
-
 #[tokio::test]
 async fn test_tracks_ffmpeg_restart_count() {
     tokio::time::pause();
@@ -263,7 +259,6 @@ async fn test_tracks_ffmpeg_restart_count() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
-
 #[tokio::test]
 async fn test_tracks_consecutive_chunk_misses() {
     tokio::time::pause();
@@ -295,7 +290,6 @@ async fn test_tracks_consecutive_chunk_misses() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
-
 #[tokio::test]
 async fn test_tracks_last_error() {
     tokio::time::pause();
@@ -324,7 +318,6 @@ async fn test_tracks_last_error() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
-
 #[tokio::test]
 async fn test_ffmpeg_circuit_breaker_triggers() {
     tokio::time::pause();
@@ -365,7 +358,6 @@ async fn test_ffmpeg_circuit_breaker_triggers() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
-
 #[tokio::test]
 async fn test_chunk_gap_skip_ahead() {
     tokio::time::pause();
@@ -403,7 +395,6 @@ async fn test_chunk_gap_skip_ahead() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
-
 #[tokio::test]
 async fn test_chunk_gap_detected_when_no_skip_found() {
     tokio::time::pause();
@@ -436,7 +427,95 @@ async fn test_chunk_gap_detected_when_no_skip_found() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
+#[tokio::test]
+async fn test_drought_mode_stops_ffmpeg_and_recovers() {
+    // Verify ffmpeg is killed during chunk drought and recovers when chunks resume.
+    tokio::time::pause();
 
+    // 30 chunks total. Initially only 1-5 available.
+    let chunks: Vec<(i64, Vec<u8>)> = (1..=30).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = TimedMockFetcher::new(chunks, 5);
+    let available = fetcher.available_up_to();
+
+    let factory = MockProcessFactory::new();
+    let spawn_count = factory.spawn_count.clone();
+    let alive = factory.alive.clone();
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let stats_clone = stats.clone();
+
+    let task = tokio::spawn(async move {
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+    });
+
+    // Process first 5 chunks
+    for _ in 0..20 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let s = stats.lock().await;
+    assert!(
+        s.chunks_processed >= 5,
+        "Should process available chunks, got {}",
+        s.chunks_processed
+    );
+    drop(s);
+
+    // Simulate drought: no new chunks. Advance time past MAX_CHUNK_MISS_COUNT
+    // (60 misses at 2s = 120s) plus extra margin.
+    // After this, the endpoint should have detected drought via chunk_gap stall.
+    for _ in 0..80 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+
+    // ffmpeg should be killed during drought (chunk_gap stall)
+    assert!(
+        !alive.load(Ordering::Relaxed),
+        "ffmpeg should be killed during drought (chunk_gap), but it is still alive"
+    );
+    let spawns_after_initial = spawn_count.load(Ordering::Relaxed);
+    // Continue drought for another 60s — ffmpeg should NOT be respawned
+    for _ in 0..30 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let spawns_during_extended_drought = spawn_count.load(Ordering::Relaxed) - spawns_after_initial;
+    assert!(
+        spawns_during_extended_drought == 0,
+        "ffmpeg should not be respawned during drought, got {} spawns",
+        spawns_during_extended_drought
+    );
+
+    // Resume chunks — make 6-30 available
+    available.store(30, Ordering::Relaxed);
+
+    // Advance time for recovery — ffmpeg should restart and process chunks
+    for _ in 0..80 {
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let s = stats.lock().await;
+    assert!(
+        s.chunks_processed >= 20,
+        "Should recover and process more chunks after drought, got {}",
+        s.chunks_processed
+    );
+    // Stall reason should clear after recovery
+    assert!(
+        s.stall_reason.is_none() || s.stall_reason.as_deref() != Some("chunk_gap"),
+        "Stall reason should clear after recovery, got {:?}",
+        s.stall_reason
+    );
+    drop(s);
+
+    stop_tx.send(true).ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+}
 #[tokio::test]
 async fn test_write_timeout_kills_ffmpeg() {
     tokio::time::pause();
@@ -475,7 +554,6 @@ async fn test_write_timeout_kills_ffmpeg() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
-
 #[tokio::test]
 async fn test_processes_100_sequential_chunks() {
     tokio::time::pause();
@@ -523,7 +601,6 @@ async fn test_processes_100_sequential_chunks() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
-
 #[tokio::test]
 async fn test_stats_struct_serializes() {
     let stats = EndpointStats {
@@ -542,13 +619,7 @@ async fn test_stats_struct_serializes() {
     assert!(json.contains("\"ffmpeg_restart_count\":2"));
 }
 
-// ============================================================
-// TimedMockFetcher: simulates chunks arriving over real time
-// ============================================================
-
-/// A fetcher where chunks become available at a configured rate.
-/// `available_up_to` is an AtomicI64 that external code advances to simulate
-/// new chunks arriving from S3.
+// TimedMockFetcher: chunks available at configured rate
 struct TimedMockFetcher {
     chunks: Arc<TokioMutex<std::collections::HashMap<i64, Vec<u8>>>>,
     available_up_to: Arc<AtomicI64>,
@@ -581,17 +652,10 @@ impl ChunkFetcher for TimedMockFetcher {
     }
 }
 
-// ============================================================
-// Buffer fill tests (TDD for cache delay bug)
-// ============================================================
+// Buffer fill tests
 
 #[tokio::test]
 async fn test_buffer_fill_waits_for_target_chunk() {
-    // With delivery_delay_chunks=5, start_chunk_id=1:
-    // target_chunk = 1 + 5 = 6
-    // Buffer fill must NOT complete before chunk 6 is available.
-    // Buffer fill DOES complete once chunk 6 is available.
-    // chunks_processed == 0 during buffer fill.
     tokio::time::pause();
 
     let all_chunks: Vec<(i64, Vec<u8>)> = (1..=10).map(|i| (i, vec![i as u8; 100])).collect();
@@ -659,7 +723,6 @@ async fn test_buffer_fill_waits_for_target_chunk() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
-
 #[tokio::test]
 async fn test_chunk_gap_maintained_at_delay_target() {
     // With delivery_delay_chunks=10, start_chunk_id=1, pre-load chunks 1-30:
@@ -706,7 +769,6 @@ async fn test_chunk_gap_maintained_at_delay_target() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
-
 #[tokio::test]
 async fn test_buffer_fill_stops_on_signal() {
     // If stop signal is sent during buffer fill, the loop should exit
@@ -756,7 +818,6 @@ async fn test_buffer_fill_stops_on_signal() {
         "Should not have processed any chunks, stopped during buffer fill"
     );
 }
-
 #[tokio::test]
 async fn test_delivery_delay_chunks_calculation() {
     // Verify the formula: delivery_delay_chunks = (delay_secs * 1000) / chunk_duration_ms
@@ -799,11 +860,8 @@ async fn test_delivery_delay_chunks_calculation() {
     assert_eq!(chunks, 240, "120s / 500ms should = 240 chunks");
 }
 
-// ============================================================
 // FlvStreamNormalizer unit tests
-// ============================================================
 
-/// Build a minimal valid FLV chunk with header, sequence headers, and data tags.
 fn build_test_flv_chunk(video_data: &[u8], timestamp: u32) -> Vec<u8> {
     let mut buf = Vec::new();
     // FLV header (9 bytes)
@@ -841,7 +899,6 @@ fn write_flv_tag(buf: &mut Vec<u8>, tag_type: u8, timestamp: u32, data: &[u8]) {
     let tag_size = 11 + data_size;
     buf.extend_from_slice(&tag_size.to_be_bytes());
 }
-
 #[test]
 fn flv_normalizer_passes_first_chunk_through() {
     let mut norm = FlvStreamNormalizer::new();
@@ -849,7 +906,6 @@ fn flv_normalizer_passes_first_chunk_through() {
     let result = norm.normalize(&chunk);
     assert_eq!(result, chunk, "First chunk should pass through unchanged");
 }
-
 #[test]
 fn flv_normalizer_strips_header_and_seq_from_subsequent_chunks() {
     let mut norm = FlvStreamNormalizer::new();
@@ -876,7 +932,6 @@ fn flv_normalizer_strips_header_and_seq_from_subsequent_chunks() {
     // but NOT the sequence header tag (0x17, 0x00 = seq header)
     assert!(!result.is_empty(), "Should contain the data tag");
 }
-
 #[test]
 fn flv_normalizer_passes_through_non_flv_data() {
     let mut norm = FlvStreamNormalizer::new();
@@ -884,7 +939,6 @@ fn flv_normalizer_passes_through_non_flv_data() {
     let result = norm.normalize(&raw_data);
     assert_eq!(result, raw_data, "Non-FLV data should pass through");
 }
-
 #[test]
 fn flv_normalizer_passes_through_short_data() {
     let mut norm = FlvStreamNormalizer::new();
@@ -900,11 +954,44 @@ fn flv_normalizer_reset_after_new() {
         !norm.sent_header,
         "New normalizer should not have sent header"
     );
-
     let chunk = build_test_flv_chunk(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA], 100);
     let _ = norm.normalize(&chunk);
     assert!(
         norm.sent_header,
         "After first chunk, sent_header should be true"
     );
+}
+
+#[tokio::test]
+async fn test_write_failure_skips_chunk_after_retries() {
+    tokio::time::pause();
+    let chunks: Vec<(i64, Vec<u8>)> = (1..=10).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = MockFetcher::new(chunks);
+    let mut factory = MockProcessFactory::new();
+    factory.fail_after_writes = Some(0);
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(TokioMutex::new(EndpointStats::default()));
+    let sc = stats.clone();
+    let task = tokio::spawn(endpoint_loop(
+        fetcher,
+        factory,
+        test_ep_cfg(),
+        1,
+        0,
+        stop_rx,
+        sc,
+    ));
+    for _ in 0..80 {
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    let s = stats.lock().await;
+    assert!(
+        s.current_chunk_id > 1,
+        "Should skip failed chunks, stuck at {}",
+        s.current_chunk_id
+    );
+    drop(s);
+    stop_tx.send(true).ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
 }

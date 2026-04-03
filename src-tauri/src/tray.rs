@@ -83,7 +83,7 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let copy_rtmp = MenuItem::with_id(
         app,
         "copy_rtmp_url",
-        format!("Copy RTMP URL (rtmp://{lan_ip}:1234/live)"),
+        "Copy RTMP URL (rtmp://127.0.0.1:1234/live)".to_string(),
         true,
         None::<&str>,
     )?;
@@ -224,7 +224,7 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
                 .try_state::<Arc<AppState>>()
                 .map(|s| s.config().inpoint.rtmp_port)
                 .unwrap_or(1234);
-            let url = format!("rtmp://{}:{port}/live", best_lan_ip());
+            let url = format!("rtmp://127.0.0.1:{port}/live");
             match app.clipboard().write_text(&url) {
                 Ok(()) => tracing::info!("Copied RTMP URL to clipboard: {url}"),
                 Err(e) => tracing::error!("Failed to copy to clipboard: {e}"),

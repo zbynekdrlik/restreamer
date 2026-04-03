@@ -551,7 +551,7 @@ fn EndpointTree() -> impl IntoView {
                             "endpoint-node pending"
                         } else if !ep.alive {
                             "endpoint-node dead"
-                        } else if ep.stall_count >= 3 || ep.stall_reason.is_some() {
+                        } else if ep.stall_reason.is_some() || ep.ffmpeg_restart_count >= 10 {
                             "endpoint-node stalled"
                         } else {
                             "endpoint-node healthy"
@@ -561,12 +561,14 @@ fn EndpointTree() -> impl IntoView {
                     let dot_class = move || {
                         let ep = ep_data.get();
                         let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
+                        let has_critical_error = ep.ffmpeg_restart_count >= 10
+                            || ep.stall_reason.is_some();
                         if is_pending {
                             "status-dot"
-                        } else if ep.alive {
-                            "status-dot active"
-                        } else {
+                        } else if !ep.alive || has_critical_error {
                             "status-dot error"
+                        } else {
+                            "status-dot active"
                         }
                     };
 

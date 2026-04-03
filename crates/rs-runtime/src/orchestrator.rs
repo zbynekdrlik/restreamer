@@ -131,6 +131,9 @@ impl ServiceCore {
         // Shared RTMP connection state
         let inpoint_state = self.inpoint_state.clone();
 
+        // Shared S3 upload blocked flag (test hook for simulating outages)
+        let s3_upload_blocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         // API server
         let api_addr: SocketAddr =
             format!("{}:{}", self.config.api.bind, self.config.api.port).parse()?;
@@ -138,7 +141,8 @@ impl ServiceCore {
             .with_config_path(self.config_path)
             .with_log_buffer(self.log_buffer)
             .with_inpoint_state(inpoint_state.clone())
-            .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx);
+            .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx)
+            .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked));
 
         // Serve the WASM frontend from a "www" directory next to the binary,
         // so LAN browsers can access the dashboard at http://<host>:8910/
@@ -259,6 +263,7 @@ impl ServiceCore {
                 endpoint_ws_tx,
                 endpoint_restart_rx,
                 endpoint_shutdown_rx,
+                s3_upload_blocked,
             )
             .await;
         });
@@ -320,6 +325,10 @@ impl ServiceCore {
 }
 
 /// Run the RTMP inpoint server with restart support.
+///
+/// Auto-restarts on crash with exponential backoff (2s, 4s, 8s, 16s, max 30s).
+/// Crash counter resets when a publisher connects. Gives up after 10 consecutive
+/// crashes without any successful connection.
 async fn run_inpoint_loop(
     bind: String,
     port: u16,
@@ -328,6 +337,10 @@ async fn run_inpoint_loop(
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
+    let mut consecutive_crashes: u32 = 0;
+    let mut last_connected = false;
+    const MAX_CONSECUTIVE_CRASHES: u32 = 10;
+
     loop {
         let server = RtmpServer::new(&bind, port);
         let rtmp_shutdown = server.shutdown_handle();
@@ -344,11 +357,34 @@ async fn run_inpoint_loop(
             tokio::select! {
                 result = &mut handle => {
                     match result {
-                        Ok(Ok(())) => info!("RTMP server stopped"),
-                        Ok(Err(e)) => tracing::error!("RTMP server error: {e}"),
-                        Err(e) => tracing::error!("RTMP task panicked: {e}"),
+                        Ok(Ok(())) => {
+                            info!("RTMP server stopped cleanly");
+                            break false; // Clean stop, don't restart
+                        }
+                        Ok(Err(e)) => {
+                            tracing::error!("RTMP server error: {e}");
+                            consecutive_crashes += 1;
+                        }
+                        Err(e) => {
+                            tracing::error!("RTMP task panicked: {e}");
+                            consecutive_crashes += 1;
+                        }
                     }
-                    break false;
+                    if consecutive_crashes >= MAX_CONSECUTIVE_CRASHES {
+                        tracing::error!(
+                            crashes = consecutive_crashes,
+                            "RTMP server exceeded max consecutive crashes, giving up"
+                        );
+                        break false;
+                    }
+                    let backoff = (1u64 << consecutive_crashes.min(4)).min(30);
+                    tracing::warn!(
+                        crashes = consecutive_crashes,
+                        backoff_secs = backoff,
+                        "RTMP server crashed, auto-restarting in {backoff}s"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                    break true; // Restart
                 }
                 msg = restart_rx.recv() => {
                     if msg.is_some() {
@@ -368,6 +404,11 @@ async fn run_inpoint_loop(
                 }
                 _ = heartbeat.tick() => {
                     let connected = inpoint_state.is_connected();
+                    if connected && !last_connected {
+                        consecutive_crashes = 0;
+                        info!("RTMP publisher connected, crash counter reset");
+                    }
+                    last_connected = connected;
                     info!(
                         rtmp_connected = connected,
                         "Inpoint heartbeat: RTMP server alive"
@@ -393,6 +434,7 @@ async fn run_endpoint_loop(
     ws_tx: broadcast::Sender<WsEvent>,
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
+    s3_upload_blocked: Arc<std::sync::atomic::AtomicBool>,
 ) {
     loop {
         let s3 = match S3Client::new(&s3_config) {
@@ -406,7 +448,8 @@ async fn run_endpoint_loop(
         let (component_shutdown_tx, _) = broadcast::channel::<()>(1);
         let component_rx = component_shutdown_tx.subscribe();
 
-        let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx.clone());
+        let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx.clone())
+            .with_upload_blocked(Arc::clone(&s3_upload_blocked));
         let mut handle = tokio::spawn(async move { uploader.run(component_rx).await });
 
         info!("Endpoint uploader started");
