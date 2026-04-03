@@ -1149,144 +1149,7 @@ test.describe("Delivery Endpoint Add/Remove Controls", () => {
 });
 
 // --- Cache Bar Health Colors ---
-
-test.describe("Cache Bar Health Colors", () => {
-  test("cache bar shows healthy class when progress >= 75%", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    await page.waitForTimeout(1000);
-
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
-      data: {
-        type: "PipelineState",
-        data: {
-          state: "streaming",
-          event_id: 1,
-          event_name: "Sunday Service",
-          buffer_progress: 0.85,
-          target_delay_secs: 120,
-          current_delay_secs: 102.0,
-          session_start: null,
-          predicted: false,
-          local_buffer_chunks: 2,
-          s3_queue_chunks: 10,
-        },
-      },
-    });
-
-    const fill = page.locator(".cache-bar-fill");
-    await expect(fill).toHaveClass(/healthy/, { timeout: 5000 });
-  });
-
-  test("cache bar shows warning class when progress 40-75%", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    await page.waitForTimeout(1000);
-
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
-      data: {
-        type: "PipelineState",
-        data: {
-          state: "buffering",
-          event_id: 1,
-          event_name: "Sunday Service",
-          buffer_progress: 0.5,
-          target_delay_secs: 120,
-          current_delay_secs: 60.0,
-          session_start: null,
-          predicted: false,
-          local_buffer_chunks: 5,
-          s3_queue_chunks: 20,
-        },
-      },
-    });
-
-    const fill = page.locator(".cache-bar-fill");
-    await expect(fill).toHaveClass(/warning/, { timeout: 5000 });
-  });
-
-  test("cache bar shows critical class when progress < 40%", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    await page.waitForTimeout(1000);
-
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
-      data: {
-        type: "PipelineState",
-        data: {
-          state: "buffering",
-          event_id: 1,
-          event_name: "Sunday Service",
-          buffer_progress: 0.2,
-          target_delay_secs: 120,
-          current_delay_secs: 24.0,
-          session_start: null,
-          predicted: false,
-          local_buffer_chunks: 8,
-          s3_queue_chunks: 5,
-        },
-      },
-    });
-
-    const fill = page.locator(".cache-bar-fill");
-    await expect(fill).toHaveClass(/critical/, { timeout: 5000 });
-  });
-
-  test("cache bar transitions from critical to healthy as buffer fills", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    await page.waitForTimeout(1000);
-
-    // Start critical
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
-      data: {
-        type: "PipelineState",
-        data: {
-          state: "buffering",
-          event_id: 1,
-          event_name: "Sunday Service",
-          buffer_progress: 0.1,
-          target_delay_secs: 120,
-          current_delay_secs: 12.0,
-          session_start: null,
-          predicted: false,
-          local_buffer_chunks: 10,
-          s3_queue_chunks: 2,
-        },
-      },
-    });
-    await expect(page.locator(".cache-bar-fill")).toHaveClass(/critical/, {
-      timeout: 5000,
-    });
-
-    // Transition to healthy
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
-      data: {
-        type: "PipelineState",
-        data: {
-          state: "streaming",
-          event_id: 1,
-          event_name: "Sunday Service",
-          buffer_progress: 0.9,
-          target_delay_secs: 120,
-          current_delay_secs: 108.0,
-          session_start: null,
-          predicted: false,
-          local_buffer_chunks: 1,
-          s3_queue_chunks: 15,
-        },
-      },
-    });
-    await expect(page.locator(".cache-bar-fill")).toHaveClass(/healthy/, {
-      timeout: 5000,
-    });
-    await expect(page.locator(".cache-bar-fill")).not.toHaveClass(/critical/);
-  });
-});
+// (Removed: global cache bar replaced by per-endpoint cache bar — see "Per-Endpoint Cache Bar" suite)
 
 // --- Pipeline Node Data ---
 
@@ -1305,11 +1168,8 @@ test.describe("Pipeline Node Data", () => {
           state: "streaming",
           event_id: 1,
           event_name: "Sunday Service",
-          buffer_progress: 0.8,
           target_delay_secs: 120,
-          current_delay_secs: 96.0,
           session_start: null,
-          predicted: false,
           local_buffer_chunks: 5,
           s3_queue_chunks: 42,
         },
@@ -1390,7 +1250,7 @@ test.describe("Pipeline Node Data", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    // Streaming state with good buffer_progress
+    // Streaming state — S3 dot shows active when delivery is running
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -1398,11 +1258,8 @@ test.describe("Pipeline Node Data", () => {
           state: "streaming",
           event_id: 1,
           event_name: "Test",
-          buffer_progress: 0.8,
           target_delay_secs: 120,
-          current_delay_secs: 96.0,
           session_start: null,
-          predicted: false,
           local_buffer_chunks: 0,
           s3_queue_chunks: 53,
         },
@@ -1412,32 +1269,6 @@ test.describe("Pipeline Node Data", () => {
     // S3 dot is at index 3 (OBS=0, RTMP=1, Local Buffer=2, S3/VPS=3)
     const s3Dot = page.locator(".pipeline-node .status-dot").nth(3);
     await expect(s3Dot).toHaveClass(/active/, { timeout: 5000 });
-  });
-
-  test("S3 dot shows warning when progress 40-75%", async ({ page }) => {
-    await page.goto("/");
-    await page.waitForTimeout(1000);
-
-    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
-      data: {
-        type: "PipelineState",
-        data: {
-          state: "buffering",
-          event_id: 1,
-          event_name: "Test",
-          buffer_progress: 0.5,
-          target_delay_secs: 120,
-          current_delay_secs: 60.0,
-          session_start: null,
-          predicted: false,
-          local_buffer_chunks: 3,
-          s3_queue_chunks: 10,
-        },
-      },
-    });
-
-    const s3Dot = page.locator(".pipeline-node .status-dot").nth(3);
-    await expect(s3Dot).toHaveClass(/warning/, { timeout: 5000 });
   });
 
   test("VPS dot is active when delivery running", async ({ page }) => {
