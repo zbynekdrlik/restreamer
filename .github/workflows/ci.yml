@@ -2249,6 +2249,86 @@ jobs:
           Write-Host "  DELIVERY CONFIRMED: All $($epReadings.Count) endpoints progressing"
           Write-Host "=========================================="
 
+      - name: Verify dashboard cache bar via Playwright
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          Write-Host "Installing Playwright and verifying dashboard..."
+          Set-Location "$env:GITHUB_WORKSPACE\e2e"
+          npm ci --silent 2>&1 | Out-Null
+          npx playwright install chromium --with-deps 2>&1 | Out-Null
+
+          # Write inline Playwright test
+          $testScript = @'
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage();
+
+            // Collect console errors
+            const consoleErrors = [];
+            page.on('console', msg => {
+              if (msg.type() === 'error' || msg.type() === 'warning') {
+                consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
+              }
+            });
+
+            await page.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
+            await page.waitForTimeout(5000); // Wait for WebSocket data
+
+            // Check cache bar is visible and shows a value > 0
+            const cacheLabel = await page.locator('.cache-bar-label').textContent().catch(() => null);
+            console.log('Cache bar label:', cacheLabel);
+
+            if (!cacheLabel) {
+              console.error('FAILED: Cache bar label not found on dashboard');
+              process.exit(1);
+            }
+
+            // Extract delay value from label (e.g., "Cache: 120s / 300s target (healthy)")
+            const match = cacheLabel.match(/(\d+)s/);
+            if (!match) {
+              console.error('FAILED: Could not parse delay from cache bar label:', cacheLabel);
+              process.exit(1);
+            }
+
+            const delayValue = parseInt(match[1]);
+            console.log('Cache delay on dashboard:', delayValue, 's');
+
+            if (delayValue === 0) {
+              console.error('FAILED: Dashboard shows 0s cache delay — cache bar stuck at zero');
+              process.exit(1);
+            }
+
+            // Check cache bar fill element exists and has a class (not empty)
+            const fillClass = await page.locator('.cache-bar-fill').getAttribute('class').catch(() => null);
+            console.log('Cache bar fill class:', fillClass);
+
+            if (!fillClass || fillClass.includes('exhausted')) {
+              console.error('FAILED: Cache bar shows exhausted state');
+              process.exit(1);
+            }
+
+            // Check for console errors (filter allowed ones)
+            const allowed = [/favicon/i, /Autofill/i];
+            const real = consoleErrors.filter(e => !allowed.some(r => r.test(e)));
+            if (real.length > 0) {
+              console.error('FAILED: Browser console errors:', real);
+              process.exit(1);
+            }
+
+            console.log('Dashboard verification PASSED: cache bar shows', delayValue, 's, class:', fillClass);
+            await browser.close();
+          })();
+          '@
+
+          $testScript | Out-File -FilePath "dashboard-check.cjs" -Encoding UTF8
+          node dashboard-check.cjs
+          if ($LASTEXITCODE -ne 0) {
+            throw "FAILED: Dashboard cache bar verification failed"
+          }
+          Remove-Item "dashboard-check.cjs" -ErrorAction SilentlyContinue
+
       - name: Verify cache delay meets target
         shell: powershell
         timeout-minutes: 5
