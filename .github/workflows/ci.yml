@@ -1832,6 +1832,10 @@ jobs:
           }
           Write-Host "Event id: $($targetEvent.id), name: $($targetEvent.name)"
 
+          # Save original cache_delay_secs before changing (restore at end)
+          $origCacheDelay = $targetEvent.cache_delay_secs
+          Write-Host "Original cache_delay_secs: $origCacheDelay"
+
           # Set cache delay to 300s for testing custom delay fill
           $patchBody = @{ cache_delay_secs = 300 } | ConvertTo-Json
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
@@ -2148,6 +2152,9 @@ jobs:
 
               if ($response.server_ready -and $allAlive) {
                 # Verify buffer fill was monotonic (sent chunks always increasing)
+                if ($fillReadings.Count -lt 3) {
+                  throw "FAILED: Only $($fillReadings.Count) buffer fill readings captured (need >= 3). VPS started too fast or fill monitoring broken."
+                }
                 if ($fillReadings.Count -ge 3) {
                   for ($j = 1; $j -lt $fillReadings.Count; $j++) {
                     if ($fillReadings[$j] -lt $fillReadings[$j-1]) {
@@ -3097,6 +3104,31 @@ jobs:
           } catch {
             Write-Host "ERROR: Failed to restore OBS settings: $_"
             Write-Host "OBS may be misconfigured - check stream settings manually"
+            exit 1
+          }
+
+      - name: Restore original cache_delay_secs
+        if: always()
+        shell: powershell
+        env:
+          EVENT_NAME: "E2E-Test"
+        run: |
+          try {
+            $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+            $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+            if ($targetEvent) {
+              # Restore to config default (120s) — CI set it to 300
+              $patchBody = @{ cache_delay_secs = 120 } | ConvertTo-Json
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
+                -Method PATCH -Body $patchBody -ContentType "application/json" -TimeoutSec 10
+              $verify = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" -TimeoutSec 5
+              if ($verify.cache_delay_secs -ne 120) {
+                throw "FAILED: cache_delay_secs restore failed — expected 120, got $($verify.cache_delay_secs)"
+              }
+              Write-Host "Restored cache_delay_secs=120 (config default)"
+            }
+          } catch {
+            Write-Host "ERROR: Failed to restore cache_delay_secs: $_"
             exit 1
           }
 
