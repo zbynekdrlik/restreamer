@@ -148,8 +148,13 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 .obs-toggle-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* Per-endpoint cache */
-.endpoint-cache { width: 100%; }
-.endpoint-cache-label { font-size: 11px; color: var(--text-secondary); }
+.endpoint-cache { width: 100%; position: relative; }
+.endpoint-cache-label {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 600; color: var(--text-primary);
+    z-index: 1; pointer-events: none;
+}
 
 /* Buffering indicator */
 .buffering-indicator {
@@ -160,8 +165,8 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
     text-align: center;
 }
 
-/* Buffer bar — NEW inline (Task 5) */
-.buffer-bar { height: 4px; background: var(--bg-primary); border-radius: var(--radius); overflow: hidden; width: 100%; margin-top: var(--spacing-xs); }
+/* Buffer bar */
+.buffer-bar { height: 22px; background: var(--bg-primary); border-radius: var(--radius); overflow: hidden; width: 100%; margin-top: var(--spacing-xs); }
 .buffer-bar-fill { height: 100%; border-radius: var(--radius); transition: width 0.5s ease; }
 .buffer-bar-fill.healthy { background: var(--status-ok); }
 .buffer-bar-fill.warning { background: var(--status-warn); }
