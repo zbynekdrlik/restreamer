@@ -1442,8 +1442,10 @@ jobs:
         run: |
           # OBS Advanced mode stores encoder bitrate in streamEncoder.json
           # CI requires 12000 kbps for YouTube 'good' health verdict
-          $profileDir = "$env:APPDATA\obs-studio\basic\profiles"
-          $globalIni = "$env:APPDATA\obs-studio\global.ini"
+          # CI runner runs as SYSTEM — use newlevel user's AppData explicitly
+          $userAppData = "C:\Users\newlevel\AppData\Roaming"
+          $profileDir = "$userAppData\obs-studio\basic\profiles"
+          $globalIni = "$userAppData\obs-studio\global.ini"
 
           # Detect active profile from OBS global config
           $profileMatch = Select-String -Path $globalIni -Pattern "^Profile=" -ErrorAction SilentlyContinue
