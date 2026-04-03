@@ -20,11 +20,8 @@ pub struct PipelineState {
     pub state: String,
     pub event_id: Option<i64>,
     pub event_name: Option<String>,
-    pub buffer_progress: f64,
     pub target_delay_secs: u64,
-    pub current_delay_secs: f64,
     pub session_start: Option<String>,
-    pub predicted: bool,
     pub local_buffer_chunks: i64,
     pub s3_queue_chunks: i64,
 }

@@ -17,67 +17,8 @@ pub fn OperatorDashboard() -> impl IntoView {
     view! {
         <div class="operator-dashboard">
             <ControlBar />
-            <CacheBar />
             <Pipeline />
             <AddEndpointModal show=show_add_modal />
-        </div>
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CacheBar — prominent buffer fill progress bar
-// ---------------------------------------------------------------------------
-
-#[component]
-fn CacheBar() -> impl IntoView {
-    let store = use_context::<DashboardStore>().expect("DashboardStore");
-
-    let progress = move || store.pipeline_state.get().buffer_progress;
-    let target = move || store.pipeline_state.get().target_delay_secs;
-    let current = move || store.pipeline_state.get().current_delay_secs;
-    let is_predicted = move || store.pipeline_state.get().predicted;
-    let is_exhausted = move || store.pipeline_state.get().state == "buffer_exhausted";
-    let is_visible = move || {
-        let ps = store.pipeline_state.get();
-        ps.state == "buffering" || ps.state == "streaming" || ps.state == "buffer_exhausted"
-    };
-    let bar_class = move || {
-        if is_exhausted() {
-            "cache-bar-fill exhausted"
-        } else if is_predicted() {
-            "cache-bar-fill predicted"
-        } else if progress() >= 0.75 {
-            "cache-bar-fill healthy"
-        } else if progress() >= 0.40 {
-            "cache-bar-fill warning"
-        } else {
-            "cache-bar-fill critical"
-        }
-    };
-
-    view! {
-        <div class="cache-bar-container" style:display=move || if is_visible() { "block" } else { "none" }>
-            <div class="cache-bar">
-                <div class={bar_class} style:width=move || format!("{}%", (progress() * 100.0).min(100.0))></div>
-            </div>
-            <span class="cache-bar-label">
-                {move || {
-                    if is_exhausted() {
-                        "Buffer Exhausted \u{2014} delivery VPS has no remaining cache".to_string()
-                    } else if is_predicted() {
-                        format!("~{}s / {}s target (predicted \u{2014} VPS unreachable)", current() as u64, target())
-                    } else {
-                        let zone = if progress() >= 0.75 {
-                            "healthy"
-                        } else if progress() >= 0.40 {
-                            "building"
-                        } else {
-                            "low"
-                        };
-                        format!("Cache: {}s / {}s target ({zone})", current() as u64, target())
-                    }
-                }}
-            </span>
         </div>
     }
 }
@@ -376,21 +317,13 @@ fn Pipeline() -> impl IntoView {
     let s3_dot = move || {
         let p = ps();
         let s = delivery_status();
-        // Active if delivery VPS is running (even before pipeline enters buffering)
         if s == "running" || s == "delivering" {
             if p.state == "buffer_exhausted" {
                 "status-dot error"
-            } else if p.predicted {
-                "status-dot warning"
-            } else if p.buffer_progress >= 0.75 || !is_delivering() {
-                "status-dot active"
-            } else if p.buffer_progress >= 0.40 {
-                "status-dot warning"
             } else {
-                "status-dot error"
+                "status-dot active"
             }
         } else if is_delivering() {
-            // Pipeline is buffering but VPS not yet started
             "status-dot warning"
         } else {
             "status-dot"
@@ -514,6 +447,19 @@ fn EndpointTree() -> impl IntoView {
 
     view! {
         <div class="endpoint-tree" style:display=move || if has_endpoints.get() || is_running.get() { "block" } else { "none" }>
+            <Show when=move || {
+                let ps = store.pipeline_state.get();
+                ps.state == "buffering"
+                    && store.delivery.get().endpoints.iter().all(|ep| !ep.alive)
+            } fallback=|| ()>
+                <div class="buffering-indicator">
+                    {move || {
+                        let ps = store.pipeline_state.get();
+                        let secs = ps.s3_queue_chunks * 5;
+                        format!("Buffering: {} chunks on S3 (~{}s)", ps.s3_queue_chunks, secs)
+                    }}
+                </div>
+            </Show>
             <For
                 each=move || store.delivery.get().endpoints.clone()
                 key=|ep| ep.alias.clone()
@@ -618,6 +564,33 @@ fn EndpointTree() -> impl IntoView {
                                         }
                                     }}
                                 </span>
+                                {move || {
+                                    let ep = ep_data.get();
+                                    let target = store.pipeline_state.get().target_delay_secs;
+                                    let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
+                                    if is_pending || target == 0 {
+                                        None
+                                    } else {
+                                        let progress = (ep.chunk_delay_secs / target as f64).min(1.0);
+                                        let bar_class = if progress >= 0.75 {
+                                            "buffer-bar-fill healthy"
+                                        } else if progress >= 0.40 {
+                                            "buffer-bar-fill warning"
+                                        } else {
+                                            "buffer-bar-fill critical"
+                                        };
+                                        Some(view! {
+                                            <div class="endpoint-cache">
+                                                <div class="buffer-bar">
+                                                    <div class=bar_class style:width=format!("{}%", (progress * 100.0).min(100.0))></div>
+                                                </div>
+                                                <span class="endpoint-cache-label">
+                                                    {format!("{}s / {}s cache", ep.chunk_delay_secs as u64, target)}
+                                                </span>
+                                            </div>
+                                        })
+                                    }
+                                }}
                                 {move || {
                                     ep_data.get().stall_reason.clone().map(|r| view! {
                                         <span class="endpoint-anomaly">{format!("stall: {r}")}</span>
