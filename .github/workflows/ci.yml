@@ -2251,12 +2251,13 @@ jobs:
 
       - name: Verify dashboard cache bar via Playwright
         shell: powershell
-        timeout-minutes: 3
+        timeout-minutes: 5
         run: |
           Write-Host "Installing Playwright and verifying dashboard..."
           Set-Location "$env:GITHUB_WORKSPACE\e2e"
-          npm ci --silent 2>&1 | Out-Null
-          npx playwright install chromium --with-deps 2>&1 | Out-Null
+          # Use cmd /c to avoid PowerShell treating npm stderr warnings as errors
+          cmd /c "npm ci --silent 2>&1" | Out-Null
+          cmd /c "npx playwright install chromium 2>&1"
 
           # Write inline Playwright test
           $testScript = @'
@@ -3203,7 +3204,7 @@ jobs:
                 -Method PATCH -Body $patchBody -ContentType "application/json" -TimeoutSec 10
               $verify = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" -TimeoutSec 5
               if ($verify.cache_delay_secs -ne 120) {
-                throw "FAILED: cache_delay_secs restore failed — expected 120, got $($verify.cache_delay_secs)"
+                throw "FAILED: cache_delay_secs restore failed - expected 120, got $($verify.cache_delay_secs)"
               }
               Write-Host "Restored cache_delay_secs=120 (config default)"
             }
