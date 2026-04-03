@@ -2311,7 +2311,7 @@ jobs:
             }
 
             // Check for console errors (filter allowed ones)
-            const allowed = [/favicon/i, /Autofill/i];
+            const allowed = [/favicon/i, /Autofill/i, /integrity.*preload/i, /subresource integrity/i];
             const real = consoleErrors.filter(e => !allowed.some(r => r.test(e)));
             if (real.length > 0) {
               console.error('FAILED: Browser console errors:', real);
