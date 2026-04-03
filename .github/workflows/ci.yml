@@ -2255,9 +2255,9 @@ jobs:
         run: |
           Write-Host "Installing Playwright and verifying dashboard..."
           Set-Location "$env:GITHUB_WORKSPACE\e2e"
-          # Use cmd /c to avoid PowerShell treating npm stderr warnings as errors
-          cmd /c "npm ci --silent 2>&1" | Out-Null
-          cmd /c "npx playwright install chromium 2>&1"
+          # Install playwright package and browser
+          cmd /c "npm install playwright 2>&1" | Out-Null
+          cmd /c "npx playwright install chromium 2>&1" | Out-Null
 
           # Write inline Playwright test
           $testScript = @'
