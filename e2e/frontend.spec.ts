@@ -781,7 +781,7 @@ test.describe("Per-Endpoint Cache Bar", () => {
       },
     });
 
-    // Warning level: chunk_delay_secs = 40 (33% of 120)
+    // Warning level: chunk_delay_secs = 60 (50% of 120, between 40-75%)
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "DeliveryStatus",
@@ -797,7 +797,7 @@ test.describe("Per-Endpoint Cache Bar", () => {
               current_chunk_id: 20,
               bytes_processed_total: 1000000,
               chunks_processed: 20,
-              chunk_delay_secs: 40.0,
+              chunk_delay_secs: 60.0,
               is_fast: false,
             },
           ],

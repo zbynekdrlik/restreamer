@@ -446,7 +446,7 @@ fn EndpointTree() -> impl IntoView {
     });
 
     view! {
-        <div class="endpoint-tree" style:display=move || if has_endpoints.get() || is_running.get() { "block" } else { "none" }>
+        <div class="endpoint-tree" style:display=move || if has_endpoints.get() || is_running.get() || store.pipeline_state.get().state == "buffering" { "block" } else { "none" }>
             <Show when=move || {
                 let ps = store.pipeline_state.get();
                 ps.state == "buffering"
