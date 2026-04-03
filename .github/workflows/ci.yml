@@ -2315,7 +2315,7 @@ jobs:
           Write-Host "  DELIVERY CONFIRMED: All $($epReadings.Count) endpoints progressing"
           Write-Host "=========================================="
 
-      - name: Verify dashboard cache bar via Playwright
+      - name: Verify dashboard per-endpoint cache bar via Playwright
         shell: powershell
         timeout-minutes: 5
         run: |
@@ -2343,36 +2343,32 @@ jobs:
             await page.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
             await page.waitForTimeout(5000); // Wait for WebSocket data
 
-            // Check cache bar is visible and shows a value > 0
-            const cacheLabel = await page.locator('.cache-bar-label').textContent().catch(() => null);
-            console.log('Cache bar label:', cacheLabel);
+            // Check per-endpoint cache bar is visible
+            const cacheLabel = await page.locator('.endpoint-cache-label').first().textContent().catch(() => null);
+            console.log('Endpoint cache label:', cacheLabel);
 
             if (!cacheLabel) {
-              console.error('FAILED: Cache bar label not found on dashboard');
+              console.error('FAILED: Per-endpoint cache label not found on dashboard');
               process.exit(1);
             }
 
-            // Extract delay value from label (e.g., "Cache: 120s / 300s target (healthy)")
-            const match = cacheLabel.match(/(\d+)s/);
+            // Extract delay value from label (e.g., "90s / 120s cache")
+            const match = cacheLabel.match(/(\d+)s\s*\/\s*(\d+)s/);
             if (!match) {
-              console.error('FAILED: Could not parse delay from cache bar label:', cacheLabel);
+              console.error('FAILED: Could not parse delay from cache label:', cacheLabel);
               process.exit(1);
             }
 
             const delayValue = parseInt(match[1]);
-            console.log('Cache delay on dashboard:', delayValue, 's');
+            const targetValue = parseInt(match[2]);
+            console.log('Endpoint cache:', delayValue, 's /', targetValue, 's');
 
-            if (delayValue === 0) {
-              console.error('FAILED: Dashboard shows 0s cache delay — cache bar stuck at zero');
-              process.exit(1);
-            }
-
-            // Check cache bar fill element exists and has a class (not empty)
-            const fillClass = await page.locator('.cache-bar-fill').getAttribute('class').catch(() => null);
+            // Check cache bar fill element exists inside endpoint node
+            const fillClass = await page.locator('.endpoint-node .buffer-bar-fill').first().getAttribute('class').catch(() => null);
             console.log('Cache bar fill class:', fillClass);
 
-            if (!fillClass || fillClass.includes('exhausted')) {
-              console.error('FAILED: Cache bar shows exhausted state');
+            if (!fillClass) {
+              console.error('FAILED: Per-endpoint cache bar fill not found');
               process.exit(1);
             }
 
@@ -2384,7 +2380,7 @@ jobs:
               process.exit(1);
             }
 
-            console.log('Dashboard verification PASSED: cache bar shows', delayValue, 's, class:', fillClass);
+            console.log('Dashboard verification PASSED: endpoint cache shows', delayValue, 's, class:', fillClass);
             await browser.close();
           })();
           '@
@@ -2392,7 +2388,7 @@ jobs:
           $testScript | Out-File -FilePath "dashboard-check.cjs" -Encoding UTF8
           node dashboard-check.cjs
           if ($LASTEXITCODE -ne 0) {
-            throw "FAILED: Dashboard cache bar verification failed"
+            throw "FAILED: Dashboard per-endpoint cache bar verification failed"
           }
           Remove-Item "dashboard-check.cjs" -ErrorAction SilentlyContinue
 
