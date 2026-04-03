@@ -166,7 +166,7 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 }
 
 /* Buffer bar */
-.buffer-bar { height: 22px; background: var(--bg-primary); border-radius: var(--radius); overflow: hidden; width: 100%; margin-top: var(--spacing-xs); }
+.buffer-bar { height: 18px; background: var(--bg-primary); border-radius: var(--radius); overflow: hidden; width: 100%; margin-top: 2px; }
 .buffer-bar-fill { height: 100%; border-radius: var(--radius); transition: width 0.5s ease; }
 .buffer-bar-fill.healthy { background: var(--status-ok); }
 .buffer-bar-fill.warning { background: var(--status-warn); }
@@ -214,9 +214,9 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 
 .btn-remove-endpoint {
     margin-left: auto; background: none; border: 1px solid var(--status-error);
-    color: var(--status-error); border-radius: var(--radius); padding: 0 8px;
-    font-size: 14px; cursor: pointer; line-height: 1.4; opacity: 0.5;
-    min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center;
+    color: var(--status-error); border-radius: var(--radius); padding: 0 6px;
+    font-size: 12px; cursor: pointer; line-height: 1.4; opacity: 0.4;
+    min-width: 24px; min-height: 24px; display: flex; align-items: center; justify-content: center;
 }
 .btn-remove-endpoint:hover { opacity: 1; }
 /* Add Endpoint Button */
@@ -279,8 +279,8 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 .endpoint-branch { display: flex; flex-direction: row; align-items: center; gap: var(--spacing-xs); }
 .branch-connector { color: var(--text-secondary); font-size: 14px; padding-left: var(--spacing-lg); user-select: none; line-height: 1; }
 .endpoint-node {
-    display: flex; align-items: center; flex-wrap: wrap; gap: var(--spacing-sm);
-    padding: 8px 14px; border: var(--border-w) solid var(--border);
+    display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+    padding: 4px 10px; border: var(--border-w) solid var(--border);
     border-radius: var(--radius); background: var(--bg-card);
     border-left: 2px solid var(--border); flex: 1;
 }
