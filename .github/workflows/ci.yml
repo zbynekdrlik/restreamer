@@ -1436,6 +1436,70 @@ jobs:
 
           try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
 
+      - name: Set OBS encoder bitrate to 12000 for CI
+        id: obs-bitrate
+        shell: powershell
+        run: |
+          # OBS Advanced mode stores encoder bitrate in streamEncoder.json
+          # CI requires 12000 kbps for YouTube 'good' health verdict
+          $profileDir = "$env:APPDATA\obs-studio\basic\profiles"
+          $globalIni = "$env:APPDATA\obs-studio\global.ini"
+
+          # Detect active profile from OBS global config
+          $profileMatch = Select-String -Path $globalIni -Pattern "^Profile=" -ErrorAction SilentlyContinue
+          if ($profileMatch) {
+            $activeProfile = $profileMatch.Line.Split("=", 2)[1].Trim()
+          }
+          if (-not $activeProfile) {
+            # Fallback: use first profile directory that has streamEncoder.json
+            $activeProfile = (Get-ChildItem $profileDir -Directory | Where-Object {
+              Test-Path "$($_.FullName)\streamEncoder.json"
+            } | Select-Object -First 1).Name
+          }
+          if (-not $activeProfile) {
+            throw "Cannot detect active OBS profile"
+          }
+
+          $encoderFile = "$profileDir\$activeProfile\streamEncoder.json"
+          Write-Host "Active profile: $activeProfile"
+          Write-Host "Encoder config: $encoderFile"
+
+          if (Test-Path $encoderFile) {
+            $encoder = Get-Content $encoderFile -Raw | ConvertFrom-Json
+            $origBitrate = $encoder.bitrate
+            Write-Host "Original bitrate: $origBitrate"
+            "ORIG_BITRATE=$origBitrate" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "ENCODER_FILE=$encoderFile" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+            if ($origBitrate -ne 12000) {
+              $encoder.bitrate = 12000
+              $encoder | ConvertTo-Json | Set-Content $encoderFile -Encoding UTF8
+              Write-Host "Bitrate set to 12000 for CI (was $origBitrate)"
+
+              # OBS reads streamEncoder.json on stream start, so restart OBS
+              # to ensure the new bitrate takes effect
+              Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 5
+              schtasks.exe /run /tn "Start OBS Studio"
+              if ($LASTEXITCODE -ne 0) { throw "Failed to restart OBS after bitrate change" }
+              Start-Sleep -Seconds 20
+
+              $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+              if (-not $obs) { throw "OBS did not restart after bitrate change" }
+              $mem = $obs.WorkingSet64 / 1MB
+              if ($mem -lt 50) { throw "OBS in broken state after restart ($([math]::Round($mem))MB)" }
+              Write-Host "OBS restarted with 12000 kbps bitrate (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
+            } else {
+              Write-Host "Bitrate already 12000, no change needed"
+              "ORIG_BITRATE=12000" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+              "ENCODER_FILE=$encoderFile" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            }
+          } else {
+            Write-Host "WARNING: streamEncoder.json not found at $encoderFile - cannot set bitrate"
+            "ORIG_BITRATE=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "ENCODER_FILE=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
       - name: "Baseline: OBS direct-to-YouTube RTMP (prove OBS works)"
         shell: powershell
         timeout-minutes: 4
@@ -3087,6 +3151,45 @@ jobs:
           }
 
           throw "FAILED: YouTube is still receiving stream data after deactivation ($maxRetries attempts, ~$($maxRetries * $retryDelay)s). Deactivation did not stop delivery to YouTube."
+
+      - name: Restore OBS encoder bitrate
+        if: always()
+        shell: powershell
+        run: |
+          $origBitrate = "${{ steps.obs-bitrate.outputs.ORIG_BITRATE }}"
+          $encoderFile = "${{ steps.obs-bitrate.outputs.ENCODER_FILE }}"
+
+          if (-not $origBitrate -or -not $encoderFile) {
+            Write-Host "No original bitrate saved - skipping restore"
+            exit 0
+          }
+
+          $origBitrateInt = [int]$origBitrate
+          if (Test-Path $encoderFile) {
+            $encoder = Get-Content $encoderFile -Raw | ConvertFrom-Json
+            if ($encoder.bitrate -ne $origBitrateInt) {
+              $ciBitrate = $encoder.bitrate
+              $encoder.bitrate = $origBitrateInt
+              $encoder | ConvertTo-Json | Set-Content $encoderFile -Encoding UTF8
+              Write-Host "Restored bitrate to $origBitrateInt (was $ciBitrate)"
+
+              # Restart OBS to pick up restored bitrate
+              Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 5
+              schtasks.exe /run /tn "Start OBS Studio"
+              Start-Sleep -Seconds 20
+              $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+              if ($obs) {
+                Write-Host "OBS restarted with restored bitrate $origBitrateInt (PID: $($obs.Id))"
+              } else {
+                Write-Host "WARNING: OBS did not restart after bitrate restore"
+              }
+            } else {
+              Write-Host "Bitrate already at $origBitrateInt, no restore needed"
+            }
+          } else {
+            Write-Host "WARNING: Encoder file not found at $encoderFile"
+          }
 
       - name: Restore OBS stream settings
         if: always()
