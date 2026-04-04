@@ -106,9 +106,16 @@ async fn uploader_full_flow_success() {
     let temp_dir = TempDir::new().unwrap();
     let chunk_path = create_test_chunk_file(&temp_dir, "chunk_1.bin", b"test chunk data");
 
-    db::insert_chunk(&pool, event.id, chunk_path.to_str().unwrap(), 17, "abc123")
-        .await
-        .unwrap();
+    db::insert_chunk(
+        &pool,
+        event.id,
+        chunk_path.to_str().unwrap(),
+        17,
+        "abc123",
+        0,
+    )
+    .await
+    .unwrap();
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
@@ -152,9 +159,16 @@ async fn uploader_s3_failure_keeps_chunk_unsent() {
     let temp_dir = TempDir::new().unwrap();
     let chunk_path = create_test_chunk_file(&temp_dir, "chunk_s3fail.bin", b"data");
 
-    db::insert_chunk(&pool, event.id, chunk_path.to_str().unwrap(), 4, "md5hash")
-        .await
-        .unwrap();
+    db::insert_chunk(
+        &pool,
+        event.id,
+        chunk_path.to_str().unwrap(),
+        4,
+        "md5hash",
+        0,
+    )
+    .await
+    .unwrap();
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
@@ -202,6 +216,7 @@ async fn uploader_multiple_chunks_uploads_concurrently() {
             path.to_str().unwrap(),
             12 + i as i64,
             &format!("md5_{i}"),
+            0,
         )
         .await
         .unwrap();
@@ -240,7 +255,7 @@ async fn uploader_chunk_without_event_skipped() {
     let temp_dir = TempDir::new().unwrap();
     let chunk_path = create_test_chunk_file(&temp_dir, "chunk_orphan.bin", b"data");
 
-    db::insert_chunk(&pool, 99, chunk_path.to_str().unwrap(), 4, "md5hash")
+    db::insert_chunk(&pool, 99, chunk_path.to_str().unwrap(), 4, "md5hash", 0)
         .await
         .unwrap();
 
@@ -276,9 +291,16 @@ async fn uploader_ws_event_sent_on_upload() {
     let temp_dir = TempDir::new().unwrap();
     let chunk_path = create_test_chunk_file(&temp_dir, "chunk_ws.bin", b"data");
 
-    db::insert_chunk(&pool, event.id, chunk_path.to_str().unwrap(), 4, "md5hash")
-        .await
-        .unwrap();
+    db::insert_chunk(
+        &pool,
+        event.id,
+        chunk_path.to_str().unwrap(),
+        4,
+        "md5hash",
+        0,
+    )
+    .await
+    .unwrap();
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(16);

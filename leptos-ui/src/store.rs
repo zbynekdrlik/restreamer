@@ -24,6 +24,7 @@ pub struct PipelineState {
     pub session_start: Option<String>,
     pub local_buffer_chunks: i64,
     pub s3_queue_chunks: i64,
+    pub cache_duration_secs: f64,
 }
 
 /// Activity feed entry from WebSocket.

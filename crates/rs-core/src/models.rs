@@ -30,6 +30,7 @@ pub struct ChunkRecord {
     pub in_process: bool,
     pub sent: bool,
     pub sequence_number: i64,
+    pub duration_ms: i64,
 }
 
 /// Endpoint configuration (e.g., YouTube HLS, Facebook RTMP).
@@ -154,6 +155,8 @@ pub enum WsEvent {
         local_buffer_chunks: i64,
         #[serde(default)]
         s3_queue_chunks: i64,
+        #[serde(default)]
+        cache_duration_secs: f64,
     },
     ObsStatus {
         connected: bool,
@@ -317,6 +320,7 @@ mod tests {
                 session_start: Some("2026-01-01T10:00:00Z".to_string()),
                 local_buffer_chunks: 3,
                 s3_queue_chunks: 15,
+                cache_duration_secs: 75.0,
             },
             WsEvent::ObsStatus {
                 connected: true,

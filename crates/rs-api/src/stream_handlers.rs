@@ -160,6 +160,7 @@ pub async fn start_stream(
                     session_start: Some(chrono::Utc::now().to_rfc3339()),
                     local_buffer_chunks: 0,
                     s3_queue_chunks: 0,
+                    cache_duration_secs: 0.0,
                 });
             }
             Err(e) => {

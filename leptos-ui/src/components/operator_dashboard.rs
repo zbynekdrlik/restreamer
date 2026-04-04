@@ -303,8 +303,7 @@ fn Pipeline() -> impl IntoView {
     let local_buffer_metric = move || {
         let chunks = local_chunks();
         if chunks > 0 {
-            // ~5s per chunk
-            format!("{} chunks (~{}s)", chunks, chunks * 5)
+            format!("{} chunks", chunks)
         } else {
             "0 chunks".to_string()
         }
@@ -456,8 +455,7 @@ fn EndpointTree() -> impl IntoView {
                 <div class="buffering-indicator">
                     {move || {
                         let ps = store.pipeline_state.get();
-                        let secs = ps.s3_queue_chunks * 5;
-                        format!("Buffering: {} chunks on S3 (~{}s)", ps.s3_queue_chunks, secs)
+                        format!("Buffering: {} chunks on S3 (~{}s)", ps.s3_queue_chunks, ps.cache_duration_secs as u64)
                     }}
                 </div>
             </Show>
@@ -623,7 +621,7 @@ fn EndpointTree() -> impl IntoView {
                                     }
                                     let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
                                     let cache_secs = if is_pending {
-                                        ps.s3_queue_chunks as f64 * 5.0
+                                        ps.cache_duration_secs
                                     } else {
                                         ep.chunk_delay_secs
                                     };

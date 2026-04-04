@@ -77,6 +77,8 @@ enum WsEvent {
         local_buffer_chunks: i64,
         #[serde(default)]
         s3_queue_chunks: i64,
+        #[serde(default)]
+        cache_duration_secs: f64,
     },
     ObsStatus {
         connected: bool,
@@ -326,6 +328,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
             session_start,
             local_buffer_chunks,
             s3_queue_chunks,
+            cache_duration_secs,
         } => {
             store.pipeline_state.set(crate::store::PipelineState {
                 state,
@@ -335,6 +338,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                 session_start,
                 local_buffer_chunks,
                 s3_queue_chunks,
+                cache_duration_secs,
             });
         }
         WsEvent::ObsStatus {

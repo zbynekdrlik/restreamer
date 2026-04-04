@@ -205,6 +205,7 @@ async fn delivery_broadcast_loop(
                     session_start: None,
                     local_buffer_chunks: 0,
                     s3_queue_chunks: 0,
+                    cache_duration_secs: 0.0,
                 });
                 prev_alive.clear();
                 session_start_time = None;
@@ -293,6 +294,10 @@ async fn delivery_broadcast_loop(
                     .unwrap_or(0);
                 let s3_queue = (sent_chunks - max_delivery_chunk).max(0);
 
+                let cache_duration = db::get_cache_duration_secs(&pool, event.id)
+                    .await
+                    .unwrap_or(0.0);
+
                 let _ = ws_tx.send(WsEvent::PipelineState {
                     state: state_str.to_string(),
                     event_id: Some(event.id),
@@ -301,6 +306,7 @@ async fn delivery_broadcast_loop(
                     session_start: session_start_time.clone(),
                     local_buffer_chunks: pending_chunks,
                     s3_queue_chunks: s3_queue,
+                    cache_duration_secs: cache_duration,
                 });
 
                 // Emit ActivityFeed for endpoint state transitions
@@ -334,6 +340,8 @@ async fn delivery_broadcast_loop(
                     let sent = db::get_sent_chunk_count_for_event(&pool, eid)
                         .await
                         .unwrap_or(0);
+                    let cache_duration =
+                        db::get_cache_duration_secs(&pool, eid).await.unwrap_or(0.0);
                     let _ = ws_tx.send(WsEvent::PipelineState {
                         state: last_state_str.clone(),
                         event_id: Some(eid),
@@ -342,6 +350,7 @@ async fn delivery_broadcast_loop(
                         session_start: session_start_time.clone(),
                         local_buffer_chunks: pending,
                         s3_queue_chunks: sent,
+                        cache_duration_secs: cache_duration,
                     });
                 }
             }

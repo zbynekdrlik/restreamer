@@ -185,6 +185,7 @@ impl ServiceCore {
                                     &path_str,
                                     chunk_info.size as i64,
                                     &chunk_info.md5,
+                                    chunk_info.duration_ms as i64,
                                 )
                                 .await
                                 {

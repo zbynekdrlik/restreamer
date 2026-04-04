@@ -14,6 +14,7 @@ pub struct ChunkInfo {
     pub size: usize,
     pub md5: String,
     pub index: u64,
+    pub duration_ms: u64,
 }
 
 /// Maximum buffer size before a forced flush (50 MB).
@@ -59,6 +60,7 @@ struct PendingChunkWrite {
     size: usize,
     md5: String,
     index: u64,
+    duration_ms: u64,
 }
 
 impl FlvChunkSink {
@@ -313,6 +315,10 @@ impl FlvChunkSink {
         let size = inner.buffer.len();
         let data = std::mem::replace(&mut inner.buffer, Vec::with_capacity(128 * 1024));
 
+        let duration_ms = inner
+            .chunk_start
+            .map(|s| s.elapsed().as_millis() as u64)
+            .unwrap_or(0);
         inner.chunk_start = None;
 
         Some(PendingChunkWrite {
@@ -321,6 +327,7 @@ impl FlvChunkSink {
             size,
             md5,
             index,
+            duration_ms,
         })
     }
 
@@ -388,6 +395,7 @@ impl FlvChunkSink {
             size: pending.size,
             md5: pending.md5,
             index: pending.index,
+            duration_ms: pending.duration_ms,
         };
 
         if let Err(e) = chunk_tx.send(chunk_info) {
