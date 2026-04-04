@@ -168,9 +168,9 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 /* Buffer bar */
 .buffer-bar { height: 18px; background: var(--bg-primary); border-radius: var(--radius); overflow: hidden; width: 100%; margin-top: 2px; }
 .buffer-bar-fill { height: 100%; border-radius: var(--radius); transition: width 0.5s ease; }
-.buffer-bar-fill.healthy { background: var(--status-ok); }
-.buffer-bar-fill.warning { background: var(--status-warn); }
-.buffer-bar-fill.critical { background: var(--status-error); animation: pulse-bar 1.5s ease-in-out infinite; }
+.buffer-bar-fill.healthy { background: rgba(34,197,94,0.35); }
+.buffer-bar-fill.warning { background: rgba(234,179,8,0.35); }
+.buffer-bar-fill.critical { background: rgba(239,68,68,0.35); animation: pulse-bar 1.5s ease-in-out infinite; }
 @keyframes pulse-bar { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 /* Endpoint Groups — current two-column layout */
