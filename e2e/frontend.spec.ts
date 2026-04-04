@@ -842,7 +842,7 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    // Broadcast PipelineState with S3 chunks buffered
+    // Broadcast PipelineState with S3 chunks buffered and real cache duration
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -854,6 +854,7 @@ test.describe("Per-Endpoint Cache Bar", () => {
           session_start: null,
           local_buffer_chunks: 0,
           s3_queue_chunks: 20,
+          cache_duration_secs: 100.0,
         },
       },
     });
@@ -886,7 +887,7 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await expect(page.locator(".endpoint-node")).toHaveCount(1, {
       timeout: 5000,
     });
-    // Pending endpoint should show cache bar using S3 chunks (20 * 5s = 100s)
+    // Pending endpoint should show cache bar using backend-computed cache duration
     const cacheLabel = page.locator(".endpoint-cache-label");
     await expect(cacheLabel).toContainText("100s / 120s cache", { timeout: 5000 });
     // 100/120 = 83% -> healthy
@@ -897,7 +898,7 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    // Broadcast PipelineState in buffering state with S3 chunks
+    // Broadcast PipelineState in buffering state with S3 chunks and real cache duration
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -909,6 +910,7 @@ test.describe("Per-Endpoint Cache Bar", () => {
           session_start: null,
           local_buffer_chunks: 0,
           s3_queue_chunks: 16,
+          cache_duration_secs: 16.5,
         },
       },
     });
@@ -927,11 +929,11 @@ test.describe("Per-Endpoint Cache Bar", () => {
       },
     });
 
-    // Buffering indicator should show S3 chunk count
+    // Buffering indicator should show S3 chunk count and cache duration
     const indicator = page.locator(".buffering-indicator");
     await expect(indicator).toBeVisible({ timeout: 5000 });
     await expect(indicator).toContainText("16 chunks");
-    await expect(indicator).toContainText("80s");
+    await expect(indicator).toContainText("16s");
   });
 });
 
