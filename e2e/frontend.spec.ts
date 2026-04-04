@@ -750,11 +750,12 @@ test.describe("Per-Endpoint Cache Bar", () => {
           session_start: null,
           local_buffer_chunks: 0,
           s3_queue_chunks: 20,
+          cache_duration_secs: 90.0,
         },
       },
     });
 
-    // Cache bar fill should be visible with healthy class
+    // Cache bar fill should be visible with healthy class (90/120 = 75%)
     const healthyBar = page.locator(".endpoint-node .buffer-bar-fill.healthy");
     await expect(healthyBar).toBeVisible({ timeout: 5000 });
     const cacheLabel = page.locator(".endpoint-cache-label");
@@ -765,7 +766,7 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    // Broadcast PipelineState so target_delay_secs is known
+    // Warning level: cache_duration_secs = 60 (50% of 120, between 40-75%)
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -777,11 +778,10 @@ test.describe("Per-Endpoint Cache Bar", () => {
           session_start: null,
           local_buffer_chunks: 0,
           s3_queue_chunks: 20,
+          cache_duration_secs: 60.0,
         },
       },
     });
-
-    // Warning level: chunk_delay_secs = 60 (50% of 120, between 40-75%)
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "DeliveryStatus",
@@ -809,26 +809,19 @@ test.describe("Per-Endpoint Cache Bar", () => {
     );
     await expect(warningBar).toBeVisible({ timeout: 5000 });
 
-    // Critical level: chunk_delay_secs = 10 (8% of 120)
+    // Critical level: cache_duration_secs = 10 (8% of 120)
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
-        type: "DeliveryStatus",
+        type: "PipelineState",
         data: {
-          instance_name: "e2e-vps",
-          status: "delivering",
-          server_ip: "1.2.3.4",
-          endpoint_count: 1,
-          endpoints: [
-            {
-              alias: "e2e rtmp",
-              alive: true,
-              current_chunk_id: 22,
-              bytes_processed_total: 1100000,
-              chunks_processed: 22,
-              chunk_delay_secs: 10.0,
-              is_fast: false,
-            },
-          ],
+          state: "streaming",
+          event_id: 1,
+          event_name: "Test Event",
+          target_delay_secs: 120,
+          session_start: null,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 22,
+          cache_duration_secs: 10.0,
         },
       },
     });
