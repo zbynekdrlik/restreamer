@@ -693,14 +693,20 @@ pub async fn get_pending_chunk_count_for_event(
     Ok(row.get::<i32, _>("cnt") as i64)
 }
 
-/// Compute the total duration of sent (S3-uploaded) chunks for an event.
-/// This represents the cache duration — how much content is on S3 but not yet delivered.
-pub async fn get_cache_duration_secs(pool: &SqlitePool, event_id: i64) -> Result<f64> {
+/// Compute the cache duration: total content on S3 that has NOT yet been delivered.
+/// Only counts sent chunks with sequence_number above the delivery position.
+/// During buffering (delivered_up_to = 0), this equals the total sent duration.
+pub async fn get_cache_duration_secs(
+    pool: &SqlitePool,
+    event_id: i64,
+    delivered_up_to: i64,
+) -> Result<f64> {
     let row = sqlx::query(
         "SELECT COALESCE(SUM(duration_ms), 0) as total_ms FROM chunk_records
-         WHERE streaming_event_id = ?1 AND sent = 1",
+         WHERE streaming_event_id = ?1 AND sent = 1 AND sequence_number > ?2",
     )
     .bind(event_id)
+    .bind(delivered_up_to)
     .fetch_one(pool)
     .await?;
     Ok(row.get::<i64, _>("total_ms") as f64 / 1000.0)

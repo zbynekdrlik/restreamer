@@ -838,3 +838,51 @@ async fn get_latest_chunk_id_for_event_works() {
         .unwrap();
     assert_eq!(latest, Some(c2));
 }
+
+#[tokio::test]
+async fn cache_duration_sums_undelivered_sent_chunks() {
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "cache-dur-test")
+        .await
+        .unwrap();
+
+    // No chunks → 0 duration
+    let dur = get_cache_duration_secs(&pool, event_id, 0).await.unwrap();
+    assert!((dur - 0.0).abs() < 0.001);
+
+    // Insert 3 chunks with known durations
+    let c1 = insert_chunk(&pool, event_id, "/tmp/c1.ts", 1000, "md5a", 500)
+        .await
+        .unwrap();
+    let c2 = insert_chunk(&pool, event_id, "/tmp/c2.ts", 1000, "md5b", 1000)
+        .await
+        .unwrap();
+    let c3 = insert_chunk(&pool, event_id, "/tmp/c3.ts", 1000, "md5c", 1500)
+        .await
+        .unwrap();
+
+    // Unsent chunks → 0 duration
+    let dur = get_cache_duration_secs(&pool, event_id, 0).await.unwrap();
+    assert!((dur - 0.0).abs() < 0.001);
+
+    // Mark all as sent
+    mark_chunk_sent(&pool, c1).await.unwrap();
+    mark_chunk_sent(&pool, c2).await.unwrap();
+    mark_chunk_sent(&pool, c3).await.unwrap();
+
+    // All sent, none delivered → sum of all durations (500+1000+1500 = 3000ms = 3.0s)
+    let dur = get_cache_duration_secs(&pool, event_id, 0).await.unwrap();
+    assert!((dur - 3.0).abs() < 0.001);
+
+    // VPS delivered up to sequence 1 → only chunks 2 and 3 count (1000+1500 = 2500ms = 2.5s)
+    let dur = get_cache_duration_secs(&pool, event_id, 1).await.unwrap();
+    assert!((dur - 2.5).abs() < 0.001);
+
+    // VPS delivered up to sequence 2 → only chunk 3 counts (1500ms = 1.5s)
+    let dur = get_cache_duration_secs(&pool, event_id, 2).await.unwrap();
+    assert!((dur - 1.5).abs() < 0.001);
+
+    // VPS delivered all → 0 duration
+    let dur = get_cache_duration_secs(&pool, event_id, 3).await.unwrap();
+    assert!((dur - 0.0).abs() < 0.001);
+}

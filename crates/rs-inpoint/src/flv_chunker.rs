@@ -251,7 +251,10 @@ impl FlvChunkSink {
     }
 
     /// Write FLV file header + sequence headers at the start of a new chunk.
-    fn write_chunk_header(inner: &mut FlvChunkSinkInner, _timestamp: u32) {
+    /// `timestamp` is the RTMP timestamp of the first frame — used for content duration tracking.
+    /// Note: `chunk_start` (Instant) is for wall-clock flush timing decisions,
+    /// while `chunk_first_ts`/`chunk_last_ts` track RTMP content duration.
+    fn write_chunk_header(inner: &mut FlvChunkSinkInner, timestamp: u32) {
         // FLV file header (9 bytes)
         inner.buffer.extend_from_slice(&FLV_HEADER);
         // Previous tag size 0 (4 bytes)
@@ -269,8 +272,8 @@ impl FlvChunkSink {
         }
 
         inner.chunk_start = Some(Instant::now());
-        inner.chunk_first_ts = _timestamp;
-        inner.chunk_last_ts = _timestamp;
+        inner.chunk_first_ts = timestamp;
+        inner.chunk_last_ts = timestamp;
     }
 
     /// Write an FLV tag (11-byte header + data + 4-byte previous tag size).
