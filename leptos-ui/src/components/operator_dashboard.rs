@@ -447,10 +447,11 @@ fn EndpointTree() -> impl IntoView {
 
     view! {
         <div class="endpoint-tree" style:display=move || if has_endpoints.get() || is_running.get() || store.pipeline_state.get().state == "buffering" { "block" } else { "none" }>
+            // Buffering indicator only when no endpoints exist at all
             <Show when=move || {
                 let ps = store.pipeline_state.get();
                 ps.state == "buffering"
-                    && store.delivery.get().endpoints.iter().all(|ep| !ep.alive)
+                    && store.delivery.get().endpoints.is_empty()
             } fallback=|| ()>
                 <div class="buffering-indicator">
                     {move || {
@@ -558,45 +559,12 @@ fn EndpointTree() -> impl IntoView {
                                         let ep = ep_data.get();
                                         let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
                                         if is_pending {
-                                            "\u{2014}".to_string()
+                                            String::new()
                                         } else {
-                                            format!("{} chunks | {:.0}s delay", ep.chunks_processed, ep.chunk_delay_secs)
+                                            format!("{} chunks", ep.chunks_processed)
                                         }
                                     }}
                                 </span>
-                                {move || {
-                                    let ep = ep_data.get();
-                                    let ps = store.pipeline_state.get();
-                                    let target = ps.target_delay_secs;
-                                    if target == 0 {
-                                        return None;
-                                    }
-                                    // Pending endpoint: all S3 chunks are cache (endpoint at position 0)
-                                    let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
-                                    let cache_secs = if is_pending {
-                                        ps.s3_queue_chunks as f64 * 5.0
-                                    } else {
-                                        ep.chunk_delay_secs
-                                    };
-                                    let progress = (cache_secs / target as f64).min(1.0);
-                                    let bar_class = if progress >= 0.75 {
-                                        "buffer-bar-fill healthy"
-                                    } else if progress >= 0.40 {
-                                        "buffer-bar-fill warning"
-                                    } else {
-                                        "buffer-bar-fill critical"
-                                    };
-                                    Some(view! {
-                                        <div class="endpoint-cache">
-                                            <div class="buffer-bar">
-                                                <div class=bar_class style:width=format!("{}%", (progress * 100.0).min(100.0))></div>
-                                            </div>
-                                            <span class="endpoint-cache-label">
-                                                {format!("{}s / {}s cache", cache_secs as u64, target)}
-                                            </span>
-                                        </div>
-                                    })
-                                }}
                                 {move || {
                                     ep_data.get().stall_reason.clone().map(|r| view! {
                                         <span class="endpoint-anomaly">{format!("stall: {r}")}</span>
@@ -644,6 +612,38 @@ fn EndpointTree() -> impl IntoView {
                                                 {"\u{00D7}"}
                                             </button>
                                         }
+                                    })
+                                }}
+                                {move || {
+                                    let ep = ep_data.get();
+                                    let ps = store.pipeline_state.get();
+                                    let target = ps.target_delay_secs;
+                                    if target == 0 {
+                                        return None;
+                                    }
+                                    let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
+                                    let cache_secs = if is_pending {
+                                        ps.s3_queue_chunks as f64 * 5.0
+                                    } else {
+                                        ep.chunk_delay_secs
+                                    };
+                                    let progress = (cache_secs / target as f64).min(1.0);
+                                    let bar_class = if progress >= 0.75 {
+                                        "buffer-bar-fill healthy"
+                                    } else if progress >= 0.40 {
+                                        "buffer-bar-fill warning"
+                                    } else {
+                                        "buffer-bar-fill critical"
+                                    };
+                                    Some(view! {
+                                        <div class="endpoint-cache">
+                                            <div class="buffer-bar">
+                                                <div class=bar_class style:width=format!("{}%", (progress * 100.0).min(100.0))></div>
+                                            </div>
+                                            <span class="endpoint-cache-label">
+                                                {format!("{}s / {}s cache", cache_secs as u64, target)}
+                                            </span>
+                                        </div>
                                     })
                                 }}
                             </div>
