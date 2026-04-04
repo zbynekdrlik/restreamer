@@ -2105,6 +2105,101 @@ jobs:
             throw "FAILED: $($stats.pending_chunks) chunks still pending S3 upload"
           }
 
+      - name: Verify cache bar grows during buffering phase (Playwright)
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          Write-Host "Verifying cache bar grows during initial buffering phase..."
+          Set-Location "$env:GITHUB_WORKSPACE\e2e"
+          cmd /c "npm install playwright 2>&1" | Out-Null
+          cmd /c "npx playwright install chromium 2>&1" | Out-Null
+
+          $testScript = @'
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage();
+
+            const consoleErrors = [];
+            page.on('console', msg => {
+              if (msg.type() === 'error' || msg.type() === 'warning') {
+                consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
+              }
+            });
+
+            await page.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
+            await page.waitForTimeout(5000);
+
+            // During buffering phase: endpoints exist but are pending, cache bar should show
+            // the backend-computed cache_duration_secs value (real measured chunk duration sum)
+            const cacheLabels = await page.locator('.endpoint-cache-label').allTextContents().catch(() => []);
+            console.log('Cache labels during buffering:', cacheLabels);
+
+            if (cacheLabels.length === 0) {
+              console.error('FAILED: No cache bar labels found during buffering phase');
+              console.error('Expected per-endpoint cache bars showing S3 buffer accumulation');
+              process.exit(1);
+            }
+
+            // Parse the first cache label (e.g., "45s / 300s cache")
+            const match = cacheLabels[0].match(/(\d+)s\s*\/\s*(\d+)s/);
+            if (!match) {
+              console.error('FAILED: Could not parse cache label:', cacheLabels[0]);
+              process.exit(1);
+            }
+
+            const cacheSecs = parseInt(match[1]);
+            const targetSecs = parseInt(match[2]);
+            console.log('Cache during buffering:', cacheSecs, 's /', targetSecs, 's');
+
+            // Cache MUST be > 0 during buffering (chunks are on S3)
+            if (cacheSecs === 0) {
+              console.error('FAILED: Cache bar shows 0s during buffering phase.');
+              console.error('This is the exact bug from issue #80 - cache bar not growing.');
+              process.exit(1);
+            }
+
+            // Cache bar fill should be visible
+            const fillEl = await page.locator('.endpoint-node .buffer-bar-fill').first();
+            const fillClass = await fillEl.getAttribute('class').catch(() => null);
+            console.log('Bar fill class:', fillClass);
+
+            if (!fillClass) {
+              console.error('FAILED: Cache bar fill element not found');
+              process.exit(1);
+            }
+
+            // Take second reading after 10s to verify growth
+            await page.waitForTimeout(10000);
+            const cacheLabels2 = await page.locator('.endpoint-cache-label').allTextContents().catch(() => []);
+            const match2 = cacheLabels2[0].match(/(\d+)s\s*\/\s*(\d+)s/);
+            const cacheSecs2 = match2 ? parseInt(match2[1]) : 0;
+            console.log('Cache after 10s:', cacheSecs2, 's');
+
+            if (cacheSecs2 < cacheSecs) {
+              console.error('FAILED: Cache decreased from', cacheSecs, 'to', cacheSecs2, '(should be growing)');
+              process.exit(1);
+            }
+
+            const allowed = [/favicon/i, /Autofill/i, /integrity.*preload/i, /subresource integrity/i];
+            const real = consoleErrors.filter(e => !allowed.some(r => r.test(e)));
+            if (real.length > 0) {
+              console.error('FAILED: Browser console errors:', real);
+              process.exit(1);
+            }
+
+            console.log('PASSED: Cache bar growing during buffering:', cacheSecs, 's ->', cacheSecs2, 's');
+            await browser.close();
+          })();
+          '@
+
+          $testScript | Out-File -FilePath "buffering-cache-check.cjs" -Encoding UTF8
+          node buffering-cache-check.cjs
+          if ($LASTEXITCODE -ne 0) {
+            throw "FAILED: Cache bar buffering phase verification failed"
+          }
+          Remove-Item "buffering-cache-check.cjs" -ErrorAction SilentlyContinue
+
       - name: Verify YouTube is NOT receiving stream (baseline)
         shell: powershell
         timeout-minutes: 2
