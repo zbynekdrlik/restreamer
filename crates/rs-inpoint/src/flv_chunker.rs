@@ -51,6 +51,10 @@ struct FlvChunkSinkInner {
     /// Saved codec sequence headers for writing at chunk start.
     video_sequence_header: Option<BytesMut>,
     audio_sequence_header: Option<BytesMut>,
+    /// RTMP timestamp of the first frame in current chunk (milliseconds).
+    chunk_first_ts: u32,
+    /// RTMP timestamp of the last frame written to current chunk (milliseconds).
+    chunk_last_ts: u32,
 }
 
 /// Data extracted from the buffer, ready to be written to disk outside the lock.
@@ -76,6 +80,8 @@ impl FlvChunkSink {
                 null_mode: false,
                 video_sequence_header: None,
                 audio_sequence_header: None,
+                chunk_first_ts: 0,
+                chunk_last_ts: 0,
             }),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
@@ -95,6 +101,8 @@ impl FlvChunkSink {
                 null_mode: true,
                 video_sequence_header: None,
                 audio_sequence_header: None,
+                chunk_first_ts: 0,
+                chunk_last_ts: 0,
             }),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
@@ -148,6 +156,7 @@ impl FlvChunkSink {
             }
 
             // Use absolute timestamps — delivery normalizer handles continuity
+            inner.chunk_last_ts = timestamp;
             Self::write_tag(&mut inner, FLV_TAG_VIDEO, timestamp, data);
 
             // Force-flush if buffer exceeds max size
@@ -196,6 +205,7 @@ impl FlvChunkSink {
                 return;
             }
 
+            inner.chunk_last_ts = timestamp;
             Self::write_tag(&mut inner, FLV_TAG_AUDIO, timestamp, data);
             None
         };
@@ -259,6 +269,8 @@ impl FlvChunkSink {
         }
 
         inner.chunk_start = Some(Instant::now());
+        inner.chunk_first_ts = _timestamp;
+        inner.chunk_last_ts = _timestamp;
     }
 
     /// Write an FLV tag (11-byte header + data + 4-byte previous tag size).
@@ -315,10 +327,13 @@ impl FlvChunkSink {
         let size = inner.buffer.len();
         let data = std::mem::replace(&mut inner.buffer, Vec::with_capacity(128 * 1024));
 
-        let duration_ms = inner
-            .chunk_start
-            .map(|s| s.elapsed().as_millis() as u64)
-            .unwrap_or(0);
+        // Use RTMP frame timestamps for accurate content duration
+        let duration_ms = if inner.chunk_last_ts >= inner.chunk_first_ts {
+            (inner.chunk_last_ts - inner.chunk_first_ts) as u64
+        } else {
+            // Timestamp wrapped around (u32 overflow after ~49 days)
+            0
+        };
         inner.chunk_start = None;
 
         Some(PendingChunkWrite {

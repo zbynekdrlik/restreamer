@@ -2181,6 +2181,15 @@ jobs:
               process.exit(1);
             }
 
+            // Cache growth should roughly match wall time (10s wait = ~10s growth)
+            // Allow 50% tolerance for timing variance, but reject 2x growth (broken duration)
+            const growth = cacheSecs2 - cacheSecs;
+            console.log('Cache growth in 10s:', growth, 's');
+            if (growth > 16) {
+              console.error('FAILED: Cache grew', growth, 's in 10s wall time. Duration measurement is broken (> 1.6x real time).');
+              process.exit(1);
+            }
+
             const allowed = [/favicon/i, /Autofill/i, /integrity.*preload/i, /subresource integrity/i];
             const real = consoleErrors.filter(e => !allowed.some(r => r.test(e)));
             if (real.length > 0) {
@@ -2188,7 +2197,7 @@ jobs:
               process.exit(1);
             }
 
-            console.log('PASSED: Cache bar growing during buffering:', cacheSecs, 's ->', cacheSecs2, 's');
+            console.log('PASSED: Cache bar growing during buffering:', cacheSecs, 's ->', cacheSecs2, 's', '(growth:', growth, 's in 10s)');
             await browser.close();
           })();
           '@
