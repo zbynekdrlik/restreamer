@@ -2476,6 +2476,22 @@ jobs:
               process.exit(1);
             }
 
+            // Stability check: take 3 readings over 10s, cache must not jump backward > 20%
+            const readings = [delayValue];
+            for (let i = 0; i < 2; i++) {
+              await page.waitForTimeout(5000);
+              const label = await page.locator('.endpoint-cache-label').first().textContent().catch(() => '');
+              const m = label.match(/(\d+)s/);
+              if (m) readings.push(parseInt(m[1]));
+            }
+            console.log('Cache stability readings:', readings);
+            for (let i = 1; i < readings.length; i++) {
+              if (readings[i] < readings[i-1] * 0.8) {
+                console.error('FAILED: Cache jumped backward:', readings[i-1], '->', readings[i], '(> 20% drop). Transition jump bug.');
+                process.exit(1);
+              }
+            }
+
             // Check for console errors (filter allowed ones)
             const allowed = [/favicon/i, /Autofill/i, /integrity.*preload/i, /subresource integrity/i];
             const real = consoleErrors.filter(e => !allowed.some(r => r.test(e)));
@@ -2484,7 +2500,7 @@ jobs:
               process.exit(1);
             }
 
-            console.log('Dashboard verification PASSED: endpoint cache shows', delayValue, 's, class:', fillClass);
+            console.log('Dashboard verification PASSED: endpoint cache shows', delayValue, 's, class:', fillClass, ', stability:', readings);
             await browser.close();
           })();
           '@
