@@ -866,9 +866,9 @@ async fn cache_duration_sums_undelivered_sent_chunks() {
     assert!((dur - 0.0).abs() < 0.001);
 
     // Mark all as sent
-    mark_chunk_sent(&pool, c1).await.unwrap();
-    mark_chunk_sent(&pool, c2).await.unwrap();
-    mark_chunk_sent(&pool, c3).await.unwrap();
+    set_chunk_sent(&pool, c1).await.unwrap();
+    set_chunk_sent(&pool, c2).await.unwrap();
+    set_chunk_sent(&pool, c3).await.unwrap();
 
     // All sent, none delivered → sum of all durations (500+1000+1500 = 3000ms = 3.0s)
     let dur = get_cache_duration_secs(&pool, event_id, 0).await.unwrap();
