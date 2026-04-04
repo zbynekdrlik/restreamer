@@ -619,13 +619,9 @@ fn EndpointTree() -> impl IntoView {
                                     if target == 0 {
                                         return None;
                                     }
-                                    // Use VPS-reported delay when available, fall back to
-                                    // total S3 cache duration while endpoint hasn't reported yet
-                                    let cache_secs = if ep.chunk_delay_secs > 0.0 {
-                                        ep.chunk_delay_secs
-                                    } else {
-                                        ps.cache_duration_secs
-                                    };
+                                    // Always use backend-computed cache duration (single metric,
+                                    // no jump at buffering→streaming transition)
+                                    let cache_secs = ps.cache_duration_secs;
                                     let progress = (cache_secs / target as f64).min(1.0);
                                     let bar_class = if progress >= 0.75 {
                                         "buffer-bar-fill healthy"
