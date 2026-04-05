@@ -712,6 +712,19 @@ pub async fn get_cache_duration_secs(
     Ok(row.get::<i64, _>("total_ms") as f64 / 1000.0)
 }
 
+/// Total content duration of chunks uploaded to S3 for an event.
+/// Only counts chunks with sent = 1. Used for buffer-fill wait.
+pub async fn get_sent_duration_ms(pool: &SqlitePool, event_id: i64) -> Result<i64> {
+    let row = sqlx::query(
+        "SELECT COALESCE(SUM(duration_ms), 0) as total_ms FROM chunk_records
+         WHERE streaming_event_id = ?1 AND sent = 1",
+    )
+    .bind(event_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get::<i64, _>("total_ms"))
+}
+
 /// Delete all chunks for a specific streaming event.
 /// Used to clear stale chunks when restarting a stream so buffer starts at 0%.
 pub async fn delete_chunks_for_event(pool: &SqlitePool, streaming_event_id: i64) -> Result<u64> {
