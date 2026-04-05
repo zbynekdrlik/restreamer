@@ -16,6 +16,12 @@ pub enum S3FetchError {
     Fetch(String),
 }
 
+/// Chunk data with metadata parsed from S3 key filename.
+pub struct ChunkData {
+    pub data: Vec<u8>,
+    pub duration_ms: i64,
+}
+
 pub struct S3Fetcher {
     bucket: Box<Bucket>,
     event_identifier: String,
@@ -46,26 +52,42 @@ impl S3Fetcher {
         })
     }
 
-    /// Fetch a chunk by sequential ID. Returns None if not found (404).
-    pub async fn fetch_chunk(&self, chunk_id: i64) -> Result<Option<Vec<u8>>, S3FetchError> {
-        let key = format!(
-            "{}/{}_{}.bin",
-            self.event_identifier, chunk_id, self.event_identifier
-        );
+    /// Fetch a chunk with metadata (duration_ms parsed from S3 key filename).
+    /// Uses S3 LIST to discover the key since duration is embedded in the filename.
+    pub async fn fetch_chunk_with_meta(
+        &self,
+        chunk_id: i64,
+    ) -> Result<Option<ChunkData>, S3FetchError> {
+        let prefix = format!("{}/{}_", self.event_identifier, chunk_id);
+        let list_result = self
+            .bucket
+            .list(prefix, Some("/".to_string()))
+            .await
+            .map_err(|e| S3FetchError::Fetch(format!("list failed: {e}")))?;
+
+        let key = list_result
+            .iter()
+            .flat_map(|r| r.contents.iter())
+            .map(|obj| &obj.key)
+            .next();
+
+        let key = match key {
+            Some(k) => k.clone(),
+            None => return Ok(None),
+        };
+
+        let (_seq, duration_ms) = crate::db::parse_chunk_key(&key).unwrap_or((chunk_id, 0));
 
         match self.bucket.get_object(&key).await {
-            Ok(response) => {
-                if response.status_code() == 200 {
-                    Ok(Some(response.to_vec()))
-                } else if response.status_code() == 404 {
-                    Ok(None)
-                } else {
-                    Err(S3FetchError::Fetch(format!(
-                        "status {}",
-                        response.status_code()
-                    )))
-                }
-            }
+            Ok(response) if response.status_code() == 200 => Ok(Some(ChunkData {
+                data: response.to_vec(),
+                duration_ms,
+            })),
+            Ok(response) if response.status_code() == 404 => Ok(None),
+            Ok(response) => Err(S3FetchError::Fetch(format!(
+                "status {}",
+                response.status_code()
+            ))),
             Err(e) => {
                 let err_str = e.to_string();
                 if err_str.contains("404") || err_str.contains("NoSuchKey") {
@@ -76,13 +98,24 @@ impl S3Fetcher {
             }
         }
     }
+
+    /// Fetch a chunk by sequential ID. Returns None if not found (404).
+    /// Delegates to `fetch_chunk_with_meta` and discards metadata.
+    pub async fn fetch_chunk(&self, chunk_id: i64) -> Result<Option<Vec<u8>>, S3FetchError> {
+        match self.fetch_chunk_with_meta(chunk_id).await? {
+            Some(cd) => Ok(Some(cd.data)),
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn chunk_key_format() {
-        let key = format!("{}/{}_{}.bin", "evt-123", 42, "evt-123");
-        assert_eq!(key, "evt-123/42_evt-123.bin");
+        // New format includes duration_ms
+        let key = format!("{}/{}_{}_{}_{}.bin", "evt-123", 42, 2100, "evt-123", "");
+        // Verify prefix matches pattern used by fetch_chunk_with_meta
+        assert!(key.starts_with("evt-123/42_"));
     }
 }

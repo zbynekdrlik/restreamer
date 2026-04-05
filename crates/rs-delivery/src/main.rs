@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use rs_core::log_buffer::LogBuffer;
+use sqlx::SqlitePool;
 use tracing_subscriber::prelude::*;
 
 mod api;
@@ -27,14 +28,19 @@ pub struct AppState {
     pub s3_config: RwLock<Option<api::S3Config>>,
     /// Event identifier stored after /api/init for use by /api/endpoints/add.
     pub event_identifier: RwLock<Option<String>>,
-    /// Delivery delay in chunks, stored after /api/init.
-    pub delivery_delay_chunks: RwLock<i64>,
+    /// Delivery delay in milliseconds, stored after /api/init.
+    pub delivery_delay_ms: RwLock<u64>,
     /// In-memory log buffer for /api/logs endpoint.
     pub log_buffer: LogBuffer,
+    /// SQLite pool for chunk metadata tracking.
+    pub db_pool: SqlitePool,
 }
 
-impl Default for AppState {
-    fn default() -> Self {
+impl AppState {
+    pub async fn new() -> Self {
+        let db_pool = crate::db::init_pool()
+            .await
+            .expect("failed to init VPS SQLite");
         let auth_token = std::env::var("DELIVERY_AUTH_TOKEN").ok();
         Self {
             endpoints: RwLock::new(HashMap::new()),
@@ -43,15 +49,16 @@ impl Default for AppState {
             auth_token: RwLock::new(auth_token),
             s3_config: RwLock::new(None),
             event_identifier: RwLock::new(None),
-            delivery_delay_chunks: RwLock::new(0),
+            delivery_delay_ms: RwLock::new(0),
             log_buffer: LogBuffer::new(5000),
+            db_pool,
         }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let state = Arc::new(AppState::default());
+    let state = Arc::new(AppState::new().await);
 
     let capture_layer = rs_core::log_capture::LogCaptureLayer::new(state.log_buffer.clone());
     let fmt_layer = tracing_subscriber::fmt::layer().with_filter(

@@ -79,7 +79,7 @@ pub struct InitRequest {
     #[serde(default)]
     pub auth_token: Option<String>,
     #[serde(default)]
-    pub delivery_delay_chunks: i64,
+    pub delivery_delay_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -157,7 +157,7 @@ async fn init_endpoints(
     // Store S3 config and event identifier for later use by /api/endpoints/add
     *state.s3_config.write().await = Some(s3_config.clone());
     *state.event_identifier.write().await = Some(req.event_identifier.clone());
-    *state.delivery_delay_chunks.write().await = req.delivery_delay_chunks;
+    *state.delivery_delay_ms.write().await = req.delivery_delay_ms;
 
     let mut endpoints = state.endpoints.write().await;
     let mut started = 0usize;
@@ -175,7 +175,7 @@ async fn init_endpoints(
             s3_config.clone(),
             req.event_identifier.clone(),
             start_id,
-            req.delivery_delay_chunks,
+            req.delivery_delay_ms,
         );
 
         endpoints.insert(ep_cfg.alias.clone(), handle);
@@ -319,7 +319,7 @@ async fn add_endpoint(
             "Delivery not initialized — call /api/init first".to_string(),
         )
     })?;
-    let delivery_delay_chunks = *state.delivery_delay_chunks.read().await;
+    let delivery_delay_ms = *state.delivery_delay_ms.read().await;
 
     let mut endpoints = state.endpoints.write().await;
 
@@ -339,7 +339,7 @@ async fn add_endpoint(
         s3_config,
         event_identifier,
         start_id,
-        delivery_delay_chunks,
+        delivery_delay_ms,
     );
 
     let alias = req.endpoint.alias.clone();
@@ -423,16 +423,15 @@ mod tests {
 
     const TEST_TOKEN: &str = "test-secret-token";
 
-    fn test_state() -> Arc<AppState> {
-        Arc::new(AppState {
-            auth_token: RwLock::new(Some(TEST_TOKEN.to_string())),
-            ..AppState::default()
-        })
+    async fn test_state() -> Arc<AppState> {
+        let mut state = AppState::new().await;
+        state.auth_token = RwLock::new(Some(TEST_TOKEN.to_string()));
+        Arc::new(state)
     }
 
     #[tokio::test]
     async fn health_endpoint() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let req = Request::builder()
             .uri("/api/health")
             .body(Body::empty())
@@ -450,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_endpoint_requires_auth() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         // Request without auth header should be rejected
         let req = Request::builder()
             .uri("/api/status")
@@ -462,7 +461,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_endpoint_empty() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let req = Request::builder()
             .uri("/api/status")
             .header("authorization", format!("Bearer {TEST_TOKEN}"))
@@ -480,7 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_response_includes_diagnostic_fields() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let req = Request::builder()
             .uri("/api/status")
             .header("authorization", format!("Bearer {TEST_TOKEN}"))
@@ -499,7 +498,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_endpoint_empty() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let req = Request::builder()
             .method("POST")
             .uri("/api/stop")
@@ -513,7 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_endpoint_returns_conflict_before_init() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let body = serde_json::json!({
             "endpoint": {
                 "alias": "test-yt",
@@ -534,7 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_endpoint_not_found() {
-        let app = router(test_state());
+        let app = router(test_state().await);
         let body = serde_json::json!({ "alias": "nonexistent" });
         let req = Request::builder()
             .method("POST")
@@ -554,7 +553,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_logs_requires_auth() {
-        let state = Arc::new(AppState::default());
+        let state = Arc::new(AppState::new().await);
         let app = router(state);
         let resp = app
             .oneshot(
@@ -571,7 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_logs_returns_entries() {
-        let state = Arc::new(AppState::default());
+        let state = Arc::new(AppState::new().await);
         state.log_buffer.push(rs_core::log_buffer::LogEntry {
             level: "WARN".into(),
             target: "rs_delivery::endpoint_task".into(),

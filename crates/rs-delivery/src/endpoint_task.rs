@@ -89,6 +89,11 @@ pub trait ChunkFetcher: Send + Sync {
         &self,
         chunk_id: i64,
     ) -> impl std::future::Future<Output = Result<Option<Vec<u8>>, String>> + Send;
+
+    fn chunk_duration_ms(
+        &self,
+        chunk_id: i64,
+    ) -> impl std::future::Future<Output = Result<Option<i64>, String>> + Send;
 }
 
 /// Trait for output process (ffmpeg or mock).
@@ -117,6 +122,14 @@ impl ChunkFetcher for S3Fetcher {
         S3Fetcher::fetch_chunk(self, chunk_id)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        match S3Fetcher::fetch_chunk_with_meta(self, chunk_id).await {
+            Ok(Some(cd)) => Ok(Some(cd.duration_ms)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 }
 
@@ -187,7 +200,7 @@ impl EndpointHandle {
         s3_cfg: S3Config,
         event_identifier: String,
         start_chunk_id: i64,
-        delivery_delay_chunks: i64,
+        delivery_delay_ms: u64,
     ) -> Self {
         let (stop_tx, stop_rx) = watch::channel(false);
         let stats: Stats = Arc::new(Mutex::new(EndpointStats {
@@ -213,11 +226,7 @@ impl EndpointHandle {
         };
 
         // Fast endpoints skip the delay entirely
-        let effective_delay = if ep_cfg.is_fast {
-            0
-        } else {
-            delivery_delay_chunks
-        };
+        let effective_delay = if ep_cfg.is_fast { 0 } else { delivery_delay_ms };
 
         let task = tokio::spawn(endpoint_loop(
             fetcher,
@@ -257,27 +266,40 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
     factory: P,
     ep_cfg: EndpointConfig,
     start_chunk_id: i64,
-    delivery_delay_chunks: i64,
+    delivery_delay_ms: u64,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
 ) {
     let alias = ep_cfg.alias.clone();
 
-    // Wait for enough chunks to buffer before starting (delayed start approach)
-    if delivery_delay_chunks > 0 {
-        let target_chunk = start_chunk_id + delivery_delay_chunks;
-        tracing::info!(alias = %alias, target_chunk, "Waiting for buffer fill");
+    // Wait for enough duration to buffer before starting (duration-based approach)
+    if delivery_delay_ms > 0 {
+        let mut accum_ms: u64 = 0;
+        let mut probe_id = start_chunk_id;
+        tracing::info!(alias = %alias, delivery_delay_ms, "Waiting for duration-based buffer fill");
         loop {
             if *stop_rx.borrow() {
                 return;
             }
-            if let Ok(Some(_)) = fetcher.fetch_chunk(target_chunk).await {
-                tracing::info!(alias = %alias, target_chunk, "Buffer filled");
-                break;
-            }
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                _ = stop_rx.changed() => { if *stop_rx.borrow() { return; } }
+            match fetcher.chunk_duration_ms(probe_id).await {
+                Ok(Some(dur_ms)) => {
+                    accum_ms += dur_ms.max(0) as u64;
+                    probe_id += 1;
+                    if accum_ms >= delivery_delay_ms {
+                        tracing::info!(alias = %alias, accum_ms, probe_id, "Buffer filled");
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                        _ = stop_rx.changed() => { if *stop_rx.borrow() { return; } }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(alias = %alias, "Buffer fill fetch error: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
             }
         }
     }
@@ -413,27 +435,33 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
                         s.stall_reason = Some("re-buffering".to_string());
                         s.consecutive_chunk_misses = 0;
                     }
-                    // Re-buffer: wait for delivery_delay_chunks to accumulate
-                    // before restarting ffmpeg (same as initial buffer fill)
-                    if delivery_delay_chunks > 0 {
-                        let rebuffer_target = chunk_id + delivery_delay_chunks;
-                        tracing::info!(
-                            alias = %alias,
-                            chunk_id,
-                            rebuffer_target,
-                            "Re-buffering: waiting for chunk {rebuffer_target}"
-                        );
+                    // Re-buffer: accumulate duration before restarting ffmpeg
+                    if delivery_delay_ms > 0 {
+                        let mut accum_ms: u64 = 0;
+                        let mut rebuf_id = chunk_id;
+                        tracing::info!(alias = %alias, chunk_id, "Re-buffering: accumulating duration");
                         loop {
                             if *stop_rx.borrow() {
                                 return;
                             }
-                            if let Ok(Some(_)) = fetcher.fetch_chunk(rebuffer_target).await {
-                                tracing::info!(alias = %alias, rebuffer_target, "Re-buffer complete");
-                                break;
-                            }
-                            tokio::select! {
-                                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                                _ = stop_rx.changed() => { if *stop_rx.borrow() { return; } }
+                            match fetcher.chunk_duration_ms(rebuf_id).await {
+                                Ok(Some(dur_ms)) => {
+                                    accum_ms += dur_ms.max(0) as u64;
+                                    rebuf_id += 1;
+                                    if accum_ms >= delivery_delay_ms {
+                                        tracing::info!(alias = %alias, accum_ms, "Re-buffer complete");
+                                        break;
+                                    }
+                                }
+                                Ok(None) => {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                                        _ = stop_rx.changed() => { if *stop_rx.borrow() { return; } }
+                                    }
+                                }
+                                Err(_) => {
+                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                }
                             }
                         }
                         let mut s = stats.lock().await;
