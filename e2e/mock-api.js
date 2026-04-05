@@ -194,11 +194,10 @@ app.post("/api/v1/events/:id/start-stream", (req, res) => {
       state: "buffering",
       event_id: id,
       event_name: evt.name,
-      buffer_progress: 0.0,
       target_delay_secs: 120,
-      current_delay_secs: 0.0,
       session_start: null,
-      predicted: false,
+      local_buffer_chunks: 0,
+      s3_queue_chunks: 0,
     },
   });
 
@@ -226,11 +225,10 @@ app.post("/api/v1/events/:id/stop-stream", (req, res) => {
         state: "idle",
         event_id: null,
         event_name: null,
-        buffer_progress: 0.0,
         target_delay_secs: 0,
-        current_delay_secs: 0.0,
         session_start: null,
-        predicted: false,
+        local_buffer_chunks: 0,
+        s3_queue_chunks: 0,
       },
     });
 
@@ -409,8 +407,6 @@ app.post("/api/v1/_test/simulate-disconnect", (req, res) => {
   if (disconnectTimer) clearInterval(disconnectTimer);
   disconnectTimer = setInterval(() => {
     currentDelay = Math.max(0, currentDelay - drain_rate);
-    const progress =
-      target_delay > 0 ? Math.min(1.0, currentDelay / target_delay) : 0;
     const state = currentDelay <= 0 ? "buffer_exhausted" : "streaming";
     broadcastWs({
       type: "PipelineState",
@@ -418,11 +414,8 @@ app.post("/api/v1/_test/simulate-disconnect", (req, res) => {
         state,
         event_id: 1,
         event_name: "Test Event",
-        buffer_progress: progress,
         target_delay_secs: target_delay,
-        current_delay_secs: currentDelay,
         session_start: null,
-        predicted: true,
         local_buffer_chunks: Math.floor(currentDelay / 2),
         s3_queue_chunks: 0,
       },

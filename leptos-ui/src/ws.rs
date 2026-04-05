@@ -71,16 +71,14 @@ enum WsEvent {
         state: String,
         event_id: Option<i64>,
         event_name: Option<String>,
-        buffer_progress: f64,
         target_delay_secs: u64,
-        current_delay_secs: f64,
         session_start: Option<String>,
-        #[serde(default)]
-        predicted: bool,
         #[serde(default)]
         local_buffer_chunks: i64,
         #[serde(default)]
         s3_queue_chunks: i64,
+        #[serde(default)]
+        cache_duration_secs: f64,
     },
     ObsStatus {
         connected: bool,
@@ -326,25 +324,21 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
             state,
             event_id,
             event_name,
-            buffer_progress,
             target_delay_secs,
-            current_delay_secs,
             session_start,
-            predicted,
             local_buffer_chunks,
             s3_queue_chunks,
+            cache_duration_secs,
         } => {
             store.pipeline_state.set(crate::store::PipelineState {
                 state,
                 event_id,
                 event_name,
-                buffer_progress,
                 target_delay_secs,
-                current_delay_secs,
                 session_start,
-                predicted,
                 local_buffer_chunks,
                 s3_queue_chunks,
+                cache_duration_secs,
             });
         }
         WsEvent::ObsStatus {

@@ -53,7 +53,7 @@ async fn chunk_record_crud() {
     let pool = setup_db().await;
     let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
 
-    let chunk_id = insert_chunk(&pool, event_id, "/tmp/chunk1.bin", 512, "abc123")
+    let chunk_id = insert_chunk(&pool, event_id, "/tmp/chunk1.bin", 512, "abc123", 0)
         .await
         .unwrap();
     assert!(chunk_id > 0);
@@ -87,6 +87,7 @@ async fn chunk_stats_and_pagination() {
             &format!("/tmp/chunk{i}.bin"),
             100 * (i + 1),
             &format!("md5_{i}"),
+            0,
         )
         .await
         .unwrap();
@@ -115,15 +116,15 @@ async fn get_first_chunk_id_for_event_works() {
     assert_eq!(first, None);
 
     // Insert chunks for event 1
-    let c1 = insert_chunk(&pool, event_id, "/tmp/c1.bin", 100, "md5a")
+    let c1 = insert_chunk(&pool, event_id, "/tmp/c1.bin", 100, "md5a", 0)
         .await
         .unwrap();
-    let _c2 = insert_chunk(&pool, event_id, "/tmp/c2.bin", 100, "md5b")
+    let _c2 = insert_chunk(&pool, event_id, "/tmp/c2.bin", 100, "md5b", 0)
         .await
         .unwrap();
 
     // Insert chunk for event 2 (should not affect event 1)
-    let _c3 = insert_chunk(&pool, event_id2, "/tmp/c3.bin", 100, "md5c")
+    let _c3 = insert_chunk(&pool, event_id2, "/tmp/c3.bin", 100, "md5c", 0)
         .await
         .unwrap();
 
@@ -146,12 +147,12 @@ async fn delete_chunks_for_event_works() {
 
     // Insert chunks for both events
     for i in 0..3 {
-        insert_chunk(&pool, evt1, &format!("/tmp/e1c{i}.bin"), 100, "md5")
+        insert_chunk(&pool, evt1, &format!("/tmp/e1c{i}.bin"), 100, "md5", 0)
             .await
             .unwrap();
     }
     for i in 0..2 {
-        insert_chunk(&pool, evt2, &format!("/tmp/e2c{i}.bin"), 200, "md5")
+        insert_chunk(&pool, evt2, &format!("/tmp/e2c{i}.bin"), 200, "md5", 0)
             .await
             .unwrap();
     }
@@ -181,7 +182,7 @@ async fn delete_all_chunks_works() {
     let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
 
     for i in 0..3 {
-        insert_chunk(&pool, event_id, &format!("/tmp/c{i}.bin"), 100, "md5")
+        insert_chunk(&pool, event_id, &format!("/tmp/c{i}.bin"), 100, "md5", 0)
             .await
             .unwrap();
     }
@@ -197,7 +198,7 @@ async fn delete_all_chunks_works() {
 async fn cascade_delete() {
     let pool = setup_db().await;
     let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
-    insert_chunk(&pool, event_id, "/tmp/c.bin", 100, "md5")
+    insert_chunk(&pool, event_id, "/tmp/c.bin", 100, "md5", 0)
         .await
         .unwrap();
 
@@ -257,10 +258,10 @@ async fn delete_other_streaming_events_cascades_chunks() {
     let id1 = upsert_streaming_event(&pool, "stale").await.unwrap();
     let id2 = upsert_streaming_event(&pool, "active").await.unwrap();
 
-    insert_chunk(&pool, id1, "/tmp/stale.bin", 100, "md5_stale")
+    insert_chunk(&pool, id1, "/tmp/stale.bin", 100, "md5_stale", 0)
         .await
         .unwrap();
-    insert_chunk(&pool, id2, "/tmp/active.bin", 200, "md5_active")
+    insert_chunk(&pool, id2, "/tmp/active.bin", 200, "md5_active", 0)
         .await
         .unwrap();
 
@@ -610,7 +611,7 @@ async fn delivery_endpoint_status_cascade_on_instance_delete() {
 async fn migration_v6_sent_at_column_exists() {
     let pool = setup_db().await;
     let event_id = upsert_streaming_event(&pool, "evt-v6").await.unwrap();
-    let chunk_id = insert_chunk(&pool, event_id, "/tmp/v6.bin", 100, "md5v6")
+    let chunk_id = insert_chunk(&pool, event_id, "/tmp/v6.bin", 100, "md5v6", 0)
         .await
         .unwrap();
 
@@ -660,19 +661,19 @@ async fn interleaved_events_have_independent_sequence_numbers() {
     let evt2 = upsert_streaming_event(&pool, "evt-2").await.unwrap();
 
     // Interleave chunks: evt1, evt2, evt1, evt2, evt1
-    let _c1 = insert_chunk(&pool, evt1, "/tmp/c1.bin", 100, "md5a")
+    let _c1 = insert_chunk(&pool, evt1, "/tmp/c1.bin", 100, "md5a", 0)
         .await
         .unwrap();
-    let _c2 = insert_chunk(&pool, evt2, "/tmp/c2.bin", 100, "md5b")
+    let _c2 = insert_chunk(&pool, evt2, "/tmp/c2.bin", 100, "md5b", 0)
         .await
         .unwrap();
-    let _c3 = insert_chunk(&pool, evt1, "/tmp/c3.bin", 100, "md5c")
+    let _c3 = insert_chunk(&pool, evt1, "/tmp/c3.bin", 100, "md5c", 0)
         .await
         .unwrap();
-    let _c4 = insert_chunk(&pool, evt2, "/tmp/c4.bin", 100, "md5d")
+    let _c4 = insert_chunk(&pool, evt2, "/tmp/c4.bin", 100, "md5d", 0)
         .await
         .unwrap();
-    let _c5 = insert_chunk(&pool, evt1, "/tmp/c5.bin", 100, "md5e")
+    let _c5 = insert_chunk(&pool, evt1, "/tmp/c5.bin", 100, "md5e", 0)
         .await
         .unwrap();
 
@@ -714,7 +715,7 @@ async fn sequence_number_starts_at_one_for_new_event() {
     let pool = setup_db().await;
     let evt = upsert_streaming_event(&pool, "evt-seq").await.unwrap();
 
-    let _c1 = insert_chunk(&pool, evt, "/tmp/s1.bin", 50, "md5x")
+    let _c1 = insert_chunk(&pool, evt, "/tmp/s1.bin", 50, "md5x", 0)
         .await
         .unwrap();
     let chunks = get_chunks_for_event(&pool, evt).await.unwrap();
@@ -737,6 +738,7 @@ async fn sequence_numbers_are_contiguous_with_many_events() {
             &format!("/tmp/e1c{i}.bin"),
             100,
             &format!("e1m{i}"),
+            0,
         )
         .await
         .unwrap();
@@ -746,6 +748,7 @@ async fn sequence_numbers_are_contiguous_with_many_events() {
             &format!("/tmp/e2c{i}.bin"),
             100,
             &format!("e2m{i}"),
+            0,
         )
         .await
         .unwrap();
@@ -755,6 +758,7 @@ async fn sequence_numbers_are_contiguous_with_many_events() {
             &format!("/tmp/e3c{i}.bin"),
             100,
             &format!("e3m{i}"),
+            0,
         )
         .await
         .unwrap();
@@ -786,13 +790,13 @@ async fn get_sent_chunk_count_for_event_works() {
     assert_eq!(count, 0);
 
     // Insert 3 chunks for evt1, mark 2 as sent
-    let c1 = insert_chunk(&pool, evt1, "/tmp/s1.bin", 100, "md5a")
+    let c1 = insert_chunk(&pool, evt1, "/tmp/s1.bin", 100, "md5a", 0)
         .await
         .unwrap();
-    let c2 = insert_chunk(&pool, evt1, "/tmp/s2.bin", 100, "md5b")
+    let c2 = insert_chunk(&pool, evt1, "/tmp/s2.bin", 100, "md5b", 0)
         .await
         .unwrap();
-    let _c3 = insert_chunk(&pool, evt1, "/tmp/s3.bin", 100, "md5c")
+    let _c3 = insert_chunk(&pool, evt1, "/tmp/s3.bin", 100, "md5c", 0)
         .await
         .unwrap();
 
@@ -803,7 +807,7 @@ async fn get_sent_chunk_count_for_event_works() {
     assert_eq!(count, 2);
 
     // evt2 should have 0 sent chunks
-    let _c4 = insert_chunk(&pool, evt2, "/tmp/s4.bin", 100, "md5d")
+    let _c4 = insert_chunk(&pool, evt2, "/tmp/s4.bin", 100, "md5d", 0)
         .await
         .unwrap();
     let count2 = get_sent_chunk_count_for_event(&pool, evt2).await.unwrap();
@@ -822,10 +826,10 @@ async fn get_latest_chunk_id_for_event_works() {
     assert_eq!(latest, None);
 
     // Insert chunks
-    let _c1 = insert_chunk(&pool, event_id, "/tmp/l1.bin", 100, "md5a")
+    let _c1 = insert_chunk(&pool, event_id, "/tmp/l1.bin", 100, "md5a", 0)
         .await
         .unwrap();
-    let c2 = insert_chunk(&pool, event_id, "/tmp/l2.bin", 100, "md5b")
+    let c2 = insert_chunk(&pool, event_id, "/tmp/l2.bin", 100, "md5b", 0)
         .await
         .unwrap();
 
@@ -833,4 +837,52 @@ async fn get_latest_chunk_id_for_event_works() {
         .await
         .unwrap();
     assert_eq!(latest, Some(c2));
+}
+
+#[tokio::test]
+async fn cache_duration_sums_undelivered_sent_chunks() {
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "cache-dur-test")
+        .await
+        .unwrap();
+
+    // No chunks → 0 duration
+    let dur = get_cache_duration_secs(&pool, event_id, 0).await.unwrap();
+    assert!((dur - 0.0).abs() < 0.001);
+
+    // Insert 3 chunks with known durations
+    let c1 = insert_chunk(&pool, event_id, "/tmp/c1.ts", 1000, "md5a", 500)
+        .await
+        .unwrap();
+    let c2 = insert_chunk(&pool, event_id, "/tmp/c2.ts", 1000, "md5b", 1000)
+        .await
+        .unwrap();
+    let c3 = insert_chunk(&pool, event_id, "/tmp/c3.ts", 1000, "md5c", 1500)
+        .await
+        .unwrap();
+
+    // Unsent chunks → 0 duration
+    let dur = get_cache_duration_secs(&pool, event_id, 0).await.unwrap();
+    assert!((dur - 0.0).abs() < 0.001);
+
+    // Mark all as sent
+    set_chunk_sent(&pool, c1).await.unwrap();
+    set_chunk_sent(&pool, c2).await.unwrap();
+    set_chunk_sent(&pool, c3).await.unwrap();
+
+    // All sent, none delivered → sum of all durations (500+1000+1500 = 3000ms = 3.0s)
+    let dur = get_cache_duration_secs(&pool, event_id, 0).await.unwrap();
+    assert!((dur - 3.0).abs() < 0.001);
+
+    // VPS delivered up to sequence 1 → only chunks 2 and 3 count (1000+1500 = 2500ms = 2.5s)
+    let dur = get_cache_duration_secs(&pool, event_id, 1).await.unwrap();
+    assert!((dur - 2.5).abs() < 0.001);
+
+    // VPS delivered up to sequence 2 → only chunk 3 counts (1500ms = 1.5s)
+    let dur = get_cache_duration_secs(&pool, event_id, 2).await.unwrap();
+    assert!((dur - 1.5).abs() < 0.001);
+
+    // VPS delivered all → 0 duration
+    let dur = get_cache_duration_secs(&pool, event_id, 3).await.unwrap();
+    assert!((dur - 0.0).abs() < 0.001);
 }

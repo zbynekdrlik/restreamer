@@ -108,10 +108,10 @@ async fn chunks_crud_via_http() {
     let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
 
     // Insert chunks directly
-    db::insert_chunk(&pool, event.id, "/tmp/chunk1.ts", 1024, "abc123")
+    db::insert_chunk(&pool, event.id, "/tmp/chunk1.ts", 1024, "abc123", 0)
         .await
         .unwrap();
-    db::insert_chunk(&pool, event.id, "/tmp/chunk2.ts", 2048, "def456")
+    db::insert_chunk(&pool, event.id, "/tmp/chunk2.ts", 2048, "def456", 0)
         .await
         .unwrap();
 
@@ -170,6 +170,7 @@ async fn chunks_pagination() {
             &format!("/tmp/c{i}.ts"),
             i * 100,
             &format!("md5_{i}"),
+            0,
         )
         .await
         .unwrap();
@@ -398,10 +399,10 @@ async fn clear_chunks_resets_stats_to_zero() {
     let event_id = db::upsert_streaming_event(&pool, "old-session")
         .await
         .unwrap();
-    db::insert_chunk(&pool, event_id, "/tmp/old1.bin", 1024, "md5a")
+    db::insert_chunk(&pool, event_id, "/tmp/old1.bin", 1024, "md5a", 0)
         .await
         .unwrap();
-    let chunk2 = db::insert_chunk(&pool, event_id, "/tmp/old2.bin", 2048, "md5b")
+    let chunk2 = db::insert_chunk(&pool, event_id, "/tmp/old2.bin", 2048, "md5b", 0)
         .await
         .unwrap();
     db::set_chunk_sent(&pool, chunk2).await.unwrap();

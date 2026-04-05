@@ -63,6 +63,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (8, MIGRATION_V8_SQL),
         (9, MIGRATION_V9_SQL),
         (10, MIGRATION_V10_SQL),
+        (11, MIGRATION_V11_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -268,6 +269,10 @@ const MIGRATION_V10_SQL: &str = r#"
 ALTER TABLE chunk_records ADD COLUMN chunk_format TEXT NOT NULL DEFAULT 'ts'
 "#;
 
+const MIGRATION_V11_SQL: &str = r#"
+ALTER TABLE chunk_records ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0
+"#;
+
 // --- Client Profile ---
 
 pub async fn get_client_profile(pool: &SqlitePool) -> Result<Option<ClientProfile>> {
@@ -440,17 +445,20 @@ pub async fn insert_chunk(
     chunk_file_path: &str,
     data_size: i64,
     md5: &str,
+    duration_ms: i64,
 ) -> Result<i64> {
     let row = sqlx::query(
-        "INSERT INTO chunk_records (streaming_event_id, chunk_file_path, data_size, md5, sequence_number)
+        "INSERT INTO chunk_records (streaming_event_id, chunk_file_path, data_size, md5, sequence_number, duration_ms)
          VALUES (?1, ?2, ?3, ?4,
-           COALESCE((SELECT MAX(sequence_number) FROM chunk_records WHERE streaming_event_id = ?1), 0) + 1
+           COALESCE((SELECT MAX(sequence_number) FROM chunk_records WHERE streaming_event_id = ?1), 0) + 1,
+           ?5
          ) RETURNING id",
     )
     .bind(streaming_event_id)
     .bind(chunk_file_path)
     .bind(data_size)
     .bind(md5)
+    .bind(duration_ms)
     .fetch_one(pool)
     .await?;
     Ok(row.get("id"))
@@ -459,7 +467,7 @@ pub async fn insert_chunk(
 pub async fn get_unsent_chunks(pool: &SqlitePool, limit: i64) -> Result<Vec<ChunkRecord>> {
     let rows = sqlx::query(
         "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-         in_process, sent, sequence_number
+         in_process, sent, sequence_number, duration_ms
          FROM chunk_records
          WHERE sent = 0 AND in_process = 0
          ORDER BY id ASC
@@ -481,6 +489,7 @@ pub async fn get_unsent_chunks(pool: &SqlitePool, limit: i64) -> Result<Vec<Chun
             in_process: r.get::<i32, _>("in_process") != 0,
             sent: r.get::<i32, _>("sent") != 0,
             sequence_number: r.get("sequence_number"),
+            duration_ms: r.get("duration_ms"),
         })
         .collect())
 }
@@ -512,7 +521,7 @@ pub async fn get_chunks_paginated(
 ) -> Result<Vec<ChunkRecord>> {
     let rows = sqlx::query(
         "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-         in_process, sent, sequence_number
+         in_process, sent, sequence_number, duration_ms
          FROM chunk_records ORDER BY id DESC LIMIT ?1 OFFSET ?2",
     )
     .bind(limit)
@@ -532,6 +541,7 @@ pub async fn get_chunks_paginated(
             in_process: r.get::<i32, _>("in_process") != 0,
             sent: r.get::<i32, _>("sent") != 0,
             sequence_number: r.get("sequence_number"),
+            duration_ms: r.get("duration_ms"),
         })
         .collect())
 }
@@ -630,7 +640,7 @@ pub async fn get_chunks_for_event(
 ) -> Result<Vec<ChunkRecord>> {
     let rows = sqlx::query(
         "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-         in_process, sent, sequence_number
+         in_process, sent, sequence_number, duration_ms
          FROM chunk_records WHERE streaming_event_id = ?1
          ORDER BY sequence_number ASC",
     )
@@ -650,6 +660,7 @@ pub async fn get_chunks_for_event(
             in_process: r.get::<i32, _>("in_process") != 0,
             sent: r.get::<i32, _>("sent") != 0,
             sequence_number: r.get("sequence_number"),
+            duration_ms: r.get("duration_ms"),
         })
         .collect())
 }
@@ -680,6 +691,25 @@ pub async fn get_pending_chunk_count_for_event(
     .fetch_one(pool)
     .await?;
     Ok(row.get::<i32, _>("cnt") as i64)
+}
+
+/// Compute the cache duration: total content on S3 that has NOT yet been delivered.
+/// Only counts sent chunks with sequence_number above the delivery position.
+/// During buffering (delivered_up_to = 0), this equals the total sent duration.
+pub async fn get_cache_duration_secs(
+    pool: &SqlitePool,
+    event_id: i64,
+    delivered_up_to: i64,
+) -> Result<f64> {
+    let row = sqlx::query(
+        "SELECT COALESCE(SUM(duration_ms), 0) as total_ms FROM chunk_records
+         WHERE streaming_event_id = ?1 AND sent = 1 AND sequence_number > ?2",
+    )
+    .bind(event_id)
+    .bind(delivered_up_to)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get::<i64, _>("total_ms") as f64 / 1000.0)
 }
 
 /// Delete all chunks for a specific streaming event.
