@@ -341,20 +341,25 @@ async fn api_shows_correct_status_during_stream() {
     assert_eq!(resp.status(), 200, "Health check must succeed");
 
     // Start streaming
-    let mut ffmpeg = spawn_ffmpeg(rtmp_port, 5);
+    let mut ffmpeg = spawn_ffmpeg(rtmp_port, 15);
 
-    // Wait for some data to arrive
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    // Check chunks are appearing
-    let resp = client
-        .get(format!("{api_base}/chunks/stats"))
-        .send()
-        .await
-        .unwrap();
-    let stats: serde_json::Value = resp.json().await.unwrap();
+    // Poll for chunks to appear (RTMP handshake + keyframe wait takes 2-4s on slow CI)
+    let mut found_chunks = false;
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let resp = client
+            .get(format!("{api_base}/chunks/stats"))
+            .send()
+            .await
+            .unwrap();
+        let stats: serde_json::Value = resp.json().await.unwrap();
+        if stats["total_chunks"].as_i64().unwrap_or(0) > 0 {
+            found_chunks = true;
+            break;
+        }
+    }
     assert!(
-        stats["total_chunks"].as_i64().unwrap() > 0,
+        found_chunks,
         "Chunks should be accumulating while streaming"
     );
 
