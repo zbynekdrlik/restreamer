@@ -468,13 +468,6 @@ impl DeliveryOrchestrator {
     pub async fn get_delivery_status(&self, event_id: i64) -> anyhow::Result<DeliveryStatus> {
         let instance = db::get_delivery_instance_by_event(&self.pool, event_id).await?;
 
-        // Get latest local sequence number for delay calculation (per-event sequential)
-        let latest_local_chunk = db::get_latest_sequence_number_for_event(&self.pool, event_id)
-            .await
-            .unwrap_or(None)
-            .unwrap_or(0);
-        let chunk_duration_secs = self.config.inpoint.chunk_duration_ms as f64 / 1000.0;
-
         // Read cached is_fast map (populated in init_endpoints, empty before init)
         let fast_map = {
             let cache = self.endpoint_fast_cache.lock().await;
@@ -513,9 +506,11 @@ impl DeliveryOrchestrator {
                             let ffmpeg_last_stderr =
                                 entry["ffmpeg_last_stderr"].as_str().map(|s| s.to_string());
 
-                            // Compute chunk delay
-                            let chunk_gap = (latest_local_chunk - chunk_id).max(0) as f64;
-                            let chunk_delay_secs = chunk_gap * chunk_duration_secs;
+                            // Compute cache delay using actual content duration from DB
+                            let chunk_delay_secs =
+                                db::get_cache_duration_secs(&self.pool, event_id, chunk_id)
+                                    .await
+                                    .unwrap_or(0.0);
 
                             // Update DB with latest status
                             if let Err(e) = db::upsert_delivery_endpoint_status(
