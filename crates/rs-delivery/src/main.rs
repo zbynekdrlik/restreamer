@@ -9,6 +9,7 @@ use rs_core::log_buffer::LogBuffer;
 use tracing_subscriber::prelude::*;
 
 mod api;
+pub mod db;
 mod endpoint_task;
 mod s3_fetch;
 

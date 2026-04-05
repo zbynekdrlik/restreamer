@@ -19,6 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 rust-s3.workspace = true
+sqlx.workspace = true
 async-trait = "0.1"
 rs-core = { path = "../rs-core" }
 rs-ffmpeg = { path = "../rs-ffmpeg" }
