@@ -135,9 +135,10 @@ impl ChunkUploader {
                     return;
                 }
 
-                // Use sequence_number for S3 key — per-event sequential numbering
-                // avoids interleaving when multiple events create chunks concurrently
-                let s3_key = S3Client::chunk_key(&event_id, chunk.sequence_number);
+                // Use sequence_number and duration_ms for S3 key — per-event sequential
+                // numbering avoids interleaving; duration_ms lets the VPS learn chunk
+                // duration from S3 without needing the local database
+                let s3_key = S3Client::chunk_key(&event_id, chunk.sequence_number, chunk.duration_ms);
 
                 // Upload to S3 with retry
                 let mut uploaded = false;

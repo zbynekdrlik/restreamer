@@ -71,10 +71,9 @@ impl S3Client {
     }
 
     /// Generate an S3 key for a chunk file.
-    /// Format: `{event_id}/{sequence_number}_{event_id}.bin`
-    /// Uses per-event sequence numbers to avoid interleaving when multiple events run concurrently.
-    pub fn chunk_key(event_identifier: &str, sequence_number: i64) -> String {
-        format!("{event_identifier}/{sequence_number}_{event_identifier}.bin")
+    /// Format: `{event_id}/{sequence_number}_{duration_ms}_{event_id}.bin`
+    pub fn chunk_key(event_identifier: &str, sequence_number: i64, duration_ms: i64) -> String {
+        format!("{event_identifier}/{sequence_number}_{duration_ms}_{event_identifier}.bin")
     }
 }
 
@@ -84,8 +83,8 @@ mod tests {
 
     #[test]
     fn chunk_key_format() {
-        let key = S3Client::chunk_key("evt-123", 1);
-        assert_eq!(key, "evt-123/1_evt-123.bin");
+        let key = S3Client::chunk_key("evt-123", 1, 2100);
+        assert_eq!(key, "evt-123/1_2100_evt-123.bin");
     }
 
     #[test]

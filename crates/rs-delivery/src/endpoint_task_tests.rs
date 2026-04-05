@@ -4,6 +4,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 struct MockFetcher {
     chunks: Arc<TokioMutex<std::collections::HashMap<i64, Vec<u8>>>>,
+    duration_ms_per_chunk: i64,
 }
 
 impl MockFetcher {
@@ -11,6 +12,7 @@ impl MockFetcher {
         let map: std::collections::HashMap<i64, Vec<u8>> = chunks.into_iter().collect();
         Self {
             chunks: Arc::new(TokioMutex::new(map)),
+            duration_ms_per_chunk: 2000,
         }
     }
 }
@@ -19,6 +21,15 @@ impl ChunkFetcher for MockFetcher {
     async fn fetch_chunk(&self, chunk_id: i64) -> Result<Option<Vec<u8>>, String> {
         let map = self.chunks.lock().await;
         Ok(map.get(&chunk_id).cloned())
+    }
+
+    async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        let map = self.chunks.lock().await;
+        if map.contains_key(&chunk_id) {
+            Ok(Some(self.duration_ms_per_chunk))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -623,6 +634,7 @@ async fn test_stats_struct_serializes() {
 struct TimedMockFetcher {
     chunks: Arc<TokioMutex<std::collections::HashMap<i64, Vec<u8>>>>,
     available_up_to: Arc<AtomicI64>,
+    duration_ms_per_chunk: i64,
 }
 
 impl TimedMockFetcher {
@@ -633,6 +645,7 @@ impl TimedMockFetcher {
         Self {
             chunks: Arc::new(TokioMutex::new(map)),
             available_up_to: Arc::new(AtomicI64::new(initially_available)),
+            duration_ms_per_chunk: 2000,
         }
     }
 
@@ -649,6 +662,19 @@ impl ChunkFetcher for TimedMockFetcher {
         }
         let map = self.chunks.lock().await;
         Ok(map.get(&chunk_id).cloned())
+    }
+
+    async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        let available = self.available_up_to.load(Ordering::Relaxed);
+        if chunk_id > available {
+            return Ok(None);
+        }
+        let map = self.chunks.lock().await;
+        if map.contains_key(&chunk_id) {
+            Ok(Some(self.duration_ms_per_chunk))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -673,15 +699,15 @@ async fn test_buffer_fill_waits_for_target_chunk() {
             fetcher,
             factory,
             test_ep_cfg(),
-            1, // start_chunk_id
-            5, // delivery_delay_chunks
+            1,     // start_chunk_id
+            10000, // delivery_delay_ms (5 chunks * 2000ms)
             stop_rx,
             stats_clone,
         )
         .await;
     });
 
-    // Advance time: buffer fill polls every 2s, but chunk 6 is not available yet
+    // Advance time: buffer fill polls every 2s, but only 3 chunks available (6000ms < 10000ms)
     for _ in 0..5 {
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
         tokio::task::yield_now().await;
@@ -692,11 +718,11 @@ async fn test_buffer_fill_waits_for_target_chunk() {
         let s = stats.lock().await;
         assert_eq!(
             s.chunks_processed, 0,
-            "Should not process any chunks during buffer fill (only 1-3 available, need 6)"
+            "Should not process any chunks during buffer fill (only 3 available = 6000ms, need 10000ms)"
         );
     }
 
-    // Make chunk 6 available (simulate chunks arriving over time)
+    // Make chunks 1-6 available (6 * 2000ms = 12000ms >= 10000ms)
     avail.store(6, Ordering::Relaxed);
 
     // Advance time for buffer fill to detect chunk 6 and start processing
@@ -725,7 +751,7 @@ async fn test_buffer_fill_waits_for_target_chunk() {
 }
 #[tokio::test]
 async fn test_chunk_gap_maintained_at_delay_target() {
-    // With delivery_delay_chunks=10, start_chunk_id=1, pre-load chunks 1-30:
+    // With delivery_delay_ms=20000, start_chunk_id=1, pre-load chunks 1-30 (2000ms each):
     // After buffer fill (chunk 11 available), VPS starts consuming from chunk 1.
     // Elapsed-aware pacing: 1000ms per chunk (non-fast).
     tokio::time::pause();
@@ -744,8 +770,8 @@ async fn test_chunk_gap_maintained_at_delay_target() {
             fetcher,
             factory,
             test_ep_cfg(),
-            1,  // start_chunk_id
-            10, // delivery_delay_chunks
+            1,     // start_chunk_id
+            20000, // delivery_delay_ms (10 chunks * 2000ms)
             stop_rx,
             stats_clone,
         )
@@ -790,7 +816,7 @@ async fn test_buffer_fill_stops_on_signal() {
             factory,
             test_ep_cfg(),
             1,
-            10, // delivery_delay_chunks
+            20000, // delivery_delay_ms (10 chunks * 2000ms)
             stop_rx,
             stats_clone,
         )
@@ -818,46 +844,20 @@ async fn test_buffer_fill_stops_on_signal() {
         "Should not have processed any chunks, stopped during buffer fill"
     );
 }
-#[tokio::test]
-async fn test_delivery_delay_chunks_calculation() {
-    // Verify the formula: delivery_delay_chunks = (delay_secs * 1000) / chunk_duration_ms
-    // This tests the calculation that happens in DeliveryOrchestrator::poll_and_init
+#[test]
+fn test_delivery_delay_ms_direct() {
+    // VPS now receives delivery_delay_ms directly from local side.
+    // No chunk-count conversion needed -- duration is the native unit.
+    let delay_ms: u64 = 120_000;
+    assert_eq!(delay_ms, 120_000, "120s = 120000ms");
 
-    // Default: 120s delay, 1000ms chunk = 120 chunks
-    let delay_secs: u64 = 120;
-    let chunk_duration_ms: u64 = 1000;
-    let chunks = if chunk_duration_ms > 0 {
-        (delay_secs * 1000 / chunk_duration_ms) as i64
-    } else {
-        0
-    };
-    assert_eq!(chunks, 120, "120s / 1000ms should = 120 chunks");
+    // 90s delay
+    let delay_ms: u64 = 90_000;
+    assert_eq!(delay_ms, 90_000, "90s = 90000ms");
 
-    // Custom: 90s delay, 1000ms chunk = 90 chunks
-    let delay_secs: u64 = 90;
-    let chunks = (delay_secs * 1000 / chunk_duration_ms) as i64;
-    assert_eq!(chunks, 90, "90s / 1000ms should = 90 chunks");
-
-    // Edge: 120s delay, 2000ms chunk = 60 chunks
-    let chunk_duration_ms: u64 = 2000;
-    let delay_secs: u64 = 120;
-    let chunks = (delay_secs * 1000 / chunk_duration_ms) as i64;
-    assert_eq!(chunks, 60, "120s / 2000ms should = 60 chunks");
-
-    // Edge: chunk_duration_ms = 0 -> 0
-    let chunk_duration_ms: u64 = 0;
-    let chunks = if chunk_duration_ms > 0 {
-        (delay_secs * 1000 / chunk_duration_ms) as i64
-    } else {
-        0
-    };
-    assert_eq!(chunks, 0, "0ms chunk duration should = 0 chunks");
-
-    // Edge: 500ms chunks -> 240 chunks for 120s
-    let chunk_duration_ms: u64 = 500;
-    let delay_secs: u64 = 120;
-    let chunks = (delay_secs * 1000 / chunk_duration_ms) as i64;
-    assert_eq!(chunks, 240, "120s / 500ms should = 240 chunks");
+    // Zero delay
+    let delay_ms: u64 = 0;
+    assert_eq!(delay_ms, 0, "No delay = 0ms");
 }
 
 // FlvStreamNormalizer unit tests

@@ -27,15 +27,12 @@ pub enum StartPosition {
 
 /// Resolve a StartPosition into a concrete start_chunk_id for an event.
 ///
-/// For `Live`, queries the DB for current chunk positions and computes
-/// `latest_seq - delivery_delay_chunks`. For `Beginning`, returns the first
-/// sequence number. For `Resume`, passes through the chunk_id directly.
+/// For `Live` and `Beginning`, returns the first sequence number for the event.
+/// For `Resume`, passes through the chunk_id directly.
 pub async fn resolve_start_chunk_id(
     pool: &SqlitePool,
     event_id: i64,
-    config: &Config,
     position: &StartPosition,
-    event_cache_delay_secs: Option<i64>,
 ) -> anyhow::Result<i64> {
     match position {
         StartPosition::Resume { chunk_id } => Ok(*chunk_id),
@@ -46,44 +43,20 @@ pub async fn resolve_start_chunk_id(
             Ok(first)
         }
         StartPosition::Live => {
-            let delay_secs = event_cache_delay_secs
-                .map(|s| s as u64)
-                .unwrap_or(config.delivery.delivery_delay_secs);
-            let chunk_duration_ms = config.inpoint.chunk_duration_ms;
-            let delivery_delay_chunks = if chunk_duration_ms > 0 {
-                (delay_secs * 1000 / chunk_duration_ms) as i64
-            } else {
-                0
-            };
-
             let first_seq = db::get_first_sequence_number_for_event(pool, event_id)
                 .await?
                 .unwrap_or(1);
-            let latest_seq = db::get_latest_sequence_number_for_event(pool, event_id)
-                .await?
-                .unwrap_or(first_seq);
-
-            let start = if latest_seq - first_seq >= delivery_delay_chunks {
-                (latest_seq - delivery_delay_chunks).max(first_seq)
-            } else {
-                first_seq
-            };
-            Ok(start)
+            Ok(first_seq)
         }
     }
 }
 
-/// Compute delivery_delay_chunks from config and optional per-event override.
-pub fn compute_delivery_delay_chunks(config: &Config, event_cache_delay_secs: Option<i64>) -> i64 {
+/// Compute delivery delay in milliseconds from config and optional per-event override.
+pub fn compute_delivery_delay_ms(config: &Config, event_cache_delay_secs: Option<i64>) -> u64 {
     let delay_secs = event_cache_delay_secs
         .map(|s| s as u64)
         .unwrap_or(config.delivery.delivery_delay_secs);
-    let chunk_duration_ms = config.inpoint.chunk_duration_ms;
-    if chunk_duration_ms > 0 {
-        (delay_secs * 1000 / chunk_duration_ms) as i64
-    } else {
-        0
-    }
+    delay_secs * 1000
 }
 
 /// Add a single endpoint to a running delivery VPS mid-stream.
@@ -112,19 +85,7 @@ pub async fn add_endpoint_to_delivery(
         ));
     }
 
-    // Resolve event cache delay
-    let event = db::get_streaming_event_by_id(pool, event_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Event {event_id} not found"))?;
-
-    let start_chunk_id = resolve_start_chunk_id(
-        pool,
-        event_id,
-        config,
-        &start_position,
-        event.cache_delay_secs,
-    )
-    .await?;
+    let start_chunk_id = resolve_start_chunk_id(pool, event_id, &start_position).await?;
 
     let chunk_format = &config.inpoint.chunk_format;
 

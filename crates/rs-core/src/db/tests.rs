@@ -886,3 +886,34 @@ async fn cache_duration_sums_undelivered_sent_chunks() {
     let dur = get_cache_duration_secs(&pool, event_id, 3).await.unwrap();
     assert!((dur - 0.0).abs() < 0.001);
 }
+
+#[tokio::test]
+async fn sent_duration_ms_only_counts_uploaded_chunks() {
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "sent-dur-test")
+        .await
+        .unwrap();
+
+    // Insert 3 chunks: two will be sent to S3, one local only
+    let c1 = insert_chunk(&pool, event_id, "/tmp/c1.bin", 1000, "aaa", 2000)
+        .await
+        .unwrap();
+    let c2 = insert_chunk(&pool, event_id, "/tmp/c2.bin", 1000, "bbb", 1800)
+        .await
+        .unwrap();
+    let _c3 = insert_chunk(&pool, event_id, "/tmp/c3.bin", 1000, "ccc", 2200)
+        .await
+        .unwrap();
+
+    // No chunks sent yet → 0
+    let total = get_sent_duration_ms(&pool, event_id).await.unwrap();
+    assert_eq!(total, 0);
+
+    // Mark chunks 1 and 2 as sent (uploaded to S3)
+    set_chunk_sent(&pool, c1).await.unwrap();
+    set_chunk_sent(&pool, c2).await.unwrap();
+    // Chunk 3 stays local (sent = 0)
+
+    let total = get_sent_duration_ms(&pool, event_id).await.unwrap();
+    assert_eq!(total, 3800); // 2000 + 1800, NOT 6000
+}

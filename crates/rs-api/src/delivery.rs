@@ -355,12 +355,7 @@ impl DeliveryOrchestrator {
             .cache_delay_secs
             .map(|s| s as u64)
             .unwrap_or(self.config.delivery.delivery_delay_secs);
-        let chunk_duration_ms = self.config.inpoint.chunk_duration_ms;
-        let delivery_delay_chunks = if chunk_duration_ms > 0 {
-            (delay_secs * 1000 / chunk_duration_ms) as i64
-        } else {
-            0
-        };
+        let target_delay_ms = (delay_secs * 1000) as i64;
 
         // Check if we have resume positions from a crash recovery
         let resume_pos = self.resume_positions.lock().await.remove(&event_id);
@@ -372,96 +367,47 @@ impl DeliveryOrchestrator {
             let first_seq = db::get_first_sequence_number_for_event(&self.pool, event_id)
                 .await?
                 .unwrap_or(1);
-            let latest_seq = db::get_latest_sequence_number_for_event(&self.pool, event_id)
-                .await?
-                .unwrap_or(first_seq);
-            start_chunk_id = if latest_seq - first_seq >= delivery_delay_chunks {
-                (latest_seq - delivery_delay_chunks).max(first_seq)
-            } else {
-                first_seq
-            };
+            start_chunk_id = first_seq;
             info!(
                 event_id,
                 start_chunk_id, "Resuming delivery after crash recovery"
             );
         } else {
-            // Wait for enough LOCAL chunks to exist before initializing the VPS.
-            let mut first_seq = None;
-            let mut latest_seq = 0i64;
-            // Wait up to 15 min: 4K@1s chunks take ~2s each to encode+upload,
-            // so 300 chunks (for 300s cache) needs ~600s real time.
-            let max_chunk_wait = 900;
-            for attempt in 0..max_chunk_wait {
-                match db::get_first_sequence_number_for_event(&self.pool, event_id).await {
-                    Ok(Some(seq)) => {
-                        if first_seq.is_none() {
-                            first_seq = Some(seq);
-                        }
-                        latest_seq = db::get_latest_sequence_number_for_event(&self.pool, event_id)
-                            .await
-                            .ok()
-                            .flatten()
-                            .unwrap_or(seq);
-                        let gap = latest_seq - first_seq.unwrap_or(seq);
-                        if gap >= delivery_delay_chunks {
-                            info!(
-                                event_id,
-                                first_seq = first_seq.unwrap_or(seq),
-                                latest_seq,
-                                gap,
-                                delivery_delay_chunks,
-                                "Enough chunks accumulated for target delay"
-                            );
-                            break;
-                        }
-                        if attempt % 10 == 0 {
-                            info!(
-                                event_id,
-                                gap,
-                                delivery_delay_chunks,
-                                attempt,
-                                "Waiting for chunks to reach target delay ({gap}/{delivery_delay_chunks})"
-                            );
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    Ok(None) => {
-                        if attempt % 10 == 0 {
-                            info!(
-                                event_id,
-                                attempt, "No chunks found for event yet, retrying..."
-                            );
-                        }
-                        tokio::time::sleep(Duration::from_secs(3)).await;
-                    }
-                    Err(e) => {
-                        warn!(event_id, "Failed to query chunk sequence: {e}");
-                        tokio::time::sleep(Duration::from_secs(3)).await;
-                    }
+            // Wait for enough LOCAL sent content duration before initializing the VPS.
+            // Uses actual duration_ms from DB — correctly handles variable chunk sizes
+            // (e.g. 2s keyframe interval chunks are ~2000ms each, not 1000ms).
+            let max_wait_secs = 900;
+            for attempt in 0..max_wait_secs {
+                let sent_ms = db::get_sent_duration_ms(&self.pool, event_id)
+                    .await
+                    .unwrap_or(0);
+                if sent_ms >= target_delay_ms {
+                    info!(
+                        event_id,
+                        sent_ms, target_delay_ms, "Sent content duration meets target"
+                    );
+                    break;
                 }
+                if attempt % 10 == 0 {
+                    info!(
+                        event_id,
+                        sent_ms,
+                        target_delay_ms,
+                        attempt,
+                        "Waiting for sent duration ({sent_ms}ms / {target_delay_ms}ms)"
+                    );
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            let first_seq_val = first_seq.ok_or_else(|| {
-                anyhow::anyhow!("No chunks found for event {event_id} after wait")
-            })?;
-            let gap = latest_seq - first_seq_val;
-            start_chunk_id = if gap >= delivery_delay_chunks {
-                (latest_seq - delivery_delay_chunks).max(first_seq_val)
-            } else {
-                warn!(
-                    event_id,
-                    gap,
-                    delivery_delay_chunks,
-                    "Buffer fill incomplete after max wait — starting with {gap}/{delivery_delay_chunks} chunks"
-                );
-                first_seq_val
-            };
+            let first_seq_val = db::get_first_sequence_number_for_event(&self.pool, event_id)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("No chunks found for event {event_id} after wait")
+                })?;
+            start_chunk_id = first_seq_val;
             info!(
                 event_id,
-                start_chunk_id,
-                first_seq = first_seq_val,
-                latest_seq,
-                delivery_delay_chunks,
-                "Starting delivery from sequence"
+                start_chunk_id, "Starting delivery from first chunk"
             );
         }
 
@@ -490,7 +436,7 @@ impl DeliveryOrchestrator {
             },
             "event_identifier": event_name,
             "start_chunk_id": start_chunk_id,
-            "delivery_delay_chunks": delivery_delay_chunks,
+            "delivery_delay_ms": target_delay_ms,
         });
 
         let resp = client
@@ -521,13 +467,6 @@ impl DeliveryOrchestrator {
     /// Get delivery status for an event.
     pub async fn get_delivery_status(&self, event_id: i64) -> anyhow::Result<DeliveryStatus> {
         let instance = db::get_delivery_instance_by_event(&self.pool, event_id).await?;
-
-        // Get latest local sequence number for delay calculation (per-event sequential)
-        let latest_local_chunk = db::get_latest_sequence_number_for_event(&self.pool, event_id)
-            .await
-            .unwrap_or(None)
-            .unwrap_or(0);
-        let chunk_duration_secs = self.config.inpoint.chunk_duration_ms as f64 / 1000.0;
 
         // Read cached is_fast map (populated in init_endpoints, empty before init)
         let fast_map = {
@@ -567,9 +506,11 @@ impl DeliveryOrchestrator {
                             let ffmpeg_last_stderr =
                                 entry["ffmpeg_last_stderr"].as_str().map(|s| s.to_string());
 
-                            // Compute chunk delay
-                            let chunk_gap = (latest_local_chunk - chunk_id).max(0) as f64;
-                            let chunk_delay_secs = chunk_gap * chunk_duration_secs;
+                            // Compute cache delay using actual content duration from DB
+                            let chunk_delay_secs =
+                                db::get_cache_duration_secs(&self.pool, event_id, chunk_id)
+                                    .await
+                                    .unwrap_or(0.0);
 
                             // Update DB with latest status
                             if let Err(e) = db::upsert_delivery_endpoint_status(
