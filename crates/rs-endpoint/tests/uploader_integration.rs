@@ -2,7 +2,7 @@
 //! with a mock S3 server.
 //!
 //! These tests exercise:
-//! - S3 upload with correct key format (`{event_id}/{sequence_number}_{event_id}.bin`)
+//! - S3 upload with correct key format (`{event_id}/{sequence_number}_{duration_ms}_{event_id}.bin`)
 //! - Database state transitions (in_process, sent)
 //! - Local file cleanup after successful upload
 
@@ -129,7 +129,7 @@ async fn uploader_full_flow_success() {
     assert_eq!(s3_state.upload_count.load(Ordering::SeqCst), 1);
     let last_key = s3_state.last_key.lock().clone();
     assert!(
-        last_key.contains("evt-integration-test/1_evt-integration-test.bin"),
+        last_key.contains("evt-integration-test/1_0_evt-integration-test.bin"),
         "S3 key should match format: {last_key}"
     );
 
