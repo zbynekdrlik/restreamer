@@ -441,6 +441,31 @@ fn EndpointTree() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let show_add_modal = use_context::<RwSignal<bool>>().expect("show_add_modal");
 
+    // Confirm modal state for endpoint removal
+    let confirm_remove_alias: RwSignal<Option<String>> = RwSignal::new(None);
+    let show_remove_confirm = RwSignal::new(false);
+
+    // When modal is dismissed, clear the alias
+    Effect::new(move |_| {
+        if !show_remove_confirm.get() {
+            confirm_remove_alias.set(None);
+        }
+    });
+
+    let remove_confirm_message = Signal::derive(move || match confirm_remove_alias.get() {
+        Some(ref alias) => format!("Remove endpoint \"{}\" from active delivery?", alias),
+        None => String::new(),
+    });
+
+    let on_remove_confirmed = Callback::new(move |()| {
+        if let Some(alias) = confirm_remove_alias.get_untracked() {
+            let event_id = store.pipeline_state.get().event_id.unwrap_or(0);
+            spawn_local(async move {
+                let _ = api::delivery_remove_endpoint(event_id, &alias).await;
+            });
+        }
+    });
+
     // YouTube health polling: fast initial poll, then every 30s
     let yt_has_polled = RwSignal::new(false);
     let _yt_poll = Interval::new(5_000, move || {
@@ -620,18 +645,8 @@ fn EndpointTree() -> impl IntoView {
                                                 title="Remove endpoint"
                                                 on:click=move |_| {
                                                     let alias = remove_alias.clone();
-                                                    let window = web_sys::window().unwrap();
-                                                    let confirmed = window.confirm_with_message(
-                                                        &format!("Remove endpoint '{}'?", alias)
-                                                    ).unwrap_or(false);
-                                                    if !confirmed { return; }
-                                                    let event_id = store.pipeline_state.get()
-                                                        .event_id.unwrap_or(0);
-                                                    spawn_local(async move {
-                                                        let _ = api::delivery_remove_endpoint(
-                                                            event_id, &alias,
-                                                        ).await;
-                                                    });
+                                                    confirm_remove_alias.set(Some(alias));
+                                                    show_remove_confirm.set(true);
                                                 }
                                             >
                                                 {"\u{00D7}"}
@@ -684,6 +699,13 @@ fn EndpointTree() -> impl IntoView {
                     </button>
                 </div>
             </Show>
+            <ConfirmModal
+                show=show_remove_confirm
+                title="Remove Endpoint?"
+                message=remove_confirm_message
+                confirm_label="Remove"
+                on_confirm=on_remove_confirmed
+            />
         </div>
     }
 }
