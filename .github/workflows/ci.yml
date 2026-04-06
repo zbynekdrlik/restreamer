@@ -176,32 +176,14 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
       - name: Install cargo-mutants
         run: cargo install cargo-mutants
-      - name: "Tier 1: Diff-only -- zero survivors"
+      - name: "Mutation testing: zero survivors in changed code"
         run: |
           git diff origin/main...HEAD > pr.diff
           if [ ! -s pr.diff ]; then
-            echo "No diff found -- skipping Tier 1"
-          else
-            cargo mutants --in-diff pr.diff --timeout 120
-          fi
-        env:
-          SQLX_OFFLINE: true
-      - name: "Tier 2: Full workspace -- 60% threshold"
-        run: |
-          cargo mutants --workspace --timeout 120 --output mutants-out
-          killed=$(jq '[.outcomes[] | select(.scenario != "Baseline") | select(.summary == "CaughtMutant")] | length' mutants-out/outcomes.json)
-          total=$(jq '[.outcomes[] | select(.scenario != "Baseline")] | length' mutants-out/outcomes.json)
-          if [ "$total" -eq 0 ]; then
-            echo "No mutants generated -- skipping threshold check"
+            echo "No Rust source changes in diff -- skipping"
             exit 0
           fi
-          score=$((killed * 100 / total))
-          echo "Mutation score: ${score}% (${killed}/${total} killed)"
-          if [ "$score" -lt 60 ]; then
-            echo "FAIL: Mutation score ${score}% is below 60% threshold"
-            exit 1
-          fi
-          echo "OK: Mutation score ${score}%"
+          cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --output mutants-out
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report

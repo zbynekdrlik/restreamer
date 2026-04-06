@@ -14,14 +14,13 @@ Line coverage (cargo-tarpaulin at 55%) proves tests execute code but not that th
 
 `cargo-mutants` — the standard Rust mutation testing tool. Modifies source code (swaps operators, removes returns, changes constants) and re-runs tests. If tests still pass after a mutation, the test is weak.
 
-### Two-Tier Approach
+### Approach: Diff-Only, Zero Survivors
 
-| Tier | Scope | Rule | Purpose |
-|------|-------|------|---------|
-| **Tier 1** | Changed code only (`--in-diff`) | Zero surviving mutants | New/modified code must be properly tested |
-| **Tier 2** | Full workspace | >= 60% mutation score | Existing tests must meet minimum quality bar |
+Full workspace mutation (1048 mutants) takes 50-80 hours — not feasible in CI. Instead, enforce zero surviving mutants on changed code only.
 
-Both tiers run in a single CI job. Tier 1 runs first (fast fail). Tier 2 runs second.
+| Scope | Rule | Purpose |
+|-------|------|---------|
+| Changed code only (`--in-diff`) | Zero surviving mutants | Every new/modified line must be properly tested |
 
 ### CI Job: `mutation-testing`
 
@@ -37,29 +36,13 @@ Both tiers run in a single CI job. Tier 1 runs first (fast fail). Tier 2 runs se
 2. **Rust toolchain** + `Swatinem/rust-cache@v2`
 3. **System dependencies** — same as test job: `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg`
 4. **Install cargo-mutants:** `cargo install cargo-mutants`
-5. **Tier 1 — Diff zero survivors:**
+5. **Run mutation testing on diff:**
    ```bash
    git diff origin/main...HEAD > pr.diff
-   cargo mutants --in-diff pr.diff --timeout 120
+   cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --output mutants-out
    ```
-   Exits non-zero if any mutant survives in changed code. Fast (2-5 min).
-6. **Tier 2 — Full workspace 60%:**
-   ```bash
-   cargo mutants --workspace --timeout 120 --output mutants-out
-   ```
-   Parse `mutants-out/outcomes.json` for mutation score:
-   ```bash
-   killed=$(jq '[.outcomes[] | select(.scenario != "Baseline") | select(.summary == "CaughtMutant")] | length' mutants-out/outcomes.json)
-   total=$(jq '[.outcomes[] | select(.scenario != "Baseline")] | length' mutants-out/outcomes.json)
-   score=$((killed * 100 / total))
-   if [ "$score" -lt 60 ]; then
-     echo "FAIL: Mutation score ${score}% is below 60% threshold"
-     exit 1
-   fi
-   echo "OK: Mutation score ${score}%"
-   ```
-   Fail if below 60%.
-7. **Upload artifact** on failure: `mutants-out/` directory for debugging which mutants survived.
+   Exits non-zero if any mutant survives in changed code.
+6. **Upload artifact** on failure: `mutants-out/` directory for debugging which mutants survived.
 
 **Environment:**
 - `SQLX_OFFLINE: true` (same as test job)
@@ -78,22 +61,17 @@ Per-mutant timeout: 120 seconds. If a single test run takes longer than this, th
 - `leptos-ui/` — excluded from workspace, won't be mutated
 - Generated code or FFI bindings — `cargo-mutants` skips `unsafe` blocks by default
 
-### Future Ratcheting
+### Future: Full Workspace Scoring
 
-As test quality improves, increase Tier 2 threshold:
-- **Phase 1:** 60% (initial gate)
-- **Phase 2:** 70% (after test hardening pass)
-- **Phase 3:** 80% (target)
-
-Update the threshold in `ci.yml` when ready to ratchet.
+Full workspace mutation (1048 mutants, 50-80 hours) is not feasible in CI today.
+Options for the future: sharding across parallel jobs, nightly scheduled runs, or
+limiting to specific high-value crates.
 
 ## Estimated CI Impact
 
 | Metric | Value |
 |--------|-------|
-| Tier 1 (diff-only) | 2-5 min |
-| Tier 2 (full workspace) | 30-60 min |
-| Total job time | 35-65 min |
+| Diff-only mutation | 5-15 min (depends on PR size) |
 | Trigger | PR to main only |
 | Impact on dev pushes | None |
 
