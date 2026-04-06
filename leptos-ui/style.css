@@ -267,6 +267,27 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
     cursor: pointer; font-family: var(--font-mono); font-size: 12px;
 }
 
+/* Confirm Modal (reusable danger confirmation) */
+.confirm-modal {
+    background: var(--bg-card); border: var(--border-w) solid var(--status-error);
+    border-radius: var(--radius); padding: var(--spacing-lg);
+    min-width: 300px; max-width: 400px;
+}
+.confirm-modal-title {
+    margin: 0 0 var(--spacing-sm) 0; color: var(--status-error);
+    font-size: 16px; font-weight: 600;
+}
+.confirm-modal-message {
+    margin: 0 0 var(--spacing-lg) 0; color: var(--text-secondary);
+    font-size: 13px; line-height: 1.5;
+}
+.confirm-btn-danger {
+    padding: var(--spacing-xs) var(--spacing-sm); border: 1px solid var(--status-error);
+    border-radius: var(--radius); background: rgba(239,68,68,0.15); color: var(--status-error);
+    cursor: pointer; font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+}
+.confirm-btn-danger:hover { background: rgba(239,68,68,0.25); }
+
 /* Start position select (used in modal) */
 .start-position-select {
     background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border);
