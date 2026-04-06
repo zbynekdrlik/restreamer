@@ -6,6 +6,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api;
 use crate::store::DashboardStore;
+use super::confirm_modal::ConfirmModal;
 
 /// Main operator dashboard view.
 #[component]
@@ -32,6 +33,7 @@ pub fn OperatorDashboard() -> impl IntoView {
 fn ControlBar() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let loading = RwSignal::new(false);
+    let show_stop_confirm = RwSignal::new(false);
 
     let pipeline_state = move || store.pipeline_state.get().state.clone();
     let is_active = move || {
@@ -68,7 +70,11 @@ fn ControlBar() -> impl IntoView {
         }
     };
 
-    let on_stop = move |_| {
+    let on_stop_click = move |_| {
+        show_stop_confirm.set(true);
+    };
+
+    let on_stop_confirmed = Callback::new(move |()| {
         let selected = store.selected_event_id.get();
         if let Some(event_id) = selected {
             loading.set(true);
@@ -82,7 +88,21 @@ fn ControlBar() -> impl IntoView {
                 }
             });
         }
-    };
+    });
+
+    let stop_confirm_message = Signal::derive(move || {
+        let ep_count = store.delivery.get().endpoints.len();
+        let event_name = store
+            .pipeline_state
+            .get()
+            .event_name
+            .unwrap_or_else(|| "this event".to_string());
+        format!(
+            "This will stop all delivery for \"{}\" and tear down the VPS. \
+             {} endpoint(s) will go offline immediately.",
+            event_name, ep_count
+        )
+    });
 
     // 1-second tick for session timer
     let tick = RwSignal::new(0u32);
@@ -158,7 +178,7 @@ fn ControlBar() -> impl IntoView {
                 </button>
                 <button
                     class="stop-btn"
-                    on:click=on_stop
+                    on:click=on_stop_click
                     disabled=move || loading.get() || !(is_active() || is_delivering_active())
                 >
                     "Stop Delivering"
@@ -168,6 +188,13 @@ fn ControlBar() -> impl IntoView {
                 <span class={state_class}>{state_label}</span>
                 <span class="session-timer">{session_duration}</span>
             </div>
+            <ConfirmModal
+                show=show_stop_confirm
+                title="Stop Delivering?"
+                message=stop_confirm_message
+                confirm_label="Stop Delivering"
+                on_confirm=on_stop_confirmed
+            />
         </div>
     }
 }
