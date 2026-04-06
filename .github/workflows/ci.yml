@@ -159,6 +159,40 @@ jobs:
       - name: Run coverage
         run: cargo tarpaulin --workspace --exclude-files "src-tauri/*" --fail-under 55 --skip-clean --timeout 300
 
+  mutation-testing:
+    name: Mutation Testing
+    if: github.event_name == 'pull_request'
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev ffmpeg
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants
+      - name: "Mutation testing: zero survivors in changed code"
+        run: |
+          git diff origin/main...HEAD > pr.diff
+          if [ ! -s pr.diff ]; then
+            echo "No Rust source changes in diff -- skipping"
+            exit 0
+          fi
+          cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --output mutants-out
+        env:
+          SQLX_OFFLINE: true
+      - name: Upload mutants report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-report
+          path: mutants-out/
+
   security:
     name: Security audit
     runs-on: ubuntu-latest
@@ -588,6 +622,7 @@ jobs:
         file-size,
         test-integrity,
         frontend-e2e,
+        mutation-testing,
       ]
     runs-on: ubuntu-latest
     steps:
@@ -603,6 +638,7 @@ jobs:
           echo "file-size:      ${{ needs.file-size.result }}"
           echo "test-integrity: ${{ needs.test-integrity.result }}"
           echo "frontend-e2e:   ${{ needs.frontend-e2e.result }}"
+          echo "mutation-testing: ${{ needs.mutation-testing.result }}"
 
           FAILED=0
 
@@ -615,6 +651,17 @@ jobs:
             fi
           else
             echo "version-check: $VERSION_RESULT (OK - only required on PRs)"
+          fi
+
+          # mutation-testing is only required on pull_request (skipped on push is OK)
+          MUTATION_RESULT="${{ needs.mutation-testing.result }}"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ "$MUTATION_RESULT" != "success" ]]; then
+              echo "FAIL: mutation-testing did not succeed (result: $MUTATION_RESULT)"
+              FAILED=1
+            fi
+          else
+            echo "mutation-testing: $MUTATION_RESULT (OK - only required on PRs)"
           fi
 
           # All other jobs must succeed
