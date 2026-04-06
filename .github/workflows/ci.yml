@@ -640,6 +640,7 @@ jobs:
         file-size,
         test-integrity,
         frontend-e2e,
+        mutation-testing,
       ]
     runs-on: ubuntu-latest
     steps:
@@ -655,6 +656,7 @@ jobs:
           echo "file-size:      ${{ needs.file-size.result }}"
           echo "test-integrity: ${{ needs.test-integrity.result }}"
           echo "frontend-e2e:   ${{ needs.frontend-e2e.result }}"
+          echo "mutation-testing: ${{ needs.mutation-testing.result }}"
 
           FAILED=0
 
@@ -667,6 +669,17 @@ jobs:
             fi
           else
             echo "version-check: $VERSION_RESULT (OK - only required on PRs)"
+          fi
+
+          # mutation-testing is only required on pull_request (skipped on push is OK)
+          MUTATION_RESULT="${{ needs.mutation-testing.result }}"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ "$MUTATION_RESULT" != "success" ]]; then
+              echo "FAIL: mutation-testing did not succeed (result: $MUTATION_RESULT)"
+              FAILED=1
+            fi
+          else
+            echo "mutation-testing: $MUTATION_RESULT (OK - only required on PRs)"
           fi
 
           # All other jobs must succeed
