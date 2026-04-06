@@ -172,11 +172,196 @@ test.describe("Operator Dashboard", () => {
     await page.locator(".event-selector").selectOption({ index: 1 });
     await page.locator(".start-btn").click();
     await page.waitForTimeout(500);
-    // Now stop
+    // Now stop — confirm modal appears
     await page.locator(".stop-btn").click();
+    await expect(page.locator(".confirm-modal")).toBeVisible({ timeout: 2000 });
+    await page.locator(".confirm-btn-danger").click();
     await expect(page.locator(".state-badge")).toContainText("Idle", {
       timeout: 5000,
     });
+  });
+
+  test("Stop Delivering shows confirmation modal", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    // Click stop — modal appears
+    await page.locator(".stop-btn").click();
+    await expect(page.locator(".modal-overlay")).toBeVisible();
+    await expect(page.locator(".confirm-modal")).toBeVisible();
+    await expect(page.locator(".confirm-modal-title")).toHaveText(
+      "Stop Delivering?",
+    );
+    await expect(page.locator(".confirm-modal-message")).toContainText(
+      "stop all delivery",
+    );
+
+    // Dismiss to clean up
+    await page.locator(".modal-cancel-btn").click();
+  });
+
+  test("Stop Delivering cancel dismisses modal without stopping", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    await page.locator(".stop-btn").click();
+    await expect(page.locator(".confirm-modal")).toBeVisible();
+
+    // Click cancel — modal closes, state unchanged
+    await page.locator(".modal-cancel-btn").click();
+    await expect(page.locator(".modal-overlay")).not.toBeVisible();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+    );
+  });
+
+  test("Stop Delivering confirm calls stop-stream API", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    await page.locator(".stop-btn").click();
+    await expect(page.locator(".confirm-modal")).toBeVisible();
+
+    const [request] = await Promise.all([
+      page.waitForRequest(
+        (req) => req.url().includes("/stop-stream") && req.method() === "POST",
+      ),
+      page.locator(".confirm-btn-danger").click(),
+    ]);
+    expect(request.url()).toContain("/events/1/stop-stream");
+    await expect(page.locator(".modal-overlay")).not.toBeVisible();
+  });
+
+  test("Remove endpoint shows confirmation modal", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    // Simulate delivery with endpoint
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "test-vps",
+          status: "running",
+          server_ip: "1.2.3.4",
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "YouTube Main",
+              alive: true,
+              current_chunk_id: 10,
+              bytes_processed_total: 1000,
+              chunks_processed: 10,
+              chunk_delay_secs: 5.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+              is_fast: false,
+            },
+          ],
+        },
+      },
+    });
+
+    await expect(page.locator(".btn-remove-endpoint")).toBeVisible({
+      timeout: 5000,
+    });
+    await page.locator(".btn-remove-endpoint").click();
+
+    // Confirm modal appears with endpoint name
+    await expect(page.locator(".confirm-modal")).toBeVisible();
+    await expect(page.locator(".confirm-modal-title")).toHaveText(
+      "Remove Endpoint?",
+    );
+    await expect(page.locator(".confirm-modal-message")).toContainText(
+      "YouTube Main",
+    );
+
+    // Cancel — endpoint stays
+    await page.locator(".modal-cancel-btn").click();
+    await expect(page.locator(".modal-overlay")).not.toBeVisible();
+  });
+
+  test("Remove endpoint confirm calls delivery remove API", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "test-vps",
+          status: "running",
+          server_ip: "1.2.3.4",
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "YouTube Main",
+              alive: true,
+              current_chunk_id: 10,
+              bytes_processed_total: 1000,
+              chunks_processed: 10,
+              chunk_delay_secs: 5.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+              is_fast: false,
+            },
+          ],
+        },
+      },
+    });
+
+    await expect(page.locator(".btn-remove-endpoint")).toBeVisible({
+      timeout: 5000,
+    });
+    await page.locator(".btn-remove-endpoint").click();
+    await expect(page.locator(".confirm-modal")).toBeVisible();
+
+    const [request] = await Promise.all([
+      page.waitForRequest(
+        (req) =>
+          req.url().includes("/delivery/endpoints/remove") &&
+          req.method() === "POST",
+      ),
+      page.locator(".confirm-btn-danger").click(),
+    ]);
+    expect(request.postDataJSON().alias).toBe("YouTube Main");
+    await expect(page.locator(".modal-overlay")).not.toBeVisible();
   });
 
   test("pipeline shows OBS Disconnected and RTMP Idle by default", async ({
@@ -298,34 +483,31 @@ test.describe("Operator Dashboard", () => {
     );
 
     // Simulate delivery status via WebSocket so endpoint tree appears
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
         data: {
-          type: "DeliveryStatus",
-          data: {
-            instance_name: "test-vps",
-            status: "running",
-            server_ip: "1.2.3.4",
-            endpoint_count: 1,
-            endpoints: [
-              {
-                alias: "YouTube Main",
-                alive: true,
-                current_chunk_id: 10,
-                bytes_processed_total: 1000,
-                chunks_processed: 10,
-                chunk_delay_secs: 5.0,
-                stall_reason: null,
-                ffmpeg_restart_count: 0,
-                last_error: null,
-                is_fast: false,
-              },
-            ],
-          },
+          instance_name: "test-vps",
+          status: "running",
+          server_ip: "1.2.3.4",
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "YouTube Main",
+              alive: true,
+              current_chunk_id: 10,
+              bytes_processed_total: 1000,
+              chunks_processed: 10,
+              chunk_delay_secs: 5.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+              is_fast: false,
+            },
+          ],
         },
       },
-    );
+    });
 
     // Wait for endpoint tree to render
     await expect(page.locator(".endpoint-tree")).toBeVisible({ timeout: 5000 });
@@ -351,21 +533,18 @@ test.describe("Operator Dashboard", () => {
     );
 
     // Simulate delivery running
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
         data: {
-          type: "DeliveryStatus",
-          data: {
-            instance_name: "test-vps",
-            status: "running",
-            server_ip: "1.2.3.4",
-            endpoint_count: 0,
-            endpoints: [],
-          },
+          instance_name: "test-vps",
+          status: "running",
+          server_ip: "1.2.3.4",
+          endpoint_count: 0,
+          endpoints: [],
         },
       },
-    );
+    });
 
     await expect(page.locator(".endpoint-tree")).toBeVisible({ timeout: 5000 });
     await page.locator(".btn-add-endpoint").click();
@@ -402,21 +581,18 @@ test.describe("Operator Dashboard", () => {
       { timeout: 5000 },
     );
 
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
         data: {
-          type: "DeliveryStatus",
-          data: {
-            instance_name: "test-vps",
-            status: "running",
-            server_ip: "1.2.3.4",
-            endpoint_count: 0,
-            endpoints: [],
-          },
+          instance_name: "test-vps",
+          status: "running",
+          server_ip: "1.2.3.4",
+          endpoint_count: 0,
+          endpoints: [],
         },
       },
-    );
+    });
 
     await expect(page.locator(".endpoint-tree")).toBeVisible({ timeout: 5000 });
     await page.locator(".btn-add-endpoint").click();
@@ -444,8 +620,10 @@ test.describe("Operator Dashboard", () => {
     // Event selector should be disabled while delivering
     await expect(page.locator(".event-selector")).toBeDisabled();
 
-    // Stop delivering
+    // Stop delivering — confirm modal
     await page.locator(".stop-btn").click();
+    await expect(page.locator(".confirm-modal")).toBeVisible({ timeout: 2000 });
+    await page.locator(".confirm-btn-danger").click();
     await expect(page.locator(".state-badge")).toContainText("Idle", {
       timeout: 5000,
     });
@@ -804,9 +982,7 @@ test.describe("Per-Endpoint Cache Bar", () => {
         },
       },
     });
-    const warningBar = page.locator(
-      ".endpoint-node .buffer-bar-fill.warning",
-    );
+    const warningBar = page.locator(".endpoint-node .buffer-bar-fill.warning");
     await expect(warningBar).toBeVisible({ timeout: 5000 });
 
     // Critical level: cache_duration_secs = 10 (8% of 120)
@@ -831,7 +1007,9 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await expect(criticalBar).toBeVisible({ timeout: 5000 });
   });
 
-  test("pending endpoint shows S3 cache from first second", async ({ page }) => {
+  test("pending endpoint shows S3 cache from first second", async ({
+    page,
+  }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
@@ -882,7 +1060,9 @@ test.describe("Per-Endpoint Cache Bar", () => {
     });
     // Pending endpoint should show cache bar using backend-computed cache duration
     const cacheLabel = page.locator(".endpoint-cache-label");
-    await expect(cacheLabel).toContainText("100s / 120s cache", { timeout: 5000 });
+    await expect(cacheLabel).toContainText("100s / 120s cache", {
+      timeout: 5000,
+    });
     // 100/120 = 83% -> healthy
     await expect(page.locator(".buffer-bar-fill.healthy")).toBeVisible();
   });
@@ -1056,34 +1236,31 @@ test.describe("Delivery Endpoint Add/Remove Controls", () => {
     await page.waitForTimeout(1000);
 
     // Broadcast running delivery status
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
         data: {
-          type: "DeliveryStatus",
-          data: {
-            instance_name: "rs-delivery-1",
-            status: "running",
-            server_ip: "1.2.3.4",
-            endpoint_count: 1,
-            endpoints: [
-              {
-                alias: "YouTube Main",
-                alive: true,
-                current_chunk_id: 42,
-                bytes_processed_total: 1000000,
-                chunks_processed: 40,
-                chunk_delay_secs: 15.0,
-                stall_reason: null,
-                ffmpeg_restart_count: 0,
-                last_error: null,
-                is_fast: false,
-              },
-            ],
-          },
+          instance_name: "rs-delivery-1",
+          status: "running",
+          server_ip: "1.2.3.4",
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "YouTube Main",
+              alive: true,
+              current_chunk_id: 42,
+              bytes_processed_total: 1000000,
+              chunks_processed: 40,
+              chunk_delay_secs: 15.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+              is_fast: false,
+            },
+          ],
         },
       },
-    );
+    });
 
     // Add endpoint button should be visible (opens modal on click)
     await expect(page.locator(".btn-add-endpoint")).toBeVisible({
@@ -1098,62 +1275,54 @@ test.describe("Delivery Endpoint Add/Remove Controls", () => {
     await page.waitForTimeout(1000);
 
     // Broadcast running delivery status
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
         data: {
-          type: "DeliveryStatus",
-          data: {
-            instance_name: "rs-delivery-1",
-            status: "running",
-            server_ip: "1.2.3.4",
-            endpoint_count: 1,
-            endpoints: [
-              {
-                alias: "YouTube Main",
-                alive: true,
-                current_chunk_id: 42,
-                bytes_processed_total: 1000000,
-                chunks_processed: 40,
-                chunk_delay_secs: 15.0,
-                stall_reason: null,
-                ffmpeg_restart_count: 0,
-                last_error: null,
-                is_fast: false,
-              },
-            ],
-          },
+          instance_name: "rs-delivery-1",
+          status: "running",
+          server_ip: "1.2.3.4",
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "YouTube Main",
+              alive: true,
+              current_chunk_id: 42,
+              bytes_processed_total: 1000000,
+              chunks_processed: 40,
+              chunk_delay_secs: 15.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+              is_fast: false,
+            },
+          ],
         },
       },
-    );
+    });
 
     // Remove button (×) should appear on the endpoint node
     const removeBtn = page.locator(".btn-remove-endpoint");
     await expect(removeBtn).toBeVisible({ timeout: 5000 });
   });
 
-  test("add/remove controls hidden when delivery is idle", async ({
-    page,
-  }) => {
+  test("add/remove controls hidden when delivery is idle", async ({ page }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
 
     // Broadcast idle delivery status to clear any leftover state from previous tests
-    await page.request.post(
-      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
-      {
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
         data: {
-          type: "DeliveryStatus",
-          data: {
-            instance_name: "",
-            status: "none",
-            server_ip: null,
-            endpoint_count: 0,
-            endpoints: [],
-          },
+          instance_name: "",
+          status: "none",
+          server_ip: null,
+          endpoint_count: 0,
+          endpoints: [],
         },
       },
-    );
+    });
     await page.waitForTimeout(500);
 
     // Idle state — no add/remove controls
