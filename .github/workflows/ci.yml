@@ -2437,7 +2437,7 @@ jobs:
               break
             }
             if ($i % 5 -eq 0) {
-              Write-Host "  Attempt $i/$maxWait: min chunk_id=$minChunk (waiting for > 1)"
+              Write-Host "  Attempt $($i)/$($maxWait): min chunk_id=$($minChunk) (waiting for > 1)"
             }
             Start-Sleep -Seconds 5
           }
