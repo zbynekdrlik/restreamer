@@ -2408,14 +2408,48 @@ jobs:
 
       - name: Verify delivery progression
         shell: powershell
-        timeout-minutes: 3
+        timeout-minutes: 10
         run: |
           # Delivering server sends to YouTube via the configured endpoint service type
-          # Take 4 readings at 15s intervals to catch stalls that 2-reading check misses
+          # The VPS-side buffer fill (probing S3 for delivery_delay_ms worth of chunks)
+          # must complete before endpoints start advancing. Wait for chunk_id > 1 first.
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
 
+          # Phase 1: Wait for VPS buffer fill to complete (chunk_id advances past 1)
+          Write-Host "Waiting for VPS buffer fill to complete (chunk_id > 1)..."
+          $maxWait = 60
+          $bufferReady = $false
+          for ($i = 1; $i -le $maxWait; $i++) {
+            $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+            $minChunk = [int]::MaxValue
+            $foundEndpoint = $false
+            if ($resp.endpoint_details) {
+              foreach ($ep in $resp.endpoint_details) {
+                if (-not $ep.is_fast) {
+                  $foundEndpoint = $true
+                  if ($ep.current_chunk_id -lt $minChunk) {
+                    $minChunk = $ep.current_chunk_id
+                  }
+                }
+              }
+            }
+            if ($foundEndpoint -and $minChunk -gt 1) {
+              Write-Host "Buffer fill complete at attempt $i (min chunk_id=$minChunk)"
+              $bufferReady = $true
+              break
+            }
+            if ($i % 5 -eq 0) {
+              Write-Host "  Attempt $($i)/$($maxWait): min chunk_id=$($minChunk) (waiting for > 1)"
+            }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $bufferReady) {
+            throw "FAILED: VPS buffer fill did not complete within $($maxWait * 5)s"
+          }
+
+          # Phase 2: Take 4 readings at 15s intervals to verify progression
           Write-Host "Verifying delivery progression for ALL endpoints (4 readings, 15s apart)..."
 
           # Track per-endpoint chunk progression across 4 readings
