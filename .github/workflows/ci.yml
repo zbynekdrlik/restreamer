@@ -2423,15 +2423,19 @@ jobs:
           $bufferReady = $false
           for ($i = 1; $i -le $maxWait; $i++) {
             $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
-            $minChunk = 999999
+            $minChunk = [int]::MaxValue
+            $foundEndpoint = $false
             if ($resp.endpoint_details) {
               foreach ($ep in $resp.endpoint_details) {
-                if (-not $ep.is_fast -and $ep.current_chunk_id -lt $minChunk) {
-                  $minChunk = $ep.current_chunk_id
+                if (-not $ep.is_fast) {
+                  $foundEndpoint = $true
+                  if ($ep.current_chunk_id -lt $minChunk) {
+                    $minChunk = $ep.current_chunk_id
+                  }
                 }
               }
             }
-            if ($minChunk -gt 1) {
+            if ($foundEndpoint -and $minChunk -gt 1) {
               Write-Host "Buffer fill complete at attempt $i (min chunk_id=$minChunk)"
               $bufferReady = $true
               break
