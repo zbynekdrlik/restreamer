@@ -1950,11 +1950,12 @@ jobs:
           $origCacheDelay = $targetEvent.cache_delay_secs
           Write-Host "Original cache_delay_secs: $origCacheDelay"
 
-          # Set cache delay to 300s for testing custom delay fill
-          $patchBody = @{ cache_delay_secs = 300 } | ConvertTo-Json
+          # Set cache delay to 60s for E2E testing — validates buffer fill feature
+          # without exceeding VPS-side S3 LIST probe time on Hetzner (~2s/chunk)
+          $patchBody = @{ cache_delay_secs = 60 } | ConvertTo-Json
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
             -Method PATCH -Body $patchBody -ContentType "application/json" -TimeoutSec 10
-          Write-Host "Set cache_delay_secs=300 on event $($targetEvent.id)"
+          Write-Host "Set cache_delay_secs=60 on event $($targetEvent.id)"
 
           # Start stream: activates receiving + delivering, clears stale chunks, starts VPS
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/start-stream" `
@@ -2189,7 +2190,7 @@ jobs:
               process.exit(1);
             }
 
-            // Parse the first cache label (e.g., "45s / 300s cache")
+            // Parse the first cache label (e.g., "45s / 60s cache")
             const match = cacheLabels[0].match(/(\d+)s\s*\/\s*(\d+)s/);
             if (!match) {
               console.error('FAILED: Could not parse cache label:', cacheLabels[0]);
