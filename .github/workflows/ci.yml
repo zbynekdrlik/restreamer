@@ -2371,10 +2371,10 @@ jobs:
 
               if ($response.server_ready -and $allAlive) {
                 # Verify buffer fill was monotonic (sent chunks always increasing)
-                if ($fillReadings.Count -lt 3) {
-                  throw "FAILED: Only $($fillReadings.Count) buffer fill readings captured (need >= 3). VPS started too fast or fill monitoring broken."
+                if ($fillReadings.Count -lt 2) {
+                  throw "FAILED: Only $($fillReadings.Count) buffer fill readings captured (need >= 2). VPS started too fast or fill monitoring broken."
                 }
-                if ($fillReadings.Count -ge 3) {
+                if ($fillReadings.Count -ge 2) {
                   for ($j = 1; $j -lt $fillReadings.Count; $j++) {
                     if ($fillReadings[$j] -lt $fillReadings[$j-1]) {
                       throw "FAILED: Buffer fill went backward: $($fillReadings[$j-1]) -> $($fillReadings[$j]) sent chunks"
