@@ -318,7 +318,8 @@ jobs:
           pip install awscli
           aws s3 cp target/release/rs-delivery \
             s3://restreamer-chunks/rs-delivery \
-            --endpoint-url https://eu-central-1.linodeobjects.com \
+            --endpoint-url https://nbg1.your-objectstorage.com \
+            --region nbg1 \
             --acl public-read
 
   file-size:

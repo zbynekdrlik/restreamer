@@ -364,8 +364,8 @@ impl Default for Config {
             client_uuid: String::new(),
             s3: S3Config {
                 bucket: "restreamer-chunks".to_string(),
-                region: "eu-central-1".to_string(),
-                endpoint: "https://fsn1.your-objectstorage.com".to_string(),
+                region: "nbg1".to_string(),
+                endpoint: "https://nbg1.your-objectstorage.com".to_string(),
                 access_key_id: String::new(),
                 secret_access_key: String::new(),
             },
