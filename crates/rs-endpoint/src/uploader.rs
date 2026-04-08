@@ -135,16 +135,16 @@ impl ChunkUploader {
                     return;
                 }
 
-                // Use sequence_number and duration_ms for S3 key — per-event sequential
-                // numbering avoids interleaving; duration_ms lets the VPS learn chunk
-                // duration from S3 without needing the local database
-                let s3_key = S3Client::chunk_key(&event_id, chunk.sequence_number, chunk.duration_ms);
-
-                // Upload to S3 with retry
+                // Upload to S3 with retry — duration stored as S3 object metadata
                 let mut uploaded = false;
                 for attempt in 0..MAX_RETRIES {
                     match s3
-                        .upload_file(Path::new(&chunk.chunk_file_path), &s3_key)
+                        .upload_chunk(
+                            Path::new(&chunk.chunk_file_path),
+                            &event_id,
+                            chunk.sequence_number,
+                            chunk.duration_ms,
+                        )
                         .await
                     {
                         Ok(()) => {
