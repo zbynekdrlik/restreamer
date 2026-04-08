@@ -16,7 +16,7 @@ pub enum S3FetchError {
     Fetch(String),
 }
 
-/// Chunk data with metadata parsed from S3 key filename.
+/// Chunk data with duration from S3 object metadata header.
 pub struct ChunkData {
     pub data: Vec<u8>,
     pub duration_ms: i64,
@@ -52,37 +52,26 @@ impl S3Fetcher {
         })
     }
 
-    /// Fetch a chunk with metadata (duration_ms parsed from S3 key filename).
-    /// Uses S3 LIST to discover the key since duration is embedded in the filename.
+    /// Fetch a chunk with metadata (duration_ms from S3 object metadata header).
+    /// Uses direct GET with key `{event}/{seq}.bin`.
     pub async fn fetch_chunk_with_meta(
         &self,
         chunk_id: i64,
     ) -> Result<Option<ChunkData>, S3FetchError> {
-        let prefix = format!("{}/{}_", self.event_identifier, chunk_id);
-        let list_result = self
-            .bucket
-            .list(prefix, Some("/".to_string()))
-            .await
-            .map_err(|e| S3FetchError::Fetch(format!("list failed: {e}")))?;
-
-        let key = list_result
-            .iter()
-            .flat_map(|r| r.contents.iter())
-            .map(|obj| &obj.key)
-            .next();
-
-        let key = match key {
-            Some(k) => k.clone(),
-            None => return Ok(None),
-        };
-
-        let (_seq, duration_ms) = crate::db::parse_chunk_key(&key).unwrap_or((chunk_id, 0));
+        let key = format!("{}/{}.bin", self.event_identifier, chunk_id);
 
         match self.bucket.get_object(&key).await {
-            Ok(response) if response.status_code() == 200 => Ok(Some(ChunkData {
-                data: response.to_vec(),
-                duration_ms,
-            })),
+            Ok(response) if response.status_code() == 200 => {
+                let duration_ms = response
+                    .headers()
+                    .get("x-amz-meta-duration-ms")
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(0);
+                Ok(Some(ChunkData {
+                    data: response.to_vec(),
+                    duration_ms,
+                }))
+            }
             Ok(response) if response.status_code() == 404 => Ok(None),
             Ok(response) => Err(S3FetchError::Fetch(format!(
                 "status {}",
@@ -99,12 +88,31 @@ impl S3Fetcher {
         }
     }
 
-    /// Fetch a chunk by sequential ID. Returns None if not found (404).
-    /// Delegates to `fetch_chunk_with_meta` and discards metadata.
-    pub async fn fetch_chunk(&self, chunk_id: i64) -> Result<Option<Vec<u8>>, S3FetchError> {
-        match self.fetch_chunk_with_meta(chunk_id).await? {
-            Some(cd) => Ok(Some(cd.data)),
-            None => Ok(None),
+    /// Get chunk duration via HEAD request (no data download).
+    /// Returns `Ok(Some(duration_ms))` for 200, `Ok(None)` for 404.
+    pub async fn head_chunk_duration(&self, chunk_id: i64) -> Result<Option<i64>, S3FetchError> {
+        let key = format!("{}/{}.bin", self.event_identifier, chunk_id);
+
+        match self.bucket.head_object(&key).await {
+            Ok((head, 200)) => {
+                let duration_ms = head
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("duration-ms"))
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(0);
+                Ok(Some(duration_ms))
+            }
+            Ok((_, 404)) => Ok(None),
+            Ok((_, code)) => Err(S3FetchError::Fetch(format!("HEAD status {}", code))),
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("404") || err_str.contains("NoSuchKey") {
+                    Ok(None)
+                } else {
+                    Err(S3FetchError::Fetch(err_str))
+                }
+            }
         }
     }
 }
@@ -113,9 +121,8 @@ impl S3Fetcher {
 mod tests {
     #[test]
     fn chunk_key_format() {
-        // New format includes duration_ms
-        let key = format!("{}/{}_{}_{}_{}.bin", "evt-123", 42, 2100, "evt-123", "");
-        // Verify prefix matches pattern used by fetch_chunk_with_meta
-        assert!(key.starts_with("evt-123/42_"));
+        // Direct key format: {event}/{seq}.bin
+        let key = format!("{}/{}.bin", "evt-123", 42);
+        assert_eq!(key, "evt-123/42.bin");
     }
 }

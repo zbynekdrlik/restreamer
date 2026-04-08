@@ -1,8 +1,11 @@
 /// Per-endpoint delivery task: S3 poll -> normalize -> ffmpeg pipe.
+///
+/// Architecture: producer-consumer pipeline with pre-fetch buffer.
+///   Producer (S3 fetcher) -> bounded channel (10 chunks ~20s) -> Consumer (ffmpeg writer)
 use async_trait::async_trait;
 use rs_ffmpeg::{FfmpegProcess, ServiceType};
 use std::sync::Arc;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::api::{EndpointConfig, S3Config};
@@ -82,13 +85,22 @@ const S3_BACKOFF_BASE_SECS: u64 = 2;
 const S3_BACKOFF_MAX_SECS: u64 = 60;
 /// Heartbeat interval for endpoint delivery loop.
 const ENDPOINT_HEARTBEAT_SECS: u64 = 60;
+/// Pre-fetch buffer size: ~20s of chunks (10 x ~2s each).
+const PREFETCH_BUFFER_SIZE: usize = 10;
+
+/// A chunk that has been fetched from S3 and is ready for the consumer.
+struct PrefetchedChunk {
+    chunk_id: i64,
+    data: Vec<u8>,
+    duration_ms: i64,
+}
 
 /// Trait for fetching chunks (S3 or mock).
 pub trait ChunkFetcher: Send + Sync {
-    fn fetch_chunk(
+    fn fetch_chunk_with_meta(
         &self,
         chunk_id: i64,
-    ) -> impl std::future::Future<Output = Result<Option<Vec<u8>>, String>> + Send;
+    ) -> impl std::future::Future<Output = Result<Option<(Vec<u8>, i64)>, String>> + Send;
 
     fn chunk_duration_ms(
         &self,
@@ -118,18 +130,18 @@ pub trait OutputProcessFactory: Send + Sync {
 
 /// Real S3 chunk fetcher implementing ChunkFetcher.
 impl ChunkFetcher for S3Fetcher {
-    async fn fetch_chunk(&self, chunk_id: i64) -> Result<Option<Vec<u8>>, String> {
-        S3Fetcher::fetch_chunk(self, chunk_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+    async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
         match S3Fetcher::fetch_chunk_with_meta(self, chunk_id).await {
-            Ok(Some(cd)) => Ok(Some(cd.duration_ms)),
+            Ok(Some(cd)) => Ok(Some((cd.data, cd.duration_ms))),
             Ok(None) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        S3Fetcher::head_chunk_duration(self, chunk_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -175,6 +187,7 @@ impl OutputProcessFactory for FfmpegProcessFactory {
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct EndpointStats {
     pub bytes_processed_total: u64,
+    pub duration_processed_ms: u64,
     pub current_chunk_id: i64,
     pub chunks_processed: u64,
     // Diagnostics
@@ -259,9 +272,342 @@ impl EndpointHandle {
     }
 }
 
+/// Producer task: fetches chunks from S3 and sends them into the bounded channel.
+/// Blocks on channel send when buffer is full (backpressure).
+async fn producer_task<F: ChunkFetcher>(
+    fetcher: F,
+    tx: mpsc::Sender<PrefetchedChunk>,
+    start_chunk_id: i64,
+    mut stop_rx: watch::Receiver<bool>,
+    stats: Stats,
+    alias: String,
+) {
+    let mut chunk_id = start_chunk_id;
+    let mut consecutive_chunk_misses: u32 = 0;
+    let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
+
+    loop {
+        if *stop_rx.borrow() {
+            tracing::info!(alias = %alias, "Producer: stop signal received");
+            break;
+        }
+
+        // Fetch chunk with metadata in one S3 GET
+        match fetcher.fetch_chunk_with_meta(chunk_id).await {
+            Ok(Some((data, duration_ms))) => {
+                consecutive_chunk_misses = 0;
+                s3_backoff_secs = S3_BACKOFF_BASE_SECS;
+                {
+                    let mut s = stats.lock().await;
+                    s.consecutive_chunk_misses = 0;
+                    if s.stall_reason.as_deref() == Some("chunk_gap") {
+                        s.stall_reason = None;
+                    }
+                }
+
+                let chunk = PrefetchedChunk {
+                    chunk_id,
+                    data,
+                    duration_ms,
+                };
+
+                // Send into channel; blocks if buffer full (backpressure).
+                // If receiver is dropped (consumer gone), stop.
+                if tx.send(chunk).await.is_err() {
+                    tracing::info!(alias = %alias, "Producer: consumer gone, stopping");
+                    break;
+                }
+
+                chunk_id += 1;
+                tokio::task::yield_now().await;
+            }
+            Ok(None) => {
+                consecutive_chunk_misses += 1;
+
+                // Chunk gap skip-ahead logic
+                if consecutive_chunk_misses >= MAX_CHUNK_MISS_COUNT {
+                    tracing::warn!(
+                        alias = %alias,
+                        chunk_id,
+                        misses = consecutive_chunk_misses,
+                        "Producer: probing ahead for chunks"
+                    );
+
+                    let mut found_ahead = false;
+                    for offset in 1..=SKIP_AHEAD_PROBE {
+                        let probe_id = chunk_id + offset;
+                        // Use HEAD (duration check) instead of GET to avoid downloading data
+                        if let Ok(Some(_)) = fetcher.chunk_duration_ms(probe_id).await {
+                            tracing::info!(
+                                alias = %alias,
+                                from = chunk_id,
+                                to = probe_id,
+                                "Producer: skipping ahead to chunk"
+                            );
+                            chunk_id = probe_id;
+                            consecutive_chunk_misses = 0;
+                            let mut s = stats.lock().await;
+                            s.consecutive_chunk_misses = 0;
+                            s.stall_reason = None;
+                            found_ahead = true;
+                            break;
+                        }
+                    }
+
+                    if !found_ahead {
+                        let mut s = stats.lock().await;
+                        s.stall_reason = Some("chunk_gap".to_string());
+                        s.consecutive_chunk_misses = consecutive_chunk_misses;
+                        drop(s);
+                        tracing::warn!(
+                            alias = %alias,
+                            chunk_id,
+                            "Producer: no chunks found in probe range"
+                        );
+                        // Reset counter so we probe again after another cycle
+                        consecutive_chunk_misses = 0;
+                    }
+                } else {
+                    let mut s = stats.lock().await;
+                    s.consecutive_chunk_misses = consecutive_chunk_misses;
+                }
+
+                tracing::debug!(alias = %alias, chunk_id, "Producer: chunk not found, waiting");
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                    _ = stop_rx.changed() => {
+                        if *stop_rx.borrow() { break; }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    alias = %alias,
+                    chunk_id,
+                    backoff_secs = s3_backoff_secs,
+                    "Producer: S3 fetch error, retrying in {s3_backoff_secs}s: {e}"
+                );
+                let mut s = stats.lock().await;
+                s.last_error = Some(e);
+                drop(s);
+                tokio::time::sleep(std::time::Duration::from_secs(s3_backoff_secs)).await;
+                s3_backoff_secs = (s3_backoff_secs * 2).min(S3_BACKOFF_MAX_SECS);
+            }
+        }
+    }
+
+    tracing::info!(alias = %alias, "Producer task stopped");
+}
+
+/// Consumer task: pulls pre-fetched chunks from the channel, normalizes FLV, writes to ffmpeg.
+/// Never makes S3 calls -- zero network I/O.
+async fn consumer_task<P: OutputProcessFactory>(
+    mut rx: mpsc::Receiver<PrefetchedChunk>,
+    factory: P,
+    ep_cfg: EndpointConfig,
+    mut stop_rx: watch::Receiver<bool>,
+    stats: Stats,
+) {
+    let alias = ep_cfg.alias.clone();
+
+    let service_type: ServiceType = match ep_cfg.service_type.parse() {
+        Ok(st) => st,
+        Err(e) => {
+            tracing::error!(alias = %alias, "Unknown service type '{}': {e}", ep_cfg.service_type);
+            return;
+        }
+    };
+
+    let mut flv_normalizer = FlvStreamNormalizer::new();
+    let mut proc: Option<Box<dyn OutputProcess>> = None;
+    let mut consecutive_ffmpeg_failures: u32 = 0;
+    let mut circuit_trips: u32 = 0;
+    let mut consecutive_write_failures: u32 = 0;
+    let mut last_heartbeat = std::time::Instant::now();
+
+    tracing::info!(alias = %alias, "Consumer: endpoint delivery configured (FLV-only)");
+
+    loop {
+        if *stop_rx.borrow() {
+            tracing::info!(alias = %alias, "Consumer: stop signal received");
+            break;
+        }
+
+        // Periodic heartbeat
+        if last_heartbeat.elapsed() >= std::time::Duration::from_secs(ENDPOINT_HEARTBEAT_SECS) {
+            tracing::info!(
+                alias = %alias,
+                ffmpeg_alive = proc.as_mut().is_some_and(|p| p.is_alive()),
+                "Consumer: delivery endpoint heartbeat"
+            );
+            last_heartbeat = std::time::Instant::now();
+        }
+
+        // Ensure output process is running
+        if !proc.as_mut().is_some_and(|p| p.is_alive()) {
+            if proc.is_some() {
+                let mut s = stats.lock().await;
+                s.ffmpeg_restart_count += 1;
+                if let Some(ref mut p) = proc {
+                    s.ffmpeg_last_stderr = p.last_stderr_line();
+                }
+                drop(s);
+                let delay = match consecutive_ffmpeg_failures {
+                    0 => 1,
+                    1 => 3,
+                    _ => 5,
+                };
+                tracing::warn!(alias = %alias, delay, "Consumer: ffmpeg died, restarting");
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                flv_normalizer = FlvStreamNormalizer::new();
+            }
+
+            match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {
+                Ok(new_proc) => {
+                    tracing::info!(alias = %alias, "Consumer: ffmpeg started");
+                    proc = Some(new_proc);
+                    consecutive_ffmpeg_failures = 0;
+                    let mut s = stats.lock().await;
+                    s.consecutive_ffmpeg_failures = 0;
+                    if s.stall_reason.as_deref() == Some("ffmpeg_crash_loop") {
+                        s.stall_reason = None;
+                    }
+                }
+                Err(e) => {
+                    consecutive_ffmpeg_failures += 1;
+                    let mut s = stats.lock().await;
+                    s.consecutive_ffmpeg_failures = consecutive_ffmpeg_failures;
+                    s.last_error = Some(e.clone());
+
+                    if consecutive_ffmpeg_failures >= MAX_FFMPEG_RESTARTS {
+                        circuit_trips += 1;
+                        let cooldown = (30 * 2u64.pow(circuit_trips.min(4) - 1)).min(300);
+                        tracing::error!(
+                            alias = %alias,
+                            failures = consecutive_ffmpeg_failures,
+                            circuit_trip = circuit_trips,
+                            "Consumer: ffmpeg circuit breaker #{circuit_trips}, cooldown {cooldown}s"
+                        );
+                        s.stall_reason = Some("ffmpeg_crash_loop".to_string());
+                        drop(s);
+                        let sleep_dur = std::time::Duration::from_secs(cooldown);
+                        tokio::select! {
+                            _ = tokio::time::sleep(sleep_dur) => {}
+                            _ = stop_rx.changed() => {
+                                if *stop_rx.borrow() { break; }
+                            }
+                        }
+                        consecutive_ffmpeg_failures = 0;
+                        let mut s = stats.lock().await;
+                        s.consecutive_ffmpeg_failures = 0;
+                    } else {
+                        drop(s);
+                        tracing::error!(alias = %alias, "Consumer: failed to spawn ffmpeg: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Pull next chunk from channel (blocks until available or producer drops)
+        let chunk = tokio::select! {
+            maybe_chunk = rx.recv() => {
+                match maybe_chunk {
+                    Some(c) => c,
+                    None => {
+                        tracing::info!(alias = %alias, "Consumer: producer gone, stopping");
+                        break;
+                    }
+                }
+            }
+            _ = stop_rx.changed() => {
+                if *stop_rx.borrow() {
+                    tracing::info!(alias = %alias, "Consumer: stop signal during recv");
+                    break;
+                }
+                continue;
+            }
+        };
+
+        let chunk_id = chunk.chunk_id;
+        let chunk_duration_ms = chunk.duration_ms;
+        let processed = flv_normalizer.normalize(&chunk.data);
+
+        if let Some(ref mut p) = proc {
+            let write_result = tokio::time::timeout(
+                std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
+                p.write(&processed),
+            )
+            .await;
+
+            match write_result {
+                Ok(Ok(())) => {
+                    consecutive_write_failures = 0;
+                    if circuit_trips > 0 {
+                        circuit_trips = 0;
+                        tracing::info!(alias = %alias, "Consumer: circuit breaker reset");
+                    }
+                    let mut s = stats.lock().await;
+                    s.bytes_processed_total += processed.len() as u64;
+                    s.duration_processed_ms += chunk_duration_ms.max(0) as u64;
+                    s.current_chunk_id = chunk_id;
+                    s.chunks_processed += 1;
+                }
+                Ok(Err(e)) => {
+                    consecutive_write_failures += 1;
+                    tracing::warn!(alias = %alias, chunk_id, failures = consecutive_write_failures, "Consumer: ffmpeg write failed: {e}");
+                    let mut s = stats.lock().await;
+                    s.last_error = Some(e);
+                    s.ffmpeg_restart_count += 1;
+                    drop(s);
+                    if let Some(mut p) = proc.take() {
+                        p.kill().await;
+                    }
+                    if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
+                        tracing::error!(alias = %alias, chunk_id, "Consumer: skipping chunk after {consecutive_write_failures} write failures");
+                        consecutive_write_failures = 0;
+                        flv_normalizer = FlvStreamNormalizer::new();
+                        let mut s = stats.lock().await;
+                        s.current_chunk_id = chunk_id;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    consecutive_write_failures += 1;
+                    tracing::error!(alias = %alias, chunk_id, failures = consecutive_write_failures, "Consumer: ffmpeg write timed out");
+                    let mut s = stats.lock().await;
+                    s.last_error = Some("write_timeout".to_string());
+                    s.stall_reason = Some("write_timeout".to_string());
+                    s.ffmpeg_restart_count += 1;
+                    drop(s);
+                    if let Some(mut p) = proc.take() {
+                        p.kill().await;
+                    }
+                    if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
+                        tracing::error!(alias = %alias, chunk_id, "Consumer: skipping chunk after {consecutive_write_failures} write timeouts");
+                        consecutive_write_failures = 0;
+                        flv_normalizer = FlvStreamNormalizer::new();
+                        let mut s = stats.lock().await;
+                        s.current_chunk_id = chunk_id;
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+
+    // Cleanup
+    if let Some(mut p) = proc {
+        p.kill().await;
+    }
+    tracing::info!(alias = %alias, "Consumer task stopped");
+}
+
 /// Core endpoint loop -- generic over ChunkFetcher and OutputProcessFactory for testability.
+/// Orchestrates buffer fill, then spawns producer-consumer pipeline.
 #[allow(clippy::too_many_arguments)]
-pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
+pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 'static>(
     fetcher: F,
     factory: P,
     ep_cfg: EndpointConfig,
@@ -304,338 +650,73 @@ pub async fn endpoint_loop<F: ChunkFetcher, P: OutputProcessFactory>(
         }
     }
 
-    let service_type: ServiceType = match ep_cfg.service_type.parse() {
-        Ok(st) => st,
-        Err(e) => {
-            tracing::error!(alias = %alias, "Unknown service type '{}': {e}", ep_cfg.service_type);
-            return;
-        }
-    };
+    tracing::info!(alias = %alias, "Starting producer-consumer pipeline");
 
-    // FLV stream normalizer: strips duplicate FLV headers from concatenated chunks.
-    let mut flv_normalizer = FlvStreamNormalizer::new();
+    // Create bounded channel for pre-fetch buffer
+    let (tx, rx) = mpsc::channel::<PrefetchedChunk>(PREFETCH_BUFFER_SIZE);
 
-    tracing::info!(
-        alias = %alias,
-        "Endpoint delivery configured (FLV-only)"
-    );
+    let producer_stop = stop_rx.clone();
+    let producer_stats = stats.clone();
+    let producer_alias = alias.clone();
+    let producer = tokio::spawn(producer_task(
+        fetcher,
+        tx,
+        start_chunk_id,
+        producer_stop,
+        producer_stats,
+        producer_alias,
+    ));
 
-    let mut chunk_id = start_chunk_id;
-    let mut proc: Option<Box<dyn OutputProcess>> = None;
-    let mut consecutive_ffmpeg_failures: u32 = 0;
-    let mut consecutive_chunk_misses: u32 = 0;
-    let mut circuit_trips: u32 = 0;
-    let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
-    let mut last_heartbeat = std::time::Instant::now();
-    let mut drought_mode = false;
-    let mut consecutive_write_failures: u32 = 0;
+    let consumer_stop = stop_rx.clone();
+    let consumer_stats = stats.clone();
+    let consumer = tokio::spawn(consumer_task(
+        rx,
+        factory,
+        ep_cfg,
+        consumer_stop,
+        consumer_stats,
+    ));
+
+    // Wait for either task to finish or stop signal.
+    // Both producer and consumer already listen for stop_rx internally,
+    // but we also watch here for cleanup coordination.
+    tokio::pin!(producer);
+    tokio::pin!(consumer);
 
     loop {
-        // Check for stop signal
-        if *stop_rx.borrow() {
-            tracing::info!(alias = %alias, "Stop signal received");
-            break;
-        }
-
-        // Periodic heartbeat
-        if last_heartbeat.elapsed() >= std::time::Duration::from_secs(ENDPOINT_HEARTBEAT_SECS) {
-            tracing::info!(
-                alias = %alias,
-                chunk_id,
-                ffmpeg_alive = proc.as_mut().is_some_and(|p| p.is_alive()),
-                "Delivery endpoint heartbeat"
-            );
-            last_heartbeat = std::time::Instant::now();
-        }
-
-        // Ensure output process is running (skip during drought mode)
-        if !drought_mode && !proc.as_mut().is_some_and(|p| p.is_alive()) {
-            if proc.is_some() {
-                let mut s = stats.lock().await;
-                s.ffmpeg_restart_count += 1;
-                // Capture stderr before dropping
-                if let Some(ref mut p) = proc {
-                    s.ffmpeg_last_stderr = p.last_stderr_line();
+        tokio::select! {
+            result = &mut producer => {
+                if let Err(e) = result {
+                    tracing::error!(alias = %alias, "Producer panicked: {e}");
                 }
-                drop(s);
-                let delay = match consecutive_ffmpeg_failures {
-                    0 => 1,
-                    1 => 3,
-                    _ => 5,
-                };
-                tracing::warn!(alias = %alias, delay, "ffmpeg died, restarting");
-                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                flv_normalizer = FlvStreamNormalizer::new();
+                tracing::info!(alias = %alias, "Producer finished, waiting for consumer to drain");
+                // Consumer will stop when channel is drained (recv returns None)
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    &mut consumer,
+                ).await;
+                break;
             }
-
-            match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {
-                Ok(new_proc) => {
-                    tracing::info!(alias = %alias, "ffmpeg started");
-                    proc = Some(new_proc);
-                    consecutive_ffmpeg_failures = 0;
-                    let mut s = stats.lock().await;
-                    s.consecutive_ffmpeg_failures = 0;
-                    if s.stall_reason.as_deref() == Some("ffmpeg_crash_loop") {
-                        s.stall_reason = None;
-                    }
+            result = &mut consumer => {
+                if let Err(e) = result {
+                    tracing::error!(alias = %alias, "Consumer panicked: {e}");
                 }
-                Err(e) => {
-                    consecutive_ffmpeg_failures += 1;
-                    let mut s = stats.lock().await;
-                    s.consecutive_ffmpeg_failures = consecutive_ffmpeg_failures;
-                    s.last_error = Some(e.clone());
-
-                    // Circuit breaker: after MAX_FFMPEG_RESTARTS, enter cooldown
-                    if consecutive_ffmpeg_failures >= MAX_FFMPEG_RESTARTS {
-                        circuit_trips += 1;
-                        let cooldown = (30 * 2u64.pow(circuit_trips.min(4) - 1)).min(300);
-                        tracing::error!(
-                            alias = %alias,
-                            failures = consecutive_ffmpeg_failures,
-                            circuit_trip = circuit_trips,
-                            "ffmpeg circuit breaker #{circuit_trips}, cooldown {cooldown}s"
-                        );
-                        s.stall_reason = Some("ffmpeg_crash_loop".to_string());
-                        drop(s);
-                        let sleep_dur = std::time::Duration::from_secs(cooldown);
-                        tokio::select! {
-                            _ = tokio::time::sleep(sleep_dur) => {}
-                            _ = stop_rx.changed() => {
-                                if *stop_rx.borrow() { break; }
-                            }
-                        }
-                        consecutive_ffmpeg_failures = 0;
-                        let mut s = stats.lock().await;
-                        s.consecutive_ffmpeg_failures = 0;
-                    } else {
-                        drop(s);
-                        tracing::error!(alias = %alias, "Failed to spawn ffmpeg: {e}");
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    }
-                    continue;
-                }
+                tracing::info!(alias = %alias, "Consumer finished, aborting producer");
+                producer.abort();
+                break;
             }
-        }
-
-        // Fetch next chunk from S3
-        match fetcher.fetch_chunk(chunk_id).await {
-            Ok(Some(data)) => {
-                consecutive_chunk_misses = 0;
-                s3_backoff_secs = S3_BACKOFF_BASE_SECS;
-                if circuit_trips > 0 {
-                    circuit_trips = 0;
-                    tracing::info!(alias = %alias, "ffmpeg circuit breaker reset after successful chunk");
+            _ = stop_rx.changed() => {
+                if *stop_rx.borrow() {
+                    tracing::info!(alias = %alias, "Stop signal received, aborting pipeline");
+                    producer.abort();
+                    consumer.abort();
+                    break;
                 }
-                if drought_mode {
-                    tracing::info!(alias = %alias, chunk_id, "Exiting drought mode — re-buffering before resume");
-                    drought_mode = false;
-                    flv_normalizer = FlvStreamNormalizer::new();
-                    {
-                        let mut s = stats.lock().await;
-                        s.stall_reason = Some("re-buffering".to_string());
-                        s.consecutive_chunk_misses = 0;
-                    }
-                    // Re-buffer: accumulate duration before restarting ffmpeg
-                    if delivery_delay_ms > 0 {
-                        let mut accum_ms: u64 = 0;
-                        let mut rebuf_id = chunk_id;
-                        tracing::info!(alias = %alias, chunk_id, "Re-buffering: accumulating duration");
-                        loop {
-                            if *stop_rx.borrow() {
-                                return;
-                            }
-                            match fetcher.chunk_duration_ms(rebuf_id).await {
-                                Ok(Some(dur_ms)) => {
-                                    accum_ms += dur_ms.max(0) as u64;
-                                    rebuf_id += 1;
-                                    if accum_ms >= delivery_delay_ms {
-                                        tracing::info!(alias = %alias, accum_ms, "Re-buffer complete");
-                                        break;
-                                    }
-                                }
-                                Ok(None) => {
-                                    tokio::select! {
-                                        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                                        _ = stop_rx.changed() => { if *stop_rx.borrow() { return; } }
-                                    }
-                                }
-                                Err(_) => {
-                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                }
-                            }
-                        }
-                        let mut s = stats.lock().await;
-                        s.stall_reason = None;
-                    }
-                    // Don't process this chunk yet — let "ensure ffmpeg alive" spawn ffmpeg first
-                    continue;
-                }
-                {
-                    let mut s = stats.lock().await;
-                    s.consecutive_chunk_misses = 0;
-                    if s.stall_reason.as_deref() == Some("chunk_gap") {
-                        s.stall_reason = None;
-                    }
-                }
-
-                let processed = flv_normalizer.normalize(&data);
-
-                // Write full chunk directly to ffmpeg with timeout.
-                // ffmpeg handles its own output buffering to RTMP/HLS.
-                if let Some(ref mut p) = proc {
-                    let write_result = tokio::time::timeout(
-                        std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
-                        p.write(&processed),
-                    )
-                    .await;
-
-                    match write_result {
-                        Ok(Ok(())) => {
-                            consecutive_write_failures = 0;
-                            let mut s = stats.lock().await;
-                            s.bytes_processed_total += processed.len() as u64;
-                            s.current_chunk_id = chunk_id;
-                            s.chunks_processed += 1;
-                        }
-                        Ok(Err(e)) => {
-                            consecutive_write_failures += 1;
-                            tracing::warn!(alias = %alias, chunk_id, failures = consecutive_write_failures, "ffmpeg write failed: {e}");
-                            let mut s = stats.lock().await;
-                            s.last_error = Some(e);
-                            s.ffmpeg_restart_count += 1;
-                            drop(s);
-                            if let Some(mut p) = proc.take() {
-                                p.kill().await;
-                            }
-                            if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
-                                tracing::error!(alias = %alias, chunk_id, "Skipping chunk after {consecutive_write_failures} write failures");
-                                chunk_id += 1;
-                                consecutive_write_failures = 0;
-                                flv_normalizer = FlvStreamNormalizer::new();
-                                let mut s = stats.lock().await;
-                                s.current_chunk_id = chunk_id;
-                            }
-                            continue;
-                        }
-                        Err(_) => {
-                            consecutive_write_failures += 1;
-                            tracing::error!(alias = %alias, chunk_id, failures = consecutive_write_failures, "ffmpeg write timed out");
-                            let mut s = stats.lock().await;
-                            s.last_error = Some("write_timeout".to_string());
-                            s.stall_reason = Some("write_timeout".to_string());
-                            s.ffmpeg_restart_count += 1;
-                            drop(s);
-                            if let Some(mut p) = proc.take() {
-                                p.kill().await;
-                            }
-                            if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
-                                tracing::error!(alias = %alias, chunk_id, "Skipping chunk after {consecutive_write_failures} write timeouts");
-                                chunk_id += 1;
-                                consecutive_write_failures = 0;
-                                flv_normalizer = FlvStreamNormalizer::new();
-                                let mut s = stats.lock().await;
-                                s.current_chunk_id = chunk_id;
-                            }
-                            continue;
-                        }
-                    }
-                }
-
-                chunk_id += 1;
-                // Minimal yield to let other tasks run. Delivery is naturally
-                // paced by S3 chunk availability -- when we catch up to the live
-                // edge, fetch_chunk returns None and the loop waits 2s.
-                tokio::task::yield_now().await;
-            }
-            Ok(None) => {
-                consecutive_chunk_misses += 1;
-
-                // Chunk gap skip-ahead logic
-                if consecutive_chunk_misses >= MAX_CHUNK_MISS_COUNT {
-                    tracing::warn!(
-                        alias = %alias,
-                        chunk_id,
-                        misses = consecutive_chunk_misses,
-                        "Probing ahead for chunks"
-                    );
-
-                    let mut found_ahead = false;
-                    for offset in 1..=SKIP_AHEAD_PROBE {
-                        let probe_id = chunk_id + offset;
-                        if let Ok(Some(_)) = fetcher.fetch_chunk(probe_id).await {
-                            tracing::info!(
-                                alias = %alias,
-                                from = chunk_id,
-                                to = probe_id,
-                                "Skipping ahead to chunk"
-                            );
-                            chunk_id = probe_id;
-                            consecutive_chunk_misses = 0;
-                            // Reset normalizer on skip
-                            flv_normalizer = FlvStreamNormalizer::new();
-                            let mut s = stats.lock().await;
-                            s.consecutive_chunk_misses = 0;
-                            s.stall_reason = None;
-                            found_ahead = true;
-                            break;
-                        }
-                    }
-
-                    if !found_ahead {
-                        if !drought_mode {
-                            tracing::warn!(alias = %alias, chunk_id, "Entering drought mode — killing ffmpeg until chunks resume");
-                            if let Some(mut p) = proc.take() {
-                                p.kill().await;
-                            }
-                            drought_mode = true;
-                        }
-                        let mut s = stats.lock().await;
-                        s.stall_reason = Some("chunk_gap".to_string());
-                        s.consecutive_chunk_misses = consecutive_chunk_misses;
-                        drop(s);
-                        tracing::warn!(
-                            alias = %alias,
-                            chunk_id,
-                            "No chunks found in probe range, still in drought mode"
-                        );
-                        // Reset counter so we probe again after another cycle
-                        consecutive_chunk_misses = 0;
-                    }
-                } else {
-                    let mut s = stats.lock().await;
-                    s.consecutive_chunk_misses = consecutive_chunk_misses;
-                }
-
-                // Chunk not available yet
-                tracing::debug!(alias = %alias, chunk_id, "Chunk not found, waiting");
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                    _ = stop_rx.changed() => {
-                        if *stop_rx.borrow() { break; }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    alias = %alias,
-                    chunk_id,
-                    backoff_secs = s3_backoff_secs,
-                    "S3 fetch error, retrying in {s3_backoff_secs}s: {e}"
-                );
-                let mut s = stats.lock().await;
-                s.last_error = Some(e);
-                drop(s);
-                tokio::time::sleep(std::time::Duration::from_secs(s3_backoff_secs)).await;
-                s3_backoff_secs = (s3_backoff_secs * 2).min(S3_BACKOFF_MAX_SECS);
             }
         }
     }
 
-    // Cleanup
-    if let Some(mut p) = proc {
-        p.kill().await;
-    }
-    tracing::info!(alias = %alias, "Endpoint task stopped");
+    tracing::info!(alias = %alias, "Endpoint pipeline stopped");
 }
 
 #[cfg(test)]

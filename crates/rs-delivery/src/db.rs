@@ -1,5 +1,5 @@
 /// In-memory SQLite database for VPS chunk metadata.
-/// Tracks duration_ms per chunk, parsed from S3 key filenames.
+/// Tracks duration_ms per chunk, read from S3 object metadata headers.
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::str::FromStr;
@@ -55,27 +55,6 @@ pub async fn get_chunk_duration(pool: &SqlitePool, seq: i64) -> Result<Option<i6
     Ok(row.map(|r| r.get::<i64, _>("duration_ms")))
 }
 
-/// Parse S3 key to extract (sequence_number, duration_ms).
-/// New format: "{event}/{seq}_{duration_ms}_{event}.bin"
-/// Legacy format: "{event}/{seq}_{event}.bin" → returns duration_ms = 0
-pub fn parse_chunk_key(key: &str) -> Option<(i64, i64)> {
-    let filename = key.rsplit('/').next()?;
-    let stem = filename.strip_suffix(".bin")?;
-    let parts: Vec<&str> = stem.splitn(3, '_').collect();
-    match parts.len() {
-        3 => {
-            let seq: i64 = parts[0].parse().ok()?;
-            let dur: i64 = parts[1].parse().ok()?;
-            Some((seq, dur))
-        }
-        2 => {
-            let seq: i64 = parts[0].parse().ok()?;
-            Some((seq, 0))
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,26 +74,6 @@ mod tests {
         assert_eq!(get_chunk_duration(&pool, 1).await.unwrap(), None);
         insert_chunk(&pool, 1, 2100, 50000).await.unwrap();
         assert_eq!(get_chunk_duration(&pool, 1).await.unwrap(), Some(2100));
-    }
-
-    #[test]
-    fn parse_new_format_key() {
-        let (seq, dur) = parse_chunk_key("evt-123/42_2100_evt-123.bin").unwrap();
-        assert_eq!(seq, 42);
-        assert_eq!(dur, 2100);
-    }
-
-    #[test]
-    fn parse_legacy_format_key() {
-        let (seq, dur) = parse_chunk_key("evt-123/42_evt-123.bin").unwrap();
-        assert_eq!(seq, 42);
-        assert_eq!(dur, 0);
-    }
-
-    #[test]
-    fn parse_invalid_key() {
-        assert!(parse_chunk_key("garbage").is_none());
-        assert!(parse_chunk_key("").is_none());
     }
 
     #[tokio::test]
