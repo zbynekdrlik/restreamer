@@ -125,11 +125,9 @@ impl ChunkFetcher for S3Fetcher {
     }
 
     async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
-        match S3Fetcher::fetch_chunk_with_meta(self, chunk_id).await {
-            Ok(Some(cd)) => Ok(Some(cd.duration_ms)),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e.to_string()),
-        }
+        S3Fetcher::head_chunk_duration(self, chunk_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
