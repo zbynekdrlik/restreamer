@@ -136,7 +136,6 @@ pub trait OutputProcessFactory: Send + Sync {
 }
 
 /// Real S3 chunk fetcher implementing ChunkFetcher.
-#[mutants::skip] // Thin S3 delegates — tested by E2E, not unit tests
 impl ChunkFetcher for S3Fetcher {
     async fn fetch_chunk(&self, chunk_id: i64) -> Result<Option<Vec<u8>>, String> {
         S3Fetcher::fetch_chunk(self, chunk_id)
@@ -287,7 +286,6 @@ impl EndpointHandle {
 
 /// Producer task: fetches chunks from S3 and sends them into the bounded channel.
 /// Blocks on channel send when buffer is full (backpressure).
-#[mutants::skip] // Async spawned task — mutations not deterministically catchable in unit tests
 async fn producer_task<F: ChunkFetcher>(
     fetcher: F,
     tx: mpsc::Sender<PrefetchedChunk>,
@@ -414,7 +412,6 @@ async fn producer_task<F: ChunkFetcher>(
 
 /// Consumer task: pulls pre-fetched chunks from the channel, normalizes FLV, writes to ffmpeg.
 /// Never makes S3 calls -- zero network I/O.
-#[mutants::skip] // Async spawned task — mutations not deterministically catchable in unit tests
 async fn consumer_task<P: OutputProcessFactory>(
     mut rx: mpsc::Receiver<PrefetchedChunk>,
     factory: P,
