@@ -1484,6 +1484,87 @@ jobs:
 
           try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
 
+      - name: Set OBS scene to 'test' for CI
+        id: obs-scene
+        shell: powershell
+        run: |
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+          $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+
+          $hello = Receive-OBSMessage $ws
+          $authRequired = $hello.d.authentication
+          if ($authRequired) {
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+            $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+            $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+          } else {
+            $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+          }
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+
+          # Get current scene
+          $getScene = @{
+            op = 6
+            d = @{
+              requestType = "GetCurrentProgramScene"
+              requestId = "get-scene-1"
+            }
+          } | ConvertTo-Json -Depth 5
+          Send-OBSMessage $ws $getScene
+          $sceneResp = Receive-OBSMessage $ws
+          $origScene = $sceneResp.d.responseData.currentProgramSceneName
+          Write-Host "Current OBS scene: $origScene"
+          "ORIG_SCENE=$origScene" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          if ($origScene -ne "test") {
+            $setScene = @{
+              op = 6
+              d = @{
+                requestType = "SetCurrentProgramScene"
+                requestId = "set-scene-1"
+                requestData = @{
+                  sceneName = "test"
+                }
+              }
+            } | ConvertTo-Json -Depth 5
+            Send-OBSMessage $ws $setScene
+            $setResp = Receive-OBSMessage $ws
+            Write-Host "Scene changed to 'test' (was '$origScene')"
+            Start-Sleep -Seconds 2
+          } else {
+            Write-Host "Scene already set to 'test', no change needed"
+          }
+
+          try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+
       - name: Set OBS encoder bitrate to 12000 for CI
         id: obs-bitrate
         shell: powershell
@@ -3329,6 +3410,78 @@ jobs:
           }
 
           throw "FAILED: YouTube is still receiving stream data after deactivation ($maxRetries attempts, ~$($maxRetries * $retryDelay)s). Deactivation did not stop delivery to YouTube."
+
+      - name: Restore OBS scene
+        if: always()
+        shell: powershell
+        run: |
+          $origScene = "${{ steps.obs-scene.outputs.ORIG_SCENE }}"
+          if (-not $origScene -or $origScene -eq "test") {
+            Write-Host "Original scene was 'test' or empty - skipping restore"
+            exit 0
+          }
+
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $identified = Receive-OBSMessage $ws
+
+            $setScene = @{
+              op = 6
+              d = @{
+                requestType = "SetCurrentProgramScene"
+                requestId = "restore-scene-1"
+                requestData = @{
+                  sceneName = $origScene
+                }
+              }
+            } | ConvertTo-Json -Depth 5
+            Send-OBSMessage $ws $setScene
+            $setResp = Receive-OBSMessage $ws
+            Write-Host "OBS scene restored to '$origScene'"
+
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+          } catch {
+            Write-Host "WARNING: Failed to restore OBS scene: $_"
+          }
 
       - name: Restore OBS encoder bitrate
         if: always()
