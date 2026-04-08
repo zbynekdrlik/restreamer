@@ -1103,6 +1103,64 @@ jobs:
             Write-Host "Restreamer started (PID: $($proc.Id), Session: $($proc.SessionId))"
           }
 
+      - name: Ensure OBS is not streaming (avoid RTMP conflict)
+        shell: powershell
+        run: |
+          # OBS may be streaming from a previous YouTube E2E test.
+          # Since rtmp_connected is a global flag, OBS streaming would prevent
+          # the ffmpeg disconnect check from ever seeing rtmp_connected=false.
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://127.0.0.1:4455"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(5000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMsg($ws, $msg) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($msg)
+              $seg = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $c = New-Object System.Threading.CancellationTokenSource; $c.CancelAfter(5000)
+              $ws.SendAsync($seg, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $c.Token).GetAwaiter().GetResult()
+            }
+            function Recv-OBSMsg($ws) {
+              $buf = New-Object byte[] 65536; $r = ""
+              do {
+                $seg = [ArraySegment[byte]]::new($buf, 0, $buf.Length)
+                $c = New-Object System.Threading.CancellationTokenSource; $c.CancelAfter(5000)
+                $recv = $ws.ReceiveAsync($seg, $c.Token).GetAwaiter().GetResult()
+                $r += [System.Text.Encoding]::UTF8.GetString($buf, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $r | ConvertFrom-Json
+            }
+
+            $hello = Recv-OBSMsg $ws
+            $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            Send-OBSMsg $ws $identify
+            $identified = Recv-OBSMsg $ws
+
+            # Check if OBS is streaming
+            $req = @{ op = 6; d = @{ requestType = "GetStreamStatus"; requestId = "check-stream" } } | ConvertTo-Json -Depth 5
+            Send-OBSMsg $ws $req
+            $resp = Recv-OBSMsg $ws
+            $streaming = $resp.d.responseData.outputActive
+
+            if ($streaming) {
+              Write-Host "OBS is streaming - stopping it before E2E streaming test"
+              $stop = @{ op = 6; d = @{ requestType = "StopStream"; requestId = "stop-stream" } } | ConvertTo-Json -Depth 5
+              Send-OBSMsg $ws $stop
+              $stopResp = Recv-OBSMsg $ws
+              Start-Sleep -Seconds 5
+              Write-Host "OBS stream stopped"
+            } else {
+              Write-Host "OBS is not streaming - good"
+            }
+
+            $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          } catch {
+            Write-Host "OBS WebSocket check failed (OBS may not be running): $_"
+            Write-Host "Proceeding anyway - ffmpeg test does not require OBS"
+          }
+
       - name: Verify API is responding
         shell: powershell
         run: |
