@@ -92,8 +92,6 @@ const PREFETCH_BUFFER_SIZE: usize = 10;
 struct PrefetchedChunk {
     chunk_id: i64,
     data: Vec<u8>,
-    /// Duration metadata from S3 -- carried through for future metrics/pacing.
-    #[allow(dead_code)]
     duration_ms: i64,
 }
 
@@ -200,6 +198,7 @@ impl OutputProcessFactory for FfmpegProcessFactory {
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct EndpointStats {
     pub bytes_processed_total: u64,
+    pub duration_processed_ms: u64,
     pub current_chunk_id: i64,
     pub chunks_processed: u64,
     // Diagnostics
@@ -348,7 +347,8 @@ async fn producer_task<F: ChunkFetcher>(
                     let mut found_ahead = false;
                     for offset in 1..=SKIP_AHEAD_PROBE {
                         let probe_id = chunk_id + offset;
-                        if let Ok(Some(_)) = fetcher.fetch_chunk(probe_id).await {
+                        // Use HEAD (duration check) instead of GET to avoid downloading data
+                        if let Ok(Some(_)) = fetcher.chunk_duration_ms(probe_id).await {
                             tracing::info!(
                                 alias = %alias,
                                 from = chunk_id,
@@ -542,6 +542,7 @@ async fn consumer_task<P: OutputProcessFactory>(
         };
 
         let chunk_id = chunk.chunk_id;
+        let chunk_duration_ms = chunk.duration_ms;
         let processed = flv_normalizer.normalize(&chunk.data);
 
         if let Some(ref mut p) = proc {
@@ -560,6 +561,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                     }
                     let mut s = stats.lock().await;
                     s.bytes_processed_total += processed.len() as u64;
+                    s.duration_processed_ms += chunk_duration_ms.max(0) as u64;
                     s.current_chunk_id = chunk_id;
                     s.chunks_processed += 1;
                 }
