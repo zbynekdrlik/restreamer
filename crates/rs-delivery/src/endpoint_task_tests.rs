@@ -23,6 +23,13 @@ impl ChunkFetcher for MockFetcher {
         Ok(map.get(&chunk_id).cloned())
     }
 
+    async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+        let map = self.chunks.lock().await;
+        Ok(map
+            .get(&chunk_id)
+            .map(|data| (data.clone(), self.duration_ms_per_chunk)))
+    }
+
     async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
         let map = self.chunks.lock().await;
         if map.contains_key(&chunk_id) {
@@ -439,8 +446,11 @@ async fn test_chunk_gap_detected_when_no_skip_found() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
 #[tokio::test]
-async fn test_drought_mode_stops_ffmpeg_and_recovers() {
-    // Verify ffmpeg is killed during chunk drought and recovers when chunks resume.
+async fn test_drought_mode_recovers_when_chunks_resume() {
+    // Verify that when chunks dry up, the producer detects chunk_gap stall
+    // and resumes processing when chunks become available again.
+    // In the producer-consumer architecture, the consumer blocks on rx.recv()
+    // while the producer waits for new chunks -- no ffmpeg kill/restart needed.
     tokio::time::pause();
 
     // 30 chunks total. Initially only 1-5 available.
@@ -449,8 +459,6 @@ async fn test_drought_mode_stops_ffmpeg_and_recovers() {
     let available = fetcher.available_up_to();
 
     let factory = MockProcessFactory::new();
-    let spawn_count = factory.spawn_count.clone();
-    let alive = factory.alive.clone();
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
@@ -475,36 +483,25 @@ async fn test_drought_mode_stops_ffmpeg_and_recovers() {
     drop(s);
 
     // Simulate drought: no new chunks. Advance time past MAX_CHUNK_MISS_COUNT
-    // (60 misses at 2s = 120s) plus extra margin.
-    // After this, the endpoint should have detected drought via chunk_gap stall.
     for _ in 0..80 {
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
         tokio::task::yield_now().await;
     }
 
-    // ffmpeg should be killed during drought (chunk_gap stall)
-    assert!(
-        !alive.load(Ordering::Relaxed),
-        "ffmpeg should be killed during drought (chunk_gap), but it is still alive"
+    // Producer should have set chunk_gap stall
+    let s = stats.lock().await;
+    assert_eq!(
+        s.stall_reason.as_deref(),
+        Some("chunk_gap"),
+        "Should have chunk_gap stall during drought, got {:?}",
+        s.stall_reason
     );
-    let spawns_after_initial = spawn_count.load(Ordering::Relaxed);
-    // Continue drought for another 60s — ffmpeg should NOT be respawned
-    for _ in 0..30 {
-        tokio::time::advance(std::time::Duration::from_secs(2)).await;
-        tokio::task::yield_now().await;
-    }
+    drop(s);
 
-    let spawns_during_extended_drought = spawn_count.load(Ordering::Relaxed) - spawns_after_initial;
-    assert!(
-        spawns_during_extended_drought == 0,
-        "ffmpeg should not be respawned during drought, got {} spawns",
-        spawns_during_extended_drought
-    );
-
-    // Resume chunks — make 6-30 available
+    // Resume chunks -- make 6-30 available
     available.store(30, Ordering::Relaxed);
 
-    // Advance time for recovery — ffmpeg should restart and process chunks
+    // Advance time for recovery
     for _ in 0..80 {
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
         tokio::task::yield_now().await;
@@ -662,6 +659,17 @@ impl ChunkFetcher for TimedMockFetcher {
         }
         let map = self.chunks.lock().await;
         Ok(map.get(&chunk_id).cloned())
+    }
+
+    async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+        let available = self.available_up_to.load(Ordering::Relaxed);
+        if chunk_id > available {
+            return Ok(None);
+        }
+        let map = self.chunks.lock().await;
+        Ok(map
+            .get(&chunk_id)
+            .map(|data| (data.clone(), self.duration_ms_per_chunk)))
     }
 
     async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
@@ -846,18 +854,10 @@ async fn test_buffer_fill_stops_on_signal() {
 }
 #[test]
 fn test_delivery_delay_ms_direct() {
-    // VPS now receives delivery_delay_ms directly from local side.
-    // No chunk-count conversion needed -- duration is the native unit.
-    let delay_ms: u64 = 120_000;
-    assert_eq!(delay_ms, 120_000, "120s = 120000ms");
-
-    // 90s delay
-    let delay_ms: u64 = 90_000;
-    assert_eq!(delay_ms, 90_000, "90s = 90000ms");
-
-    // Zero delay
-    let delay_ms: u64 = 0;
-    assert_eq!(delay_ms, 0, "No delay = 0ms");
+    // VPS receives delivery_delay_ms directly -- no chunk-count conversion.
+    assert_eq!(120_000u64, 120_000, "120s = 120000ms");
+    assert_eq!(90_000u64, 90_000, "90s = 90000ms");
+    assert_eq!(0u64, 0, "No delay = 0ms");
 }
 
 // FlvStreamNormalizer unit tests
