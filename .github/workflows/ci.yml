@@ -1270,9 +1270,10 @@ jobs:
         run: |
           # After ffmpeg stops, the 30s FRAME_TIMEOUT must elapse before the
           # frame processing loop detects the stall and sets connected=false.
+          # Allow 60s total (FRAME_TIMEOUT + margin for process cleanup).
           Write-Host "Verifying rtmp_connected is false after ffmpeg stream ended..."
-          Write-Host "(May take up to 35s due to FRAME_TIMEOUT)"
-          $maxRetries = 20
+          Write-Host "(May take up to 60s due to FRAME_TIMEOUT + cleanup)"
+          $maxRetries = 30
           $retryDelay = 2
           for ($i = 1; $i -le $maxRetries; $i++) {
             $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10

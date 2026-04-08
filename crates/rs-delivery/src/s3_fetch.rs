@@ -54,6 +54,7 @@ impl S3Fetcher {
 
     /// Fetch a chunk with metadata (duration_ms from S3 object metadata header).
     /// Uses direct GET with key `{event}/{seq}.bin`.
+    #[mutants::skip] // Requires real S3 — tested by E2E
     pub async fn fetch_chunk_with_meta(
         &self,
         chunk_id: i64,
@@ -90,6 +91,7 @@ impl S3Fetcher {
 
     /// Get chunk duration via HEAD request (no data download).
     /// Returns `Ok(Some(duration_ms))` for 200, `Ok(None)` for 404.
+    #[mutants::skip] // Requires real S3 — tested by E2E
     pub async fn head_chunk_duration(&self, chunk_id: i64) -> Result<Option<i64>, S3FetchError> {
         let key = format!("{}/{}.bin", self.event_identifier, chunk_id);
 
@@ -117,6 +119,7 @@ impl S3Fetcher {
     }
 
     /// Fetch a chunk by sequential ID. Returns None if not found (404).
+    #[mutants::skip] // Requires real S3 — tested by E2E
     pub async fn fetch_chunk(&self, chunk_id: i64) -> Result<Option<Vec<u8>>, S3FetchError> {
         let key = format!("{}/{}.bin", self.event_identifier, chunk_id);
 
