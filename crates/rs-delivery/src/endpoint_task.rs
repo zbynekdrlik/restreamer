@@ -97,11 +97,6 @@ struct PrefetchedChunk {
 
 /// Trait for fetching chunks (S3 or mock).
 pub trait ChunkFetcher: Send + Sync {
-    fn fetch_chunk(
-        &self,
-        chunk_id: i64,
-    ) -> impl std::future::Future<Output = Result<Option<Vec<u8>>, String>> + Send;
-
     fn fetch_chunk_with_meta(
         &self,
         chunk_id: i64,
@@ -135,12 +130,6 @@ pub trait OutputProcessFactory: Send + Sync {
 
 /// Real S3 chunk fetcher implementing ChunkFetcher.
 impl ChunkFetcher for S3Fetcher {
-    async fn fetch_chunk(&self, chunk_id: i64) -> Result<Option<Vec<u8>>, String> {
-        S3Fetcher::fetch_chunk(self, chunk_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
     async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
         match S3Fetcher::fetch_chunk_with_meta(self, chunk_id).await {
             Ok(Some(cd)) => Ok(Some((cd.data, cd.duration_ms))),

@@ -18,11 +18,6 @@ impl MockFetcher {
 }
 
 impl ChunkFetcher for MockFetcher {
-    async fn fetch_chunk(&self, chunk_id: i64) -> Result<Option<Vec<u8>>, String> {
-        let map = self.chunks.lock().await;
-        Ok(map.get(&chunk_id).cloned())
-    }
-
     async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
         let map = self.chunks.lock().await;
         Ok(map
@@ -652,15 +647,6 @@ impl TimedMockFetcher {
 }
 
 impl ChunkFetcher for TimedMockFetcher {
-    async fn fetch_chunk(&self, chunk_id: i64) -> Result<Option<Vec<u8>>, String> {
-        let available = self.available_up_to.load(Ordering::Relaxed);
-        if chunk_id > available {
-            return Ok(None);
-        }
-        let map = self.chunks.lock().await;
-        Ok(map.get(&chunk_id).cloned())
-    }
-
     async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
         let available = self.available_up_to.load(Ordering::Relaxed);
         if chunk_id > available {

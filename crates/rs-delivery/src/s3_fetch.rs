@@ -115,28 +115,6 @@ impl S3Fetcher {
             }
         }
     }
-
-    /// Fetch a chunk by sequential ID. Returns None if not found (404).
-    pub async fn fetch_chunk(&self, chunk_id: i64) -> Result<Option<Vec<u8>>, S3FetchError> {
-        let key = format!("{}/{}.bin", self.event_identifier, chunk_id);
-
-        match self.bucket.get_object(&key).await {
-            Ok(response) if response.status_code() == 200 => Ok(Some(response.to_vec())),
-            Ok(response) if response.status_code() == 404 => Ok(None),
-            Ok(response) => Err(S3FetchError::Fetch(format!(
-                "status {}",
-                response.status_code()
-            ))),
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("404") || err_str.contains("NoSuchKey") {
-                    Ok(None)
-                } else {
-                    Err(S3FetchError::Fetch(err_str))
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]

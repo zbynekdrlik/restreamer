@@ -187,7 +187,6 @@ jobs:
             --exclude-re 'impl ChunkFetcher for S3Fetcher' \
             --exclude-re 'S3Fetcher::fetch_chunk_with_meta' \
             --exclude-re 'S3Fetcher::head_chunk_duration' \
-            --exclude-re 'S3Fetcher::fetch_chunk' \
             --exclude-re 'producer_task' \
             --exclude-re 'consumer_task' \
             --exclude-re 'endpoint_loop' \
