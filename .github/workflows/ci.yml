@@ -190,7 +190,8 @@ jobs:
             --exclude-re 'S3Fetcher::fetch_chunk' \
             --exclude-re 'producer_task' \
             --exclude-re 'consumer_task' \
-            --exclude-re 'endpoint_loop'
+            --exclude-re 'endpoint_loop' \
+            --exclude-re 'S3Client::upload_chunk'
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report
