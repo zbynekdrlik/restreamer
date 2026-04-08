@@ -608,6 +608,7 @@ async fn test_processes_100_sequential_chunks() {
 async fn test_stats_struct_serializes() {
     let stats = EndpointStats {
         bytes_processed_total: 1000,
+        duration_processed_ms: 20000,
         current_chunk_id: 42,
         chunks_processed: 10,
         ffmpeg_restart_count: 2,
