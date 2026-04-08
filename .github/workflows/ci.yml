@@ -2821,10 +2821,25 @@ jobs:
               }
 
               if ($response.stream_receiving -and $healthValue -eq "good") {
+                # Check for bitrateLow in configuration_issues even when health is "good"
+                $hasBitrateLow = $false
+                if ($response.streams) {
+                  foreach ($s in $response.streams) {
+                    if ($s.configuration_issues -and $s.configuration_issues -contains "bitrateLow") {
+                      $hasBitrateLow = $true
+                      Write-Host "  WARNING: bitrateLow detected on stream '$($s.title)' despite 'good' health"
+                    }
+                  }
+                }
+                if ($hasBitrateLow) {
+                  throw "FAILED: YouTube reports 'good' health but bitrateLow is present in configuration_issues. Stream bitrate is insufficient."
+                }
+
                 Write-Host ""
                 Write-Host "=========================================="
                 Write-Host "  YOUTUBE STREAM HEALTH: GOOD"
                 Write-Host "  Matches OBS direct quality."
+                Write-Host "  No bitrateLow issues detected."
                 Write-Host "=========================================="
                 return
               }
@@ -3203,6 +3218,83 @@ jobs:
           }
 
           Write-Host "=== Restreamer Crash Recovery Test PASSED ==="
+
+      - name: "GATE: Second YouTube health check after resilience tests"
+        if: success()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # Second health gate: verify YouTube stream is still healthy after
+          # resilience tests (OBS disconnect, network disconnect, crash recovery).
+          # By now the stream has been running 10+ minutes -- any degradation
+          # would be visible.
+          $maxRetries = 5
+          $retryDelay = 10
+
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            Write-Host "--- Second health check ${i}/${maxRetries} ---"
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
+
+              Write-Host "  stream_receiving: $($response.stream_receiving)"
+
+              $healthValue = ""
+              if ($response.streams) {
+                foreach ($s in $response.streams) {
+                  Write-Host "  Stream '$($s.title)': status=$($s.stream_status), health=$($s.health_status)"
+                  if ($s.stream_status -eq "active") {
+                    $healthValue = $s.health_status
+                  }
+                  if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
+                    foreach ($issue in $s.configuration_issues) {
+                      Write-Host "    ISSUE: $issue"
+                    }
+                  }
+                }
+              }
+
+              if ($response.stream_receiving -and $healthValue -eq "good") {
+                # Check for bitrateLow even when health reports "good"
+                $hasBitrateLow = $false
+                if ($response.streams) {
+                  foreach ($s in $response.streams) {
+                    if ($s.configuration_issues -and $s.configuration_issues -contains "bitrateLow") {
+                      $hasBitrateLow = $true
+                      Write-Host "  WARNING: bitrateLow detected on stream '$($s.title)'"
+                    }
+                  }
+                }
+                if ($hasBitrateLow) {
+                  throw "FAILED: Second health check -- YouTube reports 'good' but bitrateLow present. Stream quality degraded after resilience tests."
+                }
+
+                Write-Host ""
+                Write-Host "=========================================="
+                Write-Host "  SECOND YOUTUBE HEALTH CHECK: GOOD"
+                Write-Host "  Stream quality maintained after resilience tests."
+                Write-Host "  No bitrateLow issues detected."
+                Write-Host "=========================================="
+                return
+              }
+
+              if ($response.stream_receiving -and $healthValue -and $healthValue -ne "good") {
+                Write-Host "  Health='${healthValue}' (need 'good'). Waiting..."
+              }
+            } catch {
+              if ($_.Exception.Message -match "^FAILED:") { throw }
+              Write-Host "  Request failed: $_"
+            }
+
+            if ($i -lt $maxRetries) {
+              Start-Sleep -Seconds $retryDelay
+            }
+          }
+
+          if ($healthValue) {
+            throw "FAILED: Second health check -- YouTube health is '${healthValue}' after resilience tests (must be 'good'). Stream quality degraded during OBS disconnect/reconnect or crash recovery."
+          } else {
+            throw "FAILED: Second health check -- YouTube not receiving stream after resilience tests ($maxRetries attempts)."
+          }
 
       - name: Stop OBS stream
         if: always()
