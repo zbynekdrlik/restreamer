@@ -963,3 +963,125 @@ async fn migration_v12_creates_template_tables() {
             .get("created_from");
     assert_eq!(val.as_deref(), Some("test-template"));
 }
+
+// --- Template DB tests (Task 3) ---
+
+#[tokio::test]
+async fn template_crud() {
+    let pool = setup_db().await;
+    let list = list_templates(&pool).await.unwrap();
+    assert!(list.is_empty());
+
+    let id = create_template(&pool, "Sunday Service", Some(30))
+        .await
+        .unwrap();
+    assert!(id > 0);
+
+    let list = list_templates(&pool).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].name, "Sunday Service");
+    assert_eq!(list[0].cache_delay_secs, Some(30));
+
+    let tmpl = get_template_by_id(&pool, id).await.unwrap().unwrap();
+    assert_eq!(tmpl.id, id);
+    assert_eq!(tmpl.name, "Sunday Service");
+    assert_eq!(tmpl.cache_delay_secs, Some(30));
+
+    update_template(&pool, id, "Sunday Service Updated", Some(60))
+        .await
+        .unwrap();
+    let tmpl = get_template_by_id(&pool, id).await.unwrap().unwrap();
+    assert_eq!(tmpl.name, "Sunday Service Updated");
+    assert_eq!(tmpl.cache_delay_secs, Some(60));
+
+    update_template(&pool, id, "No Delay", None).await.unwrap();
+    let tmpl = get_template_by_id(&pool, id).await.unwrap().unwrap();
+    assert_eq!(tmpl.cache_delay_secs, None);
+
+    delete_template(&pool, id).await.unwrap();
+    assert!(get_template_by_id(&pool, id).await.unwrap().is_none());
+    assert!(list_templates(&pool).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn template_duplicate_name_fails() {
+    let pool = setup_db().await;
+
+    create_template(&pool, "Weekend Service", None)
+        .await
+        .unwrap();
+    let result = create_template(&pool, "Weekend Service", Some(15)).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn template_endpoint_linking() {
+    let pool = setup_db().await;
+
+    let tmpl_id = create_template(&pool, "Multi-endpoint Template", Some(45))
+        .await
+        .unwrap();
+    let ep1 = create_endpoint_config(&pool, "YT-tmpl", "YT_HLS", "key-yt", false)
+        .await
+        .unwrap();
+    let ep2 = create_endpoint_config(&pool, "FB-tmpl", "FB", "key-fb", false)
+        .await
+        .unwrap();
+
+    // Initially no endpoints
+    let eps = get_template_endpoints(&pool, tmpl_id).await.unwrap();
+    assert!(eps.is_empty());
+
+    // Attach both endpoints
+    attach_endpoint_to_template(&pool, tmpl_id, ep1)
+        .await
+        .unwrap();
+    attach_endpoint_to_template(&pool, tmpl_id, ep2)
+        .await
+        .unwrap();
+
+    let eps = get_template_endpoints(&pool, tmpl_id).await.unwrap();
+    assert_eq!(eps.len(), 2);
+
+    // Duplicate attach is idempotent (INSERT OR IGNORE)
+    attach_endpoint_to_template(&pool, tmpl_id, ep1)
+        .await
+        .unwrap();
+    let eps = get_template_endpoints(&pool, tmpl_id).await.unwrap();
+    assert_eq!(eps.len(), 2);
+
+    // Detach one endpoint
+    detach_endpoint_from_template(&pool, tmpl_id, ep1)
+        .await
+        .unwrap();
+    let eps = get_template_endpoints(&pool, tmpl_id).await.unwrap();
+    assert_eq!(eps.len(), 1);
+    assert_eq!(eps[0].id, ep2);
+}
+
+#[tokio::test]
+async fn template_cascade_deletes_endpoints() {
+    let pool = setup_db().await;
+
+    let tmpl_id = create_template(&pool, "Cascade Test", None).await.unwrap();
+    let ep_id = create_endpoint_config(&pool, "YT-cascade", "YT_HLS", "key", false)
+        .await
+        .unwrap();
+    attach_endpoint_to_template(&pool, tmpl_id, ep_id)
+        .await
+        .unwrap();
+
+    // Verify link exists
+    let eps = get_template_endpoints(&pool, tmpl_id).await.unwrap();
+    assert_eq!(eps.len(), 1);
+
+    // Delete the template — should cascade to template_endpoints
+    delete_template(&pool, tmpl_id).await.unwrap();
+
+    // endpoint_config itself should still exist (only the join row is deleted)
+    let ep = get_endpoint_config(&pool, ep_id).await.unwrap();
+    assert!(ep.is_some());
+
+    // The template is gone
+    assert!(get_template_by_id(&pool, tmpl_id).await.unwrap().is_none());
+}

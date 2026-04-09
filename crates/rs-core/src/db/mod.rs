@@ -6,6 +6,9 @@ use std::str::FromStr;
 use crate::error::Result;
 use crate::models::{ChunkRecord, ChunkStats, ClientProfile, StreamingEvent};
 
+mod templates;
+pub use templates::*;
+
 mod v2;
 pub use v2::*;
 
