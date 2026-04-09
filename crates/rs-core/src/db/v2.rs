@@ -1,7 +1,8 @@
+use chrono::Utc;
 use sqlx::Row;
 use sqlx::sqlite::SqlitePool;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::models::{
     DeliveryEndpointStatus, DeliveryInstance, EndpointConfig, StreamingEvent, YouTubeOAuth,
 };
@@ -452,4 +453,73 @@ pub async fn update_streaming_event(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+// --- Create Event from Template ---
+
+async fn find_unique_event_name(pool: &SqlitePool, base_name: &str) -> Result<String> {
+    let candidate = base_name.to_string();
+    let exists: i32 = sqlx::query("SELECT COUNT(*) as cnt FROM streaming_events WHERE name = ?1")
+        .bind(&candidate)
+        .fetch_one(pool)
+        .await
+        .map(|r| r.get("cnt"))?;
+
+    if exists == 0 {
+        return Ok(candidate);
+    }
+
+    for suffix in 2..=100i32 {
+        let candidate = format!("{base_name}-{suffix}");
+        let exists: i32 =
+            sqlx::query("SELECT COUNT(*) as cnt FROM streaming_events WHERE name = ?1")
+                .bind(&candidate)
+                .fetch_one(pool)
+                .await
+                .map(|r| r.get("cnt"))?;
+
+        if exists == 0 {
+            return Ok(candidate);
+        }
+    }
+
+    Err(CoreError::Other(format!(
+        "Could not find a unique name for base '{base_name}' after 100 attempts"
+    )))
+}
+
+/// Create a new streaming event from a template.
+///
+/// Generates a name `{template.name}-{YYYY-MM-DD}` (UTC). If that name already
+/// exists, appends `-2`, `-3`, … up to `-100`. Copies the template's
+/// `cache_delay_secs` and all its endpoints to the new event.
+///
+/// Returns `(event_id, event_name)`.
+pub async fn create_event_from_template(
+    pool: &SqlitePool,
+    template_id: i64,
+) -> Result<(i64, String)> {
+    let template = super::templates::get_template_by_id_required(pool, template_id).await?;
+
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let base_name = format!("{}-{}", template.name, today);
+    let event_name = find_unique_event_name(pool, &base_name).await?;
+
+    let row = sqlx::query(
+        "INSERT INTO streaming_events (name, cache_delay_secs, created_from) VALUES (?1, ?2, ?3) RETURNING id",
+    )
+    .bind(&event_name)
+    .bind(template.cache_delay_secs)
+    .bind(&template.name)
+    .fetch_one(pool)
+    .await?;
+    let event_id: i64 = row.get("id");
+
+    // Copy template endpoints to the new event
+    let template_eps = super::templates::get_template_endpoints(pool, template_id).await?;
+    for ep in template_eps {
+        attach_endpoint_to_event(pool, event_id, ep.id).await?;
+    }
+
+    Ok((event_id, event_name))
 }
