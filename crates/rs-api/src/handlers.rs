@@ -380,25 +380,44 @@ pub async fn list_events(
 
 #[derive(Deserialize)]
 pub struct CreateEventRequest {
-    pub name: String,
+    pub name: Option<String>,
+    pub template_id: Option<i64>,
 }
 
 pub async fn create_event(
     State(state): State<AppState>,
     Json(req): Json<CreateEventRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
-    if req.name.trim().is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+    match (req.template_id, req.name) {
+        (Some(tid), _) => {
+            let (id, name) = db::create_event_from_template(&state.pool, tid)
+                .await
+                .map_err(|e| {
+                    error!("Failed to create event from template {tid}: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            Ok((
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "id": id, "name": name })),
+            ))
+        }
+        (None, Some(name)) => {
+            if name.trim().is_empty() {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            let id = db::create_streaming_event(&state.pool, &name)
+                .await
+                .map_err(|e| {
+                    error!("Failed to create event: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            Ok((
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "id": id, "name": name })),
+            ))
+        }
+        (None, None) => Err(StatusCode::BAD_REQUEST),
     }
-
-    let id = db::create_streaming_event(&state.pool, &req.name)
-        .await
-        .map_err(|e| {
-            error!("Failed to create event: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
 }
 
 pub async fn get_event_by_id(
