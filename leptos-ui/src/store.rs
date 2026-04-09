@@ -5,7 +5,9 @@
 
 use leptos::prelude::*;
 
-use crate::api::{ChunkStats, EndpointConfig, LogEntry, StreamingEvent, YouTubeStatusResponse};
+use crate::api::{
+    ChunkStats, EndpointConfig, EventTemplate, LogEntry, StreamingEvent, YouTubeStatusResponse,
+};
 
 /// A timestamped error for the error list.
 #[derive(Debug, Clone)]
@@ -90,6 +92,7 @@ pub struct DashboardStore {
     // Lists (fetched via HTTP, refreshed on WS events)
     pub events_list: RwSignal<Vec<StreamingEvent>>,
     pub endpoints_list: RwSignal<Vec<EndpointConfig>>,
+    pub templates_list: RwSignal<Vec<EventTemplate>>,
     pub logs: RwSignal<Vec<LogEntry>>,
     pub log_component: RwSignal<String>,
 
@@ -117,6 +120,7 @@ impl DashboardStore {
             errors: RwSignal::new(Vec::new()),
             events_list: RwSignal::new(Vec::new()),
             endpoints_list: RwSignal::new(Vec::new()),
+            templates_list: RwSignal::new(Vec::new()),
             logs: RwSignal::new(Vec::new()),
             log_component: RwSignal::new("rs_inpoint".to_string()),
             delivery: RwSignal::new(DeliveryState::default()),
