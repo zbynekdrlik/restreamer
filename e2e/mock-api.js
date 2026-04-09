@@ -111,6 +111,13 @@ let eventEndpoints = {
   2: [],
 };
 
+// Store initial data snapshots for test reset
+const initialEvents = JSON.parse(JSON.stringify(events));
+const initialEndpoints = JSON.parse(JSON.stringify(endpoints));
+const initialTemplates = JSON.parse(JSON.stringify(templates));
+const initialEventEndpoints = JSON.parse(JSON.stringify(eventEndpoints));
+const initialTemplateEndpoints = JSON.parse(JSON.stringify(templateEndpoints));
+
 // --- Status endpoint (Tauri invoke mock handled client-side) ---
 app.get("/api/v1/status", (_req, res) => {
   res.json(statusResponse);
@@ -495,6 +502,16 @@ app.get("/api/v1/youtube/status", (_req, res) => {
     ],
     error: null,
   });
+});
+
+// Test-only: reset all mock data to initial state between tests
+app.post("/api/v1/__reset", (_req, res) => {
+  events = JSON.parse(JSON.stringify(initialEvents));
+  endpoints = JSON.parse(JSON.stringify(initialEndpoints));
+  templates = JSON.parse(JSON.stringify(initialTemplates));
+  eventEndpoints = JSON.parse(JSON.stringify(initialEventEndpoints));
+  templateEndpoints = JSON.parse(JSON.stringify(initialTemplateEndpoints));
+  res.json({ reset: true });
 });
 
 // Test-only: broadcast arbitrary WebSocket events for E2E pipeline state tests

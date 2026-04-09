@@ -16,7 +16,7 @@ const ALLOWED_CONSOLE = [
 // Collect console errors/warnings per-test and assert clean console in afterEach
 let consoleMessages: string[] = [];
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page, request }) => {
   consoleMessages = [];
   page.on("console", (msg) => {
     if (msg.type() === "error" || msg.type() === "warning") {
@@ -24,6 +24,8 @@ test.beforeEach(async ({ page }) => {
     }
   });
   await page.addInitScript(tauriMockScript);
+  // Reset mock API state so each test starts with clean initial data
+  await request.post("http://127.0.0.1:8910/api/v1/__reset");
 });
 
 test.afterEach(async () => {
