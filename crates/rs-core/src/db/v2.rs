@@ -411,7 +411,7 @@ pub async fn upsert_youtube_oauth(
 
 pub async fn list_streaming_events(pool: &SqlitePool) -> Result<Vec<StreamingEvent>> {
     let rows = sqlx::query(
-        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from
          FROM streaming_events ORDER BY id DESC",
     )
     .fetch_all(pool)
@@ -426,6 +426,7 @@ pub async fn list_streaming_events(pool: &SqlitePool) -> Result<Vec<StreamingEve
             receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
             delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
             cache_delay_secs: r.get("cache_delay_secs"),
+            created_from: r.get("created_from"),
         })
         .collect())
 }

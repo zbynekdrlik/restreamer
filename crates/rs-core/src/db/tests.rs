@@ -917,3 +917,49 @@ async fn sent_duration_ms_only_counts_uploaded_chunks() {
     let total = get_sent_duration_ms(&pool, event_id).await.unwrap();
     assert_eq!(total, 3800); // 2000 + 1800, NOT 6000
 }
+
+#[tokio::test]
+async fn migration_v12_creates_template_tables() {
+    let pool = setup_db().await;
+
+    // event_templates table exists and is writable
+    let id: i64 = sqlx::query("INSERT INTO event_templates (name) VALUES ('test') RETURNING id")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get("id");
+    assert!(id > 0);
+
+    // template_endpoints table exists (FK to event_templates)
+    let ep_id: i64 = sqlx::query(
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key) VALUES ('yt', 'YT_HLS', 'k') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .get("id");
+
+    sqlx::query("INSERT INTO template_endpoints (template_id, endpoint_id) VALUES (?1, ?2)")
+        .bind(id)
+        .bind(ep_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // created_from column exists on streaming_events
+    let evt_id = create_streaming_event(&pool, "test-evt").await.unwrap();
+    sqlx::query("UPDATE streaming_events SET created_from = 'test-template' WHERE id = ?1")
+        .bind(evt_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let val: Option<String> =
+        sqlx::query("SELECT created_from FROM streaming_events WHERE id = ?1")
+            .bind(evt_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("created_from");
+    assert_eq!(val.as_deref(), Some("test-template"));
+}
