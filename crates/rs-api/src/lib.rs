@@ -11,6 +11,7 @@ pub mod router;
 mod router_tests;
 pub mod state;
 pub mod stream_handlers;
+pub mod template_handlers;
 pub mod websocket;
 pub mod youtube;
 

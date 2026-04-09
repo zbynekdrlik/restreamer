@@ -8,6 +8,7 @@ use crate::delivery_handlers;
 use crate::handlers;
 use crate::state::AppState;
 use crate::stream_handlers;
+use crate::template_handlers;
 use crate::websocket;
 use crate::youtube;
 
@@ -82,6 +83,27 @@ pub fn build_router(state: AppState) -> Router {
         .route("/endpoints/{id}", get(handlers::get_endpoint_by_id))
         .route("/endpoints/{id}", put(handlers::update_endpoint))
         .route("/endpoints/{id}", delete(handlers::delete_endpoint))
+        // Template CRUD
+        .route("/templates", get(template_handlers::list_templates))
+        .route("/templates", post(template_handlers::create_template))
+        .route("/templates/{id}", get(template_handlers::get_template))
+        .route("/templates/{id}", patch(template_handlers::update_template))
+        .route(
+            "/templates/{id}",
+            delete(template_handlers::delete_template),
+        )
+        .route(
+            "/templates/{id}/endpoints",
+            get(template_handlers::get_template_endpoints),
+        )
+        .route(
+            "/templates/{template_id}/endpoints/{endpoint_id}",
+            post(template_handlers::attach_endpoint_to_template),
+        )
+        .route(
+            "/templates/{template_id}/endpoints/{endpoint_id}",
+            delete(template_handlers::detach_endpoint_from_template),
+        )
         // Delivery orchestration
         .route("/delivery/start", post(delivery_handlers::delivery_start))
         .route("/delivery/status", get(delivery_handlers::delivery_status))
