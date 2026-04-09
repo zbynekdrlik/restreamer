@@ -1677,3 +1677,229 @@ test.describe("PWA Manifest", () => {
     expect(manifest.theme_color).toBe("#0f172a");
   });
 });
+
+// --- Templates Management ---
+
+test.describe("Templates Management", () => {
+  test("templates tab shows template list", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    // Click the Templates tab
+    await page.locator(".settings-tabs button:has-text('Templates')").click();
+    await page.waitForTimeout(1000);
+
+    // Should show the templates-tab container
+    await expect(page.locator(".templates-tab")).toBeVisible({ timeout: 5000 });
+
+    // Should show 2 mock template cards
+    await expect(
+      page.locator(".templates-tab .items-list .settings-card"),
+    ).toHaveCount(2, { timeout: 5000 });
+  });
+
+  test("create template calls POST /api/v1/templates", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Templates')").click();
+    await expect(page.locator(".templates-tab")).toBeVisible({ timeout: 5000 });
+
+    // Intercept the POST request
+    const requestPromise = page.waitForRequest(
+      (req) =>
+        req.url().includes("/api/v1/templates") && req.method() === "POST",
+    );
+
+    // Fill the template name input and click Create
+    await page
+      .locator('.templates-tab .create-form input[placeholder="Template name"]')
+      .fill("special-event");
+    await page
+      .locator(".templates-tab .create-form button:has-text('Create Template')")
+      .click();
+
+    const request = await requestPromise;
+    const body = request.postDataJSON();
+    expect(body.name).toBe("special-event");
+  });
+
+  test("delete template calls DELETE /api/v1/templates/:id", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Templates')").click();
+    await expect(
+      page.locator(".templates-tab .items-list .settings-card"),
+    ).toHaveCount(2, { timeout: 5000 });
+
+    const requestPromise = page.waitForRequest(
+      (req) =>
+        req.url().match(/\/api\/v1\/templates\/\d+$/) !== null &&
+        req.method() === "DELETE",
+    );
+
+    // Click delete on first template card
+    await page
+      .locator(".templates-tab .items-list .settings-card")
+      .first()
+      .locator("button.btn-danger")
+      .click();
+
+    const request = await requestPromise;
+    expect(request.url()).toMatch(/\/api\/v1\/templates\/\d+$/);
+  });
+});
+
+// --- Events Management Tab ---
+
+test.describe("Events Management Tab", () => {
+  test("events tab shows event list", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    // Click the Events tab
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await page.waitForTimeout(1000);
+
+    // Should show the events-management-tab container
+    await expect(page.locator(".events-management-tab")).toBeVisible({
+      timeout: 5000,
+    });
+
+    // Should show 2 mock event cards
+    await expect(
+      page.locator(".events-management-tab .items-list .settings-card"),
+    ).toHaveCount(2, { timeout: 5000 });
+  });
+
+  test("create event from template opens picker modal", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await expect(page.locator(".events-management-tab")).toBeVisible({
+      timeout: 5000,
+    });
+
+    // Click "New from Template" button
+    await page
+      .locator(".events-management-tab button.btn-primary:has-text('New from Template')")
+      .click();
+
+    // Modal should appear
+    await expect(page.locator(".modal-overlay")).toBeVisible({ timeout: 3000 });
+    await expect(
+      page.locator(".confirm-modal-title:has-text('New Event from Template')"),
+    ).toBeVisible();
+
+    // Should list the 2 mock templates as picker buttons
+    await expect(page.locator(".template-pick-btn")).toHaveCount(2, {
+      timeout: 5000,
+    });
+
+    // Dismiss modal
+    await page.locator(".modal-cancel-btn").click();
+    await expect(page.locator(".modal-overlay")).not.toBeVisible();
+  });
+
+  test("create event from template calls POST /api/v1/events with template_id", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await expect(page.locator(".events-management-tab")).toBeVisible({
+      timeout: 5000,
+    });
+
+    // Open the template picker
+    await page
+      .locator(".events-management-tab button.btn-primary:has-text('New from Template')")
+      .click();
+    await expect(page.locator(".template-pick-btn")).toHaveCount(2, {
+      timeout: 5000,
+    });
+
+    // Intercept the POST /events request
+    const requestPromise = page.waitForRequest(
+      (req) =>
+        req.url().includes("/api/v1/events") && req.method() === "POST",
+    );
+
+    // Click on the first template (sunday-service, id=1)
+    await page
+      .locator(".template-pick-btn:has-text('sunday-service')")
+      .click();
+
+    const request = await requestPromise;
+    const body = request.postDataJSON();
+    expect(body.template_id).toBe(1);
+  });
+
+  test("delete event shows confirmation modal", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await expect(
+      page.locator(".events-management-tab .items-list .settings-card"),
+    ).toHaveCount(2, { timeout: 5000 });
+
+    // Click delete on the first non-streaming event
+    await page
+      .locator(".events-management-tab .items-list .settings-card")
+      .first()
+      .locator("button.btn-danger:has-text('Delete + Cleanup')")
+      .click();
+
+    // Confirmation modal should appear
+    await expect(page.locator(".confirm-modal")).toBeVisible({ timeout: 3000 });
+    await expect(
+      page.locator(".confirm-modal-title:has-text('Delete Event')"),
+    ).toBeVisible();
+    await expect(page.locator(".confirm-modal-message")).toContainText(
+      "clean up S3 chunks",
+    );
+
+    // Cancel to clean up
+    await page.locator(".modal-cancel-btn").click();
+    await expect(page.locator(".modal-overlay")).not.toBeVisible();
+  });
+
+  test("delete event confirm calls DELETE /api/v1/events/:id", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await expect(
+      page.locator(".events-management-tab .items-list .settings-card"),
+    ).toHaveCount(2, { timeout: 5000 });
+
+    // Click delete on the first event
+    await page
+      .locator(".events-management-tab .items-list .settings-card")
+      .first()
+      .locator("button.btn-danger:has-text('Delete + Cleanup')")
+      .click();
+
+    await expect(page.locator(".confirm-modal")).toBeVisible({ timeout: 3000 });
+
+    const requestPromise = page.waitForRequest(
+      (req) =>
+        req.url().match(/\/api\/v1\/events\/\d+$/) !== null &&
+        req.method() === "DELETE",
+    );
+
+    // Confirm the deletion
+    await page.locator(".confirm-btn-danger").click();
+
+    const request = await requestPromise;
+    expect(request.url()).toMatch(/\/api\/v1\/events\/\d+$/);
+  });
+});

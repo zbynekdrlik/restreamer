@@ -47,6 +47,7 @@ let events = [
     receiving_activated: false,
     delivering_activated: false,
     cache_delay_secs: null,
+    created_from: null,
   },
   {
     id: 2,
@@ -55,8 +56,27 @@ let events = [
     receiving_activated: false,
     delivering_activated: false,
     cache_delay_secs: 300,
+    created_from: null,
   },
 ];
+
+let templates = [
+  {
+    id: 1,
+    name: "sunday-service",
+    cache_delay_secs: 120,
+  },
+  {
+    id: 2,
+    name: "wednesday-study",
+    cache_delay_secs: null,
+  },
+];
+
+let templateEndpoints = {
+  1: [1], // sunday-service has YouTube Main
+  2: [],
+};
 
 let endpoints = [
   {
@@ -102,13 +122,38 @@ app.get("/api/v1/events", (_req, res) => {
 });
 
 app.post("/api/v1/events", (req, res) => {
+  let name;
+  let createdFrom = null;
+  let cacheDelaySecs = null;
+
+  if (req.body.template_id) {
+    const tmpl = templates.find((t) => t.id === parseInt(req.body.template_id));
+    if (!tmpl) {
+      return res.status(404).json({ error: "template not found" });
+    }
+    const dateStr = new Date().toISOString().split("T")[0];
+    let candidate = `${tmpl.name}-${dateStr}`;
+    // Deduplicate: if name exists, append -2, -3, etc.
+    let suffix = 2;
+    while (events.some((e) => e.name === candidate)) {
+      candidate = `${tmpl.name}-${dateStr}-${suffix}`;
+      suffix++;
+    }
+    name = candidate;
+    createdFrom = tmpl.name;
+    cacheDelaySecs = tmpl.cache_delay_secs;
+  } else {
+    name = req.body.name || "New Event";
+  }
+
   const newEvent = {
     id: events.length + 1,
-    name: req.body.name || "New Event",
+    name,
     received_bytes: 0,
     receiving_activated: false,
     delivering_activated: false,
-    cache_delay_secs: null,
+    cache_delay_secs: cacheDelaySecs,
+    created_from: createdFrom,
   };
   events.push(newEvent);
   eventEndpoints[newEvent.id] = [];
@@ -247,6 +292,65 @@ app.patch("/api/v1/events/:id", (req, res) => {
   if (req.body.cache_delay_secs !== undefined)
     evt.cache_delay_secs = req.body.cache_delay_secs;
   res.json({ status: "ok" });
+});
+
+// --- Templates API ---
+app.get("/api/v1/templates", (_req, res) => res.json(templates));
+
+app.post("/api/v1/templates", (req, res) => {
+  const t = {
+    id: templates.length + 1,
+    name: req.body.name,
+    cache_delay_secs: req.body.cache_delay_secs || null,
+  };
+  templates.push(t);
+  templateEndpoints[t.id] = [];
+  res.status(201).json({ id: t.id });
+});
+
+app.get("/api/v1/templates/:id", (req, res) => {
+  const t = templates.find((t) => t.id === parseInt(req.params.id));
+  if (!t) return res.status(404).json({ error: "not found" });
+  res.json(t);
+});
+
+app.patch("/api/v1/templates/:id", (req, res) => {
+  const t = templates.find((t) => t.id === parseInt(req.params.id));
+  if (!t) return res.status(404).json({ error: "not found" });
+  if (req.body.name) t.name = req.body.name;
+  if (req.body.cache_delay_secs !== undefined)
+    t.cache_delay_secs = req.body.cache_delay_secs;
+  res.json(t);
+});
+
+app.delete("/api/v1/templates/:id", (req, res) => {
+  const id = parseInt(req.params.id);
+  templates = templates.filter((t) => t.id !== id);
+  delete templateEndpoints[id];
+  res.status(204).send();
+});
+
+app.get("/api/v1/templates/:id/endpoints", (req, res) => {
+  const id = parseInt(req.params.id);
+  const epIds = templateEndpoints[id] || [];
+  res.json(endpoints.filter((e) => epIds.includes(e.id)));
+});
+
+app.post("/api/v1/templates/:tid/endpoints/:eid", (req, res) => {
+  const tid = parseInt(req.params.tid);
+  const eid = parseInt(req.params.eid);
+  if (!templateEndpoints[tid]) templateEndpoints[tid] = [];
+  if (!templateEndpoints[tid].includes(eid)) templateEndpoints[tid].push(eid);
+  res.status(201).send();
+});
+
+app.delete("/api/v1/templates/:tid/endpoints/:eid", (req, res) => {
+  const tid = parseInt(req.params.tid);
+  const eid = parseInt(req.params.eid);
+  if (templateEndpoints[tid]) {
+    templateEndpoints[tid] = templateEndpoints[tid].filter((e) => e !== eid);
+  }
+  res.status(204).send();
 });
 
 // --- Event-Endpoint M2M ---
