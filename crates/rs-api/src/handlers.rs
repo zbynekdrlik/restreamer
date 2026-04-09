@@ -10,6 +10,7 @@ use rs_core::log_buffer::LogEntry;
 use rs_core::models::{
     ChunkStats, ComponentStatus, EndpointConfig, ServiceStatus, StreamingEvent, WsEvent,
 };
+use rs_endpoint::s3::S3Client;
 
 use crate::state::AppState;
 
@@ -438,12 +439,55 @@ pub async fn delete_event_by_id(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
+    // Fetch event first — return 404 if not found
+    let event = db::get_streaming_event_by_id(&state.pool, id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get event {id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Refuse to delete while streaming is active
+    if event.receiving_activated || event.delivering_activated {
+        tracing::warn!(
+            "Refusing to delete event {id} ({}) — streaming is active",
+            event.name
+        );
+        return Err(StatusCode::CONFLICT);
+    }
+
+    // Clean up S3 chunks before removing DB records
+    let config = state
+        .config_live
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or_else(|_| state.config.clone());
+
+    let s3_client = S3Client::new(&config.s3).map_err(|e| {
+        error!("Failed to create S3 client for event {id} cleanup: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    s3_client
+        .delete_event_chunks(&event.name)
+        .await
+        .map_err(|e| {
+            error!(
+                "Failed to delete S3 chunks for event {id} ({}): {e}",
+                event.name
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Delete DB records (cascade deletes chunks, endpoint links, etc.)
     db::delete_streaming_event(&state.pool, id)
         .await
         .map_err(|e| {
             error!("Failed to delete event {id}: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 

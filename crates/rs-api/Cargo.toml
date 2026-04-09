@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 rs-core.workspace = true
 rs-cloud.workspace = true
+rs-endpoint = { path = "../rs-endpoint" }
 rs-youtube.workspace = true
 axum.workspace = true
 axum-server.workspace = true

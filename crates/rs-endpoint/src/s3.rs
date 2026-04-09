@@ -89,6 +89,48 @@ impl S3Client {
         info!("Uploaded {s3_key} ({file_size} bytes, duration_ms={duration_ms})");
         Ok(())
     }
+
+    /// Delete all S3 objects under the given event name prefix.
+    /// Returns the number of objects deleted.
+    pub async fn delete_event_chunks(&self, event_name: &str) -> Result<u64, EndpointError> {
+        let prefix = format!("{event_name}/");
+        let mut deleted = 0u64;
+
+        loop {
+            let list = self
+                .bucket
+                .list(prefix.clone(), None)
+                .await
+                .map_err(|e| EndpointError::S3(format!("list failed: {e}")))?;
+
+            let keys: Vec<String> = list
+                .iter()
+                .flat_map(|page| page.contents.iter().map(|obj| obj.key.clone()))
+                .collect();
+
+            if keys.is_empty() {
+                break;
+            }
+
+            for key in &keys {
+                let response = self
+                    .bucket
+                    .delete_object(key)
+                    .await
+                    .map_err(|e| EndpointError::S3(format!("delete {key} failed: {e}")))?;
+                if response.status_code() >= 300 {
+                    return Err(EndpointError::S3(format!(
+                        "delete {key} returned status {}",
+                        response.status_code()
+                    )));
+                }
+                deleted += 1;
+            }
+        }
+
+        info!("Deleted {deleted} S3 objects under prefix '{prefix}'");
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]
