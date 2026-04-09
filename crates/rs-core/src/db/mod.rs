@@ -15,6 +15,9 @@ pub use v2::*;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod template_tests;
+
 /// Create a SQLite connection pool.
 pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
