@@ -192,9 +192,8 @@ jobs:
             --exclude-re 'endpoint_loop' \
             --exclude-re 'S3Client::upload_chunk' \
             --exclude-re 'S3Client::delete_event_chunks' \
-            --exclude-re 'template_handlers::' \
             --exclude-re 'delete_event_by_id' \
-            --exclude-re 'get_template_endpoints'
+            -e 'crates/rs-api/src/template_handlers.rs'
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report
