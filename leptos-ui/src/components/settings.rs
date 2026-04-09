@@ -6,15 +6,50 @@ use wasm_bindgen_futures::spawn_local;
 use crate::api;
 use crate::store::DashboardStore;
 
-/// Settings page with events, endpoints, and stream config.
+/// Settings page with tab navigation: Config, Templates, Events.
 #[component]
 pub fn SettingsView() -> impl IntoView {
+    let (settings_tab, set_settings_tab) = signal("config".to_string());
+
     view! {
         <div class="settings-page">
             <h2>"Settings"</h2>
-            <ObsSettingsSection />
-            <EventsSection />
-            <crate::components::EndpointsView />
+            <div class="settings-tabs">
+                <button
+                    class=move || if settings_tab.get() == "config" { "tab active" } else { "tab" }
+                    on:click=move |_| set_settings_tab.set("config".to_string())
+                >
+                    "Config"
+                </button>
+                <button
+                    class=move || {
+                        if settings_tab.get() == "templates" { "tab active" } else { "tab" }
+                    }
+                    on:click=move |_| set_settings_tab.set("templates".to_string())
+                >
+                    "Templates"
+                </button>
+                <button
+                    class=move || if settings_tab.get() == "events" { "tab active" } else { "tab" }
+                    on:click=move |_| set_settings_tab.set("events".to_string())
+                >
+                    "Events"
+                </button>
+            </div>
+            {move || match settings_tab.get().as_str() {
+                "templates" => view! { <super::templates::TemplatesView /> }.into_any(),
+                "events" => view! { <EventsManagement /> }.into_any(),
+                _ => {
+                    view! {
+                        <div>
+                            <ObsSettingsSection />
+                            <EventsSection />
+                            <crate::components::EndpointsView />
+                        </div>
+                    }
+                    .into_any()
+                }
+            }}
         </div>
     }
 }
@@ -241,11 +276,7 @@ fn EventsSection() -> impl IntoView {
 #[component]
 fn CacheDelayEditor(event_id: i64, initial_delay: Option<i64>) -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
-    let delay_value = RwSignal::new(
-        initial_delay
-            .map(|d| d.to_string())
-            .unwrap_or_default(),
-    );
+    let delay_value = RwSignal::new(initial_delay.map(|d| d.to_string()).unwrap_or_default());
 
     let on_save = move |_| {
         let val = delay_value.get();
@@ -356,3 +387,194 @@ fn EventEndpoints(event_id: i64) -> impl IntoView {
     }
 }
 
+/// Events management tab: list events, create from template, delete with cleanup.
+#[component]
+fn EventsManagement() -> impl IntoView {
+    let store = use_context::<DashboardStore>().expect("DashboardStore");
+
+    // Delete confirmation modal state
+    let show_delete_modal = RwSignal::new(false);
+    let delete_target_id = RwSignal::new(0i64);
+    let delete_target_name = RwSignal::new(String::new());
+
+    // Template picker modal state
+    let show_template_modal = RwSignal::new(false);
+    let (template_error, set_template_error) = signal::<Option<String>>(None);
+
+    // Load events and templates on mount
+    Effect::new(move |_| {
+        spawn_local(async move {
+            if let Ok(events) = api::list_events().await {
+                store.events_list.set(events);
+            }
+            if let Ok(templates) = api::list_templates().await {
+                store.templates_list.set(templates);
+            }
+        });
+    });
+
+    let on_confirm_delete = Callback::new(move |_: ()| {
+        let id = delete_target_id.get();
+        spawn_local(async move {
+            let _ = api::delete_event(id).await;
+            if let Ok(events) = api::list_events().await {
+                store.events_list.set(events);
+            }
+        });
+    });
+
+    let delete_message = Signal::derive(move || {
+        format!(
+            "Delete event \"{}\"? This will also clean up S3 chunks.",
+            delete_target_name.get()
+        )
+    });
+
+    view! {
+        <div class="events-management-tab">
+            <h2>"Events"</h2>
+
+            <div class="events-actions-bar">
+                <button
+                    class="btn-primary"
+                    on:click=move |_| {
+                        set_template_error.set(None);
+                        show_template_modal.set(true);
+                    }
+                >
+                    "+ New from Template"
+                </button>
+            </div>
+
+            <div class="items-list">
+                {move || {
+                    store.events_list.get().iter().map(|evt| {
+                        let id = evt.id;
+                        let name = evt.name.clone();
+                        let recv = evt.receiving_activated;
+                        let deliv = evt.delivering_activated;
+                        let is_streaming = recv || deliv;
+                        let created_from = evt.created_from.clone();
+                        let name_for_modal = name.clone();
+
+                        view! {
+                            <div class="settings-card">
+                                <div class="card-header">
+                                    <strong>{name}</strong>
+                                    <div class="badges">
+                                        {if recv {
+                                            Some(view! { <span class="badge active">"Receiving"</span> })
+                                        } else {
+                                            Some(view! { <span class="badge">"Idle"</span> })
+                                        }}
+                                        {if deliv {
+                                            Some(view! {
+                                                <span class="badge active">"Delivering"</span>
+                                            })
+                                        } else {
+                                            Some(view! { <span class="badge">"Stopped"</span> })
+                                        }}
+                                        {created_from.map(|src| view! {
+                                            <span class="badge template-badge">
+                                                {format!("from: {src}")}
+                                            </span>
+                                        })}
+                                    </div>
+                                </div>
+                                <div class="card-actions">
+                                    <button
+                                        class="btn-danger"
+                                        disabled=is_streaming
+                                        on:click=move |_| {
+                                            delete_target_id.set(id);
+                                            delete_target_name.set(name_for_modal.clone());
+                                            show_delete_modal.set(true);
+                                        }
+                                    >
+                                        {if is_streaming {
+                                            "Delete (stop stream first)"
+                                        } else {
+                                            "Delete + Cleanup"
+                                        }}
+                                    </button>
+                                </div>
+                            </div>
+                        }
+                    }).collect::<Vec<_>>()
+                }}
+            </div>
+
+            <crate::components::ConfirmModal
+                show=show_delete_modal
+                title="Delete Event"
+                message=delete_message
+                confirm_label="Delete + Cleanup"
+                on_confirm=on_confirm_delete
+            />
+
+            // Template picker modal
+            <Show when=move || show_template_modal.get() fallback=|| ()>
+                <div class="modal-overlay" on:click=move |_| show_template_modal.set(false)>
+                    <div
+                        class="confirm-modal"
+                        on:click=move |ev| ev.stop_propagation()
+                    >
+                        <h3 class="confirm-modal-title">"New Event from Template"</h3>
+                        {move || template_error.get().map(|e| view! {
+                            <div class="error-message">{e}</div>
+                        })}
+                        <div class="template-picker-list">
+                            {move || {
+                                let templates = store.templates_list.get();
+                                if templates.is_empty() {
+                                    view! {
+                                        <p class="section-hint">"No templates yet. Create one in the Templates tab."</p>
+                                    }.into_any()
+                                } else {
+                                    templates.iter().map(|t| {
+                                        let tid = t.id;
+                                        let tname = t.name.clone();
+                                        view! {
+                                            <button
+                                                class="template-pick-btn"
+                                                on:click=move |_| {
+                                                    let tname = tname.clone();
+                                                    spawn_local(async move {
+                                                        match api::create_event_from_template(tid).await {
+                                                            Ok(_) => {
+                                                                show_template_modal.set(false);
+                                                                set_template_error.set(None);
+                                                                if let Ok(events) = api::list_events().await {
+                                                                    store.events_list.set(events);
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                set_template_error.set(Some(
+                                                                    format!("Failed to create event from \"{tname}\": {e}")
+                                                                ));
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            >
+                                                {t.name.clone()}
+                                            </button>
+                                        }
+                                    }).collect::<Vec<_>>().into_any()
+                                }
+                            }}
+                        </div>
+                        <div class="modal-actions">
+                            <button
+                                class="modal-cancel-btn"
+                                on:click=move |_| show_template_modal.set(false)
+                            >
+                                "Cancel"
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </Show>
+        </div>
+    }
+}
