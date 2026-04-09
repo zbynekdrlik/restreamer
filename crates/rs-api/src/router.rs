@@ -1,6 +1,6 @@
 use axum::Router;
 use axum::http::{Method, header};
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
