@@ -189,6 +189,12 @@ pub fn run() {
                     return;
                 }
 
+                // Seed templates from existing events (idempotent one-shot)
+                if let Err(e) = db::seed_templates_from_events(&pool).await {
+                    tracing::error!("Failed to seed templates: {e}");
+                    return;
+                }
+
                 // Create app state with direct database access
                 // Clone the pool to share with ServiceCore (avoids duplicate pool creation)
                 let pool_for_service = pool.clone();
