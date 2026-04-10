@@ -1022,7 +1022,10 @@ test.describe("Per-Endpoint Cache Bar", () => {
     const warningBar = page.locator(".endpoint-node .buffer-bar-fill.warning");
     await expect(warningBar).toBeVisible({ timeout: 5000 });
 
-    // Critical level: cache_duration_secs = 10 (8% of 120)
+    // Critical level: chunk_delay_secs = 10 (8% of 120). Update BOTH the
+    // per-endpoint delay and the pipeline cache_duration_secs. The cache bar
+    // now reads per-endpoint chunk_delay_secs (see commit 018af89), so a
+    // pipeline-only update is insufficient.
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -1035,6 +1038,28 @@ test.describe("Per-Endpoint Cache Bar", () => {
           local_buffer_chunks: 0,
           s3_queue_chunks: 22,
           cache_duration_secs: 10.0,
+        },
+      },
+    });
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "e2e-vps",
+          status: "delivering",
+          server_ip: "1.2.3.4",
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "e2e rtmp",
+              alive: true,
+              current_chunk_id: 22,
+              bytes_processed_total: 1100000,
+              chunks_processed: 22,
+              chunk_delay_secs: 10.0,
+              is_fast: false,
+            },
+          ],
         },
       },
     });
