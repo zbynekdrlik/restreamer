@@ -1904,4 +1904,49 @@ test.describe("Events Management Tab", () => {
     const request = await requestPromise;
     expect(request.url()).toMatch(/\/api\/v1\/events\/\d+$/);
   });
+
+  test("event card shows assigned endpoint badges", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await page.waitForTimeout(1000);
+
+    // Find the first event card and verify endpoint tag(s) visible inside it
+    const firstCard = page
+      .locator(".events-management-tab .settings-card")
+      .first();
+    await expect(firstCard.locator(".endpoint-tag")).toHaveCount(1, {
+      timeout: 5000,
+    });
+  });
+
+  test("event card shows editable cache delay input", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await page.waitForTimeout(1000);
+
+    const firstCard = page
+      .locator(".events-management-tab .settings-card")
+      .first();
+    await expect(firstCard.locator(".cache-delay-input")).toBeVisible({
+      timeout: 5000,
+    });
+  });
+
+  test("Config tab no longer shows Events section", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    // Click Config tab
+    await page.locator(".settings-tabs button:has-text('Config')").click();
+    await page.waitForTimeout(500);
+
+    // Verify no h3 with text "Events" appears in the Config tab content
+    // (the OLD EventsSection had <h3>"Events"</h3>)
+    const eventsHeader = page.locator(".settings-section h3:text-is('Events')");
+    await expect(eventsHeader).toHaveCount(0);
+  });
 });
