@@ -12,7 +12,12 @@ impl MockFetcher {
         let map: std::collections::HashMap<i64, Vec<u8>> = chunks.into_iter().collect();
         Self {
             chunks: Arc::new(TokioMutex::new(map)),
-            duration_ms_per_chunk: 2000,
+            // Small duration so consumer-side real-time pacing (which sleeps
+            // delivered_ms minus elapsed wall clock) doesn't dominate test
+            // runtime. Most throughput tests just care about counts, not the
+            // absolute duration; tests that verify pacing explicitly advance
+            // mock time to the right amount.
+            duration_ms_per_chunk: 20,
         }
     }
 }
@@ -496,8 +501,11 @@ async fn test_drought_mode_recovers_when_chunks_resume() {
     // Resume chunks -- make 6-30 available
     available.store(30, Ordering::Relaxed);
 
-    // Advance time for recovery
-    for _ in 0..80 {
+    // Advance just enough for the consumer to process most of the new
+    // chunks. 25 more chunks at 2s pacing = ~50s. Use 30 ticks × 2s = 60s
+    // so the assertion sees a cleared stall_reason BEFORE the producer
+    // exhausts chunks again and re-enters chunk_gap stall.
+    for _ in 0..30 {
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
         tokio::task::yield_now().await;
     }
@@ -633,6 +641,13 @@ struct TimedMockFetcher {
 impl TimedMockFetcher {
     /// Create with pre-loaded chunk data. Chunks are only returned if
     /// chunk_id <= available_up_to.
+    ///
+    /// Uses realistic 2000ms chunk duration because several tests that rely
+    /// on this fetcher verify buffer fill and chunk gap behaviour, which
+    /// depend on the interaction between chunk durations and delivery_delay.
+    /// Tests that exercise throughput with this fetcher must advance mock
+    /// time by at least `num_chunks * 2000ms` of real-time pacing budget to
+    /// account for the consumer's wall-clock pacing sleep.
     fn new(chunks: Vec<(i64, Vec<u8>)>, initially_available: i64) -> Self {
         let map: std::collections::HashMap<i64, Vec<u8>> = chunks.into_iter().collect();
         Self {
@@ -773,9 +788,12 @@ async fn test_chunk_gap_maintained_at_delay_target() {
         .await;
     });
 
-    // Direct write + 1s sleep per chunk. 30 chunks = 30s.
-    for _ in 0..4000 {
-        tokio::time::advance(std::time::Duration::from_millis(10)).await;
+    // Buffer fill needs 10 chunks (20000ms / 2000ms) which are already
+    // available. Consumer pacing sleeps ~2000ms per chunk. 30 chunks require
+    // ~60s of wall-clock advancement for pacing. Each iteration advances
+    // 100ms, so we need at least 600 iterations; use 2000 for slack.
+    for _ in 0..2000 {
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
     }
 
@@ -981,4 +999,129 @@ async fn test_write_failure_skips_chunk_after_retries() {
     drop(s);
     stop_tx.send(true).ok();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+}
+
+/// Regression test for the cache-collapse-on-ffmpeg-restart bug.
+///
+/// Before this fix, consumer_task wrote chunks to ffmpeg as fast as they
+/// arrived from the channel. ffmpeg's `-re` was supposed to pace output
+/// based on input timestamps, but on restart the new ffmpeg process would
+/// see absolute FLV timestamps deep in the past and drain stdin as fast as
+/// possible to "catch up". The producer would then drain the pre-fetch
+/// buffer, catch up to the latest chunk on S3, hit chunk-gap skip-ahead,
+/// and the configured cache delay would collapse to ~0s permanently.
+///
+/// This test asserts that with a MockProcess that accepts writes instantly
+/// (simulating post-restart ffmpeg), the consumer still paces chunk
+/// delivery to real time via its internal pacing anchor, and the total
+/// delivered duration never runs more than one chunk ahead of wall clock.
+#[tokio::test]
+async fn test_consumer_paces_chunk_delivery_to_real_time() {
+    tokio::time::pause();
+
+    // 50 chunks at 2000ms each. A naive consumer would burn through them
+    // in microseconds against a fast mock ffmpeg; a paced consumer sleeps.
+    let chunks: Vec<(i64, Vec<u8>)> = (1..=50).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = MockFetcher {
+        chunks: Arc::new(TokioMutex::new(chunks.into_iter().collect())),
+        duration_ms_per_chunk: 2000,
+    };
+    let factory = MockProcessFactory::new();
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+
+    let stats_clone = stats.clone();
+    let handle = tokio::spawn(async move {
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+    });
+
+    // Advance 10 seconds. With real-time pacing a paced consumer should
+    // deliver at most ~5 chunks (10000ms / 2000ms per chunk). A naive
+    // consumer would deliver all 50 instantly.
+    for _ in 0..100 {
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let s = stats.lock().await;
+    let processed = s.chunks_processed;
+    drop(s);
+
+    // Upper bound: real-time pacing means we cannot deliver more than
+    // (wall_elapsed / chunk_duration) + small slack for the initial chunk
+    // that is written before the anchor is set. Allow up to 7 (5 from
+    // pacing + 1 initial unpaced + 1 slack).
+    assert!(
+        processed <= 7,
+        "Consumer ran faster than real time: processed {processed} chunks \
+         in 10s of mock time (should pace to ~5 chunks max)"
+    );
+
+    // Lower bound: the consumer must make progress. At least 3 chunks in
+    // 10s of mock time.
+    assert!(
+        processed >= 3,
+        "Consumer not making progress: processed only {processed} chunks \
+         in 10s of mock time"
+    );
+
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+}
+
+/// Regression test: pacing anchor is preserved across ffmpeg restarts,
+/// so the cache delay survives restarts without collapsing.
+#[tokio::test]
+async fn test_consumer_pacing_anchor_survives_ffmpeg_restart() {
+    tokio::time::pause();
+
+    let chunks: Vec<(i64, Vec<u8>)> = (1..=20).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = MockFetcher {
+        chunks: Arc::new(TokioMutex::new(chunks.into_iter().collect())),
+        duration_ms_per_chunk: 2000,
+    };
+
+    // MockProcessFactory configured to fail the first ffmpeg after 3 writes,
+    // triggering a restart mid-stream.
+    let mut factory = MockProcessFactory::new();
+    factory.fail_after_writes = Some(3);
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+
+    let stats_clone = stats.clone();
+    let handle = tokio::spawn(async move {
+        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+    });
+
+    // Advance 30 seconds of mock time. With 2s pacing, expect ~15 chunks
+    // delivered. If pacing reset on restart, we would see more.
+    for _ in 0..300 {
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let s = stats.lock().await;
+    let processed = s.chunks_processed;
+    let restarts = s.ffmpeg_restart_count;
+    drop(s);
+
+    // At least one restart must have happened (fail_after_writes=3).
+    assert!(
+        restarts >= 1,
+        "Expected at least one ffmpeg restart, got {restarts}"
+    );
+
+    // With pacing preserved across restart: ~15 chunks in 30s (upper
+    // bound loose for restart backoff).
+    assert!(
+        processed <= 18,
+        "Consumer delivered too many chunks ({processed}) in 30s — pacing \
+         anchor was likely reset on ffmpeg restart, which would collapse \
+         the cache delay in production"
+    );
+
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }

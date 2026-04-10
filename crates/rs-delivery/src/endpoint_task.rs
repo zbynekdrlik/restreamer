@@ -401,6 +401,21 @@ async fn producer_task<F: ChunkFetcher>(
 
 /// Consumer task: pulls pre-fetched chunks from the channel, normalizes FLV, writes to ffmpeg.
 /// Never makes S3 calls -- zero network I/O.
+///
+/// Paces chunk delivery to real time using a wall-clock anchor:
+///
+///   pacing_anchor + delivered_ms == wall_now
+///
+/// If we are ahead of the anchor, the consumer sleeps the difference BEFORE
+/// writing the next chunk. This is essential because ffmpeg's `-re` pacing
+/// re-anchors on every process start — after an ffmpeg restart the fresh
+/// process sees FLV timestamps deep in the past (xiu writes absolute
+/// timestamps that grow for the lifetime of the ingest), treats the stream
+/// as "behind", and drains stdin as fast as possible. Without Rust-side
+/// pacing, that would burn through the pre-fetch buffer in seconds, the
+/// producer would catch up to the latest S3 chunk, skip-ahead would fire,
+/// and the configured cache delay would collapse to ~0s permanently. The
+/// anchor is preserved across ffmpeg restarts so the delay is maintained.
 async fn consumer_task<P: OutputProcessFactory>(
     mut rx: mpsc::Receiver<PrefetchedChunk>,
     factory: P,
@@ -424,6 +439,12 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut circuit_trips: u32 = 0;
     let mut consecutive_write_failures: u32 = 0;
     let mut last_heartbeat = std::time::Instant::now();
+
+    // Pacing anchor: set when the first successful write completes. Maintained
+    // across ffmpeg restarts so the configured cache delay survives restarts.
+    // Uses tokio::time::Instant so it respects paused/mock time in tests.
+    let mut pacing_anchor: Option<tokio::time::Instant> = None;
+    let mut delivered_ms: u64 = 0;
 
     tracing::info!(alias = %alias, "Consumer: endpoint delivery configured (FLV-only)");
 
@@ -534,6 +555,32 @@ async fn consumer_task<P: OutputProcessFactory>(
         let chunk_duration_ms = chunk.duration_ms;
         let processed = flv_normalizer.normalize(&chunk.data);
 
+        // Rust-side real-time pacing. We guarantee that over the lifetime of
+        // the consumer (across ffmpeg restarts), the total delivered content
+        // duration never runs ahead of wall-clock elapsed since the pacing
+        // anchor was set. If we would, sleep the difference. This prevents
+        // the producer-consumer buffer from being drained faster than
+        // real-time when ffmpeg misbehaves (e.g., just after a restart).
+        //
+        // The anchor is set lazily on the first successful write so that the
+        // initial buffer fill in endpoint_loop doesn't count against the
+        // real-time budget and the pipeline enters steady state cleanly.
+        if let Some(anchor) = pacing_anchor {
+            let elapsed_ms = anchor.elapsed().as_millis() as u64;
+            if delivered_ms > elapsed_ms {
+                let ahead_ms = delivered_ms - elapsed_ms;
+                // Be interruptible so stop signals don't wait for the sleep.
+                let sleep_fut = tokio::time::sleep(std::time::Duration::from_millis(ahead_ms));
+                tokio::pin!(sleep_fut);
+                tokio::select! {
+                    _ = &mut sleep_fut => {}
+                    _ = stop_rx.changed() => {
+                        if *stop_rx.borrow() { break; }
+                    }
+                }
+            }
+        }
+
         if let Some(ref mut p) = proc {
             let write_result = tokio::time::timeout(
                 std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
@@ -548,6 +595,17 @@ async fn consumer_task<P: OutputProcessFactory>(
                         circuit_trips = 0;
                         tracing::info!(alias = %alias, "Consumer: circuit breaker reset");
                     }
+                    // Pacing bookkeeping: set the anchor on the first write,
+                    // accumulate delivered duration afterwards. The anchor is
+                    // intentionally NOT reset on ffmpeg restarts — we want
+                    // the total delivered wall-clock budget to include time
+                    // spent restarting ffmpeg, so the configured cache delay
+                    // is preserved across restarts.
+                    if pacing_anchor.is_none() {
+                        pacing_anchor = Some(tokio::time::Instant::now());
+                        tracing::info!(alias = %alias, "Consumer: pacing anchor set");
+                    }
+                    delivered_ms += chunk_duration_ms.max(0) as u64;
                     let mut s = stats.lock().await;
                     s.bytes_processed_total += processed.len() as u64;
                     s.duration_processed_ms += chunk_duration_ms.max(0) as u64;

@@ -90,7 +90,9 @@ pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &st
 }
 
 /// YT_HLS: FLV input, HLS output via HTTPS PUT.
-/// Uses -re for pacing (same as other FLV paths).
+/// Uses -re for pacing; real-time pacing is also enforced in the Rust
+/// consumer task in rs-delivery so that ffmpeg restarts cannot drain the
+/// pre-fetch buffer faster than real time.
 fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
     let output_url = format!(
         "https://a.upload.youtube.com/http_upload_hls?cid={stream_key}&copy=0&file=out1248.ts"
@@ -101,15 +103,6 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
         "flv".into(),
         "-loglevel".into(),
         "info".into(),
-        // Override absolute FLV timestamps from xiu with wallclock timestamps.
-        // Without this, after an ffmpeg restart the new process would see
-        // input timestamps deep into the past (e.g., 3,600,000ms for an
-        // hour-old stream) while its own clock starts at 0. With -re, ffmpeg
-        // would then drain stdin as fast as possible to "catch up", burning
-        // through the producer-consumer pre-fetch buffer in seconds and
-        // collapsing the configured cache delay to ~0s.
-        "-use_wallclock_as_timestamps".into(),
-        "1".into(),
         "-i".into(),
         "pipe:".into(),
         "-avoid_negative_ts".into(),
@@ -147,27 +140,19 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
 /// FLV->FLV passthrough for RTMP/RTMPS endpoints.
 /// Minimal flags: input is already valid FLV, just forward bytes.
 /// No genpts, no avoid_negative_ts, no copytb, no bsf needed.
+///
+/// Real-time pacing is enforced in the Rust consumer task in rs-delivery
+/// (see `consumer_task` pacing anchor). `-re` here is a secondary safety net;
+/// it alone is not sufficient because on ffmpeg restart the fresh process
+/// re-anchors on the absolute FLV timestamps from xiu, treats the old
+/// timestamps as "behind", and drains stdin as fast as possible.
 fn build_flv_rtmp_args(url: &str) -> Vec<String> {
     vec![
-        // -re: read input at native frame rate. With
-        // -use_wallclock_as_timestamps below, native frame rate is paced by
-        // wallclock instead of the absolute FLV timestamps embedded in the
-        // input. Without -re, ffmpeg would blast all buffered chunks at once.
         "-re".into(),
         "-f".into(),
         "flv".into(),
         "-loglevel".into(),
         "info".into(),
-        // Override absolute FLV timestamps from xiu with wallclock timestamps.
-        // Without this, after an ffmpeg restart the new process would see
-        // input timestamps deep into the past (e.g., 3,600,000ms for an
-        // hour-old stream) while its own clock starts at 0. With -re, ffmpeg
-        // would then drain stdin as fast as possible to "catch up", burning
-        // through the producer-consumer pre-fetch buffer in seconds and
-        // collapsing the configured cache delay to ~0s. This was the root
-        // cause of the "cache goes to zero after ffmpeg restart" bug.
-        "-use_wallclock_as_timestamps".into(),
-        "1".into(),
         "-i".into(),
         "pipe:".into(),
         "-c".into(),
@@ -194,10 +179,6 @@ fn build_test_file_args(alias: &str) -> Vec<String> {
         "flv".into(),
         "-loglevel".into(),
         "info".into(),
-        // Match the production paths: pace by wallclock so ffmpeg restarts
-        // don't burn through the buffer. See build_flv_rtmp_args for details.
-        "-use_wallclock_as_timestamps".into(),
-        "1".into(),
         "-i".into(),
         "pipe:".into(),
         "-f".into(),
@@ -492,22 +473,16 @@ mod tests {
         }
     }
 
-    /// Regression test for the cache-collapse-on-restart bug.
-    ///
-    /// xiu writes FLV chunks with absolute timestamps that grow monotonically
-    /// for the lifetime of the source stream. After an ffmpeg restart, a fresh
-    /// ffmpeg process sees those absolute timestamps starting in the past
-    /// (e.g., 3,600,000ms after an hour), but its own clock starts at 0. With
-    /// `-re`, ffmpeg would then try to "catch up" by reading stdin as fast as
-    /// possible, draining the producer-consumer pre-fetch buffer in seconds
-    /// and collapsing the configured cache delay to ~0s.
-    ///
-    /// Fix: pass `-use_wallclock_as_timestamps 1` as an INPUT option (i.e.,
-    /// before `-i pipe:`) so ffmpeg overrides the embedded FLV timestamps with
-    /// its own wallclock. Then `-re` paces by wallclock and behaves correctly
-    /// across restarts.
+    /// All FLV paths keep `-re` so ffmpeg paces output approximately to
+    /// real time. Note that `-re` ALONE is not sufficient to prevent the
+    /// cache-collapse-on-restart bug — on ffmpeg restart the fresh process
+    /// re-anchors on the absolute FLV timestamps from xiu, sees them as
+    /// deep in the past, and drains stdin as fast as possible to catch up.
+    /// The real fix lives in the Rust consumer task in rs-delivery, which
+    /// enforces wall-clock real-time pacing across ffmpeg restarts. This
+    /// test just pins the `-re` flag so a careless removal is caught.
     #[test]
-    fn flv_paths_use_wallclock_timestamps_as_input_option() {
+    fn flv_paths_use_re_flag() {
         let types = [
             ServiceType::YtHls,
             ServiceType::Facebook,
@@ -518,33 +493,9 @@ mod tests {
         ];
         for st in types {
             let args = build_ffmpeg_args(st, "key", "alias");
-
-            // The flag must be present.
-            let flag_idx = args
-                .iter()
-                .position(|a| a == "-use_wallclock_as_timestamps")
-                .unwrap_or_else(|| panic!("{st} missing -use_wallclock_as_timestamps flag"));
-
-            // The value must be "1".
-            assert_eq!(
-                args[flag_idx + 1],
-                "1",
-                "{st} -use_wallclock_as_timestamps must be 1"
-            );
-
-            // It must be an INPUT option (i.e., before -i). If placed after
-            // -i, ffmpeg silently ignores it as an output option, which would
-            // bring back the cache-collapse bug. This assertion exists
-            // specifically to prevent that regression.
-            let input_idx = args
-                .iter()
-                .position(|a| a == "-i")
-                .unwrap_or_else(|| panic!("{st} missing -i"));
             assert!(
-                flag_idx < input_idx,
-                "{st} -use_wallclock_as_timestamps must come BEFORE -i (input option), \
-                 not after (would be ignored as output option). \
-                 flag_idx={flag_idx} input_idx={input_idx}"
+                args.contains(&"-re".to_string()),
+                "{st} must have -re for ffmpeg-side pacing"
             );
         }
     }
