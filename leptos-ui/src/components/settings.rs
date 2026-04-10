@@ -450,6 +450,7 @@ fn EventsManagement() -> impl IntoView {
                 {move || {
                     store.events_list.get().iter().map(|evt| {
                         let id = evt.id;
+                        let cache = evt.cache_delay_secs;
                         let name = evt.name.clone();
                         let recv = evt.receiving_activated;
                         let deliv = evt.delivering_activated;
@@ -480,6 +481,10 @@ fn EventsManagement() -> impl IntoView {
                                             </span>
                                         })}
                                     </div>
+                                </div>
+                                <div class="card-body">
+                                    <CacheDelayEditor event_id=id initial_delay=cache />
+                                    <EventEndpoints event_id=id />
                                 </div>
                                 <div class="card-actions">
                                     <button
