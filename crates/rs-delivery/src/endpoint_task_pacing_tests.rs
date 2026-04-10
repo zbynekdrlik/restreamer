@@ -242,3 +242,93 @@ async fn test_consumer_pacing_anchor_survives_ffmpeg_restart() {
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
+
+/// Regression test for the "cache drifts when ffmpeg fails writes" bug.
+///
+/// When ffmpeg write fails repeatedly (e.g., stale Facebook stream keys),
+/// each failed chunk is lost. Before this fix, `delivered_ms` only advanced
+/// on SUCCESSFUL writes, so failures silently let the pacing budget fall
+/// behind wall clock and the consumer raced through the buffer. This test
+/// reproduces that scenario: a factory that spawns ffmpegs which always
+/// fail after 1 write, causing constant restarts. Despite every write
+/// failing, the consumer must still pace by real time.
+#[tokio::test]
+async fn test_consumer_paces_even_when_writes_fail() {
+    tokio::time::pause();
+
+    let chunks: std::collections::HashMap<i64, Vec<u8>> =
+        (1..=100).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = PacingMockFetcher {
+        chunks: Arc::new(TokioMutex::new(chunks)),
+        duration_ms_per_chunk: 2000,
+    };
+
+    // Each spawned ffmpeg fails on the first write, triggering an immediate
+    // restart. This simulates a stream key that's rejected by the upstream
+    // server (Facebook/YouTube) every time.
+    let spawn_count = Arc::new(AtomicU32::new(0));
+    let factory = PacingMockProcessFactory {
+        alive: Arc::new(AtomicBool::new(true)),
+        fail_after_writes: Some(0),
+        spawn_count: spawn_count.clone(),
+    };
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+
+    let stats_clone = stats.clone();
+    let handle = tokio::spawn(async move {
+        endpoint_loop(
+            fetcher,
+            factory,
+            pacing_test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+        )
+        .await;
+    });
+
+    // Advance 40 seconds of mock time. Each chunk is 2000ms, so even with
+    // every write failing the consumer should not advance current_chunk_id
+    // by more than ~20-21 chunks (plus a few for restart-backoff-induced
+    // slack).
+    for _ in 0..400 {
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let current = stats.lock().await.current_chunk_id;
+
+    // current_chunk_id is only updated on MAX_WRITE_FAILURES (3) skip.
+    // Each skip consumes 3 chunks, so we expect ~(40s * 1 chunk/2s) / 3 ≈ 6
+    // skip events. But the important assertion is that the consumer has not
+    // raced to the end of the 100 chunks — without the fix, it would have
+    // drained the buffer almost immediately. Allow up to 25 chunks as an
+    // upper bound (covers restart backoff, race conditions, slack).
+    assert!(
+        current <= 25,
+        "Consumer raced past real-time pacing during write failures: \
+         current_chunk_id={current} after 40s of mock time (should be \
+         ≤ ~20 with real-time pacing). This means delivered_ms is not \
+         being advanced on failed writes and the pacing budget is leaking."
+    );
+
+    // Sanity: at least some chunks should have been consumed.
+    assert!(
+        current >= 3,
+        "Consumer made no progress: current_chunk_id={current} — \
+         pacing may be stuck or test setup is broken"
+    );
+
+    // Sanity: restarts are happening (proves we're exercising the failure path).
+    let final_spawn_count = spawn_count.load(Ordering::Relaxed);
+    assert!(
+        final_spawn_count >= 3,
+        "Expected multiple spawn attempts due to write failures, got {final_spawn_count}"
+    );
+
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+}
