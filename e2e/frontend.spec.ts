@@ -876,6 +876,107 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await expect(cacheLabel).toContainText("90s / 120s cache");
   });
 
+  // Regression test for the per-endpoint cache label bug. The dashboard
+  // previously displayed a single global `ps.cache_duration_secs` on every
+  // endpoint's cache bar, so two endpoints with very different per-endpoint
+  // delays would both show the same label. This hid drift on individual
+  // endpoints and made it look like "all endpoints are going down" when in
+  // fact only a subset were affected. This test asserts each endpoint's
+  // cache label shows ITS OWN chunk_delay_secs.
+  test("per-endpoint cache label shows individual chunk_delay_secs", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast PipelineState with a global cache_duration_secs that is
+    // DIFFERENT from both endpoint delays below. If the dashboard
+    // accidentally uses this global value for per-endpoint cache bars,
+    // both endpoints would show "75s" instead of their individual delays.
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Test Event",
+          target_delay_secs: 120,
+          session_start: null,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 38,
+          cache_duration_secs: 75.0,
+        },
+      },
+    });
+
+    // Two endpoints with very different per-endpoint delays:
+    //   - YT stable:  chunk_delay_secs = 118s (healthy)
+    //   - FB drifted: chunk_delay_secs = 35s (critical, e.g., stale key)
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "e2e-vps",
+          status: "delivering",
+          server_ip: "1.2.3.4",
+          endpoint_count: 2,
+          endpoints: [
+            {
+              alias: "YT Stable",
+              alive: true,
+              current_chunk_id: 500,
+              bytes_processed_total: 2000000,
+              chunks_processed: 500,
+              chunk_delay_secs: 118.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+              is_fast: false,
+            },
+            {
+              alias: "FB Drifted",
+              alive: true,
+              current_chunk_id: 535,
+              bytes_processed_total: 1500000,
+              chunks_processed: 500,
+              chunk_delay_secs: 35.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 12,
+              last_error: "ffmpeg stdin closed",
+              is_fast: false,
+            },
+          ],
+        },
+      },
+    });
+
+    // Wait for both endpoints to render
+    await expect(page.locator(".endpoint-node")).toHaveCount(2, {
+      timeout: 5000,
+    });
+
+    // Each endpoint must display ITS OWN chunk_delay_secs, not the shared
+    // global (75s). Scope the cache label lookup to each endpoint node.
+    const ytNode = page.locator(".endpoint-node", { hasText: "YT Stable" });
+    const fbNode = page.locator(".endpoint-node", { hasText: "FB Drifted" });
+
+    await expect(ytNode.locator(".endpoint-cache-label")).toContainText(
+      "118s / 120s cache",
+    );
+    await expect(fbNode.locator(".endpoint-cache-label")).toContainText(
+      "35s / 120s cache",
+    );
+
+    // Bar color must also reflect per-endpoint delay: YT is healthy (>75%),
+    // FB is critical (<40%).
+    await expect(
+      ytNode.locator(".buffer-bar-fill.healthy"),
+    ).toBeVisible();
+    await expect(
+      fbNode.locator(".buffer-bar-fill.critical"),
+    ).toBeVisible();
+  });
+
   test("cache bar color changes with delay level", async ({ page }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
