@@ -43,7 +43,6 @@ pub fn SettingsView() -> impl IntoView {
                     view! {
                         <div>
                             <ObsSettingsSection />
-                            <EventsSection />
                             <crate::components::EndpointsView />
                         </div>
                     }
@@ -190,83 +189,6 @@ fn ObsSettingsSection() -> impl IntoView {
                     </button>
                     {move || status_msg.get().map(|msg| view! { <span class="status-hint">{msg}</span> })}
                 </div>
-            </div>
-        </div>
-    }
-}
-
-/// Events management section.
-#[component]
-fn EventsSection() -> impl IntoView {
-    let store = use_context::<DashboardStore>().expect("DashboardStore");
-    let new_name = RwSignal::new(String::new());
-    let loading = RwSignal::new(false);
-
-    let on_create = move |_| {
-        let name = new_name.get();
-        if name.trim().is_empty() {
-            return;
-        }
-        loading.set(true);
-        spawn_local(async move {
-            if api::create_event(&name).await.is_ok() {
-                new_name.set(String::new());
-                if let Ok(events) = api::list_events().await {
-                    store.events_list.set(events);
-                }
-            }
-            loading.set(false);
-        });
-    };
-
-    view! {
-        <div class="settings-section">
-            <h3>"Events"</h3>
-            <div class="create-form">
-                <input
-                    type="text"
-                    placeholder="Event name"
-                    prop:value=move || new_name.get()
-                    on:input=move |ev| new_name.set(event_target_value(&ev))
-                />
-                <button on:click=on_create disabled=move || loading.get()>"Create Event"</button>
-            </div>
-            <div class="items-list">
-                {move || {
-                    store.events_list.get().iter().map(|evt| {
-                        let id = evt.id;
-                        let name = evt.name.clone();
-                        let recv = evt.receiving_activated;
-                        let deliv = evt.delivering_activated;
-                        let cache = evt.cache_delay_secs;
-
-                        view! {
-                            <div class="settings-card">
-                                <div class="card-header">
-                                    <strong>{name}</strong>
-                                    <div class="badges">
-                                        {if recv { Some(view! { <span class="badge active">"Receiving"</span> }) } else { None }}
-                                        {if deliv { Some(view! { <span class="badge active">"Delivering"</span> }) } else { None }}
-                                    </div>
-                                </div>
-                                <div class="card-body">
-                                    <CacheDelayEditor event_id=id initial_delay=cache />
-                                    <EventEndpoints event_id=id />
-                                </div>
-                                <div class="card-actions">
-                                    <button class="btn-danger" on:click=move |_| {
-                                        spawn_local(async move {
-                                            let _ = api::delete_event(id).await;
-                                            if let Ok(events) = api::list_events().await {
-                                                store.events_list.set(events);
-                                            }
-                                        });
-                                    }>"Delete"</button>
-                                </div>
-                            </div>
-                        }
-                    }).collect::<Vec<_>>()
-                }}
             </div>
         </div>
     }
