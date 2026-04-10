@@ -4,9 +4,9 @@ use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use super::confirm_modal::ConfirmModal;
 use crate::api;
 use crate::store::DashboardStore;
-use super::confirm_modal::ConfirmModal;
 
 /// Main operator dashboard view.
 #[component]
@@ -275,7 +275,11 @@ fn Pipeline() -> impl IntoView {
 
     // RTMP node — with bitrate computation and session bytes
     let rtmp_dot = move || {
-        if rtmp_connected() { "status-dot active" } else { "status-dot" }
+        if rtmp_connected() {
+            "status-dot active"
+        } else {
+            "status-dot"
+        }
     };
     let prev_bytes = RwSignal::new(0i64);
     let session_start_bytes = RwSignal::new(0i64);
@@ -338,7 +342,14 @@ fn Pipeline() -> impl IntoView {
 
     // S3 → Delivery node — chunks on S3 + delivered by VPS
     let delivered_chunks = move || {
-        store.delivery.get().endpoints.iter().map(|ep| ep.chunks_processed).max().unwrap_or(0)
+        store
+            .delivery
+            .get()
+            .endpoints
+            .iter()
+            .map(|ep| ep.chunks_processed)
+            .max()
+            .unwrap_or(0)
     };
     let s3_dot = move || {
         let p = ps();
@@ -358,7 +369,11 @@ fn Pipeline() -> impl IntoView {
     let s3_metric = move || {
         let s = delivery_status();
         if s == "running" || s == "delivering" {
-            format!("{} queued \u{2192} {} delivered", s3_chunks(), delivered_chunks())
+            format!(
+                "{} queued \u{2192} {} delivered",
+                s3_chunks(),
+                delivered_chunks()
+            )
         } else if s.is_empty() || s == "none" {
             format!("{} on S3", s3_chunks())
         } else {
@@ -661,9 +676,23 @@ fn EndpointTree() -> impl IntoView {
                                     if target == 0 {
                                         return None;
                                     }
-                                    // Always use backend-computed cache duration (single metric,
-                                    // no jump at buffering→streaming transition)
-                                    let cache_secs = ps.cache_duration_secs;
+                                    // Use per-endpoint delivery delay so each
+                                    // endpoint's cache bar reflects its own
+                                    // state. Previously we used the global
+                                    // ps.cache_duration_secs (S3 queue depth),
+                                    // which showed the same value for every
+                                    // endpoint and hid per-endpoint drift.
+                                    //
+                                    // During the initial buffer-fill phase
+                                    // each endpoint reports chunk_delay_secs
+                                    // = 0, so we fall back to the global
+                                    // cache_duration_secs until delivery has
+                                    // started.
+                                    let cache_secs = if ep.chunks_processed > 0 {
+                                        ep.chunk_delay_secs
+                                    } else {
+                                        ps.cache_duration_secs
+                                    };
                                     let progress = (cache_secs / target as f64).min(1.0);
                                     let bar_class = if progress >= 0.75 {
                                         "buffer-bar-fill healthy"
