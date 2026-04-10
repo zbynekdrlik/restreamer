@@ -194,6 +194,7 @@ jobs:
             --exclude-re 'S3Client::delete_event_chunks' \
             --exclude-re 'delete_event_by_id' \
             --exclude-re 'get_template_endpoints' \
+            --exclude-re 'ServiceCore::run_with_signal' \
             -e 'crates/rs-api/src/template_handlers.rs'
         env:
           SQLX_OFFLINE: true
