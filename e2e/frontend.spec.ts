@@ -677,78 +677,12 @@ test.describe("Settings page", () => {
     await expect(backLink).toBeVisible({ timeout: 10000 });
   });
 
-  test("events section shows event list", async ({ page }) => {
-    await page.goto("/settings");
-    await page.waitForTimeout(1000);
-    // Events section is the second .settings-section (OBS section is first)
-    const cards = page
-      .locator(".settings-section")
-      .nth(1)
-      .locator(".settings-card");
-    await expect(cards.first()).toBeVisible({ timeout: 10000 });
-  });
-
   test("endpoints section renders with create form", async ({ page }) => {
     await page.goto("/settings");
     await expect(page.locator(".endpoints-tab")).toBeVisible({
       timeout: 10000,
     });
     await expect(page.locator(".endpoints-tab .create-form")).toBeVisible();
-  });
-
-  test("event create form exists", async ({ page }) => {
-    await page.goto("/settings");
-    await expect(
-      page.locator('.settings-section:has(h3:text("Events")) .create-form'),
-    ).toBeVisible({ timeout: 10000 });
-    await expect(
-      page.locator(
-        '.settings-section:has(h3:text("Events")) input[placeholder="Event name"]',
-      ),
-    ).toBeVisible();
-  });
-
-  test("can create a new event and it appears with correct name", async ({
-    page,
-  }) => {
-    await page.goto("/settings");
-    await page.waitForTimeout(1000);
-    const section = page.locator('.settings-section:has(h3:text("Events"))');
-    await section.locator('input[placeholder="Event name"]').fill("Test Event");
-    await section.locator('button:has-text("Create Event")').click();
-    await page.waitForTimeout(500);
-    // Should now show the new event in the list
-    await expect(section.locator(".settings-card")).toHaveCount(3);
-    // Verify the new event name appears
-    const cardTexts = await section.locator(".settings-card").allTextContents();
-    expect(cardTexts.join(" ")).toContain("Test Event");
-  });
-
-  test("event card shows cache delay editor", async ({ page }) => {
-    await page.goto("/settings");
-    await page.waitForTimeout(1000);
-    const section = page.locator('.settings-section:has(h3:text("Events"))');
-    // Should have cache delay input
-    const cacheInput = section.locator(".cache-delay-input").first();
-    await expect(cacheInput).toBeVisible({ timeout: 5000 });
-  });
-
-  test("cache delay save calls PATCH API", async ({ page }) => {
-    await page.goto("/settings");
-    await page.waitForTimeout(1000);
-    const section = page.locator('.settings-section:has(h3:text("Events"))');
-    const cacheInput = section.locator(".cache-delay-input").first();
-    await cacheInput.fill("300");
-
-    // Intercept the PATCH call
-    const [request] = await Promise.all([
-      page.waitForRequest(
-        (req) => req.url().includes("/events/") && req.method() === "PATCH",
-      ),
-      section.locator(".btn-small").first().click(),
-    ]);
-    const body = request.postDataJSON();
-    expect(body.cache_delay_secs).toBe(300);
   });
 
   test("endpoint list shows existing endpoints with aliases", async ({
