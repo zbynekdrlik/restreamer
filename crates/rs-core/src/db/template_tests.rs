@@ -246,3 +246,193 @@ async fn create_event_from_template_duplicate_date() {
     // Third event: Evening Service-YYYY-MM-DD-3
     assert_eq!(name3, format!("Evening Service-{today}-3"));
 }
+
+// --- seed_templates_from_events tests (Task 2) ---
+
+#[tokio::test]
+async fn seed_templates_converts_events() {
+    let pool = setup_db().await;
+
+    // Wipe templates so the seed has work to do
+    sqlx::query("DELETE FROM template_endpoints")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM event_templates")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Insert two non-streaming events
+    let evt1: i64 = sqlx::query(
+        "INSERT INTO streaming_events (name, cache_delay_secs, receiving_activated, delivering_activated)
+         VALUES ('sunday-service', 120, 0, 0) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .get("id");
+
+    let _evt2: i64 = sqlx::query(
+        "INSERT INTO streaming_events (name, cache_delay_secs, receiving_activated, delivering_activated)
+         VALUES ('wednesday-study', NULL, 0, 0) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .get("id");
+
+    // Create endpoint and assign to evt1
+    let ep_id: i64 = sqlx::query(
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key) VALUES ('yt', 'YT_HLS', 'k') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .get("id");
+
+    attach_endpoint_to_event(&pool, evt1, ep_id).await.unwrap();
+
+    // Run the seed function
+    let created = seed_templates_from_events(&pool).await.unwrap();
+    assert_eq!(created, 2);
+
+    // Verify: 2 templates created with correct fields
+    let templates = list_templates(&pool).await.unwrap();
+    assert_eq!(templates.len(), 2);
+
+    let sunday = templates
+        .iter()
+        .find(|t| t.name == "sunday-service")
+        .unwrap();
+    assert_eq!(sunday.cache_delay_secs, Some(120));
+
+    let wed = templates
+        .iter()
+        .find(|t| t.name == "wednesday-study")
+        .unwrap();
+    assert_eq!(wed.cache_delay_secs, None);
+
+    // Verify: sunday-service has its endpoint
+    let sunday_eps = get_template_endpoints(&pool, sunday.id).await.unwrap();
+    assert_eq!(sunday_eps.len(), 1);
+    assert_eq!(sunday_eps[0].alias, "yt");
+
+    // Verify: events deleted (none were streaming)
+    let remaining: i64 = sqlx::query("SELECT COUNT(*) as c FROM streaming_events")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get("c");
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn seed_templates_idempotent() {
+    let pool = setup_db().await;
+
+    // Pre-create a template — this makes the templates table non-empty
+    create_template(&pool, "existing-template", Some(60))
+        .await
+        .unwrap();
+
+    // Insert an event with a different name
+    sqlx::query(
+        "INSERT INTO streaming_events (name, cache_delay_secs, receiving_activated, delivering_activated)
+         VALUES ('orphan-event', 120, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Run seed — should be no-op because templates table is non-empty
+    let created = seed_templates_from_events(&pool).await.unwrap();
+    assert_eq!(created, 0);
+
+    // Verify: still only the original template
+    let templates = list_templates(&pool).await.unwrap();
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0].name, "existing-template");
+
+    // Verify: event was NOT deleted (seed didn't run)
+    let remaining: i64 = sqlx::query("SELECT COUNT(*) as c FROM streaming_events")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get("c");
+    assert_eq!(remaining, 1);
+}
+
+#[tokio::test]
+async fn seed_templates_preserves_streaming() {
+    let pool = setup_db().await;
+
+    // Wipe templates
+    sqlx::query("DELETE FROM template_endpoints")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM event_templates")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Insert one streaming event and one idle event
+    sqlx::query(
+        "INSERT INTO streaming_events (name, cache_delay_secs, receiving_activated, delivering_activated)
+         VALUES ('live-stream', 60, 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO streaming_events (name, cache_delay_secs, receiving_activated, delivering_activated)
+         VALUES ('idle-stream', 60, 0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Run seed
+    let created = seed_templates_from_events(&pool).await.unwrap();
+    assert_eq!(created, 2);
+
+    // Verify: BOTH templates created (both event names)
+    let templates = list_templates(&pool).await.unwrap();
+    assert_eq!(templates.len(), 2);
+
+    // Verify: streaming event preserved, idle event deleted
+    let remaining: Vec<String> = sqlx::query("SELECT name FROM streaming_events")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0], "live-stream");
+}
+
+#[tokio::test]
+async fn seed_templates_no_events() {
+    let pool = setup_db().await;
+
+    // Wipe templates
+    sqlx::query("DELETE FROM template_endpoints")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM event_templates")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // No events to seed from
+    let created = seed_templates_from_events(&pool).await.unwrap();
+    assert_eq!(created, 0);
+
+    // Verify: still no templates
+    let templates = list_templates(&pool).await.unwrap();
+    assert_eq!(templates.len(), 0);
+}

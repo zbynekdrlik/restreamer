@@ -136,3 +136,57 @@ pub async fn get_template_by_id_required(pool: &SqlitePool, id: i64) -> Result<E
         .await?
         .ok_or_else(|| CoreError::Other(format!("template {id} not found")))
 }
+
+/// Seed templates from existing streaming events. One-shot startup helper.
+///
+/// Idempotency: runs only when `event_templates` is empty. If a user has any
+/// templates already, this function is a no-op (returns 0).
+///
+/// Behavior when seeding:
+/// - For each event in `streaming_events`, create a matching template (same
+///   name, same cache_delay_secs).
+/// - Copy the event's endpoint assignments to `template_endpoints`.
+/// - Delete events that are not currently streaming
+///   (`receiving_activated = 0 AND delivering_activated = 0`). Streaming
+///   events are preserved so we don't disrupt active live sessions.
+///
+/// Returns the number of templates created.
+pub async fn seed_templates_from_events(pool: &SqlitePool) -> Result<usize> {
+    // Idempotency check
+    let template_count: i64 = sqlx::query("SELECT COUNT(*) as c FROM event_templates")
+        .fetch_one(pool)
+        .await?
+        .get("c");
+    if template_count > 0 {
+        return Ok(0);
+    }
+
+    // Fetch all events
+    let events = super::list_streaming_events(pool).await?;
+    if events.is_empty() {
+        return Ok(0);
+    }
+
+    let mut created = 0usize;
+    for event in &events {
+        // Create template with same name + cache_delay
+        let template_id = create_template(pool, &event.name, event.cache_delay_secs).await?;
+
+        // Copy endpoint assignments
+        let endpoints = super::get_event_endpoints(pool, event.id).await?;
+        for ep in &endpoints {
+            attach_endpoint_to_template(pool, template_id, ep.id).await?;
+        }
+        created += 1;
+    }
+
+    // Delete non-streaming events. Cascade removes chunk_records and event_endpoints.
+    sqlx::query(
+        "DELETE FROM streaming_events WHERE receiving_activated = 0 AND delivering_activated = 0",
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!("Seeded {created} templates from existing streaming events");
+    Ok(created)
+}
