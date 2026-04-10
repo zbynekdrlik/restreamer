@@ -369,7 +369,7 @@ async fn seed_templates_idempotent() {
 }
 
 #[tokio::test]
-async fn seed_templates_preserves_streaming() {
+async fn seed_templates_preserves_all_events() {
     let pool = setup_db().await;
 
     // Wipe templates

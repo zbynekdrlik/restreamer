@@ -151,9 +151,13 @@ pub async fn get_template_by_id_required(pool: &SqlitePool, id: i64) -> Result<E
 ///   functional. Templates and events coexist; templates serve as presets for
 ///   new instances, while existing events continue to work.
 ///
+/// All writes happen inside a single transaction so a partial failure rolls
+/// back cleanly; the idempotency check on the next startup will then retry
+/// the entire seed instead of leaving the DB in a half-seeded state.
+///
 /// Returns the number of templates created.
 pub async fn seed_templates_from_events(pool: &SqlitePool) -> Result<usize> {
-    // Idempotency check
+    // Idempotency check (outside the transaction — read-only)
     let template_count: i64 = sqlx::query("SELECT COUNT(*) as c FROM event_templates")
         .fetch_one(pool)
         .await?
@@ -162,24 +166,45 @@ pub async fn seed_templates_from_events(pool: &SqlitePool) -> Result<usize> {
         return Ok(0);
     }
 
-    // Fetch all events
+    // Fetch all events (read-only — outside the transaction is fine)
     let events = super::list_streaming_events(pool).await?;
     if events.is_empty() {
         return Ok(0);
     }
 
-    let mut created = 0usize;
+    // Collect endpoint assignments up front so the transaction only writes.
+    let mut event_plans: Vec<(String, Option<i64>, Vec<i64>)> = Vec::with_capacity(events.len());
     for event in &events {
-        // Create template with same name + cache_delay
-        let template_id = create_template(pool, &event.name, event.cache_delay_secs).await?;
-
-        // Copy endpoint assignments
         let endpoints = super::get_event_endpoints(pool, event.id).await?;
-        for ep in &endpoints {
-            attach_endpoint_to_template(pool, template_id, ep.id).await?;
+        let endpoint_ids: Vec<i64> = endpoints.iter().map(|e| e.id).collect();
+        event_plans.push((event.name.clone(), event.cache_delay_secs, endpoint_ids));
+    }
+
+    // Wrap all writes in one transaction so a failure mid-seed rolls back.
+    let mut tx = pool.begin().await?;
+    let mut created = 0usize;
+    for (name, cache_delay, endpoint_ids) in &event_plans {
+        let row = sqlx::query(
+            "INSERT INTO event_templates (name, cache_delay_secs) VALUES (?1, ?2) RETURNING id",
+        )
+        .bind(name)
+        .bind(cache_delay)
+        .fetch_one(&mut *tx)
+        .await?;
+        let template_id: i64 = row.get("id");
+
+        for endpoint_id in endpoint_ids {
+            sqlx::query(
+                "INSERT OR IGNORE INTO template_endpoints (template_id, endpoint_id) VALUES (?1, ?2)",
+            )
+            .bind(template_id)
+            .bind(endpoint_id)
+            .execute(&mut *tx)
+            .await?;
         }
         created += 1;
     }
+    tx.commit().await?;
 
     tracing::info!("Seeded {created} templates from existing streaming events");
     Ok(created)

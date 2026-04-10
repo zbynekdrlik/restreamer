@@ -457,18 +457,31 @@ pub async fn delete_event_by_id(
         return Err(StatusCode::CONFLICT);
     }
 
-    // Clean up S3 chunks before removing DB records
-    let config = state
-        .config_live
-        .read()
-        .map(|c| c.clone())
-        .unwrap_or_else(|_| state.config.clone());
+    // Clean up S3 chunks before removing DB records. If config_live is
+    // poisoned (another thread panicked while holding the lock), fall back
+    // to the initial config snapshot — but log a warning so the underlying
+    // panic isn't hidden.
+    let config = match state.config_live.read() {
+        Ok(c) => c.clone(),
+        Err(poisoned) => {
+            tracing::warn!(
+                "config_live lock is poisoned (another thread panicked) — \
+                 falling back to initial config snapshot for event {id} cleanup"
+            );
+            poisoned.into_inner().clone()
+        }
+    };
 
     let s3_client = S3Client::new(&config.s3).map_err(|e| {
         error!("Failed to create S3 client for event {id} cleanup: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // Note: S3 deletion is not transactional. If delete_event_chunks fails
+    // mid-loop (network error on object #5 of 10), the first 4 objects are
+    // already gone. We still abort the DB delete, leaving the remaining S3
+    // objects accessible-but-orphaned. Retrying the delete is safe because
+    // the list-then-delete pattern cleans them up on the next attempt.
     s3_client
         .delete_event_chunks(&event.name)
         .await

@@ -457,28 +457,41 @@ pub async fn update_streaming_event(
 
 // --- Create Event from Template ---
 
+/// Find the next unused name in the sequence `base_name`, `base_name-2`,
+/// `base_name-3`, … up to `base_name-100`.
+///
+/// Single query: fetches every existing event name that starts with
+/// `base_name` into a HashSet, then walks the candidate sequence locally.
+/// This avoids the up-to-100-round-trips behaviour of the previous loop.
 async fn find_unique_event_name(pool: &SqlitePool, base_name: &str) -> Result<String> {
-    let candidate = base_name.to_string();
-    let exists: i32 = sqlx::query("SELECT COUNT(*) as cnt FROM streaming_events WHERE name = ?1")
-        .bind(&candidate)
-        .fetch_one(pool)
-        .await
-        .map(|r| r.get("cnt"))?;
+    use std::collections::HashSet;
 
-    if exists == 0 {
-        return Ok(candidate);
+    // Escape SQLite LIKE wildcards so a literal % or _ in the template name
+    // doesn't accidentally match unrelated rows. The escape character is
+    // declared in the LIKE clause via `ESCAPE '\'`.
+    let escaped = base_name
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("{escaped}%");
+
+    let rows = sqlx::query(r#"SELECT name FROM streaming_events WHERE name LIKE ?1 ESCAPE '\'"#)
+        .bind(&pattern)
+        .fetch_all(pool)
+        .await?;
+
+    let existing: HashSet<String> = rows
+        .into_iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+
+    if !existing.contains(base_name) {
+        return Ok(base_name.to_string());
     }
 
     for suffix in 2..=100i32 {
         let candidate = format!("{base_name}-{suffix}");
-        let exists: i32 =
-            sqlx::query("SELECT COUNT(*) as cnt FROM streaming_events WHERE name = ?1")
-                .bind(&candidate)
-                .fetch_one(pool)
-                .await
-                .map(|r| r.get("cnt"))?;
-
-        if exists == 0 {
+        if !existing.contains(&candidate) {
             return Ok(candidate);
         }
     }
