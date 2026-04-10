@@ -3199,10 +3199,6 @@ jobs:
           $vpsId = $instances[0].hetzner_id
           Write-Host "VPS hetzner_id: $vpsId"
 
-          # Record chunk count before crash
-          $chunksBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
-          Write-Host "Chunks before: total=$($chunksBefore.total_chunks) sent=$($chunksBefore.sent_chunks)"
-
           # CRASH: kill Restreamer process
           Write-Host "Killing Restreamer process (simulating crash)..."
           taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
@@ -3258,13 +3254,20 @@ jobs:
             throw "FAILED: OBS did not reconnect within 60 seconds"
           }
 
+          # Baseline AFTER restart: cleanup has already pruned any chunks
+          # >1hr old (see db/mod.rs startup cleanup), so this baseline reflects
+          # the post-cleanup state. Comparing chunksAfter to this baseline
+          # measures only the chunks created in the 30s window below.
+          $chunksBaseline = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          Write-Host "Chunks baseline (post-restart): total=$($chunksBaseline.total_chunks) sent=$($chunksBaseline.sent_chunks)"
+
           # Wait for chunks to flow
           Write-Host "Waiting 30s for chunks to flow after restart..."
           Start-Sleep -Seconds 30
 
           $chunksAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
           Write-Host "Chunks after: total=$($chunksAfter.total_chunks) sent=$($chunksAfter.sent_chunks)"
-          $newChunks = $chunksAfter.total_chunks - $chunksBefore.total_chunks
+          $newChunks = $chunksAfter.total_chunks - $chunksBaseline.total_chunks
           Write-Host "New chunks since restart: $newChunks"
           if ($newChunks -lt 5) {
             throw "FAILED: Only $newChunks new chunks after restart (expected >= 5)"
