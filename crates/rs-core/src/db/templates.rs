@@ -146,9 +146,10 @@ pub async fn get_template_by_id_required(pool: &SqlitePool, id: i64) -> Result<E
 /// - For each event in `streaming_events`, create a matching template (same
 ///   name, same cache_delay_secs).
 /// - Copy the event's endpoint assignments to `template_endpoints`.
-/// - Delete events that are not currently streaming
-///   (`receiving_activated = 0 AND delivering_activated = 0`). Streaming
-///   events are preserved so we don't disrupt active live sessions.
+/// - Existing events are preserved as-is (not deleted) — this avoids losing
+///   endpoint assignments and keeps all current event configurations
+///   functional. Templates and events coexist; templates serve as presets for
+///   new instances, while existing events continue to work.
 ///
 /// Returns the number of templates created.
 pub async fn seed_templates_from_events(pool: &SqlitePool) -> Result<usize> {
@@ -179,13 +180,6 @@ pub async fn seed_templates_from_events(pool: &SqlitePool) -> Result<usize> {
         }
         created += 1;
     }
-
-    // Delete non-streaming events. Cascade removes chunk_records and event_endpoints.
-    sqlx::query(
-        "DELETE FROM streaming_events WHERE receiving_activated = 0 AND delivering_activated = 0",
-    )
-    .execute(pool)
-    .await?;
 
     tracing::info!("Seeded {created} templates from existing streaming events");
     Ok(created)

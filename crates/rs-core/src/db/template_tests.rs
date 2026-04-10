@@ -318,13 +318,18 @@ async fn seed_templates_converts_events() {
     assert_eq!(sunday_eps.len(), 1);
     assert_eq!(sunday_eps[0].alias, "yt");
 
-    // Verify: events deleted (none were streaming)
+    // Verify: events still exist (seed does not delete events)
     let remaining: i64 = sqlx::query("SELECT COUNT(*) as c FROM streaming_events")
         .fetch_one(&pool)
         .await
         .unwrap()
         .get("c");
-    assert_eq!(remaining, 0);
+    assert_eq!(remaining, 2);
+
+    // Verify: event_endpoints assignments still exist (cascade not triggered)
+    let evt1_eps = get_event_endpoints(&pool, evt1).await.unwrap();
+    assert_eq!(evt1_eps.len(), 1);
+    assert_eq!(evt1_eps[0].alias, "yt");
 }
 
 #[tokio::test]
@@ -402,16 +407,17 @@ async fn seed_templates_preserves_streaming() {
     let templates = list_templates(&pool).await.unwrap();
     assert_eq!(templates.len(), 2);
 
-    // Verify: streaming event preserved, idle event deleted
-    let remaining: Vec<String> = sqlx::query("SELECT name FROM streaming_events")
+    // Verify: BOTH events still exist (seed does not delete events)
+    let remaining: Vec<String> = sqlx::query("SELECT name FROM streaming_events ORDER BY name")
         .fetch_all(&pool)
         .await
         .unwrap()
         .iter()
         .map(|r| r.get::<String, _>("name"))
         .collect();
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0], "live-stream");
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.contains(&"live-stream".to_string()));
+    assert!(remaining.contains(&"idle-stream".to_string()));
 }
 
 #[tokio::test]
