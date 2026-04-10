@@ -780,3 +780,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
 #[cfg(test)]
 #[path = "endpoint_task_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "endpoint_task_pacing_tests.rs"]
+mod pacing_tests;
