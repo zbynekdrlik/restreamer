@@ -432,6 +432,27 @@ app.delete("/api/v1/endpoints/:id", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// Delivery endpoint add/remove. The real backend has these for adding /
+// removing endpoints from an actively delivering event. Mock as no-ops
+// (200) so frontend tests that fire these requests don't get a 404
+// response which the browser would log as a console error and trip the
+// global afterEach console-clean assertion.
+app.post("/api/v1/delivery/endpoints/add", (_req, res) => {
+  res.json({ status: "ok" });
+});
+app.post("/api/v1/delivery/endpoints/remove", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+// S3 usage + per-event clear stubs for the new Settings tab UI. Both
+// no-op so frontend tests that visit /settings don't 404.
+app.get("/api/v1/s3/usage", (_req, res) => {
+  res.json({ total_bytes: 0, total_objects: 0, by_event: [] });
+});
+app.post("/api/v1/events/:id/clear-s3", (_req, res) => {
+  res.json({ deleted: 0 });
+});
+
 // --- Chunks endpoints (used by dashboard/chunk_list) ---
 app.get("/api/v1/chunks/stats", (_req, res) => {
   res.json(statusResponse.chunk_stats);
