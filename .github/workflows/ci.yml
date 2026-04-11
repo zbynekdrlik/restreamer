@@ -2401,7 +2401,24 @@ jobs:
             });
 
             await page.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
-            await page.waitForTimeout(5000);
+
+            // Wait for at least one endpoint cache label to appear. The
+            // dashboard renders endpoint cards from the DeliveryStatus
+            // WebSocket broadcast which is fired by the orchestrator on a
+            // poll loop. networkidle does not wait for WebSocket frames,
+            // so we have to wait for the actual UI element. Up to 30s
+            // because the orchestrator first poll plus VPS HTTP round-trip
+            // can take longer than the 5s the previous fixed wait used.
+            try {
+              await page.locator('.endpoint-cache-label').first().waitFor({
+                state: 'attached',
+                timeout: 30000,
+              });
+            } catch (e) {
+              console.error('FAILED: No endpoint cache labels appeared within 30s');
+              console.error('Expected DeliveryStatus broadcast with endpoints by now');
+              process.exit(1);
+            }
 
             // During buffering phase: endpoints exist but are pending, cache bar should show
             // the backend-computed cache_duration_secs value (real measured chunk duration sum)
