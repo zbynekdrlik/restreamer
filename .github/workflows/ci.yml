@@ -1346,13 +1346,13 @@ jobs:
           Write-Host "=== E2E Stability Test PASSED ==="
           Write-Host "10-minute stream: $($stats.total_chunks) chunks produced and uploaded without freeze"
 
-      - name: GATE — clear-s3 endpoint deletes 250+ chunks within 25s
+      - name: GATE clear-s3 endpoint deletes 250+ chunks within 25s
         shell: powershell
         timeout-minutes: 2
         run: |
           # Regression for the bug where DELETE+CLEANUP did nothing in the
           # dashboard: delete_event_chunks ran S3 deletes serially, taking
-          # ~200ms per object. With 250 chunks that is ~50s — well past the
+          # ~200ms per object. With 250 chunks that is ~50s, well past the
           # frontend HTTP client timeout (~30s), so the user saw "nothing
           # happens" while the server kept slogging.
           #
@@ -1362,7 +1362,7 @@ jobs:
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
           if (-not $e2eEvent) {
-            throw "FAILED: E2E-Test event not found — earlier streaming step did not run?"
+            throw "FAILED: E2E-Test event not found - earlier streaming step did not run?"
           }
 
           $statsBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
@@ -1384,14 +1384,14 @@ jobs:
           Write-Host "clear-s3 elapsed: ${elapsed}s, deleted: $($resp.deleted)"
 
           if ($elapsed -ge 25) {
-            throw "FAILED: clear-s3 took ${elapsed}s (limit 25s) — parallel delete regression"
+            throw "FAILED: clear-s3 took ${elapsed}s (limit 25s) - parallel delete regression"
           }
           if ($resp.deleted -lt 1) {
             throw "FAILED: clear-s3 reported 0 objects deleted but stats showed $($statsBefore.total_chunks) chunks"
           }
           Write-Host "=== clear-s3 GATE PASSED: ${elapsed}s for $($resp.deleted) objects ==="
 
-      - name: GATE — /s3/usage endpoint returns total + per-event entries
+      - name: GATE /s3/usage endpoint returns total + per-event entries
         shell: powershell
         timeout-minutes: 2
         run: |
