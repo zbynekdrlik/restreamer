@@ -265,6 +265,124 @@ async fn test_restart_audit_log_records_each_death() {
     let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
 }
 
+/// Process that lives but FAILS every write — simulates a destination
+/// RTMP server that accepted the connection but rejects every payload
+/// (e.g. stale Facebook stream key after some negotiation).
+struct WriteFailMockProcess {
+    alive: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl OutputProcess for WriteFailMockProcess {
+    fn is_alive(&mut self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    async fn write(&mut self, _data: &[u8]) -> Result<(), String> {
+        Err("write rejected by destination".to_string())
+    }
+
+    async fn kill(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
+
+    fn last_stderr_line(&self) -> Option<String> {
+        Some("destination rejected".to_string())
+    }
+}
+
+struct WriteFailFactory {
+    spawn_count: Arc<AtomicU32>,
+}
+
+impl OutputProcessFactory for WriteFailFactory {
+    fn spawn(
+        &self,
+        _service_type: ServiceType,
+        _stream_key: &str,
+        _alias: &str,
+    ) -> Result<Box<dyn OutputProcess>, String> {
+        self.spawn_count.fetch_add(1, Ordering::Relaxed);
+        Ok(Box::new(WriteFailMockProcess {
+            alive: Arc::new(AtomicBool::new(true)),
+        }))
+    }
+}
+
+/// Regression for the bug where the write-error path bypassed both the
+/// audit log AND exponential backoff. ffmpeg writes were rejected (stale
+/// Facebook stream key), the consumer called proc.take() to kill it, and
+/// the next loop iteration found proc=None — so the death handler's
+/// `if proc.is_some()` skipped recording the restart and applying
+/// backoff. Result: instant respawn loop.
+///
+/// With the fix, write-failure leaves proc as Some(dead_process), so the
+/// death handler runs, increments restart_count, records an audit row,
+/// and applies exponential backoff.
+#[tokio::test]
+async fn test_write_failure_records_audit_log_and_applies_backoff() {
+    tokio::time::pause();
+
+    let chunks: std::collections::HashMap<i64, Vec<u8>> =
+        (1..=1000).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = BackoffMockFetcher {
+        chunks: Arc::new(TokioMutex::new(chunks)),
+        duration_ms_per_chunk: 2000,
+    };
+
+    let spawn_count = Arc::new(AtomicU32::new(0));
+    let factory = WriteFailFactory {
+        spawn_count: spawn_count.clone(),
+    };
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+
+    let stats_clone = stats.clone();
+    let handle = tokio::spawn(async move {
+        endpoint_loop(
+            fetcher,
+            factory,
+            backoff_test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+        )
+        .await;
+    });
+
+    // Run for 120s of mock time. With proper backoff (1+2+4+8+16+32+60),
+    // <=10 spawns should occur. Without the fix (instant respawn loop),
+    // hundreds.
+    for _ in 0..1200 {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let total_spawns = spawn_count.load(Ordering::Relaxed);
+    assert!(
+        total_spawns <= 15,
+        "Write-failure path is not applying backoff: {total_spawns} spawns in 120s \
+         (expected <= 15 with exponential backoff)"
+    );
+
+    let s = stats.lock().await;
+    assert!(
+        s.ffmpeg_restart_count > 0,
+        "ffmpeg_restart_count should be incremented on write failure"
+    );
+    assert!(
+        !s.restart_history.is_empty(),
+        "restart_history should be populated on write failure (audit log was \
+         missing for the write-error path before the fix)"
+    );
+    drop(s);
+
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+}
+
 /// The restart_history ring buffer must be bounded — old records get
 /// evicted past RESTART_HISTORY_CAP.
 #[tokio::test]

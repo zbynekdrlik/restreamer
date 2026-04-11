@@ -705,9 +705,14 @@ async fn consumer_task<P: OutputProcessFactory>(
                     tracing::warn!(alias = %alias, chunk_id, failures = consecutive_write_failures, "Consumer: ffmpeg write failed: {e}");
                     let mut s = stats.lock().await;
                     s.last_error = Some(e);
-                    s.ffmpeg_restart_count += 1;
                     drop(s);
-                    if let Some(mut p) = proc.take() {
+                    // Kill the process IN PLACE — leave the Option as Some
+                    // so the death handler at the top of the loop catches
+                    // it and applies backoff + audit log on the next
+                    // iteration. Previously this called proc.take() which
+                    // left proc=None, and the death handler's `if
+                    // proc.is_some()` check skipped both backoff AND audit.
+                    if let Some(p) = proc.as_mut() {
                         p.kill().await;
                     }
                     if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
@@ -725,9 +730,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                     let mut s = stats.lock().await;
                     s.last_error = Some("write_timeout".to_string());
                     s.stall_reason = Some("write_timeout".to_string());
-                    s.ffmpeg_restart_count += 1;
                     drop(s);
-                    if let Some(mut p) = proc.take() {
+                    // Same fix as above — kill in place, let the death
+                    // handler record the audit entry and apply backoff.
+                    if let Some(p) = proc.as_mut() {
                         p.kill().await;
                     }
                     if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
