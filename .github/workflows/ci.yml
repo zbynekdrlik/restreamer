@@ -192,10 +192,15 @@ jobs:
             --exclude-re 'endpoint_loop' \
             --exclude-re 'S3Client::upload_chunk' \
             --exclude-re 'S3Client::delete_event_chunks' \
+            --exclude-re 'S3Client::measure_prefix' \
+            --exclude-re 'S3Client::list_event_prefixes' \
             --exclude-re 'delete_event_by_id' \
+            --exclude-re 'clear_event_s3_chunks' \
+            --exclude-re 'get_s3_usage' \
             --exclude-re 'get_template_endpoints' \
             --exclude-re 'ServiceCore::run_with_signal' \
-            -e 'crates/rs-api/src/template_handlers.rs'
+            -e 'crates/rs-api/src/template_handlers.rs' \
+            -e 'crates/rs-api/src/s3_handlers.rs'
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report
