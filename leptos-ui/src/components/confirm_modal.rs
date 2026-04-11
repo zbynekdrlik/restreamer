@@ -1,17 +1,23 @@
 //! Reusable confirmation modal for destructive actions.
 
+use gloo_timers::callback::Timeout;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 
 /// A confirmation modal with Cancel and a danger-styled Confirm button.
 ///
 /// Dismisses on: Cancel click, overlay click, Escape key.
 ///
 /// IMPORTANT: All click handlers defer the `show.set(false)` dismiss via
-/// `spawn_local` so the surrounding `<Show>` does not unmount the button
-/// while its `on:click` Closure is still executing. Without the defer,
-/// Leptos panics with `closure invoked recursively or after being dropped`
-/// because the wasm-bindgen Closure backing the button is freed mid-call.
+/// `setTimeout(0)` (gloo_timers::Timeout) so the surrounding `<Show>` does
+/// not unmount the button while its `on:click` Closure is still executing.
+/// Without the defer, Leptos panics with `closure invoked recursively or
+/// after being dropped` because the wasm-bindgen Closure backing the
+/// button is freed mid-call.
+///
+/// `spawn_local` is NOT enough here — Leptos's local executor polls the
+/// queued future before the JS click event loop yields, so the dismiss
+/// still races with the running handler. setTimeout truly defers to the
+/// next macrotask.
 #[component]
 pub fn ConfirmModal(
     show: RwSignal<bool>,
@@ -20,12 +26,11 @@ pub fn ConfirmModal(
     confirm_label: &'static str,
     on_confirm: Callback<()>,
 ) -> impl IntoView {
-    // Defer show.set(false) to the next microtask so the click handler
-    // returns before the button is unmounted.
     let dismiss_deferred = move || {
-        spawn_local(async move {
+        Timeout::new(0, move || {
             show.set(false);
-        });
+        })
+        .forget();
     };
 
     let on_overlay_click = move |_| dismiss_deferred();

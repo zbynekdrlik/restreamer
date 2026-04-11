@@ -231,6 +231,52 @@ test.describe("Operator Dashboard", () => {
     );
   });
 
+  test("ConfirmModal click does not produce closure-dropped console errors", async ({
+    page,
+  }) => {
+    // Regression for the bug where ConfirmModal's dismiss ran inside the
+    // running click handler, freeing the wasm-bindgen Closure mid-call and
+    // panicking with 'closure invoked recursively or after being dropped'.
+    // The fix defers show.set(false) via setTimeout(0) so the click handler
+    // returns before the button is unmounted.
+    const consoleErrors: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error") {
+        consoleErrors.push(msg.text());
+      }
+    });
+
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    // Open the Stop Delivering confirm modal
+    await page.locator(".stop-btn").click();
+    await expect(page.locator(".confirm-modal")).toBeVisible();
+
+    // Click confirm — this is where the closure-drop bug used to fire
+    await page.locator(".confirm-btn-danger").click();
+
+    // Wait for the modal to fully unmount before checking errors
+    await expect(page.locator(".modal-overlay")).not.toBeVisible({
+      timeout: 3000,
+    });
+    await page.waitForTimeout(500);
+
+    const closureErrors = consoleErrors.filter((e) =>
+      e.includes("closure invoked recursively or after being dropped"),
+    );
+    expect(
+      closureErrors,
+      `ConfirmModal should not log closure errors. All errors: ${JSON.stringify(consoleErrors)}`,
+    ).toEqual([]);
+  });
+
   test("Stop Delivering confirm calls stop-stream API", async ({ page }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
