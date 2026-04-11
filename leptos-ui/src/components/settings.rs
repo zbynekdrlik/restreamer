@@ -6,6 +6,13 @@ use wasm_bindgen_futures::spawn_local;
 use crate::api;
 use crate::store::DashboardStore;
 
+/// Format a byte count as a human-readable string. Wraps `api::format_bytes`
+/// for the unsigned u64 values returned by the S3 usage endpoint.
+fn format_bytes(bytes: u64) -> String {
+    // Saturate at i64::MAX to handle absurd values without panicking.
+    api::format_bytes(bytes.min(i64::MAX as u64) as i64)
+}
+
 /// Settings page with tab navigation: Config, Templates, Events.
 #[component]
 pub fn SettingsView() -> impl IntoView {
@@ -319,11 +326,20 @@ fn EventsManagement() -> impl IntoView {
     let delete_target_id = RwSignal::new(0i64);
     let delete_target_name = RwSignal::new(String::new());
 
+    // Clear-S3 confirmation modal state (clears chunks but keeps event)
+    let show_clear_modal = RwSignal::new(false);
+    let clear_target_id = RwSignal::new(0i64);
+    let clear_target_name = RwSignal::new(String::new());
+
+    // S3 usage state
+    let s3_usage = RwSignal::<Option<api::S3UsageResponse>>::new(None);
+    let s3_usage_error = RwSignal::<Option<String>>::new(None);
+
     // Template picker modal state
     let show_template_modal = RwSignal::new(false);
     let (template_error, set_template_error) = signal::<Option<String>>(None);
 
-    // Load events and templates on mount
+    // Load events, templates, and S3 usage on mount.
     Effect::new(move |_| {
         spawn_local(async move {
             if let Ok(events) = api::list_events().await {
@@ -331,6 +347,13 @@ fn EventsManagement() -> impl IntoView {
             }
             if let Ok(templates) = api::list_templates().await {
                 store.templates_list.set(templates);
+            }
+            match api::get_s3_usage().await {
+                Ok(u) => {
+                    s3_usage.set(Some(u));
+                    s3_usage_error.set(None);
+                }
+                Err(e) => s3_usage_error.set(Some(e)),
             }
         });
     });
@@ -342,6 +365,19 @@ fn EventsManagement() -> impl IntoView {
             if let Ok(events) = api::list_events().await {
                 store.events_list.set(events);
             }
+            if let Ok(u) = api::get_s3_usage().await {
+                s3_usage.set(Some(u));
+            }
+        });
+    });
+
+    let on_confirm_clear = Callback::new(move |_: ()| {
+        let id = clear_target_id.get();
+        spawn_local(async move {
+            let _ = api::clear_event_s3_chunks(id).await;
+            if let Ok(u) = api::get_s3_usage().await {
+                s3_usage.set(Some(u));
+            }
         });
     });
 
@@ -349,6 +385,14 @@ fn EventsManagement() -> impl IntoView {
         format!(
             "Delete event \"{}\"? This will also clean up S3 chunks.",
             delete_target_name.get()
+        )
+    });
+
+    let clear_message = Signal::derive(move || {
+        format!(
+            "Delete all S3 chunks for event \"{}\"? The event row stays \
+             — only the chunks are removed.",
+            clear_target_name.get()
         )
     });
 
@@ -368,8 +412,42 @@ fn EventsManagement() -> impl IntoView {
                 </button>
             </div>
 
+            // S3 storage usage banner. Shows total bucket usage and lets the
+            // operator see at a glance which event is using the most space.
+            {move || {
+                if let Some(usage) = s3_usage.get() {
+                    Some(view! {
+                        <div class="s3-usage-banner">
+                            <strong>"S3 storage: "</strong>
+                            {format_bytes(usage.total_bytes)}
+                            " ("
+                            {usage.total_objects}
+                            " objects)"
+                        </div>
+                    })
+                } else if let Some(err) = s3_usage_error.get() {
+                    Some(view! {
+                        <div class="s3-usage-banner error">
+                            "S3 usage unavailable: "
+                            {err}
+                        </div>
+                    })
+                } else {
+                    None
+                }
+            }}
+
             <div class="items-list">
                 {move || {
+                    let usage_map: std::collections::HashMap<String, (u64, u64)> = s3_usage
+                        .get()
+                        .map(|u| {
+                            u.by_event
+                                .into_iter()
+                                .map(|e| (e.event_name, (e.bytes, e.objects)))
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     store.events_list.get().iter().map(|evt| {
                         let id = evt.id;
                         let cache = evt.cache_delay_secs;
@@ -379,6 +457,8 @@ fn EventsManagement() -> impl IntoView {
                         let is_streaming = recv || deliv;
                         let created_from = evt.created_from.clone();
                         let name_for_modal = name.clone();
+                        let name_for_clear = name.clone();
+                        let usage_for_event = usage_map.get(&name).cloned();
 
                         view! {
                             <div class="settings-card">
@@ -402,6 +482,11 @@ fn EventsManagement() -> impl IntoView {
                                                 {format!("from: {src}")}
                                             </span>
                                         })}
+                                        {usage_for_event.map(|(bytes, objects)| view! {
+                                            <span class="badge s3-badge">
+                                                {format!("S3: {} ({} obj)", format_bytes(bytes), objects)}
+                                            </span>
+                                        })}
                                     </div>
                                 </div>
                                 <div class="card-body">
@@ -409,6 +494,18 @@ fn EventsManagement() -> impl IntoView {
                                     <EventEndpoints event_id=id />
                                 </div>
                                 <div class="card-actions">
+                                    <button
+                                        class="btn-secondary"
+                                        disabled=is_streaming
+                                        on:click=move |_| {
+                                            clear_target_id.set(id);
+                                            clear_target_name.set(name_for_clear.clone());
+                                            show_clear_modal.set(true);
+                                        }
+                                        title="Delete S3 chunks for this event but keep the event row"
+                                    >
+                                        "Clear S3 chunks"
+                                    </button>
                                     <button
                                         class="btn-danger"
                                         disabled=is_streaming
@@ -437,6 +534,14 @@ fn EventsManagement() -> impl IntoView {
                 message=delete_message
                 confirm_label="Delete + Cleanup"
                 on_confirm=on_confirm_delete
+            />
+
+            <crate::components::ConfirmModal
+                show=show_clear_modal
+                title="Clear S3 chunks"
+                message=clear_message
+                confirm_label="Clear chunks"
+                on_confirm=on_confirm_clear
             />
 
             // Template picker modal

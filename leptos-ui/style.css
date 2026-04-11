@@ -368,6 +368,19 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
     font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
 }
 .btn-danger:hover { background: rgba(220,53,69,0.15); }
+.btn-secondary {
+    background: transparent; color: var(--status-warn); border: 1px solid var(--status-warn);
+    padding: var(--spacing-xs) var(--spacing-sm); border-radius: var(--radius); cursor: pointer;
+    font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+}
+.btn-secondary:hover { background: rgba(255,170,0,0.15); }
+.s3-usage-banner {
+    padding: var(--spacing-sm); background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); color: var(--text-primary); font-size: 13px;
+    margin-bottom: var(--spacing-md);
+}
+.s3-usage-banner.error { border-color: var(--status-error); color: var(--status-error); }
+.badge.s3-badge { border-color: var(--border-active); color: var(--text-primary); }
 .btn-small {
     padding: var(--spacing-xs) var(--spacing-sm); font-size: 11px;
     border: 1px solid var(--border-active); border-radius: var(--radius);

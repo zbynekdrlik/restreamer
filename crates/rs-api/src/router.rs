@@ -65,6 +65,11 @@ pub fn build_router(state: AppState) -> Router {
                 .delete(handlers::delete_event_by_id)
                 .patch(stream_handlers::update_event),
         )
+        .route(
+            "/events/{id}/clear-s3",
+            post(handlers::clear_event_s3_chunks),
+        )
+        .route("/s3/usage", get(handlers::get_s3_usage))
         .route("/events/{id}/activate", post(handlers::activate_event))
         .route(
             "/events/{id}/start-delivering",

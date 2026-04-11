@@ -1335,6 +1335,67 @@ jobs:
           Write-Host "=== E2E Stability Test PASSED ==="
           Write-Host "10-minute stream: $($stats.total_chunks) chunks produced and uploaded without freeze"
 
+      - name: GATE — clear-s3 endpoint deletes 250+ chunks within 25s
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # Regression for the bug where DELETE+CLEANUP did nothing in the
+          # dashboard: delete_event_chunks ran S3 deletes serially, taking
+          # ~200ms per object. With 250 chunks that is ~50s — well past the
+          # frontend HTTP client timeout (~30s), so the user saw "nothing
+          # happens" while the server kept slogging.
+          #
+          # The fix parallelises with futures::stream::buffer_unordered(20).
+          # 250 chunks should now finish in ~3 seconds. We assert < 25s to
+          # leave headroom for runner / S3 latency variance.
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
+          if (-not $e2eEvent) {
+            throw "FAILED: E2E-Test event not found — earlier streaming step did not run?"
+          }
+
+          $statsBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          Write-Host "Chunks before clear-s3: total=$($statsBefore.total_chunks)"
+
+          # The streaming step asserts >= 250 chunks, so the parallelism is
+          # actually exercised under realistic load.
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          try {
+            $resp = Invoke-RestMethod `
+              -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)/clear-s3" `
+              -Method POST -TimeoutSec 25
+          } catch {
+            $sw.Stop()
+            throw "FAILED: clear-s3 endpoint errored after $($sw.Elapsed.TotalSeconds)s: $_"
+          }
+          $sw.Stop()
+          $elapsed = $sw.Elapsed.TotalSeconds
+          Write-Host "clear-s3 elapsed: ${elapsed}s, deleted: $($resp.deleted)"
+
+          if ($elapsed -ge 25) {
+            throw "FAILED: clear-s3 took ${elapsed}s (limit 25s) — parallel delete regression"
+          }
+          if ($resp.deleted -lt 1) {
+            throw "FAILED: clear-s3 reported 0 objects deleted but stats showed $($statsBefore.total_chunks) chunks"
+          }
+          Write-Host "=== clear-s3 GATE PASSED: ${elapsed}s for $($resp.deleted) objects ==="
+
+      - name: GATE — /s3/usage endpoint returns total + per-event entries
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          $usage = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/s3/usage" -TimeoutSec 25
+          if ($null -eq $usage.total_bytes) {
+            throw "FAILED: /s3/usage missing total_bytes"
+          }
+          if ($null -eq $usage.total_objects) {
+            throw "FAILED: /s3/usage missing total_objects"
+          }
+          if ($null -eq $usage.by_event) {
+            throw "FAILED: /s3/usage missing by_event array"
+          }
+          Write-Host "=== /s3/usage GATE PASSED: $($usage.total_bytes) bytes, $($usage.total_objects) objects, $($usage.by_event.Count) events ==="
+
       - name: Verify RTMP disconnected after stream stop
         shell: powershell
         run: |

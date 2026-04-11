@@ -361,6 +361,42 @@ pub async fn delete_event(id: i64) -> Result<(), String> {
     http_delete(&format!("/events/{id}")).await
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClearChunksResponse {
+    pub deleted: u64,
+}
+
+pub async fn clear_event_s3_chunks(id: i64) -> Result<ClearChunksResponse, String> {
+    let path = format!("/events/{id}/clear-s3");
+    let url = format!("{}{path}", api_base());
+    let resp = gloo_net::http::Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {e}"))?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Parse error: {e}"))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct S3UsageEntry {
+    pub event_name: String,
+    pub bytes: u64,
+    pub objects: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct S3UsageResponse {
+    pub total_bytes: u64,
+    pub total_objects: u64,
+    pub by_event: Vec<S3UsageEntry>,
+}
+
+pub async fn get_s3_usage() -> Result<S3UsageResponse, String> {
+    http_get("/s3/usage").await
+}
+
 // Templates API
 pub async fn list_templates() -> Result<Vec<EventTemplate>, String> {
     http_get("/templates").await
