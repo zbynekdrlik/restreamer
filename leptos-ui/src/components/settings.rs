@@ -414,9 +414,12 @@ fn EventsManagement() -> impl IntoView {
 
             // S3 storage usage banner. Shows total bucket usage and lets the
             // operator see at a glance which event is using the most space.
+            // Branches use .into_any() so the if/else arms unify to a single
+            // AnyView type — Leptos generates a unique type for every view!{}
+            // call so the raw arms can't be unified directly.
             {move || {
                 if let Some(usage) = s3_usage.get() {
-                    Some(view! {
+                    view! {
                         <div class="s3-usage-banner">
                             <strong>"S3 storage: "</strong>
                             {format_bytes(usage.total_bytes)}
@@ -424,16 +427,18 @@ fn EventsManagement() -> impl IntoView {
                             {usage.total_objects}
                             " objects)"
                         </div>
-                    })
+                    }
+                    .into_any()
                 } else if let Some(err) = s3_usage_error.get() {
-                    Some(view! {
+                    view! {
                         <div class="s3-usage-banner error">
                             "S3 usage unavailable: "
                             {err}
                         </div>
-                    })
+                    }
+                    .into_any()
                 } else {
-                    None
+                    view! { <div></div> }.into_any()
                 }
             }}
 

@@ -6,6 +6,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::delivery_handlers;
 use crate::handlers;
+use crate::s3_handlers;
 use crate::state::AppState;
 use crate::stream_handlers;
 use crate::template_handlers;
@@ -67,9 +68,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/events/{id}/clear-s3",
-            post(handlers::clear_event_s3_chunks),
+            post(s3_handlers::clear_event_s3_chunks),
         )
-        .route("/s3/usage", get(handlers::get_s3_usage))
+        .route("/s3/usage", get(s3_handlers::get_s3_usage))
         .route("/events/{id}/activate", post(handlers::activate_event))
         .route(
             "/events/{id}/start-delivering",
