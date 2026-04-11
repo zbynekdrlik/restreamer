@@ -1365,6 +1365,24 @@ jobs:
             throw "FAILED: E2E-Test event not found - earlier streaming step did not run?"
           }
 
+          # clear-s3 refuses while the event is active (409 Conflict).
+          # Deactivate before running the gate. The end-of-job cleanup
+          # 'Deactivate streaming event' is then a no-op for this event.
+          if ($e2eEvent.receiving_activated -or $e2eEvent.delivering_activated) {
+            Write-Host "Deactivating E2E-Test (recv=$($e2eEvent.receiving_activated) deliv=$($e2eEvent.delivering_activated)) before clear-s3"
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)/deactivate" `
+                -Method POST -TimeoutSec 10
+            } catch {
+              throw "FAILED: could not deactivate event before clear-s3: $_"
+            }
+            # Re-fetch to confirm flags are clear
+            $e2eEvent = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)" -TimeoutSec 10
+            if ($e2eEvent.receiving_activated -or $e2eEvent.delivering_activated) {
+              throw "FAILED: deactivate did not clear flags (recv=$($e2eEvent.receiving_activated) deliv=$($e2eEvent.delivering_activated))"
+            }
+          }
+
           $statsBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
           Write-Host "Chunks before clear-s3: total=$($statsBefore.total_chunks)"
 
