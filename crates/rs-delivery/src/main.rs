@@ -11,7 +11,7 @@ use tracing_subscriber::prelude::*;
 
 mod api;
 pub mod db;
-mod endpoint_task;
+pub mod endpoint_task;
 mod s3_fetch;
 
 pub use endpoint_task::EndpointHandle;

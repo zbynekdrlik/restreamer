@@ -51,6 +51,16 @@ pub struct DeliveryStatus {
     pub endpoints: Vec<EndpointDeliveryStatus>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EndpointRestartRecord {
+    pub timestamp_ms: i64,
+    pub chunk_id: i64,
+    pub lifetime_secs: u64,
+    pub reason: String,
+    pub stderr_tail: Option<String>,
+    pub backoff_secs: u64,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct EndpointDeliveryStatus {
     pub alias: String,
@@ -64,6 +74,11 @@ pub struct EndpointDeliveryStatus {
     pub last_error: Option<String>,
     pub ffmpeg_last_stderr: Option<String>,
     pub is_fast: bool,
+    /// Per-endpoint audit log of recent ffmpeg restarts (capped at 100).
+    /// Empty when the rs-delivery binary on the VPS is older than this
+    /// field's introduction.
+    #[serde(default)]
+    pub restart_history: Vec<EndpointRestartRecord>,
 }
 
 /// Result of querying YouTube status.
@@ -505,6 +520,20 @@ impl DeliveryOrchestrator {
                             let last_error = entry["last_error"].as_str().map(|s| s.to_string());
                             let ffmpeg_last_stderr =
                                 entry["ffmpeg_last_stderr"].as_str().map(|s| s.to_string());
+                            let restart_history: Vec<EndpointRestartRecord> =
+                                entry["restart_history"]
+                                    .as_array()
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| {
+                                                serde_json::from_value::<EndpointRestartRecord>(
+                                                    v.clone(),
+                                                )
+                                                .ok()
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
 
                             // Compute cache delay using actual content duration from DB
                             let chunk_delay_secs =
@@ -539,6 +568,7 @@ impl DeliveryOrchestrator {
                                 last_error,
                                 ffmpeg_last_stderr,
                                 is_fast: fast_map.get(&alias).copied().unwrap_or(false),
+                                restart_history,
                             });
                         }
 

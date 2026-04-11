@@ -3,8 +3,8 @@
 //! Connects to `/api/v1/ws`, deserializes `WsEvent` messages, and
 //! dispatches them to the corresponding signals in `DashboardStore`.
 
-use gloo_net::websocket::futures::WebSocket;
 use gloo_net::websocket::Message;
+use gloo_net::websocket::futures::WebSocket;
 use gloo_timers::callback::Timeout;
 use leptos::prelude::*;
 use serde::Deserialize;
@@ -260,27 +260,17 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                     .into_iter()
                     .map(|ep| {
                         // Find previous state for this alias
-                        let prev_state = d
-                            .endpoints
-                            .iter()
-                            .find(|prev_ep| prev_ep.alias == ep.alias);
-                        let prev_bytes = prev_state
-                            .map(|p| p.bytes_processed_total)
-                            .unwrap_or(0);
-                        let prev_chunk = prev_state
-                            .map(|p| p.current_chunk_id)
-                            .unwrap_or(0);
-                        let prev_stall = prev_state
-                            .map(|p| p.stall_count)
-                            .unwrap_or(0);
+                        let prev_state =
+                            d.endpoints.iter().find(|prev_ep| prev_ep.alias == ep.alias);
+                        let prev_bytes = prev_state.map(|p| p.bytes_processed_total).unwrap_or(0);
+                        let prev_chunk = prev_state.map(|p| p.current_chunk_id).unwrap_or(0);
+                        let prev_stall = prev_state.map(|p| p.stall_count).unwrap_or(0);
 
                         let delta = (ep.bytes_processed_total - prev_bytes).max(0) as f64;
                         let bandwidth_bytes_sec = delta / 2.0; // 2-second poll interval
 
                         // Stall detection: if chunk ID hasn't changed, increment counter
-                        let stall_count = if prev_chunk > 0
-                            && ep.current_chunk_id == prev_chunk
-                        {
+                        let stall_count = if prev_chunk > 0 && ep.current_chunk_id == prev_chunk {
                             prev_stall + 1
                         } else {
                             0

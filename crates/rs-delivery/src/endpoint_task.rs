@@ -183,6 +183,30 @@ impl OutputProcessFactory for FfmpegProcessFactory {
     }
 }
 
+/// One row in the ffmpeg restart audit log. Captures everything we know
+/// about a process death so the operator can diagnose patterns (e.g. all
+/// restarts after exactly 65s = upstream session timeout).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FfmpegRestartRecord {
+    /// Wall-clock unix epoch (ms) of the death.
+    pub timestamp_ms: i64,
+    /// chunk_id the process was on when it died.
+    pub chunk_id: i64,
+    /// How long the ffmpeg process lived before dying.
+    pub lifetime_secs: u64,
+    /// Reason classification: "stdin_closed", "spawn_failed", "write_error",
+    /// "killed", "init_failed".
+    pub reason: String,
+    /// Last few stderr lines from ffmpeg (if available).
+    pub stderr_tail: Option<String>,
+    /// Backoff applied before the next spawn attempt.
+    pub backoff_secs: u64,
+}
+
+/// Cap on the per-endpoint restart history ring buffer. Keeps the API
+/// payload bounded while still showing operators a useful pattern.
+pub const RESTART_HISTORY_CAP: usize = 100;
+
 /// Stats tracked per endpoint with diagnostics.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct EndpointStats {
@@ -197,6 +221,9 @@ pub struct EndpointStats {
     pub last_error: Option<String>,
     pub stall_reason: Option<String>,
     pub ffmpeg_last_stderr: Option<String>,
+    /// Per-endpoint ring buffer of recent ffmpeg restarts. Capped at
+    /// RESTART_HISTORY_CAP — oldest dropped first.
+    pub restart_history: std::collections::VecDeque<FfmpegRestartRecord>,
 }
 
 pub type Stats = Arc<Mutex<EndpointStats>>;
@@ -436,6 +463,13 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut flv_normalizer = FlvStreamNormalizer::new();
     let mut proc: Option<Box<dyn OutputProcess>> = None;
     let mut consecutive_ffmpeg_failures: u32 = 0;
+    // consecutive_ffmpeg_deaths counts ffmpeg processes that died AFTER
+    // spawning successfully (e.g. destination RTMP server rejected the
+    // stream key after accepting some bytes). consecutive_ffmpeg_failures
+    // only counts spawn errors, so without this separate counter the FB
+    // stale-key restart loop never backs off.
+    let mut consecutive_ffmpeg_deaths: u32 = 0;
+    let mut proc_spawned_at: Option<tokio::time::Instant> = None;
     let mut circuit_trips: u32 = 0;
     let mut consecutive_write_failures: u32 = 0;
     let mut last_heartbeat = std::time::Instant::now();
@@ -467,19 +501,64 @@ async fn consumer_task<P: OutputProcessFactory>(
         // Ensure output process is running
         if !proc.as_mut().is_some_and(|p| p.is_alive()) {
             if proc.is_some() {
+                // ffmpeg died after running. Track death and back off
+                // exponentially. If it lived a long time (>= LIFETIME_RESET
+                // secs), this was a real working session — reset the counter
+                // so a one-off death after hours doesn't trigger a 60s
+                // penalty.
+                const LIFETIME_RESET_SECS: u64 = 60;
+                let lifetime_secs = proc_spawned_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                if lifetime_secs >= LIFETIME_RESET_SECS {
+                    consecutive_ffmpeg_deaths = 0;
+                }
+
+                let stderr_tail = proc.as_mut().and_then(|p| p.last_stderr_line());
+
+                // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s (cap).
+                // Without this, a stale stream key causes ~1 ffmpeg restart
+                // per minute for the lifetime of the stream (observed: 524
+                // restarts in 9.5h).
+                let backoff_secs = (1u64 << consecutive_ffmpeg_deaths.min(6)).min(60);
+                consecutive_ffmpeg_deaths = consecutive_ffmpeg_deaths.saturating_add(1);
+
+                let current_chunk_id_for_record = {
+                    let s = stats.lock().await;
+                    s.current_chunk_id
+                };
+                let timestamp_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let record = FfmpegRestartRecord {
+                    timestamp_ms,
+                    chunk_id: current_chunk_id_for_record,
+                    lifetime_secs,
+                    reason: "stdin_closed".to_string(),
+                    stderr_tail: stderr_tail.clone(),
+                    backoff_secs,
+                };
                 let mut s = stats.lock().await;
                 s.ffmpeg_restart_count += 1;
-                if let Some(ref mut p) = proc {
-                    s.ffmpeg_last_stderr = p.last_stderr_line();
+                s.ffmpeg_last_stderr = stderr_tail;
+                if s.restart_history.len() >= RESTART_HISTORY_CAP {
+                    s.restart_history.pop_front();
                 }
+                s.restart_history.push_back(record);
                 drop(s);
-                let delay = match consecutive_ffmpeg_failures {
-                    0 => 1,
-                    1 => 3,
-                    _ => 5,
-                };
-                tracing::warn!(alias = %alias, delay, "Consumer: ffmpeg died, restarting");
-                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+
+                tracing::warn!(
+                    alias = %alias,
+                    lifetime_secs,
+                    consecutive_deaths = consecutive_ffmpeg_deaths,
+                    backoff_secs,
+                    "Consumer: ffmpeg died, backing off before restart"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
+                    _ = stop_rx.changed() => {
+                        if *stop_rx.borrow() { break; }
+                    }
+                }
                 flv_normalizer = FlvStreamNormalizer::new();
             }
 
@@ -487,6 +566,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                 Ok(new_proc) => {
                     tracing::info!(alias = %alias, "Consumer: ffmpeg started");
                     proc = Some(new_proc);
+                    proc_spawned_at = Some(tokio::time::Instant::now());
                     consecutive_ffmpeg_failures = 0;
                     let mut s = stats.lock().await;
                     s.consecutive_ffmpeg_failures = 0;
@@ -786,3 +866,7 @@ mod tests;
 #[cfg(test)]
 #[path = "endpoint_task_pacing_tests.rs"]
 mod pacing_tests;
+
+#[cfg(test)]
+#[path = "endpoint_task_backoff_tests.rs"]
+mod backoff_tests;

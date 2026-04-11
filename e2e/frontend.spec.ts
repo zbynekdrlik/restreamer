@@ -471,6 +471,39 @@ test.describe("Operator Dashboard", () => {
     );
   });
 
+  test("RTMP node shows absolute received_bytes, not session delta", async ({
+    page,
+  }) => {
+    // Regression for Issue 6: after 10 hours of streaming the dashboard
+    // showed ~3 MB instead of ~57 GB because the session-bytes computation
+    // reset to 0 on every page load. The fix shows the absolute
+    // received_bytes from InpointStatus directly.
+    await page.goto("/");
+    await expect(page.locator(".pipeline")).toBeVisible({ timeout: 10000 });
+
+    const FIVE_GB: number = 5_000_000_000;
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "InpointStatus",
+        data: {
+          state: "receiving",
+          rtmp_connected: true,
+          received_bytes: FIVE_GB,
+          chunk_count: 5000,
+        },
+      },
+    });
+
+    // The RTMP node is at index 1 in pipeline-node-metric. With absolute
+    // bytes display the metric must contain "GB" (5 GB or 4.65 GB depending
+    // on formatter). The old broken code showed bytes since the page opened,
+    // which is approximately zero on a freshly-loaded page.
+    await expect(page.locator(".pipeline-node-metric").nth(1)).toContainText(
+      "GB",
+      { timeout: 5000 },
+    );
+  });
+
   // --- Add Endpoint Modal ---
 
   test("add endpoint button opens modal when delivering", async ({ page }) => {
