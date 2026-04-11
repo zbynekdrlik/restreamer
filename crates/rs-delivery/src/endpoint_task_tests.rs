@@ -622,6 +622,7 @@ async fn test_stats_struct_serializes() {
         last_error: Some("test error".to_string()),
         stall_reason: Some("chunk_gap".to_string()),
         ffmpeg_last_stderr: Some("connection refused".to_string()),
+        restart_history: std::collections::VecDeque::new(),
     };
     let json = serde_json::to_string(&stats).unwrap();
     assert!(json.contains("\"stall_reason\":\"chunk_gap\""));

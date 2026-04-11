@@ -17,6 +17,12 @@ pub struct FlvStreamNormalizer {
     sent_header: bool,
 }
 
+impl Default for FlvStreamNormalizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FlvStreamNormalizer {
     pub fn new() -> Self {
         Self { sent_header: false }
