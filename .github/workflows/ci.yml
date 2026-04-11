@@ -2416,7 +2416,25 @@ jobs:
               });
             } catch (e) {
               console.error('FAILED: No endpoint cache labels appeared within 30s');
-              console.error('Expected DeliveryStatus broadcast with endpoints by now');
+              // Diagnostic: dump dashboard state to find why endpoints
+              // are not in store.delivery.endpoints.
+              try {
+                const apiStatus = await fetch('http://127.0.0.1:8910/api/v1/status').then(r => r.json());
+                console.error('API status:', JSON.stringify(apiStatus.streaming_event));
+                const cached = await fetch('http://127.0.0.1:8910/api/v1/delivery/status/cached').then(r => r.json()).catch(() => null);
+                console.error('Cached delivery:', JSON.stringify(cached));
+                const eventId = apiStatus.streaming_event && apiStatus.streaming_event.id;
+                if (eventId) {
+                  const live = await fetch(`http://127.0.0.1:8910/api/v1/delivery/status?event_id=${eventId}`).then(r => r.json()).catch(() => null);
+                  console.error('Live delivery status:', JSON.stringify(live));
+                }
+                const pipelineNodes = await page.locator('.pipeline-node-metric').allTextContents().catch(() => []);
+                console.error('Pipeline node metrics:', pipelineNodes);
+                const allClasses = await page.locator('.endpoint-tree').count().catch(() => 0);
+                console.error('Endpoint tree count:', allClasses);
+              } catch (diagErr) {
+                console.error('Diagnostic dump failed:', diagErr.message);
+              }
               process.exit(1);
             }
 
