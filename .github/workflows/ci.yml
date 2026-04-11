@@ -2170,6 +2170,32 @@ jobs:
           }
           Write-Host "Event id: $($targetEvent.id), name: $($targetEvent.name)"
 
+          # Ensure 'e2e rtmp' and 'e2e hls' endpoints are attached. The
+          # event row may exist but have zero attachments if it was
+          # recreated after the original was deleted (the OBS-to-YouTube
+          # buffering test depends on these two endpoints showing up in
+          # the dashboard).
+          $allEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -TimeoutSec 10
+          $needAttach = @("e2e rtmp", "e2e hls")
+          $eventEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/endpoints" -TimeoutSec 10
+          $attachedAliases = @($eventEndpoints | ForEach-Object { $_.alias })
+          foreach ($alias in $needAttach) {
+            if ($attachedAliases -notcontains $alias) {
+              $ep = $allEndpoints | Where-Object { $_.alias -eq $alias }
+              if ($ep) {
+                try {
+                  Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/endpoints/$($ep.id)" `
+                    -Method POST -TimeoutSec 10
+                  Write-Host "Attached endpoint '$alias' (id=$($ep.id)) to event $($targetEvent.id)"
+                } catch {
+                  Write-Host "WARNING: Failed to attach $alias`: $_"
+                }
+              } else {
+                Write-Host "WARNING: Endpoint config '$alias' not found in /endpoints list"
+              }
+            }
+          }
+
           # Save original cache_delay_secs before changing (restore at end)
           $origCacheDelay = $targetEvent.cache_delay_secs
           Write-Host "Original cache_delay_secs: $origCacheDelay"
