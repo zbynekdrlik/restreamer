@@ -282,7 +282,13 @@ jobs:
           BUILD_VERSION: ${{ env.BUILD_VERSION }}
           BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
       - name: Install Tauri CLI
-        run: cargo install tauri-cli
+        # Use prebuilt binary instead of `cargo install tauri-cli` because the
+        # source build hangs intermittently on Windows runners (observed twice
+        # in a row, ~30+ minutes stuck) and even when it works it adds ~10
+        # minutes of cold cargo compile time per run.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
       - name: Build Tauri app
         run: cargo tauri build
         env:
