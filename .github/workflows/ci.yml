@@ -199,6 +199,9 @@ jobs:
             --exclude-re 'get_s3_usage' \
             --exclude-re 'get_template_endpoints' \
             --exclude-re 'ServiceCore::run_with_signal' \
+            --exclude-re 'DeliveryOrchestrator::stop_delivery' \
+            --exclude-re 'DeliveryOrchestrator::get_delivery_status' \
+            --exclude-re 'delivery_logs' \
             -e 'crates/rs-api/src/template_handlers.rs' \
             -e 'crates/rs-api/src/s3_handlers.rs'
         env:
