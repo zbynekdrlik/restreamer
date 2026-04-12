@@ -18,6 +18,9 @@ mod tests;
 #[cfg(test)]
 mod template_tests;
 
+#[cfg(test)]
+mod delivery_log_tests;
+
 /// Create a SQLite connection pool.
 pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -71,6 +74,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (10, MIGRATION_V10_SQL),
         (11, MIGRATION_V11_SQL),
         (12, MIGRATION_V12_SQL),
+        (13, MIGRATION_V13_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -294,6 +298,35 @@ CREATE TABLE IF NOT EXISTS template_endpoints (
 );
 
 ALTER TABLE streaming_events ADD COLUMN created_from TEXT
+"#;
+
+const MIGRATION_V13_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS delivery_logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id INTEGER NOT NULL,
+    event_id    INTEGER,
+    captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+    log_text    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS delivery_restart_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id   INTEGER NOT NULL,
+    event_id      INTEGER,
+    alias         TEXT NOT NULL,
+    timestamp_ms  INTEGER NOT NULL,
+    chunk_id      INTEGER NOT NULL,
+    lifetime_secs INTEGER NOT NULL,
+    reason        TEXT NOT NULL,
+    stderr_tail   TEXT,
+    backoff_secs  INTEGER NOT NULL
+);
+
+CREATE INDEX idx_delivery_restart_log_instance
+    ON delivery_restart_log(instance_id);
+
+CREATE INDEX idx_delivery_logs_instance
+    ON delivery_logs(instance_id)
 "#;
 
 // --- Client Profile ---

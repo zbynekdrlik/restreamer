@@ -535,6 +535,27 @@ impl DeliveryOrchestrator {
                                     })
                                     .unwrap_or_default();
 
+                            // Persist restart records to DB for post-mortem analysis.
+                            // The dedup INSERT ignores records already saved from previous polls.
+                            for record in &restart_history {
+                                if let Err(e) = db::insert_delivery_restart_record(
+                                    &self.pool,
+                                    inst.id,
+                                    inst.event_id,
+                                    &alias,
+                                    record.timestamp_ms,
+                                    record.chunk_id,
+                                    record.lifetime_secs as i64,
+                                    &record.reason,
+                                    record.stderr_tail.as_deref(),
+                                    record.backoff_secs as i64,
+                                )
+                                .await
+                                {
+                                    warn!("Failed to persist restart record: {e}");
+                                }
+                            }
+
                             // Compute cache delay using actual content duration from DB
                             let chunk_delay_secs =
                                 db::get_cache_duration_secs(&self.pool, event_id, chunk_id)
@@ -684,6 +705,72 @@ impl DeliveryOrchestrator {
                 .timeout(Duration::from_secs(10))
                 .send()
                 .await;
+        }
+
+        // Capture VPS logs before deletion for post-mortem analysis.
+        // Best-effort: if the VPS is unresponsive, we still proceed with deletion.
+        if instance.status == "running" {
+            let client = reqwest::Client::new();
+            let delivery_url = format!("http://{}:8000", instance.ipv4);
+            match client
+                .get(format!("{delivery_url}/api/logs?limit=5000"))
+                .bearer_auth(&instance.auth_token)
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(body) => {
+                            // Format log entries as text lines for human-readable storage
+                            let log_text = body["entries"]
+                                .as_array()
+                                .map(|entries| {
+                                    entries
+                                        .iter()
+                                        .rev() // API returns newest-first, store chronologically
+                                        .map(|e| {
+                                            format!(
+                                                "[{}] {} {}",
+                                                e["level"].as_str().unwrap_or("?"),
+                                                e["target"].as_str().unwrap_or("?"),
+                                                e["message"].as_str().unwrap_or("")
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                })
+                                .unwrap_or_default();
+
+                            if !log_text.is_empty() {
+                                if let Err(e) = db::insert_delivery_log(
+                                    &self.pool,
+                                    instance.id,
+                                    instance.event_id,
+                                    &log_text,
+                                )
+                                .await
+                                {
+                                    warn!("Failed to persist VPS logs: {e}");
+                                } else {
+                                    info!(
+                                        instance_id = instance.id,
+                                        lines = log_text.lines().count(),
+                                        "Captured VPS logs before deletion"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => warn!("Failed to parse VPS log response: {e}"),
+                    }
+                }
+                Ok(resp) => {
+                    warn!(status = %resp.status(), "VPS log capture returned non-success");
+                }
+                Err(e) => {
+                    warn!("VPS log capture failed (VPS may be unresponsive): {e}");
+                }
+            }
         }
 
         // Delete Hetzner server

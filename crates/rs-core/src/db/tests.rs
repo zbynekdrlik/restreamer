@@ -920,3 +920,4 @@ async fn sent_duration_ms_only_counts_uploaded_chunks() {
 }
 
 // Template and create-event-from-template tests are in template_tests.rs
+// Delivery log capture tests are in delivery_log_tests.rs

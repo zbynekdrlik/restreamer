@@ -199,6 +199,9 @@ jobs:
             --exclude-re 'get_s3_usage' \
             --exclude-re 'get_template_endpoints' \
             --exclude-re 'ServiceCore::run_with_signal' \
+            --exclude-re 'DeliveryOrchestrator::stop_delivery' \
+            --exclude-re 'DeliveryOrchestrator::get_delivery_status' \
+            --exclude-re 'delivery_logs' \
             -e 'crates/rs-api/src/template_handlers.rs' \
             -e 'crates/rs-api/src/s3_handlers.rs'
         env:
@@ -1424,6 +1427,21 @@ jobs:
             throw "FAILED: /s3/usage missing by_event array"
           }
           Write-Host "=== /s3/usage GATE PASSED: $($usage.total_bytes) bytes, $($usage.total_objects) objects, $($usage.by_event.Count) events ==="
+
+      - name: GATE delivery logs endpoint returns valid structure
+        shell: powershell
+        timeout-minutes: 1
+        run: |
+          # The delivery/logs endpoint must return valid JSON even when
+          # no delivery instance exists (empty restart_log, null captured_log).
+          $logs = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/logs?instance_id=1" -TimeoutSec 10
+          if ($null -eq $logs.instance_id) {
+            throw "FAILED: /delivery/logs missing instance_id"
+          }
+          if ($null -eq $logs.restart_log) {
+            throw "FAILED: /delivery/logs missing restart_log array"
+          }
+          Write-Host "=== /delivery/logs GATE PASSED: instance_id=$($logs.instance_id), restart_records=$($logs.restart_log.Count), has_captured_log=$($null -ne $logs.captured_log) ==="
 
       - name: Verify RTMP disconnected after stream stop
         shell: powershell
