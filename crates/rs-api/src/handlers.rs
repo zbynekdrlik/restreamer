@@ -439,6 +439,10 @@ pub async fn delete_event_by_id(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
+    // Serialize with other S3 mutation handlers (clear-s3, delete-event).
+    // See AppState::s3_mutation_lock doc.
+    let _guard = state.s3_mutation_lock.lock().await;
+
     // Fetch event first — return 404 if not found
     let event = db::get_streaming_event_by_id(&state.pool, id)
         .await
@@ -482,16 +486,39 @@ pub async fn delete_event_by_id(
     // already gone. We still abort the DB delete, leaving the remaining S3
     // objects accessible-but-orphaned. Retrying the delete is safe because
     // the list-then-delete pattern cleans them up on the next attempt.
-    s3_client
-        .delete_event_chunks(&event.name)
-        .await
-        .map_err(|e| {
+    //
+    // Wrapped in a timeout so we can't hang a reverse proxy on a slow S3
+    // endpoint (same bound as S3_OPERATION_TIMEOUT in s3_handlers.rs).
+    let delete_future = s3_client.delete_event_chunks(&event.name);
+    match tokio::time::timeout(std::time::Duration::from_secs(60), delete_future).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
             error!(
                 "Failed to delete S3 chunks for event {id} ({}): {e}",
                 event.name
             );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        Err(_) => {
+            error!(
+                "Timeout deleting S3 chunks for event {id} ({}) after 60s",
+                event.name
+            );
+            return Err(StatusCode::GATEWAY_TIMEOUT);
+        }
+    }
+
+    // TOCTOU double-check: if streaming was started during the delete, log
+    // a warning. The chunks are already gone — recovery is restart-stream.
+    if let Ok(Some(post)) = db::get_streaming_event_by_id(&state.pool, id).await {
+        if post.receiving_activated || post.delivering_activated {
+            tracing::warn!(
+                "delete_event_by_id for {id} ({}) raced against a start-stream — \
+                 new chunks may have been deleted during the scan",
+                event.name
+            );
+        }
+    }
 
     // Delete DB records (cascade deletes chunks, endpoint links, etc.)
     db::delete_streaming_event(&state.pool, id)

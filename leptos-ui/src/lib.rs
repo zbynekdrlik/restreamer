@@ -6,6 +6,7 @@ mod api;
 mod app;
 mod components;
 mod store;
+mod utils;
 mod ws;
 
 use wasm_bindgen::prelude::*;

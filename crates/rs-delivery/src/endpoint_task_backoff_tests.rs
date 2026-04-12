@@ -383,6 +383,159 @@ async fn test_write_failure_records_audit_log_and_applies_backoff() {
     let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
 }
 
+/// A process that lives for a configurable duration before dying.
+/// Used to verify that the death-counter reset fires when ffmpeg lives
+/// long enough to prove the session was "real".
+struct LongLivedProcess {
+    alive: Arc<AtomicBool>,
+    spawned_at: tokio::time::Instant,
+    live_secs: u64,
+}
+
+#[async_trait]
+impl OutputProcess for LongLivedProcess {
+    fn is_alive(&mut self) -> bool {
+        if self.spawned_at.elapsed().as_secs() >= self.live_secs {
+            self.alive.store(false, Ordering::Relaxed);
+        }
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    async fn write(&mut self, _data: &[u8]) -> Result<(), String> {
+        if self.spawned_at.elapsed().as_secs() >= self.live_secs {
+            self.alive.store(false, Ordering::Relaxed);
+            return Err("lived out its duration".to_string());
+        }
+        Ok(())
+    }
+
+    async fn kill(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
+
+    fn last_stderr_line(&self) -> Option<String> {
+        Some("scheduled exit".to_string())
+    }
+}
+
+struct LongLivedFactory {
+    live_secs_sequence: Arc<StdMutex<Vec<u64>>>,
+    spawn_count: Arc<AtomicU32>,
+}
+
+impl OutputProcessFactory for LongLivedFactory {
+    fn spawn(
+        &self,
+        _service_type: ServiceType,
+        _stream_key: &str,
+        _alias: &str,
+    ) -> Result<Box<dyn OutputProcess>, String> {
+        let idx = self.spawn_count.fetch_add(1, Ordering::Relaxed) as usize;
+        let seq = self.live_secs_sequence.lock().unwrap();
+        let live_secs = seq.get(idx).copied().unwrap_or(0);
+        drop(seq);
+        Ok(Box::new(LongLivedProcess {
+            alive: Arc::new(AtomicBool::new(true)),
+            spawned_at: tokio::time::Instant::now(),
+            live_secs,
+        }))
+    }
+}
+
+/// When ffmpeg lives longer than LIFETIME_RESET_SECS (60s) before dying,
+/// the `consecutive_ffmpeg_deaths` counter is reset so a one-off death
+/// after hours of successful streaming does not trigger a 60s backoff
+/// penalty. This test verifies that reset by running a sequence:
+///
+///   process 1 lives 120s then dies (long-lived session)
+///   process 2 spawns immediately with backoff=1s (reset proved)
+///   process 2 dies fast
+///   process 3 spawns with backoff=2s (counter now at 1, not 2)
+#[tokio::test]
+async fn test_backoff_counter_resets_after_long_lived_session() {
+    tokio::time::pause();
+
+    let chunks: std::collections::HashMap<i64, Vec<u8>> =
+        (1..=1000).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = BackoffMockFetcher {
+        chunks: Arc::new(TokioMutex::new(chunks)),
+        duration_ms_per_chunk: 2000,
+    };
+
+    // Sequence: 1st process lives 120s, 2nd dies fast, 3rd dies fast.
+    // After the 120s-long-lived process dies, the reset must fire, so
+    // the 2nd process should be spawned with backoff=1s (as if it were
+    // the first death), not with the backoff that would have applied
+    // without the reset.
+    let live_sequence = Arc::new(StdMutex::new(vec![120u64, 0, 0, 0, 0]));
+    let spawn_count = Arc::new(AtomicU32::new(0));
+    let factory = LongLivedFactory {
+        live_secs_sequence: live_sequence.clone(),
+        spawn_count: spawn_count.clone(),
+    };
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+
+    let stats_clone = stats.clone();
+    let handle = tokio::spawn(async move {
+        endpoint_loop(
+            fetcher,
+            factory,
+            backoff_test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+        )
+        .await;
+    });
+
+    // Advance 200s of mock time. Timeline:
+    //   t=0   -> spawn 1, lives 120s
+    //   t=120 -> spawn 1 dies, consecutive_deaths reset to 0 because
+    //            lifetime >= 60s. Backoff is (1 << 0).min(60) = 1s.
+    //   t=121 -> spawn 2, dies instantly
+    //   t=122 -> backoff 2s applied (consecutive_deaths now 1)
+    //   t=124 -> spawn 3, dies instantly
+    //   ...continues with exponential backoff
+    for _ in 0..2000 {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let s = stats.lock().await;
+    let history: Vec<_> = s.restart_history.iter().cloned().collect();
+    drop(s);
+
+    assert!(
+        !history.is_empty(),
+        "No restart records — long-lived process never died?"
+    );
+
+    // First recorded backoff should be 1s because the counter reset to 0
+    // after the 120s long-lived process. Without the reset, the backoff
+    // sequence would carry the counter from earlier deaths (if any) and
+    // this assertion would catch a regression.
+    assert_eq!(
+        history[0].backoff_secs, 1,
+        "After a long-lived session (>= LIFETIME_RESET_SECS), the backoff \
+         counter must reset so the next death is treated as the first. \
+         First record: {:?}",
+        history[0]
+    );
+
+    // Lifetime of the first process should be at least 120s (mock time).
+    assert!(
+        history[0].lifetime_secs >= 120,
+        "First dead process should have lived >= 120s, got {}s",
+        history[0].lifetime_secs
+    );
+
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+}
+
 /// The restart_history ring buffer must be bounded — old records get
 /// evicted past RESTART_HISTORY_CAP.
 #[tokio::test]

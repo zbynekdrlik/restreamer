@@ -127,7 +127,6 @@ impl S3Client {
                 break;
             }
 
-            let batch_size = keys.len();
             let results: Vec<Result<String, EndpointError>> = futures::stream::iter(keys)
                 .map(|key| {
                     let bucket = Arc::clone(&bucket);
@@ -149,17 +148,16 @@ impl S3Client {
                 .collect()
                 .await;
 
-            // Surface the first error but report partial progress so the
-            // operator can retry without re-deleting succeeded objects.
-            for result in &results {
-                if let Err(e) = result {
-                    info!(
-                        "Deleted {total_deleted} S3 objects under prefix '{prefix}' before error"
-                    );
-                    return Err(EndpointError::S3(e.to_string()));
-                }
+            // Count successful deletes before surfacing any error so the
+            // reported total reflects real progress, not "attempted deletes".
+            // This matters when an error occurs mid-batch — without this the
+            // log line overstates progress by up to DELETE_CONCURRENCY - 1.
+            let batch_successes = results.iter().filter(|r| r.is_ok()).count() as u64;
+            total_deleted += batch_successes;
+            if let Some(err) = results.into_iter().find_map(|r| r.err()) {
+                info!("Deleted {total_deleted} S3 objects under prefix '{prefix}' before error");
+                return Err(err);
             }
-            total_deleted += batch_size as u64;
         }
 
         info!("Deleted {total_deleted} S3 objects under prefix '{prefix}'");

@@ -712,9 +712,20 @@ async fn consumer_task<P: OutputProcessFactory>(
                     // iteration. Previously this called proc.take() which
                     // left proc=None, and the death handler's `if
                     // proc.is_some()` check skipped both backoff AND audit.
+                    //
+                    // Race note: on a real FfmpegProcess, kill() sends
+                    // SIGKILL but is_alive() reads the child's try_wait()
+                    // exit code non-blockingly. There's a ~ms window where
+                    // is_alive() may still return true on the next loop
+                    // iteration, causing one more write attempt before the
+                    // death handler catches it. The 10ms sleep below gives
+                    // the OS time to reap the child so the death handler
+                    // runs on the next iteration with accurate
+                    // lifetime_secs in the audit entry.
                     if let Some(p) = proc.as_mut() {
                         p.kill().await;
                     }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
                         tracing::error!(alias = %alias, chunk_id, "Consumer: skipping chunk after {consecutive_write_failures} write failures");
                         consecutive_write_failures = 0;
@@ -733,9 +744,14 @@ async fn consumer_task<P: OutputProcessFactory>(
                     drop(s);
                     // Same fix as above — kill in place, let the death
                     // handler record the audit entry and apply backoff.
+                    // The 10ms post-kill sleep gives the OS a chance to
+                    // reap the child so is_alive() returns false on the
+                    // next iteration. See the race note in the Ok(Err)
+                    // branch above.
                     if let Some(p) = proc.as_mut() {
                         p.kill().await;
                     }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     if consecutive_write_failures >= MAX_WRITE_FAILURES_PER_CHUNK {
                         tracing::error!(alias = %alias, chunk_id, "Consumer: skipping chunk after {consecutive_write_failures} write timeouts");
                         consecutive_write_failures = 0;

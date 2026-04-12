@@ -50,6 +50,11 @@ pub struct AppState {
     pub obs_client: Arc<tokio::sync::RwLock<Option<Arc<ObsClient>>>>,
     /// Test hook: when true, S3 uploads are paused (simulates network outage).
     pub s3_upload_blocked: Arc<std::sync::atomic::AtomicBool>,
+    /// Serializes S3 mutation operations (delete-event and clear-s3) so
+    /// two concurrent deletes cannot overlap their S3 LIST+DELETE scans
+    /// and double the load on the S3 endpoint. Also provides a stable
+    /// happens-before boundary between concurrent delete requests.
+    pub s3_mutation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -79,6 +84,7 @@ impl AppState {
             cached_delivery: Arc::new(std::sync::RwLock::new(CachedDeliveryStatus::default())),
             obs_client: Arc::new(tokio::sync::RwLock::new(obs_client)),
             s3_upload_blocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            s3_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
