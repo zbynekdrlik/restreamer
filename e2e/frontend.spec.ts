@@ -2075,6 +2075,59 @@ test.describe("Events Management Tab", () => {
     });
   });
 
+  test("event card shows rescue video URL input and saves via PATCH", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await page.waitForTimeout(1000);
+
+    const firstCard = page
+      .locator(".events-management-tab .settings-card")
+      .first();
+
+    // The rescue video input reuses the .cache-delay-input class inside a
+    // .cache-edit block whose label reads "Rescue video URL:"
+    const rescueInput = firstCard
+      .locator(".cache-edit")
+      .filter({ hasText: "Rescue video URL:" })
+      .locator("input.cache-delay-input");
+    await expect(rescueInput).toBeVisible({ timeout: 5000 });
+
+    // Track PATCH requests to verify the value is sent
+    const patchBodies: string[] = [];
+    await page.route("**/api/v1/events/*", async (route) => {
+      if (route.request().method() === "PATCH") {
+        const body = route.request().postData() ?? "";
+        patchBodies.push(body);
+      }
+      await route.continue();
+    });
+
+    const testUrl = "https://s3.example.com/rescue-test.mp4";
+    await rescueInput.fill(testUrl);
+
+    // Click the Save button in the same .cache-edit block
+    const saveBtn = firstCard
+      .locator(".cache-edit")
+      .filter({ hasText: "Rescue video URL:" })
+      .locator("button.btn-small");
+    await saveBtn.click();
+
+    // Wait for the PATCH to fire
+    await page.waitForTimeout(500);
+
+    // At least one PATCH was sent containing the rescue_video_url field
+    const sentRescue = patchBodies.some((b) => b.includes("rescue_video_url"));
+    expect(sentRescue).toBe(true);
+
+    // The sent body should include our test URL
+    const sentUrl = patchBodies.some((b) => b.includes("rescue-test.mp4"));
+    expect(sentUrl).toBe(true);
+  });
+
   test("Config tab no longer shows Events section", async ({ page }) => {
     await page.goto("/settings");
     await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
