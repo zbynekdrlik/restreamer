@@ -75,6 +75,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (11, MIGRATION_V11_SQL),
         (12, MIGRATION_V12_SQL),
         (13, MIGRATION_V13_SQL),
+        (14, MIGRATION_V14_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -329,6 +330,10 @@ CREATE INDEX idx_delivery_logs_instance
     ON delivery_logs(instance_id)
 "#;
 
+const MIGRATION_V14_SQL: &str = r#"
+ALTER TABLE streaming_events ADD COLUMN rescue_video_url TEXT
+"#;
+
 // --- Client Profile ---
 
 pub async fn get_client_profile(pool: &SqlitePool) -> Result<Option<ClientProfile>> {
@@ -357,7 +362,7 @@ pub async fn upsert_client_profile(pool: &SqlitePool, user_uuid: &str) -> Result
 pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEvent>> {
     // Prefer the event with receiving_activated=1, fall back to highest ID
     let row = sqlx::query(
-        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from, rescue_video_url
          FROM streaming_events ORDER BY receiving_activated DESC, id DESC LIMIT 1",
     )
     .fetch_optional(pool)
@@ -371,6 +376,7 @@ pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEv
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
         cache_delay_secs: r.get("cache_delay_secs"),
         created_from: r.get("created_from"),
+        rescue_video_url: r.get("rescue_video_url"),
     }))
 }
 
@@ -379,7 +385,7 @@ pub async fn get_streaming_event_by_id(
     id: i64,
 ) -> Result<Option<StreamingEvent>> {
     let row = sqlx::query(
-        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from, rescue_video_url
          FROM streaming_events WHERE id = ?1",
     )
     .bind(id)
@@ -394,6 +400,7 @@ pub async fn get_streaming_event_by_id(
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
         cache_delay_secs: r.get("cache_delay_secs"),
         created_from: r.get("created_from"),
+        rescue_video_url: r.get("rescue_video_url"),
     }))
 }
 

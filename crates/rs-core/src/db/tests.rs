@@ -919,5 +919,46 @@ async fn sent_duration_ms_only_counts_uploaded_chunks() {
     assert_eq!(total, 3800); // 2000 + 1800, NOT 6000
 }
 
+#[tokio::test]
+async fn migration_v14_rescue_video_url_column_exists() {
+    let pool = create_memory_pool().await.unwrap();
+    run_migrations(&pool).await.unwrap();
+    sqlx::query("INSERT INTO streaming_events (name, received_bytes, receiving_activated, delivering_activated, rescue_video_url) VALUES ('test', 0, 0, 0, 'https://example.com/rescue.mp4')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let row = sqlx::query("SELECT rescue_video_url FROM streaming_events WHERE name = 'test'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let url: Option<String> = row.get("rescue_video_url");
+    assert_eq!(url, Some("https://example.com/rescue.mp4".to_string()));
+}
+
+#[tokio::test]
+async fn update_event_rescue_video_url() {
+    let pool = create_memory_pool().await.unwrap();
+    run_migrations(&pool).await.unwrap();
+    create_streaming_event(&pool, "rescue-test").await.unwrap();
+    let events = list_streaming_events(&pool).await.unwrap();
+    let id = events[0].id;
+    let evt = get_streaming_event_by_id(&pool, id).await.unwrap().unwrap();
+    assert_eq!(evt.rescue_video_url, None);
+    update_streaming_event(
+        &pool,
+        id,
+        "rescue-test",
+        None,
+        Some("https://example.com/rescue.mp4".to_string()),
+    )
+    .await
+    .unwrap();
+    let evt = get_streaming_event_by_id(&pool, id).await.unwrap().unwrap();
+    assert_eq!(
+        evt.rescue_video_url,
+        Some("https://example.com/rescue.mp4".to_string())
+    );
+}
+
 // Template and create-event-from-template tests are in template_tests.rs
 // Delivery log capture tests are in delivery_log_tests.rs
