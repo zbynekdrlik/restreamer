@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use rs_ffmpeg::{FfmpegProcess, ServiceType};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -99,6 +100,29 @@ struct PrefetchedChunk {
     chunk_id: i64,
     data: Vec<u8>,
     duration_ms: i64,
+}
+
+/// Shared buffer state between producer and consumer for rescue mode.
+pub struct BufferState {
+    /// Estimated buffer duration in ms (chunks available on S3 ahead of consumer).
+    pub buffer_duration_ms: AtomicU64,
+    /// Whether the producer is actively finding new chunks (vs stalled).
+    pub producer_active: AtomicBool,
+}
+
+impl BufferState {
+    pub fn new() -> Self {
+        Self {
+            buffer_duration_ms: AtomicU64::new(0),
+            producer_active: AtomicBool::new(true),
+        }
+    }
+}
+
+impl Default for BufferState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Trait for fetching chunks (S3 or mock).
@@ -214,7 +238,7 @@ pub struct FfmpegRestartRecord {
 pub const RESTART_HISTORY_CAP: usize = 100;
 
 /// Stats tracked per endpoint with diagnostics.
-#[derive(Debug, Default, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct EndpointStats {
     pub bytes_processed_total: u64,
     pub duration_processed_ms: u64,
@@ -230,6 +254,30 @@ pub struct EndpointStats {
     /// Per-endpoint ring buffer of recent ffmpeg restarts. Capped at
     /// RESTART_HISTORY_CAP — oldest dropped first.
     pub restart_history: std::collections::VecDeque<FfmpegRestartRecord>,
+    /// Current delivery mode: "normal", "warmup", "rescue", "recovering".
+    pub delivery_mode: String,
+    /// ETA in seconds until rescue mode ends (warmup or buffer refill).
+    pub rescue_eta_secs: Option<u64>,
+}
+
+impl Default for EndpointStats {
+    fn default() -> Self {
+        Self {
+            bytes_processed_total: 0,
+            duration_processed_ms: 0,
+            current_chunk_id: 0,
+            chunks_processed: 0,
+            ffmpeg_restart_count: 0,
+            consecutive_ffmpeg_failures: 0,
+            consecutive_chunk_misses: 0,
+            last_error: None,
+            stall_reason: None,
+            ffmpeg_last_stderr: None,
+            restart_history: std::collections::VecDeque::new(),
+            delivery_mode: "normal".to_string(),
+            rescue_eta_secs: None,
+        }
+    }
 }
 
 pub type Stats = Arc<Mutex<EndpointStats>>;
@@ -247,12 +295,24 @@ impl EndpointHandle {
         event_identifier: String,
         start_chunk_id: i64,
         delivery_delay_ms: u64,
+        rescue_video_url: Option<String>,
     ) -> Self {
         let (stop_tx, stop_rx) = watch::channel(false);
+
+        let initial_mode = if rescue_video_url.is_some() && !ep_cfg.is_fast && delivery_delay_ms > 0
+        {
+            "warmup".to_string()
+        } else {
+            "normal".to_string()
+        };
+
         let stats: Stats = Arc::new(Mutex::new(EndpointStats {
             current_chunk_id: start_chunk_id,
+            delivery_mode: initial_mode,
             ..Default::default()
         }));
+
+        let buffer_state = Arc::new(BufferState::new());
 
         let fetcher = match S3Fetcher::new(&s3_cfg, &event_identifier) {
             Ok(f) => f,
@@ -282,6 +342,8 @@ impl EndpointHandle {
             effective_delay,
             stop_rx,
             stats.clone(),
+            rescue_video_url,
+            buffer_state,
         ));
 
         Self {
@@ -314,6 +376,7 @@ async fn producer_task<F: ChunkFetcher>(
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
     alias: String,
+    buffer_state: Arc<BufferState>,
 ) {
     let mut chunk_id = start_chunk_id;
     let mut consecutive_chunk_misses: u32 = 0;
@@ -343,6 +406,18 @@ async fn producer_task<F: ChunkFetcher>(
                     data,
                     duration_ms,
                 };
+
+                // Track buffer growth for rescue mode
+                let current_buf = buffer_state
+                    .buffer_duration_ms
+                    .load(AtomicOrdering::Relaxed);
+                buffer_state.buffer_duration_ms.store(
+                    current_buf.saturating_add(duration_ms.max(0) as u64),
+                    AtomicOrdering::Relaxed,
+                );
+                buffer_state
+                    .producer_active
+                    .store(true, AtomicOrdering::Relaxed);
 
                 // Send into channel; blocks if buffer full (backpressure).
                 // If receiver is dropped (consumer gone), stop.
@@ -405,6 +480,13 @@ async fn producer_task<F: ChunkFetcher>(
                     s.consecutive_chunk_misses = consecutive_chunk_misses;
                 }
 
+                // Signal producer stall for rescue mode detection
+                if consecutive_chunk_misses >= 15 {
+                    buffer_state
+                        .producer_active
+                        .store(false, AtomicOrdering::Relaxed);
+                }
+
                 tracing::debug!(alias = %alias, chunk_id, "Producer: chunk not found, waiting");
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
@@ -455,6 +537,8 @@ async fn consumer_task<P: OutputProcessFactory>(
     ep_cfg: EndpointConfig,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
+    rescue_video_url: Option<String>,
+    buffer_state: Arc<BufferState>,
 ) {
     let alias = ep_cfg.alias.clone();
 
@@ -617,16 +701,127 @@ async fn consumer_task<P: OutputProcessFactory>(
             }
         }
 
-        // Pull next chunk from channel (blocks until available or producer drops)
+        // Pull next chunk from channel (rescue-mode-aware)
         let chunk = tokio::select! {
             maybe_chunk = rx.recv() => {
                 match maybe_chunk {
-                    Some(c) => c,
+                    Some(c) => {
+                        // Decrease buffer duration tracking as consumer pulls chunks
+                        let dur = c.duration_ms.max(0) as u64;
+                        let current = buffer_state.buffer_duration_ms.load(AtomicOrdering::Relaxed);
+                        buffer_state.buffer_duration_ms.store(current.saturating_sub(dur), AtomicOrdering::Relaxed);
+                        c
+                    }
                     None => {
                         tracing::info!(alias = %alias, "Consumer: producer gone, stopping");
                         break;
                     }
                 }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS)) => {
+                if let Some(ref rescue_url) = rescue_video_url {
+                    if !buffer_state.producer_active.load(AtomicOrdering::Relaxed) {
+                        tracing::warn!(alias = %alias, "Consumer: buffer empty + producer stalled, entering rescue mode");
+
+                        // Kill current ffmpeg
+                        if let Some(mut p) = proc.take() {
+                            p.kill().await;
+                        }
+
+                        // Update stats
+                        {
+                            let mut s = stats.lock().await;
+                            s.delivery_mode = "rescue".to_string();
+                            s.rescue_eta_secs = Some(crate::rescue::RESCUE_REFILL_TARGET_SECS);
+                        }
+
+                        // Spawn rescue ffmpeg
+                        let svc_type: rs_ffmpeg::ServiceType = ep_cfg.service_type.parse().unwrap_or(rs_ffmpeg::ServiceType::TestFile);
+                        let ep_url = crate::rescue::endpoint_url_for_service(svc_type, &ep_cfg.stream_key);
+                        let out_fmt = crate::rescue::output_format_for_service(svc_type);
+                        let rescue_args = crate::rescue::build_rescue_ffmpeg_args(rescue_url, &ep_url, out_fmt, &alias);
+
+                        // Write initial countdown
+                        let initial_text = crate::rescue::format_countdown_text(
+                            &crate::rescue::DeliveryMode::Rescue { reason: crate::rescue::RescueReason::BufferEmpty },
+                            crate::rescue::RESCUE_REFILL_TARGET_SECS,
+                        );
+                        crate::rescue::write_countdown_file(&alias, &initial_text);
+
+                        // Spawn rescue ffmpeg process
+                        let mut rescue_proc = match tokio::process::Command::new("ffmpeg")
+                            .args(&rescue_args)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .kill_on_drop(true)
+                            .spawn()
+                        {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::error!(alias = %alias, "Failed to spawn rescue ffmpeg: {e}");
+                                continue;
+                            }
+                        };
+
+                        tracing::info!(alias = %alias, "Consumer: rescue ffmpeg started");
+
+                        let target_ms = crate::rescue::RESCUE_REFILL_TARGET_SECS * 1000;
+                        loop {
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                                    let buf_ms = buffer_state.buffer_duration_ms.load(AtomicOrdering::Relaxed);
+                                    let eta_secs = if buf_ms >= target_ms { 0 } else { (target_ms - buf_ms) / 1000 };
+
+                                    let text = crate::rescue::format_countdown_text(
+                                        &crate::rescue::DeliveryMode::Rescue { reason: crate::rescue::RescueReason::BufferEmpty },
+                                        eta_secs,
+                                    );
+                                    crate::rescue::write_countdown_file(&alias, &text);
+
+                                    {
+                                        let mut s = stats.lock().await;
+                                        s.delivery_mode = if buffer_state.producer_active.load(AtomicOrdering::Relaxed) {
+                                            "recovering".to_string()
+                                        } else {
+                                            "rescue".to_string()
+                                        };
+                                        s.rescue_eta_secs = Some(eta_secs);
+                                    }
+
+                                    if buf_ms >= target_ms {
+                                        tracing::info!(alias = %alias, buf_ms, "Consumer: buffer refilled, exiting rescue mode");
+                                        break;
+                                    }
+                                }
+                                _ = stop_rx.changed() => {
+                                    if *stop_rx.borrow() {
+                                        let _ = rescue_proc.kill().await;
+                                        crate::rescue::cleanup_countdown_file(&alias);
+                                        // Kill proc and exit outer loop
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Kill rescue ffmpeg and clean up
+                        let _ = rescue_proc.kill().await;
+                        crate::rescue::cleanup_countdown_file(&alias);
+
+                        // Update stats back to normal
+                        {
+                            let mut s = stats.lock().await;
+                            s.delivery_mode = "normal".to_string();
+                            s.rescue_eta_secs = None;
+                        }
+
+                        // Reset normalizer for fresh ffmpeg
+                        flv_normalizer = FlvStreamNormalizer::new();
+                        tracing::info!(alias = %alias, "Consumer: resumed normal delivery");
+                    }
+                }
+                continue;
             }
             _ = stop_rx.changed() => {
                 if *stop_rx.borrow() {
@@ -783,6 +978,8 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
     delivery_delay_ms: u64,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
+    rescue_video_url: Option<String>,
+    buffer_state: Arc<BufferState>,
 ) {
     let alias = ep_cfg.alias.clone();
 
@@ -799,6 +996,15 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
                 Ok(Some(dur_ms)) => {
                     accum_ms += dur_ms.max(0) as u64;
                     probe_id += 1;
+
+                    // Update warmup ETA stats
+                    if rescue_video_url.is_some() {
+                        let mut s = stats.lock().await;
+                        s.delivery_mode = "warmup".to_string();
+                        let remaining_ms = delivery_delay_ms.saturating_sub(accum_ms);
+                        s.rescue_eta_secs = Some(remaining_ms / 1000);
+                    }
+
                     if accum_ms >= delivery_delay_ms {
                         tracing::info!(alias = %alias, accum_ms, probe_id, "Buffer filled");
                         break;
@@ -816,6 +1022,13 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
                 }
             }
         }
+
+        // Buffer fill complete — transition to normal mode
+        {
+            let mut s = stats.lock().await;
+            s.delivery_mode = "normal".to_string();
+            s.rescue_eta_secs = None;
+        }
     }
 
     tracing::info!(alias = %alias, "Starting producer-consumer pipeline");
@@ -826,6 +1039,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
     let producer_stop = stop_rx.clone();
     let producer_stats = stats.clone();
     let producer_alias = alias.clone();
+    let producer_buffer_state = buffer_state.clone();
     let producer = tokio::spawn(producer_task(
         fetcher,
         tx,
@@ -833,6 +1047,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
         producer_stop,
         producer_stats,
         producer_alias,
+        producer_buffer_state,
     ));
 
     let consumer_stop = stop_rx.clone();
@@ -843,6 +1058,8 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
         ep_cfg,
         consumer_stop,
         consumer_stats,
+        rescue_video_url,
+        buffer_state,
     ));
 
     // Wait for either task to finish or stop signal.

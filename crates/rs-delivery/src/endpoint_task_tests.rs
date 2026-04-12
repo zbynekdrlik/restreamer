@@ -153,7 +153,18 @@ async fn test_processes_sequential_chunks() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     // Direct write + 1s sleep per chunk. 5 chunks x 1s = 5s.
@@ -186,7 +197,18 @@ async fn test_stops_on_signal() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     tokio::time::advance(std::time::Duration::from_millis(500)).await;
@@ -212,7 +234,18 @@ async fn test_restarts_ffmpeg_on_death() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     // Direct write + 1s sleep per chunk. Need enough time for restart cycle.
@@ -255,7 +288,18 @@ async fn test_tracks_ffmpeg_restart_count() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     for _ in 0..30 {
@@ -285,7 +329,18 @@ async fn test_tracks_consecutive_chunk_misses() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     for _ in 0..20 {
@@ -318,7 +373,18 @@ async fn test_tracks_last_error() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     for _ in 0..15 {
@@ -347,7 +413,18 @@ async fn test_ffmpeg_circuit_breaker_triggers() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     for _ in 0..60 {
@@ -386,7 +463,18 @@ async fn test_chunk_gap_skip_ahead() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     for _ in 0..200 {
@@ -422,7 +510,18 @@ async fn test_chunk_gap_detected_when_no_skip_found() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     for _ in 0..200 {
@@ -462,7 +561,18 @@ async fn test_drought_mode_recovers_when_chunks_resume() {
     let stats_clone = stats.clone();
 
     let task = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     // Process first 5 chunks
@@ -538,7 +648,18 @@ async fn test_write_timeout_kills_ffmpeg() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     for _ in 0..40 {
@@ -575,7 +696,18 @@ async fn test_processes_100_sequential_chunks() {
 
     let stats_clone = stats.clone();
     let handle = tokio::spawn(async move {
-        endpoint_loop(fetcher, factory, test_ep_cfg(), 1, 0, stop_rx, stats_clone).await;
+        endpoint_loop(
+            fetcher,
+            factory,
+            test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+            None,
+            Arc::new(BufferState::new()),
+        )
+        .await;
     });
 
     // Direct write + 1s sleep per chunk. 100 chunks = 100s.
@@ -711,6 +843,8 @@ async fn test_buffer_fill_waits_for_target_chunk() {
             10000, // delivery_delay_ms (5 chunks * 2000ms)
             stop_rx,
             stats_clone,
+            None,
+            Arc::new(BufferState::new()),
         )
         .await;
     });
@@ -782,6 +916,8 @@ async fn test_chunk_gap_maintained_at_delay_target() {
             20000, // delivery_delay_ms (10 chunks * 2000ms)
             stop_rx,
             stats_clone,
+            None,
+            Arc::new(BufferState::new()),
         )
         .await;
     });
@@ -830,6 +966,8 @@ async fn test_buffer_fill_stops_on_signal() {
             20000, // delivery_delay_ms (10 chunks * 2000ms)
             stop_rx,
             stats_clone,
+            None,
+            Arc::new(BufferState::new()),
         )
         .await;
     });
@@ -983,6 +1121,8 @@ async fn test_write_failure_skips_chunk_after_retries() {
         0,
         stop_rx,
         sc,
+        None,
+        Arc::new(BufferState::new()),
     ));
     for _ in 0..80 {
         tokio::time::advance(std::time::Duration::from_secs(1)).await;

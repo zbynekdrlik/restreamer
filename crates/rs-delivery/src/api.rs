@@ -80,6 +80,9 @@ pub struct InitRequest {
     pub auth_token: Option<String>,
     #[serde(default)]
     pub delivery_delay_ms: u64,
+    /// Optional URL to a rescue video played when buffer is empty during warmup or outage.
+    #[serde(default)]
+    pub rescue_video_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -158,6 +161,7 @@ async fn init_endpoints(
     *state.s3_config.write().await = Some(s3_config.clone());
     *state.event_identifier.write().await = Some(req.event_identifier.clone());
     *state.delivery_delay_ms.write().await = req.delivery_delay_ms;
+    *state.rescue_video_url.write().await = req.rescue_video_url.clone();
 
     let mut endpoints = state.endpoints.write().await;
     let mut started = 0usize;
@@ -176,6 +180,7 @@ async fn init_endpoints(
             req.event_identifier.clone(),
             start_id,
             req.delivery_delay_ms,
+            req.rescue_video_url.clone(),
         );
 
         endpoints.insert(ep_cfg.alias.clone(), handle);
@@ -222,6 +227,11 @@ struct EndpointStatusEntry {
     /// the moment of death, lifetime, reason, stderr tail, and the
     /// backoff applied before the next spawn.
     restart_history: Vec<crate::endpoint_task::FfmpegRestartRecord>,
+    /// Current delivery mode: "normal", "warmup", "rescue", "recovering".
+    delivery_mode: String,
+    /// ETA in seconds until rescue mode ends (warmup or buffer refill).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rescue_eta_secs: Option<u64>,
 }
 
 async fn endpoint_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
@@ -243,6 +253,8 @@ async fn endpoint_status(State(state): State<Arc<AppState>>) -> Json<StatusRespo
             consecutive_chunk_misses: stats.consecutive_chunk_misses,
             consecutive_ffmpeg_failures: stats.consecutive_ffmpeg_failures,
             restart_history: stats.restart_history.into_iter().collect(),
+            delivery_mode: stats.delivery_mode.clone(),
+            rescue_eta_secs: stats.rescue_eta_secs,
         });
     }
 
@@ -326,6 +338,7 @@ async fn add_endpoint(
         )
     })?;
     let delivery_delay_ms = *state.delivery_delay_ms.read().await;
+    let rescue_video_url = state.rescue_video_url.read().await.clone();
 
     let mut endpoints = state.endpoints.write().await;
 
@@ -346,6 +359,7 @@ async fn add_endpoint(
         event_identifier,
         start_id,
         delivery_delay_ms,
+        rescue_video_url,
     );
 
     let alias = req.endpoint.alias.clone();

@@ -142,6 +142,8 @@ async fn test_consumer_paces_chunk_delivery_to_real_time() {
             0,
             stop_rx,
             stats_clone,
+            None,
+            Arc::new(BufferState::new()),
         )
         .await;
     });
@@ -209,6 +211,8 @@ async fn test_consumer_pacing_anchor_survives_ffmpeg_restart() {
             0,
             stop_rx,
             stats_clone,
+            None,
+            Arc::new(BufferState::new()),
         )
         .await;
     });
@@ -286,6 +290,8 @@ async fn test_consumer_paces_even_when_writes_fail() {
             0,
             stop_rx,
             stats_clone,
+            None,
+            Arc::new(BufferState::new()),
         )
         .await;
     });

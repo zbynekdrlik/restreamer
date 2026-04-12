@@ -31,6 +31,8 @@ pub struct AppState {
     pub event_identifier: RwLock<Option<String>>,
     /// Delivery delay in milliseconds, stored after /api/init.
     pub delivery_delay_ms: RwLock<u64>,
+    /// Rescue video URL stored after /api/init for use by /api/endpoints/add.
+    pub rescue_video_url: RwLock<Option<String>>,
     /// In-memory log buffer for /api/logs endpoint.
     pub log_buffer: LogBuffer,
     /// SQLite pool for chunk metadata tracking.
@@ -51,6 +53,7 @@ impl AppState {
             s3_config: RwLock::new(None),
             event_identifier: RwLock::new(None),
             delivery_delay_ms: RwLock::new(0),
+            rescue_video_url: RwLock::new(None),
             log_buffer: LogBuffer::new(5000),
             db_pool,
         }

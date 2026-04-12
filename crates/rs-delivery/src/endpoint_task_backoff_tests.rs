@@ -146,6 +146,8 @@ async fn test_consumer_backs_off_exponentially_on_repeated_deaths() {
             0,
             stop_rx,
             stats_clone,
+            None,
+            Arc::new(BufferState::new()),
         )
         .await;
     });
@@ -218,6 +220,8 @@ async fn test_restart_audit_log_records_each_death() {
             0,
             stop_rx,
             stats_clone,
+            None,
+            Arc::new(BufferState::new()),
         )
         .await;
     });
@@ -348,6 +352,8 @@ async fn test_write_failure_records_audit_log_and_applies_backoff() {
             0,
             stop_rx,
             stats_clone,
+            None,
+            Arc::new(BufferState::new()),
         )
         .await;
     });
@@ -487,6 +493,8 @@ async fn test_backoff_counter_resets_after_long_lived_session() {
             0,
             stop_rx,
             stats_clone,
+            None,
+            Arc::new(BufferState::new()),
         )
         .await;
     });
