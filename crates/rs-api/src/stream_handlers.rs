@@ -139,6 +139,8 @@ pub async fn start_stream(
                         ffmpeg_restart_count: 0,
                         last_error: None,
                         is_fast: ep.is_fast,
+                        delivery_mode: None,
+                        rescue_eta_secs: None,
                     })
                     .collect();
                 let _ = state.ws_tx.send(WsEvent::DeliveryStatus {
@@ -234,6 +236,7 @@ pub async fn stop_stream(
 pub struct UpdateEventRequest {
     pub name: Option<String>,
     pub cache_delay_secs: Option<i64>,
+    pub rescue_video_url: Option<String>,
 }
 
 pub async fn update_event(
@@ -256,8 +259,12 @@ pub async fn update_event(
 
     // Merge: preserve existing cache_delay_secs if not provided in request
     let new_delay = req.cache_delay_secs.or(existing.cache_delay_secs);
+    let new_rescue_url = req
+        .rescue_video_url
+        .clone()
+        .or(existing.rescue_video_url.clone());
 
-    db::update_streaming_event(&state.pool, id, new_name, new_delay)
+    db::update_streaming_event(&state.pool, id, new_name, new_delay, new_rescue_url)
         .await
         .map_err(|e| {
             error!("Failed to update event {id}: {e}");

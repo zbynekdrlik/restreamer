@@ -666,6 +666,8 @@ impl DeliveryOrchestrator {
                 ffmpeg_restart_count: ep.ffmpeg_restart_count,
                 last_error: ep.last_error,
                 is_fast: ep.is_fast,
+                delivery_mode: None,
+                rescue_eta_secs: None,
             })
             .collect();
 

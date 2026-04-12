@@ -240,6 +240,8 @@ async fn delivery_broadcast_loop(
                             ffmpeg_restart_count: 0,
                             last_error: None,
                             is_fast: ep.is_fast,
+                            delivery_mode: None,
+                            rescue_eta_secs: None,
                         })
                         .collect();
                     let count = placeholders.len() as u32;

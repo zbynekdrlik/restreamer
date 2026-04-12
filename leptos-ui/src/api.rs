@@ -30,6 +30,8 @@ pub struct StreamingEvent {
     pub cache_delay_secs: Option<i64>,
     #[serde(default)]
     pub created_from: Option<String>,
+    #[serde(default)]
+    pub rescue_video_url: Option<String>,
 }
 
 /// Event template (reusable preset).
