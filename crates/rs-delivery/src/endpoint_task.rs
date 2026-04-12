@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use crate::api::{EndpointConfig, S3Config};
 use crate::s3_fetch::S3Fetcher;
 
+#[path = "flv_normalizer.rs"]
 mod flv_normalizer;
 pub use flv_normalizer::FlvStreamNormalizer;
 
