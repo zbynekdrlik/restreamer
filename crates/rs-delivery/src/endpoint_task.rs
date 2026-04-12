@@ -1115,3 +1115,7 @@ mod pacing_tests;
 #[cfg(test)]
 #[path = "endpoint_task_backoff_tests.rs"]
 mod backoff_tests;
+
+#[cfg(test)]
+#[path = "endpoint_task_rescue_tests.rs"]
+mod rescue_tests;
