@@ -550,6 +550,8 @@ pub struct UpdateEventRequest {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_delay_secs: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rescue_video_url: Option<String>,
 }
 
 pub async fn update_event(id: i64, req: &UpdateEventRequest) -> Result<(), String> {
@@ -583,6 +585,10 @@ pub struct DeliveryEndpointDetail {
     pub ffmpeg_restart_count: u32,
     #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub delivery_mode: Option<String>,
+    #[serde(default)]
+    pub rescue_eta_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -622,6 +628,10 @@ pub struct CachedDeliveryEndpoint {
     pub last_error: Option<String>,
     #[serde(default)]
     pub is_fast: bool,
+    #[serde(default)]
+    pub delivery_mode: Option<String>,
+    #[serde(default)]
+    pub rescue_eta_secs: Option<u64>,
 }
 
 /// Get cached delivery status (instant, no VPS round-trip).

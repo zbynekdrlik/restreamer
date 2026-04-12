@@ -633,6 +633,34 @@ fn EndpointTree() -> impl IntoView {
                                     })
                                 }}
                                 {move || {
+                                    let ep = ep_data.get();
+                                    ep.delivery_mode.clone().and_then(|mode| {
+                                        let (badge_class, label) = match mode.as_str() {
+                                            "warmup" => ("endpoint-mode-warmup", "WARMUP"),
+                                            "rescue" => ("endpoint-mode-rescue", "RESCUE"),
+                                            "recovering" => {
+                                                ("endpoint-mode-recovering", "RECOVERING")
+                                            }
+                                            _ => return None,
+                                        };
+                                        let eta = ep
+                                            .rescue_eta_secs
+                                            .map(|s| {
+                                                if s >= 60 {
+                                                    format!(" ~{}m {}s", s / 60, s % 60)
+                                                } else {
+                                                    format!(" ~{s}s")
+                                                }
+                                            })
+                                            .unwrap_or_default();
+                                        Some(view! {
+                                            <span class=badge_class>
+                                                {format!("{label}{eta}")}
+                                            </span>
+                                        })
+                                    })
+                                }}
+                                {move || {
                                     ep_data.get().last_error.clone().map(|e| view! {
                                         <span class="endpoint-anomaly">{e}</span>
                                     })

@@ -309,6 +309,30 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 .endpoint-node.warning { border-left-color: var(--status-warn); }
 .endpoint-node.error { border-left-color: var(--status-error); }
 .endpoint-anomaly { font-size: 13px; color: var(--status-warn); }
+.endpoint-mode-warmup {
+    background: #3b82f6;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    margin-left: 8px;
+}
+.endpoint-mode-rescue {
+    background: #f59e0b;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    margin-left: 8px;
+}
+.endpoint-mode-recovering {
+    background: #eab308;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    margin-left: 8px;
+}
 
 /* Activity Feed (kept for current code) */
 .activity-feed { background: var(--bg-card); border: var(--border-w) solid var(--border); border-radius: var(--radius); padding: var(--spacing-md); }
