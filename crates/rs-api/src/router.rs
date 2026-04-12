@@ -124,6 +124,7 @@ pub fn build_router(state: AppState) -> Router {
         // Delivery orchestration
         .route("/delivery/start", post(delivery_handlers::delivery_start))
         .route("/delivery/status", get(delivery_handlers::delivery_status))
+        .route("/delivery/logs", get(delivery_handlers::delivery_logs))
         .route(
             "/delivery/status/cached",
             get(delivery_handlers::delivery_status_cached),

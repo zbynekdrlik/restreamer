@@ -287,3 +287,42 @@ pub async fn delivery_remove_endpoint(
 
     Ok(StatusCode::OK)
 }
+
+#[derive(Deserialize)]
+pub struct DeliveryLogsQuery {
+    pub instance_id: i64,
+}
+
+#[derive(Serialize)]
+pub struct DeliveryLogsResponse {
+    pub instance_id: i64,
+    pub restart_log: Vec<rs_core::db::DeliveryRestartRow>,
+    pub captured_log: Option<String>,
+}
+
+/// GET /delivery/logs?instance_id=N — retrieve persisted delivery logs
+/// and ffmpeg restart records for a (possibly deleted) VPS instance.
+pub async fn delivery_logs(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<DeliveryLogsQuery>,
+) -> Result<Json<DeliveryLogsResponse>, StatusCode> {
+    let restart_log = rs_core::db::get_delivery_restart_log(&state.pool, query.instance_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get restart log: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let captured_log = rs_core::db::get_delivery_log(&state.pool, query.instance_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get delivery log: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(DeliveryLogsResponse {
+        instance_id: query.instance_id,
+        restart_log,
+        captured_log,
+    }))
+}
