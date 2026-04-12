@@ -1,13 +1,15 @@
 use axum::Router;
 use axum::http::{Method, header};
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::delivery_handlers;
 use crate::handlers;
+use crate::s3_handlers;
 use crate::state::AppState;
 use crate::stream_handlers;
+use crate::template_handlers;
 use crate::websocket;
 use crate::youtube;
 
@@ -17,11 +19,15 @@ pub fn build_router(state: AppState) -> Router {
         // Core status/health
         .route("/health", get(handlers::health))
         .route("/status", get(handlers::get_status))
-        .route("/streaming-event", get(handlers::get_streaming_event))
-        .route("/streaming-event", delete(handlers::delete_streaming_event))
-        .route("/chunks", get(handlers::get_chunks))
+        .route(
+            "/streaming-event",
+            get(handlers::get_streaming_event).delete(handlers::delete_streaming_event),
+        )
+        .route(
+            "/chunks",
+            get(handlers::get_chunks).delete(handlers::delete_chunks),
+        )
         .route("/chunks/stats", get(handlers::get_chunk_stats))
-        .route("/chunks", delete(handlers::delete_chunks))
         // Actions
         .route(
             "/actions/restart-inpoint",
@@ -40,19 +46,31 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::action_toggle_delivering),
         )
         // Config
-        .route("/config", get(handlers::get_config))
-        .route("/config", patch(handlers::patch_config))
+        .route(
+            "/config",
+            get(handlers::get_config).patch(handlers::patch_config),
+        )
         // Logs
         .route("/logs/inpoint", get(handlers::get_logs_inpoint))
         .route("/logs/endpoint", get(handlers::get_logs_endpoint))
         // WebSocket
         .route("/ws", get(websocket::ws_handler))
         // Events CRUD
-        .route("/events", get(handlers::list_events))
-        .route("/events", post(handlers::create_event))
-        .route("/events/{id}", get(handlers::get_event_by_id))
-        .route("/events/{id}", delete(handlers::delete_event_by_id))
-        .route("/events/{id}", patch(stream_handlers::update_event))
+        .route(
+            "/events",
+            get(handlers::list_events).post(handlers::create_event),
+        )
+        .route(
+            "/events/{id}",
+            get(handlers::get_event_by_id)
+                .delete(handlers::delete_event_by_id)
+                .patch(stream_handlers::update_event),
+        )
+        .route(
+            "/events/{id}/clear-s3",
+            post(s3_handlers::clear_event_s3_chunks),
+        )
+        .route("/s3/usage", get(s3_handlers::get_s3_usage))
         .route("/events/{id}/activate", post(handlers::activate_event))
         .route(
             "/events/{id}/start-delivering",
@@ -70,18 +88,39 @@ pub fn build_router(state: AppState) -> Router {
         .route("/events/{id}/endpoints", get(handlers::get_event_endpoints))
         .route(
             "/events/{event_id}/endpoints/{endpoint_id}",
-            post(handlers::attach_endpoint_to_event),
-        )
-        .route(
-            "/events/{event_id}/endpoints/{endpoint_id}",
-            delete(handlers::detach_endpoint_from_event),
+            post(handlers::attach_endpoint_to_event).delete(handlers::detach_endpoint_from_event),
         )
         // Endpoint Configs CRUD
-        .route("/endpoints", get(handlers::list_endpoints))
-        .route("/endpoints", post(handlers::create_endpoint))
-        .route("/endpoints/{id}", get(handlers::get_endpoint_by_id))
-        .route("/endpoints/{id}", put(handlers::update_endpoint))
-        .route("/endpoints/{id}", delete(handlers::delete_endpoint))
+        .route(
+            "/endpoints",
+            get(handlers::list_endpoints).post(handlers::create_endpoint),
+        )
+        .route(
+            "/endpoints/{id}",
+            get(handlers::get_endpoint_by_id)
+                .put(handlers::update_endpoint)
+                .delete(handlers::delete_endpoint),
+        )
+        // Template CRUD
+        .route(
+            "/templates",
+            get(template_handlers::list_templates).post(template_handlers::create_template),
+        )
+        .route(
+            "/templates/{id}",
+            get(template_handlers::get_template)
+                .patch(template_handlers::update_template)
+                .delete(template_handlers::delete_template),
+        )
+        .route(
+            "/templates/{id}/endpoints",
+            get(template_handlers::get_template_endpoints),
+        )
+        .route(
+            "/templates/{template_id}/endpoints/{endpoint_id}",
+            post(template_handlers::attach_endpoint_to_template)
+                .delete(template_handlers::detach_endpoint_from_template),
+        )
         // Delivery orchestration
         .route("/delivery/start", post(delivery_handlers::delivery_start))
         .route("/delivery/status", get(delivery_handlers::delivery_status))
@@ -868,120 +907,4 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod youtube_oauth_tests {
-    use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use rs_core::config::Config;
-    use rs_core::db;
-    use rs_core::models::WsEvent;
-    use tokio::sync::broadcast;
-    use tower::ServiceExt;
-
-    fn yt_config() -> Config {
-        let mut c = Config::for_testing();
-        c.youtube.client_id = "yt-cid-for-test".into();
-        c.youtube.client_secret = "yt-cs-for-test".into();
-        c
-    }
-
-    #[tokio::test]
-    async fn oauth_start_returns_url() {
-        let pool = db::create_memory_pool().await.unwrap();
-        db::run_migrations(&pool).await.unwrap();
-        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, yt_config(), ws_tx);
-        let app = build_router(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/youtube/oauth/start")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let url = val["url"].as_str().unwrap();
-        assert!(url.contains("yt-cid-for-test"));
-        assert!(url.contains("response_type=code"));
-        assert!(url.contains("access_type=offline"));
-    }
-
-    #[tokio::test]
-    async fn oauth_start_no_creds_returns_400() {
-        let pool = db::create_memory_pool().await.unwrap();
-        db::run_migrations(&pool).await.unwrap();
-        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, Config::for_testing(), ws_tx);
-        let app = build_router(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/youtube/oauth/start")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn oauth_callback_no_code_returns_400() {
-        let pool = db::create_memory_pool().await.unwrap();
-        db::run_migrations(&pool).await.unwrap();
-        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, yt_config(), ws_tx);
-        let app = build_router(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/youtube/oauth/callback")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn oauth_callback_error_param_returns_html() {
-        let pool = db::create_memory_pool().await.unwrap();
-        db::run_migrations(&pool).await.unwrap();
-        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, yt_config(), ws_tx);
-        let app = build_router(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/youtube/oauth/callback?error=access_denied")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let text = String::from_utf8(body.to_vec()).unwrap();
-        assert!(text.contains("Authorization Failed"));
-    }
-}
-
-// OBS route tests are in router_tests.rs to keep this file under 1000 lines.
+// YouTube OAuth and OBS route tests are in router_tests.rs to keep this file under 1000 lines.

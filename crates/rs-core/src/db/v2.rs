@@ -1,7 +1,8 @@
+use chrono::Utc;
 use sqlx::Row;
 use sqlx::sqlite::SqlitePool;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::models::{
     DeliveryEndpointStatus, DeliveryInstance, EndpointConfig, StreamingEvent, YouTubeOAuth,
 };
@@ -411,7 +412,7 @@ pub async fn upsert_youtube_oauth(
 
 pub async fn list_streaming_events(pool: &SqlitePool) -> Result<Vec<StreamingEvent>> {
     let rows = sqlx::query(
-        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from
          FROM streaming_events ORDER BY id DESC",
     )
     .fetch_all(pool)
@@ -426,6 +427,7 @@ pub async fn list_streaming_events(pool: &SqlitePool) -> Result<Vec<StreamingEve
             receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
             delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
             cache_delay_secs: r.get("cache_delay_secs"),
+            created_from: r.get("created_from"),
         })
         .collect())
 }
@@ -451,4 +453,86 @@ pub async fn update_streaming_event(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+// --- Create Event from Template ---
+
+/// Find the next unused name in the sequence `base_name`, `base_name-2`,
+/// `base_name-3`, … up to `base_name-100`.
+///
+/// Single query: fetches every existing event name that starts with
+/// `base_name` into a HashSet, then walks the candidate sequence locally.
+/// This avoids the up-to-100-round-trips behaviour of the previous loop.
+async fn find_unique_event_name(pool: &SqlitePool, base_name: &str) -> Result<String> {
+    use std::collections::HashSet;
+
+    // Escape SQLite LIKE wildcards so a literal % or _ in the template name
+    // doesn't accidentally match unrelated rows. The escape character is
+    // declared in the LIKE clause via `ESCAPE '\'`.
+    let escaped = base_name
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("{escaped}%");
+
+    let rows = sqlx::query(r#"SELECT name FROM streaming_events WHERE name LIKE ?1 ESCAPE '\'"#)
+        .bind(&pattern)
+        .fetch_all(pool)
+        .await?;
+
+    let existing: HashSet<String> = rows
+        .into_iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+
+    if !existing.contains(base_name) {
+        return Ok(base_name.to_string());
+    }
+
+    for suffix in 2..=100i32 {
+        let candidate = format!("{base_name}-{suffix}");
+        if !existing.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(CoreError::Other(format!(
+        "Could not find a unique name for base '{base_name}' after 100 attempts"
+    )))
+}
+
+/// Create a new streaming event from a template.
+///
+/// Generates a name `{template.name}-{YYYY-MM-DD}` (UTC). If that name already
+/// exists, appends `-2`, `-3`, … up to `-100`. Copies the template's
+/// `cache_delay_secs` and all its endpoints to the new event.
+///
+/// Returns `(event_id, event_name)`.
+pub async fn create_event_from_template(
+    pool: &SqlitePool,
+    template_id: i64,
+) -> Result<(i64, String)> {
+    let template = super::templates::get_template_by_id_required(pool, template_id).await?;
+
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let base_name = format!("{}-{}", template.name, today);
+    let event_name = find_unique_event_name(pool, &base_name).await?;
+
+    let row = sqlx::query(
+        "INSERT INTO streaming_events (name, cache_delay_secs, created_from) VALUES (?1, ?2, ?3) RETURNING id",
+    )
+    .bind(&event_name)
+    .bind(template.cache_delay_secs)
+    .bind(&template.name)
+    .fetch_one(pool)
+    .await?;
+    let event_id: i64 = row.get("id");
+
+    // Copy template endpoints to the new event
+    let template_eps = super::templates::get_template_endpoints(pool, template_id).await?;
+    for ep in template_eps {
+        attach_endpoint_to_event(pool, event_id, ep.id).await?;
+    }
+
+    Ok((event_id, event_name))
 }

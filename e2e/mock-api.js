@@ -47,6 +47,7 @@ let events = [
     receiving_activated: false,
     delivering_activated: false,
     cache_delay_secs: null,
+    created_from: null,
   },
   {
     id: 2,
@@ -55,8 +56,27 @@ let events = [
     receiving_activated: false,
     delivering_activated: false,
     cache_delay_secs: 300,
+    created_from: null,
   },
 ];
+
+let templates = [
+  {
+    id: 1,
+    name: "sunday-service",
+    cache_delay_secs: 120,
+  },
+  {
+    id: 2,
+    name: "wednesday-study",
+    cache_delay_secs: null,
+  },
+];
+
+let templateEndpoints = {
+  1: [1], // sunday-service has YouTube Main
+  2: [],
+};
 
 let endpoints = [
   {
@@ -91,6 +111,13 @@ let eventEndpoints = {
   2: [],
 };
 
+// Store initial data snapshots for test reset
+const initialEvents = JSON.parse(JSON.stringify(events));
+const initialEndpoints = JSON.parse(JSON.stringify(endpoints));
+const initialTemplates = JSON.parse(JSON.stringify(templates));
+const initialEventEndpoints = JSON.parse(JSON.stringify(eventEndpoints));
+const initialTemplateEndpoints = JSON.parse(JSON.stringify(templateEndpoints));
+
 // --- Status endpoint (Tauri invoke mock handled client-side) ---
 app.get("/api/v1/status", (_req, res) => {
   res.json(statusResponse);
@@ -102,13 +129,38 @@ app.get("/api/v1/events", (_req, res) => {
 });
 
 app.post("/api/v1/events", (req, res) => {
+  let name;
+  let createdFrom = null;
+  let cacheDelaySecs = null;
+
+  if (req.body.template_id) {
+    const tmpl = templates.find((t) => t.id === parseInt(req.body.template_id));
+    if (!tmpl) {
+      return res.status(404).json({ error: "template not found" });
+    }
+    const dateStr = new Date().toISOString().split("T")[0];
+    let candidate = `${tmpl.name}-${dateStr}`;
+    // Deduplicate: if name exists, append -2, -3, etc.
+    let suffix = 2;
+    while (events.some((e) => e.name === candidate)) {
+      candidate = `${tmpl.name}-${dateStr}-${suffix}`;
+      suffix++;
+    }
+    name = candidate;
+    createdFrom = tmpl.name;
+    cacheDelaySecs = tmpl.cache_delay_secs;
+  } else {
+    name = req.body.name || "New Event";
+  }
+
   const newEvent = {
     id: events.length + 1,
-    name: req.body.name || "New Event",
+    name,
     received_bytes: 0,
     receiving_activated: false,
     delivering_activated: false,
-    cache_delay_secs: null,
+    cache_delay_secs: cacheDelaySecs,
+    created_from: createdFrom,
   };
   events.push(newEvent);
   eventEndpoints[newEvent.id] = [];
@@ -249,6 +301,65 @@ app.patch("/api/v1/events/:id", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// --- Templates API ---
+app.get("/api/v1/templates", (_req, res) => res.json(templates));
+
+app.post("/api/v1/templates", (req, res) => {
+  const t = {
+    id: templates.length + 1,
+    name: req.body.name,
+    cache_delay_secs: req.body.cache_delay_secs || null,
+  };
+  templates.push(t);
+  templateEndpoints[t.id] = [];
+  res.status(201).json({ id: t.id });
+});
+
+app.get("/api/v1/templates/:id", (req, res) => {
+  const t = templates.find((t) => t.id === parseInt(req.params.id));
+  if (!t) return res.status(404).json({ error: "not found" });
+  res.json(t);
+});
+
+app.patch("/api/v1/templates/:id", (req, res) => {
+  const t = templates.find((t) => t.id === parseInt(req.params.id));
+  if (!t) return res.status(404).json({ error: "not found" });
+  if (req.body.name) t.name = req.body.name;
+  if (req.body.cache_delay_secs !== undefined)
+    t.cache_delay_secs = req.body.cache_delay_secs;
+  res.json(t);
+});
+
+app.delete("/api/v1/templates/:id", (req, res) => {
+  const id = parseInt(req.params.id);
+  templates = templates.filter((t) => t.id !== id);
+  delete templateEndpoints[id];
+  res.status(204).send();
+});
+
+app.get("/api/v1/templates/:id/endpoints", (req, res) => {
+  const id = parseInt(req.params.id);
+  const epIds = templateEndpoints[id] || [];
+  res.json(endpoints.filter((e) => epIds.includes(e.id)));
+});
+
+app.post("/api/v1/templates/:tid/endpoints/:eid", (req, res) => {
+  const tid = parseInt(req.params.tid);
+  const eid = parseInt(req.params.eid);
+  if (!templateEndpoints[tid]) templateEndpoints[tid] = [];
+  if (!templateEndpoints[tid].includes(eid)) templateEndpoints[tid].push(eid);
+  res.status(201).send();
+});
+
+app.delete("/api/v1/templates/:tid/endpoints/:eid", (req, res) => {
+  const tid = parseInt(req.params.tid);
+  const eid = parseInt(req.params.eid);
+  if (templateEndpoints[tid]) {
+    templateEndpoints[tid] = templateEndpoints[tid].filter((e) => e !== eid);
+  }
+  res.status(204).send();
+});
+
 // --- Event-Endpoint M2M ---
 app.get("/api/v1/events/:id/endpoints", (req, res) => {
   const id = parseInt(req.params.id);
@@ -321,6 +432,27 @@ app.delete("/api/v1/endpoints/:id", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// Delivery endpoint add/remove. The real backend has these for adding /
+// removing endpoints from an actively delivering event. Mock as no-ops
+// (200) so frontend tests that fire these requests don't get a 404
+// response which the browser would log as a console error and trip the
+// global afterEach console-clean assertion.
+app.post("/api/v1/delivery/endpoints/add", (_req, res) => {
+  res.json({ status: "ok" });
+});
+app.post("/api/v1/delivery/endpoints/remove", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+// S3 usage + per-event clear stubs for the new Settings tab UI. Both
+// no-op so frontend tests that visit /settings don't 404.
+app.get("/api/v1/s3/usage", (_req, res) => {
+  res.json({ total_bytes: 0, total_objects: 0, by_event: [] });
+});
+app.post("/api/v1/events/:id/clear-s3", (_req, res) => {
+  res.json({ deleted: 0 });
+});
+
 // --- Chunks endpoints (used by dashboard/chunk_list) ---
 app.get("/api/v1/chunks/stats", (_req, res) => {
   res.json(statusResponse.chunk_stats);
@@ -391,6 +523,16 @@ app.get("/api/v1/youtube/status", (_req, res) => {
     ],
     error: null,
   });
+});
+
+// Test-only: reset all mock data to initial state between tests
+app.post("/api/v1/__reset", (_req, res) => {
+  events = JSON.parse(JSON.stringify(initialEvents));
+  endpoints = JSON.parse(JSON.stringify(initialEndpoints));
+  templates = JSON.parse(JSON.stringify(initialTemplates));
+  eventEndpoints = JSON.parse(JSON.stringify(initialEventEndpoints));
+  templateEndpoints = JSON.parse(JSON.stringify(initialTemplateEndpoints));
+  res.json({ reset: true });
 });
 
 // Test-only: broadcast arbitrary WebSocket events for E2E pipeline state tests

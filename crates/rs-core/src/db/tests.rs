@@ -1,4 +1,5 @@
 use super::*;
+use chrono::Utc;
 
 async fn setup_db() -> sqlx::sqlite::SqlitePool {
     let pool = create_memory_pool().await.unwrap();
@@ -917,3 +918,5 @@ async fn sent_duration_ms_only_counts_uploaded_chunks() {
     let total = get_sent_duration_ms(&pool, event_id).await.unwrap();
     assert_eq!(total, 3800); // 2000 + 1800, NOT 6000
 }
+
+// Template and create-event-from-template tests are in template_tests.rs

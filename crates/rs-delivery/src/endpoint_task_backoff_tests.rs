@@ -1,0 +1,561 @@
+//! Regression tests for the ffmpeg-restart-loop bug.
+//!
+//! When ffmpeg dies after running successfully (e.g., the destination RTMP
+//! server rejects the stream key after accepting some data), the consumer
+//! must back off exponentially before respawning. The original code only
+//! backed off on **spawn** failures (`consecutive_ffmpeg_failures`), not
+//! on death-after-running, so a stale Facebook stream key would cause
+//! ~1 ffmpeg restart per minute for the lifetime of the stream — observed
+//! 524 restarts in a 9.5h overnight test.
+
+use super::*;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Duration;
+use tokio::sync::Mutex as TokioMutex;
+
+// Minimal duplicated test helpers (kept small for the file-size budget).
+
+struct BackoffMockFetcher {
+    chunks: Arc<TokioMutex<std::collections::HashMap<i64, Vec<u8>>>>,
+    duration_ms_per_chunk: i64,
+}
+
+impl ChunkFetcher for BackoffMockFetcher {
+    async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+        let map = self.chunks.lock().await;
+        Ok(map
+            .get(&chunk_id)
+            .map(|data| (data.clone(), self.duration_ms_per_chunk)))
+    }
+
+    async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        let map = self.chunks.lock().await;
+        if map.contains_key(&chunk_id) {
+            Ok(Some(self.duration_ms_per_chunk))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// A process that dies after the first write — simulates a destination
+/// RTMP server that closes the connection (e.g., stale stream key).
+struct DyingMockProcess {
+    alive: Arc<AtomicBool>,
+    has_written: bool,
+}
+
+#[async_trait]
+impl OutputProcess for DyingMockProcess {
+    fn is_alive(&mut self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    async fn write(&mut self, _data: &[u8]) -> Result<(), String> {
+        if self.has_written {
+            self.alive.store(false, Ordering::Relaxed);
+            return Err("destination closed".to_string());
+        }
+        self.has_written = true;
+        // Process accepts the first write, then dies on the next is_alive
+        // check.
+        self.alive.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn kill(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
+
+    fn last_stderr_line(&self) -> Option<String> {
+        Some("destination closed".to_string())
+    }
+}
+
+/// Factory that records every spawn timestamp (mock-time) so the test can
+/// verify the gaps grow exponentially.
+struct RecordingFactory {
+    spawn_times_ms: Arc<StdMutex<Vec<u64>>>,
+    anchor: tokio::time::Instant,
+    spawn_count: Arc<AtomicU32>,
+}
+
+impl OutputProcessFactory for RecordingFactory {
+    fn spawn(
+        &self,
+        _service_type: ServiceType,
+        _stream_key: &str,
+        _alias: &str,
+    ) -> Result<Box<dyn OutputProcess>, String> {
+        let elapsed_ms = self.anchor.elapsed().as_millis() as u64;
+        self.spawn_times_ms.lock().unwrap().push(elapsed_ms);
+        self.spawn_count.fetch_add(1, Ordering::Relaxed);
+        Ok(Box::new(DyingMockProcess {
+            alive: Arc::new(AtomicBool::new(true)),
+            has_written: false,
+        }))
+    }
+}
+
+fn backoff_test_ep_cfg() -> EndpointConfig {
+    EndpointConfig {
+        alias: "backoff-test".to_string(),
+        service_type: "TEST_FILE".to_string(),
+        stream_key: "test-key".to_string(),
+        is_fast: false,
+        chunk_format: "flv".to_string(),
+        start_chunk_id: None,
+    }
+}
+
+/// Reproduces the FB stale-key restart loop. Without exponential backoff
+/// on death-after-running, the consumer respawns ffmpeg every ~1 second
+/// forever. With proper backoff (1s -> 2s -> 4s -> 8s -> ... capped at
+/// 60s), spawns are rate-limited so only ~6-8 occur in 60 seconds.
+#[tokio::test]
+async fn test_consumer_backs_off_exponentially_on_repeated_deaths() {
+    tokio::time::pause();
+
+    // Plenty of chunks so the producer never starves.
+    let chunks: std::collections::HashMap<i64, Vec<u8>> =
+        (1..=1000).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = BackoffMockFetcher {
+        chunks: Arc::new(TokioMutex::new(chunks)),
+        duration_ms_per_chunk: 2000,
+    };
+
+    let spawn_times_ms: Arc<StdMutex<Vec<u64>>> = Arc::new(StdMutex::new(Vec::new()));
+    let spawn_count = Arc::new(AtomicU32::new(0));
+    let factory = RecordingFactory {
+        spawn_times_ms: spawn_times_ms.clone(),
+        anchor: tokio::time::Instant::now(),
+        spawn_count: spawn_count.clone(),
+    };
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+
+    let stats_clone = stats.clone();
+    let handle = tokio::spawn(async move {
+        endpoint_loop(
+            fetcher,
+            factory,
+            backoff_test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+        )
+        .await;
+    });
+
+    // Advance 120 seconds of mock time. With proper backoff (1+2+4+8+16+
+    // 32+60+60 = 183s, the 60s cap kicks in early), we should see ~7 spawns
+    // in 120s. Without backoff (current bug), we'd see ~120 spawns.
+    for _ in 0..1200 {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let total_spawns = spawn_count.load(Ordering::Relaxed);
+    let times = spawn_times_ms.lock().unwrap().clone();
+
+    // Hard upper bound: with proper backoff, no more than 10 spawns in 120s.
+    // Without backoff, this fails dramatically (typically 60-120 spawns).
+    assert!(
+        total_spawns <= 10,
+        "Consumer made too many spawns in 120s: {total_spawns} (expected <= 10 with \
+         exponential backoff). Spawn timestamps (ms): {times:?}"
+    );
+
+    // Sanity: backoff is at least growing. Check the gap between the 2nd
+    // and 5th spawn is bigger than the gap between the 1st and 2nd.
+    if times.len() >= 5 {
+        let early_gap = times[1].saturating_sub(times[0]);
+        let later_gap = times[4].saturating_sub(times[3]);
+        assert!(
+            later_gap > early_gap,
+            "Backoff is not growing: early gap {early_gap}ms, later gap {later_gap}ms. \
+             All times: {times:?}"
+        );
+    }
+
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+}
+
+/// Each ffmpeg death must produce a row in the per-endpoint restart_history
+/// ring buffer. The ring is capped at RESTART_HISTORY_CAP — past that point
+/// the oldest record is dropped.
+#[tokio::test]
+async fn test_restart_audit_log_records_each_death() {
+    tokio::time::pause();
+
+    let chunks: std::collections::HashMap<i64, Vec<u8>> =
+        (1..=1000).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = BackoffMockFetcher {
+        chunks: Arc::new(TokioMutex::new(chunks)),
+        duration_ms_per_chunk: 2000,
+    };
+
+    let factory = RecordingFactory {
+        spawn_times_ms: Arc::new(StdMutex::new(Vec::new())),
+        anchor: tokio::time::Instant::now(),
+        spawn_count: Arc::new(AtomicU32::new(0)),
+    };
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+
+    let stats_clone = stats.clone();
+    let handle = tokio::spawn(async move {
+        endpoint_loop(
+            fetcher,
+            factory,
+            backoff_test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+        )
+        .await;
+    });
+
+    // Run long enough to record several deaths.
+    for _ in 0..600 {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let s = stats.lock().await;
+    let history = s.restart_history.clone();
+    drop(s);
+
+    assert!(
+        !history.is_empty(),
+        "restart_history is empty — audit log not wired up"
+    );
+
+    // Verify the structure of the first record.
+    let first = &history[0];
+    assert!(
+        first.timestamp_ms > 0,
+        "restart record missing timestamp_ms"
+    );
+    assert!(
+        first.backoff_secs > 0,
+        "restart record missing backoff_secs"
+    );
+    assert!(
+        !first.reason.is_empty(),
+        "restart record missing reason classification"
+    );
+
+    // Backoff in the records should be growing (exponential).
+    if history.len() >= 3 {
+        assert!(
+            history[2].backoff_secs >= history[0].backoff_secs,
+            "backoff is not growing across records: {:?}",
+            history.iter().map(|r| r.backoff_secs).collect::<Vec<_>>()
+        );
+    }
+
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+}
+
+/// Process that lives but FAILS every write — simulates a destination
+/// RTMP server that accepted the connection but rejects every payload
+/// (e.g. stale Facebook stream key after some negotiation).
+struct WriteFailMockProcess {
+    alive: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl OutputProcess for WriteFailMockProcess {
+    fn is_alive(&mut self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    async fn write(&mut self, _data: &[u8]) -> Result<(), String> {
+        Err("write rejected by destination".to_string())
+    }
+
+    async fn kill(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
+
+    fn last_stderr_line(&self) -> Option<String> {
+        Some("destination rejected".to_string())
+    }
+}
+
+struct WriteFailFactory {
+    spawn_count: Arc<AtomicU32>,
+}
+
+impl OutputProcessFactory for WriteFailFactory {
+    fn spawn(
+        &self,
+        _service_type: ServiceType,
+        _stream_key: &str,
+        _alias: &str,
+    ) -> Result<Box<dyn OutputProcess>, String> {
+        self.spawn_count.fetch_add(1, Ordering::Relaxed);
+        Ok(Box::new(WriteFailMockProcess {
+            alive: Arc::new(AtomicBool::new(true)),
+        }))
+    }
+}
+
+/// Regression for the bug where the write-error path bypassed both the
+/// audit log AND exponential backoff. ffmpeg writes were rejected (stale
+/// Facebook stream key), the consumer called proc.take() to kill it, and
+/// the next loop iteration found proc=None — so the death handler's
+/// `if proc.is_some()` skipped recording the restart and applying
+/// backoff. Result: instant respawn loop.
+///
+/// With the fix, write-failure leaves proc as Some(dead_process), so the
+/// death handler runs, increments restart_count, records an audit row,
+/// and applies exponential backoff.
+#[tokio::test]
+async fn test_write_failure_records_audit_log_and_applies_backoff() {
+    tokio::time::pause();
+
+    let chunks: std::collections::HashMap<i64, Vec<u8>> =
+        (1..=1000).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = BackoffMockFetcher {
+        chunks: Arc::new(TokioMutex::new(chunks)),
+        duration_ms_per_chunk: 2000,
+    };
+
+    let spawn_count = Arc::new(AtomicU32::new(0));
+    let factory = WriteFailFactory {
+        spawn_count: spawn_count.clone(),
+    };
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+
+    let stats_clone = stats.clone();
+    let handle = tokio::spawn(async move {
+        endpoint_loop(
+            fetcher,
+            factory,
+            backoff_test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+        )
+        .await;
+    });
+
+    // Run for 120s of mock time. With proper backoff (1+2+4+8+16+32+60),
+    // <=10 spawns should occur. Without the fix (instant respawn loop),
+    // hundreds.
+    for _ in 0..1200 {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let total_spawns = spawn_count.load(Ordering::Relaxed);
+    assert!(
+        total_spawns <= 15,
+        "Write-failure path is not applying backoff: {total_spawns} spawns in 120s \
+         (expected <= 15 with exponential backoff)"
+    );
+
+    let s = stats.lock().await;
+    assert!(
+        s.ffmpeg_restart_count > 0,
+        "ffmpeg_restart_count should be incremented on write failure"
+    );
+    assert!(
+        !s.restart_history.is_empty(),
+        "restart_history should be populated on write failure (audit log was \
+         missing for the write-error path before the fix)"
+    );
+    drop(s);
+
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+}
+
+/// A process that lives for a configurable duration before dying.
+/// Used to verify that the death-counter reset fires when ffmpeg lives
+/// long enough to prove the session was "real".
+struct LongLivedProcess {
+    alive: Arc<AtomicBool>,
+    spawned_at: tokio::time::Instant,
+    live_secs: u64,
+}
+
+#[async_trait]
+impl OutputProcess for LongLivedProcess {
+    fn is_alive(&mut self) -> bool {
+        if self.spawned_at.elapsed().as_secs() >= self.live_secs {
+            self.alive.store(false, Ordering::Relaxed);
+        }
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    async fn write(&mut self, _data: &[u8]) -> Result<(), String> {
+        if self.spawned_at.elapsed().as_secs() >= self.live_secs {
+            self.alive.store(false, Ordering::Relaxed);
+            return Err("lived out its duration".to_string());
+        }
+        Ok(())
+    }
+
+    async fn kill(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
+
+    fn last_stderr_line(&self) -> Option<String> {
+        Some("scheduled exit".to_string())
+    }
+}
+
+struct LongLivedFactory {
+    live_secs_sequence: Arc<StdMutex<Vec<u64>>>,
+    spawn_count: Arc<AtomicU32>,
+}
+
+impl OutputProcessFactory for LongLivedFactory {
+    fn spawn(
+        &self,
+        _service_type: ServiceType,
+        _stream_key: &str,
+        _alias: &str,
+    ) -> Result<Box<dyn OutputProcess>, String> {
+        let idx = self.spawn_count.fetch_add(1, Ordering::Relaxed) as usize;
+        let seq = self.live_secs_sequence.lock().unwrap();
+        let live_secs = seq.get(idx).copied().unwrap_or(0);
+        drop(seq);
+        Ok(Box::new(LongLivedProcess {
+            alive: Arc::new(AtomicBool::new(true)),
+            spawned_at: tokio::time::Instant::now(),
+            live_secs,
+        }))
+    }
+}
+
+/// When ffmpeg lives longer than LIFETIME_RESET_SECS (60s) before dying,
+/// the `consecutive_ffmpeg_deaths` counter is reset so a one-off death
+/// after hours of successful streaming does not trigger a 60s backoff
+/// penalty. This test verifies that reset by running a sequence:
+///
+///   process 1 lives 120s then dies (long-lived session)
+///   process 2 spawns immediately with backoff=1s (reset proved)
+///   process 2 dies fast
+///   process 3 spawns with backoff=2s (counter now at 1, not 2)
+#[tokio::test]
+async fn test_backoff_counter_resets_after_long_lived_session() {
+    tokio::time::pause();
+
+    let chunks: std::collections::HashMap<i64, Vec<u8>> =
+        (1..=1000).map(|i| (i, vec![i as u8; 100])).collect();
+    let fetcher = BackoffMockFetcher {
+        chunks: Arc::new(TokioMutex::new(chunks)),
+        duration_ms_per_chunk: 2000,
+    };
+
+    // Sequence: 1st process lives 120s, 2nd dies fast, 3rd dies fast.
+    // After the 120s-long-lived process dies, the reset must fire, so
+    // the 2nd process should be spawned with backoff=1s (as if it were
+    // the first death), not with the backoff that would have applied
+    // without the reset.
+    let live_sequence = Arc::new(StdMutex::new(vec![120u64, 0, 0, 0, 0]));
+    let spawn_count = Arc::new(AtomicU32::new(0));
+    let factory = LongLivedFactory {
+        live_secs_sequence: live_sequence.clone(),
+        spawn_count: spawn_count.clone(),
+    };
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+
+    let stats_clone = stats.clone();
+    let handle = tokio::spawn(async move {
+        endpoint_loop(
+            fetcher,
+            factory,
+            backoff_test_ep_cfg(),
+            1,
+            0,
+            stop_rx,
+            stats_clone,
+        )
+        .await;
+    });
+
+    // Advance 200s of mock time. Timeline:
+    //   t=0   -> spawn 1, lives 120s
+    //   t=120 -> spawn 1 dies, consecutive_deaths reset to 0 because
+    //            lifetime >= 60s. Backoff is (1 << 0).min(60) = 1s.
+    //   t=121 -> spawn 2, dies instantly
+    //   t=122 -> backoff 2s applied (consecutive_deaths now 1)
+    //   t=124 -> spawn 3, dies instantly
+    //   ...continues with exponential backoff
+    for _ in 0..2000 {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let s = stats.lock().await;
+    let history: Vec<_> = s.restart_history.iter().cloned().collect();
+    drop(s);
+
+    assert!(
+        !history.is_empty(),
+        "No restart records — long-lived process never died?"
+    );
+
+    // First recorded backoff should be 1s because the counter reset to 0
+    // after the 120s long-lived process. Without the reset, the backoff
+    // sequence would carry the counter from earlier deaths (if any) and
+    // this assertion would catch a regression.
+    assert_eq!(
+        history[0].backoff_secs, 1,
+        "After a long-lived session (>= LIFETIME_RESET_SECS), the backoff \
+         counter must reset so the next death is treated as the first. \
+         First record: {:?}",
+        history[0]
+    );
+
+    // Lifetime of the first process should be at least 120s (mock time).
+    assert!(
+        history[0].lifetime_secs >= 120,
+        "First dead process should have lived >= 120s, got {}s",
+        history[0].lifetime_secs
+    );
+
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+}
+
+/// The restart_history ring buffer must be bounded — old records get
+/// evicted past RESTART_HISTORY_CAP.
+#[tokio::test]
+async fn test_restart_audit_log_is_bounded() {
+    let mut s = EndpointStats::default();
+    for i in 0..(RESTART_HISTORY_CAP + 50) {
+        if s.restart_history.len() >= RESTART_HISTORY_CAP {
+            s.restart_history.pop_front();
+        }
+        s.restart_history.push_back(FfmpegRestartRecord {
+            timestamp_ms: i as i64,
+            chunk_id: i as i64,
+            lifetime_secs: 0,
+            reason: "test".to_string(),
+            stderr_tail: None,
+            backoff_secs: 1,
+        });
+    }
+    assert_eq!(s.restart_history.len(), RESTART_HISTORY_CAP);
+    // Oldest 50 entries dropped — first remaining record should have
+    // chunk_id == 50.
+    assert_eq!(s.restart_history[0].chunk_id, 50);
+}

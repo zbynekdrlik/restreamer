@@ -28,6 +28,17 @@ pub struct StreamingEvent {
     pub delivering_activated: bool,
     #[serde(default)]
     pub cache_delay_secs: Option<i64>,
+    #[serde(default)]
+    pub created_from: Option<String>,
+}
+
+/// Event template (reusable preset).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct EventTemplate {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub cache_delay_secs: Option<i64>,
 }
 
 /// Chunk statistics from the backend.
@@ -336,9 +347,9 @@ pub async fn start_delivering(id: i64) -> Result<(), String> {
     http_post(&format!("/events/{id}/start-delivering")).await?;
     // Also start the Hetzner delivery VPS
     let body = serde_json::json!({ "event_id": id });
-    http_post_json("/delivery/start", &body).await.map_err(|e| {
-        format!("Delivery VPS start failed: {e}")
-    })?;
+    http_post_json("/delivery/start", &body)
+        .await
+        .map_err(|e| format!("Delivery VPS start failed: {e}"))?;
     Ok(())
 }
 
@@ -348,6 +359,113 @@ pub async fn deactivate_event(id: i64) -> Result<(), String> {
 
 pub async fn delete_event(id: i64) -> Result<(), String> {
     http_delete(&format!("/events/{id}")).await
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClearChunksResponse {
+    pub deleted: u64,
+}
+
+pub async fn clear_event_s3_chunks(id: i64) -> Result<ClearChunksResponse, String> {
+    let path = format!("/events/{id}/clear-s3");
+    let url = format!("{}{path}", api_base());
+    let resp = gloo_net::http::Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {e}"))?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Parse error: {e}"))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct S3UsageEntry {
+    pub event_name: String,
+    pub bytes: u64,
+    pub objects: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct S3UsageResponse {
+    pub total_bytes: u64,
+    pub total_objects: u64,
+    pub by_event: Vec<S3UsageEntry>,
+}
+
+pub async fn get_s3_usage() -> Result<S3UsageResponse, String> {
+    http_get("/s3/usage").await
+}
+
+// Templates API
+pub async fn list_templates() -> Result<Vec<EventTemplate>, String> {
+    http_get("/templates").await
+}
+
+pub async fn create_template(
+    name: &str,
+    cache_delay_secs: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    #[derive(Serialize)]
+    struct Body {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_delay_secs: Option<i64>,
+    }
+    http_post_json(
+        "/templates",
+        &Body {
+            name: name.to_string(),
+            cache_delay_secs,
+        },
+    )
+    .await
+}
+
+pub async fn update_template(
+    id: i64,
+    name: Option<&str>,
+    cache_delay_secs: Option<i64>,
+) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Body {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_delay_secs: Option<i64>,
+    }
+    http_patch_json(
+        &format!("/templates/{id}"),
+        &Body {
+            name: name.map(|s| s.to_string()),
+            cache_delay_secs,
+        },
+    )
+    .await
+}
+
+pub async fn delete_template(id: i64) -> Result<(), String> {
+    http_delete(&format!("/templates/{id}")).await
+}
+
+pub async fn get_template_endpoints(template_id: i64) -> Result<Vec<EndpointConfig>, String> {
+    http_get(&format!("/templates/{template_id}/endpoints")).await
+}
+
+pub async fn attach_template_endpoint(template_id: i64, endpoint_id: i64) -> Result<(), String> {
+    http_post(&format!("/templates/{template_id}/endpoints/{endpoint_id}")).await
+}
+
+pub async fn detach_template_endpoint(template_id: i64, endpoint_id: i64) -> Result<(), String> {
+    http_delete(&format!("/templates/{template_id}/endpoints/{endpoint_id}")).await
+}
+
+pub async fn create_event_from_template(template_id: i64) -> Result<serde_json::Value, String> {
+    #[derive(Serialize)]
+    struct Body {
+        template_id: i64,
+    }
+    http_post_json("/events", &Body { template_id }).await
 }
 
 // Endpoints API
@@ -533,7 +651,9 @@ pub struct YouTubeStreamHealth {
 
 /// Fetch YouTube health status. Returns None on any error (non-critical polling).
 pub async fn get_youtube_health() -> Option<YouTubeStatusResponse> {
-    http_get::<YouTubeStatusResponse>("/youtube/status").await.ok()
+    http_get::<YouTubeStatusResponse>("/youtube/status")
+        .await
+        .ok()
 }
 
 // OBS API
@@ -586,7 +706,9 @@ pub async fn delivery_add_endpoint(
         "endpoint_id": endpoint_id,
         "start_position": { "strategy": start_position },
     });
-    http_post_json("/delivery/endpoints/add", &body).await.map(|_| ())
+    http_post_json("/delivery/endpoints/add", &body)
+        .await
+        .map(|_| ())
 }
 
 /// Remove an endpoint from a running delivery VPS mid-stream.
@@ -595,5 +717,7 @@ pub async fn delivery_remove_endpoint(event_id: i64, alias: &str) -> Result<(), 
         "event_id": event_id,
         "alias": alias,
     });
-    http_post_json("/delivery/endpoints/remove", &body).await.map(|_| ())
+    http_post_json("/delivery/endpoints/remove", &body)
+        .await
+        .map(|_| ())
 }

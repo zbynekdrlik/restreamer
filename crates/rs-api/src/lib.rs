@@ -9,8 +9,10 @@ pub mod obs;
 pub mod router;
 #[cfg(test)]
 mod router_tests;
+pub mod s3_handlers;
 pub mod state;
 pub mod stream_handlers;
+pub mod template_handlers;
 pub mod websocket;
 pub mod youtube;
 

@@ -190,7 +190,17 @@ jobs:
             --exclude-re 'producer_task' \
             --exclude-re 'consumer_task' \
             --exclude-re 'endpoint_loop' \
-            --exclude-re 'S3Client::upload_chunk'
+            --exclude-re 'S3Client::upload_chunk' \
+            --exclude-re 'S3Client::delete_event_chunks' \
+            --exclude-re 'S3Client::measure_prefix' \
+            --exclude-re 'S3Client::list_event_prefixes' \
+            --exclude-re 'delete_event_by_id' \
+            --exclude-re 'clear_event_s3_chunks' \
+            --exclude-re 'get_s3_usage' \
+            --exclude-re 'get_template_endpoints' \
+            --exclude-re 'ServiceCore::run_with_signal' \
+            -e 'crates/rs-api/src/template_handlers.rs' \
+            -e 'crates/rs-api/src/s3_handlers.rs'
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report
@@ -272,7 +282,13 @@ jobs:
           BUILD_VERSION: ${{ env.BUILD_VERSION }}
           BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
       - name: Install Tauri CLI
-        run: cargo install tauri-cli
+        # Use prebuilt binary instead of `cargo install tauri-cli` because the
+        # source build hangs intermittently on Windows runners (observed twice
+        # in a row, ~30+ minutes stuck) and even when it works it adds ~10
+        # minutes of cold cargo compile time per run.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
       - name: Build Tauri app
         run: cargo tauri build
         env:
@@ -1330,6 +1346,85 @@ jobs:
           Write-Host "=== E2E Stability Test PASSED ==="
           Write-Host "10-minute stream: $($stats.total_chunks) chunks produced and uploaded without freeze"
 
+      - name: GATE clear-s3 endpoint deletes 250+ chunks within 25s
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # Regression for the bug where DELETE+CLEANUP did nothing in the
+          # dashboard: delete_event_chunks ran S3 deletes serially, taking
+          # ~200ms per object. With 250 chunks that is ~50s, well past the
+          # frontend HTTP client timeout (~30s), so the user saw "nothing
+          # happens" while the server kept slogging.
+          #
+          # The fix parallelises with futures::stream::buffer_unordered(20).
+          # 250 chunks should now finish in ~3 seconds. We assert < 25s to
+          # leave headroom for runner / S3 latency variance.
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
+          if (-not $e2eEvent) {
+            throw "FAILED: E2E-Test event not found - earlier streaming step did not run?"
+          }
+
+          # clear-s3 refuses while the event is active (409 Conflict).
+          # Deactivate before running the gate. The end-of-job cleanup
+          # 'Deactivate streaming event' is then a no-op for this event.
+          if ($e2eEvent.receiving_activated -or $e2eEvent.delivering_activated) {
+            Write-Host "Deactivating E2E-Test (recv=$($e2eEvent.receiving_activated) deliv=$($e2eEvent.delivering_activated)) before clear-s3"
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)/deactivate" `
+                -Method POST -TimeoutSec 10
+            } catch {
+              throw "FAILED: could not deactivate event before clear-s3: $_"
+            }
+            # Re-fetch to confirm flags are clear
+            $e2eEvent = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)" -TimeoutSec 10
+            if ($e2eEvent.receiving_activated -or $e2eEvent.delivering_activated) {
+              throw "FAILED: deactivate did not clear flags (recv=$($e2eEvent.receiving_activated) deliv=$($e2eEvent.delivering_activated))"
+            }
+          }
+
+          $statsBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          Write-Host "Chunks before clear-s3: total=$($statsBefore.total_chunks)"
+
+          # The streaming step asserts >= 250 chunks, so the parallelism is
+          # actually exercised under realistic load.
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          try {
+            $resp = Invoke-RestMethod `
+              -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)/clear-s3" `
+              -Method POST -TimeoutSec 25
+          } catch {
+            $sw.Stop()
+            throw "FAILED: clear-s3 endpoint errored after $($sw.Elapsed.TotalSeconds)s: $_"
+          }
+          $sw.Stop()
+          $elapsed = $sw.Elapsed.TotalSeconds
+          Write-Host "clear-s3 elapsed: ${elapsed}s, deleted: $($resp.deleted)"
+
+          if ($elapsed -ge 25) {
+            throw "FAILED: clear-s3 took ${elapsed}s (limit 25s) - parallel delete regression"
+          }
+          if ($resp.deleted -lt 1) {
+            throw "FAILED: clear-s3 reported 0 objects deleted but stats showed $($statsBefore.total_chunks) chunks"
+          }
+          Write-Host "=== clear-s3 GATE PASSED: ${elapsed}s for $($resp.deleted) objects ==="
+
+      - name: GATE /s3/usage endpoint returns total + per-event entries
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          $usage = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/s3/usage" -TimeoutSec 25
+          if ($null -eq $usage.total_bytes) {
+            throw "FAILED: /s3/usage missing total_bytes"
+          }
+          if ($null -eq $usage.total_objects) {
+            throw "FAILED: /s3/usage missing total_objects"
+          }
+          if ($null -eq $usage.by_event) {
+            throw "FAILED: /s3/usage missing by_event array"
+          }
+          Write-Host "=== /s3/usage GATE PASSED: $($usage.total_bytes) bytes, $($usage.total_objects) objects, $($usage.by_event.Count) events ==="
+
       - name: Verify RTMP disconnected after stream stop
         shell: powershell
         run: |
@@ -2093,6 +2188,32 @@ jobs:
           }
           Write-Host "Event id: $($targetEvent.id), name: $($targetEvent.name)"
 
+          # Ensure 'e2e rtmp' and 'e2e hls' endpoints are attached. The
+          # event row may exist but have zero attachments if it was
+          # recreated after the original was deleted (the OBS-to-YouTube
+          # buffering test depends on these two endpoints showing up in
+          # the dashboard).
+          $allEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -TimeoutSec 10
+          $needAttach = @("e2e rtmp", "e2e hls")
+          $eventEndpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/endpoints" -TimeoutSec 10
+          $attachedAliases = @($eventEndpoints | ForEach-Object { $_.alias })
+          foreach ($alias in $needAttach) {
+            if ($attachedAliases -notcontains $alias) {
+              $ep = $allEndpoints | Where-Object { $_.alias -eq $alias }
+              if ($ep) {
+                try {
+                  Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/endpoints/$($ep.id)" `
+                    -Method POST -TimeoutSec 10
+                  Write-Host "Attached endpoint '$alias' (id=$($ep.id)) to event $($targetEvent.id)"
+                } catch {
+                  Write-Host "WARNING: Failed to attach $alias`: $_"
+                }
+              } else {
+                Write-Host "WARNING: Endpoint config '$alias' not found in /endpoints list"
+              }
+            }
+          }
+
           # Save original cache_delay_secs before changing (restore at end)
           $origCacheDelay = $targetEvent.cache_delay_secs
           Write-Host "Original cache_delay_secs: $origCacheDelay"
@@ -2324,7 +2445,42 @@ jobs:
             });
 
             await page.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
-            await page.waitForTimeout(5000);
+
+            // Wait for at least one endpoint cache label to appear. The
+            // dashboard renders endpoint cards from the DeliveryStatus
+            // WebSocket broadcast which is fired by the orchestrator on a
+            // poll loop. networkidle does not wait for WebSocket frames,
+            // so we have to wait for the actual UI element. Up to 30s
+            // because the orchestrator first poll plus VPS HTTP round-trip
+            // can take longer than the 5s the previous fixed wait used.
+            try {
+              await page.locator('.endpoint-cache-label').first().waitFor({
+                state: 'attached',
+                timeout: 30000,
+              });
+            } catch (e) {
+              console.error('FAILED: No endpoint cache labels appeared within 30s');
+              // Diagnostic: dump dashboard state to find why endpoints
+              // are not in store.delivery.endpoints.
+              try {
+                const apiStatus = await fetch('http://127.0.0.1:8910/api/v1/status').then(r => r.json());
+                console.error('API status:', JSON.stringify(apiStatus.streaming_event));
+                const cached = await fetch('http://127.0.0.1:8910/api/v1/delivery/status/cached').then(r => r.json()).catch(() => null);
+                console.error('Cached delivery:', JSON.stringify(cached));
+                const eventId = apiStatus.streaming_event && apiStatus.streaming_event.id;
+                if (eventId) {
+                  const live = await fetch(`http://127.0.0.1:8910/api/v1/delivery/status?event_id=${eventId}`).then(r => r.json()).catch(() => null);
+                  console.error('Live delivery status:', JSON.stringify(live));
+                }
+                const pipelineNodes = await page.locator('.pipeline-node-metric').allTextContents().catch(() => []);
+                console.error('Pipeline node metrics:', pipelineNodes);
+                const allClasses = await page.locator('.endpoint-tree').count().catch(() => 0);
+                console.error('Endpoint tree count:', allClasses);
+              } catch (diagErr) {
+                console.error('Diagnostic dump failed:', diagErr.message);
+              }
+              process.exit(1);
+            }
 
             // During buffering phase: endpoints exist but are pending, cache bar should show
             // the backend-computed cache_duration_secs value (real measured chunk duration sum)
@@ -3194,10 +3350,6 @@ jobs:
           $vpsId = $instances[0].hetzner_id
           Write-Host "VPS hetzner_id: $vpsId"
 
-          # Record chunk count before crash
-          $chunksBefore = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
-          Write-Host "Chunks before: total=$($chunksBefore.total_chunks) sent=$($chunksBefore.sent_chunks)"
-
           # CRASH: kill Restreamer process
           Write-Host "Killing Restreamer process (simulating crash)..."
           taskkill /F /IM "Restreamer.exe" 2>&1 | Out-Null
@@ -3253,13 +3405,20 @@ jobs:
             throw "FAILED: OBS did not reconnect within 60 seconds"
           }
 
+          # Baseline AFTER restart: cleanup has already pruned any chunks
+          # >1hr old (see db/mod.rs startup cleanup), so this baseline reflects
+          # the post-cleanup state. Comparing chunksAfter to this baseline
+          # measures only the chunks created in the 30s window below.
+          $chunksBaseline = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
+          Write-Host "Chunks baseline (post-restart): total=$($chunksBaseline.total_chunks) sent=$($chunksBaseline.sent_chunks)"
+
           # Wait for chunks to flow
           Write-Host "Waiting 30s for chunks to flow after restart..."
           Start-Sleep -Seconds 30
 
           $chunksAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats"
           Write-Host "Chunks after: total=$($chunksAfter.total_chunks) sent=$($chunksAfter.sent_chunks)"
-          $newChunks = $chunksAfter.total_chunks - $chunksBefore.total_chunks
+          $newChunks = $chunksAfter.total_chunks - $chunksBaseline.total_chunks
           Write-Host "New chunks since restart: $newChunks"
           if ($newChunks -lt 5) {
             throw "FAILED: Only $newChunks new chunks after restart (expected >= 5)"

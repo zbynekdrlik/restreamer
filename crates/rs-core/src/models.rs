@@ -9,6 +9,14 @@ pub struct ClientProfile {
     pub user_uuid: String,
 }
 
+/// Reusable event configuration preset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventTemplate {
+    pub id: i64,
+    pub name: String,
+    pub cache_delay_secs: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamingEvent {
     pub id: i64,
@@ -17,6 +25,7 @@ pub struct StreamingEvent {
     pub receiving_activated: bool,
     pub delivering_activated: bool,
     pub cache_delay_secs: Option<i64>,
+    pub created_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,6 +357,7 @@ mod tests {
             receiving_activated: true,
             delivering_activated: false,
             cache_delay_secs: None,
+            created_from: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: StreamingEvent = serde_json::from_str(&json).unwrap();

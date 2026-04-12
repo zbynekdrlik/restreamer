@@ -8,11 +8,13 @@ struct MockFetcher {
 }
 
 impl MockFetcher {
+    // Default 20ms per chunk so consumer pacing doesn't dominate throughput
+    // tests. Pacing-specific tests construct with a larger value explicitly.
     fn new(chunks: Vec<(i64, Vec<u8>)>) -> Self {
         let map: std::collections::HashMap<i64, Vec<u8>> = chunks.into_iter().collect();
         Self {
             chunks: Arc::new(TokioMutex::new(map)),
-            duration_ms_per_chunk: 2000,
+            duration_ms_per_chunk: 20,
         }
     }
 }
@@ -496,8 +498,11 @@ async fn test_drought_mode_recovers_when_chunks_resume() {
     // Resume chunks -- make 6-30 available
     available.store(30, Ordering::Relaxed);
 
-    // Advance time for recovery
-    for _ in 0..80 {
+    // Advance just enough for the consumer to process most of the new
+    // chunks. 25 more chunks at 2s pacing = ~50s. Use 30 ticks × 2s = 60s
+    // so the assertion sees a cleared stall_reason BEFORE the producer
+    // exhausts chunks again and re-enters chunk_gap stall.
+    for _ in 0..30 {
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
         tokio::task::yield_now().await;
     }
@@ -617,6 +622,7 @@ async fn test_stats_struct_serializes() {
         last_error: Some("test error".to_string()),
         stall_reason: Some("chunk_gap".to_string()),
         ffmpeg_last_stderr: Some("connection refused".to_string()),
+        restart_history: std::collections::VecDeque::new(),
     };
     let json = serde_json::to_string(&stats).unwrap();
     assert!(json.contains("\"stall_reason\":\"chunk_gap\""));
@@ -633,6 +639,13 @@ struct TimedMockFetcher {
 impl TimedMockFetcher {
     /// Create with pre-loaded chunk data. Chunks are only returned if
     /// chunk_id <= available_up_to.
+    ///
+    /// Uses realistic 2000ms chunk duration because several tests that rely
+    /// on this fetcher verify buffer fill and chunk gap behaviour, which
+    /// depend on the interaction between chunk durations and delivery_delay.
+    /// Tests that exercise throughput with this fetcher must advance mock
+    /// time by at least `num_chunks * 2000ms` of real-time pacing budget to
+    /// account for the consumer's wall-clock pacing sleep.
     fn new(chunks: Vec<(i64, Vec<u8>)>, initially_available: i64) -> Self {
         let map: std::collections::HashMap<i64, Vec<u8>> = chunks.into_iter().collect();
         Self {
@@ -773,9 +786,12 @@ async fn test_chunk_gap_maintained_at_delay_target() {
         .await;
     });
 
-    // Direct write + 1s sleep per chunk. 30 chunks = 30s.
-    for _ in 0..4000 {
-        tokio::time::advance(std::time::Duration::from_millis(10)).await;
+    // Buffer fill needs 10 chunks (20000ms / 2000ms) which are already
+    // available. Consumer pacing sleeps ~2000ms per chunk. 30 chunks require
+    // ~60s of wall-clock advancement for pacing. Each iteration advances
+    // 100ms, so we need at least 600 iterations; use 2000 for slack.
+    for _ in 0..2000 {
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
     }
 

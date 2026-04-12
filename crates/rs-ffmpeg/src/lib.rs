@@ -90,7 +90,9 @@ pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &st
 }
 
 /// YT_HLS: FLV input, HLS output via HTTPS PUT.
-/// Uses -re for pacing (same as other FLV paths).
+/// Uses -re for pacing; real-time pacing is also enforced in the Rust
+/// consumer task in rs-delivery so that ffmpeg restarts cannot drain the
+/// pre-fetch buffer faster than real time.
 fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
     let output_url = format!(
         "https://a.upload.youtube.com/http_upload_hls?cid={stream_key}&copy=0&file=out1248.ts"
@@ -138,11 +140,14 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
 /// FLV->FLV passthrough for RTMP/RTMPS endpoints.
 /// Minimal flags: input is already valid FLV, just forward bytes.
 /// No genpts, no avoid_negative_ts, no copytb, no bsf needed.
+///
+/// Real-time pacing is enforced in the Rust consumer task in rs-delivery
+/// (see `consumer_task` pacing anchor). `-re` here is a secondary safety net;
+/// it alone is not sufficient because on ffmpeg restart the fresh process
+/// re-anchors on the absolute FLV timestamps from xiu, treats the old
+/// timestamps as "behind", and drains stdin as fast as possible.
 fn build_flv_rtmp_args(url: &str) -> Vec<String> {
     vec![
-        // -re: read input at native frame rate (based on FLV timestamps).
-        // This makes ffmpeg pace output to match the original stream timing.
-        // Without it, ffmpeg would blast all buffered chunks instantly.
         "-re".into(),
         "-f".into(),
         "flv".into(),
@@ -465,6 +470,33 @@ mod tests {
             let args = build_ffmpeg_args(st, "key", "alias");
             let f_idx = args.iter().position(|a| a == "-f").unwrap();
             assert_eq!(args[f_idx + 1], "flv", "{st} missing flv input format");
+        }
+    }
+
+    /// All FLV paths keep `-re` so ffmpeg paces output approximately to
+    /// real time. Note that `-re` ALONE is not sufficient to prevent the
+    /// cache-collapse-on-restart bug — on ffmpeg restart the fresh process
+    /// re-anchors on the absolute FLV timestamps from xiu, sees them as
+    /// deep in the past, and drains stdin as fast as possible to catch up.
+    /// The real fix lives in the Rust consumer task in rs-delivery, which
+    /// enforces wall-clock real-time pacing across ffmpeg restarts. This
+    /// test just pins the `-re` flag so a careless removal is caught.
+    #[test]
+    fn flv_paths_use_re_flag() {
+        let types = [
+            ServiceType::YtHls,
+            ServiceType::Facebook,
+            ServiceType::YtRtmp,
+            ServiceType::Vimeo,
+            ServiceType::Instagram,
+            ServiceType::TestFile,
+        ];
+        for st in types {
+            let args = build_ffmpeg_args(st, "key", "alias");
+            assert!(
+                args.contains(&"-re".to_string()),
+                "{st} must have -re for ffmpeg-side pacing"
+            );
         }
     }
 

@@ -217,6 +217,11 @@ struct EndpointStatusEntry {
     ffmpeg_last_stderr: Option<String>,
     consecutive_chunk_misses: u32,
     consecutive_ffmpeg_failures: u32,
+    /// Per-endpoint audit log of recent ffmpeg restarts (capped at
+    /// RESTART_HISTORY_CAP). Each entry records timestamp, chunk_id at
+    /// the moment of death, lifetime, reason, stderr tail, and the
+    /// backoff applied before the next spawn.
+    restart_history: Vec<crate::endpoint_task::FfmpegRestartRecord>,
 }
 
 async fn endpoint_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
@@ -237,6 +242,7 @@ async fn endpoint_status(State(state): State<Arc<AppState>>) -> Json<StatusRespo
             ffmpeg_last_stderr: stats.ffmpeg_last_stderr,
             consecutive_chunk_misses: stats.consecutive_chunk_misses,
             consecutive_ffmpeg_failures: stats.consecutive_ffmpeg_failures,
+            restart_history: stats.restart_history.into_iter().collect(),
         });
     }
 

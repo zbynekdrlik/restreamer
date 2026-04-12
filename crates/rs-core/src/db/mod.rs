@@ -6,11 +6,17 @@ use std::str::FromStr;
 use crate::error::Result;
 use crate::models::{ChunkRecord, ChunkStats, ClientProfile, StreamingEvent};
 
+mod templates;
+pub use templates::*;
+
 mod v2;
 pub use v2::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod template_tests;
 
 /// Create a SQLite connection pool.
 pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
@@ -64,6 +70,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (9, MIGRATION_V9_SQL),
         (10, MIGRATION_V10_SQL),
         (11, MIGRATION_V11_SQL),
+        (12, MIGRATION_V12_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -273,6 +280,22 @@ const MIGRATION_V11_SQL: &str = r#"
 ALTER TABLE chunk_records ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0
 "#;
 
+const MIGRATION_V12_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS event_templates (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL UNIQUE,
+    cache_delay_secs INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS template_endpoints (
+    template_id INTEGER NOT NULL REFERENCES event_templates(id) ON DELETE CASCADE,
+    endpoint_id INTEGER NOT NULL REFERENCES endpoint_configs(id) ON DELETE CASCADE,
+    PRIMARY KEY (template_id, endpoint_id)
+);
+
+ALTER TABLE streaming_events ADD COLUMN created_from TEXT
+"#;
+
 // --- Client Profile ---
 
 pub async fn get_client_profile(pool: &SqlitePool) -> Result<Option<ClientProfile>> {
@@ -301,7 +324,7 @@ pub async fn upsert_client_profile(pool: &SqlitePool, user_uuid: &str) -> Result
 pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEvent>> {
     // Prefer the event with receiving_activated=1, fall back to highest ID
     let row = sqlx::query(
-        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from
          FROM streaming_events ORDER BY receiving_activated DESC, id DESC LIMIT 1",
     )
     .fetch_optional(pool)
@@ -314,6 +337,7 @@ pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEv
         receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
         cache_delay_secs: r.get("cache_delay_secs"),
+        created_from: r.get("created_from"),
     }))
 }
 
@@ -322,7 +346,7 @@ pub async fn get_streaming_event_by_id(
     id: i64,
 ) -> Result<Option<StreamingEvent>> {
     let row = sqlx::query(
-        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from
          FROM streaming_events WHERE id = ?1",
     )
     .bind(id)
@@ -336,6 +360,7 @@ pub async fn get_streaming_event_by_id(
         receiving_activated: r.get::<i32, _>("receiving_activated") != 0,
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
         cache_delay_secs: r.get("cache_delay_secs"),
+        created_from: r.get("created_from"),
     }))
 }
 

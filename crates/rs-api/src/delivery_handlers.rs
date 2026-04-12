@@ -121,6 +121,7 @@ pub struct DeliveryEndpointEntry {
     pub ffmpeg_restart_count: u32,
     pub last_error: Option<String>,
     pub is_fast: bool,
+    pub restart_history: Vec<crate::delivery::EndpointRestartRecord>,
 }
 
 pub async fn delivery_status(
@@ -155,6 +156,7 @@ pub async fn delivery_status(
             ffmpeg_restart_count: ep.ffmpeg_restart_count,
             last_error: ep.last_error,
             is_fast: ep.is_fast,
+            restart_history: ep.restart_history,
         })
         .collect();
     let endpoints_alive =

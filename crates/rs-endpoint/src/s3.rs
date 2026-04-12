@@ -1,11 +1,21 @@
+use futures::StreamExt;
 use rs_core::config::S3Config;
 use s3::Region;
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use std::path::Path;
+use std::sync::Arc;
 use tracing::{debug, info};
 
 use crate::EndpointError;
+
+/// Concurrency for parallel S3 deletes. The previous implementation deleted
+/// objects sequentially, which caused the dashboard "Delete + Cleanup"
+/// button to time out for any event with more than ~150 chunks (one HTTP
+/// round-trip per object × ~200ms). Twenty parallel deletes is a good
+/// trade-off — fast enough to finish 1000 chunks in ~10 seconds, slow
+/// enough not to flood the S3 endpoint.
+const DELETE_CONCURRENCY: usize = 20;
 
 /// S3 client wrapper for uploading chunk files.
 pub struct S3Client {
@@ -88,6 +98,113 @@ impl S3Client {
 
         info!("Uploaded {s3_key} ({file_size} bytes, duration_ms={duration_ms})");
         Ok(())
+    }
+
+    /// Delete all S3 objects under the given event name prefix.
+    /// Returns the number of objects deleted.
+    ///
+    /// Deletes are issued in parallel (up to DELETE_CONCURRENCY in flight)
+    /// because rust-s3 0.35 has no native bulk-delete API. The serial loop
+    /// this replaced caused the "Delete + Cleanup" dashboard action to hang
+    /// past the HTTP client timeout for any event with >150 chunks.
+    pub async fn delete_event_chunks(&self, event_name: &str) -> Result<u64, EndpointError> {
+        let prefix = format!("{event_name}/");
+        let bucket = Arc::new((*self.bucket).clone());
+        let mut total_deleted = 0u64;
+
+        loop {
+            let list = bucket
+                .list(prefix.clone(), None)
+                .await
+                .map_err(|e| EndpointError::S3(format!("list failed: {e}")))?;
+
+            let keys: Vec<String> = list
+                .iter()
+                .flat_map(|page| page.contents.iter().map(|obj| obj.key.clone()))
+                .collect();
+
+            if keys.is_empty() {
+                break;
+            }
+
+            let results: Vec<Result<String, EndpointError>> = futures::stream::iter(keys)
+                .map(|key| {
+                    let bucket = Arc::clone(&bucket);
+                    async move {
+                        let response = bucket
+                            .delete_object(&key)
+                            .await
+                            .map_err(|e| EndpointError::S3(format!("delete {key} failed: {e}")))?;
+                        if response.status_code() >= 300 {
+                            return Err(EndpointError::S3(format!(
+                                "delete {key} returned status {}",
+                                response.status_code()
+                            )));
+                        }
+                        Ok(key)
+                    }
+                })
+                .buffer_unordered(DELETE_CONCURRENCY)
+                .collect()
+                .await;
+
+            // Count successful deletes before surfacing any error so the
+            // reported total reflects real progress, not "attempted deletes".
+            // This matters when an error occurs mid-batch — without this the
+            // log line overstates progress by up to DELETE_CONCURRENCY - 1.
+            let batch_successes = results.iter().filter(|r| r.is_ok()).count() as u64;
+            total_deleted += batch_successes;
+            if let Some(err) = results.into_iter().find_map(|r| r.err()) {
+                info!("Deleted {total_deleted} S3 objects under prefix '{prefix}' before error");
+                return Err(err);
+            }
+        }
+
+        info!("Deleted {total_deleted} S3 objects under prefix '{prefix}'");
+        Ok(total_deleted)
+    }
+
+    /// Compute total bytes and object count under a given prefix without
+    /// downloading anything. Used by the S3 usage endpoint.
+    pub async fn measure_prefix(&self, prefix: &str) -> Result<(u64, u64), EndpointError> {
+        let list = self
+            .bucket
+            .list(prefix.to_string(), None)
+            .await
+            .map_err(|e| EndpointError::S3(format!("list failed: {e}")))?;
+
+        let mut total_bytes: u64 = 0;
+        let mut object_count: u64 = 0;
+        for page in &list {
+            for obj in &page.contents {
+                total_bytes += obj.size;
+                object_count += 1;
+            }
+        }
+        Ok((total_bytes, object_count))
+    }
+
+    /// List all top-level "directories" (CommonPrefixes) in the bucket.
+    /// Each entry corresponds to one event_identifier folder.
+    pub async fn list_event_prefixes(&self) -> Result<Vec<String>, EndpointError> {
+        let list = self
+            .bucket
+            .list("".to_string(), Some("/".to_string()))
+            .await
+            .map_err(|e| EndpointError::S3(format!("list failed: {e}")))?;
+
+        let mut prefixes = Vec::new();
+        for page in &list {
+            if let Some(common) = &page.common_prefixes {
+                for cp in common {
+                    let prefix = cp.prefix.trim_end_matches('/').to_string();
+                    if !prefix.is_empty() {
+                        prefixes.push(prefix);
+                    }
+                }
+            }
+        }
+        Ok(prefixes)
     }
 }
 

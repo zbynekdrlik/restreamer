@@ -109,6 +109,9 @@ impl ServiceCore {
                 db::run_migrations(&pool)
                     .await
                     .context("failed to run database migrations")?;
+                db::seed_templates_from_events(&pool)
+                    .await
+                    .context("failed to seed templates from events")?;
                 info!("Database initialized at {}", self.db_path.display());
                 pool
             }

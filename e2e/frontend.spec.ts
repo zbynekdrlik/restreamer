@@ -16,7 +16,7 @@ const ALLOWED_CONSOLE = [
 // Collect console errors/warnings per-test and assert clean console in afterEach
 let consoleMessages: string[] = [];
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page, request }) => {
   consoleMessages = [];
   page.on("console", (msg) => {
     if (msg.type() === "error" || msg.type() === "warning") {
@@ -24,6 +24,8 @@ test.beforeEach(async ({ page }) => {
     }
   });
   await page.addInitScript(tauriMockScript);
+  // Reset mock API state so each test starts with clean initial data
+  await request.post("http://127.0.0.1:8910/api/v1/__reset");
 });
 
 test.afterEach(async () => {
@@ -227,6 +229,52 @@ test.describe("Operator Dashboard", () => {
     await expect(page.locator(".state-badge")).toContainText(
       /Buffering|Streaming/,
     );
+  });
+
+  test("ConfirmModal click does not produce closure-dropped console errors", async ({
+    page,
+  }) => {
+    // Regression for the bug where ConfirmModal's dismiss ran inside the
+    // running click handler, freeing the wasm-bindgen Closure mid-call and
+    // panicking with 'closure invoked recursively or after being dropped'.
+    // The fix defers show.set(false) via setTimeout(0) so the click handler
+    // returns before the button is unmounted.
+    const consoleErrors: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error") {
+        consoleErrors.push(msg.text());
+      }
+    });
+
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.locator(".start-btn").click();
+    await expect(page.locator(".state-badge")).toContainText(
+      /Buffering|Streaming/,
+      { timeout: 5000 },
+    );
+
+    // Open the Stop Delivering confirm modal
+    await page.locator(".stop-btn").click();
+    await expect(page.locator(".confirm-modal")).toBeVisible();
+
+    // Click confirm — this is where the closure-drop bug used to fire
+    await page.locator(".confirm-btn-danger").click();
+
+    // Wait for the modal to fully unmount before checking errors
+    await expect(page.locator(".modal-overlay")).not.toBeVisible({
+      timeout: 3000,
+    });
+    await page.waitForTimeout(500);
+
+    const closureErrors = consoleErrors.filter((e) =>
+      e.includes("closure invoked recursively or after being dropped"),
+    );
+    expect(
+      closureErrors,
+      `ConfirmModal should not log closure errors. All errors: ${JSON.stringify(consoleErrors)}`,
+    ).toEqual([]);
   });
 
   test("Stop Delivering confirm calls stop-stream API", async ({ page }) => {
@@ -469,6 +517,39 @@ test.describe("Operator Dashboard", () => {
     );
   });
 
+  test("RTMP node shows absolute received_bytes, not session delta", async ({
+    page,
+  }) => {
+    // Regression for Issue 6: after 10 hours of streaming the dashboard
+    // showed ~3 MB instead of ~57 GB because the session-bytes computation
+    // reset to 0 on every page load. The fix shows the absolute
+    // received_bytes from InpointStatus directly.
+    await page.goto("/");
+    await expect(page.locator(".pipeline")).toBeVisible({ timeout: 10000 });
+
+    const FIVE_GB: number = 5_000_000_000;
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "InpointStatus",
+        data: {
+          state: "receiving",
+          rtmp_connected: true,
+          received_bytes: FIVE_GB,
+          chunk_count: 5000,
+        },
+      },
+    });
+
+    // The RTMP node is at index 1 in pipeline-node-metric. With absolute
+    // bytes display the metric must contain "GB" (5 GB or 4.65 GB depending
+    // on formatter). The old broken code showed bytes since the page opened,
+    // which is approximately zero on a freshly-loaded page.
+    await expect(page.locator(".pipeline-node-metric").nth(1)).toContainText(
+      "GB",
+      { timeout: 5000 },
+    );
+  });
+
   // --- Add Endpoint Modal ---
 
   test("add endpoint button opens modal when delivering", async ({ page }) => {
@@ -675,78 +756,12 @@ test.describe("Settings page", () => {
     await expect(backLink).toBeVisible({ timeout: 10000 });
   });
 
-  test("events section shows event list", async ({ page }) => {
-    await page.goto("/settings");
-    await page.waitForTimeout(1000);
-    // Events section is the second .settings-section (OBS section is first)
-    const cards = page
-      .locator(".settings-section")
-      .nth(1)
-      .locator(".settings-card");
-    await expect(cards.first()).toBeVisible({ timeout: 10000 });
-  });
-
   test("endpoints section renders with create form", async ({ page }) => {
     await page.goto("/settings");
     await expect(page.locator(".endpoints-tab")).toBeVisible({
       timeout: 10000,
     });
     await expect(page.locator(".endpoints-tab .create-form")).toBeVisible();
-  });
-
-  test("event create form exists", async ({ page }) => {
-    await page.goto("/settings");
-    await expect(
-      page.locator('.settings-section:has(h3:text("Events")) .create-form'),
-    ).toBeVisible({ timeout: 10000 });
-    await expect(
-      page.locator(
-        '.settings-section:has(h3:text("Events")) input[placeholder="Event name"]',
-      ),
-    ).toBeVisible();
-  });
-
-  test("can create a new event and it appears with correct name", async ({
-    page,
-  }) => {
-    await page.goto("/settings");
-    await page.waitForTimeout(1000);
-    const section = page.locator('.settings-section:has(h3:text("Events"))');
-    await section.locator('input[placeholder="Event name"]').fill("Test Event");
-    await section.locator('button:has-text("Create Event")').click();
-    await page.waitForTimeout(500);
-    // Should now show the new event in the list
-    await expect(section.locator(".settings-card")).toHaveCount(3);
-    // Verify the new event name appears
-    const cardTexts = await section.locator(".settings-card").allTextContents();
-    expect(cardTexts.join(" ")).toContain("Test Event");
-  });
-
-  test("event card shows cache delay editor", async ({ page }) => {
-    await page.goto("/settings");
-    await page.waitForTimeout(1000);
-    const section = page.locator('.settings-section:has(h3:text("Events"))');
-    // Should have cache delay input
-    const cacheInput = section.locator(".cache-delay-input").first();
-    await expect(cacheInput).toBeVisible({ timeout: 5000 });
-  });
-
-  test("cache delay save calls PATCH API", async ({ page }) => {
-    await page.goto("/settings");
-    await page.waitForTimeout(1000);
-    const section = page.locator('.settings-section:has(h3:text("Events"))');
-    const cacheInput = section.locator(".cache-delay-input").first();
-    await cacheInput.fill("300");
-
-    // Intercept the PATCH call
-    const [request] = await Promise.all([
-      page.waitForRequest(
-        (req) => req.url().includes("/events/") && req.method() === "PATCH",
-      ),
-      section.locator(".btn-small").first().click(),
-    ]);
-    const body = request.postDataJSON();
-    expect(body.cache_delay_secs).toBe(300);
   });
 
   test("endpoint list shows existing endpoints with aliases", async ({
@@ -940,6 +955,107 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await expect(cacheLabel).toContainText("90s / 120s cache");
   });
 
+  // Regression test for the per-endpoint cache label bug. The dashboard
+  // previously displayed a single global `ps.cache_duration_secs` on every
+  // endpoint's cache bar, so two endpoints with very different per-endpoint
+  // delays would both show the same label. This hid drift on individual
+  // endpoints and made it look like "all endpoints are going down" when in
+  // fact only a subset were affected. This test asserts each endpoint's
+  // cache label shows ITS OWN chunk_delay_secs.
+  test("per-endpoint cache label shows individual chunk_delay_secs", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    // Broadcast PipelineState with a global cache_duration_secs that is
+    // DIFFERENT from both endpoint delays below. If the dashboard
+    // accidentally uses this global value for per-endpoint cache bars,
+    // both endpoints would show "75s" instead of their individual delays.
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "PipelineState",
+        data: {
+          state: "streaming",
+          event_id: 1,
+          event_name: "Test Event",
+          target_delay_secs: 120,
+          session_start: null,
+          local_buffer_chunks: 0,
+          s3_queue_chunks: 38,
+          cache_duration_secs: 75.0,
+        },
+      },
+    });
+
+    // Two endpoints with very different per-endpoint delays:
+    //   - YT stable:  chunk_delay_secs = 118s (healthy)
+    //   - FB drifted: chunk_delay_secs = 35s (critical, e.g., stale key)
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "e2e-vps",
+          status: "delivering",
+          server_ip: "1.2.3.4",
+          endpoint_count: 2,
+          endpoints: [
+            {
+              alias: "YT Stable",
+              alive: true,
+              current_chunk_id: 500,
+              bytes_processed_total: 2000000,
+              chunks_processed: 500,
+              chunk_delay_secs: 118.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+              is_fast: false,
+            },
+            {
+              alias: "FB Drifted",
+              alive: true,
+              current_chunk_id: 535,
+              bytes_processed_total: 1500000,
+              chunks_processed: 500,
+              chunk_delay_secs: 35.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 12,
+              last_error: "ffmpeg stdin closed",
+              is_fast: false,
+            },
+          ],
+        },
+      },
+    });
+
+    // Wait for both endpoints to render
+    await expect(page.locator(".endpoint-node")).toHaveCount(2, {
+      timeout: 5000,
+    });
+
+    // Each endpoint must display ITS OWN chunk_delay_secs, not the shared
+    // global (75s). Scope the cache label lookup to each endpoint node.
+    const ytNode = page.locator(".endpoint-node", { hasText: "YT Stable" });
+    const fbNode = page.locator(".endpoint-node", { hasText: "FB Drifted" });
+
+    await expect(ytNode.locator(".endpoint-cache-label")).toContainText(
+      "118s / 120s cache",
+    );
+    await expect(fbNode.locator(".endpoint-cache-label")).toContainText(
+      "35s / 120s cache",
+    );
+
+    // Bar color must also reflect per-endpoint delay: YT is healthy (>75%),
+    // FB is critical (<40%).
+    await expect(
+      ytNode.locator(".buffer-bar-fill.healthy"),
+    ).toBeVisible();
+    await expect(
+      fbNode.locator(".buffer-bar-fill.critical"),
+    ).toBeVisible();
+  });
+
   test("cache bar color changes with delay level", async ({ page }) => {
     await page.goto("/");
     await page.waitForTimeout(1000);
@@ -985,7 +1101,10 @@ test.describe("Per-Endpoint Cache Bar", () => {
     const warningBar = page.locator(".endpoint-node .buffer-bar-fill.warning");
     await expect(warningBar).toBeVisible({ timeout: 5000 });
 
-    // Critical level: cache_duration_secs = 10 (8% of 120)
+    // Critical level: chunk_delay_secs = 10 (8% of 120). Update BOTH the
+    // per-endpoint delay and the pipeline cache_duration_secs. The cache bar
+    // now reads per-endpoint chunk_delay_secs (see commit 018af89), so a
+    // pipeline-only update is insufficient.
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -998,6 +1117,28 @@ test.describe("Per-Endpoint Cache Bar", () => {
           local_buffer_chunks: 0,
           s3_queue_chunks: 22,
           cache_duration_secs: 10.0,
+        },
+      },
+    });
+    await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "e2e-vps",
+          status: "delivering",
+          server_ip: "1.2.3.4",
+          endpoint_count: 1,
+          endpoints: [
+            {
+              alias: "e2e rtmp",
+              alive: true,
+              current_chunk_id: 22,
+              bytes_processed_total: 1100000,
+              chunks_processed: 22,
+              chunk_delay_secs: 10.0,
+              is_fast: false,
+            },
+          ],
         },
       },
     });
@@ -1675,5 +1816,276 @@ test.describe("PWA Manifest", () => {
     expect(manifest.name).toBe("Restreamer");
     expect(manifest.display).toBe("standalone");
     expect(manifest.theme_color).toBe("#0f172a");
+  });
+});
+
+// --- Templates Management ---
+
+test.describe("Templates Management", () => {
+  test("templates tab shows template list", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    // Click the Templates tab
+    await page.locator(".settings-tabs button:has-text('Templates')").click();
+    await page.waitForTimeout(1000);
+
+    // Should show the templates-tab container
+    await expect(page.locator(".templates-tab")).toBeVisible({ timeout: 5000 });
+
+    // Should show 2 mock template cards
+    await expect(
+      page.locator(".templates-tab .items-list .settings-card"),
+    ).toHaveCount(2, { timeout: 5000 });
+  });
+
+  test("create template calls POST /api/v1/templates", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Templates')").click();
+    await expect(page.locator(".templates-tab")).toBeVisible({ timeout: 5000 });
+
+    // Intercept the POST request
+    const requestPromise = page.waitForRequest(
+      (req) =>
+        req.url().includes("/api/v1/templates") && req.method() === "POST",
+    );
+
+    // Fill the template name input and click Create
+    await page
+      .locator('.templates-tab .create-form input[placeholder="Template name"]')
+      .fill("special-event");
+    await page
+      .locator(".templates-tab .create-form button:has-text('Create Template')")
+      .click();
+
+    const request = await requestPromise;
+    const body = request.postDataJSON();
+    expect(body.name).toBe("special-event");
+  });
+
+  test("delete template calls DELETE /api/v1/templates/:id", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Templates')").click();
+    await expect(
+      page.locator(".templates-tab .items-list .settings-card"),
+    ).toHaveCount(2, { timeout: 5000 });
+
+    const requestPromise = page.waitForRequest(
+      (req) =>
+        req.url().match(/\/api\/v1\/templates\/\d+$/) !== null &&
+        req.method() === "DELETE",
+    );
+
+    // Click delete on first template card
+    await page
+      .locator(".templates-tab .items-list .settings-card")
+      .first()
+      .locator("button.btn-danger")
+      .click();
+
+    const request = await requestPromise;
+    expect(request.url()).toMatch(/\/api\/v1\/templates\/\d+$/);
+  });
+});
+
+// --- Events Management Tab ---
+
+test.describe("Events Management Tab", () => {
+  test("events tab shows event list", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    // Click the Events tab
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await page.waitForTimeout(1000);
+
+    // Should show the events-management-tab container
+    await expect(page.locator(".events-management-tab")).toBeVisible({
+      timeout: 5000,
+    });
+
+    // Should show 2 mock event cards
+    await expect(
+      page.locator(".events-management-tab .items-list .settings-card"),
+    ).toHaveCount(2, { timeout: 5000 });
+  });
+
+  test("create event from template opens picker modal", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await expect(page.locator(".events-management-tab")).toBeVisible({
+      timeout: 5000,
+    });
+
+    // Click "New from Template" button
+    await page
+      .locator(".events-management-tab button.btn-primary:has-text('New from Template')")
+      .click();
+
+    // Modal should appear
+    await expect(page.locator(".modal-overlay")).toBeVisible({ timeout: 3000 });
+    await expect(
+      page.locator(".confirm-modal-title:has-text('New Event from Template')"),
+    ).toBeVisible();
+
+    // Should list the 2 mock templates as picker buttons
+    await expect(page.locator(".template-pick-btn")).toHaveCount(2, {
+      timeout: 5000,
+    });
+
+    // Dismiss modal
+    await page.locator(".modal-cancel-btn").click();
+    await expect(page.locator(".modal-overlay")).not.toBeVisible();
+  });
+
+  test("create event from template calls POST /api/v1/events with template_id", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await expect(page.locator(".events-management-tab")).toBeVisible({
+      timeout: 5000,
+    });
+
+    // Open the template picker
+    await page
+      .locator(".events-management-tab button.btn-primary:has-text('New from Template')")
+      .click();
+    await expect(page.locator(".template-pick-btn")).toHaveCount(2, {
+      timeout: 5000,
+    });
+
+    // Intercept the POST /events request
+    const requestPromise = page.waitForRequest(
+      (req) =>
+        req.url().includes("/api/v1/events") && req.method() === "POST",
+    );
+
+    // Click on the first template (sunday-service, id=1)
+    await page
+      .locator(".template-pick-btn:has-text('sunday-service')")
+      .click();
+
+    const request = await requestPromise;
+    const body = request.postDataJSON();
+    expect(body.template_id).toBe(1);
+  });
+
+  test("delete event shows confirmation modal", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await expect(
+      page.locator(".events-management-tab .items-list .settings-card"),
+    ).toHaveCount(2, { timeout: 5000 });
+
+    // Click delete on the first non-streaming event
+    await page
+      .locator(".events-management-tab .items-list .settings-card")
+      .first()
+      .locator("button.btn-danger:has-text('Delete + Cleanup')")
+      .click();
+
+    // Confirmation modal should appear
+    await expect(page.locator(".confirm-modal")).toBeVisible({ timeout: 3000 });
+    await expect(
+      page.locator(".confirm-modal-title:has-text('Delete Event')"),
+    ).toBeVisible();
+    await expect(page.locator(".confirm-modal-message")).toContainText(
+      "clean up S3 chunks",
+    );
+
+    // Cancel to clean up
+    await page.locator(".modal-cancel-btn").click();
+    await expect(page.locator(".modal-overlay")).not.toBeVisible();
+  });
+
+  test("delete event confirm calls DELETE /api/v1/events/:id", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await expect(
+      page.locator(".events-management-tab .items-list .settings-card"),
+    ).toHaveCount(2, { timeout: 5000 });
+
+    // Click delete on the first event
+    await page
+      .locator(".events-management-tab .items-list .settings-card")
+      .first()
+      .locator("button.btn-danger:has-text('Delete + Cleanup')")
+      .click();
+
+    await expect(page.locator(".confirm-modal")).toBeVisible({ timeout: 3000 });
+
+    const requestPromise = page.waitForRequest(
+      (req) =>
+        req.url().match(/\/api\/v1\/events\/\d+$/) !== null &&
+        req.method() === "DELETE",
+    );
+
+    // Confirm the deletion
+    await page.locator(".confirm-btn-danger").click();
+
+    const request = await requestPromise;
+    expect(request.url()).toMatch(/\/api\/v1\/events\/\d+$/);
+  });
+
+  test("event card shows assigned endpoint badges", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await page.waitForTimeout(1000);
+
+    // Find the first event card and verify endpoint tag(s) visible inside it
+    const firstCard = page
+      .locator(".events-management-tab .settings-card")
+      .first();
+    await expect(firstCard.locator(".endpoint-tag")).toHaveCount(1, {
+      timeout: 5000,
+    });
+  });
+
+  test("event card shows editable cache delay input", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    await page.locator(".settings-tabs button:has-text('Events')").click();
+    await page.waitForTimeout(1000);
+
+    const firstCard = page
+      .locator(".events-management-tab .settings-card")
+      .first();
+    await expect(firstCard.locator(".cache-delay-input")).toBeVisible({
+      timeout: 5000,
+    });
+  });
+
+  test("Config tab no longer shows Events section", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".settings-page")).toBeVisible({ timeout: 10000 });
+
+    // Click Config tab
+    await page.locator(".settings-tabs button:has-text('Config')").click();
+    await page.waitForTimeout(500);
+
+    // Verify no h3 with text "Events" appears in the Config tab content
+    // (the OLD EventsSection had <h3>"Events"</h3>)
+    const eventsHeader = page.locator(".settings-section h3:text-is('Events')");
+    await expect(eventsHeader).toHaveCount(0);
   });
 });
