@@ -169,6 +169,91 @@ pub fn endpoint_url_for_service(service_type: ServiceType, stream_key: &str) -> 
     }
 }
 
+/// Run the rescue ffmpeg loop: spawn rescue ffmpeg, update countdown every 5s,
+/// wait until buffer is refilled or stop signal received.
+///
+/// Returns `true` if a stop signal was received (caller should exit),
+/// `false` if the buffer was refilled and normal delivery can resume.
+pub async fn run_rescue_loop(
+    alias: &str,
+    rescue_url: &str,
+    service_type: rs_ffmpeg::ServiceType,
+    stream_key: &str,
+    buffer_state: &std::sync::Arc<crate::endpoint_task::BufferState>,
+    stats: &crate::endpoint_task::Stats,
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    let ep_url = endpoint_url_for_service(service_type, stream_key);
+    let out_fmt = output_format_for_service(service_type);
+    let rescue_args = build_rescue_ffmpeg_args(rescue_url, &ep_url, out_fmt, alias);
+
+    let initial_text = format_countdown_text(
+        &DeliveryMode::Rescue {
+            reason: RescueReason::BufferEmpty,
+        },
+        RESCUE_REFILL_TARGET_SECS,
+    );
+    write_countdown_file(alias, &initial_text);
+
+    let mut rescue_proc = match tokio::process::Command::new("ffmpeg")
+        .args(&rescue_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(alias, "Failed to spawn rescue ffmpeg: {e}");
+            cleanup_countdown_file(alias);
+            return false;
+        }
+    };
+
+    tracing::info!(alias, "Rescue ffmpeg started");
+
+    let target_ms = RESCUE_REFILL_TARGET_SECS * 1000;
+    let should_stop = loop {
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                let buf_ms = buffer_state.buffer_duration_ms.load(std::sync::atomic::Ordering::Relaxed);
+                let eta_secs = if buf_ms >= target_ms { 0 } else { (target_ms - buf_ms) / 1000 };
+
+                let text = format_countdown_text(
+                    &DeliveryMode::Rescue { reason: RescueReason::BufferEmpty },
+                    eta_secs,
+                );
+                write_countdown_file(alias, &text);
+
+                {
+                    let mut s = stats.lock().await;
+                    s.delivery_mode = if buffer_state.producer_active.load(std::sync::atomic::Ordering::Relaxed) {
+                        "recovering".to_string()
+                    } else {
+                        "rescue".to_string()
+                    };
+                    s.rescue_eta_secs = Some(eta_secs);
+                }
+
+                if buf_ms >= target_ms {
+                    tracing::info!(alias, buf_ms, "Buffer refilled, exiting rescue mode");
+                    break false;
+                }
+            }
+            _ = stop_rx.changed() => {
+                if *stop_rx.borrow() {
+                    break true;
+                }
+            }
+        }
+    };
+
+    let _ = rescue_proc.kill().await;
+    cleanup_countdown_file(alias);
+    should_stop
+}
+
 #[cfg(test)]
 #[path = "rescue_tests.rs"]
 mod tests;

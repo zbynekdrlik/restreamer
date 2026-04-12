@@ -12,75 +12,8 @@ use tokio::task::JoinHandle;
 use crate::api::{EndpointConfig, S3Config};
 use crate::s3_fetch::S3Fetcher;
 
-/// FLV stream normalizer: strips duplicate FLV headers and sequence headers
-/// from concatenated FLV chunks, producing a single continuous FLV stream.
-pub struct FlvStreamNormalizer {
-    sent_header: bool,
-}
-
-impl Default for FlvStreamNormalizer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FlvStreamNormalizer {
-    pub fn new() -> Self {
-        Self { sent_header: false }
-    }
-
-    /// Normalize an FLV chunk for continuous streaming.
-    /// First chunk: pass through as-is (has FLV header + sequence headers).
-    /// Subsequent chunks: strip FLV header (9+4 bytes) and sequence header tags,
-    /// keeping only data tags.
-    pub fn normalize(&mut self, data: &[u8]) -> Vec<u8> {
-        // Not valid FLV -- pass through raw
-        if data.len() < 13 || &data[0..3] != b"FLV" {
-            return data.to_vec();
-        }
-
-        if !self.sent_header {
-            // First chunk: send everything as-is
-            self.sent_header = true;
-            return data.to_vec();
-        }
-
-        // Subsequent chunks: skip FLV header and sequence header tags
-        let mut offset = 9 + 4; // Skip FLV header + first prev_tag_size
-        let mut result = Vec::with_capacity(data.len());
-
-        while offset + 11 <= data.len() {
-            let tag_type = data[offset];
-            if tag_type != 8 && tag_type != 9 && tag_type != 18 {
-                break;
-            }
-
-            let data_size = ((data[offset + 1] as u32) << 16)
-                | ((data[offset + 2] as u32) << 8)
-                | (data[offset + 3] as u32);
-
-            let tag_total = 11 + data_size as usize + 4; // header + body + prev_tag_size
-
-            if offset + tag_total > data.len() {
-                break;
-            }
-
-            // Check if this is a sequence header (skip it -- already sent in first chunk)
-            let is_seq_header = (tag_type == 9 || tag_type == 8)
-                && offset + 12 < data.len()
-                && data[offset + 12] == 0x00;
-
-            if !is_seq_header {
-                // Copy data tag as-is (with absolute timestamps from xiu)
-                result.extend_from_slice(&data[offset..offset + tag_total]);
-            }
-
-            offset += tag_total;
-        }
-
-        result
-    }
-}
+mod flv_normalizer;
+pub use flv_normalizer::FlvStreamNormalizer;
 
 const MAX_FFMPEG_RESTARTS: u32 = 10;
 const MAX_CHUNK_MISS_COUNT: u32 = 40; // ~80s at 2s polls
@@ -369,6 +302,7 @@ impl EndpointHandle {
 
 /// Producer task: fetches chunks from S3 and sends them into the bounded channel.
 /// Blocks on channel send when buffer is full (backpressure).
+#[allow(clippy::too_many_arguments)]
 async fn producer_task<F: ChunkFetcher>(
     fetcher: F,
     tx: mpsc::Sender<PrefetchedChunk>,
@@ -531,6 +465,7 @@ async fn producer_task<F: ChunkFetcher>(
 /// producer would catch up to the latest S3 chunk, skip-ahead would fire,
 /// and the configured cache delay would collapse to ~0s permanently. The
 /// anchor is preserved across ffmpeg restarts so the delay is maintained.
+#[allow(clippy::too_many_arguments)]
 async fn consumer_task<P: OutputProcessFactory>(
     mut rx: mpsc::Receiver<PrefetchedChunk>,
     factory: P,
@@ -723,100 +658,37 @@ async fn consumer_task<P: OutputProcessFactory>(
                     if !buffer_state.producer_active.load(AtomicOrdering::Relaxed) {
                         tracing::warn!(alias = %alias, "Consumer: buffer empty + producer stalled, entering rescue mode");
 
-                        // Kill current ffmpeg
+                        // Kill current ffmpeg before entering rescue
                         if let Some(mut p) = proc.take() {
                             p.kill().await;
                         }
-
-                        // Update stats
+                        // Update stats to rescue mode
                         {
                             let mut s = stats.lock().await;
                             s.delivery_mode = "rescue".to_string();
                             s.rescue_eta_secs = Some(crate::rescue::RESCUE_REFILL_TARGET_SECS);
                         }
-
-                        // Spawn rescue ffmpeg
-                        let svc_type: rs_ffmpeg::ServiceType = ep_cfg.service_type.parse().unwrap_or(rs_ffmpeg::ServiceType::TestFile);
-                        let ep_url = crate::rescue::endpoint_url_for_service(svc_type, &ep_cfg.stream_key);
-                        let out_fmt = crate::rescue::output_format_for_service(svc_type);
-                        let rescue_args = crate::rescue::build_rescue_ffmpeg_args(rescue_url, &ep_url, out_fmt, &alias);
-
-                        // Write initial countdown
-                        let initial_text = crate::rescue::format_countdown_text(
-                            &crate::rescue::DeliveryMode::Rescue { reason: crate::rescue::RescueReason::BufferEmpty },
-                            crate::rescue::RESCUE_REFILL_TARGET_SECS,
-                        );
-                        crate::rescue::write_countdown_file(&alias, &initial_text);
-
-                        // Spawn rescue ffmpeg process
-                        let mut rescue_proc = match tokio::process::Command::new("ffmpeg")
-                            .args(&rescue_args)
-                            .stdin(std::process::Stdio::null())
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .kill_on_drop(true)
-                            .spawn()
-                        {
-                            Ok(p) => p,
-                            Err(e) => {
-                                tracing::error!(alias = %alias, "Failed to spawn rescue ffmpeg: {e}");
-                                continue;
-                            }
-                        };
-
-                        tracing::info!(alias = %alias, "Consumer: rescue ffmpeg started");
-
-                        let target_ms = crate::rescue::RESCUE_REFILL_TARGET_SECS * 1000;
-                        loop {
-                            tokio::select! {
-                                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                                    let buf_ms = buffer_state.buffer_duration_ms.load(AtomicOrdering::Relaxed);
-                                    let eta_secs = if buf_ms >= target_ms { 0 } else { (target_ms - buf_ms) / 1000 };
-
-                                    let text = crate::rescue::format_countdown_text(
-                                        &crate::rescue::DeliveryMode::Rescue { reason: crate::rescue::RescueReason::BufferEmpty },
-                                        eta_secs,
-                                    );
-                                    crate::rescue::write_countdown_file(&alias, &text);
-
-                                    {
-                                        let mut s = stats.lock().await;
-                                        s.delivery_mode = if buffer_state.producer_active.load(AtomicOrdering::Relaxed) {
-                                            "recovering".to_string()
-                                        } else {
-                                            "rescue".to_string()
-                                        };
-                                        s.rescue_eta_secs = Some(eta_secs);
-                                    }
-
-                                    if buf_ms >= target_ms {
-                                        tracing::info!(alias = %alias, buf_ms, "Consumer: buffer refilled, exiting rescue mode");
-                                        break;
-                                    }
-                                }
-                                _ = stop_rx.changed() => {
-                                    if *stop_rx.borrow() {
-                                        let _ = rescue_proc.kill().await;
-                                        crate::rescue::cleanup_countdown_file(&alias);
-                                        // Kill proc and exit outer loop
-                                        return;
-                                    }
-                                }
-                            }
+                        let svc_type: rs_ffmpeg::ServiceType =
+                            ep_cfg.service_type.parse().unwrap_or(rs_ffmpeg::ServiceType::TestFile);
+                        let should_stop = crate::rescue::run_rescue_loop(
+                            &alias,
+                            rescue_url,
+                            svc_type,
+                            &ep_cfg.stream_key,
+                            &buffer_state,
+                            &stats,
+                            &mut stop_rx,
+                        )
+                        .await;
+                        if should_stop {
+                            return;
                         }
-
-                        // Kill rescue ffmpeg and clean up
-                        let _ = rescue_proc.kill().await;
-                        crate::rescue::cleanup_countdown_file(&alias);
-
-                        // Update stats back to normal
+                        // Rescue complete — reset to normal delivery
                         {
                             let mut s = stats.lock().await;
                             s.delivery_mode = "normal".to_string();
                             s.rescue_eta_secs = None;
                         }
-
-                        // Reset normalizer for fresh ffmpeg
                         flv_normalizer = FlvStreamNormalizer::new();
                         tracing::info!(alias = %alias, "Consumer: resumed normal delivery");
                     }
@@ -1119,3 +991,7 @@ mod backoff_tests;
 #[cfg(test)]
 #[path = "endpoint_task_rescue_tests.rs"]
 mod rescue_tests;
+
+#[cfg(test)]
+#[path = "endpoint_task_flv_tests.rs"]
+mod flv_tests;

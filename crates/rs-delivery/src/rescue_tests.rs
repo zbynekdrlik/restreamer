@@ -1,4 +1,4 @@
-use super::rescue::*;
+use super::*;
 
 #[test]
 fn build_rescue_ffmpeg_args_rtmp_endpoint() {
