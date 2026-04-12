@@ -536,3 +536,110 @@ pub async fn create_event_from_template(
 
     Ok((event_id, event_name))
 }
+
+/// Row from the delivery_restart_log table.
+#[derive(Debug, serde::Serialize)]
+pub struct DeliveryRestartRow {
+    pub alias: String,
+    pub timestamp_ms: i64,
+    pub chunk_id: i64,
+    pub lifetime_secs: i64,
+    pub reason: String,
+    pub stderr_tail: Option<String>,
+    pub backoff_secs: i64,
+}
+
+// --- Delivery Log Capture ---
+
+/// Insert a single ffmpeg restart record. Deduplicates on (instance_id, alias, timestamp_ms).
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_delivery_restart_record(
+    pool: &SqlitePool,
+    instance_id: i64,
+    event_id: Option<i64>,
+    alias: &str,
+    timestamp_ms: i64,
+    chunk_id: i64,
+    lifetime_secs: i64,
+    reason: &str,
+    stderr_tail: Option<&str>,
+    backoff_secs: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO delivery_restart_log
+             (instance_id, event_id, alias, timestamp_ms, chunk_id, lifetime_secs, reason, stderr_tail, backoff_secs)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
+         WHERE NOT EXISTS (
+             SELECT 1 FROM delivery_restart_log
+             WHERE instance_id = ?1 AND alias = ?3 AND timestamp_ms = ?4
+         )",
+    )
+    .bind(instance_id)
+    .bind(event_id)
+    .bind(alias)
+    .bind(timestamp_ms)
+    .bind(chunk_id)
+    .bind(lifetime_secs)
+    .bind(reason)
+    .bind(stderr_tail)
+    .bind(backoff_secs)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Get all restart records for a delivery instance, ordered by timestamp.
+pub async fn get_delivery_restart_log(
+    pool: &SqlitePool,
+    instance_id: i64,
+) -> Result<Vec<DeliveryRestartRow>> {
+    let rows = sqlx::query(
+        "SELECT alias, timestamp_ms, chunk_id, lifetime_secs, reason, stderr_tail, backoff_secs
+         FROM delivery_restart_log
+         WHERE instance_id = ?1
+         ORDER BY timestamp_ms ASC",
+    )
+    .bind(instance_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| DeliveryRestartRow {
+            alias: r.get("alias"),
+            timestamp_ms: r.get("timestamp_ms"),
+            chunk_id: r.get("chunk_id"),
+            lifetime_secs: r.get("lifetime_secs"),
+            reason: r.get("reason"),
+            stderr_tail: r.get("stderr_tail"),
+            backoff_secs: r.get("backoff_secs"),
+        })
+        .collect())
+}
+
+/// Store captured VPS log text for a delivery instance.
+pub async fn insert_delivery_log(
+    pool: &SqlitePool,
+    instance_id: i64,
+    event_id: Option<i64>,
+    log_text: &str,
+) -> Result<()> {
+    sqlx::query("INSERT INTO delivery_logs (instance_id, event_id, log_text) VALUES (?1, ?2, ?3)")
+        .bind(instance_id)
+        .bind(event_id)
+        .bind(log_text)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Get the captured log text for a delivery instance (most recent capture).
+pub async fn get_delivery_log(pool: &SqlitePool, instance_id: i64) -> Result<Option<String>> {
+    let row = sqlx::query(
+        "SELECT log_text FROM delivery_logs WHERE instance_id = ?1 ORDER BY id DESC LIMIT 1",
+    )
+    .bind(instance_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.get("log_text")))
+}
