@@ -214,12 +214,28 @@ pub async fn run_rescue_loop(
 
     tracing::info!(alias, "Rescue ffmpeg started");
 
-    let target_ms = RESCUE_REFILL_TARGET_SECS * 1000;
+    // Exit condition: producer must be active (finding chunks on S3) for
+    // RESCUE_REFILL_TARGET_SECS continuous seconds. This proves OBS is back
+    // streaming AND enough time has passed to refill the cache window.
+    //
+    // The original design tracked `buffer_duration_ms` via the producer, but
+    // that counter is capped by the prefetch channel capacity (10 chunks /
+    // ~20s) because the consumer is blocked in rescue mode — so it could
+    // never reach the 120s target. A time-based check sidesteps that and
+    // correctly models "OBS is back and stable".
+    let target_secs = RESCUE_REFILL_TARGET_SECS;
+    let mut continuous_active_secs: u64 = 0;
     let should_stop = loop {
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                let buf_ms = buffer_state.buffer_duration_ms.load(std::sync::atomic::Ordering::Relaxed);
-                let eta_secs = if buf_ms >= target_ms { 0 } else { (target_ms - buf_ms) / 1000 };
+                let is_active = buffer_state.producer_active.load(std::sync::atomic::Ordering::Relaxed);
+                if is_active {
+                    continuous_active_secs = continuous_active_secs.saturating_add(5);
+                } else {
+                    continuous_active_secs = 0;
+                }
+
+                let eta_secs = target_secs.saturating_sub(continuous_active_secs);
 
                 let text = format_countdown_text(
                     &DeliveryMode::Rescue { reason: RescueReason::BufferEmpty },
@@ -229,7 +245,7 @@ pub async fn run_rescue_loop(
 
                 {
                     let mut s = stats.lock().await;
-                    s.delivery_mode = if buffer_state.producer_active.load(std::sync::atomic::Ordering::Relaxed) {
+                    s.delivery_mode = if is_active {
                         "recovering".to_string()
                     } else {
                         "rescue".to_string()
@@ -237,8 +253,12 @@ pub async fn run_rescue_loop(
                     s.rescue_eta_secs = Some(eta_secs);
                 }
 
-                if buf_ms >= target_ms {
-                    tracing::info!(alias, buf_ms, "Buffer refilled, exiting rescue mode");
+                if continuous_active_secs >= target_secs {
+                    tracing::info!(
+                        alias,
+                        continuous_active_secs,
+                        "Producer active for target window, exiting rescue mode"
+                    );
                     break false;
                 }
             }
