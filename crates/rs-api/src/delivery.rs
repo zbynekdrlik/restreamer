@@ -452,6 +452,7 @@ impl DeliveryOrchestrator {
             "event_identifier": event_name,
             "start_chunk_id": start_chunk_id,
             "delivery_delay_ms": target_delay_ms,
+            "rescue_video_url": event.rescue_video_url,
         });
 
         let resp = client
