@@ -2093,7 +2093,7 @@ test.describe("Events Management Tab", () => {
     const rescueInput = firstCard
       .locator(".cache-edit")
       .filter({ hasText: "Rescue video URL:" })
-      .locator("input.cache-delay-input");
+      .locator("input.rescue-video-input");
     await expect(rescueInput).toBeVisible({ timeout: 5000 });
 
     // Track PATCH requests to verify the value is sent

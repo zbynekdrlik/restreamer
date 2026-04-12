@@ -282,7 +282,7 @@ fn RescueVideoEditor(event_id: i64, initial_url: Option<String>) -> impl IntoVie
             <label>"Rescue video URL:"</label>
             <input
                 type="text"
-                class="cache-delay-input"
+                class="rescue-video-input"
                 placeholder="https://s3.example.com/rescue-video.mp4"
                 prop:value=move || url_value.get()
                 on:input=move |ev| url_value.set(event_target_value(&ev))
