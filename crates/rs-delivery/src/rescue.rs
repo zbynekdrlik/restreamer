@@ -174,6 +174,7 @@ pub fn endpoint_url_for_service(service_type: ServiceType, stream_key: &str) -> 
 ///
 /// Returns `true` if a stop signal was received (caller should exit),
 /// `false` if the buffer was refilled and normal delivery can resume.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_rescue_loop(
     alias: &str,
     rescue_url: &str,
