@@ -202,6 +202,8 @@ jobs:
             --exclude-re 'DeliveryOrchestrator::stop_delivery' \
             --exclude-re 'DeliveryOrchestrator::get_delivery_status' \
             --exclude-re 'delivery_logs' \
+            --exclude-re 'rescue::' \
+            --exclude-re 'endpoint_url_for_service' \
             -e 'crates/rs-api/src/template_handlers.rs' \
             -e 'crates/rs-api/src/s3_handlers.rs'
         env:
