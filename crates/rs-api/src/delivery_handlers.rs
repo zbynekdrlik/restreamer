@@ -122,6 +122,10 @@ pub struct DeliveryEndpointEntry {
     pub last_error: Option<String>,
     pub is_fast: bool,
     pub restart_history: Vec<crate::delivery::EndpointRestartRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rescue_eta_secs: Option<u64>,
 }
 
 pub async fn delivery_status(
@@ -157,6 +161,8 @@ pub async fn delivery_status(
             last_error: ep.last_error,
             is_fast: ep.is_fast,
             restart_history: ep.restart_history,
+            delivery_mode: ep.delivery_mode,
+            rescue_eta_secs: ep.rescue_eta_secs,
         })
         .collect();
     let endpoints_alive =

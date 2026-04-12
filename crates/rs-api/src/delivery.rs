@@ -79,6 +79,14 @@ pub struct EndpointDeliveryStatus {
     /// field's introduction.
     #[serde(default)]
     pub restart_history: Vec<EndpointRestartRecord>,
+    /// Current delivery mode: "normal", "warmup", "rescue", or "recovering".
+    /// None when the rs-delivery binary on the VPS is older than the
+    /// rescue-mode feature.
+    #[serde(default)]
+    pub delivery_mode: Option<String>,
+    /// ETA in seconds until rescue mode exits. None when not in rescue mode.
+    #[serde(default)]
+    pub rescue_eta_secs: Option<u64>,
 }
 
 /// Result of querying YouTube status.
@@ -521,6 +529,9 @@ impl DeliveryOrchestrator {
                             let last_error = entry["last_error"].as_str().map(|s| s.to_string());
                             let ffmpeg_last_stderr =
                                 entry["ffmpeg_last_stderr"].as_str().map(|s| s.to_string());
+                            let delivery_mode =
+                                entry["delivery_mode"].as_str().map(|s| s.to_string());
+                            let rescue_eta_secs = entry["rescue_eta_secs"].as_u64();
                             let restart_history: Vec<EndpointRestartRecord> =
                                 entry["restart_history"]
                                     .as_array()
@@ -591,6 +602,8 @@ impl DeliveryOrchestrator {
                                 ffmpeg_last_stderr,
                                 is_fast: fast_map.get(&alias).copied().unwrap_or(false),
                                 restart_history,
+                                delivery_mode,
+                                rescue_eta_secs,
                             });
                         }
 
@@ -667,8 +680,8 @@ impl DeliveryOrchestrator {
                 ffmpeg_restart_count: ep.ffmpeg_restart_count,
                 last_error: ep.last_error,
                 is_fast: ep.is_fast,
-                delivery_mode: None,
-                rescue_eta_secs: None,
+                delivery_mode: ep.delivery_mode,
+                rescue_eta_secs: ep.rescue_eta_secs,
             })
             .collect();
 
