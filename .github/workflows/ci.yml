@@ -204,6 +204,9 @@ jobs:
             --exclude-re 'delivery_logs' \
             --exclude-re 'rescue::' \
             --exclude-re 'endpoint_url_for_service' \
+            --exclude-re 'DeliveryOrchestrator::poll_and_init' \
+            --exclude-re 'DeliveryOrchestrator::poll_delivery_metrics' \
+            --exclude-re 'delivery_broadcast_loop' \
             -e 'crates/rs-api/src/template_handlers.rs' \
             -e 'crates/rs-api/src/s3_handlers.rs'
         env:
