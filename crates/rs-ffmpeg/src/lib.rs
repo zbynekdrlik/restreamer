@@ -190,7 +190,7 @@ fn build_test_file_args(alias: &str) -> Vec<String> {
 }
 
 /// Max stderr lines to keep in the ring buffer.
-const STDERR_BUFFER_SIZE: usize = 5;
+const STDERR_BUFFER_SIZE: usize = 30;
 
 /// Managed ffmpeg process with stdin pipe for writing data.
 pub struct FfmpegProcess {

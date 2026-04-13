@@ -105,7 +105,17 @@ impl OutputProcess for FfmpegProcess {
     }
 
     fn last_stderr_line(&self) -> Option<String> {
-        rs_ffmpeg::FfmpegProcess::last_stderr_line(self)
+        // Return the full tail (up to STDERR_BUFFER_SIZE lines) joined with
+        // newlines so the persisted restart audit surfaces the REAL ffmpeg
+        // error. ffmpeg's final line is always the generic "Conversion
+        // failed!"; the actual cause (bad codec, invalid timestamp, 404,
+        // etc.) is in the lines before it.
+        let lines = rs_ffmpeg::FfmpegProcess::stderr_lines(self);
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
+        }
     }
 }
 

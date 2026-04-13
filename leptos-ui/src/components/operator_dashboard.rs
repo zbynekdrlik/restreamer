@@ -726,37 +726,27 @@ fn EndpointTree() -> impl IntoView {
                                     // = 0, so we fall back to the global
                                     // cache_duration_secs until delivery has
                                     // started.
-                                    let raw_cache_secs = if ep.chunks_processed > 0 {
+                                    let cache_secs = if ep.chunks_processed > 0 {
                                         ep.chunk_delay_secs
                                     } else {
                                         ps.cache_duration_secs
                                     };
-                                    // Cap displayed cache at the target. When no
-                                    // delivery is active (e.g. VPS not yet ready,
-                                    // or delivery stopped while OBS keeps
-                                    // streaming), S3 piles up chunks far beyond
-                                    // target — showing "905s / 60s" alarms the
-                                    // user even though everything is normal.
-                                    // The S3→VPS metric shows the actual queue
-                                    // depth separately.
-                                    let cache_secs = raw_cache_secs.min(target as f64);
+                                    // Bar fill caps at 100% visually (can't render past full),
+                                    // but the numeric label shows the TRUE cache seconds.
+                                    // If cache exceeds target the operator MUST see "905s / 60s"
+                                    // because that means delivery VPS has fallen behind — a real
+                                    // bug, not a cosmetic issue to be hidden with fancy labels.
                                     let progress = (cache_secs / target as f64).min(1.0);
-                                    let bar_class = if progress >= 0.75 {
+                                    let bar_class = if cache_secs > target as f64 * 1.1 {
+                                        "buffer-bar-fill critical"
+                                    } else if progress >= 0.75 {
                                         "buffer-bar-fill healthy"
                                     } else if progress >= 0.40 {
                                         "buffer-bar-fill warning"
                                     } else {
                                         "buffer-bar-fill critical"
                                     };
-                                    // Show backlog suffix if S3 has way more than
-                                    // target — gives operator visibility without
-                                    // alarming numbers in the main cache count.
-                                    let label = if raw_cache_secs > target as f64 * 1.1 {
-                                        let backlog_min = (raw_cache_secs / 60.0) as u64;
-                                        format!("{}s / {}s cache (+{}m backlog)", cache_secs as u64, target, backlog_min)
-                                    } else {
-                                        format!("{}s / {}s cache", cache_secs as u64, target)
-                                    };
+                                    let label = format!("{}s / {}s cache", cache_secs as u64, target);
                                     Some(view! {
                                         <div class="endpoint-cache">
                                             <div class="buffer-bar">

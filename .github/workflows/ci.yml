@@ -2976,69 +2976,111 @@ jobs:
           Write-Host "  CACHE DELAY VERIFIED: All $($epDelays.Count) endpoints >= ${minAcceptable}s"
           Write-Host "=========================================="
 
-      - name: Verify cache delay is stable (not growing)
+      - name: "STRICT: Steady-state delivery verification (3min sustained)"
         shell: powershell
         timeout-minutes: 5
         run: |
-          # TDD assertion: Cache delay should stabilize, not grow indefinitely.
-          # Take two readings 2 minutes apart. If delta > 15s, delivery is
-          # slower than real-time (the pacing bug).
+          # Sustained verification of delivery health during steady-state
+          # streaming. The whole point of the restreamer is that once OBS
+          # is streaming and the VPS buffer is filled, EVERYTHING should
+          # be rock-solid:
+          #   - Cache delay stays AT target (not growing, not oscillating)
+          #   - Zero ffmpeg restarts (VPS reads from S3 — nothing should
+          #     cause ffmpeg to die during normal operation)
+          #   - Endpoints remain alive
+          #
+          # Historical gap: previous "stable" check only compared two
+          # samples 2 min apart with 15s tolerance — hiding crash loops
+          # that happened once per minute.
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
+          $targetDelay = if ($targetEvent.cache_delay_secs) { $targetEvent.cache_delay_secs } else { 60 }
+          $maxAllowed = [math]::Round($targetDelay * 1.5)  # 50% tolerance above target
+          Write-Host "Target cache delay: ${targetDelay}s (fail if > ${maxAllowed}s)"
 
-          # Reading 1 — capture delay per endpoint
-          $resp1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
-          $delays1 = @{}
-          if ($resp1.endpoint_details) {
-            foreach ($ep in $resp1.endpoint_details) {
+          # Capture baseline restart counts — no new restarts allowed during window
+          $baselineResp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          $baselineRestarts = @{}
+          if ($baselineResp.endpoint_details) {
+            foreach ($ep in $baselineResp.endpoint_details) {
               if (-not $ep.is_fast) {
-                $delays1[$ep.alias] = $ep.chunk_delay_secs
-                Write-Host "Reading 1: [$($ep.alias)] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
+                $baselineRestarts[$ep.alias] = [int]$ep.ffmpeg_restart_count
+                Write-Host "Baseline: [$($ep.alias)] restarts=$($ep.ffmpeg_restart_count) delay=$($ep.chunk_delay_secs)s"
+              }
+            }
+          }
+          if ($baselineRestarts.Count -eq 0) {
+            throw "FAILED: No non-fast endpoints found in delivery status — cannot run steady-state check"
+          }
+
+          $samples = 12
+          $intervalSecs = 15  # 12 * 15s = 180s = 3min
+          $failures = @()
+
+          for ($i = 1; $i -le $samples; $i++) {
+            Start-Sleep -Seconds $intervalSecs
+            try {
+              $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+            } catch {
+              $failures += "Sample ${i}: delivery/status request failed: $_"
+              continue
+            }
+
+            if (-not $resp.endpoints_alive) {
+              $failures += "Sample ${i}: endpoints_alive=false"
+            }
+
+            foreach ($ep in $resp.endpoint_details) {
+              if ($ep.is_fast) { continue }
+              $alias = $ep.alias
+              $delay = [int]$ep.chunk_delay_secs
+              $restarts = [int]$ep.ffmpeg_restart_count
+              $baseRestarts = [int]$baselineRestarts[$alias]
+              $delta = $restarts - $baseRestarts
+              Write-Host "Sample ${i}/${samples} [$alias]: delay=${delay}s restarts=${restarts} (delta=${delta}) alive=$($ep.alive) stall=$($ep.stall_reason)"
+
+              if (-not $ep.alive) {
+                $failures += "Sample ${i}: [$alias] endpoint went alive=false (stall=$($ep.stall_reason))"
+              }
+              if ($delta -gt 0) {
+                $tail = if ($ep.ffmpeg_last_stderr) { $ep.ffmpeg_last_stderr } else { '<empty>' }
+                $failures += "Sample ${i}: [$alias] NEW ffmpeg restart (delta=${delta}). stderr_tail:`n${tail}"
+              }
+              if ($delay -gt $maxAllowed) {
+                $failures += "Sample ${i}: [$alias] cache delay ${delay}s exceeds max ${maxAllowed}s (target=${targetDelay}s) — VPS falling behind"
               }
             }
           }
 
-          # Wait 2 minutes
-          Write-Host "Waiting 2 minutes to check cache stability..."
-          Start-Sleep -Seconds 120
-
-          # Reading 2 — capture delay per endpoint
-          $resp2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
-          $delays2 = @{}
-          if ($resp2.endpoint_details) {
-            foreach ($ep in $resp2.endpoint_details) {
-              if (-not $ep.is_fast) {
-                $delays2[$ep.alias] = $ep.chunk_delay_secs
-                Write-Host "Reading 2: [$($ep.alias)] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
-              }
+          if ($failures.Count -gt 0) {
+            Write-Host ""
+            Write-Host "=========================================="
+            Write-Host "  STEADY-STATE VERIFICATION FAILED"
+            Write-Host "=========================================="
+            foreach ($f in $failures) {
+              Write-Host "FAIL: $f"
             }
-          }
-
-          # Check stability for EACH endpoint
-          Write-Host ""
-
-          $allStable = $true
-          foreach ($alias in $delays1.Keys) {
-            if ($delays2.ContainsKey($alias)) {
-              $d1 = $delays1[$alias]
-              $d2 = $delays2[$alias]
-              $delta = [math]::Abs($d2 - $d1)
-              Write-Host "  [$alias] delay: ${d1}s -> ${d2}s (delta: ${delta}s)"
-              if ($delta -gt 15) {
-                Write-Host "  FAIL: [$alias] cache delay grew by ${delta}s in 2 minutes"
-                $allStable = $false
+            # Dump restart history for forensics
+            try {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 10
+              foreach ($ep in $status.endpoint_details) {
+                if ($ep.restart_history) {
+                  Write-Host ""
+                  Write-Host "Restart history [$($ep.alias)]:"
+                  foreach ($r in $ep.restart_history) {
+                    Write-Host "  lifetime=$($r.lifetime_secs)s reason=$($r.reason) backoff=$($r.backoff_secs)s"
+                    if ($r.stderr_tail) { Write-Host "    stderr_tail:`n$($r.stderr_tail)" }
+                  }
+                }
               }
-            }
-          }
-
-          if (-not $allStable) {
-            throw "FAILED: One or more endpoints have unstable cache delay (delta > 15s over 2 min)"
+            } catch { Write-Host "Could not fetch restart history: $_" }
+            throw "FAILED: $($failures.Count) steady-state violation(s) over 3 minutes of streaming"
           }
 
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "  CACHE STABILITY VERIFIED: All endpoints delta < 15s"
+          Write-Host "  STEADY-STATE VERIFIED: 3min, 0 restarts, cache <= ${maxAllowed}s"
           Write-Host "=========================================="
 
       - name: "GATE: Verify YouTube stream health is 'good'"
@@ -3208,12 +3250,15 @@ jobs:
           Write-Host "Waiting 60s for chunk pipeline to stabilize..."
           Start-Sleep -Seconds 60
 
-          # Verify delivery endpoints are advancing
+          # Verify delivery endpoints are advancing AND zero ffmpeg restarts.
+          # VPS reads from S3 (not OBS) — OBS disconnect must not cause any
+          # ffmpeg restarts on the VPS. Any restart indicates a bug.
           $statusAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
           foreach ($ep in $statusAfter.endpoints) {
             Write-Host "Endpoint '$($ep.alias)': chunks=$($ep.chunks_processed), delay=$($ep.chunk_delay_secs)s, restarts=$($ep.ffmpeg_restart_count)"
-            if ($ep.ffmpeg_restart_count -gt 20) {
-              throw "FAILED: Endpoint '$($ep.alias)' has $($ep.ffmpeg_restart_count) ffmpeg restarts - crash loop detected"
+            if ($ep.ffmpeg_restart_count -gt 0) {
+              $tail = if ($ep.ffmpeg_last_stderr) { $ep.ffmpeg_last_stderr } else { '<empty>' }
+              throw "FAILED: Endpoint '$($ep.alias)' has $($ep.ffmpeg_restart_count) ffmpeg restart(s) after OBS disconnect. VPS reads from S3 and should be unaffected. stderr_tail:`n$tail"
             }
           }
 
