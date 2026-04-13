@@ -201,6 +201,9 @@ pub type Stats = Arc<Mutex<EndpointStats>>;
 ///
 /// Extracted from EndpointHandle::spawn to make the field-assignment
 /// mutation-testable without spinning up S3/ffmpeg infrastructure.
+/// Uses explicit assignment (not struct literal) so `delete stmt`
+/// mutations on each field are caught by unit tests.
+#[allow(clippy::field_reassign_with_default)]
 pub fn initial_endpoint_stats(start_chunk_id: i64, initial_mode: String) -> EndpointStats {
     let mut s = EndpointStats::default();
     s.current_chunk_id = start_chunk_id;
