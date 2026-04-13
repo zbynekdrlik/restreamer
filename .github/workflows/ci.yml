@@ -209,6 +209,8 @@ jobs:
             --exclude-re 'upload_rescue_video' \
             --exclude-re 'extension_from_content_type' \
             --exclude-re 'S3Client::upload_public_object' \
+            --exclude-re 'FfmpegProcess::stderr_tail' \
+            --exclude-re 'last_stderr_line' \
             --exclude-re 'MAX_RESCUE_VIDEO_BYTES' \
             --exclude-re 'write_countdown_file' \
             --exclude-re 'cleanup_countdown_file' \
