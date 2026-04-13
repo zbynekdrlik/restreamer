@@ -33,9 +33,10 @@ async fn delivery_instance_status_accepts_all_phases() {
     let pool = setup_db().await;
     create_streaming_event(&pool, "s-evt").await.unwrap();
     let evt_id = list_streaming_events(&pool).await.unwrap()[0].id;
-    let inst_id = create_delivery_instance(&pool, 12345, "tn", "1.2.3.4", "cpx22", Some(evt_id), "tok")
-        .await
-        .unwrap();
+    let inst_id =
+        create_delivery_instance(&pool, 12345, "tn", "1.2.3.4", "cpx22", Some(evt_id), "tok")
+            .await
+            .unwrap();
 
     for status in [
         "creating",
