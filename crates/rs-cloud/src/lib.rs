@@ -138,7 +138,7 @@ pub fn bootstrap_cloud_init(
 packages:
   - ffmpeg
   - curl
-  - python3-pip
+  - unzip
 
 write_files:
   - path: /opt/restreamer/rs-delivery.env
@@ -152,6 +152,7 @@ write_files:
       # Background watchdog: uploads rs-delivery.log to S3 every 15s so we
       # can post-mortem VPS startup crashes (rs-delivery binary dying before
       # its HTTP endpoint is reachable). Runs for the lifetime of the VPS.
+      # Nice-to-have: do nothing if aws CLI isn't installed yet.
       set +e
       set -a; source /opt/restreamer/rs-delivery.env; set +a
       export AWS_ACCESS_KEY_ID="$DELIVERY_S3_ACCESS_KEY_ID"
@@ -160,20 +161,34 @@ write_files:
       HN=$(hostname)
       S3_LOG="s3://$DELIVERY_S3_BUCKET/delivery-logs/$HN.log"
       while true; do
-        if [ -s /opt/restreamer/rs-delivery.log ]; then
+        if command -v aws >/dev/null 2>&1 && [ -s /opt/restreamer/rs-delivery.log ]; then
           aws s3 cp /opt/restreamer/rs-delivery.log "$S3_LOG" \
             --endpoint-url "$DELIVERY_S3_ENDPOINT" --quiet 2>&1 | head -5
         fi
         sleep 15
       done
+  - path: /opt/restreamer/install-awscli.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Install AWS CLI v2 from the official bundled installer (Ubuntu 24.04
+      # has no awscli apt package and pip install is blocked by PEP 668).
+      # This is a NICE-TO-HAVE for log capture; failures here must NOT block
+      # rs-delivery from starting.
+      set +e
+      curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+      unzip -qo /tmp/awscliv2.zip -d /tmp/
+      /tmp/aws/install --update --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli
+      rm -rf /tmp/awscliv2.zip /tmp/aws
   - path: /opt/restreamer/setup.sh
     permissions: '0755'
     content: |
       #!/bin/bash
+      # CRITICAL path: download rs-delivery and start it. Nothing here may
+      # fail silently. Log capture (awscli install) runs separately in the
+      # background and its failure does not block rs-delivery startup.
       set -ex
       mkdir -p /opt/restreamer
-      echo "[setup] Installing awscli..."
-      pip3 install awscli --quiet
       echo "[setup] Downloading binary..."
       curl -fsSL -o /opt/restreamer/rs-delivery "{delivery_binary_url}"
       chmod +x /opt/restreamer/rs-delivery
@@ -182,11 +197,13 @@ write_files:
       echo "[setup] Starting rs-delivery..."
       /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &
       RS_PID=$!
-      echo "[setup] Starting log uploader watchdog..."
+      echo "[setup] Starting log uploader watchdog (waits for awscli)..."
       nohup /opt/restreamer/log-uploader.sh > /var/log/log-uploader.log 2>&1 &
+      echo "[setup] Installing awscli in background..."
+      nohup /opt/restreamer/install-awscli.sh > /var/log/install-awscli.log 2>&1 &
       sleep 3
       if ! kill -0 $RS_PID 2>/dev/null; then
-        echo "[setup] ERROR: Process crashed! Log:" >&2
+        echo "[setup] ERROR: rs-delivery crashed! Log:" >&2
         cat /opt/restreamer/rs-delivery.log >&2
         exit 1
       fi
@@ -245,7 +262,6 @@ write_files:
 runcmd:
   - pkill -f rs-delivery || true
   - pkill -f log-uploader || true
-  - (command -v aws >/dev/null || pip3 install awscli --quiet) &
   - curl -fsSL -o /opt/restreamer/rs-delivery "{delivery_binary_url}"
   - chmod +x /opt/restreamer/rs-delivery
   - bash -c 'set -a; source /opt/restreamer/rs-delivery.env; set +a; nohup /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &'
