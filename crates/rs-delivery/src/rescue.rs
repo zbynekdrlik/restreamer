@@ -175,9 +175,17 @@ pub fn format_countdown_text(mode: &DeliveryMode, eta_secs: u64) -> String {
 }
 
 /// Path to the countdown text file for a given endpoint alias.
+///
+/// Uses the platform temp dir so tests work on both Linux (VPS) and
+/// Windows (stream.lan CI). The rescue ffmpeg drawtext filter reads the
+/// file path literally, so whatever path we return here must be a path
+/// that ffmpeg can open.
 pub fn countdown_file_path(alias: &str) -> String {
     let safe_alias = alias.replace([' ', '/', '\\'], "_");
-    format!("/tmp/rescue_{safe_alias}.txt")
+    std::env::temp_dir()
+        .join(format!("rescue_{safe_alias}.txt"))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Write the countdown text to the file. Called periodically by the producer.

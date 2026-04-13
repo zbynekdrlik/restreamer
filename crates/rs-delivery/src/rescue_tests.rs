@@ -15,7 +15,12 @@ fn build_rescue_ffmpeg_args_rtmp_endpoint() {
     let vf_val = &args[vf_idx + 1];
     assert!(vf_val.contains("drawtext="));
     assert!(vf_val.contains("reload=1"));
-    assert!(vf_val.contains("/tmp/rescue_FB-Test.txt"));
+    // Countdown file path is platform-dependent (std::env::temp_dir), so
+    // match only the suffix that identifies the alias.
+    assert!(
+        vf_val.contains("rescue_FB-Test.txt"),
+        "vf should reference rescue_FB-Test.txt, got: {vf_val}"
+    );
     assert!(args.last().unwrap().contains("facebook.com"));
 }
 
@@ -176,9 +181,11 @@ fn format_countdown_normal_mode_empty() {
 
 #[test]
 fn countdown_file_path_sanitizes() {
-    assert_eq!(
-        countdown_file_path("FB/Test Stream"),
-        "/tmp/rescue_FB_Test_Stream.txt"
+    // Path is platform-dependent (temp_dir), so assert only the suffix
+    let path = countdown_file_path("FB/Test Stream");
+    assert!(
+        path.ends_with("rescue_FB_Test_Stream.txt"),
+        "path should end with sanitized alias, got: {path}"
     );
 }
 
