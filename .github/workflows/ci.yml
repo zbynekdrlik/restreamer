@@ -205,6 +205,11 @@ jobs:
             --exclude-re 'rescue::' \
             --exclude-re 'endpoint_url_for_service' \
             --exclude-re 'run_rescue_loop' \
+            --exclude-re 'run_warmup_loop' \
+            --exclude-re 'upload_rescue_video' \
+            --exclude-re 'extension_from_content_type' \
+            --exclude-re 'S3Client::upload_public_object' \
+            --exclude-re 'MAX_RESCUE_VIDEO_BYTES' \
             --exclude-re 'write_countdown_file' \
             --exclude-re 'cleanup_countdown_file' \
             --exclude-re 'format_countdown_text' \
