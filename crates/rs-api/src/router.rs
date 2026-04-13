@@ -6,6 +6,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::delivery_handlers;
 use crate::handlers;
+use crate::rescue_video_handlers;
 use crate::s3_handlers;
 use crate::state::AppState;
 use crate::stream_handlers;
