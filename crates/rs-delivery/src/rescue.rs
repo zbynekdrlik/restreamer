@@ -180,7 +180,7 @@ pub async fn run_rescue_loop(
     rescue_url: &str,
     service_type: rs_ffmpeg::ServiceType,
     stream_key: &str,
-    buffer_state: &std::sync::Arc<crate::endpoint_task::BufferState>,
+    buffer_state: &std::sync::Arc<crate::buffer_state::BufferState>,
     stats: &crate::endpoint_task::Stats,
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
 ) -> bool {

@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 use tracing_subscriber::prelude::*;
 
 mod api;
+pub mod buffer_state;
 pub mod db;
 pub mod endpoint_task;
 pub mod rescue;

@@ -5,11 +5,12 @@
 use async_trait::async_trait;
 use rs_ffmpeg::{FfmpegProcess, ServiceType};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::Ordering as AtomicOrdering;
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::api::{EndpointConfig, S3Config};
+pub use crate::buffer_state::{BufferState, initial_delivery_mode};
 use crate::s3_fetch::S3Fetcher;
 
 #[path = "flv_normalizer.rs"]
@@ -34,23 +35,6 @@ struct PrefetchedChunk {
     chunk_id: i64,
     data: Vec<u8>,
     duration_ms: i64,
-}
-
-/// Shared buffer state between producer and consumer for rescue mode.
-pub struct BufferState {
-    /// Estimated buffer duration in ms (chunks available on S3 ahead of consumer).
-    pub buffer_duration_ms: AtomicU64,
-    /// Whether the producer is actively finding new chunks (vs stalled).
-    pub producer_active: AtomicBool,
-}
-
-impl BufferState {
-    pub fn new() -> Self {
-        Self {
-            buffer_duration_ms: AtomicU64::new(0),
-            producer_active: AtomicBool::new(true),
-        }
-    }
 }
 
 impl Default for BufferState {
@@ -215,22 +199,6 @@ impl Default for EndpointStats {
 }
 
 pub type Stats = Arc<Mutex<EndpointStats>>;
-
-/// Determine the initial delivery mode for a new endpoint based on its
-/// configuration. "warmup" only applies when rescue video is configured
-/// AND the endpoint is not fast AND there's a cache window to fill;
-/// otherwise "normal" (or effectively "skip warmup" for fast endpoints).
-pub fn initial_delivery_mode(
-    has_rescue_video: bool,
-    is_fast: bool,
-    delivery_delay_ms: u64,
-) -> String {
-    if has_rescue_video && !is_fast && delivery_delay_ms > 0 {
-        "warmup".to_string()
-    } else {
-        "normal".to_string()
-    }
-}
 
 pub struct EndpointHandle {
     task: JoinHandle<()>,
