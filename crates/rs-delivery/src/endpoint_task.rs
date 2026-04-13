@@ -194,6 +194,20 @@ impl Default for EndpointStats {
 
 pub type Stats = Arc<Mutex<EndpointStats>>;
 
+/// Build initial EndpointStats for a newly spawned endpoint. Starts from
+/// Default (delivery_mode = "normal") and overrides the two fields that
+/// differ per-endpoint: current_chunk_id (start position) and
+/// delivery_mode (warmup if rescue video configured, else normal).
+///
+/// Extracted from EndpointHandle::spawn to make the field-assignment
+/// mutation-testable without spinning up S3/ffmpeg infrastructure.
+pub fn initial_endpoint_stats(start_chunk_id: i64, initial_mode: String) -> EndpointStats {
+    let mut s = EndpointStats::default();
+    s.current_chunk_id = start_chunk_id;
+    s.delivery_mode = initial_mode;
+    s
+}
+
 pub struct EndpointHandle {
     task: JoinHandle<()>,
     stop_tx: watch::Sender<bool>,
@@ -217,11 +231,10 @@ impl EndpointHandle {
             delivery_delay_ms,
         );
 
-        let stats: Stats = Arc::new(Mutex::new(EndpointStats {
-            current_chunk_id: start_chunk_id,
-            delivery_mode: initial_mode,
-            ..Default::default()
-        }));
+        let stats: Stats = Arc::new(Mutex::new(initial_endpoint_stats(
+            start_chunk_id,
+            initial_mode,
+        )));
 
         let buffer_state = Arc::new(BufferState::new());
 
