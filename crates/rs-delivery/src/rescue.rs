@@ -38,11 +38,34 @@ pub fn build_rescue_ffmpeg_args(
     alias: &str,
 ) -> Vec<String> {
     let countdown_path = countdown_file_path(alias);
-    let drawtext = format!(
-        "drawtext=textfile={}:reload=1:fontsize=48:fontcolor=white:x=(w-tw)/2:y=h-80:borderw=2:bordercolor=black",
+
+    // Normalize the source video to stable YouTube-safe parameters so
+    // switching between the real OBS stream and the rescue video doesn't
+    // confuse YouTube's ingestion (format/resolution/framerate changes
+    // cause "bad" health reports, reconnects, or outright rejection).
+    //
+    // Pipeline:
+    //   scale to 1920x1080 preserving aspect, letterbox with black bars,
+    //   set sample aspect to 1:1, force 30fps, yuv420p color.
+    //   Then overlay the countdown text read from disk (reload=1).
+    //
+    // 1080p30 is the lowest common denominator that every RTMP/HLS
+    // destination accepts without complaint. It handles source videos of
+    // any resolution or framerate.
+    let vf = format!(
+        concat!(
+            "scale=1920:1080:force_original_aspect_ratio=decrease,",
+            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,",
+            "setsar=1,fps=30,format=yuv420p,",
+            "drawtext=textfile={}:reload=1:fontsize=48:fontcolor=white:",
+            "x=(w-tw)/2:y=h-80:borderw=2:bordercolor=black"
+        ),
         countdown_path
     );
 
+    // Standard 1080p30 H.264 + AAC encoder settings. Keyframe every 2s
+    // (-g 60 at 30fps) matches what OBS typically sends and what YouTube
+    // expects for low-latency ingestion.
     let mut args = vec![
         "-stream_loop".into(),
         "-1".into(),
@@ -50,15 +73,41 @@ pub fn build_rescue_ffmpeg_args(
         "-i".into(),
         rescue_video_url.to_string(),
         "-vf".into(),
-        drawtext,
+        vf,
+        // Video encoder
         "-c:v".into(),
         "libx264".into(),
         "-preset".into(),
-        "ultrafast".into(),
+        "veryfast".into(),
+        "-profile:v".into(),
+        "main".into(),
+        "-level".into(),
+        "4.0".into(),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-r".into(),
+        "30".into(),
+        "-g".into(),
+        "60".into(),
+        "-keyint_min".into(),
+        "60".into(),
+        "-sc_threshold".into(),
+        "0".into(),
+        "-b:v".into(),
+        "4500k".into(),
+        "-maxrate".into(),
+        "4500k".into(),
+        "-bufsize".into(),
+        "9000k".into(),
+        // Audio encoder
         "-c:a".into(),
         "aac".into(),
         "-b:a".into(),
         "128k".into(),
+        "-ar".into(),
+        "48000".into(),
+        "-ac".into(),
+        "2".into(),
     ];
 
     match output_format {

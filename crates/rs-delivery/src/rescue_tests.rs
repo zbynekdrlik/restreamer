@@ -31,6 +31,110 @@ fn build_rescue_ffmpeg_args_hls_endpoint() {
     assert!(args.iter().any(|a| a == "PUT"));
 }
 
+/// Rescue ffmpeg output MUST be stream-format-compatible with what OBS
+/// sends, otherwise switching between real content and rescue content
+/// confuses YouTube's ingestion. These tests pin the normalization so
+/// a regression that drops any of these flags is caught immediately.
+#[test]
+fn build_rescue_ffmpeg_args_normalizes_to_1080p30() {
+    let args = build_rescue_ffmpeg_args(
+        "https://s3.example.com/src.mp4",
+        "rtmp://a.rtmp.youtube.com/live2/key",
+        "flv",
+        "YT",
+    );
+
+    let vf_idx = args.iter().position(|a| a == "-vf").unwrap();
+    let vf = &args[vf_idx + 1];
+    assert!(
+        vf.contains("scale=1920:1080"),
+        "-vf must scale to 1920x1080, got: {vf}"
+    );
+    assert!(vf.contains("fps=30"), "-vf must enforce 30fps, got: {vf}");
+    assert!(
+        vf.contains("format=yuv420p"),
+        "-vf must enforce yuv420p, got: {vf}"
+    );
+    assert!(
+        vf.contains("pad="),
+        "-vf must letterbox with pad, got: {vf}"
+    );
+}
+
+#[test]
+fn build_rescue_ffmpeg_args_uses_libx264_main_profile() {
+    let args = build_rescue_ffmpeg_args(
+        "https://s3.example.com/src.mp4",
+        "rtmp://a.rtmp.youtube.com/live2/key",
+        "flv",
+        "YT",
+    );
+
+    // Find -c:v libx264 pair
+    let cv_idx = args
+        .iter()
+        .position(|a| a == "-c:v")
+        .expect("-c:v must be present");
+    assert_eq!(args[cv_idx + 1], "libx264");
+
+    let profile_idx = args
+        .iter()
+        .position(|a| a == "-profile:v")
+        .expect("-profile:v must be present");
+    assert_eq!(args[profile_idx + 1], "main");
+
+    let pix_idx = args
+        .iter()
+        .position(|a| a == "-pix_fmt")
+        .expect("-pix_fmt must be present");
+    assert_eq!(args[pix_idx + 1], "yuv420p");
+}
+
+#[test]
+fn build_rescue_ffmpeg_args_keyframe_every_2s() {
+    let args = build_rescue_ffmpeg_args(
+        "https://s3.example.com/src.mp4",
+        "rtmp://a.rtmp.youtube.com/live2/key",
+        "flv",
+        "YT",
+    );
+
+    // -g 60 at -r 30 = 2s GOP, matches OBS / YouTube low-latency expectation
+    let g_idx = args.iter().position(|a| a == "-g").expect("-g must be set");
+    assert_eq!(args[g_idx + 1], "60");
+
+    let r_idx = args.iter().position(|a| a == "-r").expect("-r must be set");
+    assert_eq!(args[r_idx + 1], "30");
+}
+
+#[test]
+fn build_rescue_ffmpeg_args_aac_audio_48k_stereo() {
+    let args = build_rescue_ffmpeg_args(
+        "https://s3.example.com/src.mp4",
+        "rtmp://a.rtmp.youtube.com/live2/key",
+        "flv",
+        "YT",
+    );
+
+    let ca_idx = args
+        .iter()
+        .position(|a| a == "-c:a")
+        .expect("-c:a must be set");
+    assert_eq!(args[ca_idx + 1], "aac");
+
+    let ar_idx = args
+        .iter()
+        .position(|a| a == "-ar")
+        .expect("-ar must be set");
+    assert_eq!(args[ar_idx + 1], "48000");
+
+    let ac_idx = args
+        .iter()
+        .position(|a| a == "-ac")
+        .expect("-ac must be set");
+    assert_eq!(args[ac_idx + 1], "2");
+}
+
 #[test]
 fn format_countdown_warmup() {
     let text = format_countdown_text(
