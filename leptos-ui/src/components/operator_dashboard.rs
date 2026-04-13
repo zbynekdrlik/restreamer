@@ -726,11 +726,20 @@ fn EndpointTree() -> impl IntoView {
                                     // = 0, so we fall back to the global
                                     // cache_duration_secs until delivery has
                                     // started.
-                                    let cache_secs = if ep.chunks_processed > 0 {
+                                    let raw_cache_secs = if ep.chunks_processed > 0 {
                                         ep.chunk_delay_secs
                                     } else {
                                         ps.cache_duration_secs
                                     };
+                                    // Cap displayed cache at the target. When no
+                                    // delivery is active (e.g. VPS not yet ready,
+                                    // or delivery stopped while OBS keeps
+                                    // streaming), S3 piles up chunks far beyond
+                                    // target — showing "905s / 60s" alarms the
+                                    // user even though everything is normal.
+                                    // The S3→VPS metric shows the actual queue
+                                    // depth separately.
+                                    let cache_secs = raw_cache_secs.min(target as f64);
                                     let progress = (cache_secs / target as f64).min(1.0);
                                     let bar_class = if progress >= 0.75 {
                                         "buffer-bar-fill healthy"
@@ -739,14 +748,21 @@ fn EndpointTree() -> impl IntoView {
                                     } else {
                                         "buffer-bar-fill critical"
                                     };
+                                    // Show backlog suffix if S3 has way more than
+                                    // target — gives operator visibility without
+                                    // alarming numbers in the main cache count.
+                                    let label = if raw_cache_secs > target as f64 * 1.1 {
+                                        let backlog_min = (raw_cache_secs / 60.0) as u64;
+                                        format!("{}s / {}s cache (+{}m backlog)", cache_secs as u64, target, backlog_min)
+                                    } else {
+                                        format!("{}s / {}s cache", cache_secs as u64, target)
+                                    };
                                     Some(view! {
                                         <div class="endpoint-cache">
                                             <div class="buffer-bar">
                                                 <div class=bar_class style:width=format!("{}%", (progress * 100.0).min(100.0))></div>
                                             </div>
-                                            <span class="endpoint-cache-label">
-                                                {format!("{}s / {}s cache", cache_secs as u64, target)}
-                                            </span>
+                                            <span class="endpoint-cache-label">{label}</span>
                                         </div>
                                     })
                                 }}

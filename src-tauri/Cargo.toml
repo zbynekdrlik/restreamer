@@ -1,6 +1,6 @@
 [package]
 name = "restreamer"
-version = "0.3.41"
+version = "0.3.42"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/restreamer"
