@@ -351,30 +351,43 @@ fn Pipeline() -> impl IntoView {
     let s3_dot = move || {
         let p = ps();
         let s = delivery_status();
-        if s == "running" || s == "delivering" {
-            if p.state == "buffer_exhausted" {
-                "status-dot error"
-            } else {
-                "status-dot active"
+        match s.as_str() {
+            "running" | "delivering" => {
+                if p.state == "buffer_exhausted" {
+                    "status-dot error"
+                } else {
+                    "status-dot active"
+                }
             }
-        } else if is_delivering() {
-            "status-dot warning"
-        } else {
-            "status-dot"
+            // VPS provisioning phases — show as "warning" (yellow) so the
+            // operator can distinguish them from idle (gray) and from
+            // delivering (green). Each phase is normal but takes time.
+            "creating" | "booting" | "initializing" => "status-dot warning",
+            _ => {
+                if is_delivering() {
+                    "status-dot warning"
+                } else {
+                    "status-dot"
+                }
+            }
         }
     };
     let s3_metric = move || {
         let s = delivery_status();
-        if s == "running" || s == "delivering" {
-            format!(
+        match s.as_str() {
+            "running" | "delivering" => format!(
                 "{} queued \u{2192} {} delivered",
                 s3_chunks(),
                 delivered_chunks()
-            )
-        } else if s.is_empty() || s == "none" {
-            format!("{} on S3", s3_chunks())
-        } else {
-            s
+            ),
+            "" | "none" => format!("{} on S3", s3_chunks()),
+            // Map orchestrator phases to operator-friendly text. Without
+            // this, the dashboard would show the raw enum value (e.g.
+            // "booting") which doesn't tell the user what's happening.
+            "creating" => "Creating VPS \u{2026}".to_string(),
+            "booting" => "VPS booting \u{2026}".to_string(),
+            "initializing" => "Starting endpoints \u{2026}".to_string(),
+            other => other.to_string(),
         }
     };
 

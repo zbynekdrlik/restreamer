@@ -290,8 +290,14 @@ impl DeliveryOrchestrator {
 
             if server.status == "running" {
                 let ipv4 = server.public_net.ipv4.ip.clone();
-                db::update_delivery_instance_status(&self.pool, instance_id, "running").await?;
-                info!(hetzner_id, ipv4 = %ipv4, "Delivery server is running");
+                // Hetzner says VM is running, but rs-delivery service is not
+                // yet ready (cloud-init still downloading the binary and
+                // starting the service). Use "booting" so the dashboard
+                // shows the correct phase to the operator — they were
+                // confused that "creating" jumped to "running" instantly
+                // but actual readiness took 60+ more seconds.
+                db::update_delivery_instance_status(&self.pool, instance_id, "booting").await?;
+                info!(hetzner_id, ipv4 = %ipv4, "VPS booted, waiting for rs-delivery");
                 break;
             }
 
@@ -327,6 +333,15 @@ impl DeliveryOrchestrator {
                         attempt,
                         "rs-delivery health check passed on {}", instance.ipv4
                     );
+                    // rs-delivery is healthy. Move to "initializing" phase
+                    // while we wait for buffer-fill and call /api/init —
+                    // operator can see this is normal startup, not a hang.
+                    db::update_delivery_instance_status(
+                        &self.pool,
+                        instance_id,
+                        "initializing",
+                    )
+                    .await?;
                     break;
                 }
                 Ok(resp) => {
@@ -502,6 +517,10 @@ impl DeliveryOrchestrator {
         info!(event_id, init_resp = %init_resp, "Init response received");
 
         db::update_delivery_instance_health(&self.pool, instance_id).await?;
+        // Init succeeded — endpoints are now warming up / delivering.
+        // The dashboard reads this status to show "Delivering" instead
+        // of "Initializing".
+        db::update_delivery_instance_status(&self.pool, instance_id, "delivering").await?;
         info!(event_id, "Delivery endpoints initialized successfully");
 
         Ok(())
