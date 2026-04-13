@@ -138,18 +138,42 @@ pub fn bootstrap_cloud_init(
 packages:
   - ffmpeg
   - curl
+  - python3-pip
 
 write_files:
   - path: /opt/restreamer/rs-delivery.env
     permissions: '0600'
     content: |
 {env_lines}
+  - path: /opt/restreamer/log-uploader.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Background watchdog: uploads rs-delivery.log to S3 every 15s so we
+      # can post-mortem VPS startup crashes (rs-delivery binary dying before
+      # its HTTP endpoint is reachable). Runs for the lifetime of the VPS.
+      set +e
+      set -a; source /opt/restreamer/rs-delivery.env; set +a
+      export AWS_ACCESS_KEY_ID="$DELIVERY_S3_ACCESS_KEY_ID"
+      export AWS_SECRET_ACCESS_KEY="$DELIVERY_S3_SECRET_ACCESS_KEY"
+      export AWS_DEFAULT_REGION="$DELIVERY_S3_REGION"
+      HN=$(hostname)
+      S3_LOG="s3://$DELIVERY_S3_BUCKET/delivery-logs/$HN.log"
+      while true; do
+        if [ -s /opt/restreamer/rs-delivery.log ]; then
+          aws s3 cp /opt/restreamer/rs-delivery.log "$S3_LOG" \
+            --endpoint-url "$DELIVERY_S3_ENDPOINT" --quiet 2>&1 | head -5
+        fi
+        sleep 15
+      done
   - path: /opt/restreamer/setup.sh
     permissions: '0755'
     content: |
       #!/bin/bash
       set -ex
       mkdir -p /opt/restreamer
+      echo "[setup] Installing awscli..."
+      pip3 install awscli --quiet
       echo "[setup] Downloading binary..."
       curl -fsSL -o /opt/restreamer/rs-delivery "{delivery_binary_url}"
       chmod +x /opt/restreamer/rs-delivery
@@ -158,6 +182,8 @@ write_files:
       echo "[setup] Starting rs-delivery..."
       /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &
       RS_PID=$!
+      echo "[setup] Starting log uploader watchdog..."
+      nohup /opt/restreamer/log-uploader.sh > /var/log/log-uploader.log 2>&1 &
       sleep 3
       if ! kill -0 $RS_PID 2>/dev/null; then
         echo "[setup] ERROR: Process crashed! Log:" >&2
@@ -194,12 +220,36 @@ write_files:
     permissions: '0600'
     content: |
 {env_lines}
+  - path: /opt/restreamer/log-uploader.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Background watchdog uploads rs-delivery.log to S3 every 15s so we
+      # can post-mortem a crash of the rs-delivery binary before its HTTP
+      # endpoint is reachable. Snapshots have awscli pre-installed.
+      set +e
+      set -a; source /opt/restreamer/rs-delivery.env; set +a
+      export AWS_ACCESS_KEY_ID="$DELIVERY_S3_ACCESS_KEY_ID"
+      export AWS_SECRET_ACCESS_KEY="$DELIVERY_S3_SECRET_ACCESS_KEY"
+      export AWS_DEFAULT_REGION="$DELIVERY_S3_REGION"
+      HN=$(hostname)
+      S3_LOG="s3://$DELIVERY_S3_BUCKET/delivery-logs/$HN.log"
+      while true; do
+        if [ -s /opt/restreamer/rs-delivery.log ]; then
+          aws s3 cp /opt/restreamer/rs-delivery.log "$S3_LOG" \
+            --endpoint-url "$DELIVERY_S3_ENDPOINT" --quiet 2>&1 | head -5
+        fi
+        sleep 15
+      done
 
 runcmd:
   - pkill -f rs-delivery || true
+  - pkill -f log-uploader || true
+  - (command -v aws >/dev/null || pip3 install awscli --quiet) &
   - curl -fsSL -o /opt/restreamer/rs-delivery "{delivery_binary_url}"
   - chmod +x /opt/restreamer/rs-delivery
   - bash -c 'set -a; source /opt/restreamer/rs-delivery.env; set +a; nohup /opt/restreamer/rs-delivery > /opt/restreamer/rs-delivery.log 2>&1 &'
+  - bash -c 'nohup /opt/restreamer/log-uploader.sh > /var/log/log-uploader.log 2>&1 &'
 "#,
         env_lines = env_content
             .lines()
