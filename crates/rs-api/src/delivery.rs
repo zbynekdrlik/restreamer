@@ -336,12 +336,8 @@ impl DeliveryOrchestrator {
                     // rs-delivery is healthy. Move to "initializing" phase
                     // while we wait for buffer-fill and call /api/init —
                     // operator can see this is normal startup, not a hang.
-                    db::update_delivery_instance_status(
-                        &self.pool,
-                        instance_id,
-                        "initializing",
-                    )
-                    .await?;
+                    db::update_delivery_instance_status(&self.pool, instance_id, "initializing")
+                        .await?;
                     break;
                 }
                 Ok(resp) => {
