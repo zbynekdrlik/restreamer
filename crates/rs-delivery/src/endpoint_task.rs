@@ -216,6 +216,22 @@ impl Default for EndpointStats {
 
 pub type Stats = Arc<Mutex<EndpointStats>>;
 
+/// Determine the initial delivery mode for a new endpoint based on its
+/// configuration. "warmup" only applies when rescue video is configured
+/// AND the endpoint is not fast AND there's a cache window to fill;
+/// otherwise "normal" (or effectively "skip warmup" for fast endpoints).
+pub fn initial_delivery_mode(
+    has_rescue_video: bool,
+    is_fast: bool,
+    delivery_delay_ms: u64,
+) -> String {
+    if has_rescue_video && !is_fast && delivery_delay_ms > 0 {
+        "warmup".to_string()
+    } else {
+        "normal".to_string()
+    }
+}
+
 pub struct EndpointHandle {
     task: JoinHandle<()>,
     stop_tx: watch::Sender<bool>,
@@ -233,12 +249,11 @@ impl EndpointHandle {
     ) -> Self {
         let (stop_tx, stop_rx) = watch::channel(false);
 
-        let initial_mode = if rescue_video_url.is_some() && !ep_cfg.is_fast && delivery_delay_ms > 0
-        {
-            "warmup".to_string()
-        } else {
-            "normal".to_string()
-        };
+        let initial_mode = initial_delivery_mode(
+            rescue_video_url.is_some(),
+            ep_cfg.is_fast,
+            delivery_delay_ms,
+        );
 
         let stats: Stats = Arc::new(Mutex::new(EndpointStats {
             current_chunk_id: start_chunk_id,

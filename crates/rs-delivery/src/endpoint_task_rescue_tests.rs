@@ -40,3 +40,29 @@ async fn buffer_state_producer_stall_detection() {
     bs.producer_active.store(false, Ordering::Relaxed);
     assert!(!bs.producer_active.load(Ordering::Relaxed));
 }
+
+// Tests for initial_delivery_mode — pure function that decides whether
+// an endpoint starts in "warmup" or "normal" based on configuration.
+// Warmup requires: rescue video configured AND not fast AND non-zero delay.
+
+#[test]
+fn initial_mode_warmup_when_all_conditions_met() {
+    assert_eq!(initial_delivery_mode(true, false, 120_000), "warmup");
+}
+
+#[test]
+fn initial_mode_normal_when_no_rescue_video() {
+    assert_eq!(initial_delivery_mode(false, false, 120_000), "normal");
+}
+
+#[test]
+fn initial_mode_normal_when_fast_endpoint() {
+    // Fast endpoints never enter warmup — they run near-live
+    assert_eq!(initial_delivery_mode(true, true, 120_000), "normal");
+}
+
+#[test]
+fn initial_mode_normal_when_zero_delay() {
+    // Zero delay means no cache window to fill, so no warmup
+    assert_eq!(initial_delivery_mode(true, false, 0), "normal");
+}
