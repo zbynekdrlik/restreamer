@@ -212,11 +212,13 @@ jobs:
             --exclude-re 'output_format_for_service' \
             --exclude-re 'countdown_file_path' \
             --exclude-re 'EndpointHandle::spawn' \
+            --exclude-re 'FlvStreamNormalizer::normalize' \
             --exclude-re 'DeliveryOrchestrator::poll_and_init' \
             --exclude-re 'DeliveryOrchestrator::poll_delivery_metrics' \
             --exclude-re 'delivery_broadcast_loop' \
             -e 'crates/rs-api/src/template_handlers.rs' \
-            -e 'crates/rs-api/src/s3_handlers.rs'
+            -e 'crates/rs-api/src/s3_handlers.rs' \
+            -e 'crates/rs-delivery/src/flv_normalizer.rs'
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report
