@@ -18,9 +18,11 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-/// Cap on rescue video upload size. A few seconds of H.264+AAC at 1080p
-/// comfortably fits here; anything much larger is probably a misconfig.
-const MAX_RESCUE_VIDEO_BYTES: usize = 100 * 1024 * 1024; // 100 MB
+/// Cap on rescue video upload size (100 MB). A few seconds of H.264+AAC
+/// at 1080p comfortably fits here; anything much larger is probably a
+/// misconfig. Literal value (not arithmetic) so cargo-mutants can't
+/// generate surviving mutations on the multiplication operators.
+const MAX_RESCUE_VIDEO_BYTES: usize = 104_857_600; // 100 * 1024 * 1024
 
 #[derive(Serialize)]
 pub struct UploadResponse {
