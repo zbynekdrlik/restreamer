@@ -849,51 +849,25 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
 ) {
     let alias = ep_cfg.alias.clone();
 
-    // Wait for enough duration to buffer before starting (duration-based approach)
+    // Wait for enough duration to buffer before starting (duration-based approach).
+    // When rescue_video_url is configured and the endpoint is not fast, the
+    // helper also spawns a rescue ffmpeg in parallel so viewers see the
+    // rescue video (with countdown) during the initial cache fill. Without
+    // this, viewers see nothing until ~120s of buffer has accumulated.
     if delivery_delay_ms > 0 {
-        let mut accum_ms: u64 = 0;
-        let mut probe_id = start_chunk_id;
-        tracing::info!(alias = %alias, delivery_delay_ms, "Waiting for duration-based buffer fill");
-        loop {
-            if *stop_rx.borrow() {
-                return;
-            }
-            match fetcher.chunk_duration_ms(probe_id).await {
-                Ok(Some(dur_ms)) => {
-                    accum_ms += dur_ms.max(0) as u64;
-                    probe_id += 1;
-
-                    // Update warmup ETA stats
-                    if rescue_video_url.is_some() {
-                        let mut s = stats.lock().await;
-                        s.delivery_mode = "warmup".to_string();
-                        let remaining_ms = delivery_delay_ms.saturating_sub(accum_ms);
-                        s.rescue_eta_secs = Some(remaining_ms / 1000);
-                    }
-
-                    if accum_ms >= delivery_delay_ms {
-                        tracing::info!(alias = %alias, accum_ms, probe_id, "Buffer filled");
-                        break;
-                    }
-                }
-                Ok(None) => {
-                    tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                        _ = stop_rx.changed() => { if *stop_rx.borrow() { return; } }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(alias = %alias, "Buffer fill fetch error: {e}");
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                }
-            }
-        }
-
-        // Buffer fill complete — transition to normal mode
-        {
-            let mut s = stats.lock().await;
-            s.delivery_mode = "normal".to_string();
-            s.rescue_eta_secs = None;
+        let stopped = crate::rescue::run_warmup_loop(
+            &fetcher,
+            &alias,
+            &ep_cfg,
+            start_chunk_id,
+            delivery_delay_ms,
+            rescue_video_url.as_deref(),
+            &stats,
+            &mut stop_rx,
+        )
+        .await;
+        if stopped {
+            return;
         }
     }
 

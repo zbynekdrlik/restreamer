@@ -275,6 +275,143 @@ pub async fn run_rescue_loop(
     should_stop
 }
 
+/// Run the warmup phase: spawn rescue ffmpeg (if configured), then probe S3
+/// for chunks until the target delay is accumulated. Returns `true` if a
+/// stop signal was received.
+///
+/// When `rescue_video_url` is Some and the endpoint is not fast, the rescue
+/// ffmpeg runs alongside the chunk probing so viewers see the rescue video
+/// during the initial cache fill — otherwise they'd see nothing for ~120s.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
+    fetcher: &F,
+    alias: &str,
+    ep_cfg: &crate::api::EndpointConfig,
+    start_chunk_id: i64,
+    delivery_delay_ms: u64,
+    rescue_video_url: Option<&str>,
+    stats: &crate::endpoint_task::Stats,
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    let mut warmup_proc: Option<tokio::process::Child> = None;
+
+    // Spawn rescue ffmpeg if configured (non-fast endpoints only)
+    if let Some(rescue_url) = rescue_video_url {
+        if !ep_cfg.is_fast {
+            let svc_type: rs_ffmpeg::ServiceType = ep_cfg
+                .service_type
+                .parse()
+                .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
+            let ep_url = endpoint_url_for_service(svc_type, &ep_cfg.stream_key);
+            let out_fmt = output_format_for_service(svc_type);
+            let rescue_args = build_rescue_ffmpeg_args(rescue_url, &ep_url, out_fmt, alias);
+
+            let initial_text = format_countdown_text(
+                &DeliveryMode::Rescue {
+                    reason: RescueReason::Warmup,
+                },
+                delivery_delay_ms / 1000,
+            );
+            write_countdown_file(alias, &initial_text);
+
+            {
+                let mut s = stats.lock().await;
+                s.delivery_mode = "warmup".to_string();
+                s.rescue_eta_secs = Some(delivery_delay_ms / 1000);
+            }
+
+            match tokio::process::Command::new("ffmpeg")
+                .args(&rescue_args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+            {
+                Ok(p) => {
+                    tracing::info!(alias, "Warmup rescue ffmpeg started");
+                    warmup_proc = Some(p);
+                }
+                Err(e) => {
+                    tracing::error!(alias, "Failed to spawn warmup rescue ffmpeg: {e}");
+                    cleanup_countdown_file(alias);
+                }
+            }
+        }
+    }
+
+    let mut accum_ms: u64 = 0;
+    let mut probe_id = start_chunk_id;
+    tracing::info!(
+        alias,
+        delivery_delay_ms,
+        "Waiting for duration-based buffer fill"
+    );
+
+    let stopped = loop {
+        if *stop_rx.borrow() {
+            break true;
+        }
+        match fetcher.chunk_duration_ms(probe_id).await {
+            Ok(Some(dur_ms)) => {
+                accum_ms += dur_ms.max(0) as u64;
+                probe_id += 1;
+
+                if rescue_video_url.is_some() {
+                    let remaining_ms = delivery_delay_ms.saturating_sub(accum_ms);
+                    let eta_secs = remaining_ms / 1000;
+
+                    {
+                        let mut s = stats.lock().await;
+                        s.delivery_mode = "warmup".to_string();
+                        s.rescue_eta_secs = Some(eta_secs);
+                    }
+
+                    let text = format_countdown_text(
+                        &DeliveryMode::Rescue {
+                            reason: RescueReason::Warmup,
+                        },
+                        eta_secs,
+                    );
+                    write_countdown_file(alias, &text);
+                }
+
+                if accum_ms >= delivery_delay_ms {
+                    tracing::info!(alias, accum_ms, probe_id, "Buffer filled");
+                    break false;
+                }
+            }
+            Ok(None) => {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                    _ = stop_rx.changed() => {
+                        if *stop_rx.borrow() { break true; }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(alias, "Buffer fill fetch error: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    };
+
+    // Tear down warmup rescue ffmpeg and countdown file
+    if let Some(mut p) = warmup_proc.take() {
+        let _ = p.kill().await;
+        tracing::info!(alias, "Warmup rescue ffmpeg stopped");
+    }
+    cleanup_countdown_file(alias);
+
+    if !stopped {
+        let mut s = stats.lock().await;
+        s.delivery_mode = "normal".to_string();
+        s.rescue_eta_secs = None;
+    }
+
+    stopped
+}
+
 #[cfg(test)]
 #[path = "rescue_tests.rs"]
 mod tests;

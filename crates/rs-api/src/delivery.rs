@@ -396,18 +396,33 @@ impl DeliveryOrchestrator {
                 start_chunk_id, "Resuming delivery after crash recovery"
             );
         } else {
-            // Wait for enough LOCAL sent content duration before initializing the VPS.
-            // Uses actual duration_ms from DB — correctly handles variable chunk sizes
-            // (e.g. 2s keyframe interval chunks are ~2000ms each, not 1000ms).
+            // When rescue_video_url is configured, skip the full cache-fill
+            // pre-wait and initialize the VPS as soon as the first chunk
+            // exists. The VPS-side endpoint_loop handles warmup by playing
+            // the rescue video while its own buffer fills. Without this,
+            // viewers see nothing during the initial 120s cache-fill.
+            //
+            // When rescue_video_url is None, wait for the full target delay
+            // (legacy behaviour) — nothing can play to viewers anyway.
+            let has_rescue_video = event.rescue_video_url.is_some();
+            let wait_target_ms = if has_rescue_video {
+                1 // First chunk is enough; VPS plays rescue video during its own fill
+            } else {
+                target_delay_ms
+            };
+
             let max_wait_secs = 900;
             for attempt in 0..max_wait_secs {
                 let sent_ms = db::get_sent_duration_ms(&self.pool, event_id)
                     .await
                     .unwrap_or(0);
-                if sent_ms >= target_delay_ms {
+                if sent_ms >= wait_target_ms {
                     info!(
                         event_id,
-                        sent_ms, target_delay_ms, "Sent content duration meets target"
+                        sent_ms,
+                        wait_target_ms,
+                        has_rescue_video,
+                        "Sent content duration meets target (init VPS)"
                     );
                     break;
                 }
@@ -415,9 +430,9 @@ impl DeliveryOrchestrator {
                     info!(
                         event_id,
                         sent_ms,
-                        target_delay_ms,
+                        wait_target_ms,
                         attempt,
-                        "Waiting for sent duration ({sent_ms}ms / {target_delay_ms}ms)"
+                        "Waiting for sent duration ({sent_ms}ms / {wait_target_ms}ms)"
                     );
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
