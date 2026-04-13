@@ -185,23 +185,34 @@ pub async fn seed_templates_from_events(pool: &SqlitePool) -> Result<usize> {
     }
 
     // Collect endpoint assignments up front so the transaction only writes.
-    let mut event_plans: Vec<(String, Option<i64>, Option<String>, Vec<i64>)> =
-        Vec::with_capacity(events.len());
+    struct EventPlan {
+        name: String,
+        cache_delay_secs: Option<i64>,
+        rescue_video_url: Option<String>,
+        endpoint_ids: Vec<i64>,
+    }
+    let mut event_plans: Vec<EventPlan> = Vec::with_capacity(events.len());
     for event in &events {
         let endpoints = super::get_event_endpoints(pool, event.id).await?;
         let endpoint_ids: Vec<i64> = endpoints.iter().map(|e| e.id).collect();
-        event_plans.push((
-            event.name.clone(),
-            event.cache_delay_secs,
-            event.rescue_video_url.clone(),
+        event_plans.push(EventPlan {
+            name: event.name.clone(),
+            cache_delay_secs: event.cache_delay_secs,
+            rescue_video_url: event.rescue_video_url.clone(),
             endpoint_ids,
-        ));
+        });
     }
 
     // Wrap all writes in one transaction so a failure mid-seed rolls back.
     let mut tx = pool.begin().await?;
     let mut created = 0usize;
-    for (name, cache_delay, rescue_video_url, endpoint_ids) in &event_plans {
+    for EventPlan {
+        name,
+        cache_delay_secs: cache_delay,
+        rescue_video_url,
+        endpoint_ids,
+    } in &event_plans
+    {
         let row = sqlx::query(
             "INSERT INTO event_templates (name, cache_delay_secs, rescue_video_url) VALUES (?1, ?2, ?3) RETURNING id",
         )
