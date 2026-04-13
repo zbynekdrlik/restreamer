@@ -37,12 +37,6 @@ struct PrefetchedChunk {
     duration_ms: i64,
 }
 
-impl Default for BufferState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Trait for fetching chunks (S3 or mock).
 pub trait ChunkFetcher: Send + Sync {
     fn fetch_chunk_with_meta(
