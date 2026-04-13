@@ -290,38 +290,25 @@ fn unique_alias(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
-// ------------------------------------------------------------------
-// Wall-clock minimum duration tests
-//
-// User report: "endpoint start streaming sooner then cache was filled
-// and also no rescue video was playing during initial phase". Root cause:
-// when chunks already exist on S3 when the VPS boots, the buffer-fill
-// loop completes in milliseconds — warmup is transient. User never sees
-// the rescue video.
-//
-// Fix: warmup must play for a wall-clock minimum duration equal to
-// delivery_delay_ms, regardless of how fast the buffer fills. That way
-// viewers actually see the rescue video with countdown.
-// ------------------------------------------------------------------
+// Test that verifies warmup exits as soon as buffer fills — regardless
+// of wall-clock time. We previously had a wall-clock minimum which
+// caused rescue video to keep playing 120s AFTER cache was ready, which
+// delayed real content from reaching viewers. The correct behavior is:
+// rescue plays until buffer is ready, no longer.
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn warmup_with_existing_chunks_still_waits_wall_clock() {
-    // All chunks already on S3 (buffer would fill in microseconds), but
-    // rescue video must play for at least delivery_delay_ms wall time.
-    // Without the wall-clock minimum, warmup returns in <1ms and the
-    // user never sees the rescue video.
-    let alias = unique_alias("wall-clock");
-    // 1000 chunks of 2000ms each = 2_000_000ms available — way more than
-    // target. Current buggy impl would fill instantly.
-    let fetcher = WarmupMockFetcher::new(1000, 2000);
+async fn warmup_exits_as_soon_as_buffer_fills() {
+    // 100 chunks of 2000ms each = 200_000ms available. Target 1000ms.
+    // Should hit target and exit after probing just one chunk.
+    let alias = unique_alias("fast-exit");
+    let fetcher = WarmupMockFetcher::new(100, 2000);
     let ep_cfg = test_endpoint_config(&alias, false);
     let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
     let (_stop_tx, mut stop_rx) = watch::channel(false);
 
-    let target_ms = 3000u64; // 3s target delay
-    let start = tokio::time::Instant::now();
+    let target_ms = 1000u64; // 1s target
 
-    let _ = run_warmup_loop(
+    let stopped = run_warmup_loop(
         &fetcher,
         &alias,
         &ep_cfg,
@@ -333,70 +320,15 @@ async fn warmup_with_existing_chunks_still_waits_wall_clock() {
     )
     .await;
 
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-    assert!(
-        elapsed_ms >= target_ms,
-        "warmup must run for at least delivery_delay_ms wall time (expected >= {}ms, got {}ms) — otherwise viewers don't see the rescue video",
-        target_ms,
-        elapsed_ms
-    );
+    assert!(!stopped, "should not be stopped");
 
-    // After warmup: back to normal, no eta
+    // After warmup: normal mode, eta cleared, buffer met immediately
     let s = stats.lock().await;
-    assert_eq!(s.delivery_mode, "normal");
-    assert_eq!(s.rescue_eta_secs, None);
-}
-
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn warmup_eta_counts_down_wall_clock() {
-    // The countdown ETA viewers see should tick down based on wall time,
-    // not buffer state. With existing chunks, buffer fills fast but ETA
-    // should still decrement from target to 0 over the delivery_delay
-    // window.
-    let alias = unique_alias("eta-count");
-    let fetcher = WarmupMockFetcher::new(1000, 2000); // buffer fills instantly
-    let ep_cfg = test_endpoint_config(&alias, false);
-    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
-    let (_stop_tx, mut stop_rx) = watch::channel(false);
-
-    let target_ms = 3000u64;
-
-    // Probe the ETA while warmup runs
-    let stats_probe = stats.clone();
-    let probe = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let s = stats_probe.lock().await;
-        (s.delivery_mode.clone(), s.rescue_eta_secs)
-    });
-
-    let _ = run_warmup_loop(
-        &fetcher,
-        &alias,
-        &ep_cfg,
-        0,
-        target_ms,
-        Some("file:///tmp/nonexistent.mp4"),
-        &stats,
-        &mut stop_rx,
-    )
-    .await;
-
-    let (mode_at_500ms, eta_at_500ms) = probe.await.unwrap();
     assert_eq!(
-        mode_at_500ms, "warmup",
-        "at 500ms into a 3s target, mode should still be 'warmup'"
+        s.delivery_mode, "normal",
+        "should transition to normal after buffer fills"
     );
-    // ETA at t=500ms should be (3000-500)/1000 = 2 or 3 (depending on rounding).
-    // Assert it's > 0 to confirm the countdown is going down from target, not 0.
-    assert!(
-        eta_at_500ms.is_some(),
-        "at 500ms into warmup, eta should be set, got None"
-    );
-    let eta = eta_at_500ms.unwrap();
-    assert!(
-        eta > 0 && eta <= target_ms / 1000,
-        "at 500ms into a 3s target, eta should be > 0 and <= 3, got {eta}"
-    );
+    assert_eq!(s.rescue_eta_secs, None);
 }
 
 #[tokio::test]
