@@ -100,6 +100,37 @@ impl S3Client {
         Ok(())
     }
 
+    /// Upload arbitrary bytes to S3 with public-read ACL and return the
+    /// public URL. Used for rescue video uploads — these files must be
+    /// publicly readable so the delivery VPS can fetch them via ffmpeg.
+    pub async fn upload_public_object(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<String, EndpointError> {
+        let mut upload_bucket = (*self.bucket).clone();
+        upload_bucket.add_header("x-amz-acl", "public-read");
+
+        let response = upload_bucket
+            .put_object_with_content_type(key, bytes, content_type)
+            .await
+            .map_err(|e| EndpointError::S3(format!("upload failed: {e}")))?;
+
+        if response.status_code() >= 300 {
+            return Err(EndpointError::S3(format!(
+                "upload returned status {}",
+                response.status_code(),
+            )));
+        }
+
+        // Public URL: {endpoint}/{bucket}/{key}
+        // The bucket.url() method gives us the proper URL for the object.
+        let url = format!("{}/{}", self.bucket.url(), key);
+        info!("Uploaded public object to {url} ({} bytes)", bytes.len());
+        Ok(url)
+    }
+
     /// Delete all S3 objects under the given event name prefix.
     /// Returns the number of objects deleted.
     ///

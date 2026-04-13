@@ -71,6 +71,10 @@ pub fn build_router(state: AppState) -> Router {
             post(s3_handlers::clear_event_s3_chunks),
         )
         .route("/s3/usage", get(s3_handlers::get_s3_usage))
+        .route(
+            "/rescue-video/upload",
+            post(rescue_video_handlers::upload_rescue_video),
+        )
         .route("/events/{id}/activate", post(handlers::activate_event))
         .route(
             "/events/{id}/start-delivering",

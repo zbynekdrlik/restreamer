@@ -2427,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "rs-api"
-version = "0.3.29"
+version = "0.3.35"
 dependencies = [
  "anyhow",
  "axum",
@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "rs-cloud"
-version = "0.3.29"
+version = "0.3.35"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "rs-core"
-version = "0.3.29"
+version = "0.3.35"
 dependencies = [
  "chrono",
  "serde",
@@ -2486,7 +2486,7 @@ dependencies = [
 
 [[package]]
 name = "rs-delivery"
-version = "0.3.29"
+version = "0.3.35"
 dependencies = [
  "async-trait",
  "axum",
@@ -2507,9 +2507,10 @@ dependencies = [
 
 [[package]]
 name = "rs-endpoint"
-version = "0.3.29"
+version = "0.3.35"
 dependencies = [
  "axum",
+ "futures",
  "md-5",
  "parking_lot",
  "reqwest 0.12.28",
@@ -2527,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "rs-ffmpeg"
-version = "0.3.29"
+version = "0.3.35"
 dependencies = [
  "serde",
  "serde_json",
@@ -2539,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "rs-inpoint"
-version = "0.3.29"
+version = "0.3.35"
 dependencies = [
  "bytes",
  "env_logger 0.11.10",
@@ -2557,7 +2558,7 @@ dependencies = [
 
 [[package]]
 name = "rs-runtime"
-version = "0.3.29"
+version = "0.3.35"
 dependencies = [
  "anyhow",
  "axum",
@@ -2576,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "rs-service"
-version = "0.3.29"
+version = "0.3.35"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -2595,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "rs-youtube"
-version = "0.3.29"
+version = "0.3.35"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",

@@ -1,6 +1,6 @@
 [package]
 name = "leptos-ui"
-version = "0.3.36"
+version = "0.3.37"
 edition = "2024"
 license = "MIT"
 
@@ -19,7 +19,20 @@ serde-wasm-bindgen = "0.6"
 gloo-net = { version = "0.6", features = ["http", "websocket"] }
 gloo-utils = "0.2"
 gloo-timers = "0.3"
-web-sys = { version = "0.3", features = ["console", "Location", "Window"] }
+web-sys = { version = "0.3", features = [
+    "console",
+    "Event",
+    "EventTarget",
+    "File",
+    "FileList",
+    "FormData",
+    "HtmlInputElement",
+    "Location",
+    "Request",
+    "RequestInit",
+    "Response",
+    "Window",
+] }
 leptos_router = "0.7"
 js-sys = "0.3"
 futures = "0.3"

@@ -408,8 +408,13 @@ async fn producer_task<F: ChunkFetcher>(
                     s.consecutive_chunk_misses = consecutive_chunk_misses;
                 }
 
-                // Signal producer stall for rescue mode detection
-                if consecutive_chunk_misses >= 15 {
+                // Signal producer stall for rescue mode detection.
+                // Polls are 2s apart, so 3 misses = ~6s of genuinely no new
+                // chunks on S3. Triggering sooner means rescue activates
+                // faster after OBS stops, at the cost of occasional false
+                // positives on transient S3 errors (which self-heal on the
+                // next successful fetch — producer_active returns to true).
+                if consecutive_chunk_misses >= 3 {
                     buffer_state
                         .producer_active
                         .store(false, AtomicOrdering::Relaxed);

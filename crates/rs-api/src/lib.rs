@@ -6,6 +6,7 @@ mod delivery_tests;
 mod delivery_youtube;
 pub mod handlers;
 pub mod obs;
+pub mod rescue_video_handlers;
 pub mod router;
 #[cfg(test)]
 mod router_tests;

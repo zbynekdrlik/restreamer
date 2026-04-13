@@ -256,6 +256,7 @@ fn CacheDelayEditor(event_id: i64, initial_delay: Option<i64>) -> impl IntoView 
 fn RescueVideoEditor(event_id: i64, initial_url: Option<String>) -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let url_value = RwSignal::new(initial_url.unwrap_or_default());
+    let upload_status = RwSignal::new(String::new());
 
     let on_save = move |_| {
         let val = url_value.get();
@@ -277,6 +278,37 @@ fn RescueVideoEditor(event_id: i64, initial_url: Option<String>) -> impl IntoVie
         });
     };
 
+    let on_file = move |ev: leptos::ev::Event| {
+        use wasm_bindgen::JsCast;
+        let target = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok());
+        let file = target.and_then(|i| i.files()).and_then(|fl| fl.get(0));
+        let Some(file) = file else {
+            return;
+        };
+        upload_status.set("Uploading...".into());
+        let eid = event_id;
+        spawn_local(async move {
+            match api::upload_rescue_video(file).await {
+                Ok(url) => {
+                    url_value.set(url.clone());
+                    upload_status.set(format!("Uploaded: {url}"));
+                    // Save immediately so the event picks up the new URL
+                    let req = api::UpdateEventRequest {
+                        rescue_video_url: Some(url),
+                        ..Default::default()
+                    };
+                    let _ = api::update_event(eid, &req).await;
+                    if let Ok(events) = api::list_events().await {
+                        store.events_list.set(events);
+                    }
+                }
+                Err(e) => upload_status.set(format!("Upload failed: {e}")),
+            }
+        });
+    };
+
     view! {
         <div class="cache-edit">
             <label>"Rescue video URL:"</label>
@@ -288,6 +320,23 @@ fn RescueVideoEditor(event_id: i64, initial_url: Option<String>) -> impl IntoVie
                 on:input=move |ev| url_value.set(event_target_value(&ev))
             />
             <button class="btn-small" on:click=on_save>"Save"</button>
+            <label class="btn-small file-upload-btn">
+                "Upload"
+                <input
+                    type="file"
+                    accept="video/mp4,video/webm,video/quicktime,video/x-matroska"
+                    style="display:none"
+                    on:change=on_file
+                />
+            </label>
+            {move || {
+                let s = upload_status.get();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(view! { <span class="upload-status">{s}</span> })
+                }
+            }}
         </div>
     }
 }

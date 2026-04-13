@@ -15,6 +15,8 @@ pub struct EventTemplate {
     pub id: i64,
     pub name: String,
     pub cache_delay_secs: Option<i64>,
+    #[serde(default)]
+    pub rescue_video_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

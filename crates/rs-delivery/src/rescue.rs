@@ -5,8 +5,13 @@ use rs_ffmpeg::ServiceType;
 /// Fixed buffer refill target before resuming normal delivery (seconds).
 pub const RESCUE_REFILL_TARGET_SECS: u64 = 120;
 
-/// Seconds of producer stall (no new chunks) before entering rescue mode.
-pub const RESCUE_STALL_THRESHOLD_SECS: u64 = 30;
+/// Seconds of channel starvation before entering rescue mode. The consumer
+/// pulls chunks from a 10-slot channel; when starved for this long AND
+/// the producer has signalled stalled (no chunks on S3), rescue activates.
+/// Lower values mean rescue kicks in faster after OBS stops — at the cost
+/// of sensitivity to transient hiccups (normally producer_active will be
+/// true during those, preventing rescue from triggering).
+pub const RESCUE_STALL_THRESHOLD_SECS: u64 = 8;
 
 /// Delivery mode state machine.
 #[derive(Debug, Clone, PartialEq)]

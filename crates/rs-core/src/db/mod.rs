@@ -76,6 +76,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (12, MIGRATION_V12_SQL),
         (13, MIGRATION_V13_SQL),
         (14, MIGRATION_V14_SQL),
+        (15, MIGRATION_V15_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -332,6 +333,10 @@ CREATE INDEX idx_delivery_logs_instance
 
 const MIGRATION_V14_SQL: &str = r#"
 ALTER TABLE streaming_events ADD COLUMN rescue_video_url TEXT
+"#;
+
+const MIGRATION_V15_SQL: &str = r#"
+ALTER TABLE event_templates ADD COLUMN rescue_video_url TEXT
 "#;
 
 // --- Client Profile ---

@@ -524,11 +524,12 @@ pub async fn create_event_from_template(
     let event_name = find_unique_event_name(pool, &base_name).await?;
 
     let row = sqlx::query(
-        "INSERT INTO streaming_events (name, cache_delay_secs, created_from) VALUES (?1, ?2, ?3) RETURNING id",
+        "INSERT INTO streaming_events (name, cache_delay_secs, created_from, rescue_video_url) VALUES (?1, ?2, ?3, ?4) RETURNING id",
     )
     .bind(&event_name)
     .bind(template.cache_delay_secs)
     .bind(&template.name)
+    .bind(&template.rescue_video_url)
     .fetch_one(pool)
     .await?;
     let event_id: i64 = row.get("id");

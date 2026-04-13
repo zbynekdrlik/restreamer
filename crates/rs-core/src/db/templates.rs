@@ -8,21 +8,25 @@ pub async fn create_template(
     pool: &SqlitePool,
     name: &str,
     cache_delay_secs: Option<i64>,
+    rescue_video_url: Option<String>,
 ) -> Result<i64> {
     let row = sqlx::query(
-        "INSERT INTO event_templates (name, cache_delay_secs) VALUES (?1, ?2) RETURNING id",
+        "INSERT INTO event_templates (name, cache_delay_secs, rescue_video_url) VALUES (?1, ?2, ?3) RETURNING id",
     )
     .bind(name)
     .bind(cache_delay_secs)
+    .bind(&rescue_video_url)
     .fetch_one(pool)
     .await?;
     Ok(row.get("id"))
 }
 
 pub async fn list_templates(pool: &SqlitePool) -> Result<Vec<EventTemplate>> {
-    let rows = sqlx::query("SELECT id, name, cache_delay_secs FROM event_templates ORDER BY id")
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT id, name, cache_delay_secs, rescue_video_url FROM event_templates ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
 
     Ok(rows
         .into_iter()
@@ -30,20 +34,24 @@ pub async fn list_templates(pool: &SqlitePool) -> Result<Vec<EventTemplate>> {
             id: r.get("id"),
             name: r.get("name"),
             cache_delay_secs: r.get("cache_delay_secs"),
+            rescue_video_url: r.get("rescue_video_url"),
         })
         .collect())
 }
 
 pub async fn get_template_by_id(pool: &SqlitePool, id: i64) -> Result<Option<EventTemplate>> {
-    let row = sqlx::query("SELECT id, name, cache_delay_secs FROM event_templates WHERE id = ?1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT id, name, cache_delay_secs, rescue_video_url FROM event_templates WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
 
     Ok(row.map(|r| EventTemplate {
         id: r.get("id"),
         name: r.get("name"),
         cache_delay_secs: r.get("cache_delay_secs"),
+        rescue_video_url: r.get("rescue_video_url"),
     }))
 }
 
@@ -52,13 +60,17 @@ pub async fn update_template(
     id: i64,
     name: &str,
     cache_delay_secs: Option<i64>,
+    rescue_video_url: Option<String>,
 ) -> Result<()> {
-    sqlx::query("UPDATE event_templates SET name = ?1, cache_delay_secs = ?2 WHERE id = ?3")
-        .bind(name)
-        .bind(cache_delay_secs)
-        .bind(id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE event_templates SET name = ?1, cache_delay_secs = ?2, rescue_video_url = ?3 WHERE id = ?4",
+    )
+    .bind(name)
+    .bind(cache_delay_secs)
+    .bind(&rescue_video_url)
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -173,22 +185,29 @@ pub async fn seed_templates_from_events(pool: &SqlitePool) -> Result<usize> {
     }
 
     // Collect endpoint assignments up front so the transaction only writes.
-    let mut event_plans: Vec<(String, Option<i64>, Vec<i64>)> = Vec::with_capacity(events.len());
+    let mut event_plans: Vec<(String, Option<i64>, Option<String>, Vec<i64>)> =
+        Vec::with_capacity(events.len());
     for event in &events {
         let endpoints = super::get_event_endpoints(pool, event.id).await?;
         let endpoint_ids: Vec<i64> = endpoints.iter().map(|e| e.id).collect();
-        event_plans.push((event.name.clone(), event.cache_delay_secs, endpoint_ids));
+        event_plans.push((
+            event.name.clone(),
+            event.cache_delay_secs,
+            event.rescue_video_url.clone(),
+            endpoint_ids,
+        ));
     }
 
     // Wrap all writes in one transaction so a failure mid-seed rolls back.
     let mut tx = pool.begin().await?;
     let mut created = 0usize;
-    for (name, cache_delay, endpoint_ids) in &event_plans {
+    for (name, cache_delay, rescue_video_url, endpoint_ids) in &event_plans {
         let row = sqlx::query(
-            "INSERT INTO event_templates (name, cache_delay_secs) VALUES (?1, ?2) RETURNING id",
+            "INSERT INTO event_templates (name, cache_delay_secs, rescue_video_url) VALUES (?1, ?2, ?3) RETURNING id",
         )
         .bind(name)
         .bind(cache_delay)
+        .bind(rescue_video_url)
         .fetch_one(&mut *tx)
         .await?;
         let template_id: i64 = row.get("id");
