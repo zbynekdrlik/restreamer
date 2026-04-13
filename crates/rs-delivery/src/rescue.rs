@@ -402,58 +402,94 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
         }
     }
 
+    // Warmup has TWO exit conditions that must BOTH be met:
+    //   1. wall_elapsed >= delivery_delay_ms  (rescue video has played
+    //      long enough for viewers to see it)
+    //   2. buffered_ms >= delivery_delay_ms   (enough chunks on S3 to
+    //      start paced delivery without immediately stalling)
+    //
+    // Without the wall-clock condition, when chunks already exist on S3
+    // (e.g. VPS boot took 60s while OBS was streaming), the buffer-fill
+    // loop completes in microseconds and the user never sees the rescue
+    // video. With both conditions, the countdown reflects actual wall-
+    // clock time until playback starts.
     let mut accum_ms: u64 = 0;
     let mut probe_id = start_chunk_id;
+    let warmup_start = tokio::time::Instant::now();
     tracing::info!(
         alias,
         delivery_delay_ms,
-        "Waiting for duration-based buffer fill"
+        "Warmup started — waiting for both wall-clock and buffer targets"
     );
 
     let stopped = loop {
         if *stop_rx.borrow() {
             break true;
         }
-        match fetcher.chunk_duration_ms(probe_id).await {
-            Ok(Some(dur_ms)) => {
-                accum_ms += dur_ms.max(0) as u64;
-                probe_id += 1;
 
-                if rescue_video_url.is_some() {
-                    let remaining_ms = delivery_delay_ms.saturating_sub(accum_ms);
-                    let eta_secs = remaining_ms / 1000;
-
-                    {
-                        let mut s = stats.lock().await;
-                        s.delivery_mode = "warmup".to_string();
-                        s.rescue_eta_secs = Some(eta_secs);
-                    }
-
-                    let text = format_countdown_text(
-                        &DeliveryMode::Rescue {
-                            reason: RescueReason::Warmup,
-                        },
-                        eta_secs,
-                    );
-                    write_countdown_file(alias, &text);
+        // Advance the buffer probe as much as we can without blocking
+        // (consume already-available chunks instantly so accum_ms stays
+        // accurate). Once we hit a missing chunk or hit the target, stop
+        // probing this iteration.
+        loop {
+            if accum_ms >= delivery_delay_ms {
+                break;
+            }
+            match fetcher.chunk_duration_ms(probe_id).await {
+                Ok(Some(dur_ms)) => {
+                    accum_ms += dur_ms.max(0) as u64;
+                    probe_id += 1;
                 }
-
-                if accum_ms >= delivery_delay_ms {
-                    tracing::info!(alias, accum_ms, probe_id, "Buffer filled");
-                    break false;
+                Ok(None) => break, // no more chunks yet
+                Err(e) => {
+                    tracing::warn!(alias, "Buffer fill fetch error: {e}");
+                    break;
                 }
             }
-            Ok(None) => {
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                    _ = stop_rx.changed() => {
-                        if *stop_rx.borrow() { break true; }
-                    }
-                }
+        }
+
+        let wall_elapsed_ms = warmup_start.elapsed().as_millis() as u64;
+
+        // ETA = wall time until BOTH conditions are met. Use min(wall, accum)
+        // as progress — we've effectively reached the lower of the two.
+        let progress_ms = wall_elapsed_ms.min(accum_ms);
+        let remaining_ms = delivery_delay_ms.saturating_sub(progress_ms);
+        let eta_secs = remaining_ms.div_ceil(1000);
+
+        if rescue_video_url.is_some() {
+            {
+                let mut s = stats.lock().await;
+                s.delivery_mode = "warmup".to_string();
+                s.rescue_eta_secs = Some(eta_secs);
             }
-            Err(e) => {
-                tracing::warn!(alias, "Buffer fill fetch error: {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let text = format_countdown_text(
+                &DeliveryMode::Rescue {
+                    reason: RescueReason::Warmup,
+                },
+                eta_secs,
+            );
+            write_countdown_file(alias, &text);
+        }
+
+        // Both conditions met → exit
+        if wall_elapsed_ms >= delivery_delay_ms && accum_ms >= delivery_delay_ms {
+            tracing::info!(
+                alias,
+                wall_elapsed_ms,
+                accum_ms,
+                probe_id,
+                "Warmup complete — wall and buffer targets both met"
+            );
+            break false;
+        }
+
+        // Sleep before the next iteration. Tick frequently so ETA
+        // updates smoothly for the countdown overlay (once per second
+        // is the user-visible resolution).
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            _ = stop_rx.changed() => {
+                if *stop_rx.borrow() { break true; }
             }
         }
     };
