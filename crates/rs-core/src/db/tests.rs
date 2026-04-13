@@ -21,6 +21,43 @@ async fn client_profile_crud() {
     assert_eq!(profile.user_uuid, "updated-uuid");
 }
 
+/// Regression: orchestrator writes `booting`, `initializing`, and
+/// `delivering` as VPS phases for the operator dashboard. Without the
+/// V16 schema update widening the CHECK constraint, these writes fail
+/// with "CHECK constraint failed: status IN (...)" and the orchestrator
+/// flips to `failed`, breaking the dashboard.
+///
+/// Test all eight allowed status values round-trip through the DB.
+#[tokio::test]
+async fn delivery_instance_status_accepts_all_phases() {
+    let pool = setup_db().await;
+    create_streaming_event(&pool, "s-evt").await.unwrap();
+    let evt_id = list_streaming_events(&pool).await.unwrap()[0].id;
+    let inst_id = create_delivery_instance(&pool, 12345, "tn", "1.2.3.4", "cpx22", Some(evt_id), "tok")
+        .await
+        .unwrap();
+
+    for status in [
+        "creating",
+        "running",
+        "stopping",
+        "deleted",
+        "failed",
+        "booting",
+        "initializing",
+        "delivering",
+    ] {
+        update_delivery_instance_status(&pool, inst_id, status)
+            .await
+            .unwrap_or_else(|e| panic!("status '{status}' should be allowed: {e}"));
+        let inst = get_delivery_instance(&pool, inst_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inst.status, status, "round-trip failed for '{status}'");
+    }
+}
+
 #[tokio::test]
 async fn streaming_event_crud() {
     let pool = setup_db().await;

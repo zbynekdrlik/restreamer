@@ -77,6 +77,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (13, MIGRATION_V13_SQL),
         (14, MIGRATION_V14_SQL),
         (15, MIGRATION_V15_SQL),
+        (16, MIGRATION_V16_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -337,6 +338,42 @@ ALTER TABLE streaming_events ADD COLUMN rescue_video_url TEXT
 
 const MIGRATION_V15_SQL: &str = r#"
 ALTER TABLE event_templates ADD COLUMN rescue_video_url TEXT
+"#;
+
+// V16: widen the delivery_instances.status CHECK constraint to allow the
+// new orchestrator phases (booting, initializing, delivering). Without
+// this, writes from poll_and_init to "booting" fail with
+//   CHECK constraint failed: status IN ('creating','running',...)
+// which then sets the instance to "failed" and leaves the operator
+// staring at a broken dashboard.
+//
+// SQLite doesn't support ALTER TABLE ... DROP CONSTRAINT so we have to
+// recreate the table, copying rows over.
+const MIGRATION_V16_SQL: &str = r#"
+CREATE TABLE delivery_instances_v16 (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    hetzner_id      INTEGER NOT NULL UNIQUE,
+    name            TEXT NOT NULL,
+    ipv4            TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'creating' CHECK(status IN (
+        'creating', 'running', 'stopping', 'deleted', 'failed',
+        'booting', 'initializing', 'delivering'
+    )),
+    server_type     TEXT NOT NULL,
+    event_id        INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    last_health_at  TEXT,
+    auth_token      TEXT NOT NULL DEFAULT ''
+);
+
+INSERT INTO delivery_instances_v16
+    (id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token)
+SELECT
+    id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token
+FROM delivery_instances;
+
+DROP TABLE delivery_instances;
+ALTER TABLE delivery_instances_v16 RENAME TO delivery_instances
 "#;
 
 // --- Client Profile ---
