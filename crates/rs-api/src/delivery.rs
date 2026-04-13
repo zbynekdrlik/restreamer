@@ -277,9 +277,11 @@ impl DeliveryOrchestrator {
             .await?
             .ok_or_else(|| anyhow::anyhow!("delivery instance {instance_id} not found"))?;
 
-        // Poll Hetzner until server is running
+        // Poll Hetzner until server is running. Poll every 1s (not 5s)
+        // so we detect "running" as soon as possible — avoids wasting
+        // up to 5s of user-visible warmup time.
         let hetzner_id = instance.hetzner_id;
-        for attempt in 0..60 {
+        for attempt in 0..300 {
             let server = self
                 .hetzner
                 .get_server(hetzner_id)
@@ -293,13 +295,13 @@ impl DeliveryOrchestrator {
                 break;
             }
 
-            if attempt == 59 {
+            if attempt == 299 {
                 return Err(anyhow::anyhow!(
                     "Timeout waiting for server {hetzner_id} to start"
                 ));
             }
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
         // Wait for rs-delivery HTTP to be ready
@@ -310,11 +312,13 @@ impl DeliveryOrchestrator {
         let delivery_url = format!("http://{}:8000", instance.ipv4);
         let client = reqwest::Client::new();
 
-        // Wait for rs-delivery to become ready (cloud-init can take several minutes)
-        for attempt in 0..60 {
+        // Wait for rs-delivery to become ready. Poll every 1s so the
+        // moment cloud-init finishes we detect it — cuts up to 5s off
+        // user-visible warmup time.
+        for attempt in 0..300 {
             match client
                 .get(format!("{delivery_url}/api/health"))
-                .timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(3))
                 .send()
                 .await
             {
@@ -326,30 +330,30 @@ impl DeliveryOrchestrator {
                     break;
                 }
                 Ok(resp) => {
-                    if attempt % 6 == 0 {
+                    if attempt % 30 == 0 {
                         info!(attempt, status = %resp.status(), "Health check returned non-OK");
                     }
-                    if attempt == 59 {
+                    if attempt == 299 {
                         return Err(anyhow::anyhow!(
                             "rs-delivery returned {} after {} attempts",
                             resp.status(),
                             attempt + 1
                         ));
                     }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 Err(e) => {
-                    if attempt % 6 == 0 {
+                    if attempt % 30 == 0 {
                         info!(attempt, error = %e, "Health check connection failed");
                     }
-                    if attempt == 59 {
+                    if attempt == 299 {
                         return Err(anyhow::anyhow!(
                             "Timeout waiting for rs-delivery on {}: {}",
                             instance.ipv4,
                             e
                         ));
                     }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         }
