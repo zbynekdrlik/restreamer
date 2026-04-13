@@ -370,24 +370,34 @@ async fn warmup_writes_countdown_file_with_warmup_text() {
     // TDD: this catches that the countdown file is actually written with
     // Warmup text (not BufferEmpty, not empty). Earlier implementation only
     // updated stats — no file was ever written during warmup.
+    //
+    // Approach: set up fetcher with limited chunks so the fill never
+    // completes, then send a stop signal after 1s. During that second,
+    // the initial seed write (+ per-chunk updates on the 1 chunk available)
+    // should have produced a "Stream starting" file.
     let alias = unique_alias("countdown");
     let fetcher = WarmupMockFetcher::new(0, 100); // only 1 chunk available, 100ms
     let ep_cfg = test_endpoint_config(&alias, false);
     let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
-    let (_stop_tx, mut stop_rx) = watch::channel(false);
+    let (stop_tx, mut stop_rx) = watch::channel(false);
 
-    // Poll the countdown file while warmup runs
+    // Poll the countdown file for warmup text, AND send a stop signal
+    // after 1s so the main warmup loop terminates (otherwise it hangs
+    // forever waiting for the target buffer duration).
     let alias_probe = alias.clone();
     let probe = tokio::spawn(async move {
         let mut saw_warmup_text = false;
-        for _ in 0..200 {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             if let Ok(contents) = std::fs::read_to_string(countdown_file_path(&alias_probe)) {
                 if contents.starts_with("Stream starting") {
                     saw_warmup_text = true;
+                    break;
                 }
             }
         }
+        // Stop the warmup loop regardless so the test doesn't hang.
+        let _ = stop_tx.send(true);
         saw_warmup_text
     });
 
@@ -396,22 +406,21 @@ async fn warmup_writes_countdown_file_with_warmup_text() {
         &alias,
         &ep_cfg,
         0,
-        200, // 200ms target, need 2 x 100ms chunks — only 1 available so stops at timeout
+        10_000, // large target we'll never reach
         Some("file:///tmp/nonexistent.mp4"),
         &stats,
         &mut stop_rx,
     )
     .await;
 
-    // Stop the warmup by closing stop_tx (already dropped above? no — still live)
-    // The loop will hang on Ok(None). We need to stop it.
-    // Actually the test probe runs for 1s total. After that we need to kill
-    // the warmup somehow. Let's do it differently:
-    // We'll send a stop signal after the probe.
-    let _ = probe.await.unwrap();
-    // We don't assert on saw_warmup_text here because the ffmpeg spawn might
-    // fail (invalid file URL) and skip the countdown write. Instead we assert
-    // the BEHAVIOR — the file should exist while the loop is running.
+    let saw_warmup_text = probe.await.unwrap();
+    // The rescue ffmpeg will fail to spawn on a file:// URL that doesn't
+    // exist, but the seed countdown write happens BEFORE the spawn, so
+    // the file should still have been created with the warmup text.
+    assert!(
+        saw_warmup_text,
+        "countdown file should contain 'Stream starting' text during warmup"
+    );
 }
 
 #[tokio::test]
