@@ -150,6 +150,15 @@ pub enum WsEvent {
     ChunkUploaded {
         chunk_id: i64,
     },
+    ChunkUploadAttempt {
+        chunk_id: i64,
+        attempt: i64,
+    },
+    ChunkUploadFailed {
+        chunk_id: i64,
+        error: String,
+        permanent: bool,
+    },
     StreamingEvent {
         action: String,
         name: Option<String>,
@@ -310,6 +319,15 @@ mod tests {
                 md5: "abc123".to_string(),
             },
             WsEvent::ChunkUploaded { chunk_id: 1 },
+            WsEvent::ChunkUploadAttempt {
+                chunk_id: 2,
+                attempt: 1,
+            },
+            WsEvent::ChunkUploadFailed {
+                chunk_id: 3,
+                error: "timeout".to_string(),
+                permanent: false,
+            },
             WsEvent::StreamingEvent {
                 action: "created".to_string(),
                 name: Some("evt-1".to_string()),
