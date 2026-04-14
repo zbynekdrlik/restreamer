@@ -15,7 +15,7 @@ pub use v2::*;
 pub mod upload;
 pub use upload::{
     list_recent_uploads, mark_upload_permanently_failed, pick_next_uploadable_chunk,
-    record_upload_attempt, record_upload_failure, record_upload_success,
+    record_upload_attempt, record_upload_failure, record_upload_success, reset_orphaned_in_process,
 };
 
 #[cfg(test)]

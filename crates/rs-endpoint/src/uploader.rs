@@ -22,6 +22,15 @@ struct WorkerCtx {
     metrics: Arc<UploadMetrics>,
     in_flight: Arc<AtomicUsize>,
     blocked: Arc<std::sync::atomic::AtomicBool>,
+    /// Number of workers that should voluntarily exit on their next iteration
+    /// (used by the adaptive controller to scale down).
+    drain_needed: Arc<AtomicUsize>,
+}
+
+/// Pure gate: should the spawner spawn another worker?
+#[inline]
+fn should_spawn_worker(live: usize, target: usize) -> bool {
+    live < target
 }
 
 const MAX_ATTEMPTS: i64 = 10;
@@ -60,6 +69,8 @@ pub struct ChunkUploader {
     upload_blocked: Arc<std::sync::atomic::AtomicBool>,
     metrics: Arc<UploadMetrics>,
     in_flight: Arc<AtomicUsize>,
+    /// Workers that should voluntarily exit on next iteration (scale-down).
+    drain_needed: Arc<AtomicUsize>,
 }
 
 impl ChunkUploader {
@@ -71,6 +82,7 @@ impl ChunkUploader {
             upload_blocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             metrics: Arc::new(UploadMetrics::default()),
             in_flight: Arc::new(AtomicUsize::new(0)),
+            drain_needed: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -95,14 +107,28 @@ impl ChunkUploader {
     /// Starts with MIN_CONCURRENCY workers and scales up to MAX_CONCURRENCY
     /// based on observed error_rate and median upload latency.
     pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) {
+        // Reset any in_process=1 rows orphaned by a prior crash.
+        match db::reset_orphaned_in_process(&self.pool).await {
+            Ok(n) if n > 0 => {
+                warn!("Reset {n} orphaned in_process rows from prior run")
+            }
+            Ok(_) => {}
+            Err(e) => error!("reset_orphaned_in_process failed: {e}"),
+        }
+
         use tokio::sync::watch;
         let (target_tx, target_rx) = watch::channel::<usize>(MIN_CONCURRENCY);
         self.metrics.set_adaptive_target(MIN_CONCURRENCY);
+
+        // Shared live-worker counter and drain signal.
+        let live = Arc::new(AtomicUsize::new(0));
+        let drain_needed = Arc::clone(&self.drain_needed);
 
         // 1. Spawn controller task (adaptive resizing every 10s)
         {
             let metrics = Arc::clone(&self.metrics);
             let tx = target_tx.clone();
+            let drain = Arc::clone(&drain_needed);
             let mut shutdown_c = shutdown.resubscribe();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(10));
@@ -115,6 +141,10 @@ impl ChunkUploader {
                             let snap = metrics.snapshot(Duration::from_secs(10));
                             let next = adjust_target(current, snap.error_rate, snap.median_ms);
                             if next != current {
+                                if next < current {
+                                    // Tell (current - next) workers to exit voluntarily.
+                                    drain.fetch_add(current - next, Ordering::SeqCst);
+                                }
                                 tracing::info!(
                                     "Adaptive concurrency {current} -> {next} (err={:.2}, med={}ms)",
                                     snap.error_rate, snap.median_ms,
@@ -129,7 +159,7 @@ impl ChunkUploader {
             });
         }
 
-        // 2. Spawner loop: keep #spawned == *target_rx.borrow()
+        // 2. Spawner loop: spawn when live < target (allows regrowth after scale-down).
         let shared_ctx = WorkerCtx {
             pool: self.pool.clone(),
             s3: Arc::clone(&self.s3),
@@ -137,19 +167,27 @@ impl ChunkUploader {
             metrics: Arc::clone(&self.metrics),
             in_flight: Arc::clone(&self.in_flight),
             blocked: Arc::clone(&self.upload_blocked),
+            drain_needed: Arc::clone(&drain_needed),
         };
-        let mut spawned: usize = 0;
+        let mut worker_id_counter: usize = 0;
         let mut rx = target_rx.clone();
         loop {
             let target = *rx.borrow_and_update();
-            while spawned < target {
-                let idx = spawned;
-                spawned += 1;
+            while should_spawn_worker(live.load(Ordering::SeqCst), target) {
+                let idx = worker_id_counter;
+                worker_id_counter += 1;
                 let ctx = shared_ctx.clone();
+                let live_for_worker = Arc::clone(&live);
+                live.fetch_add(1, Ordering::SeqCst);
                 let mut worker_shutdown = shutdown.resubscribe();
                 let mut worker_rx = target_rx.clone();
                 tokio::spawn(async move {
-                    run_worker(idx, ctx, &mut worker_shutdown, &mut worker_rx).await;
+                    supervise_future(
+                        idx,
+                        run_worker(idx, ctx, &mut worker_shutdown, &mut worker_rx),
+                    )
+                    .await;
+                    live_for_worker.fetch_sub(1, Ordering::SeqCst);
                 });
             }
             tokio::select! {
@@ -159,6 +197,23 @@ impl ChunkUploader {
                 }
             }
         }
+    }
+}
+
+/// Wraps a future so that a panic is caught, logged, and does NOT propagate.
+/// Safe to call at the top level of `tokio::spawn` closures.
+async fn supervise_future<F: std::future::Future<Output = ()>>(label: usize, fut: F) {
+    use futures::FutureExt;
+    let wrapped = std::panic::AssertUnwindSafe(fut);
+    if let Err(panic) = wrapped.catch_unwind().await {
+        let msg = if let Some(s) = panic.downcast_ref::<&'static str>() {
+            (*s).to_string()
+        } else if let Some(s) = panic.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "worker panic (unknown payload)".to_string()
+        };
+        error!(worker = label, "Upload worker panicked: {msg}");
     }
 }
 
@@ -175,10 +230,18 @@ async fn run_worker(
         metrics,
         in_flight,
         blocked: upload_blocked,
+        drain_needed,
     } = ctx;
     loop {
-        // Exit if target has shrunk below our index
-        if *target_rx.borrow() <= idx {
+        // Voluntary drain: if the adaptive controller requested a scale-down,
+        // one worker per iteration claims a drain token and exits.
+        let want = drain_needed.load(Ordering::SeqCst);
+        if want > 0
+            && drain_needed
+                .compare_exchange(want, want - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            debug!(worker = idx, "Exiting voluntarily (drain requested)");
             return;
         }
 
@@ -438,5 +501,36 @@ mod tests {
             snap.in_flight, 42,
             "both handles must observe the same state"
         );
+    }
+
+    // --- Blocker 2: supervise_future ---
+
+    #[tokio::test]
+    async fn supervise_future_catches_string_panic() {
+        // Must NOT propagate the panic — if it did, the test itself would panic and fail.
+        supervise_future(0, async { panic!("boom") }).await;
+    }
+
+    #[tokio::test]
+    async fn supervise_future_returns_on_clean_exit() {
+        supervise_future(0, async {}).await;
+    }
+
+    // --- Blocker 3: should_spawn_worker / spawn gate ---
+
+    #[test]
+    fn spawn_gate_requests_new_worker_when_live_below_target() {
+        assert!(should_spawn_worker(4, 8));
+        assert!(!should_spawn_worker(4, 4));
+        assert!(!should_spawn_worker(10, 4));
+    }
+
+    #[test]
+    fn spawn_gate_reopens_after_drain_below_target() {
+        // After scale-down 32→4, live drains from 32 toward 4.
+        // Mid-drain (live=20) with target=4: no spawn.
+        assert!(!should_spawn_worker(20, 4));
+        // After drain (live=4) with target now raised to 8: spawn.
+        assert!(should_spawn_worker(4, 8));
     }
 }

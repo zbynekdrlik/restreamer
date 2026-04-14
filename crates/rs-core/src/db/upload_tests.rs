@@ -1,5 +1,68 @@
 use crate::db;
 
+#[tokio::test]
+async fn reset_orphaned_in_process_clears_abandoned_claims() {
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+    db::upsert_client_profile(&pool, "test-uuid").await.unwrap();
+    let event_id = db::upsert_streaming_event(&pool, "evt").await.unwrap();
+
+    // Simulate three rows: sent (leave alone), orphaned (in_process=1, sent=0),
+    // perma-failed (in_process=1 but failed_permanently=1 — leave alone).
+    let c_sent = db::insert_chunk(&pool, event_id, "/tmp/s", 100, "m", 2000)
+        .await
+        .unwrap();
+    let c_orphan = db::insert_chunk(&pool, event_id, "/tmp/o", 100, "m", 2000)
+        .await
+        .unwrap();
+    let c_perma = db::insert_chunk(&pool, event_id, "/tmp/p", 100, "m", 2000)
+        .await
+        .unwrap();
+
+    db::record_upload_success(&pool, c_sent, 1, 50)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE chunk_records SET in_process = 1 WHERE id = ?1")
+        .bind(c_orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE chunk_records SET in_process = 1, upload_failed_permanently = 1 WHERE id = ?1",
+    )
+    .bind(c_perma)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let reset = db::reset_orphaned_in_process(&pool).await.unwrap();
+    assert_eq!(reset, 1, "exactly one orphaned row should be reset");
+
+    // Verify state: c_orphan is now eligible (in_process=0), c_perma stays claimed,
+    // c_sent stays sent.
+    let orphan_row: (i64, i64, i64) = sqlx::query_as(
+        "SELECT sent, in_process, upload_failed_permanently FROM chunk_records WHERE id = ?1",
+    )
+    .bind(c_orphan)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(orphan_row, (0, 0, 0));
+
+    let perma_row: (i64, i64, i64) = sqlx::query_as(
+        "SELECT sent, in_process, upload_failed_permanently FROM chunk_records WHERE id = ?1",
+    )
+    .bind(c_perma)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        perma_row,
+        (0, 1, 1),
+        "permanently-failed rows keep their claim flag"
+    );
+}
+
 async fn setup_db() -> sqlx::sqlite::SqlitePool {
     let pool = db::create_memory_pool().await.unwrap();
     db::run_migrations(&pool).await.unwrap();

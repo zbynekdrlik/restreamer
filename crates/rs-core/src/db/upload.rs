@@ -160,6 +160,21 @@ pub async fn record_upload_success(
     Ok(())
 }
 
+/// Reset abandoned in_process=1 claims left by prior runs/crashes.
+/// Only clears rows that are not yet sent and not permanently failed —
+/// the picker will then re-eligibilise them immediately.
+/// Returns the number of rows reset. Safe to call at startup.
+pub async fn reset_orphaned_in_process(pool: &SqlitePool) -> Result<u64> {
+    let result = sqlx::query(
+        "UPDATE chunk_records
+         SET in_process = 0
+         WHERE in_process = 1 AND sent = 0 AND upload_failed_permanently = 0",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// List the most-recent N chunks (by id desc) with upload telemetry joined
 /// to the streaming event name.
 pub async fn list_recent_uploads(pool: &SqlitePool, limit: i64) -> Result<Vec<UploadChunkRow>> {
