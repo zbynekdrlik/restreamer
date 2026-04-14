@@ -1,5 +1,4 @@
 use super::*;
-use chrono::Utc;
 
 async fn setup_db() -> sqlx::sqlite::SqlitePool {
     let pool = create_memory_pool().await.unwrap();
@@ -175,34 +174,6 @@ async fn delete_chunks_for_event_works() {
     // Deleting again should return 0
     let deleted_again = delete_chunks_for_event(&pool, evt1).await.unwrap();
     assert_eq!(deleted_again, 0);
-}
-
-#[tokio::test]
-async fn migration_v17_adds_upload_telemetry_columns() {
-    let pool = setup_db().await;
-
-    // All seven upload telemetry columns must exist after migrations run.
-    sqlx::query(
-        "SELECT upload_attempts, upload_first_attempt_at, upload_completed_at, \
-         upload_duration_ms, upload_last_error, upload_next_retry_at, \
-         upload_failed_permanently FROM chunk_records LIMIT 1",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("upload telemetry columns must exist on chunk_records");
-
-    // The upload-queue index must exist.
-    let row = sqlx::query(
-        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_chunks_upload_queue'",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("sqlite_master query must succeed");
-
-    assert!(
-        row.is_some(),
-        "idx_chunks_upload_queue index must exist after V17 migration"
-    );
 }
 
 #[tokio::test]
@@ -990,127 +961,4 @@ async fn update_event_rescue_video_url() {
 
 // Template and create-event-from-template tests are in template_tests.rs
 // Delivery log capture tests are in delivery_log_tests.rs
-
-#[tokio::test]
-async fn picker_skips_chunks_before_retry_time_and_claims_atomically() {
-    let pool = setup_db().await;
-    upsert_client_profile(&pool, "test-uuid").await.unwrap();
-    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
-
-    let c1 = insert_chunk(&pool, event_id, "/tmp/a", 100, "m", 2000)
-        .await
-        .unwrap();
-    let c2 = insert_chunk(&pool, event_id, "/tmp/b", 100, "m2", 2000)
-        .await
-        .unwrap();
-
-    // c1 has retry scheduled in the future, c2 is eligible now
-    record_upload_failure(&pool, c1, "timeout", 9_999_999_999_999, 500)
-        .await
-        .unwrap();
-
-    let now_ms = 1_735_000_000_000_i64;
-    let picked = pick_next_uploadable_chunk(&pool, now_ms).await.unwrap();
-    assert_eq!(
-        picked.as_ref().map(|c| c.id),
-        Some(c2),
-        "should pick eligible one"
-    );
-    // After pick, c2 is in_process=true
-    let in_proc: (i64,) = sqlx::query_as("SELECT in_process FROM chunk_records WHERE id = ?1")
-        .bind(c2)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(in_proc.0, 1, "picked chunk must be marked in_process");
-
-    // A second pick returns None (c1 still in future, c2 claimed)
-    let again = pick_next_uploadable_chunk(&pool, now_ms).await.unwrap();
-    assert!(again.is_none(), "no other chunk is eligible");
-
-    // Advancing the clock past c1's retry time lets picker claim it
-    let later = 10_000_000_000_000_i64;
-    let picked2 = pick_next_uploadable_chunk(&pool, later).await.unwrap();
-    assert_eq!(picked2.as_ref().map(|c| c.id), Some(c1));
-}
-
-#[tokio::test]
-async fn picker_skips_permanently_failed() {
-    let pool = setup_db().await;
-    upsert_client_profile(&pool, "test-uuid").await.unwrap();
-    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
-    let c = insert_chunk(&pool, event_id, "/tmp/a", 100, "m", 2000)
-        .await
-        .unwrap();
-    mark_upload_permanently_failed(&pool, c).await.unwrap();
-
-    let picked = pick_next_uploadable_chunk(&pool, 1_000_000_000_000)
-        .await
-        .unwrap();
-    assert!(
-        picked.is_none(),
-        "permanently-failed chunks must not be picked"
-    );
-}
-
-#[tokio::test]
-async fn chunk_record_round_trips_upload_columns() {
-    let pool = setup_db().await;
-    upsert_client_profile(&pool, "test-uuid").await.unwrap();
-
-    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
-
-    let chunk_id = insert_chunk(&pool, event_id, "/tmp/f.bin", 100_000, "md5xxxx", 2000)
-        .await
-        .unwrap();
-
-    record_upload_attempt(&pool, chunk_id, 1735829023000)
-        .await
-        .unwrap();
-    record_upload_failure(&pool, chunk_id, "timeout", 1735829024000, 1200)
-        .await
-        .unwrap();
-
-    let chunks = get_unsent_chunks(&pool, 10).await.unwrap();
-    let c = chunks
-        .iter()
-        .find(|c| c.id == chunk_id)
-        .expect("chunk should be queryable");
-    assert_eq!(c.upload_attempts, 1);
-    assert!(c.upload_first_attempt_at.is_some());
-    assert_eq!(c.upload_last_error.as_deref(), Some("timeout"));
-    assert_eq!(c.upload_duration_ms, Some(1200));
-    assert!(c.upload_next_retry_at.is_some());
-    assert!(!c.upload_failed_permanently);
-}
-
-#[tokio::test]
-async fn list_recent_uploads_returns_status_transitions() {
-    let pool = setup_db().await;
-    let event_id = upsert_streaming_event(&pool, "evt-a").await.unwrap();
-
-    let c1 = insert_chunk(&pool, event_id, "/tmp/a", 100, "m1", 2000)
-        .await
-        .unwrap();
-    let c2 = insert_chunk(&pool, event_id, "/tmp/b", 200, "m2", 2000)
-        .await
-        .unwrap();
-    let c3 = insert_chunk(&pool, event_id, "/tmp/c", 300, "m3", 2000)
-        .await
-        .unwrap();
-
-    record_upload_success(&pool, c1, 123, 150).await.unwrap();
-    record_upload_failure(&pool, c2, "oops", 99_999_999_999_i64, 500)
-        .await
-        .unwrap();
-    mark_upload_permanently_failed(&pool, c3).await.unwrap();
-
-    let rows = list_recent_uploads(&pool, 10).await.unwrap();
-    let by_id: std::collections::HashMap<i64, &crate::models::UploadChunkRow> =
-        rows.iter().map(|r| (r.chunk_id, r)).collect();
-    assert_eq!(by_id[&c1].status, "sent");
-    assert_eq!(by_id[&c2].status, "retrying");
-    assert_eq!(by_id[&c3].status, "failed");
-    assert_eq!(by_id[&c2].last_error.as_deref(), Some("oops"));
-    assert_eq!(by_id[&c1].event_identifier, "evt-a");
-}
+// Upload telemetry tests are in upload_tests.rs

@@ -13,6 +13,17 @@ use rs_core::models::WsEvent;
 use crate::metrics::{UploadEvent, UploadMetrics};
 use crate::s3::S3Client;
 
+/// Shared long-lived context passed to every upload worker.
+#[derive(Clone)]
+struct WorkerCtx {
+    pool: SqlitePool,
+    s3: Arc<S3Client>,
+    ws_tx: broadcast::Sender<WsEvent>,
+    metrics: Arc<UploadMetrics>,
+    in_flight: Arc<AtomicUsize>,
+    blocked: Arc<std::sync::atomic::AtomicBool>,
+}
+
 const MAX_ATTEMPTS: i64 = 10;
 const MAX_WALL_CLOCK_MS: i64 = 600_000; // 10 min total retry budget
 const MIN_CONCURRENCY: usize = 4;
@@ -119,6 +130,14 @@ impl ChunkUploader {
         }
 
         // 2. Spawner loop: keep #spawned == *target_rx.borrow()
+        let shared_ctx = WorkerCtx {
+            pool: self.pool.clone(),
+            s3: Arc::clone(&self.s3),
+            ws_tx: self.ws_tx.clone(),
+            metrics: Arc::clone(&self.metrics),
+            in_flight: Arc::clone(&self.in_flight),
+            blocked: Arc::clone(&self.upload_blocked),
+        };
         let mut spawned: usize = 0;
         let mut rx = target_rx.clone();
         loop {
@@ -126,27 +145,11 @@ impl ChunkUploader {
             while spawned < target {
                 let idx = spawned;
                 spawned += 1;
-                let pool = self.pool.clone();
-                let s3 = Arc::clone(&self.s3);
-                let ws_tx = self.ws_tx.clone();
-                let metrics = Arc::clone(&self.metrics);
-                let in_flight = Arc::clone(&self.in_flight);
-                let blocked = Arc::clone(&self.upload_blocked);
+                let ctx = shared_ctx.clone();
                 let mut worker_shutdown = shutdown.resubscribe();
                 let mut worker_rx = target_rx.clone();
                 tokio::spawn(async move {
-                    run_worker(
-                        idx,
-                        pool,
-                        s3,
-                        ws_tx,
-                        blocked,
-                        metrics,
-                        in_flight,
-                        &mut worker_shutdown,
-                        &mut worker_rx,
-                    )
-                    .await;
+                    run_worker(idx, ctx, &mut worker_shutdown, &mut worker_rx).await;
                 });
             }
             tokio::select! {
@@ -161,15 +164,18 @@ impl ChunkUploader {
 
 async fn run_worker(
     idx: usize,
-    pool: SqlitePool,
-    s3: Arc<S3Client>,
-    ws_tx: broadcast::Sender<WsEvent>,
-    upload_blocked: Arc<std::sync::atomic::AtomicBool>,
-    metrics: Arc<UploadMetrics>,
-    in_flight: Arc<AtomicUsize>,
+    ctx: WorkerCtx,
     shutdown: &mut broadcast::Receiver<()>,
     target_rx: &mut tokio::sync::watch::Receiver<usize>,
 ) {
+    let WorkerCtx {
+        pool,
+        s3,
+        ws_tx,
+        metrics,
+        in_flight,
+        blocked: upload_blocked,
+    } = ctx;
     loop {
         // Exit if target has shrunk below our index
         if *target_rx.borrow() <= idx {
