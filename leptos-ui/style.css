@@ -146,6 +146,43 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 .upload-strip__errors { color: var(--text-secondary); }
 .upload-strip__errors--alert { color: var(--status-error); font-weight: 500; }
 
+/* Uploads drill-down page */
+.uploads-page {
+    padding: 1.5rem;
+}
+.uploads-page h1 {
+    margin: 0 0 1rem;
+    color: var(--text-primary);
+}
+.uploads-filter {
+    display: inline-flex;
+    gap: 0.4rem;
+    align-items: center;
+    margin-bottom: 1rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+.uploads-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.uploads-table th,
+.uploads-table td {
+    padding: 0.4rem 0.6rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+.uploads-table th {
+    color: var(--text-secondary);
+    font-weight: 500;
+    background: var(--bg-card);
+}
+.uploads-row--sent    td { color: var(--text-primary); }
+.uploads-row--pending td { color: var(--text-secondary); }
+.uploads-row--retrying td { color: #f59e0b; }
+.uploads-row--failed  td { color: var(--status-error); font-weight: 500; }
+
 /* Status Dots */
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-secondary); opacity: 0.4; flex-shrink: 0; }
 .status-dot.active { background: var(--status-ok); opacity: 1; animation: pulse 2s ease-in-out infinite; }
