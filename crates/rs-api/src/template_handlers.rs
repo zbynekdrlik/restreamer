@@ -14,12 +14,16 @@ pub struct CreateTemplateRequest {
     pub name: String,
     #[serde(default)]
     pub cache_delay_secs: Option<i64>,
+    #[serde(default)]
+    pub rescue_video_url: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateTemplateRequest {
     pub name: Option<String>,
     pub cache_delay_secs: Option<i64>,
+    #[serde(default)]
+    pub rescue_video_url: Option<String>,
 }
 
 pub async fn list_templates(
@@ -40,12 +44,17 @@ pub async fn create_template(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let id = db::create_template(&state.pool, &req.name, req.cache_delay_secs)
-        .await
-        .map_err(|e| {
-            error!("Failed to create template: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let id = db::create_template(
+        &state.pool,
+        &req.name,
+        req.cache_delay_secs,
+        req.rescue_video_url,
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to create template: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
 }
@@ -83,8 +92,14 @@ pub async fn update_template(
     } else {
         existing.cache_delay_secs
     };
+    // For rescue_video_url, we merge: if the request provides it, use it
+    // (empty string means "clear"); otherwise preserve existing.
+    let new_rescue_url = req
+        .rescue_video_url
+        .clone()
+        .or(existing.rescue_video_url.clone());
 
-    db::update_template(&state.pool, id, new_name, new_cache_delay)
+    db::update_template(&state.pool, id, new_name, new_cache_delay, new_rescue_url)
         .await
         .map_err(|e| {
             error!("Failed to update template {id}: {e}");

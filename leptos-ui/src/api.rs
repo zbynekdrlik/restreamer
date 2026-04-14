@@ -30,6 +30,8 @@ pub struct StreamingEvent {
     pub cache_delay_secs: Option<i64>,
     #[serde(default)]
     pub created_from: Option<String>,
+    #[serde(default)]
+    pub rescue_video_url: Option<String>,
 }
 
 /// Event template (reusable preset).
@@ -39,6 +41,8 @@ pub struct EventTemplate {
     pub name: String,
     #[serde(default)]
     pub cache_delay_secs: Option<i64>,
+    #[serde(default)]
+    pub rescue_video_url: Option<String>,
 }
 
 /// Chunk statistics from the backend.
@@ -405,18 +409,22 @@ pub async fn list_templates() -> Result<Vec<EventTemplate>, String> {
 pub async fn create_template(
     name: &str,
     cache_delay_secs: Option<i64>,
+    rescue_video_url: Option<String>,
 ) -> Result<serde_json::Value, String> {
     #[derive(Serialize)]
     struct Body {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_delay_secs: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rescue_video_url: Option<String>,
     }
     http_post_json(
         "/templates",
         &Body {
             name: name.to_string(),
             cache_delay_secs,
+            rescue_video_url,
         },
     )
     .await
@@ -426,6 +434,7 @@ pub async fn update_template(
     id: i64,
     name: Option<&str>,
     cache_delay_secs: Option<i64>,
+    rescue_video_url: Option<String>,
 ) -> Result<(), String> {
     #[derive(Serialize)]
     struct Body {
@@ -433,12 +442,15 @@ pub async fn update_template(
         name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_delay_secs: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rescue_video_url: Option<String>,
     }
     http_patch_json(
         &format!("/templates/{id}"),
         &Body {
             name: name.map(|s| s.to_string()),
             cache_delay_secs,
+            rescue_video_url,
         },
     )
     .await
@@ -446,6 +458,49 @@ pub async fn update_template(
 
 pub async fn delete_template(id: i64) -> Result<(), String> {
     http_delete(&format!("/templates/{id}")).await
+}
+
+/// Upload a rescue video file to the backend. Returns the public URL of
+/// the uploaded video on success. The file is sent as multipart/form-data
+/// with a "file" field; the server stores it to S3 with public-read ACL
+/// and returns the URL.
+pub async fn upload_rescue_video(file: web_sys::File) -> Result<String, String> {
+    use wasm_bindgen::JsCast;
+
+    let form_data = web_sys::FormData::new().map_err(|e| format!("FormData: {e:?}"))?;
+    form_data
+        .append_with_blob("file", file.as_ref())
+        .map_err(|e| format!("FormData append: {e:?}"))?;
+
+    let opts = web_sys::RequestInit::new();
+    opts.set_method("POST");
+    opts.set_body(&form_data);
+
+    let url = format!("{}/rescue-video/upload", api_base());
+    let request =
+        web_sys::Request::new_with_str_and_init(&url, &opts).map_err(|e| format!("req: {e:?}"))?;
+
+    let window = web_sys::window().ok_or("no window")?;
+    let resp_promise = window.fetch_with_request(&request);
+    let resp_js = JsFuture::from(resp_promise)
+        .await
+        .map_err(|e| format!("fetch: {e:?}"))?;
+    let resp: web_sys::Response = resp_js.dyn_into().map_err(|e| format!("cast: {e:?}"))?;
+
+    if !resp.ok() {
+        return Err(format!("upload failed with status {}", resp.status()));
+    }
+
+    let json_promise = resp.json().map_err(|e| format!("json promise: {e:?}"))?;
+    let json_js = JsFuture::from(json_promise)
+        .await
+        .map_err(|e| format!("json: {e:?}"))?;
+    let parsed: serde_json::Value =
+        serde_wasm_bindgen::from_value(json_js).map_err(|e| format!("parse: {e:?}"))?;
+    parsed["url"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "response missing 'url' field".to_string())
 }
 
 pub async fn get_template_endpoints(template_id: i64) -> Result<Vec<EndpointConfig>, String> {
@@ -548,6 +603,8 @@ pub struct UpdateEventRequest {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_delay_secs: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rescue_video_url: Option<String>,
 }
 
 pub async fn update_event(id: i64, req: &UpdateEventRequest) -> Result<(), String> {
@@ -581,6 +638,10 @@ pub struct DeliveryEndpointDetail {
     pub ffmpeg_restart_count: u32,
     #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub delivery_mode: Option<String>,
+    #[serde(default)]
+    pub rescue_eta_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -620,6 +681,10 @@ pub struct CachedDeliveryEndpoint {
     pub last_error: Option<String>,
     #[serde(default)]
     pub is_fast: bool,
+    #[serde(default)]
+    pub delivery_mode: Option<String>,
+    #[serde(default)]
+    pub rescue_eta_secs: Option<u64>,
 }
 
 /// Get cached delivery status (instant, no VPS round-trip).

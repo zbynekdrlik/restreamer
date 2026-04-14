@@ -106,6 +106,10 @@ struct WsDeliveryEndpoint {
     last_error: Option<String>,
     #[serde(default)]
     is_fast: bool,
+    #[serde(default)]
+    delivery_mode: Option<String>,
+    #[serde(default)]
+    rescue_eta_secs: Option<u64>,
 }
 
 /// Compute the WebSocket URL from the current page location.
@@ -151,6 +155,8 @@ async fn load_initial_state(store: DashboardStore) {
                     ffmpeg_restart_count: ep.ffmpeg_restart_count,
                     last_error: ep.last_error,
                     is_fast: ep.is_fast,
+                    delivery_mode: ep.delivery_mode.clone(),
+                    rescue_eta_secs: ep.rescue_eta_secs,
                 })
                 .collect();
             store.delivery.set(DeliveryState {
@@ -291,6 +297,8 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                             ffmpeg_restart_count: ep.ffmpeg_restart_count,
                             last_error: ep.last_error.clone(),
                             is_fast: ep.is_fast,
+                            delivery_mode: ep.delivery_mode.clone(),
+                            rescue_eta_secs: ep.rescue_eta_secs,
                         }
                     })
                     .collect();

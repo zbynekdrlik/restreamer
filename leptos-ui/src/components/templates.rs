@@ -43,7 +43,7 @@ pub fn TemplatesView() -> impl IntoView {
         set_loading.set(true);
         set_error.set(None);
         spawn_local(async move {
-            match api::create_template(&name, cache).await {
+            match api::create_template(&name, cache, None).await {
                 Ok(_) => {
                     set_new_name.set(String::new());
                     set_new_cache.set(String::new());
@@ -93,8 +93,14 @@ pub fn TemplatesView() -> impl IntoView {
                         let id = t.id;
                         let name = t.name.clone();
                         let cache = t.cache_delay_secs;
+                        let rescue = t.rescue_video_url.clone();
                         view! {
-                            <TemplateCard template_id=id template_name=name cache_delay_secs=cache />
+                            <TemplateCard
+                                template_id=id
+                                template_name=name
+                                cache_delay_secs=cache
+                                rescue_video_url=rescue
+                            />
                         }
                     }).collect::<Vec<_>>()
                 }}
@@ -109,10 +115,13 @@ pub fn TemplateCard(
     template_id: i64,
     template_name: String,
     cache_delay_secs: Option<i64>,
+    rescue_video_url: Option<String>,
 ) -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let assigned = RwSignal::new(Vec::<api::EndpointConfig>::new());
     let (error, set_error) = signal::<Option<String>>(None);
+    let rescue_url = RwSignal::new(rescue_video_url.unwrap_or_default());
+    let upload_status = RwSignal::new(String::new());
 
     // Load assigned endpoints on mount
     let tid = template_id;
@@ -151,6 +160,71 @@ pub fn TemplateCard(
             })}
 
             <div class="card-body">
+                <div class="cache-edit">
+                    <label>"Rescue video URL:"</label>
+                    <input
+                        type="text"
+                        class="rescue-video-input"
+                        placeholder="https://s3.example.com/rescue-video.mp4"
+                        prop:value=move || rescue_url.get()
+                        on:input=move |ev| rescue_url.set(event_target_value(&ev))
+                    />
+                    <button class="btn-small" on:click=move |_| {
+                        let val = rescue_url.get();
+                        let url = if val.trim().is_empty() { None } else { Some(val) };
+                        let tid = template_id;
+                        spawn_local(async move {
+                            if let Err(e) = api::update_template(tid, None, None, url).await {
+                                set_error.set(Some(format!("Update failed: {e}")));
+                            } else {
+                                set_error.set(None);
+                                if let Ok(templates) = api::list_templates().await {
+                                    store.templates_list.set(templates);
+                                }
+                            }
+                        });
+                    }>"Save"</button>
+                    <label class="btn-small file-upload-btn">
+                        "Upload"
+                        <input
+                            type="file"
+                            accept="video/mp4,video/webm,video/quicktime,video/x-matroska"
+                            style="display:none"
+                            on:change=move |ev: leptos::ev::Event| {
+                                use wasm_bindgen::JsCast;
+                                let target = ev
+                                    .target()
+                                    .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok());
+                                let file = target
+                                    .and_then(|i| i.files())
+                                    .and_then(|fl| fl.get(0));
+                                let Some(file) = file else { return };
+                                upload_status.set("Uploading...".into());
+                                let tid = template_id;
+                                spawn_local(async move {
+                                    match api::upload_rescue_video(file).await {
+                                        Ok(url) => {
+                                            rescue_url.set(url.clone());
+                                            upload_status.set(format!("Uploaded: {url}"));
+                                            if let Err(e) = api::update_template(tid, None, None, Some(url)).await {
+                                                set_error.set(Some(format!("Update failed: {e}")));
+                                            } else if let Ok(templates) = api::list_templates().await {
+                                                store.templates_list.set(templates);
+                                            }
+                                        }
+                                        Err(e) => upload_status.set(format!("Upload failed: {e}")),
+                                    }
+                                });
+                            }
+                        />
+                    </label>
+                    {move || {
+                        let s = upload_status.get();
+                        if s.is_empty() { None } else {
+                            Some(view! { <span class="upload-status">{s}</span> })
+                        }
+                    }}
+                </div>
                 <div class="event-endpoints">
                     <div class="assigned-endpoints">
                         {move || {

@@ -12,6 +12,20 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::models::{DeliveryEndpointMetrics, DeliveryInstance};
 
+/// Returns true if the DB-side status represents a live delivery instance
+/// that we can talk to over HTTP. The orchestrator transitions instances
+/// through `creating → booting → initializing → delivering → stopping →
+/// deleted` (plus `failed` on error). The post-boot states all have rs-delivery
+/// listening on :8000; before boot we have no IP, and after stopping/deleted
+/// the VPS is gone. We keep `running` in the match for backwards-compatibility
+/// with older rows that predate the fine-grained status states.
+pub(crate) fn is_delivery_active(status: &str) -> bool {
+    matches!(
+        status,
+        "booting" | "initializing" | "delivering" | "running"
+    )
+}
+
 /// Orchestrates Hetzner VPS delivery instances and YouTube status checks.
 ///
 /// Created only when Hetzner API token is configured. Manages the full lifecycle
@@ -79,6 +93,14 @@ pub struct EndpointDeliveryStatus {
     /// field's introduction.
     #[serde(default)]
     pub restart_history: Vec<EndpointRestartRecord>,
+    /// Current delivery mode: "normal", "warmup", "rescue", or "recovering".
+    /// None when the rs-delivery binary on the VPS is older than the
+    /// rescue-mode feature.
+    #[serde(default)]
+    pub delivery_mode: Option<String>,
+    /// ETA in seconds until rescue mode exits. None when not in rescue mode.
+    #[serde(default)]
+    pub rescue_eta_secs: Option<u64>,
 }
 
 /// Result of querying YouTube status.
@@ -269,9 +291,11 @@ impl DeliveryOrchestrator {
             .await?
             .ok_or_else(|| anyhow::anyhow!("delivery instance {instance_id} not found"))?;
 
-        // Poll Hetzner until server is running
+        // Poll Hetzner until server is running. Poll every 1s (not 5s)
+        // so we detect "running" as soon as possible — avoids wasting
+        // up to 5s of user-visible warmup time.
         let hetzner_id = instance.hetzner_id;
-        for attempt in 0..60 {
+        for attempt in 0..300 {
             let server = self
                 .hetzner
                 .get_server(hetzner_id)
@@ -280,18 +304,24 @@ impl DeliveryOrchestrator {
 
             if server.status == "running" {
                 let ipv4 = server.public_net.ipv4.ip.clone();
-                db::update_delivery_instance_status(&self.pool, instance_id, "running").await?;
-                info!(hetzner_id, ipv4 = %ipv4, "Delivery server is running");
+                // Hetzner says VM is running, but rs-delivery service is not
+                // yet ready (cloud-init still downloading the binary and
+                // starting the service). Use "booting" so the dashboard
+                // shows the correct phase to the operator — they were
+                // confused that "creating" jumped to "running" instantly
+                // but actual readiness took 60+ more seconds.
+                db::update_delivery_instance_status(&self.pool, instance_id, "booting").await?;
+                info!(hetzner_id, ipv4 = %ipv4, "VPS booted, waiting for rs-delivery");
                 break;
             }
 
-            if attempt == 59 {
+            if attempt == 299 {
                 return Err(anyhow::anyhow!(
                     "Timeout waiting for server {hetzner_id} to start"
                 ));
             }
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
         // Wait for rs-delivery HTTP to be ready
@@ -302,11 +332,13 @@ impl DeliveryOrchestrator {
         let delivery_url = format!("http://{}:8000", instance.ipv4);
         let client = reqwest::Client::new();
 
-        // Wait for rs-delivery to become ready (cloud-init can take several minutes)
-        for attempt in 0..60 {
+        // Wait for rs-delivery to become ready. Poll every 1s so the
+        // moment cloud-init finishes we detect it — cuts up to 5s off
+        // user-visible warmup time.
+        for attempt in 0..300 {
             match client
                 .get(format!("{delivery_url}/api/health"))
-                .timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(3))
                 .send()
                 .await
             {
@@ -315,33 +347,38 @@ impl DeliveryOrchestrator {
                         attempt,
                         "rs-delivery health check passed on {}", instance.ipv4
                     );
+                    // rs-delivery is healthy. Move to "initializing" phase
+                    // while we wait for buffer-fill and call /api/init —
+                    // operator can see this is normal startup, not a hang.
+                    db::update_delivery_instance_status(&self.pool, instance_id, "initializing")
+                        .await?;
                     break;
                 }
                 Ok(resp) => {
-                    if attempt % 6 == 0 {
+                    if attempt % 30 == 0 {
                         info!(attempt, status = %resp.status(), "Health check returned non-OK");
                     }
-                    if attempt == 59 {
+                    if attempt == 299 {
                         return Err(anyhow::anyhow!(
                             "rs-delivery returned {} after {} attempts",
                             resp.status(),
                             attempt + 1
                         ));
                     }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 Err(e) => {
-                    if attempt % 6 == 0 {
+                    if attempt % 30 == 0 {
                         info!(attempt, error = %e, "Health check connection failed");
                     }
-                    if attempt == 59 {
+                    if attempt == 299 {
                         return Err(anyhow::anyhow!(
                             "Timeout waiting for rs-delivery on {}: {}",
                             instance.ipv4,
                             e
                         ));
                     }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         }
@@ -388,18 +425,33 @@ impl DeliveryOrchestrator {
                 start_chunk_id, "Resuming delivery after crash recovery"
             );
         } else {
-            // Wait for enough LOCAL sent content duration before initializing the VPS.
-            // Uses actual duration_ms from DB — correctly handles variable chunk sizes
-            // (e.g. 2s keyframe interval chunks are ~2000ms each, not 1000ms).
+            // When rescue_video_url is configured, skip the full cache-fill
+            // pre-wait and initialize the VPS as soon as the first chunk
+            // exists. The VPS-side endpoint_loop handles warmup by playing
+            // the rescue video while its own buffer fills. Without this,
+            // viewers see nothing during the initial 120s cache-fill.
+            //
+            // When rescue_video_url is None, wait for the full target delay
+            // (legacy behaviour) — nothing can play to viewers anyway.
+            let has_rescue_video = event.rescue_video_url.is_some();
+            let wait_target_ms = if has_rescue_video {
+                1 // First chunk is enough; VPS plays rescue video during its own fill
+            } else {
+                target_delay_ms
+            };
+
             let max_wait_secs = 900;
             for attempt in 0..max_wait_secs {
                 let sent_ms = db::get_sent_duration_ms(&self.pool, event_id)
                     .await
                     .unwrap_or(0);
-                if sent_ms >= target_delay_ms {
+                if sent_ms >= wait_target_ms {
                     info!(
                         event_id,
-                        sent_ms, target_delay_ms, "Sent content duration meets target"
+                        sent_ms,
+                        wait_target_ms,
+                        has_rescue_video,
+                        "Sent content duration meets target (init VPS)"
                     );
                     break;
                 }
@@ -407,9 +459,9 @@ impl DeliveryOrchestrator {
                     info!(
                         event_id,
                         sent_ms,
-                        target_delay_ms,
+                        wait_target_ms,
                         attempt,
-                        "Waiting for sent duration ({sent_ms}ms / {target_delay_ms}ms)"
+                        "Waiting for sent duration ({sent_ms}ms / {wait_target_ms}ms)"
                     );
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -452,6 +504,7 @@ impl DeliveryOrchestrator {
             "event_identifier": event_name,
             "start_chunk_id": start_chunk_id,
             "delivery_delay_ms": target_delay_ms,
+            "rescue_video_url": event.rescue_video_url,
         });
 
         let resp = client
@@ -474,6 +527,10 @@ impl DeliveryOrchestrator {
         info!(event_id, init_resp = %init_resp, "Init response received");
 
         db::update_delivery_instance_health(&self.pool, instance_id).await?;
+        // Init succeeded — endpoints are now warming up / delivering.
+        // The dashboard reads this status to show "Delivering" instead
+        // of "Initializing".
+        db::update_delivery_instance_status(&self.pool, instance_id, "delivering").await?;
         info!(event_id, "Delivery endpoints initialized successfully");
 
         Ok(())
@@ -490,7 +547,7 @@ impl DeliveryOrchestrator {
         };
 
         let (server_ready, endpoints) = match &instance {
-            Some(inst) if inst.status == "running" => {
+            Some(inst) if is_delivery_active(&inst.status) => {
                 // Fetch live status from rs-delivery
                 let delivery_url = format!("http://{}:8000", inst.ipv4);
                 let client = reqwest::Client::new();
@@ -520,6 +577,9 @@ impl DeliveryOrchestrator {
                             let last_error = entry["last_error"].as_str().map(|s| s.to_string());
                             let ffmpeg_last_stderr =
                                 entry["ffmpeg_last_stderr"].as_str().map(|s| s.to_string());
+                            let delivery_mode =
+                                entry["delivery_mode"].as_str().map(|s| s.to_string());
+                            let rescue_eta_secs = entry["rescue_eta_secs"].as_u64();
                             let restart_history: Vec<EndpointRestartRecord> =
                                 entry["restart_history"]
                                     .as_array()
@@ -590,6 +650,8 @@ impl DeliveryOrchestrator {
                                 ffmpeg_last_stderr,
                                 is_fast: fast_map.get(&alias).copied().unwrap_or(false),
                                 restart_history,
+                                delivery_mode,
+                                rescue_eta_secs,
                             });
                         }
 
@@ -666,6 +728,8 @@ impl DeliveryOrchestrator {
                 ffmpeg_restart_count: ep.ffmpeg_restart_count,
                 last_error: ep.last_error,
                 is_fast: ep.is_fast,
+                delivery_mode: ep.delivery_mode,
+                rescue_eta_secs: ep.rescue_eta_secs,
             })
             .collect();
 
@@ -696,7 +760,7 @@ impl DeliveryOrchestrator {
         db::update_delivery_instance_status(&self.pool, instance.id, "stopping").await?;
 
         // Best-effort: tell rs-delivery to stop endpoints
-        if instance.status == "running" {
+        if is_delivery_active(&instance.status) {
             let client = reqwest::Client::new();
             let delivery_url = format!("http://{}:8000", instance.ipv4);
             let _ = client
@@ -709,7 +773,7 @@ impl DeliveryOrchestrator {
 
         // Capture VPS logs before deletion for post-mortem analysis.
         // Best-effort: if the VPS is unresponsive, we still proceed with deletion.
-        if instance.status == "running" {
+        if is_delivery_active(&instance.status) {
             let client = reqwest::Client::new();
             let delivery_url = format!("http://{}:8000", instance.ipv4);
             match client
@@ -832,7 +896,7 @@ impl DeliveryOrchestrator {
 
             // Check if instance still exists and is running
             let instance = match db::get_delivery_instance(&self.pool, instance_id).await {
-                Ok(Some(inst)) if inst.status == "running" => inst,
+                Ok(Some(inst)) if is_delivery_active(&inst.status) => inst,
                 Ok(Some(inst)) => {
                     info!(
                         event_id,

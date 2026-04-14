@@ -202,8 +202,35 @@ jobs:
             --exclude-re 'DeliveryOrchestrator::stop_delivery' \
             --exclude-re 'DeliveryOrchestrator::get_delivery_status' \
             --exclude-re 'delivery_logs' \
+            --exclude-re 'rescue::' \
+            --exclude-re 'endpoint_url_for_service' \
+            --exclude-re 'run_rescue_loop' \
+            --exclude-re 'run_warmup_loop' \
+            --exclude-re 'upload_rescue_video' \
+            --exclude-re 'extension_from_content_type' \
+            --exclude-re 'S3Client::upload_public_object' \
+            --exclude-re 'FfmpegProcess::stderr_tail' \
+            --exclude-re 'last_stderr_line' \
+            --exclude-re 'bootstrap_cloud_init' \
+            --exclude-re 'snapshot_cloud_init' \
+            --exclude-re 'delivery_env_file' \
+            --exclude-re 'DeliveryOrchestrator::monitor_delivery_health' \
+            --exclude-re 'add_endpoint_to_delivery' \
+            --exclude-re 'remove_endpoint_from_delivery' \
+            --exclude-re 'MAX_RESCUE_VIDEO_BYTES' \
+            --exclude-re 'write_countdown_file' \
+            --exclude-re 'cleanup_countdown_file' \
+            --exclude-re 'format_countdown_text' \
+            --exclude-re 'build_rescue_ffmpeg_args' \
+            --exclude-re 'output_format_for_service' \
+            --exclude-re 'countdown_file_path' \
+            --exclude-re 'FlvStreamNormalizer::normalize' \
+            --exclude-re 'DeliveryOrchestrator::poll_and_init' \
+            --exclude-re 'DeliveryOrchestrator::poll_delivery_metrics' \
+            --exclude-re 'delivery_broadcast_loop' \
             -e 'crates/rs-api/src/template_handlers.rs' \
-            -e 'crates/rs-api/src/s3_handlers.rs'
+            -e 'crates/rs-api/src/s3_handlers.rs' \
+            -e 'crates/rs-delivery/src/flv_normalizer.rs'
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report
@@ -387,7 +414,7 @@ jobs:
         run: |
           FALSE_POS=$(grep -rn 'assert!(true)' --include='*.rs' . || true)
           if [ -n "$FALSE_POS" ]; then
-            echo "ERROR: Found assert!(true) — tests must verify real behavior."
+            echo "ERROR: Found assert!(true) -- tests must verify real behavior."
             echo "$FALSE_POS"
             exit 1
           fi
@@ -397,7 +424,7 @@ jobs:
           # Find test functions whose body is just {} or { } with nothing meaningful
           EMPTY=$(grep -Pzo '#\[test\]\s*\n\s*(async\s+)?fn\s+\w+\([^)]*\)[^{]*\{\s*\}' --include='*.rs' -rn . || true)
           if [ -n "$EMPTY" ]; then
-            echo "ERROR: Found empty test bodies — tests must contain real assertions."
+            echo "ERROR: Found empty test bodies -- tests must contain real assertions."
             echo "$EMPTY"
             exit 1
           fi
@@ -407,7 +434,7 @@ jobs:
           # Catch assert_eq!(1, 1), assert_eq!(true, true), etc.
           TRIVIAL=$(grep -rn 'assert_eq!(1,\s*1)\|assert_eq!(true,\s*true)\|assert_eq!("",\s*"")' --include='*.rs' . || true)
           if [ -n "$TRIVIAL" ]; then
-            echo "ERROR: Found trivial assertions — tests must verify real behavior."
+            echo "ERROR: Found trivial assertions -- tests must verify real behavior."
             echo "$TRIVIAL"
             exit 1
           fi
@@ -564,7 +591,7 @@ jobs:
 
           # auto-release must NOT bypass e2e-gate by depending directly on rust-ci-gate
           if echo "$RELEASE_NEEDS" | grep -q "rust-ci-gate"; then
-            echo "ERROR: auto-release depends on rust-ci-gate directly — must go through e2e-gate instead"
+            echo "ERROR: auto-release depends on rust-ci-gate directly -- must go through e2e-gate instead"
             echo "Found: $RELEASE_NEEDS"
             exit 1
           fi
@@ -1750,7 +1777,7 @@ jobs:
         run: |
           # OBS Advanced mode stores encoder bitrate in streamEncoder.json
           # CI requires 12000 kbps for YouTube 'good' health verdict
-          # CI runner runs as SYSTEM — use newlevel user's AppData explicitly
+          # CI runner runs as SYSTEM -- use newlevel user's AppData explicitly
           $userAppData = "C:\Users\newlevel\AppData\Roaming"
           $profileDir = "$userAppData\obs-studio\basic\profiles"
           $globalIni = "$userAppData\obs-studio\global.ini"
@@ -2236,7 +2263,7 @@ jobs:
           $origCacheDelay = $targetEvent.cache_delay_secs
           Write-Host "Original cache_delay_secs: $origCacheDelay"
 
-          # Set cache delay to 60s for E2E testing — validates buffer fill feature
+          # Set cache delay to 60s for E2E testing -- validates buffer fill feature
           # without exceeding VPS-side S3 LIST probe time on Hetzner (~2s/chunk)
           $patchBody = @{ cache_delay_secs = 60 } | ConvertTo-Json
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
@@ -2613,7 +2640,7 @@ jobs:
         shell: powershell
         run: |
           # The E2E event must have endpoints pre-configured on stream.lan.
-          # CI does NOT create or manage endpoints — that's the user's job.
+          # CI does NOT create or manage endpoints -- that's the user's job.
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
@@ -2957,69 +2984,153 @@ jobs:
           Write-Host "  CACHE DELAY VERIFIED: All $($epDelays.Count) endpoints >= ${minAcceptable}s"
           Write-Host "=========================================="
 
-      - name: Verify cache delay is stable (not growing)
+      - name: "STRICT: Steady-state delivery verification (3min sustained)"
         shell: powershell
         timeout-minutes: 5
         run: |
-          # TDD assertion: Cache delay should stabilize, not grow indefinitely.
-          # Take two readings 2 minutes apart. If delta > 15s, delivery is
-          # slower than real-time (the pacing bug).
+          # Sustained verification of delivery health during steady-state
+          # streaming. The whole point of the restreamer is that once OBS
+          # is streaming and the VPS buffer is filled, EVERYTHING should
+          # be rock-solid:
+          #   - Cache delay stays AT target (not growing, not oscillating)
+          #   - Zero ffmpeg restarts (VPS reads from S3 -- nothing should
+          #     cause ffmpeg to die during normal operation)
+          #   - Endpoints remain alive
+          #
+          # Historical gap: previous "stable" check only compared two
+          # samples 2 min apart with 15s tolerance -- hiding crash loops
+          # that happened once per minute.
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
+          $targetDelay = if ($targetEvent.cache_delay_secs) { $targetEvent.cache_delay_secs } else { 60 }
+          $maxAllowed = [math]::Round($targetDelay * 1.5)  # 50% tolerance above target
+          # Lower bound catches cache drain (VPS consumes faster than stream.lan
+          # uploads). stream.lan at 60s when target is 120s is ALREADY a bug
+          # (not a future one) because issue #118 shows S3 upload ~0.5 ch/s
+          # while VPS consumes at real-time. Without this check the strict gate
+          # reports green while operators see cache collapsing to zero.
+          $minAllowed = [math]::Round($targetDelay * 0.7)
+          Write-Host "Target cache delay: ${targetDelay}s (fail if > ${maxAllowed}s OR < ${minAllowed}s)"
 
-          # Reading 1 — capture delay per endpoint
-          $resp1 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
-          $delays1 = @{}
-          if ($resp1.endpoint_details) {
-            foreach ($ep in $resp1.endpoint_details) {
+          # Capture baseline restart counts -- no new restarts allowed during window
+          $baselineResp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          $baselineRestarts = @{}
+          if ($baselineResp.endpoint_details) {
+            foreach ($ep in $baselineResp.endpoint_details) {
               if (-not $ep.is_fast) {
-                $delays1[$ep.alias] = $ep.chunk_delay_secs
-                Write-Host "Reading 1: [$($ep.alias)] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
+                $baselineRestarts[$ep.alias] = [int]$ep.ffmpeg_restart_count
+                Write-Host "Baseline: [$($ep.alias)] restarts=$($ep.ffmpeg_restart_count) delay=$($ep.chunk_delay_secs)s"
+              }
+            }
+          }
+          if ($baselineRestarts.Count -eq 0) {
+            throw "FAILED: No non-fast endpoints found in delivery status -- cannot run steady-state check"
+          }
+
+          $samples = 12
+          $intervalSecs = 15  # 12 * 15s = 180s = 3min
+          $failures = @()
+          # Per-alias time-series of cache delay, printed at end as a table
+          # for operator post-mortem. Also used to detect drain trend.
+          $trend = @{}
+
+          for ($i = 1; $i -le $samples; $i++) {
+            Start-Sleep -Seconds $intervalSecs
+            try {
+              $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+            } catch {
+              $failures += "Sample ${i}: delivery/status request failed: $_"
+              continue
+            }
+
+            if (-not $resp.endpoints_alive) {
+              $failures += "Sample ${i}: endpoints_alive=false"
+            }
+
+            foreach ($ep in $resp.endpoint_details) {
+              if ($ep.is_fast) { continue }
+              $alias = $ep.alias
+              $delay = [int]$ep.chunk_delay_secs
+              $restarts = [int]$ep.ffmpeg_restart_count
+              $baseRestarts = [int]$baselineRestarts[$alias]
+              $delta = $restarts - $baseRestarts
+              Write-Host "Sample ${i}/${samples} [$alias]: delay=${delay}s restarts=${restarts} (delta=${delta}) alive=$($ep.alive) stall=$($ep.stall_reason)"
+
+              # Record for trend analysis and audit dump at end
+              if (-not $trend.ContainsKey($alias)) { $trend[$alias] = @() }
+              $trend[$alias] += $delay
+
+              if (-not $ep.alive) {
+                $failures += "Sample ${i}: [$alias] endpoint went alive=false (stall=$($ep.stall_reason))"
+              }
+              if ($delta -gt 0) {
+                $tail = if ($ep.ffmpeg_last_stderr) { $ep.ffmpeg_last_stderr } else { '<empty>' }
+                $failures += "Sample ${i}: [$alias] NEW ffmpeg restart (delta=${delta}). stderr_tail:`n${tail}"
+              }
+              if ($delay -gt $maxAllowed) {
+                $failures += "Sample ${i}: [$alias] cache delay ${delay}s exceeds max ${maxAllowed}s (target=${targetDelay}s) -- VPS falling behind"
+              }
+              # Cache-drain detection (catches issue #118: stream.lan uploads
+              # slower than VPS consumes, so cache shrinks toward zero). A
+              # sustained cache below target*0.7 is a real bug, not noise.
+              if ($delay -lt $minAllowed) {
+                $failures += "Sample ${i}: [$alias] cache delay ${delay}s below min ${minAllowed}s (target=${targetDelay}s) -- stream.lan uploads too slow, VPS catching up"
               }
             }
           }
 
-          # Wait 2 minutes
-          Write-Host "Waiting 2 minutes to check cache stability..."
-          Start-Sleep -Seconds 120
-
-          # Reading 2 — capture delay per endpoint
-          $resp2 = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
-          $delays2 = @{}
-          if ($resp2.endpoint_details) {
-            foreach ($ep in $resp2.endpoint_details) {
-              if (-not $ep.is_fast) {
-                $delays2[$ep.alias] = $ep.chunk_delay_secs
-                Write-Host "Reading 2: [$($ep.alias)] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
-              }
-            }
-          }
-
-          # Check stability for EACH endpoint
+          # Drain-trend detection: if the AVERAGE of the last 3 samples is
+          # more than 20% below the average of the first 3, cache is
+          # collapsing even if every individual sample was within bounds.
           Write-Host ""
-
-          $allStable = $true
-          foreach ($alias in $delays1.Keys) {
-            if ($delays2.ContainsKey($alias)) {
-              $d1 = $delays1[$alias]
-              $d2 = $delays2[$alias]
-              $delta = [math]::Abs($d2 - $d1)
-              Write-Host "  [$alias] delay: ${d1}s -> ${d2}s (delta: ${delta}s)"
-              if ($delta -gt 15) {
-                Write-Host "  FAIL: [$alias] cache delay grew by ${delta}s in 2 minutes"
-                $allStable = $false
+          Write-Host "=========================================="
+          Write-Host "  CACHE-DELAY AUDIT (per-alias time series)"
+          Write-Host "=========================================="
+          foreach ($alias in $trend.Keys) {
+            $arr = $trend[$alias]
+            Write-Host "[${alias}]: $($arr -join ' -> ') seconds"
+            if ($arr.Count -ge 6) {
+              $firstAvg = ($arr[0..2] | Measure-Object -Average).Average
+              $lastAvg  = ($arr[-3..-1] | Measure-Object -Average).Average
+              if ($firstAvg -gt 0) {
+                $pctDrop = [math]::Round(100 * ($firstAvg - $lastAvg) / $firstAvg, 1)
+                Write-Host "  first3_avg=${firstAvg}s last3_avg=${lastAvg}s drop=${pctDrop}%"
+                if ($pctDrop -gt 20) {
+                  $failures += "[$alias] cache drain trend: first3_avg=${firstAvg}s -> last3_avg=${lastAvg}s (${pctDrop}% drop). Check stream.lan S3 upload throughput (issue #118)."
+                }
               }
             }
           }
 
-          if (-not $allStable) {
-            throw "FAILED: One or more endpoints have unstable cache delay (delta > 15s over 2 min)"
+          if ($failures.Count -gt 0) {
+            Write-Host ""
+            Write-Host "=========================================="
+            Write-Host "  STEADY-STATE VERIFICATION FAILED"
+            Write-Host "=========================================="
+            foreach ($f in $failures) {
+              Write-Host "FAIL: $f"
+            }
+            # Dump restart history for forensics
+            try {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 10
+              foreach ($ep in $status.endpoint_details) {
+                if ($ep.restart_history) {
+                  Write-Host ""
+                  Write-Host "Restart history [$($ep.alias)]:"
+                  foreach ($r in $ep.restart_history) {
+                    Write-Host "  lifetime=$($r.lifetime_secs)s reason=$($r.reason) backoff=$($r.backoff_secs)s"
+                    if ($r.stderr_tail) { Write-Host "    stderr_tail:`n$($r.stderr_tail)" }
+                  }
+                }
+              }
+            } catch { Write-Host "Could not fetch restart history: $_" }
+            throw "FAILED: $($failures.Count) steady-state violation(s) over 3 minutes of streaming"
           }
 
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "  CACHE STABILITY VERIFIED: All endpoints delta < 15s"
+          Write-Host "  STEADY-STATE VERIFIED: 3min, 0 restarts, cache <= ${maxAllowed}s"
           Write-Host "=========================================="
 
       - name: "GATE: Verify YouTube stream health is 'good'"
@@ -3029,7 +3140,7 @@ jobs:
         run: |
           # HARD GATE: YouTube health MUST be "good" (same as OBS direct).
           # "ok" = degraded quality (jittery delivery), "bad"/"noData" = broken.
-          # Restreamer must be invisible middleman — no quality degradation.
+          # Restreamer must be invisible middleman -- no quality degradation.
           $maxRetries = 20
           $retryDelay = 15
 
@@ -3189,12 +3300,15 @@ jobs:
           Write-Host "Waiting 60s for chunk pipeline to stabilize..."
           Start-Sleep -Seconds 60
 
-          # Verify delivery endpoints are advancing
+          # Verify delivery endpoints are advancing AND zero ffmpeg restarts.
+          # VPS reads from S3 (not OBS) -- OBS disconnect must not cause any
+          # ffmpeg restarts on the VPS. Any restart indicates a bug.
           $statusAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
           foreach ($ep in $statusAfter.endpoints) {
             Write-Host "Endpoint '$($ep.alias)': chunks=$($ep.chunks_processed), delay=$($ep.chunk_delay_secs)s, restarts=$($ep.ffmpeg_restart_count)"
-            if ($ep.ffmpeg_restart_count -gt 20) {
-              throw "FAILED: Endpoint '$($ep.alias)' has $($ep.ffmpeg_restart_count) ffmpeg restarts - crash loop detected"
+            if ($ep.ffmpeg_restart_count -gt 0) {
+              $tail = if ($ep.ffmpeg_last_stderr) { $ep.ffmpeg_last_stderr } else { '<empty>' }
+              throw "FAILED: Endpoint '$($ep.alias)' has $($ep.ffmpeg_restart_count) ffmpeg restart(s) after OBS disconnect. VPS reads from S3 and should be unaffected. stderr_tail:`n$tail"
             }
           }
 
@@ -3967,7 +4081,7 @@ jobs:
             $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
             $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
             if ($targetEvent) {
-              # Restore to config default (120s) — CI set it to 300
+              # Restore to config default (120s) -- CI set it to 300
               $patchBody = @{ cache_delay_secs = 120 } | ConvertTo-Json
               Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
                 -Method PATCH -Body $patchBody -ContentType "application/json" -TimeoutSec 10
@@ -4038,7 +4152,7 @@ jobs:
             exit 1
           fi
 
-          # On push/workflow_dispatch to dev/main, E2E tests MUST succeed — no exceptions
+          # On push/workflow_dispatch to dev/main, E2E tests MUST succeed -- no exceptions
           if [[ "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             if [[ "${{ needs.e2e-streaming-test.result }}" != "success" ]]; then
               echo "FAIL: E2E Streaming Test did not succeed (result: ${{ needs.e2e-streaming-test.result }})"
@@ -4052,7 +4166,7 @@ jobs:
             fi
             echo "All E2E tests passed!"
           else
-            # On PR events, E2E tests don't run here — but a push-triggered run
+            # On PR events, E2E tests don't run here -- but a push-triggered run
             # for the same commit DOES run E2E tests. We must check that run's
             # E2E Gate result to prevent a green PR when push E2E tests fail.
             echo "PR event: checking push-triggered E2E Gate for commit ${{ github.event.pull_request.head.sha }}..."

@@ -61,7 +61,7 @@ async fn template_crud() {
     let list = list_templates(&pool).await.unwrap();
     assert!(list.is_empty());
 
-    let id = create_template(&pool, "Sunday Service", Some(30))
+    let id = create_template(&pool, "Sunday Service", Some(30), None)
         .await
         .unwrap();
     assert!(id > 0);
@@ -76,14 +76,16 @@ async fn template_crud() {
     assert_eq!(tmpl.name, "Sunday Service");
     assert_eq!(tmpl.cache_delay_secs, Some(30));
 
-    update_template(&pool, id, "Sunday Service Updated", Some(60))
+    update_template(&pool, id, "Sunday Service Updated", Some(60), None)
         .await
         .unwrap();
     let tmpl = get_template_by_id(&pool, id).await.unwrap().unwrap();
     assert_eq!(tmpl.name, "Sunday Service Updated");
     assert_eq!(tmpl.cache_delay_secs, Some(60));
 
-    update_template(&pool, id, "No Delay", None).await.unwrap();
+    update_template(&pool, id, "No Delay", None, None)
+        .await
+        .unwrap();
     let tmpl = get_template_by_id(&pool, id).await.unwrap().unwrap();
     assert_eq!(tmpl.cache_delay_secs, None);
 
@@ -96,10 +98,10 @@ async fn template_crud() {
 async fn template_duplicate_name_fails() {
     let pool = setup_db().await;
 
-    create_template(&pool, "Weekend Service", None)
+    create_template(&pool, "Weekend Service", None, None)
         .await
         .unwrap();
-    let result = create_template(&pool, "Weekend Service", Some(15)).await;
+    let result = create_template(&pool, "Weekend Service", Some(15), None).await;
     assert!(result.is_err());
 }
 
@@ -107,7 +109,7 @@ async fn template_duplicate_name_fails() {
 async fn template_endpoint_linking() {
     let pool = setup_db().await;
 
-    let tmpl_id = create_template(&pool, "Multi-endpoint Template", Some(45))
+    let tmpl_id = create_template(&pool, "Multi-endpoint Template", Some(45), None)
         .await
         .unwrap();
     let ep1 = create_endpoint_config(&pool, "YT-tmpl", "YT_HLS", "key-yt", false)
@@ -152,7 +154,9 @@ async fn template_endpoint_linking() {
 async fn template_cascade_deletes_endpoints() {
     let pool = setup_db().await;
 
-    let tmpl_id = create_template(&pool, "Cascade Test", None).await.unwrap();
+    let tmpl_id = create_template(&pool, "Cascade Test", None, None)
+        .await
+        .unwrap();
     let ep_id = create_endpoint_config(&pool, "YT-cascade", "YT_HLS", "key", false)
         .await
         .unwrap();
@@ -182,7 +186,7 @@ async fn create_event_from_template_basic() {
     let pool = setup_db().await;
 
     // Create a template with an endpoint
-    let tmpl_id = create_template(&pool, "Morning Service", Some(45))
+    let tmpl_id = create_template(&pool, "Morning Service", Some(45), None)
         .await
         .unwrap();
     let ep_id = create_endpoint_config(&pool, "YT-from-tmpl", "YT_HLS", "stream-key", false)
@@ -223,10 +227,70 @@ async fn create_event_from_template_basic() {
 }
 
 #[tokio::test]
+async fn template_rescue_video_url_propagates_to_event() {
+    let pool = setup_db().await;
+    let rescue_url = "https://example.com/rescue.mp4".to_string();
+
+    let tmpl_id = create_template(
+        &pool,
+        "Template with rescue",
+        Some(60),
+        Some(rescue_url.clone()),
+    )
+    .await
+    .unwrap();
+
+    // Verify template stored the URL
+    let tmpl = get_template_by_id(&pool, tmpl_id).await.unwrap().unwrap();
+    assert_eq!(tmpl.rescue_video_url.as_deref(), Some(rescue_url.as_str()));
+
+    // Create event from template — rescue_video_url should be copied
+    let (event_id, _) = create_event_from_template(&pool, tmpl_id).await.unwrap();
+    let event = get_streaming_event_by_id(&pool, event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        event.rescue_video_url.as_deref(),
+        Some(rescue_url.as_str()),
+        "event should inherit rescue_video_url from template"
+    );
+}
+
+#[tokio::test]
+async fn template_update_can_change_rescue_video_url() {
+    let pool = setup_db().await;
+    let id = create_template(
+        &pool,
+        "Template",
+        None,
+        Some("https://a.example.com/v1.mp4".to_string()),
+    )
+    .await
+    .unwrap();
+
+    update_template(
+        &pool,
+        id,
+        "Template",
+        None,
+        Some("https://b.example.com/v2.mp4".to_string()),
+    )
+    .await
+    .unwrap();
+
+    let tmpl = get_template_by_id(&pool, id).await.unwrap().unwrap();
+    assert_eq!(
+        tmpl.rescue_video_url.as_deref(),
+        Some("https://b.example.com/v2.mp4")
+    );
+}
+
+#[tokio::test]
 async fn create_event_from_template_duplicate_date() {
     let pool = setup_db().await;
 
-    let tmpl_id = create_template(&pool, "Evening Service", None)
+    let tmpl_id = create_template(&pool, "Evening Service", None, None)
         .await
         .unwrap();
 
@@ -337,7 +401,7 @@ async fn seed_templates_idempotent() {
     let pool = setup_db().await;
 
     // Pre-create a template — this makes the templates table non-empty
-    create_template(&pool, "existing-template", Some(60))
+    create_template(&pool, "existing-template", Some(60), None)
         .await
         .unwrap();
 

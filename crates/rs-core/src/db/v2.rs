@@ -412,7 +412,7 @@ pub async fn upsert_youtube_oauth(
 
 pub async fn list_streaming_events(pool: &SqlitePool) -> Result<Vec<StreamingEvent>> {
     let rows = sqlx::query(
-        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from, rescue_video_url
          FROM streaming_events ORDER BY id DESC",
     )
     .fetch_all(pool)
@@ -428,6 +428,7 @@ pub async fn list_streaming_events(pool: &SqlitePool) -> Result<Vec<StreamingEve
             delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
             cache_delay_secs: r.get("cache_delay_secs"),
             created_from: r.get("created_from"),
+            rescue_video_url: r.get("rescue_video_url"),
         })
         .collect())
 }
@@ -445,13 +446,17 @@ pub async fn update_streaming_event(
     id: i64,
     name: &str,
     cache_delay_secs: Option<i64>,
+    rescue_video_url: Option<String>,
 ) -> Result<()> {
-    sqlx::query("UPDATE streaming_events SET name = ?1, cache_delay_secs = ?2 WHERE id = ?3")
-        .bind(name)
-        .bind(cache_delay_secs)
-        .bind(id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE streaming_events SET name = ?1, cache_delay_secs = ?2, rescue_video_url = ?3 WHERE id = ?4",
+    )
+    .bind(name)
+    .bind(cache_delay_secs)
+    .bind(&rescue_video_url)
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -519,11 +524,12 @@ pub async fn create_event_from_template(
     let event_name = find_unique_event_name(pool, &base_name).await?;
 
     let row = sqlx::query(
-        "INSERT INTO streaming_events (name, cache_delay_secs, created_from) VALUES (?1, ?2, ?3) RETURNING id",
+        "INSERT INTO streaming_events (name, cache_delay_secs, created_from, rescue_video_url) VALUES (?1, ?2, ?3, ?4) RETURNING id",
     )
     .bind(&event_name)
     .bind(template.cache_delay_secs)
     .bind(&template.name)
+    .bind(&template.rescue_video_url)
     .fetch_one(pool)
     .await?;
     let event_id: i64 = row.get("id");

@@ -21,6 +21,9 @@ mod template_tests;
 #[cfg(test)]
 mod delivery_log_tests;
 
+#[cfg(test)]
+mod delivery_status_tests;
+
 /// Create a SQLite connection pool.
 pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -75,6 +78,9 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (11, MIGRATION_V11_SQL),
         (12, MIGRATION_V12_SQL),
         (13, MIGRATION_V13_SQL),
+        (14, MIGRATION_V14_SQL),
+        (15, MIGRATION_V15_SQL),
+        (16, MIGRATION_V16_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -329,6 +335,50 @@ CREATE INDEX idx_delivery_logs_instance
     ON delivery_logs(instance_id)
 "#;
 
+const MIGRATION_V14_SQL: &str = r#"
+ALTER TABLE streaming_events ADD COLUMN rescue_video_url TEXT
+"#;
+
+const MIGRATION_V15_SQL: &str = r#"
+ALTER TABLE event_templates ADD COLUMN rescue_video_url TEXT
+"#;
+
+// V16: widen the delivery_instances.status CHECK constraint to allow the
+// new orchestrator phases (booting, initializing, delivering). Without
+// this, writes from poll_and_init to "booting" fail with
+//   CHECK constraint failed: status IN ('creating','running',...)
+// which then sets the instance to "failed" and leaves the operator
+// staring at a broken dashboard.
+//
+// SQLite doesn't support ALTER TABLE ... DROP CONSTRAINT so we have to
+// recreate the table, copying rows over.
+const MIGRATION_V16_SQL: &str = r#"
+CREATE TABLE delivery_instances_v16 (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    hetzner_id      INTEGER NOT NULL UNIQUE,
+    name            TEXT NOT NULL,
+    ipv4            TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'creating' CHECK(status IN (
+        'creating', 'running', 'stopping', 'deleted', 'failed',
+        'booting', 'initializing', 'delivering'
+    )),
+    server_type     TEXT NOT NULL,
+    event_id        INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    last_health_at  TEXT,
+    auth_token      TEXT NOT NULL DEFAULT ''
+);
+
+INSERT INTO delivery_instances_v16
+    (id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token)
+SELECT
+    id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token
+FROM delivery_instances;
+
+DROP TABLE delivery_instances;
+ALTER TABLE delivery_instances_v16 RENAME TO delivery_instances
+"#;
+
 // --- Client Profile ---
 
 pub async fn get_client_profile(pool: &SqlitePool) -> Result<Option<ClientProfile>> {
@@ -357,7 +407,7 @@ pub async fn upsert_client_profile(pool: &SqlitePool, user_uuid: &str) -> Result
 pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEvent>> {
     // Prefer the event with receiving_activated=1, fall back to highest ID
     let row = sqlx::query(
-        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from, rescue_video_url
          FROM streaming_events ORDER BY receiving_activated DESC, id DESC LIMIT 1",
     )
     .fetch_optional(pool)
@@ -371,6 +421,7 @@ pub async fn get_streaming_event(pool: &SqlitePool) -> Result<Option<StreamingEv
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
         cache_delay_secs: r.get("cache_delay_secs"),
         created_from: r.get("created_from"),
+        rescue_video_url: r.get("rescue_video_url"),
     }))
 }
 
@@ -379,7 +430,7 @@ pub async fn get_streaming_event_by_id(
     id: i64,
 ) -> Result<Option<StreamingEvent>> {
     let row = sqlx::query(
-        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from
+        "SELECT id, name, received_bytes, receiving_activated, delivering_activated, cache_delay_secs, created_from, rescue_video_url
          FROM streaming_events WHERE id = ?1",
     )
     .bind(id)
@@ -394,6 +445,7 @@ pub async fn get_streaming_event_by_id(
         delivering_activated: r.get::<i32, _>("delivering_activated") != 0,
         cache_delay_secs: r.get("cache_delay_secs"),
         created_from: r.get("created_from"),
+        rescue_video_url: r.get("rescue_video_url"),
     }))
 }
 

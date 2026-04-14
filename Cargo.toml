@@ -21,7 +21,7 @@ members = [
 exclude = ["src-tauri", "leptos-ui"]
 
 [workspace.package]
-version = "0.3.35"
+version = "0.3.53"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/restreamer"
@@ -32,7 +32,7 @@ rust-version = "1.85"
 tokio = { version = "1", features = ["full"] }
 
 # Web framework
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
 tower = "0.5"

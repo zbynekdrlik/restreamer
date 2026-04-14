@@ -119,9 +119,14 @@ pub struct DeliveryEndpointEntry {
     pub chunk_delay_secs: f64,
     pub stall_reason: Option<String>,
     pub ffmpeg_restart_count: u32,
+    pub ffmpeg_last_stderr: Option<String>,
     pub last_error: Option<String>,
     pub is_fast: bool,
     pub restart_history: Vec<crate::delivery::EndpointRestartRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rescue_eta_secs: Option<u64>,
 }
 
 pub async fn delivery_status(
@@ -154,9 +159,12 @@ pub async fn delivery_status(
             chunk_delay_secs: ep.chunk_delay_secs,
             stall_reason: ep.stall_reason,
             ffmpeg_restart_count: ep.ffmpeg_restart_count,
+            ffmpeg_last_stderr: ep.ffmpeg_last_stderr,
             last_error: ep.last_error,
             is_fast: ep.is_fast,
             restart_history: ep.restart_history,
+            delivery_mode: ep.delivery_mode,
+            rescue_eta_secs: ep.rescue_eta_secs,
         })
         .collect();
     let endpoints_alive =

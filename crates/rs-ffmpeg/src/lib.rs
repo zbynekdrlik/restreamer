@@ -190,7 +190,7 @@ fn build_test_file_args(alias: &str) -> Vec<String> {
 }
 
 /// Max stderr lines to keep in the ring buffer.
-const STDERR_BUFFER_SIZE: usize = 5;
+const STDERR_BUFFER_SIZE: usize = 30;
 
 /// Managed ffmpeg process with stdin pipe for writing data.
 pub struct FfmpegProcess {
@@ -299,6 +299,13 @@ impl FfmpegProcess {
             .unwrap_or_default()
     }
 
+    /// Get the captured stderr tail joined by newlines (up to
+    /// STDERR_BUFFER_SIZE lines). Returns None when empty so callers can
+    /// treat absence and emptiness identically.
+    pub fn stderr_tail(&self) -> Option<String> {
+        join_stderr_tail(self.stderr_lines())
+    }
+
     pub fn service_type(&self) -> ServiceType {
         self.service_type
     }
@@ -308,9 +315,49 @@ impl FfmpegProcess {
     }
 }
 
+/// Pure helper extracted so the multi-line join logic can be unit-tested
+/// without spawning ffmpeg.
+pub(crate) fn join_stderr_tail(lines: Vec<String>) -> Option<String> {
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_stderr_tail_empty_returns_none() {
+        assert_eq!(join_stderr_tail(vec![]), None);
+    }
+
+    #[test]
+    fn join_stderr_tail_single_line_returns_that_line_verbatim() {
+        let lines = vec!["only line".to_string()];
+        assert_eq!(join_stderr_tail(lines), Some("only line".to_string()));
+    }
+
+    #[test]
+    fn join_stderr_tail_multiple_lines_joined_with_newline_in_order() {
+        let lines = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+        assert_eq!(
+            join_stderr_tail(lines),
+            Some("first\nsecond\nthird".to_string())
+        );
+    }
+
+    #[test]
+    fn join_stderr_tail_preserves_empty_inner_lines() {
+        let lines = vec!["alpha".to_string(), String::new(), "gamma".to_string()];
+        assert_eq!(join_stderr_tail(lines), Some("alpha\n\ngamma".to_string()));
+    }
 
     #[test]
     fn service_type_display_roundtrip() {

@@ -15,6 +15,8 @@ pub struct EventTemplate {
     pub id: i64,
     pub name: String,
     pub cache_delay_secs: Option<i64>,
+    #[serde(default)]
+    pub rescue_video_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +28,8 @@ pub struct StreamingEvent {
     pub delivering_activated: bool,
     pub cache_delay_secs: Option<i64>,
     pub created_from: Option<String>,
+    #[serde(default)]
+    pub rescue_video_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +198,10 @@ pub struct DeliveryEndpointMetrics {
     pub last_error: Option<String>,
     #[serde(default)]
     pub is_fast: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rescue_eta_secs: Option<u64>,
 }
 
 /// Service status summary returned by the /status endpoint.
@@ -309,6 +317,8 @@ mod tests {
                     ffmpeg_restart_count: 0,
                     last_error: None,
                     is_fast: false,
+                    delivery_mode: None,
+                    rescue_eta_secs: None,
                 }],
             },
             WsEvent::Error {
@@ -358,6 +368,7 @@ mod tests {
             delivering_activated: false,
             cache_delay_secs: None,
             created_from: None,
+            rescue_video_url: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: StreamingEvent = serde_json::from_str(&json).unwrap();
@@ -408,6 +419,8 @@ mod tests {
             ffmpeg_restart_count: 5,
             last_error: Some("S3 timeout".to_string()),
             is_fast: true,
+            delivery_mode: None,
+            rescue_eta_secs: None,
         };
         let json = serde_json::to_string(&metrics).unwrap();
         let parsed: DeliveryEndpointMetrics = serde_json::from_str(&json).unwrap();
@@ -451,6 +464,8 @@ mod tests {
                 ffmpeg_restart_count: 10,
                 last_error: Some("Connection refused".to_string()),
                 is_fast: false,
+                delivery_mode: None,
+                rescue_eta_secs: None,
             }],
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -473,6 +488,8 @@ mod tests {
                 ffmpeg_restart_count: 0,
                 last_error: None,
                 is_fast: true,
+                delivery_mode: None,
+                rescue_eta_secs: None,
             },
             DeliveryEndpointMetrics {
                 alias: "BufferedEP".to_string(),
@@ -485,6 +502,8 @@ mod tests {
                 ffmpeg_restart_count: 0,
                 last_error: None,
                 is_fast: false,
+                delivery_mode: None,
+                rescue_eta_secs: None,
             },
         ];
         let delay = endpoints
@@ -509,6 +528,8 @@ mod tests {
             ffmpeg_restart_count: 0,
             last_error: None,
             is_fast: true,
+            delivery_mode: None,
+            rescue_eta_secs: None,
         }];
         let delay = endpoints
             .iter()

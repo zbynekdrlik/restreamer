@@ -6,6 +6,7 @@ mod delivery_tests;
 mod delivery_youtube;
 pub mod handlers;
 pub mod obs;
+pub mod rescue_video_handlers;
 pub mod router;
 #[cfg(test)]
 mod router_tests;
@@ -240,6 +241,8 @@ async fn delivery_broadcast_loop(
                             ffmpeg_restart_count: 0,
                             last_error: None,
                             is_fast: ep.is_fast,
+                            delivery_mode: None,
+                            rescue_eta_secs: None,
                         })
                         .collect();
                     let count = placeholders.len() as u32;

@@ -28,6 +28,7 @@ const statusResponse = {
     receiving_activated: false,
     delivering_activated: false,
     cache_delay_secs: null,
+    rescue_video_url: null,
   },
   chunk_stats: {
     total_chunks: 42,
@@ -48,6 +49,7 @@ let events = [
     delivering_activated: false,
     cache_delay_secs: null,
     created_from: null,
+    rescue_video_url: null,
   },
   {
     id: 2,
@@ -57,6 +59,7 @@ let events = [
     delivering_activated: false,
     cache_delay_secs: 300,
     created_from: null,
+    rescue_video_url: null,
   },
 ];
 
@@ -161,6 +164,7 @@ app.post("/api/v1/events", (req, res) => {
     delivering_activated: false,
     cache_delay_secs: cacheDelaySecs,
     created_from: createdFrom,
+    rescue_video_url: null,
   };
   events.push(newEvent);
   eventEndpoints[newEvent.id] = [];
@@ -298,6 +302,8 @@ app.patch("/api/v1/events/:id", (req, res) => {
   if (req.body.name) evt.name = req.body.name;
   if (req.body.cache_delay_secs !== undefined)
     evt.cache_delay_secs = req.body.cache_delay_secs;
+  if (req.body.rescue_video_url !== undefined)
+    evt.rescue_video_url = req.body.rescue_video_url;
   res.json({ status: "ok" });
 });
 
@@ -626,6 +632,8 @@ wss.on("connection", (ws) => {
           ffmpeg_restart_count: 0,
           last_error: null,
           is_fast: false,
+          delivery_mode: "normal",
+          rescue_eta_secs: null,
         },
         {
           alias: "Facebook Page",
@@ -638,6 +646,8 @@ wss.on("connection", (ws) => {
           ffmpeg_restart_count: 3,
           last_error: "S3 fetch timeout",
           is_fast: false,
+          delivery_mode: "normal",
+          rescue_eta_secs: null,
         },
       ],
     },

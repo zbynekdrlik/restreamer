@@ -351,30 +351,43 @@ fn Pipeline() -> impl IntoView {
     let s3_dot = move || {
         let p = ps();
         let s = delivery_status();
-        if s == "running" || s == "delivering" {
-            if p.state == "buffer_exhausted" {
-                "status-dot error"
-            } else {
-                "status-dot active"
+        match s.as_str() {
+            "running" | "delivering" => {
+                if p.state == "buffer_exhausted" {
+                    "status-dot error"
+                } else {
+                    "status-dot active"
+                }
             }
-        } else if is_delivering() {
-            "status-dot warning"
-        } else {
-            "status-dot"
+            // VPS provisioning phases — show as "warning" (yellow) so the
+            // operator can distinguish them from idle (gray) and from
+            // delivering (green). Each phase is normal but takes time.
+            "creating" | "booting" | "initializing" => "status-dot warning",
+            _ => {
+                if is_delivering() {
+                    "status-dot warning"
+                } else {
+                    "status-dot"
+                }
+            }
         }
     };
     let s3_metric = move || {
         let s = delivery_status();
-        if s == "running" || s == "delivering" {
-            format!(
+        match s.as_str() {
+            "running" | "delivering" => format!(
                 "{} queued \u{2192} {} delivered",
                 s3_chunks(),
                 delivered_chunks()
-            )
-        } else if s.is_empty() || s == "none" {
-            format!("{} on S3", s3_chunks())
-        } else {
-            s
+            ),
+            "" | "none" => format!("{} on S3", s3_chunks()),
+            // Map orchestrator phases to operator-friendly text. Without
+            // this, the dashboard would show the raw enum value (e.g.
+            // "booting") which doesn't tell the user what's happening.
+            "creating" => "Creating VPS \u{2026}".to_string(),
+            "booting" => "VPS booting \u{2026}".to_string(),
+            "initializing" => "Starting endpoints \u{2026}".to_string(),
+            other => other.to_string(),
         }
     };
 
@@ -633,6 +646,34 @@ fn EndpointTree() -> impl IntoView {
                                     })
                                 }}
                                 {move || {
+                                    let ep = ep_data.get();
+                                    ep.delivery_mode.clone().and_then(|mode| {
+                                        let (badge_class, label) = match mode.as_str() {
+                                            "warmup" => ("endpoint-mode-warmup", "WARMUP"),
+                                            "rescue" => ("endpoint-mode-rescue", "RESCUE"),
+                                            "recovering" => {
+                                                ("endpoint-mode-recovering", "RECOVERING")
+                                            }
+                                            _ => return None,
+                                        };
+                                        let eta = ep
+                                            .rescue_eta_secs
+                                            .map(|s| {
+                                                if s >= 60 {
+                                                    format!(" ~{}m {}s", s / 60, s % 60)
+                                                } else {
+                                                    format!(" ~{s}s")
+                                                }
+                                            })
+                                            .unwrap_or_default();
+                                        Some(view! {
+                                            <span class=badge_class>
+                                                {format!("{label}{eta}")}
+                                            </span>
+                                        })
+                                    })
+                                }}
+                                {move || {
                                     ep_data.get().last_error.clone().map(|e| view! {
                                         <span class="endpoint-anomaly">{e}</span>
                                     })
@@ -690,22 +731,28 @@ fn EndpointTree() -> impl IntoView {
                                     } else {
                                         ps.cache_duration_secs
                                     };
+                                    // Bar fill caps at 100% visually (can't render past full),
+                                    // but the numeric label shows the TRUE cache seconds.
+                                    // If cache exceeds target the operator MUST see "905s / 60s"
+                                    // because that means delivery VPS has fallen behind — a real
+                                    // bug, not a cosmetic issue to be hidden with fancy labels.
                                     let progress = (cache_secs / target as f64).min(1.0);
-                                    let bar_class = if progress >= 0.75 {
+                                    let bar_class = if cache_secs > target as f64 * 1.1 {
+                                        "buffer-bar-fill critical"
+                                    } else if progress >= 0.75 {
                                         "buffer-bar-fill healthy"
                                     } else if progress >= 0.40 {
                                         "buffer-bar-fill warning"
                                     } else {
                                         "buffer-bar-fill critical"
                                     };
+                                    let label = format!("{}s / {}s cache", cache_secs as u64, target);
                                     Some(view! {
                                         <div class="endpoint-cache">
                                             <div class="buffer-bar">
                                                 <div class=bar_class style:width=format!("{}%", (progress * 100.0).min(100.0))></div>
                                             </div>
-                                            <span class="endpoint-cache-label">
-                                                {format!("{}s / {}s cache", cache_secs as u64, target)}
-                                            </span>
+                                            <span class="endpoint-cache-label">{label}</span>
                                         </div>
                                     })
                                 }}

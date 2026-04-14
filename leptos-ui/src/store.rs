@@ -65,6 +65,8 @@ pub struct DeliveryEndpointState {
     pub ffmpeg_restart_count: u32,
     pub last_error: Option<String>,
     pub is_fast: bool,
+    pub delivery_mode: Option<String>,
+    pub rescue_eta_secs: Option<u64>,
 }
 
 /// OBS status from WebSocket.
