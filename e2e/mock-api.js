@@ -464,6 +464,28 @@ app.get("/api/v1/chunks/stats", (_req, res) => {
   res.json(statusResponse.chunk_stats);
 });
 
+// --- Upload telemetry (issue #118, #65) ---
+let uploadStats = {
+  chunks_per_sec: 2.5,
+  median_ms: 180,
+  p95_ms: 540,
+  error_rate: 0,
+  in_flight: 3,
+  adaptive_target: 8,
+};
+app.get("/api/v1/uploads/stats", (_req, res) => {
+  res.json(uploadStats);
+});
+
+let uploadRecent = [
+  { chunk_id: 101, event_identifier: "sunday-service", sequence_number: 42, size_bytes: 102400, attempts: 1, duration_ms: 180, status: "sent",     last_error: null,      first_attempt_at: 1735000000000, completed_at: 1735000000180 },
+  { chunk_id: 100, event_identifier: "sunday-service", sequence_number: 41, size_bytes: 102400, attempts: 2, duration_ms: 450, status: "retrying", last_error: "timeout", first_attempt_at: 1734999999800, completed_at: null },
+  { chunk_id: 99,  event_identifier: "sunday-service", sequence_number: 40, size_bytes: 102400, attempts: 1, duration_ms: 150, status: "sent",     last_error: null,      first_attempt_at: 1734999999000, completed_at: 1734999999150 },
+];
+app.get("/api/v1/uploads/recent", (_req, res) => {
+  res.json(uploadRecent);
+});
+
 // --- Cached delivery status (for instant initial load) ---
 let cachedDelivery = {
   instance_name: "",

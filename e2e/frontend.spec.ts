@@ -2142,3 +2142,45 @@ test.describe("Events Management Tab", () => {
     await expect(eventsHeader).toHaveCount(0);
   });
 });
+
+test.describe("Upload telemetry UI", () => {
+  test("dashboard shows upload strip with live values", async ({ page }) => {
+    await page.goto("/");
+    const strip = page.locator(".upload-strip");
+    await expect(strip).toBeVisible({ timeout: 10_000 });
+    await expect(strip.locator(".upload-strip__rate")).toContainText("c/s");
+    await expect(strip.locator(".upload-strip__median")).toContainText("ms");
+    await expect(strip.locator(".upload-strip__inflight")).toContainText("in-flight");
+    await expect(strip.locator(".upload-strip__errors")).toContainText("errors");
+  });
+
+  test("clicking strip navigates to /uploads page", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".upload-strip")).toBeVisible({ timeout: 10_000 });
+    await page.locator(".upload-strip").click();
+    await expect(page).toHaveURL(/\/uploads$/);
+    await expect(page.locator(".uploads-table")).toBeVisible();
+  });
+
+  test("/uploads page lists chunks with status classes", async ({ page }) => {
+    await page.goto("/uploads");
+    await expect(page.locator(".uploads-table")).toBeVisible({ timeout: 10_000 });
+    // At least one sent row and one retrying row per mock fixture
+    await expect(page.locator(".uploads-row--sent").first()).toBeVisible();
+    await expect(page.locator(".uploads-row--retrying").first()).toBeVisible();
+  });
+
+  test("errors-only filter hides sent rows", async ({ page }) => {
+    await page.goto("/uploads");
+    await expect(page.locator(".uploads-table")).toBeVisible({ timeout: 10_000 });
+    const checkbox = page.locator('.uploads-filter input[type="checkbox"]');
+    await checkbox.check();
+    // Sent rows should no longer be visible
+    await expect(page.locator(".uploads-row--sent")).toHaveCount(0);
+    // Retrying row still visible (it has last_error)
+    await expect(page.locator(".uploads-row--retrying").first()).toBeVisible();
+    await checkbox.uncheck();
+    // Sent rows come back
+    await expect(page.locator(".uploads-row--sent").first()).toBeVisible();
+  });
+});
