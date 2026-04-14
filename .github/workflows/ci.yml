@@ -3003,7 +3003,13 @@ jobs:
           $eventId = $targetEvent.id
           $targetDelay = if ($targetEvent.cache_delay_secs) { $targetEvent.cache_delay_secs } else { 60 }
           $maxAllowed = [math]::Round($targetDelay * 1.5)  # 50% tolerance above target
-          Write-Host "Target cache delay: ${targetDelay}s (fail if > ${maxAllowed}s)"
+          # Lower bound catches cache drain (VPS consumes faster than stream.lan
+          # uploads). stream.lan at 60s when target is 120s is ALREADY a bug
+          # (not a future one) because issue #118 shows S3 upload ~0.5 ch/s
+          # while VPS consumes at real-time. Without this check the strict gate
+          # reports green while operators see cache collapsing to zero.
+          $minAllowed = [math]::Round($targetDelay * 0.7)
+          Write-Host "Target cache delay: ${targetDelay}s (fail if > ${maxAllowed}s OR < ${minAllowed}s)"
 
           # Capture baseline restart counts -- no new restarts allowed during window
           $baselineResp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
@@ -3023,6 +3029,9 @@ jobs:
           $samples = 12
           $intervalSecs = 15  # 12 * 15s = 180s = 3min
           $failures = @()
+          # Per-alias time-series of cache delay, printed at end as a table
+          # for operator post-mortem. Also used to detect drain trend.
+          $trend = @{}
 
           for ($i = 1; $i -le $samples; $i++) {
             Start-Sleep -Seconds $intervalSecs
@@ -3046,6 +3055,10 @@ jobs:
               $delta = $restarts - $baseRestarts
               Write-Host "Sample ${i}/${samples} [$alias]: delay=${delay}s restarts=${restarts} (delta=${delta}) alive=$($ep.alive) stall=$($ep.stall_reason)"
 
+              # Record for trend analysis and audit dump at end
+              if (-not $trend.ContainsKey($alias)) { $trend[$alias] = @() }
+              $trend[$alias] += $delay
+
               if (-not $ep.alive) {
                 $failures += "Sample ${i}: [$alias] endpoint went alive=false (stall=$($ep.stall_reason))"
               }
@@ -3055,6 +3068,35 @@ jobs:
               }
               if ($delay -gt $maxAllowed) {
                 $failures += "Sample ${i}: [$alias] cache delay ${delay}s exceeds max ${maxAllowed}s (target=${targetDelay}s) -- VPS falling behind"
+              }
+              # Cache-drain detection (catches issue #118: stream.lan uploads
+              # slower than VPS consumes, so cache shrinks toward zero). A
+              # sustained cache below target*0.7 is a real bug, not noise.
+              if ($delay -lt $minAllowed) {
+                $failures += "Sample ${i}: [$alias] cache delay ${delay}s below min ${minAllowed}s (target=${targetDelay}s) -- stream.lan uploads too slow, VPS catching up"
+              }
+            }
+          }
+
+          # Drain-trend detection: if the AVERAGE of the last 3 samples is
+          # more than 20% below the average of the first 3, cache is
+          # collapsing even if every individual sample was within bounds.
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "  CACHE-DELAY AUDIT (per-alias time series)"
+          Write-Host "=========================================="
+          foreach ($alias in $trend.Keys) {
+            $arr = $trend[$alias]
+            Write-Host "[${alias}]: $($arr -join ' -> ') seconds"
+            if ($arr.Count -ge 6) {
+              $firstAvg = ($arr[0..2] | Measure-Object -Average).Average
+              $lastAvg  = ($arr[-3..-1] | Measure-Object -Average).Average
+              if ($firstAvg -gt 0) {
+                $pctDrop = [math]::Round(100 * ($firstAvg - $lastAvg) / $firstAvg, 1)
+                Write-Host "  first3_avg=${firstAvg}s last3_avg=${lastAvg}s drop=${pctDrop}%"
+                if ($pctDrop -gt 20) {
+                  $failures += "[$alias] cache drain trend: first3_avg=${firstAvg}s -> last3_avg=${lastAvg}s (${pctDrop}% drop). Check stream.lan S3 upload throughput (issue #118)."
+                }
               }
             }
           }
