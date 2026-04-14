@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
@@ -16,8 +16,6 @@ use crate::s3::S3Client;
 const MAX_ATTEMPTS: i64 = 10;
 const MAX_WALL_CLOCK_MS: i64 = 600_000; // 10 min total retry budget
 const MIN_CONCURRENCY: usize = 4;
-// MAX_CONCURRENCY is defined but unused here; Task 6 adds the controller.
-#[allow(dead_code)]
 pub(crate) const MAX_CONCURRENCY: usize = 32;
 
 pub(crate) fn backoff_ms(attempt: i64) -> u64 {
@@ -25,6 +23,20 @@ pub(crate) fn backoff_ms(attempt: i64) -> u64 {
     let base = 1000u64;
     let shift = (attempt.saturating_sub(1) as u32).min(5);
     base.saturating_mul(1 << shift).min(30_000)
+}
+
+/// Pure-function core of the adaptive concurrency controller.
+/// Scales up (×2) when error_rate == 0 AND median_ms < 500.
+/// Scales down (÷2) when error_rate > 0.2.
+/// Otherwise holds. Bounded to [MIN_CONCURRENCY, MAX_CONCURRENCY].
+pub(crate) fn adjust_target(current: usize, error_rate: f64, median_ms: u32) -> usize {
+    if error_rate == 0.0 && median_ms < 500 {
+        current.saturating_mul(2).min(MAX_CONCURRENCY)
+    } else if error_rate > 0.2 {
+        (current / 2).max(MIN_CONCURRENCY)
+    } else {
+        current
+    }
 }
 
 /// Watches for unsent chunks and uploads them to S3 using a continuous worker pool.
@@ -63,52 +75,101 @@ impl ChunkUploader {
     }
 
     /// Run the worker pool until shutdown signal.
-    /// Spawns MIN_CONCURRENCY workers, each running an independent picker loop.
-    pub async fn run(&self, shutdown: broadcast::Receiver<()>) {
-        let mut handles = Vec::with_capacity(MIN_CONCURRENCY);
+    /// Starts with MIN_CONCURRENCY workers and scales up to MAX_CONCURRENCY
+    /// based on observed error_rate and median upload latency.
+    pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) {
+        use tokio::sync::watch;
+        let (target_tx, target_rx) = watch::channel::<usize>(MIN_CONCURRENCY);
+        self.metrics.set_adaptive_target(MIN_CONCURRENCY);
 
-        for _ in 0..MIN_CONCURRENCY {
-            let pool = self.pool.clone();
-            let s3 = Arc::clone(&self.s3);
-            let ws_tx = self.ws_tx.clone();
-            let upload_blocked = Arc::clone(&self.upload_blocked);
+        // 1. Spawn controller task (adaptive resizing every 10s)
+        {
             let metrics = Arc::clone(&self.metrics);
-            let in_flight = Arc::clone(&self.in_flight);
-            let worker_shutdown = shutdown.resubscribe();
-
-            handles.push(tokio::spawn(async move {
-                run_worker(
-                    pool,
-                    s3,
-                    ws_tx,
-                    upload_blocked,
-                    metrics,
-                    in_flight,
-                    worker_shutdown,
-                )
-                .await;
-            }));
+            let tx = target_tx.clone();
+            let mut shutdown_c = shutdown.resubscribe();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(10));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut current = MIN_CONCURRENCY;
+                loop {
+                    tokio::select! {
+                        _ = shutdown_c.recv() => break,
+                        _ = interval.tick() => {
+                            let snap = metrics.snapshot(Duration::from_secs(10));
+                            let next = adjust_target(current, snap.error_rate, snap.median_ms);
+                            if next != current {
+                                tracing::info!(
+                                    "Adaptive concurrency {current} -> {next} (err={:.2}, med={}ms)",
+                                    snap.error_rate, snap.median_ms,
+                                );
+                                current = next;
+                                metrics.set_adaptive_target(current);
+                                let _ = tx.send(current);
+                            }
+                        }
+                    }
+                }
+            });
         }
 
-        // Wait for all workers to finish
-        for handle in handles {
-            if let Err(e) = handle.await {
-                error!("Upload worker panicked: {e}");
+        // 2. Spawner loop: keep #spawned == *target_rx.borrow()
+        let mut spawned: usize = 0;
+        let mut rx = target_rx.clone();
+        loop {
+            let target = *rx.borrow_and_update();
+            while spawned < target {
+                let idx = spawned;
+                spawned += 1;
+                let pool = self.pool.clone();
+                let s3 = Arc::clone(&self.s3);
+                let ws_tx = self.ws_tx.clone();
+                let metrics = Arc::clone(&self.metrics);
+                let in_flight = Arc::clone(&self.in_flight);
+                let blocked = Arc::clone(&self.upload_blocked);
+                let mut worker_shutdown = shutdown.resubscribe();
+                let mut worker_rx = target_rx.clone();
+                tokio::spawn(async move {
+                    run_worker(
+                        idx,
+                        pool,
+                        s3,
+                        ws_tx,
+                        blocked,
+                        metrics,
+                        in_flight,
+                        &mut worker_shutdown,
+                        &mut worker_rx,
+                    )
+                    .await;
+                });
+            }
+            tokio::select! {
+                _ = shutdown.recv() => break,
+                changed = rx.changed() => {
+                    if changed.is_err() { break; }
+                }
             }
         }
     }
 }
 
 async fn run_worker(
+    idx: usize,
     pool: SqlitePool,
     s3: Arc<S3Client>,
     ws_tx: broadcast::Sender<WsEvent>,
     upload_blocked: Arc<std::sync::atomic::AtomicBool>,
     metrics: Arc<UploadMetrics>,
     in_flight: Arc<AtomicUsize>,
-    mut shutdown: broadcast::Receiver<()>,
+    shutdown: &mut broadcast::Receiver<()>,
+    target_rx: &mut tokio::sync::watch::Receiver<usize>,
 ) {
     loop {
+        // Exit if target has shrunk below our index
+        if *target_rx.borrow() <= idx {
+            return;
+        }
+
         // Check shutdown at the top of each iteration
         if shutdown.try_recv().is_ok() {
             break;
@@ -301,5 +362,44 @@ mod tests {
     #[test]
     fn max_concurrency_constant_is_valid() {
         assert!(MAX_CONCURRENCY > MIN_CONCURRENCY);
+    }
+
+    #[test]
+    fn adaptive_scales_up_on_zero_errors_fast_median() {
+        let mut target = 4usize;
+        target = adjust_target(target, 0.0, 200);
+        assert_eq!(target, 8);
+        target = adjust_target(target, 0.0, 200);
+        assert_eq!(target, 16);
+        target = adjust_target(target, 0.0, 200);
+        assert_eq!(target, 32);
+        target = adjust_target(target, 0.0, 200);
+        assert_eq!(target, 32, "capped at MAX_CONCURRENCY");
+    }
+
+    #[test]
+    fn adaptive_scales_down_on_errors() {
+        let mut target = 32usize;
+        target = adjust_target(target, 0.3, 200);
+        assert_eq!(target, 16);
+        target = adjust_target(target, 0.3, 200);
+        assert_eq!(target, 8);
+        target = adjust_target(target, 0.3, 200);
+        assert_eq!(target, 4);
+        target = adjust_target(target, 0.3, 200);
+        assert_eq!(target, 4, "capped at MIN_CONCURRENCY");
+    }
+
+    #[test]
+    fn adaptive_holds_when_median_is_slow() {
+        // error_rate = 0 but median >= 500ms → do not scale up
+        assert_eq!(adjust_target(8, 0.0, 600), 8);
+        assert_eq!(adjust_target(8, 0.0, 500), 8);
+    }
+
+    #[test]
+    fn adaptive_holds_on_borderline_error_rate() {
+        // error_rate = 0.2 exactly → does not scale down (strict >)
+        assert_eq!(adjust_target(8, 0.2, 200), 8);
     }
 }
