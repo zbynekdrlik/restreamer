@@ -438,6 +438,7 @@ async fn run_inpoint_loop(
 }
 
 /// Run the endpoint uploader with restart support.
+#[allow(clippy::too_many_arguments)]
 async fn run_endpoint_loop(
     pool: SqlitePool,
     s3_config: rs_core::config::S3Config,
