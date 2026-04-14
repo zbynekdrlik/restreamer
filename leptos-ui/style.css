@@ -131,6 +131,21 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 .pipeline-node-metric { font-size: 14px; color: var(--text-secondary); margin-left: auto; }
 .pipeline-connector { text-align: center; color: var(--text-secondary); font-size: 14px; line-height: 1; padding: 2px 0; user-select: none; }
 
+/* Upload Strip — live telemetry under S3→VPS node */
+.upload-strip {
+    display: flex; gap: 1rem;
+    padding: 0.4rem 0.8rem; margin: 0.25rem 0;
+    background: var(--bg-primary); border: var(--border-w) solid var(--border); border-radius: var(--radius);
+    font-size: 0.85rem; color: var(--text-secondary);
+    cursor: pointer; user-select: none;
+}
+.upload-strip:hover { background: var(--bg-card); }
+.upload-strip__rate { color: var(--text-primary); font-weight: 500; }
+.upload-strip__median,
+.upload-strip__inflight { color: var(--text-secondary); }
+.upload-strip__errors { color: var(--text-secondary); }
+.upload-strip__errors--alert { color: var(--status-error); font-weight: 500; }
+
 /* Status Dots */
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-secondary); opacity: 0.4; flex-shrink: 0; }
 .status-dot.active { background: var(--status-ok); opacity: 1; animation: pulse 2s ease-in-out infinite; }

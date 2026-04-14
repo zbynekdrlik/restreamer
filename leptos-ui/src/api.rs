@@ -401,6 +401,21 @@ pub async fn get_s3_usage() -> Result<S3UsageResponse, String> {
     http_get("/s3/usage").await
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Default)]
+pub struct UploadStats {
+    pub chunks_per_sec: f64,
+    pub median_ms: u32,
+    pub p95_ms: u32,
+    pub error_rate: f64,
+    pub in_flight: usize,
+    pub adaptive_target: usize,
+}
+
+/// Get current upload telemetry snapshot (1-minute window) from backend.
+pub async fn fetch_upload_stats() -> Result<UploadStats, String> {
+    http_get("/uploads/stats").await
+}
+
 // Templates API
 pub async fn list_templates() -> Result<Vec<EventTemplate>, String> {
     http_get("/templates").await
