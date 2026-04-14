@@ -12,6 +12,20 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::models::{DeliveryEndpointMetrics, DeliveryInstance};
 
+/// Returns true if the DB-side status represents a live delivery instance
+/// that we can talk to over HTTP. The orchestrator transitions instances
+/// through `creating → booting → initializing → delivering → stopping →
+/// deleted` (plus `failed` on error). The post-boot states all have rs-delivery
+/// listening on :8000; before boot we have no IP, and after stopping/deleted
+/// the VPS is gone. We keep `running` in the match for backwards-compatibility
+/// with older rows that predate the fine-grained status states.
+pub(crate) fn is_delivery_active(status: &str) -> bool {
+    matches!(
+        status,
+        "booting" | "initializing" | "delivering" | "running"
+    )
+}
+
 /// Orchestrates Hetzner VPS delivery instances and YouTube status checks.
 ///
 /// Created only when Hetzner API token is configured. Manages the full lifecycle
@@ -533,7 +547,7 @@ impl DeliveryOrchestrator {
         };
 
         let (server_ready, endpoints) = match &instance {
-            Some(inst) if inst.status == "running" => {
+            Some(inst) if is_delivery_active(&inst.status) => {
                 // Fetch live status from rs-delivery
                 let delivery_url = format!("http://{}:8000", inst.ipv4);
                 let client = reqwest::Client::new();
@@ -746,7 +760,7 @@ impl DeliveryOrchestrator {
         db::update_delivery_instance_status(&self.pool, instance.id, "stopping").await?;
 
         // Best-effort: tell rs-delivery to stop endpoints
-        if instance.status == "running" {
+        if is_delivery_active(&instance.status) {
             let client = reqwest::Client::new();
             let delivery_url = format!("http://{}:8000", instance.ipv4);
             let _ = client
@@ -759,7 +773,7 @@ impl DeliveryOrchestrator {
 
         // Capture VPS logs before deletion for post-mortem analysis.
         // Best-effort: if the VPS is unresponsive, we still proceed with deletion.
-        if instance.status == "running" {
+        if is_delivery_active(&instance.status) {
             let client = reqwest::Client::new();
             let delivery_url = format!("http://{}:8000", instance.ipv4);
             match client
@@ -882,7 +896,7 @@ impl DeliveryOrchestrator {
 
             // Check if instance still exists and is running
             let instance = match db::get_delivery_instance(&self.pool, instance_id).await {
-                Ok(Some(inst)) if inst.status == "running" => inst,
+                Ok(Some(inst)) if is_delivery_active(&inst.status) => inst,
                 Ok(Some(inst)) => {
                     info!(
                         event_id,

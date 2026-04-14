@@ -3,7 +3,26 @@
 use rs_core::config::Config;
 use rs_core::db;
 
-use crate::delivery::DeliveryOrchestrator;
+use crate::delivery::{DeliveryOrchestrator, is_delivery_active};
+
+#[test]
+fn is_delivery_active_true_for_live_states() {
+    assert!(is_delivery_active("booting"));
+    assert!(is_delivery_active("initializing"));
+    assert!(is_delivery_active("delivering"));
+    // Back-compat for older DB rows that used the flat "running" state.
+    assert!(is_delivery_active("running"));
+}
+
+#[test]
+fn is_delivery_active_false_for_pre_boot_and_post_death_states() {
+    assert!(!is_delivery_active("creating"));
+    assert!(!is_delivery_active("stopping"));
+    assert!(!is_delivery_active("deleted"));
+    assert!(!is_delivery_active("failed"));
+    assert!(!is_delivery_active(""));
+    assert!(!is_delivery_active("unknown-future-state"));
+}
 
 #[tokio::test]
 async fn orchestrator_none_without_token() {
