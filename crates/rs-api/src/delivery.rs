@@ -425,56 +425,63 @@ impl DeliveryOrchestrator {
                 start_chunk_id, "Resuming delivery after crash recovery"
             );
         } else {
-            // When rescue_video_url is configured, skip the full cache-fill
-            // pre-wait and initialize the VPS as soon as the first chunk
-            // exists. The VPS-side endpoint_loop handles warmup by playing
-            // the rescue video while its own buffer fills. Without this,
-            // viewers see nothing during the initial 120s cache-fill.
-            //
-            // When rescue_video_url is None, wait for the full target delay
-            // (legacy behaviour) — nothing can play to viewers anyway.
-            let has_rescue_video = event.rescue_video_url.is_some();
-            let wait_target_ms = if has_rescue_video {
-                1 // First chunk is enough; VPS plays rescue video during its own fill
-            } else {
-                target_delay_ms
-            };
+            // Fresh delivery: set start_chunk_id to one past the current
+            // maximum sequence number.  This ensures the VPS warmup loop
+            // accumulates ONLY fresh chunks produced after the operator
+            // clicked Start Delivering, not historical ones already on S3.
+            // When the stream has been running for 23 minutes before Start
+            // is clicked, using first_seq (= 1) caused VPS warmup to walk
+            // all 1380 historical chunks in milliseconds, hitting the 120s
+            // accumulation target instantly and then delivering from chunk 1
+            // — old content — while the dashboard showed "cache = 81 s"
+            // because latest_uploaded - current_chunk was large but did not
+            // represent freshness.
+            let max_seq = db::get_latest_sequence_number_for_event(&self.pool, event_id).await?;
+            let start = compute_start_chunk_id(max_seq);
+            info!(
+                event_id,
+                start,
+                existing_max = ?max_seq,
+                "Starting fresh delivery — start_chunk_id set to live-edge"
+            );
 
-            let max_wait_secs = 900;
+            // Wait up to 60 s for stream.lan to produce at least one chunk
+            // at or beyond start_chunk_id.  This guarantees the VPS warmup
+            // loop has somewhere to begin probing rather than spinning on an
+            // empty S3 prefix.  If the stream is not producing after 60 s,
+            // fail loudly so the operator knows to check the ingest side.
+            let max_wait_secs: u32 = 60;
             for attempt in 0..max_wait_secs {
-                let sent_ms = db::get_sent_duration_ms(&self.pool, event_id)
-                    .await
-                    .unwrap_or(0);
-                if sent_ms >= wait_target_ms {
+                let current_max =
+                    db::get_latest_sequence_number_for_event(&self.pool, event_id).await?;
+                if current_max.unwrap_or(0) >= start {
                     info!(
                         event_id,
-                        sent_ms,
-                        wait_target_ms,
-                        has_rescue_video,
-                        "Sent content duration meets target (init VPS)"
+                        current_max = ?current_max,
+                        "First fresh chunk available, launching VPS"
                     );
                     break;
                 }
                 if attempt % 10 == 0 {
                     info!(
                         event_id,
-                        sent_ms,
-                        wait_target_ms,
                         attempt,
-                        "Waiting for sent duration ({sent_ms}ms / {wait_target_ms}ms)"
+                        start,
+                        current_max = ?current_max,
+                        "Waiting for first fresh chunk (attempt {attempt}/{max_wait_secs})"
                     );
+                }
+                if attempt == max_wait_secs - 1 {
+                    return Err(anyhow::anyhow!(
+                        "Stream not producing chunks — waited {max_wait_secs}s for chunk >= {start} on event {event_id}"
+                    ));
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            let first_seq_val = db::get_first_sequence_number_for_event(&self.pool, event_id)
-                .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("No chunks found for event {event_id} after wait")
-                })?;
-            start_chunk_id = first_seq_val;
+            start_chunk_id = start;
             info!(
                 event_id,
-                start_chunk_id, "Starting delivery from first chunk"
+                start_chunk_id, "Starting delivery from live-edge chunk"
             );
         }
 
@@ -994,6 +1001,17 @@ impl DeliveryOrchestrator {
         let latest = snapshots.last().unwrap();
         Ok(latest.id.to_string())
     }
+}
+
+/// Compute the start_chunk_id for a fresh (non-resume) delivery session.
+///
+/// Returns `max_seq + 1` so that the VPS warmup loop walks forward from the
+/// first chunk produced AFTER the operator clicked Start Delivering, rather
+/// than walking historical chunks that are already on S3.  When no chunks
+/// exist yet (`max_seq` is `None`), the function returns 1 — the very first
+/// chunk of the event — which is correct because there is no history to skip.
+pub(crate) fn compute_start_chunk_id(max_seq: Option<i64>) -> i64 {
+    max_seq.unwrap_or(0) + 1
 }
 
 // Tests are in delivery_tests.rs
