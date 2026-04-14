@@ -414,4 +414,29 @@ mod tests {
         // error_rate = 0.2 exactly → does not scale down (strict >)
         assert_eq!(adjust_target(8, 0.2, 200), 8);
     }
+
+    #[tokio::test]
+    async fn uploader_metrics_getter_returns_shared_arc() {
+        // Kills the `metrics()` survivor that returned Arc::new(Default::default())
+        // instead of Arc::clone(&self.metrics).
+        let pool = setup_db().await;
+        let s3 = S3Client::new(&test_s3_config()).unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let uploader = ChunkUploader::new(pool, s3, ws_tx);
+
+        let a = uploader.metrics();
+        let b = uploader.metrics();
+        // Both calls must return handles to the same allocation.
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "metrics() must return the internal Arc, not a fresh one"
+        );
+        // Mutating via one handle must be visible via the other.
+        a.set_in_flight(42);
+        let snap = b.snapshot(Duration::from_secs(1));
+        assert_eq!(
+            snap.in_flight, 42,
+            "both handles must observe the same state"
+        );
+    }
 }

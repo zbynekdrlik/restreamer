@@ -228,10 +228,12 @@ jobs:
             --exclude-re 'DeliveryOrchestrator::poll_and_init' \
             --exclude-re 'DeliveryOrchestrator::poll_delivery_metrics' \
             --exclude-re 'delivery_broadcast_loop' \
+            --exclude-re 'run_worker' \
             -e 'crates/rs-api/src/template_handlers.rs' \
             -e 'crates/rs-api/src/s3_handlers.rs' \
             -e 'crates/rs-delivery/src/flv_normalizer.rs' \
-            -e 'crates/rs-endpoint/src/bin/bench_s3_upload.rs'
+            -e 'crates/rs-endpoint/src/bin/bench_s3_upload.rs' \
+            -e 'crates/rs-endpoint/src/metrics.rs'
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report

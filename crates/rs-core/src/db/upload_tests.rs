@@ -159,3 +159,76 @@ async fn list_recent_uploads_returns_status_transitions() {
     assert_eq!(by_id[&c2].last_error.as_deref(), Some("oops"));
     assert_eq!(by_id[&c1].event_identifier, "evt-a");
 }
+
+#[tokio::test]
+async fn list_recent_uploads_classifies_pending_and_in_process() {
+    let pool = setup_db().await;
+    db::upsert_client_profile(&pool, "test-uuid").await.unwrap();
+    let event_id = db::upsert_streaming_event(&pool, "evt-pending")
+        .await
+        .unwrap();
+
+    // Brand-new chunk: sent=0, in_process=0, attempts=0 → "pending"
+    let c_pending = db::insert_chunk(&pool, event_id, "/tmp/p", 100, "mpend", 2000)
+        .await
+        .unwrap();
+
+    // Chunk in flight: attempts=0 but in_process=1 (worker claimed it atomically)
+    let c_in_flight = db::insert_chunk(&pool, event_id, "/tmp/f", 100, "mflight", 2000)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE chunk_records SET in_process = 1 WHERE id = ?1")
+        .bind(c_in_flight)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Chunk with attempts=1 but in_process=0 (failed, awaiting retry)
+    let c_retry = db::insert_chunk(&pool, event_id, "/tmp/r", 100, "mretry", 2000)
+        .await
+        .unwrap();
+    db::record_upload_attempt(&pool, c_retry, 1_000_000_000)
+        .await
+        .unwrap();
+    db::record_upload_failure(&pool, c_retry, "oops", 9_999_999_999_999, 200)
+        .await
+        .unwrap();
+
+    let rows = db::list_recent_uploads(&pool, 10).await.unwrap();
+    let by_id: std::collections::HashMap<i64, &crate::models::UploadChunkRow> =
+        rows.iter().map(|r| (r.chunk_id, r)).collect();
+    assert_eq!(
+        by_id[&c_pending].status, "pending",
+        "brand-new chunk (sent=0, in_process=0, attempts=0) must be 'pending'"
+    );
+    assert_eq!(
+        by_id[&c_in_flight].status, "retrying",
+        "in_process=1 alone must flip to 'retrying'"
+    );
+    assert_eq!(
+        by_id[&c_retry].status, "retrying",
+        "attempts=1 with in_process=0 must be 'retrying'"
+    );
+}
+
+#[tokio::test]
+async fn list_recent_uploads_attempts_zero_is_pending_not_retrying() {
+    // Specifically targets the `attempts > 0` mutation: if `>` became `>=`,
+    // a chunk with attempts=0 would wrongly classify as 'retrying'.
+    let pool = setup_db().await;
+    db::upsert_client_profile(&pool, "test-uuid").await.unwrap();
+    let event_id = db::upsert_streaming_event(&pool, "evt-boundary")
+        .await
+        .unwrap();
+    let c = db::insert_chunk(&pool, event_id, "/tmp/x", 100, "mboundary", 2000)
+        .await
+        .unwrap();
+
+    let rows = db::list_recent_uploads(&pool, 10).await.unwrap();
+    let row = rows.iter().find(|r| r.chunk_id == c).unwrap();
+    assert_eq!(
+        row.status, "pending",
+        "attempts=0 must be 'pending', not 'retrying'"
+    );
+    assert_eq!(row.attempts, 0);
+}
