@@ -230,7 +230,8 @@ jobs:
             --exclude-re 'delivery_broadcast_loop' \
             -e 'crates/rs-api/src/template_handlers.rs' \
             -e 'crates/rs-api/src/s3_handlers.rs' \
-            -e 'crates/rs-delivery/src/flv_normalizer.rs'
+            -e 'crates/rs-delivery/src/flv_normalizer.rs' \
+            -e 'crates/rs-endpoint/src/bin/bench_s3_upload.rs'
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report
