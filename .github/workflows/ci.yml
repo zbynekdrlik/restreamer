@@ -411,7 +411,7 @@ jobs:
         run: |
           FALSE_POS=$(grep -rn 'assert!(true)' --include='*.rs' . || true)
           if [ -n "$FALSE_POS" ]; then
-            echo "ERROR: Found assert!(true) — tests must verify real behavior."
+            echo "ERROR: Found assert!(true) -- tests must verify real behavior."
             echo "$FALSE_POS"
             exit 1
           fi
@@ -421,7 +421,7 @@ jobs:
           # Find test functions whose body is just {} or { } with nothing meaningful
           EMPTY=$(grep -Pzo '#\[test\]\s*\n\s*(async\s+)?fn\s+\w+\([^)]*\)[^{]*\{\s*\}' --include='*.rs' -rn . || true)
           if [ -n "$EMPTY" ]; then
-            echo "ERROR: Found empty test bodies — tests must contain real assertions."
+            echo "ERROR: Found empty test bodies -- tests must contain real assertions."
             echo "$EMPTY"
             exit 1
           fi
@@ -431,7 +431,7 @@ jobs:
           # Catch assert_eq!(1, 1), assert_eq!(true, true), etc.
           TRIVIAL=$(grep -rn 'assert_eq!(1,\s*1)\|assert_eq!(true,\s*true)\|assert_eq!("",\s*"")' --include='*.rs' . || true)
           if [ -n "$TRIVIAL" ]; then
-            echo "ERROR: Found trivial assertions — tests must verify real behavior."
+            echo "ERROR: Found trivial assertions -- tests must verify real behavior."
             echo "$TRIVIAL"
             exit 1
           fi
@@ -588,7 +588,7 @@ jobs:
 
           # auto-release must NOT bypass e2e-gate by depending directly on rust-ci-gate
           if echo "$RELEASE_NEEDS" | grep -q "rust-ci-gate"; then
-            echo "ERROR: auto-release depends on rust-ci-gate directly — must go through e2e-gate instead"
+            echo "ERROR: auto-release depends on rust-ci-gate directly -- must go through e2e-gate instead"
             echo "Found: $RELEASE_NEEDS"
             exit 1
           fi
@@ -1774,7 +1774,7 @@ jobs:
         run: |
           # OBS Advanced mode stores encoder bitrate in streamEncoder.json
           # CI requires 12000 kbps for YouTube 'good' health verdict
-          # CI runner runs as SYSTEM — use newlevel user's AppData explicitly
+          # CI runner runs as SYSTEM -- use newlevel user's AppData explicitly
           $userAppData = "C:\Users\newlevel\AppData\Roaming"
           $profileDir = "$userAppData\obs-studio\basic\profiles"
           $globalIni = "$userAppData\obs-studio\global.ini"
@@ -2260,7 +2260,7 @@ jobs:
           $origCacheDelay = $targetEvent.cache_delay_secs
           Write-Host "Original cache_delay_secs: $origCacheDelay"
 
-          # Set cache delay to 60s for E2E testing — validates buffer fill feature
+          # Set cache delay to 60s for E2E testing -- validates buffer fill feature
           # without exceeding VPS-side S3 LIST probe time on Hetzner (~2s/chunk)
           $patchBody = @{ cache_delay_secs = 60 } | ConvertTo-Json
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
@@ -2637,7 +2637,7 @@ jobs:
         shell: powershell
         run: |
           # The E2E event must have endpoints pre-configured on stream.lan.
-          # CI does NOT create or manage endpoints — that's the user's job.
+          # CI does NOT create or manage endpoints -- that's the user's job.
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
@@ -2990,12 +2990,12 @@ jobs:
           # is streaming and the VPS buffer is filled, EVERYTHING should
           # be rock-solid:
           #   - Cache delay stays AT target (not growing, not oscillating)
-          #   - Zero ffmpeg restarts (VPS reads from S3 — nothing should
+          #   - Zero ffmpeg restarts (VPS reads from S3 -- nothing should
           #     cause ffmpeg to die during normal operation)
           #   - Endpoints remain alive
           #
           # Historical gap: previous "stable" check only compared two
-          # samples 2 min apart with 15s tolerance — hiding crash loops
+          # samples 2 min apart with 15s tolerance -- hiding crash loops
           # that happened once per minute.
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
@@ -3004,7 +3004,7 @@ jobs:
           $maxAllowed = [math]::Round($targetDelay * 1.5)  # 50% tolerance above target
           Write-Host "Target cache delay: ${targetDelay}s (fail if > ${maxAllowed}s)"
 
-          # Capture baseline restart counts — no new restarts allowed during window
+          # Capture baseline restart counts -- no new restarts allowed during window
           $baselineResp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
           $baselineRestarts = @{}
           if ($baselineResp.endpoint_details) {
@@ -3016,7 +3016,7 @@ jobs:
             }
           }
           if ($baselineRestarts.Count -eq 0) {
-            throw "FAILED: No non-fast endpoints found in delivery status — cannot run steady-state check"
+            throw "FAILED: No non-fast endpoints found in delivery status -- cannot run steady-state check"
           }
 
           $samples = 12
@@ -3053,7 +3053,7 @@ jobs:
                 $failures += "Sample ${i}: [$alias] NEW ffmpeg restart (delta=${delta}). stderr_tail:`n${tail}"
               }
               if ($delay -gt $maxAllowed) {
-                $failures += "Sample ${i}: [$alias] cache delay ${delay}s exceeds max ${maxAllowed}s (target=${targetDelay}s) — VPS falling behind"
+                $failures += "Sample ${i}: [$alias] cache delay ${delay}s exceeds max ${maxAllowed}s (target=${targetDelay}s) -- VPS falling behind"
               }
             }
           }
@@ -3095,7 +3095,7 @@ jobs:
         run: |
           # HARD GATE: YouTube health MUST be "good" (same as OBS direct).
           # "ok" = degraded quality (jittery delivery), "bad"/"noData" = broken.
-          # Restreamer must be invisible middleman — no quality degradation.
+          # Restreamer must be invisible middleman -- no quality degradation.
           $maxRetries = 20
           $retryDelay = 15
 
@@ -3256,7 +3256,7 @@ jobs:
           Start-Sleep -Seconds 60
 
           # Verify delivery endpoints are advancing AND zero ffmpeg restarts.
-          # VPS reads from S3 (not OBS) — OBS disconnect must not cause any
+          # VPS reads from S3 (not OBS) -- OBS disconnect must not cause any
           # ffmpeg restarts on the VPS. Any restart indicates a bug.
           $statusAfter = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
           foreach ($ep in $statusAfter.endpoints) {
@@ -4036,7 +4036,7 @@ jobs:
             $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
             $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
             if ($targetEvent) {
-              # Restore to config default (120s) — CI set it to 300
+              # Restore to config default (120s) -- CI set it to 300
               $patchBody = @{ cache_delay_secs = 120 } | ConvertTo-Json
               Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
                 -Method PATCH -Body $patchBody -ContentType "application/json" -TimeoutSec 10
@@ -4107,7 +4107,7 @@ jobs:
             exit 1
           fi
 
-          # On push/workflow_dispatch to dev/main, E2E tests MUST succeed — no exceptions
+          # On push/workflow_dispatch to dev/main, E2E tests MUST succeed -- no exceptions
           if [[ "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             if [[ "${{ needs.e2e-streaming-test.result }}" != "success" ]]; then
               echo "FAIL: E2E Streaming Test did not succeed (result: ${{ needs.e2e-streaming-test.result }})"
@@ -4121,7 +4121,7 @@ jobs:
             fi
             echo "All E2E tests passed!"
           else
-            # On PR events, E2E tests don't run here — but a push-triggered run
+            # On PR events, E2E tests don't run here -- but a push-triggered run
             # for the same commit DOES run E2E tests. We must check that run's
             # E2E Gate result to prevent a green PR when push E2E tests fail.
             echo "PR event: checking push-triggered E2E Gate for commit ${{ github.event.pull_request.head.sha }}..."
