@@ -44,6 +44,21 @@ pub struct ChunkRecord {
     pub sent: bool,
     pub sequence_number: i64,
     pub duration_ms: i64,
+    // V17 upload telemetry
+    #[serde(default)]
+    pub upload_attempts: i64,
+    #[serde(default)]
+    pub upload_first_attempt_at: Option<i64>,
+    #[serde(default)]
+    pub upload_completed_at: Option<i64>,
+    #[serde(default)]
+    pub upload_duration_ms: Option<i64>,
+    #[serde(default)]
+    pub upload_last_error: Option<String>,
+    #[serde(default)]
+    pub upload_next_retry_at: Option<i64>,
+    #[serde(default)]
+    pub upload_failed_permanently: bool,
 }
 
 /// Endpoint configuration (e.g., YouTube HLS, Facebook RTMP).

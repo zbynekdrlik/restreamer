@@ -990,3 +990,34 @@ async fn update_event_rescue_video_url() {
 
 // Template and create-event-from-template tests are in template_tests.rs
 // Delivery log capture tests are in delivery_log_tests.rs
+
+#[tokio::test]
+async fn chunk_record_round_trips_upload_columns() {
+    let pool = setup_db().await;
+    upsert_client_profile(&pool, "test-uuid").await.unwrap();
+
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
+
+    let chunk_id = insert_chunk(&pool, event_id, "/tmp/f.bin", 100_000, "md5xxxx", 2000)
+        .await
+        .unwrap();
+
+    record_upload_attempt(&pool, chunk_id, 1735829023000)
+        .await
+        .unwrap();
+    record_upload_failure(&pool, chunk_id, "timeout", 1735829024000, 1200)
+        .await
+        .unwrap();
+
+    let chunks = get_unsent_chunks(&pool, 10).await.unwrap();
+    let c = chunks
+        .iter()
+        .find(|c| c.id == chunk_id)
+        .expect("chunk should be queryable");
+    assert_eq!(c.upload_attempts, 1);
+    assert!(c.upload_first_attempt_at.is_some());
+    assert_eq!(c.upload_last_error.as_deref(), Some("timeout"));
+    assert_eq!(c.upload_duration_ms, Some(1200));
+    assert!(c.upload_next_retry_at.is_some());
+    assert!(!c.upload_failed_permanently);
+}

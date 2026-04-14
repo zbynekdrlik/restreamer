@@ -589,10 +589,34 @@ pub async fn insert_chunk(
     Ok(row.get("id"))
 }
 
+fn row_to_chunk_record(r: sqlx::sqlite::SqliteRow) -> ChunkRecord {
+    ChunkRecord {
+        id: r.get("id"),
+        streaming_event_id: r.get("streaming_event_id"),
+        chunk_file_path: r.get("chunk_file_path"),
+        data_size: r.get("data_size"),
+        created_at: r.get("created_at"),
+        md5: r.get("md5"),
+        in_process: r.get::<i32, _>("in_process") != 0,
+        sent: r.get::<i32, _>("sent") != 0,
+        sequence_number: r.get("sequence_number"),
+        duration_ms: r.get("duration_ms"),
+        upload_attempts: r.get("upload_attempts"),
+        upload_first_attempt_at: r.get("upload_first_attempt_at"),
+        upload_completed_at: r.get("upload_completed_at"),
+        upload_duration_ms: r.get("upload_duration_ms"),
+        upload_last_error: r.get("upload_last_error"),
+        upload_next_retry_at: r.get("upload_next_retry_at"),
+        upload_failed_permanently: r.get::<i32, _>("upload_failed_permanently") != 0,
+    }
+}
+
 pub async fn get_unsent_chunks(pool: &SqlitePool, limit: i64) -> Result<Vec<ChunkRecord>> {
     let rows = sqlx::query(
         "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-         in_process, sent, sequence_number, duration_ms
+         in_process, sent, sequence_number, duration_ms,
+         upload_attempts, upload_first_attempt_at, upload_completed_at,
+         upload_duration_ms, upload_last_error, upload_next_retry_at, upload_failed_permanently
          FROM chunk_records
          WHERE sent = 0 AND in_process = 0
          ORDER BY id ASC
@@ -602,21 +626,7 @@ pub async fn get_unsent_chunks(pool: &SqlitePool, limit: i64) -> Result<Vec<Chun
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| ChunkRecord {
-            id: r.get("id"),
-            streaming_event_id: r.get("streaming_event_id"),
-            chunk_file_path: r.get("chunk_file_path"),
-            data_size: r.get("data_size"),
-            created_at: r.get("created_at"),
-            md5: r.get("md5"),
-            in_process: r.get::<i32, _>("in_process") != 0,
-            sent: r.get::<i32, _>("sent") != 0,
-            sequence_number: r.get("sequence_number"),
-            duration_ms: r.get("duration_ms"),
-        })
-        .collect())
+    Ok(rows.into_iter().map(row_to_chunk_record).collect())
 }
 
 pub async fn set_chunk_in_process(pool: &SqlitePool, id: i64, in_process: bool) -> Result<()> {
@@ -646,7 +656,9 @@ pub async fn get_chunks_paginated(
 ) -> Result<Vec<ChunkRecord>> {
     let rows = sqlx::query(
         "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-         in_process, sent, sequence_number, duration_ms
+         in_process, sent, sequence_number, duration_ms,
+         upload_attempts, upload_first_attempt_at, upload_completed_at,
+         upload_duration_ms, upload_last_error, upload_next_retry_at, upload_failed_permanently
          FROM chunk_records ORDER BY id DESC LIMIT ?1 OFFSET ?2",
     )
     .bind(limit)
@@ -654,21 +666,7 @@ pub async fn get_chunks_paginated(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| ChunkRecord {
-            id: r.get("id"),
-            streaming_event_id: r.get("streaming_event_id"),
-            chunk_file_path: r.get("chunk_file_path"),
-            data_size: r.get("data_size"),
-            created_at: r.get("created_at"),
-            md5: r.get("md5"),
-            in_process: r.get::<i32, _>("in_process") != 0,
-            sent: r.get::<i32, _>("sent") != 0,
-            sequence_number: r.get("sequence_number"),
-            duration_ms: r.get("duration_ms"),
-        })
-        .collect())
+    Ok(rows.into_iter().map(row_to_chunk_record).collect())
 }
 
 pub async fn get_chunk_stats(pool: &SqlitePool, chunk_duration_ms: u64) -> Result<ChunkStats> {
@@ -765,7 +763,9 @@ pub async fn get_chunks_for_event(
 ) -> Result<Vec<ChunkRecord>> {
     let rows = sqlx::query(
         "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-         in_process, sent, sequence_number, duration_ms
+         in_process, sent, sequence_number, duration_ms,
+         upload_attempts, upload_first_attempt_at, upload_completed_at,
+         upload_duration_ms, upload_last_error, upload_next_retry_at, upload_failed_permanently
          FROM chunk_records WHERE streaming_event_id = ?1
          ORDER BY sequence_number ASC",
     )
@@ -773,21 +773,7 @@ pub async fn get_chunks_for_event(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| ChunkRecord {
-            id: r.get("id"),
-            streaming_event_id: r.get("streaming_event_id"),
-            chunk_file_path: r.get("chunk_file_path"),
-            data_size: r.get("data_size"),
-            created_at: r.get("created_at"),
-            md5: r.get("md5"),
-            in_process: r.get::<i32, _>("in_process") != 0,
-            sent: r.get::<i32, _>("sent") != 0,
-            sequence_number: r.get("sequence_number"),
-            duration_ms: r.get("duration_ms"),
-        })
-        .collect())
+    Ok(rows.into_iter().map(row_to_chunk_record).collect())
 }
 
 /// Count chunks that have been sent to S3 for a specific streaming event.
@@ -865,4 +851,84 @@ pub async fn delete_all_chunks(pool: &SqlitePool) -> Result<u64> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected())
+}
+
+/// Record the start of an upload attempt. Bumps `upload_attempts`, sets
+/// `upload_first_attempt_at` if NULL.
+pub async fn record_upload_attempt(pool: &SqlitePool, chunk_id: i64, now_ms: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE chunk_records
+         SET upload_attempts = upload_attempts + 1,
+             upload_first_attempt_at = COALESCE(upload_first_attempt_at, ?2)
+         WHERE id = ?1",
+    )
+    .bind(chunk_id)
+    .bind(now_ms)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Record a failed upload. Sets last_error + duration, schedules next retry,
+/// releases in_process so another worker can pick it up after backoff.
+pub async fn record_upload_failure(
+    pool: &SqlitePool,
+    chunk_id: i64,
+    error: &str,
+    next_retry_at_ms: i64,
+    duration_ms: i64,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE chunk_records
+         SET upload_last_error = ?2,
+             upload_next_retry_at = ?3,
+             upload_duration_ms = ?4,
+             in_process = 0
+         WHERE id = ?1",
+    )
+    .bind(chunk_id)
+    .bind(error)
+    .bind(next_retry_at_ms)
+    .bind(duration_ms)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Mark a chunk as permanently failed after the retry budget is exhausted.
+pub async fn mark_upload_permanently_failed(pool: &SqlitePool, chunk_id: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE chunk_records
+         SET upload_failed_permanently = 1,
+             in_process = 0
+         WHERE id = ?1",
+    )
+    .bind(chunk_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Record a successful upload.
+pub async fn record_upload_success(
+    pool: &SqlitePool,
+    chunk_id: i64,
+    completed_at_ms: i64,
+    duration_ms: i64,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE chunk_records
+         SET sent = 1,
+             in_process = 0,
+             upload_completed_at = ?2,
+             upload_duration_ms = ?3,
+             upload_last_error = NULL
+         WHERE id = ?1",
+    )
+    .bind(chunk_id)
+    .bind(completed_at_ms)
+    .bind(duration_ms)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
