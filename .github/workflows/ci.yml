@@ -215,6 +215,8 @@ jobs:
             --exclude-re 'snapshot_cloud_init' \
             --exclude-re 'delivery_env_file' \
             --exclude-re 'DeliveryOrchestrator::monitor_delivery_health' \
+            --exclude-re 'add_endpoint_to_delivery' \
+            --exclude-re 'remove_endpoint_from_delivery' \
             --exclude-re 'MAX_RESCUE_VIDEO_BYTES' \
             --exclude-re 'write_countdown_file' \
             --exclude-re 'cleanup_countdown_file' \
