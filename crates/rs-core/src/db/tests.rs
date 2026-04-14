@@ -178,6 +178,34 @@ async fn delete_chunks_for_event_works() {
 }
 
 #[tokio::test]
+async fn migration_v17_adds_upload_telemetry_columns() {
+    let pool = setup_db().await;
+
+    // All seven upload telemetry columns must exist after migrations run.
+    sqlx::query(
+        "SELECT upload_attempts, upload_first_attempt_at, upload_completed_at, \
+         upload_duration_ms, upload_last_error, upload_next_retry_at, \
+         upload_failed_permanently FROM chunk_records LIMIT 1",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("upload telemetry columns must exist on chunk_records");
+
+    // The upload-queue index must exist.
+    let row = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_chunks_upload_queue'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("sqlite_master query must succeed");
+
+    assert!(
+        row.is_some(),
+        "idx_chunks_upload_queue index must exist after V17 migration"
+    );
+}
+
+#[tokio::test]
 async fn delete_all_chunks_works() {
     let pool = setup_db().await;
     let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();

@@ -81,6 +81,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (14, MIGRATION_V14_SQL),
         (15, MIGRATION_V15_SQL),
         (16, MIGRATION_V16_SQL),
+        (17, MIGRATION_V17_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -377,6 +378,20 @@ FROM delivery_instances;
 
 DROP TABLE delivery_instances;
 ALTER TABLE delivery_instances_v16 RENAME TO delivery_instances
+"#;
+
+const MIGRATION_V17_SQL: &str = r#"
+ALTER TABLE chunk_records ADD COLUMN upload_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE chunk_records ADD COLUMN upload_first_attempt_at INTEGER;
+ALTER TABLE chunk_records ADD COLUMN upload_completed_at INTEGER;
+ALTER TABLE chunk_records ADD COLUMN upload_duration_ms INTEGER;
+ALTER TABLE chunk_records ADD COLUMN upload_last_error TEXT;
+ALTER TABLE chunk_records ADD COLUMN upload_next_retry_at INTEGER;
+ALTER TABLE chunk_records ADD COLUMN upload_failed_permanently INTEGER NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS idx_chunks_upload_queue
+  ON chunk_records(upload_failed_permanently, sent, in_process, upload_next_retry_at, id)
+  WHERE sent = 0 AND in_process = 0 AND upload_failed_permanently = 0
 "#;
 
 // --- Client Profile ---
