@@ -1083,3 +1083,34 @@ async fn chunk_record_round_trips_upload_columns() {
     assert!(c.upload_next_retry_at.is_some());
     assert!(!c.upload_failed_permanently);
 }
+
+#[tokio::test]
+async fn list_recent_uploads_returns_status_transitions() {
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "evt-a").await.unwrap();
+
+    let c1 = insert_chunk(&pool, event_id, "/tmp/a", 100, "m1", 2000)
+        .await
+        .unwrap();
+    let c2 = insert_chunk(&pool, event_id, "/tmp/b", 200, "m2", 2000)
+        .await
+        .unwrap();
+    let c3 = insert_chunk(&pool, event_id, "/tmp/c", 300, "m3", 2000)
+        .await
+        .unwrap();
+
+    record_upload_success(&pool, c1, 123, 150).await.unwrap();
+    record_upload_failure(&pool, c2, "oops", 99_999_999_999_i64, 500)
+        .await
+        .unwrap();
+    mark_upload_permanently_failed(&pool, c3).await.unwrap();
+
+    let rows = list_recent_uploads(&pool, 10).await.unwrap();
+    let by_id: std::collections::HashMap<i64, &crate::models::UploadChunkRow> =
+        rows.iter().map(|r| (r.chunk_id, r)).collect();
+    assert_eq!(by_id[&c1].status, "sent");
+    assert_eq!(by_id[&c2].status, "retrying");
+    assert_eq!(by_id[&c3].status, "failed");
+    assert_eq!(by_id[&c2].last_error.as_deref(), Some("oops"));
+    assert_eq!(by_id[&c1].event_identifier, "evt-a");
+}

@@ -283,6 +283,22 @@ impl Default for InpointState {
     }
 }
 
+/// Upload telemetry row returned by /api/v1/uploads/recent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadChunkRow {
+    pub chunk_id: i64,
+    pub event_identifier: String,
+    pub sequence_number: i64,
+    pub size_bytes: i64,
+    pub attempts: i64,
+    pub duration_ms: Option<i64>,
+    /// "sent" | "pending" | "retrying" | "failed"
+    pub status: String,
+    pub last_error: Option<String>,
+    pub first_attempt_at: Option<i64>,
+    pub completed_at: Option<i64>,
+}
+
 /// Chunk statistics returned by the /chunks/stats endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChunkStats {

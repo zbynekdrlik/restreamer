@@ -69,6 +69,12 @@ impl ChunkUploader {
         self
     }
 
+    /// Replace the default internal metrics with a shared instance.
+    pub fn with_metrics(mut self, m: Arc<UploadMetrics>) -> Self {
+        self.metrics = m;
+        self
+    }
+
     /// Expose metrics for the /uploads/stats API.
     pub fn metrics(&self) -> Arc<UploadMetrics> {
         Arc::clone(&self.metrics)

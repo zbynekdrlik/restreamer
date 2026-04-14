@@ -7,6 +7,7 @@ use tokio::sync::{broadcast, mpsc};
 use rs_core::config::{Config, ObsConfig};
 use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{InpointState, WsEvent};
+use rs_endpoint::metrics::UploadMetrics;
 
 use crate::delivery::DeliveryOrchestrator;
 use crate::obs::ObsClient;
@@ -55,6 +56,8 @@ pub struct AppState {
     /// and double the load on the S3 endpoint. Also provides a stable
     /// happens-before boundary between concurrent delete requests.
     pub s3_mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Upload metrics shared with ChunkUploader for /uploads/stats API.
+    pub upload_metrics: Arc<UploadMetrics>,
 }
 
 impl AppState {
@@ -85,7 +88,14 @@ impl AppState {
             obs_client: Arc::new(tokio::sync::RwLock::new(obs_client)),
             s3_upload_blocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             s3_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            upload_metrics: Arc::new(UploadMetrics::default()),
         }
+    }
+
+    /// Replace the upload metrics with a shared instance (set before ChunkUploader is spawned).
+    pub fn with_upload_metrics(mut self, m: Arc<UploadMetrics>) -> Self {
+        self.upload_metrics = m;
+        self
     }
 
     /// Set the S3 upload blocked flag (shared with ChunkUploader).

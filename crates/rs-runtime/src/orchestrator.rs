@@ -14,6 +14,7 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{InpointState, WsEvent};
+use rs_endpoint::metrics::UploadMetrics;
 use rs_endpoint::s3::S3Client;
 use rs_endpoint::uploader::ChunkUploader;
 use rs_inpoint::flv_chunker::FlvChunkSink;
@@ -137,6 +138,9 @@ impl ServiceCore {
         // Shared S3 upload blocked flag (test hook for simulating outages)
         let s3_upload_blocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+        // Shared upload metrics (exposed via /api/v1/uploads/stats)
+        let upload_metrics = Arc::new(UploadMetrics::default());
+
         // API server
         let api_addr: SocketAddr =
             format!("{}:{}", self.config.api.bind, self.config.api.port).parse()?;
@@ -145,7 +149,8 @@ impl ServiceCore {
             .with_log_buffer(self.log_buffer)
             .with_inpoint_state(inpoint_state.clone())
             .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx)
-            .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked));
+            .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked))
+            .with_upload_metrics(Arc::clone(&upload_metrics));
 
         // Serve the WASM frontend from a "www" directory next to the binary,
         // so LAN browsers can access the dashboard at http://<host>:8910/
@@ -268,6 +273,7 @@ impl ServiceCore {
                 endpoint_restart_rx,
                 endpoint_shutdown_rx,
                 s3_upload_blocked,
+                upload_metrics,
             )
             .await;
         });
@@ -439,6 +445,7 @@ async fn run_endpoint_loop(
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
     s3_upload_blocked: Arc<std::sync::atomic::AtomicBool>,
+    upload_metrics: Arc<UploadMetrics>,
 ) {
     loop {
         let s3 = match S3Client::new(&s3_config) {
@@ -453,7 +460,8 @@ async fn run_endpoint_loop(
         let component_rx = component_shutdown_tx.subscribe();
 
         let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx.clone())
-            .with_upload_blocked(Arc::clone(&s3_upload_blocked));
+            .with_upload_blocked(Arc::clone(&s3_upload_blocked))
+            .with_metrics(Arc::clone(&upload_metrics));
         let mut handle = tokio::spawn(async move { uploader.run(component_rx).await });
 
         info!("Endpoint uploader started");

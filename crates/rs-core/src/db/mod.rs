@@ -4,7 +4,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::error::Result;
-use crate::models::{ChunkRecord, ChunkStats, ClientProfile, StreamingEvent};
+use crate::models::{ChunkRecord, ChunkStats, ClientProfile, StreamingEvent, UploadChunkRow};
 
 mod templates;
 pub use templates::*;
@@ -984,4 +984,56 @@ pub async fn record_upload_success(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// List the most-recent N chunks (by id desc) with upload telemetry joined
+/// to the streaming event name.
+pub async fn list_recent_uploads(pool: &SqlitePool, limit: i64) -> Result<Vec<UploadChunkRow>> {
+    let rows = sqlx::query(
+        "SELECT c.id, e.name, c.sequence_number, c.data_size,
+                c.upload_attempts, c.upload_duration_ms,
+                c.sent, c.in_process, c.upload_failed_permanently,
+                c.upload_last_error, c.upload_first_attempt_at, c.upload_completed_at
+         FROM chunk_records c
+         LEFT JOIN streaming_events e ON e.id = c.streaming_event_id
+         ORDER BY c.id DESC
+         LIMIT ?1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let sent: i64 = r.get("sent");
+            let in_proc: i64 = r.get("in_process");
+            let failed: i64 = r.get("upload_failed_permanently");
+            let attempts: i64 = r.get("upload_attempts");
+            let last_error: Option<String> = r.get("upload_last_error");
+            let status = if sent == 1 {
+                "sent"
+            } else if failed == 1 {
+                "failed"
+            } else if in_proc == 1 || attempts > 0 || last_error.is_some() {
+                "retrying"
+            } else {
+                "pending"
+            }
+            .to_string();
+
+            UploadChunkRow {
+                chunk_id: r.get("id"),
+                event_identifier: r.try_get::<String, _>("name").unwrap_or_default(),
+                sequence_number: r.get("sequence_number"),
+                size_bytes: r.get("data_size"),
+                attempts,
+                duration_ms: r.get("upload_duration_ms"),
+                status,
+                last_error,
+                first_attempt_at: r.get("upload_first_attempt_at"),
+                completed_at: r.get("upload_completed_at"),
+            }
+        })
+        .collect())
 }
