@@ -221,7 +221,7 @@ async fn run_worker(
     idx: usize,
     ctx: WorkerCtx,
     shutdown: &mut broadcast::Receiver<()>,
-    target_rx: &mut tokio::sync::watch::Receiver<usize>,
+    _target_rx: &mut tokio::sync::watch::Receiver<usize>,
 ) {
     let WorkerCtx {
         pool,
