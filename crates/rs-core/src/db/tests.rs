@@ -992,6 +992,68 @@ async fn update_event_rescue_video_url() {
 // Delivery log capture tests are in delivery_log_tests.rs
 
 #[tokio::test]
+async fn picker_skips_chunks_before_retry_time_and_claims_atomically() {
+    let pool = setup_db().await;
+    upsert_client_profile(&pool, "test-uuid").await.unwrap();
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
+
+    let c1 = insert_chunk(&pool, event_id, "/tmp/a", 100, "m", 2000)
+        .await
+        .unwrap();
+    let c2 = insert_chunk(&pool, event_id, "/tmp/b", 100, "m2", 2000)
+        .await
+        .unwrap();
+
+    // c1 has retry scheduled in the future, c2 is eligible now
+    record_upload_failure(&pool, c1, "timeout", 9_999_999_999_999, 500)
+        .await
+        .unwrap();
+
+    let now_ms = 1_735_000_000_000_i64;
+    let picked = pick_next_uploadable_chunk(&pool, now_ms).await.unwrap();
+    assert_eq!(
+        picked.as_ref().map(|c| c.id),
+        Some(c2),
+        "should pick eligible one"
+    );
+    // After pick, c2 is in_process=true
+    let in_proc: (i64,) = sqlx::query_as("SELECT in_process FROM chunk_records WHERE id = ?1")
+        .bind(c2)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(in_proc.0, 1, "picked chunk must be marked in_process");
+
+    // A second pick returns None (c1 still in future, c2 claimed)
+    let again = pick_next_uploadable_chunk(&pool, now_ms).await.unwrap();
+    assert!(again.is_none(), "no other chunk is eligible");
+
+    // Advancing the clock past c1's retry time lets picker claim it
+    let later = 10_000_000_000_000_i64;
+    let picked2 = pick_next_uploadable_chunk(&pool, later).await.unwrap();
+    assert_eq!(picked2.as_ref().map(|c| c.id), Some(c1));
+}
+
+#[tokio::test]
+async fn picker_skips_permanently_failed() {
+    let pool = setup_db().await;
+    upsert_client_profile(&pool, "test-uuid").await.unwrap();
+    let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
+    let c = insert_chunk(&pool, event_id, "/tmp/a", 100, "m", 2000)
+        .await
+        .unwrap();
+    mark_upload_permanently_failed(&pool, c).await.unwrap();
+
+    let picked = pick_next_uploadable_chunk(&pool, 1_000_000_000_000)
+        .await
+        .unwrap();
+    assert!(
+        picked.is_none(),
+        "permanently-failed chunks must not be picked"
+    );
+}
+
+#[tokio::test]
 async fn chunk_record_round_trips_upload_columns() {
     let pool = setup_db().await;
     upsert_client_profile(&pool, "test-uuid").await.unwrap();

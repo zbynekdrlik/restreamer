@@ -909,6 +909,59 @@ pub async fn mark_upload_permanently_failed(pool: &SqlitePool, chunk_id: i64) ->
     Ok(())
 }
 
+/// Atomically pick the oldest eligible chunk and mark it `in_process=1`.
+/// Returns None if nothing is eligible. Eligibility:
+///   - sent = 0
+///   - in_process = 0
+///   - upload_failed_permanently = 0
+///   - upload_next_retry_at IS NULL OR upload_next_retry_at <= now_ms
+pub async fn pick_next_uploadable_chunk(
+    pool: &SqlitePool,
+    now_ms: i64,
+) -> Result<Option<ChunkRecord>> {
+    let mut tx = pool.begin().await?;
+
+    let row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
+        "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
+                in_process, sent, sequence_number, duration_ms,
+                upload_attempts, upload_first_attempt_at, upload_completed_at,
+                upload_duration_ms, upload_last_error, upload_next_retry_at,
+                upload_failed_permanently
+         FROM chunk_records
+         WHERE sent = 0
+           AND in_process = 0
+           AND upload_failed_permanently = 0
+           AND (upload_next_retry_at IS NULL OR upload_next_retry_at <= ?1)
+         ORDER BY id ASC
+         LIMIT 1",
+    )
+    .bind(now_ms)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let chunk = row_to_chunk_record(row);
+
+    // Atomic claim — if another worker grabbed it, our UPDATE affects 0 rows.
+    let result = sqlx::query(
+        "UPDATE chunk_records SET in_process = 1
+         WHERE id = ?1 AND in_process = 0 AND sent = 0",
+    )
+    .bind(chunk.id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    if result.rows_affected() == 0 {
+        return Ok(None);
+    }
+    Ok(Some(chunk))
+}
+
 /// Record a successful upload.
 pub async fn record_upload_success(
     pool: &SqlitePool,
