@@ -3444,8 +3444,11 @@ jobs:
           # STRICT: Pending chunks must have DECREASED from during-block level
           $chunksRecovery = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks/stats" -TimeoutSec 5
           Write-Host "Recovery chunks: pending=$($chunksRecovery.pending_chunks) sent=$($chunksRecovery.sent_chunks) (was $pendingDuringBlock during block)"
-          if ($chunksRecovery.pending_chunks -gt 10) {
-            throw "FAILED: $($chunksRecovery.pending_chunks) chunks still pending after 60s recovery - S3 upload not resuming"
+          # STRICT (#118): after 60s recovery window pending must be <=5.
+          # Previous bar was 10; with row-level retry + adaptive concurrency
+          # the uploader should now drain promptly once S3 is reachable.
+          if ($chunksRecovery.pending_chunks -gt 5) {
+            throw "FAILED: $($chunksRecovery.pending_chunks) chunks still pending after 60s recovery - S3 upload not draining fast enough (issue #118)"
           }
           if ($chunksRecovery.pending_chunks -ge $pendingDuringBlock) {
             throw "FAILED: Pending chunks did not decrease after S3 unblock ($pendingDuringBlock -> $($chunksRecovery.pending_chunks)) - chunks not draining to S3"
