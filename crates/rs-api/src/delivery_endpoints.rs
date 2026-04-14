@@ -10,7 +10,7 @@ use tracing::info;
 use rs_core::config::Config;
 use rs_core::db;
 
-use crate::delivery::DeliveryOrchestrator;
+use crate::delivery::{DeliveryOrchestrator, is_delivery_active};
 
 /// Start position strategy for an endpoint joining a delivery session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -78,9 +78,9 @@ pub async fn add_endpoint_to_delivery(
         .await?
         .ok_or_else(|| anyhow::anyhow!("No active delivery instance for event {event_id}"))?;
 
-    if instance.status != "running" {
+    if !is_delivery_active(&instance.status) {
         return Err(anyhow::anyhow!(
-            "Delivery instance is '{}', not 'running'",
+            "Delivery instance is in state '{}', not in an active delivery state",
             instance.status
         ));
     }
@@ -143,9 +143,9 @@ pub async fn remove_endpoint_from_delivery(
         .await?
         .ok_or_else(|| anyhow::anyhow!("No active delivery instance for event {event_id}"))?;
 
-    if instance.status != "running" {
+    if !is_delivery_active(&instance.status) {
         return Err(anyhow::anyhow!(
-            "Delivery instance is '{}', not 'running'",
+            "Delivery instance is in state '{}', not in an active delivery state",
             instance.status
         ));
     }

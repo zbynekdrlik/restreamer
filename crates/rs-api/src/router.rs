@@ -1,4 +1,5 @@
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{Method, header};
 use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
@@ -74,7 +75,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/s3/usage", get(s3_handlers::get_s3_usage))
         .route(
             "/rescue-video/upload",
-            post(rescue_video_handlers::upload_rescue_video),
+            post(rescue_video_handlers::upload_rescue_video)
+                // Hard body-size limit matches the handler's MAX_RESCUE_VIDEO_BYTES
+                // (100 MiB). Without this Axum buffers the entire multipart
+                // payload into memory before the handler sees a single byte,
+                // so a client could OOM the Tauri process by POSTing 10 GiB.
+                .layer(DefaultBodyLimit::max(104_857_600)),
         )
         .route("/events/{id}/activate", post(handlers::activate_event))
         .route(

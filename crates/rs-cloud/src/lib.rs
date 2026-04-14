@@ -260,7 +260,9 @@ write_files:
       done
 
 runcmd:
-  - pkill -f rs-delivery || true
+  # Anchor the rs-delivery pattern to the binary path so we do not kill
+  # the log-uploader.sh script (whose argv references rs-delivery.log).
+  - pkill -f '^/opt/restreamer/rs-delivery$' || true
   - pkill -f log-uploader || true
   - curl -fsSL -o /opt/restreamer/rs-delivery "{delivery_binary_url}"
   - chmod +x /opt/restreamer/rs-delivery
