@@ -232,3 +232,37 @@ async fn list_recent_uploads_attempts_zero_is_pending_not_retrying() {
     );
     assert_eq!(row.attempts, 0);
 }
+
+#[tokio::test]
+async fn list_recent_uploads_attempts_gt_zero_no_last_error_is_retrying() {
+    // The condition is `in_proc == 1 || attempts > 0 || last_error.is_some()`.
+    // A mutant changes `>` to `<` (attempts > 0 → attempts < 0).
+    // This test has attempts=1 and last_error=NULL so only `attempts > 0` can
+    // fire, proving the `>` comparison is tested independently of last_error.
+    let pool = setup_db().await;
+    db::upsert_client_profile(&pool, "test-uuid").await.unwrap();
+    let event_id = db::upsert_streaming_event(&pool, "evt-gt-zero")
+        .await
+        .unwrap();
+    let c = db::insert_chunk(&pool, event_id, "/tmp/gt", 100, "mgt", 2000)
+        .await
+        .unwrap();
+    // Directly bump attempts without setting last_error (no record_upload_failure call)
+    sqlx::query("UPDATE chunk_records SET upload_attempts = 1, in_process = 0 WHERE id = ?1")
+        .bind(c)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let rows = db::list_recent_uploads(&pool, 10).await.unwrap();
+    let row = rows.iter().find(|r| r.chunk_id == c).unwrap();
+    assert_eq!(
+        row.status, "retrying",
+        "attempts=1 with in_process=0 and no last_error must be 'retrying'"
+    );
+    assert_eq!(row.attempts, 1);
+    assert!(
+        row.last_error.is_none(),
+        "last_error must be NULL so only attempts > 0 drives the classification"
+    );
+}

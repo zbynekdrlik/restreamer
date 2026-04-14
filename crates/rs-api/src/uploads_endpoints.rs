@@ -114,4 +114,51 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
     }
+
+    #[tokio::test]
+    async fn uploads_recent_returns_inserted_rows_not_empty_vec() {
+        // Kills the mutant that returns Ok(Json::from(vec![])) regardless of DB.
+        use rs_core::config::Config;
+        use rs_core::models::WsEvent;
+        use tokio::sync::broadcast;
+
+        let pool = rs_core::db::create_memory_pool().await.unwrap();
+        rs_core::db::run_migrations(&pool).await.unwrap();
+        rs_core::db::upsert_client_profile(&pool, "test-uuid")
+            .await
+            .unwrap();
+        let event_id = rs_core::db::upsert_streaming_event(&pool, "evt-ep")
+            .await
+            .unwrap();
+        rs_core::db::insert_chunk(&pool, event_id, "/tmp/ep.bin", 100, "mep", 2000)
+            .await
+            .unwrap();
+
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let app = axum::Router::new()
+            .route(
+                "/api/v1/uploads/recent",
+                axum::routing::get(get_recent_uploads),
+            )
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/api/v1/uploads/recent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = v.as_array().expect("response must be an array");
+        assert_eq!(
+            arr.len(),
+            1,
+            "must return the 1 inserted chunk, not an empty array"
+        );
+    }
 }
