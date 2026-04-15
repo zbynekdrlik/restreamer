@@ -433,36 +433,70 @@ impl DeliveryOrchestrator {
                 "Starting fresh delivery — start_chunk_id set to live-edge"
             );
 
-            // Wait up to 60 s for stream.lan to produce at least one chunk
-            // at or beyond start_chunk_id.  This guarantees the VPS warmup
-            // loop has somewhere to begin probing rather than spinning on an
-            // empty S3 prefix.  If the stream is not producing after 60 s,
-            // fail loudly so the operator knows to check the ingest side.
-            let max_wait_secs: u32 = 60;
-            for attempt in 0..max_wait_secs {
+            // Wait until `delivery_delay_ms` worth of FRESH content (sequence >= start)
+            // has accumulated on S3 before creating the VPS. Without this wait, the VPS
+            // warmup loop walks pre-existing chunks instantly (stream.lan keeps uploading
+            // during the 60-90 s VPS boot) and current_chunk_id ends up at live-edge
+            // with zero real buffer — so the cache bar plateaus at ~2 s instead of the
+            // configured target.
+            //
+            // We must ALSO tolerate stream.lan not producing at all (60 s grace): if no
+            // chunk >= start appears in 60 s, fail loudly — ingest is broken and
+            // waiting longer will not help.  After the first fresh chunk arrives, wait
+            // until the accumulated duration meets or exceeds the target.
+            let grace_secs: u32 = 60;
+            let mut saw_first_chunk = false;
+            // Total budget: grace + (target_delay × 3) — chunks are ~2 s each, so
+            // target_delay seconds of real time is needed plus headroom.
+            let total_budget_secs = grace_secs + (delay_secs as u32) * 3;
+            for attempt in 0..total_budget_secs {
                 let current_max =
                     db::get_latest_sequence_number_for_event(&self.pool, event_id).await?;
-                if current_max.unwrap_or(0) >= start {
+                let have_first = current_max.unwrap_or(0) >= start;
+
+                if !saw_first_chunk && have_first {
+                    saw_first_chunk = true;
                     info!(
                         event_id,
                         current_max = ?current_max,
-                        "First fresh chunk available, launching VPS"
+                        "First fresh chunk available, now accumulating pre-fill buffer"
                     );
-                    break;
                 }
-                if attempt % 10 == 0 {
+                if !saw_first_chunk && attempt >= grace_secs {
+                    return Err(anyhow::anyhow!(
+                        "Stream not producing chunks — waited {grace_secs}s for chunk >= {start} on event {event_id}"
+                    ));
+                }
+
+                if saw_first_chunk {
+                    let fresh_ms = db::get_fresh_duration_ms(&self.pool, event_id, start).await?;
+                    if fresh_ms >= target_delay_ms {
+                        info!(
+                            event_id,
+                            start,
+                            fresh_ms,
+                            target_delay_ms,
+                            "Pre-fill buffer target met, launching VPS"
+                        );
+                        break;
+                    }
+                    if attempt % 10 == 0 {
+                        info!(
+                            event_id,
+                            start,
+                            fresh_ms,
+                            target_delay_ms,
+                            "Pre-fill: {fresh_ms}ms / {target_delay_ms}ms accumulated"
+                        );
+                    }
+                } else if attempt % 10 == 0 {
                     info!(
                         event_id,
                         attempt,
                         start,
                         current_max = ?current_max,
-                        "Waiting for first fresh chunk (attempt {attempt}/{max_wait_secs})"
+                        "Waiting for first fresh chunk ({attempt}/{grace_secs}s)"
                     );
-                }
-                if attempt == max_wait_secs - 1 {
-                    return Err(anyhow::anyhow!(
-                        "Stream not producing chunks — waited {max_wait_secs}s for chunk >= {start} on event {event_id}"
-                    ));
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
