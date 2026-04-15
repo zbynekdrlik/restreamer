@@ -183,7 +183,7 @@ jobs:
             echo "No Rust source changes in diff -- skipping"
             exit 0
           fi
-          cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --output mutants-out \
+          cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --jobs 1 --output mutants-out \
             --exclude-re 'impl ChunkFetcher for S3Fetcher' \
             --exclude-re 'S3Fetcher::fetch_chunk_with_meta' \
             --exclude-re 'S3Fetcher::head_chunk_duration' \
