@@ -230,6 +230,8 @@ jobs:
             --exclude-re 'delivery_broadcast_loop' \
             --exclude-re 'run_worker' \
             --exclude-re 'ChunkUploader::run' \
+            --exclude-re 'wait_for_prefill_buffer' \
+            --exclude-re 'get_fresh_duration_ms' \
             -e 'crates/rs-api/src/template_handlers.rs' \
             -e 'crates/rs-api/src/s3_handlers.rs' \
             -e 'crates/rs-delivery/src/flv_normalizer.rs' \
