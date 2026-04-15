@@ -1,6 +1,7 @@
 pub mod delivery;
 pub mod delivery_endpoints;
 pub mod delivery_handlers;
+pub(crate) mod delivery_helpers;
 #[cfg(test)]
 mod delivery_tests;
 mod delivery_youtube;
