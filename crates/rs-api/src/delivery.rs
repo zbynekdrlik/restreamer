@@ -433,73 +433,14 @@ impl DeliveryOrchestrator {
                 "Starting fresh delivery — start_chunk_id set to live-edge"
             );
 
-            // Wait until `delivery_delay_ms` worth of FRESH content (sequence >= start)
-            // has accumulated on S3 before creating the VPS. Without this wait, the VPS
-            // warmup loop walks pre-existing chunks instantly (stream.lan keeps uploading
-            // during the 60-90 s VPS boot) and current_chunk_id ends up at live-edge
-            // with zero real buffer — so the cache bar plateaus at ~2 s instead of the
-            // configured target.
-            //
-            // We must ALSO tolerate stream.lan not producing at all (60 s grace): if no
-            // chunk >= start appears in 60 s, fail loudly — ingest is broken and
-            // waiting longer will not help.  After the first fresh chunk arrives, wait
-            // until the accumulated duration meets or exceeds the target.
-            let grace_secs: u32 = 60;
-            let mut saw_first_chunk = false;
-            // Total budget: grace + (target_delay × 3) — chunks are ~2 s each, so
-            // target_delay seconds of real time is needed plus headroom.
-            let total_budget_secs = grace_secs + (delay_secs as u32) * 3;
-            for attempt in 0..total_budget_secs {
-                let current_max =
-                    db::get_latest_sequence_number_for_event(&self.pool, event_id).await?;
-                let have_first = current_max.unwrap_or(0) >= start;
-
-                if !saw_first_chunk && have_first {
-                    saw_first_chunk = true;
-                    info!(
-                        event_id,
-                        current_max = ?current_max,
-                        "First fresh chunk available, now accumulating pre-fill buffer"
-                    );
-                }
-                if !saw_first_chunk && attempt >= grace_secs {
-                    return Err(anyhow::anyhow!(
-                        "Stream not producing chunks — waited {grace_secs}s for chunk >= {start} on event {event_id}"
-                    ));
-                }
-
-                if saw_first_chunk {
-                    let fresh_ms = db::get_fresh_duration_ms(&self.pool, event_id, start).await?;
-                    if fresh_ms >= target_delay_ms {
-                        info!(
-                            event_id,
-                            start,
-                            fresh_ms,
-                            target_delay_ms,
-                            "Pre-fill buffer target met, launching VPS"
-                        );
-                        break;
-                    }
-                    if attempt % 10 == 0 {
-                        info!(
-                            event_id,
-                            start,
-                            fresh_ms,
-                            target_delay_ms,
-                            "Pre-fill: {fresh_ms}ms / {target_delay_ms}ms accumulated"
-                        );
-                    }
-                } else if attempt % 10 == 0 {
-                    info!(
-                        event_id,
-                        attempt,
-                        start,
-                        current_max = ?current_max,
-                        "Waiting for first fresh chunk ({attempt}/{grace_secs}s)"
-                    );
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            crate::delivery_helpers::wait_for_prefill_buffer(
+                &self.pool,
+                event_id,
+                start,
+                target_delay_ms,
+                delay_secs,
+            )
+            .await?;
             start_chunk_id = start;
             info!(
                 event_id,
