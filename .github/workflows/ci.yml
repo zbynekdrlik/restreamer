@@ -2747,36 +2747,40 @@ jobs:
           $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           $eventId = $targetEvent.id
 
-          # Phase 1: Wait for VPS buffer fill to complete (chunk_id advances past 1)
-          Write-Host "Waiting for VPS buffer fill to complete (chunk_id > 1)..."
+          # Phase 1: Wait for VPS warmup to complete (delivery_mode == "normal").
+          # After the start_chunk_id=live-edge fix (#118), current_chunk_id is set
+          # to max_seq+1 BEFORE warmup runs, so "chunk_id > 1" is no longer a
+          # reliable "warmup done" signal. Gate instead on delivery_mode flipping
+          # from "warmup" to "normal" on all non-fast endpoints.
+          Write-Host "Waiting for VPS warmup to finish (delivery_mode == 'normal')..."
           $maxWait = 60
           $bufferReady = $false
           for ($i = 1; $i -le $maxWait; $i++) {
             $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
-            $minChunk = [int]::MaxValue
             $foundEndpoint = $false
+            $allNormal = $true
+            $modes = @()
             if ($resp.endpoint_details) {
               foreach ($ep in $resp.endpoint_details) {
                 if (-not $ep.is_fast) {
                   $foundEndpoint = $true
-                  if ($ep.current_chunk_id -lt $minChunk) {
-                    $minChunk = $ep.current_chunk_id
-                  }
+                  $modes += "$($ep.alias)=$($ep.delivery_mode)"
+                  if ($ep.delivery_mode -ne "normal") { $allNormal = $false }
                 }
               }
             }
-            if ($foundEndpoint -and $minChunk -gt 1) {
-              Write-Host "Buffer fill complete at attempt $i (min chunk_id=$minChunk)"
+            if ($foundEndpoint -and $allNormal) {
+              Write-Host "VPS warmup complete at attempt $i ($($modes -join ', '))"
               $bufferReady = $true
               break
             }
             if ($i % 5 -eq 0) {
-              Write-Host "  Attempt $($i)/$($maxWait): min chunk_id=$($minChunk) (waiting for > 1)"
+              Write-Host "  Attempt $($i)/$($maxWait): $($modes -join ', ') (waiting for all normal)"
             }
             Start-Sleep -Seconds 5
           }
           if (-not $bufferReady) {
-            throw "FAILED: VPS buffer fill did not complete within $($maxWait * 5)s"
+            throw "FAILED: VPS warmup did not complete within $($maxWait * 5)s"
           }
 
           # Phase 2: Take 4 readings at 15s intervals to verify progression
