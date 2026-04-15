@@ -187,10 +187,11 @@ jobs:
             echo "No Rust source changes in diff -- skipping"
             exit 0
           fi
-          # --jobs=1: serialize to avoid 4GB RAM OOM on ubuntu-latest.
-          # --no-copy-vcs: skip copying .git (saves GB on repos with history).
-          # Periodic df/free to surface OOM/disk issues in the log.
-          cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --jobs 1 --no-copy-vcs --output mutants-out \
+          # --jobs=1: serialize. Earlier runs died at 8min on ubuntu-latest
+          # ('runner lost communication') — root cause unclear (16GB RAM, 88GB
+          # disk both ample per the diagnostic above), but parallel builds
+          # remain a likely contributor to runner instability.
+          cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --jobs 1 --output mutants-out \
             --exclude-re 'impl ChunkFetcher for S3Fetcher' \
             --exclude-re 'S3Fetcher::fetch_chunk_with_meta' \
             --exclude-re 'S3Fetcher::head_chunk_duration' \
