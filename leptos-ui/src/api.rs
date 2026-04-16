@@ -401,6 +401,40 @@ pub async fn get_s3_usage() -> Result<S3UsageResponse, String> {
     http_get("/s3/usage").await
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Default)]
+pub struct UploadStats {
+    pub chunks_per_sec: f64,
+    pub median_ms: u32,
+    pub p95_ms: u32,
+    pub error_rate: f64,
+    pub in_flight: usize,
+    pub adaptive_target: usize,
+}
+
+/// Get current upload telemetry snapshot (1-minute window) from backend.
+pub async fn fetch_upload_stats() -> Result<UploadStats, String> {
+    http_get("/uploads/stats").await
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct UploadRow {
+    pub chunk_id: i64,
+    pub event_identifier: String,
+    pub sequence_number: i64,
+    pub size_bytes: i64,
+    pub attempts: i64,
+    pub duration_ms: Option<i64>,
+    pub status: String,
+    pub last_error: Option<String>,
+    pub first_attempt_at: Option<i64>,
+    pub completed_at: Option<i64>,
+}
+
+/// Fetch recent chunk upload history (newest first).
+pub async fn fetch_recent_uploads(limit: u32) -> Result<Vec<UploadRow>, String> {
+    http_get(&format!("/uploads/recent?limit={limit}")).await
+}
+
 // Templates API
 pub async fn list_templates() -> Result<Vec<EventTemplate>, String> {
     http_get("/templates").await

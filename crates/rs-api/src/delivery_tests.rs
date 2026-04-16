@@ -66,3 +66,6 @@ async fn get_delivery_status_no_instance() {
     assert!(!status.server_ready);
     assert!(status.endpoints.is_empty());
 }
+
+// compute_start_chunk_id tests removed — function reverted (broke VPS creation
+// when chunks are cleared on restart). Cache init fix needs proper redesign.

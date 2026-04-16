@@ -3,7 +3,7 @@
 //!
 //! These tests exercise:
 //! - S3 upload with correct key format (`{event_id}/{sequence_number}.bin`)
-//! - Database state transitions (in_process, sent)
+//! - Database state transitions (sent=1 after success)
 //! - Local file cleanup after successful upload
 
 use std::io::Write as IoWrite;
@@ -90,6 +90,30 @@ fn create_s3_config(endpoint: &str) -> S3Config {
     }
 }
 
+/// Run the uploader long enough to drain the queue, then shut it down.
+/// Polls the DB until `predicate` returns true or `max_wait` elapses.
+async fn run_until<F>(uploader: ChunkUploader, pool: &SqlitePool, predicate: F, max_wait: Duration)
+where
+    F: Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+{
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+    let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
+
+    let deadline = tokio::time::Instant::now() + max_wait;
+    loop {
+        if predicate().await {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+    let _ = pool; // suppress unused warning
+}
+
 // --- Integration Tests ---
 
 #[tokio::test]
@@ -121,9 +145,27 @@ async fn uploader_full_flow_success() {
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
     let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
 
-    uploader.upload_batch().await;
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let s3_state_check = s3_state.clone();
+    let pool_check = pool.clone();
+    run_until(
+        uploader,
+        &pool,
+        move || {
+            let s3_state_check = s3_state_check.clone();
+            let pool_check = pool_check.clone();
+            Box::pin(async move {
+                if s3_state_check.upload_count.load(Ordering::SeqCst) >= 1 {
+                    // Give a brief moment for DB writes to complete
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let chunks = db::get_unsent_chunks(&pool_check, 10).await.unwrap();
+                    return chunks.is_empty();
+                }
+                false
+            })
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Verify S3 upload was called with correct key format
     assert_eq!(s3_state.upload_count.load(Ordering::SeqCst), 1);
@@ -174,15 +216,42 @@ async fn uploader_s3_failure_keeps_chunk_unsent() {
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
     let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
 
-    uploader.upload_batch().await;
+    // Let the uploader attempt one upload cycle (first attempt will fail and schedule retry)
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+    let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
 
-    // Chunk should still be unsent
+    // Wait until the chunk has been attempted at least once (upload_attempts > 0)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let chunks =
+            sqlx::query_as::<_, (i64,)>("SELECT upload_attempts FROM chunk_records WHERE id = 1")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        if chunks.map(|(a,)| a).unwrap_or(0) >= 1 {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+
+    // Chunk should not be marked as permanently failed yet (only 1 attempt)
+    // and should not be sent
     let chunks = db::get_unsent_chunks(&pool, 10).await.unwrap();
-    assert_eq!(
-        chunks.len(),
-        1,
-        "Chunk should remain unsent after S3 failure"
-    );
+    // After a failure, the chunk has upload_next_retry_at set in the future,
+    // so get_unsent_chunks (which excludes in_process) won't return it,
+    // but it is also not sent=1. Check sent directly.
+    let sent_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM chunk_records WHERE sent = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sent_count.0, 0, "Chunk should not be sent after S3 failure");
+    let _ = chunks;
 
     // Local file should still exist
     assert!(
@@ -226,7 +295,26 @@ async fn uploader_multiple_chunks_uploads_concurrently() {
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
     let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
 
-    uploader.upload_batch().await;
+    let s3_state_check = s3_state.clone();
+    let pool_check = pool.clone();
+    run_until(
+        uploader,
+        &pool,
+        move || {
+            let s3_state_check = s3_state_check.clone();
+            let pool_check = pool_check.clone();
+            Box::pin(async move {
+                if s3_state_check.upload_count.load(Ordering::SeqCst) >= 5 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let chunks = db::get_unsent_chunks(&pool_check, 10).await.unwrap();
+                    return chunks.is_empty();
+                }
+                false
+            })
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 
     // All 5 chunks should be uploaded
     assert_eq!(s3_state.upload_count.load(Ordering::SeqCst), 5);
@@ -262,11 +350,21 @@ async fn uploader_chunk_without_event_skipped() {
     // Delete the event so the chunk becomes orphaned
     db::delete_streaming_event(&pool, 99).await.unwrap();
 
+    // Re-insert the chunk record manually since cascade delete may have removed it
+    // Actually cascade deletes the chunk too. Insert it again with a dummy event that doesn't exist.
+    // The worker will call get_streaming_event_by_id which returns None -> marks as sent.
+    // Since the chunk was cascade-deleted, there's nothing to upload. Verify 0 S3 uploads.
+
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
     let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
 
-    uploader.upload_batch().await;
+    // Run for a short time; no chunks exist so no uploads should happen
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+    let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
 
     // Orphaned chunks (deleted event) should not cause panics
     // The chunks were cascade-deleted with the event, so no uploads happen
@@ -303,20 +401,28 @@ async fn uploader_ws_event_sent_on_upload() {
     .unwrap();
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
-    let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(16);
+    let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(32);
     let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
 
-    uploader.upload_batch().await;
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+    let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
 
-    let event = tokio::time::timeout(Duration::from_secs(1), ws_rx.recv())
-        .await
-        .expect("Should receive WS event")
-        .expect("Should not be lagged");
-
-    match event {
-        WsEvent::ChunkUploaded { chunk_id } => {
-            assert_eq!(chunk_id, 1);
+    // Wait for ChunkUploaded event
+    let uploaded_event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws_rx.recv().await {
+                Ok(WsEvent::ChunkUploaded { chunk_id }) => return chunk_id,
+                Ok(_) => continue, // skip ChunkUploadAttempt and others
+                Err(_) => panic!("WS channel closed before ChunkUploaded"),
+            }
         }
-        other => panic!("Expected ChunkUploaded event, got: {other:?}"),
-    }
+    })
+    .await
+    .expect("Should receive ChunkUploaded WS event within 5s");
+
+    assert_eq!(uploaded_event, 1);
+
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+    let _ = chunk_path;
 }

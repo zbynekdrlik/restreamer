@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 rs-core.workspace = true
+anyhow.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 rust-s3.workspace = true
@@ -18,9 +19,14 @@ thiserror.workspace = true
 sqlx.workspace = true
 md-5.workspace = true
 futures.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
 axum.workspace = true
 tower.workspace = true
 parking_lot = "0.12"
+
+[[bin]]
+name = "bench_s3_upload"
+path = "src/bin/bench_s3_upload.rs"

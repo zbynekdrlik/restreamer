@@ -12,8 +12,17 @@ pub use templates::*;
 mod v2;
 pub use v2::*;
 
+pub mod upload;
+pub use upload::{
+    list_recent_uploads, mark_upload_permanently_failed, pick_next_uploadable_chunk,
+    record_upload_attempt, record_upload_failure, record_upload_success, reset_orphaned_in_process,
+};
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod upload_tests;
 
 #[cfg(test)]
 mod template_tests;
@@ -81,6 +90,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         (14, MIGRATION_V14_SQL),
         (15, MIGRATION_V15_SQL),
         (16, MIGRATION_V16_SQL),
+        (17, MIGRATION_V17_SQL),
     ];
 
     for &(version, sql) in migrations {
@@ -379,6 +389,20 @@ DROP TABLE delivery_instances;
 ALTER TABLE delivery_instances_v16 RENAME TO delivery_instances
 "#;
 
+const MIGRATION_V17_SQL: &str = r#"
+ALTER TABLE chunk_records ADD COLUMN upload_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE chunk_records ADD COLUMN upload_first_attempt_at INTEGER;
+ALTER TABLE chunk_records ADD COLUMN upload_completed_at INTEGER;
+ALTER TABLE chunk_records ADD COLUMN upload_duration_ms INTEGER;
+ALTER TABLE chunk_records ADD COLUMN upload_last_error TEXT;
+ALTER TABLE chunk_records ADD COLUMN upload_next_retry_at INTEGER;
+ALTER TABLE chunk_records ADD COLUMN upload_failed_permanently INTEGER NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS idx_chunks_upload_queue
+  ON chunk_records(upload_failed_permanently, sent, in_process, upload_next_retry_at, id)
+  WHERE sent = 0 AND in_process = 0 AND upload_failed_permanently = 0
+"#;
+
 // --- Client Profile ---
 
 pub async fn get_client_profile(pool: &SqlitePool) -> Result<Option<ClientProfile>> {
@@ -577,7 +601,9 @@ pub async fn insert_chunk(
 pub async fn get_unsent_chunks(pool: &SqlitePool, limit: i64) -> Result<Vec<ChunkRecord>> {
     let rows = sqlx::query(
         "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-         in_process, sent, sequence_number, duration_ms
+         in_process, sent, sequence_number, duration_ms,
+         upload_attempts, upload_first_attempt_at, upload_completed_at,
+         upload_duration_ms, upload_last_error, upload_next_retry_at, upload_failed_permanently
          FROM chunk_records
          WHERE sent = 0 AND in_process = 0
          ORDER BY id ASC
@@ -587,21 +613,7 @@ pub async fn get_unsent_chunks(pool: &SqlitePool, limit: i64) -> Result<Vec<Chun
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| ChunkRecord {
-            id: r.get("id"),
-            streaming_event_id: r.get("streaming_event_id"),
-            chunk_file_path: r.get("chunk_file_path"),
-            data_size: r.get("data_size"),
-            created_at: r.get("created_at"),
-            md5: r.get("md5"),
-            in_process: r.get::<i32, _>("in_process") != 0,
-            sent: r.get::<i32, _>("sent") != 0,
-            sequence_number: r.get("sequence_number"),
-            duration_ms: r.get("duration_ms"),
-        })
-        .collect())
+    Ok(rows.into_iter().map(upload::row_to_chunk_record).collect())
 }
 
 pub async fn set_chunk_in_process(pool: &SqlitePool, id: i64, in_process: bool) -> Result<()> {
@@ -631,7 +643,9 @@ pub async fn get_chunks_paginated(
 ) -> Result<Vec<ChunkRecord>> {
     let rows = sqlx::query(
         "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-         in_process, sent, sequence_number, duration_ms
+         in_process, sent, sequence_number, duration_ms,
+         upload_attempts, upload_first_attempt_at, upload_completed_at,
+         upload_duration_ms, upload_last_error, upload_next_retry_at, upload_failed_permanently
          FROM chunk_records ORDER BY id DESC LIMIT ?1 OFFSET ?2",
     )
     .bind(limit)
@@ -639,21 +653,7 @@ pub async fn get_chunks_paginated(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| ChunkRecord {
-            id: r.get("id"),
-            streaming_event_id: r.get("streaming_event_id"),
-            chunk_file_path: r.get("chunk_file_path"),
-            data_size: r.get("data_size"),
-            created_at: r.get("created_at"),
-            md5: r.get("md5"),
-            in_process: r.get::<i32, _>("in_process") != 0,
-            sent: r.get::<i32, _>("sent") != 0,
-            sequence_number: r.get("sequence_number"),
-            duration_ms: r.get("duration_ms"),
-        })
-        .collect())
+    Ok(rows.into_iter().map(upload::row_to_chunk_record).collect())
 }
 
 pub async fn get_chunk_stats(pool: &SqlitePool, chunk_duration_ms: u64) -> Result<ChunkStats> {
@@ -750,7 +750,9 @@ pub async fn get_chunks_for_event(
 ) -> Result<Vec<ChunkRecord>> {
     let rows = sqlx::query(
         "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-         in_process, sent, sequence_number, duration_ms
+         in_process, sent, sequence_number, duration_ms,
+         upload_attempts, upload_first_attempt_at, upload_completed_at,
+         upload_duration_ms, upload_last_error, upload_next_retry_at, upload_failed_permanently
          FROM chunk_records WHERE streaming_event_id = ?1
          ORDER BY sequence_number ASC",
     )
@@ -758,21 +760,7 @@ pub async fn get_chunks_for_event(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| ChunkRecord {
-            id: r.get("id"),
-            streaming_event_id: r.get("streaming_event_id"),
-            chunk_file_path: r.get("chunk_file_path"),
-            data_size: r.get("data_size"),
-            created_at: r.get("created_at"),
-            md5: r.get("md5"),
-            in_process: r.get::<i32, _>("in_process") != 0,
-            sent: r.get::<i32, _>("sent") != 0,
-            sequence_number: r.get("sequence_number"),
-            duration_ms: r.get("duration_ms"),
-        })
-        .collect())
+    Ok(rows.into_iter().map(upload::row_to_chunk_record).collect())
 }
 
 /// Count chunks that have been sent to S3 for a specific streaming event.

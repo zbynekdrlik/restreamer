@@ -12,19 +12,7 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::models::{DeliveryEndpointMetrics, DeliveryInstance};
 
-/// Returns true if the DB-side status represents a live delivery instance
-/// that we can talk to over HTTP. The orchestrator transitions instances
-/// through `creating → booting → initializing → delivering → stopping →
-/// deleted` (plus `failed` on error). The post-boot states all have rs-delivery
-/// listening on :8000; before boot we have no IP, and after stopping/deleted
-/// the VPS is gone. We keep `running` in the match for backwards-compatibility
-/// with older rows that predate the fine-grained status states.
-pub(crate) fn is_delivery_active(status: &str) -> bool {
-    matches!(
-        status,
-        "booting" | "initializing" | "delivering" | "running"
-    )
-}
+pub(crate) use crate::delivery_helpers::is_delivery_active;
 
 /// Orchestrates Hetzner VPS delivery instances and YouTube status checks.
 ///
@@ -428,8 +416,7 @@ impl DeliveryOrchestrator {
             // When rescue_video_url is configured, skip the full cache-fill
             // pre-wait and initialize the VPS as soon as the first chunk
             // exists. The VPS-side endpoint_loop handles warmup by playing
-            // the rescue video while its own buffer fills. Without this,
-            // viewers see nothing during the initial 120s cache-fill.
+            // the rescue video while its own buffer fills.
             //
             // When rescue_video_url is None, wait for the full target delay
             // (legacy behaviour) — nothing can play to viewers anyway.
@@ -996,4 +983,4 @@ impl DeliveryOrchestrator {
     }
 }
 
-// Tests are in delivery_tests.rs
+// Helpers moved to delivery_helpers.rs; tests live in delivery_tests.rs.

@@ -451,6 +451,8 @@ fn Pipeline() -> impl IntoView {
                 <span class="pipeline-node-metric">{s3_metric}</span>
             </div>
 
+            <UploadStrip />
+
             // --- Endpoint tree (branching from VPS) ---
             <EndpointTree />
         </div>
@@ -886,5 +888,62 @@ fn AddEndpointModal(show: RwSignal<bool>) -> impl IntoView {
                 </div>
             </div>
         </Show>
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UploadStrip — live S3 upload telemetry strip under the S3→VPS node
+// ---------------------------------------------------------------------------
+
+#[component]
+fn UploadStrip() -> impl IntoView {
+    let stats: RwSignal<crate::api::UploadStats> = RwSignal::new(Default::default());
+
+    // Poll every 2s — even when idle, the strip should update adaptive_target
+    // and in_flight (both default to 0/0 so rendering stays stable).
+    let _interval = Interval::new(2_000, move || {
+        spawn_local(async move {
+            if let Ok(s) = crate::api::fetch_upload_stats().await {
+                stats.set(s);
+            }
+        });
+    });
+    std::mem::forget(_interval);
+
+    // Fire one immediate fetch so the strip isn't blank for 2s on load.
+    spawn_local(async move {
+        if let Ok(s) = crate::api::fetch_upload_stats().await {
+            stats.set(s);
+        }
+    });
+
+    let on_click = move |_| {
+        if let Some(w) = web_sys::window() {
+            let _ = w.location().set_href("/uploads");
+        }
+    };
+
+    view! {
+        <div class="upload-strip" on:click=on_click title="S3 upload telemetry — click for detail">
+            <span class="upload-strip__rate">
+                {move || format!("Upload: {:.1} c/s", stats.get().chunks_per_sec)}
+            </span>
+            <span class="upload-strip__median">
+                {move || format!("median {}ms", stats.get().median_ms)}
+            </span>
+            <span class="upload-strip__inflight">
+                {move || format!("in-flight {}/{}", stats.get().in_flight, stats.get().adaptive_target)}
+            </span>
+            <span class=move || {
+                let s = stats.get();
+                if s.error_rate > 0.0 {
+                    "upload-strip__errors upload-strip__errors--alert"
+                } else {
+                    "upload-strip__errors"
+                }
+            }>
+                {move || format!("errors {:.0}%", stats.get().error_rate * 100.0)}
+            </span>
+        </div>
     }
 }

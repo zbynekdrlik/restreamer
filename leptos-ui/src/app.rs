@@ -4,7 +4,7 @@ use leptos::prelude::*;
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
 
-use crate::components::{Header, OperatorDashboard, SettingsView};
+use crate::components::{Header, OperatorDashboard, SettingsView, UploadsView};
 use crate::store::DashboardStore;
 use crate::ws;
 
@@ -25,6 +25,7 @@ pub fn App() -> impl IntoView {
                     <Routes fallback=|| view! { <div class="empty">"Page not found"</div> }>
                         <Route path=path!("/") view=OperatorDashboard />
                         <Route path=path!("/settings") view=SettingsView />
+                        <Route path=path!("/uploads") view=UploadsView />
                     </Routes>
                 </main>
             </div>

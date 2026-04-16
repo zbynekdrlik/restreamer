@@ -12,6 +12,7 @@ use crate::s3_handlers;
 use crate::state::AppState;
 use crate::stream_handlers;
 use crate::template_handlers;
+use crate::uploads_endpoints;
 use crate::websocket;
 use crate::youtube;
 
@@ -164,6 +165,12 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/youtube/oauth/callback",
             get(youtube::youtube_oauth_callback),
+        )
+        // Upload telemetry
+        .route("/uploads/stats", get(uploads_endpoints::get_uploads_stats))
+        .route(
+            "/uploads/recent",
+            get(uploads_endpoints::get_recent_uploads),
         )
         // Test hooks for CI E2E testing
         .route("/_test/s3-block", post(handlers::test_s3_block))

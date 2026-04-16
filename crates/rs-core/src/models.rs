@@ -44,6 +44,21 @@ pub struct ChunkRecord {
     pub sent: bool,
     pub sequence_number: i64,
     pub duration_ms: i64,
+    // V17 upload telemetry
+    #[serde(default)]
+    pub upload_attempts: i64,
+    #[serde(default)]
+    pub upload_first_attempt_at: Option<i64>,
+    #[serde(default)]
+    pub upload_completed_at: Option<i64>,
+    #[serde(default)]
+    pub upload_duration_ms: Option<i64>,
+    #[serde(default)]
+    pub upload_last_error: Option<String>,
+    #[serde(default)]
+    pub upload_next_retry_at: Option<i64>,
+    #[serde(default)]
+    pub upload_failed_permanently: bool,
 }
 
 /// Endpoint configuration (e.g., YouTube HLS, Facebook RTMP).
@@ -134,6 +149,15 @@ pub enum WsEvent {
     },
     ChunkUploaded {
         chunk_id: i64,
+    },
+    ChunkUploadAttempt {
+        chunk_id: i64,
+        attempt: i64,
+    },
+    ChunkUploadFailed {
+        chunk_id: i64,
+        error: String,
+        permanent: bool,
     },
     StreamingEvent {
         action: String,
@@ -259,6 +283,22 @@ impl Default for InpointState {
     }
 }
 
+/// Upload telemetry row returned by /api/v1/uploads/recent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadChunkRow {
+    pub chunk_id: i64,
+    pub event_identifier: String,
+    pub sequence_number: i64,
+    pub size_bytes: i64,
+    pub attempts: i64,
+    pub duration_ms: Option<i64>,
+    /// "sent" | "pending" | "retrying" | "failed"
+    pub status: String,
+    pub last_error: Option<String>,
+    pub first_attempt_at: Option<i64>,
+    pub completed_at: Option<i64>,
+}
+
 /// Chunk statistics returned by the /chunks/stats endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChunkStats {
@@ -295,6 +335,15 @@ mod tests {
                 md5: "abc123".to_string(),
             },
             WsEvent::ChunkUploaded { chunk_id: 1 },
+            WsEvent::ChunkUploadAttempt {
+                chunk_id: 2,
+                attempt: 1,
+            },
+            WsEvent::ChunkUploadFailed {
+                chunk_id: 3,
+                error: "timeout".to_string(),
+                permanent: false,
+            },
             WsEvent::StreamingEvent {
                 action: "created".to_string(),
                 name: Some("evt-1".to_string()),
