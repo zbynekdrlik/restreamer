@@ -413,19 +413,15 @@ impl DeliveryOrchestrator {
                 start_chunk_id, "Resuming delivery after crash recovery"
             );
         } else {
-            // When rescue_video_url is configured, skip the full cache-fill
-            // pre-wait and initialize the VPS as soon as the first chunk
-            // exists. The VPS-side endpoint_loop handles warmup by playing
-            // the rescue video while its own buffer fills.
-            //
-            // When rescue_video_url is None, wait for the full target delay
-            // (legacy behaviour) — nothing can play to viewers anyway.
-            let has_rescue_video = event.rescue_video_url.is_some();
-            let wait_target_ms = if has_rescue_video {
-                1 // First chunk is enough; VPS plays rescue video during its own fill
-            } else {
-                target_delay_ms
-            };
+            // Wait for the full target duration of content on S3 before
+            // creating the VPS. The previous "rescue video bridges the
+            // gap, so wait for 1 chunk" shortcut produced non-deterministic
+            // cache at delivery start because VPS-side warmup can exit
+            // with fewer real seconds of content than the duration sum
+            // suggests (zero-duration chunks on session reset). Waiting
+            // orchestrator-side guarantees target content exists before
+            // the VPS boots.
+            let wait_target_ms = target_delay_ms;
 
             let max_wait_secs = 900;
             for attempt in 0..max_wait_secs {
@@ -435,10 +431,7 @@ impl DeliveryOrchestrator {
                 if sent_ms >= wait_target_ms {
                     info!(
                         event_id,
-                        sent_ms,
-                        wait_target_ms,
-                        has_rescue_video,
-                        "Sent content duration meets target (init VPS)"
+                        sent_ms, wait_target_ms, "Sent content duration meets target (init VPS)"
                     );
                     break;
                 }
