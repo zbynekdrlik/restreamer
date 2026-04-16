@@ -240,7 +240,7 @@ pub async fn get_s3_usage(State(state): State<AppState>) -> S3Result<S3UsageResp
             total_bytes += e.bytes;
             total_objects += e.objects;
         }
-        by_event.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+        by_event.sort_by_key(|e| std::cmp::Reverse(e.bytes));
 
         Ok::<_, rs_endpoint::EndpointError>(S3UsageResponse {
             total_bytes,
