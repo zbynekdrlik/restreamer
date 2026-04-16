@@ -3106,13 +3106,25 @@ jobs:
                 $failures += "Sample ${i}: [$alias] NEW ffmpeg restart (delta=${delta}). stderr_tail:`n${tail}"
               }
               if ($delay -gt $maxAllowed) {
-                $failures += "Sample ${i}: [$alias] cache delay ${delay}s exceeds max ${maxAllowed}s (target=${targetDelay}s) -- VPS falling behind"
+                $failures += "Sample ${i}: [$alias] cache delay ${delay}s exceeds max ${maxAllowed}s (target=${targetDelay}s) -- overshoot: orchestrator/warmup let cache grow past target"
               }
               # Cache-drain detection (catches issue #118: stream.lan uploads
               # slower than VPS consumes, so cache shrinks toward zero). A
               # sustained cache below target*0.7 is a real bug, not noise.
               if ($delay -lt $minAllowed) {
                 $failures += "Sample ${i}: [$alias] cache delay ${delay}s below min ${minAllowed}s (target=${targetDelay}s) -- stream.lan uploads too slow, VPS catching up"
+              }
+              # Impossible-jump detection: cache can only shrink by ~15s between
+              # 15s-apart samples (VPS consumes at 1x real-time, stream.lan
+              # produces at 1x, so net drain is ~0). A drop > 30s in one
+              # interval means the metric jumped -- either current_chunk_id
+              # skipped ahead (measurement bug) or VPS burst-consumed (bug).
+              if ($trend[$alias].Count -ge 2) {
+                $prev = $trend[$alias][$trend[$alias].Count - 2]
+                $drop = $prev - $delay
+                if ($drop -gt 30) {
+                  $failures += "Sample ${i}: [$alias] cache JUMPED from ${prev}s to ${delay}s (drop=${drop}s in ${intervalSecs}s) -- physically impossible at real-time playback"
+                }
               }
             }
           }
