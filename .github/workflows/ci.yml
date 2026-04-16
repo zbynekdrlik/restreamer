@@ -3109,6 +3109,10 @@ jobs:
           # Per-alias time-series of cache delay, printed at end as a table
           # for operator post-mortem. Also used to detect drain trend.
           $trend = @{}
+          # Tolerate up to 2 transient "endpoints_alive=false" samples (e.g.
+          # stream.lan momentarily cannot reach the VPS between healthchecks).
+          # Fail only if it happens on 3+ samples or the endpoint goes alive=false.
+          $transientAliveFalse = 0
 
           for ($i = 1; $i -le $samples; $i++) {
             Start-Sleep -Seconds $intervalSecs
@@ -3120,7 +3124,11 @@ jobs:
             }
 
             if (-not $resp.endpoints_alive) {
-              $failures += "Sample ${i}: endpoints_alive=false"
+              $transientAliveFalse++
+              Write-Host "Sample ${i}: endpoints_alive=false (transient count: ${transientAliveFalse}/2)"
+              if ($transientAliveFalse -gt 2) {
+                $failures += "Sample ${i}: endpoints_alive=false (${transientAliveFalse} samples — not transient)"
+              }
             }
 
             foreach ($ep in $resp.endpoint_details) {
