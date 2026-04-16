@@ -3111,7 +3111,7 @@ jobs:
           $trend = @{}
           # Tolerate up to 2 transient "endpoints_alive=false" samples (e.g.
           # stream.lan momentarily cannot reach the VPS between healthchecks).
-          # Fail only if it happens on 3+ samples or the endpoint goes alive=false.
+          # Fail only if 3+ samples, or if a specific endpoint goes alive=false.
           $transientAliveFalse = 0
 
           for ($i = 1; $i -le $samples; $i++) {
@@ -3127,7 +3127,7 @@ jobs:
               $transientAliveFalse++
               Write-Host "Sample ${i}: endpoints_alive=false (transient count: ${transientAliveFalse}/2)"
               if ($transientAliveFalse -gt 2) {
-                $failures += "Sample ${i}: endpoints_alive=false (${transientAliveFalse} samples — not transient)"
+                $failures += "Sample ${i}: endpoints_alive=false on ${transientAliveFalse} samples (not transient)"
               }
             }
 
