@@ -453,15 +453,17 @@ impl DeliveryOrchestrator {
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            let first_seq_val = db::get_first_sequence_number_for_event(&self.pool, event_id)
-                .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("No chunks found for event {event_id} after wait")
-                })?;
-            start_chunk_id = first_seq_val;
+            // Compute the start chunk that gives exactly target_delay_ms of
+            // buffer from the latest sent chunk. If total content <= target
+            // (normal case), this returns first_seq and VPS warmup waits for
+            // more. If content > target (VPS boot exceeded target, or OBS was
+            // started early), this returns a later chunk so cache starts at
+            // exactly the target instead of overshooting.
+            start_chunk_id =
+                db::compute_target_start_chunk(&self.pool, event_id, target_delay_ms).await?;
             info!(
                 event_id,
-                start_chunk_id, "Starting delivery from first chunk"
+                start_chunk_id, "Starting delivery (live-edge computed)"
             );
         }
 

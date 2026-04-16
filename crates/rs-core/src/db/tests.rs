@@ -951,6 +951,99 @@ async fn cache_duration_capped_at_target_during_warmup() {
 }
 
 #[tokio::test]
+async fn compute_target_start_chunk_returns_first_when_content_below_target() {
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "start-chunk-below")
+        .await
+        .unwrap();
+
+    // No chunks → default 1
+    let start = compute_target_start_chunk(&pool, event_id, 120_000)
+        .await
+        .unwrap();
+    assert_eq!(start, 1);
+
+    // 3 chunks × 4000ms = 12s total, target 120s → returns first_seq (not enough content)
+    for i in 1..=3 {
+        let id = insert_chunk(
+            &pool,
+            event_id,
+            &format!("/tmp/b{i}.ts"),
+            1000,
+            &format!("b{i}"),
+            4000,
+        )
+        .await
+        .unwrap();
+        set_chunk_sent(&pool, id).await.unwrap();
+    }
+    let start = compute_target_start_chunk(&pool, event_id, 120_000)
+        .await
+        .unwrap();
+    assert_eq!(start, 1, "content < target: should return first seq");
+}
+
+#[tokio::test]
+async fn compute_target_start_chunk_skips_old_when_content_exceeds_target() {
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "start-chunk-above")
+        .await
+        .unwrap();
+
+    // 10 chunks × 4000ms = 40s total, target = 12s → should start at chunk 8
+    // (chunks 8,9,10 = 12s)
+    for i in 1..=10 {
+        let id = insert_chunk(
+            &pool,
+            event_id,
+            &format!("/tmp/a{i}.ts"),
+            1000,
+            &format!("a{i}"),
+            4000,
+        )
+        .await
+        .unwrap();
+        set_chunk_sent(&pool, id).await.unwrap();
+    }
+
+    let start = compute_target_start_chunk(&pool, event_id, 12_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        start, 8,
+        "40s content, 12s target: should start at seq 8 (chunks 8,9,10 = 12s)"
+    );
+}
+
+#[tokio::test]
+async fn compute_target_start_chunk_exact_match() {
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "start-chunk-exact")
+        .await
+        .unwrap();
+
+    // 5 chunks × 4000ms = 20s, target = 20s → returns first seq (exact match)
+    for i in 1..=5 {
+        let id = insert_chunk(
+            &pool,
+            event_id,
+            &format!("/tmp/e{i}.ts"),
+            1000,
+            &format!("e{i}"),
+            4000,
+        )
+        .await
+        .unwrap();
+        set_chunk_sent(&pool, id).await.unwrap();
+    }
+
+    let start = compute_target_start_chunk(&pool, event_id, 20_000)
+        .await
+        .unwrap();
+    assert_eq!(start, 1, "exact match: should return first seq");
+}
+
+#[tokio::test]
 async fn sent_duration_ms_only_counts_uploaded_chunks() {
     let pool = setup_db().await;
     let event_id = upsert_streaming_event(&pool, "sent-dur-test")

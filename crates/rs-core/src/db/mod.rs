@@ -743,6 +743,45 @@ pub async fn get_latest_sequence_number_for_event(
     Ok(row.get::<Option<i64>, _>("max_seq"))
 }
 
+/// Compute the start chunk that gives exactly `target_ms` of buffer from the
+/// latest sent chunk. Walks backwards from the newest sent chunk, accumulating
+/// `duration_ms` until the target is reached.
+///
+/// Returns `first_seq` when total sent content is less than or equal to the
+/// target (the normal warmup path — VPS starts from the beginning and warmup
+/// waits for more content). Returns a later sequence number when content
+/// exceeds the target (VPS boot took longer than the cache target, or OBS was
+/// started early).
+pub async fn compute_target_start_chunk(
+    pool: &SqlitePool,
+    event_id: i64,
+    target_ms: i64,
+) -> Result<i64> {
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT sequence_number, duration_ms FROM chunk_records
+         WHERE streaming_event_id = ?1 AND sent = 1
+         ORDER BY sequence_number DESC",
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(1);
+    }
+
+    let mut accum: i64 = 0;
+    let mut start = rows[0].0; // latest seq as default
+    for (seq, dur) in &rows {
+        accum += dur;
+        start = *seq;
+        if accum >= target_ms {
+            break;
+        }
+    }
+    Ok(start)
+}
+
 /// Get all chunks for a specific streaming event, ordered by sequence number.
 pub async fn get_chunks_for_event(
     pool: &SqlitePool,

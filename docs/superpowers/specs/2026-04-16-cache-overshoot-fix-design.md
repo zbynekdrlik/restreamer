@@ -4,69 +4,67 @@
 
 ## Problem
 
-During VPS warmup, `current_chunk_id` (delivered_up_to) is 0 because VPS hasn't started real playback yet. The cache metric `SUM(duration_ms WHERE seq > 0)` returns ALL sent content. This grows past the 120s target during boot/warmup, then drops when VPS starts playing (`current_chunk_id` jumps from 0 to 1+).
+Two issues cause cache overshoot during VPS initialization:
 
-## Fix
+1. **Metric overshoot**: During warmup (`delivered_up_to == 0`), cache = `SUM(all sent)` which grows unbounded past target.
+2. **Content overshoot**: If VPS boot exceeds the cache target, or OBS started before Start Delivering, more content exists than the target allows. Starting from chunk 1 gives a cache far above target.
 
-Cap the cache metric at the target during warmup. When `delivered_up_to == 0`, return `min(raw_cache, target)`. Once VPS is playing normally (`delivered_up_to > 0`), use raw metric.
+## Fix — Two layers
+
+### Layer 1: Metric cap during warmup
+
+`get_cache_duration_secs` caps result at `target_secs` when `delivered_up_to == 0`. Smooth 0→target growth on dashboard during boot/warmup.
+
+### Layer 2: Live-edge start chunk
+
+`compute_target_start_chunk` walks backwards from latest sent chunk, accumulating `duration_ms` until `>= target_ms`. Returns the sequence number that gives exactly the target cache.
+
+- **Content ≤ target** (normal): Returns `first_seq`. VPS warmup waits for more content. Rescue video plays.
+- **Content > target** (VPS boot exceeded target, or OBS started early): Returns a later chunk. VPS skips old content to achieve exact target cache.
+- **Any cache target** (30s, 120s, 300s): Works correctly regardless of target size.
+
+### Scenarios
+
+| Scenario | Content at VPS ready | Target | start_chunk_id | Cache |
+|----------|---------------------|--------|----------------|-------|
+| Normal (boot < target) | 90s | 120s | chunk 1 | warmup waits 30s more → 120s |
+| Boot > target | 150s | 120s | chunk ~8 | 120s from live edge |
+| OBS started 3min early | 270s | 120s | chunk ~38 | 120s from live edge |
+| Small cache | 90s | 30s | chunk ~16 | 30s from live edge |
+| Exact match | 120s | 120s | chunk 1 | 120s |
 
 ## Changes
 
-### 1. `get_cache_duration_secs` — add target cap
+### `crates/rs-core/src/db/mod.rs`
 
-File: `crates/rs-core/src/db/mod.rs`
+1. `get_cache_duration_secs` — added `target_secs` param, caps when `delivered_up_to == 0`
+2. `compute_target_start_chunk` — new function, walks backwards from latest to find target buffer start
 
-Add a `target_secs` parameter. When `delivered_up_to == 0`, cap result at `target_secs`.
+### `crates/rs-api/src/delivery.rs`
 
-```rust
-pub async fn get_cache_duration_secs(
-    pool: &SqlitePool,
-    event_id: i64,
-    delivered_up_to: i64,
-    target_secs: f64,
-) -> Result<f64> {
-    let row = sqlx::query(
-        "SELECT COALESCE(SUM(duration_ms), 0) as total_ms FROM chunk_records
-         WHERE streaming_event_id = ?1 AND sent = 1 AND sequence_number > ?2",
-    )
-    .bind(event_id)
-    .bind(delivered_up_to)
-    .fetch_one(pool)
-    .await?;
-    let raw = row.get::<i64, _>("total_ms") as f64 / 1000.0;
-    if delivered_up_to == 0 {
-        Ok(raw.min(target_secs))
-    } else {
-        Ok(raw)
-    }
-}
-```
+- `poll_and_init`: replaced `get_first_sequence_number_for_event` with `compute_target_start_chunk`
 
-### 2. Update all callers to pass target_secs
+### `crates/rs-api/src/lib.rs`
 
-Find every call to `get_cache_duration_secs` and pass the event's `cache_delay_secs` (or default 120).
+- Updated both `get_cache_duration_secs` callers to pass `target_secs`
 
-### 3. Unit tests
+### Unit tests (`crates/rs-core/src/db/tests.rs`)
 
-- Cache with delivered_up_to=0 and 200s of content → returns 120 (capped)
-- Cache with delivered_up_to=0 and 50s of content → returns 50 (below cap)
-- Cache with delivered_up_to=5 and 200s of content → returns raw value (no cap)
-
-### 4. CI E2E
-
-Existing init-phase overshoot detection (156s threshold = 130% of 120) and impossible-jump detection (>20s drop in 5s) already enforce this. No CI changes needed — the fix makes the existing tests pass honestly.
+- `cache_duration_capped_at_target_during_warmup` — cap, no-cap, playing modes
+- `compute_target_start_chunk_returns_first_when_content_below_target` — normal warmup
+- `compute_target_start_chunk_skips_old_when_content_exceeds_target` — boot > target
+- `compute_target_start_chunk_exact_match` — exact content = target
 
 ## What does NOT change
 
-- VPS starts from chunk 1 (first_seq) — unchanged
 - Rescue video plays during warmup — unchanged
-- VPS warmup logic — unchanged
-- `/api/init` timing — unchanged (rescue bypass stays)
+- VPS warmup logic on VPS side — unchanged
+- `/api/init` timing — unchanged (rescue bypass stays for fast VPS creation)
 
-## Acceptance criteria (from #122)
+## Acceptance criteria
 
-- [x] Cache monotonically grows from 0→120s during initialization (no overshoot past 130%)
-- [x] Cache never drops more than 10s between consecutive 5s polls
-- [x] Dashboard shows smooth transition from warmup→delivering (no visual jump)
-- [x] Works for both fresh-start AND restart-after-stop scenarios
-- [x] CI E2E init-phase detection catches any regression
+- Cache grows monotonically 0→target during initialization (no overshoot past 130%)
+- Cache never drops more than 10s between consecutive 5s polls
+- Works for VPS boot < target, VPS boot > target, and OBS-started-early scenarios
+- Works with any cache target value (30s, 120s, 300s)
+- CI E2E init-phase + impossible-jump detection catches regressions
