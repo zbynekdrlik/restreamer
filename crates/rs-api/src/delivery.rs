@@ -604,10 +604,15 @@ impl DeliveryOrchestrator {
                             }
 
                             // Compute cache delay using actual content duration from DB
-                            let chunk_delay_secs =
-                                db::get_cache_duration_secs(&self.pool, event_id, chunk_id)
-                                    .await
-                                    .unwrap_or(0.0);
+                            let target_secs = self.config.delivery.delivery_delay_secs as f64;
+                            let chunk_delay_secs = db::get_cache_duration_secs(
+                                &self.pool,
+                                event_id,
+                                chunk_id,
+                                target_secs,
+                            )
+                            .await
+                            .unwrap_or(0.0);
 
                             // Update DB with latest status
                             if let Err(e) = db::upsert_delivery_endpoint_status(
