@@ -2297,16 +2297,11 @@ jobs:
             }
           }
 
-          # Save original cache_delay_secs before changing (restore at end)
-          $origCacheDelay = $targetEvent.cache_delay_secs
-          Write-Host "Original cache_delay_secs: $origCacheDelay"
-
-          # Set cache delay to 60s for E2E testing -- validates buffer fill feature
-          # without exceeding VPS-side S3 LIST probe time on Hetzner (~2s/chunk)
-          $patchBody = @{ cache_delay_secs = 60 } | ConvertTo-Json
-          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
-            -Method PATCH -Body $patchBody -ContentType "application/json" -TimeoutSec 10
-          Write-Host "Set cache_delay_secs=60 on event $($targetEvent.id)"
+          # Use the event's REAL cache_delay_secs (120s from production config).
+          # Previously this was patched down to 60s "for test speed" which made
+          # the 80% threshold = 48s — so weak it passed even when cache was
+          # broken at 50-80s. That hid the cache regression for weeks.
+          Write-Host "Using event's real cache_delay_secs: $($targetEvent.cache_delay_secs)"
 
           # Start stream: activates receiving + delivering, clears stale chunks, starts VPS
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)/start-stream" `
@@ -4116,29 +4111,20 @@ jobs:
             exit 1
           }
 
-      - name: Restore original cache_delay_secs
+      - name: Verify cache_delay_secs unchanged
         if: always()
         shell: powershell
         env:
           EVENT_NAME: "E2E-Test"
         run: |
-          try {
-            $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
-            $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
-            if ($targetEvent) {
-              # Restore to config default (120s) -- CI set it to 300
-              $patchBody = @{ cache_delay_secs = 120 } | ConvertTo-Json
-              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" `
-                -Method PATCH -Body $patchBody -ContentType "application/json" -TimeoutSec 10
-              $verify = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($targetEvent.id)" -TimeoutSec 5
-              if ($verify.cache_delay_secs -ne 120) {
-                throw "FAILED: cache_delay_secs restore failed - expected 120, got $($verify.cache_delay_secs)"
-              }
-              Write-Host "Restored cache_delay_secs=120 (config default)"
-            }
-          } catch {
-            Write-Host "ERROR: Failed to restore cache_delay_secs: $_"
-            exit 1
+          # No restore needed — CI no longer patches cache_delay_secs.
+          # Just verify it's still 120s (the production config value).
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $targetEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          if ($targetEvent -and $targetEvent.cache_delay_secs -ne 120) {
+            Write-Host "WARNING: cache_delay_secs is $($targetEvent.cache_delay_secs), expected 120"
+          } else {
+            Write-Host "OK: cache_delay_secs=120"
           }
 
       - name: Verify production config is intact
