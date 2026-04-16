@@ -155,7 +155,10 @@ impl FlvChunkSink {
                 Self::write_chunk_header(&mut inner, timestamp);
             }
 
-            // Use absolute timestamps — delivery normalizer handles continuity
+            // Write the xiu-assigned absolute timestamp. The delivery-side
+            // FlvStreamNormalizer rebases across chunk boundaries so the
+            // combined output to ffmpeg stays monotonic even when xiu's
+            // counter resets (OBS reconnect, session reset).
             inner.chunk_last_ts = timestamp;
             Self::write_tag(&mut inner, FLV_TAG_VIDEO, timestamp, data);
 
