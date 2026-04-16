@@ -12,7 +12,7 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::models::{DeliveryEndpointMetrics, DeliveryInstance};
 
-pub(crate) use crate::delivery_helpers::{compute_start_chunk_id, is_delivery_active};
+pub(crate) use crate::delivery_helpers::is_delivery_active;
 
 /// Orchestrates Hetzner VPS delivery instances and YouTube status checks.
 ///

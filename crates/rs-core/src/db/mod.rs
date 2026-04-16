@@ -823,21 +823,6 @@ pub async fn get_sent_duration_ms(pool: &SqlitePool, event_id: i64) -> Result<i6
     Ok(row.get::<i64, _>("total_ms"))
 }
 
-/// Total duration (ms) of uploaded chunks whose sequence_number is >= `min_seq`.
-/// Used by the orchestrator to wait for enough FRESH content (produced after
-/// Start Delivering was clicked) to accumulate on S3 before creating the VPS.
-pub async fn get_fresh_duration_ms(pool: &SqlitePool, event_id: i64, min_seq: i64) -> Result<i64> {
-    let row = sqlx::query(
-        "SELECT COALESCE(SUM(duration_ms), 0) as total_ms FROM chunk_records
-         WHERE streaming_event_id = ?1 AND sent = 1 AND sequence_number >= ?2",
-    )
-    .bind(event_id)
-    .bind(min_seq)
-    .fetch_one(pool)
-    .await?;
-    Ok(row.get::<i64, _>("total_ms"))
-}
-
 /// Delete all chunks for a specific streaming event.
 /// Used to clear stale chunks when restarting a stream so buffer starts at 0%.
 pub async fn delete_chunks_for_event(pool: &SqlitePool, streaming_event_id: i64) -> Result<u64> {
