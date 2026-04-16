@@ -12,7 +12,7 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::models::{DeliveryEndpointMetrics, DeliveryInstance};
 
-pub(crate) use crate::delivery_helpers::is_delivery_active;
+pub(crate) use crate::delivery_helpers::{is_delivery_active, persist_delivery_log_to_disk};
 
 /// Orchestrates Hetzner VPS delivery instances and YouTube status checks.
 ///
@@ -817,6 +817,11 @@ impl DeliveryOrchestrator {
                                         "Captured VPS logs before deletion"
                                     );
                                 }
+                                persist_delivery_log_to_disk(
+                                    instance.id,
+                                    instance.event_id,
+                                    &log_text,
+                                );
                             }
                         }
                         Err(e) => warn!("Failed to parse VPS log response: {e}"),
