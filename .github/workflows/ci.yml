@@ -187,11 +187,16 @@ jobs:
             echo "No Rust source changes in diff -- skipping"
             exit 0
           fi
-          # --jobs=1: serialize. Earlier runs died at 8min on ubuntu-latest
-          # ('runner lost communication') — root cause unclear (16GB RAM, 88GB
-          # disk both ample per the diagnostic above), but parallel builds
-          # remain a likely contributor to runner instability.
-          cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --jobs 1 --output mutants-out \
+          # GH ubuntu-latest runners have intermittently lost communication
+          # at ~8 min into mutation runs. Retry up to 3 times to ride past
+          # transient runner failures. --jobs=1 serializes builds (also
+          # helps stability). Each attempt rebuilds from scratch.
+          ATTEMPT=0
+          MAX_ATTEMPTS=3
+          while true; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "=== Mutation attempt $ATTEMPT/$MAX_ATTEMPTS ==="
+            if cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --jobs 1 --output mutants-out \
             --exclude-re 'impl ChunkFetcher for S3Fetcher' \
             --exclude-re 'S3Fetcher::fetch_chunk_with_meta' \
             --exclude-re 'S3Fetcher::head_chunk_duration' \
@@ -244,7 +249,19 @@ jobs:
             -e 'crates/rs-api/src/s3_handlers.rs' \
             -e 'crates/rs-delivery/src/flv_normalizer.rs' \
             -e 'crates/rs-endpoint/src/bin/bench_s3_upload.rs' \
-            -e 'crates/rs-endpoint/src/metrics.rs'
+            -e 'crates/rs-endpoint/src/metrics.rs'; then
+              echo "Mutation attempt $ATTEMPT succeeded"
+              break
+            fi
+            EXIT=$?
+            if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
+              echo "Mutation testing failed after $MAX_ATTEMPTS attempts (last exit: $EXIT)"
+              exit $EXIT
+            fi
+            echo "Attempt $ATTEMPT failed (exit $EXIT) — likely runner hiccup, retrying after 30s"
+            sleep 30
+            rm -rf mutants-out
+          done
         env:
           SQLX_OFFLINE: true
       - name: Upload mutants report
