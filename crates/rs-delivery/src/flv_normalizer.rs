@@ -358,4 +358,25 @@ mod tests {
         let out = norm.normalize(&not_flv);
         assert_eq!(out, not_flv);
     }
+
+    #[test]
+    fn apply_offset_clamps_negative_result_to_zero() {
+        // Defensive: if a future caller passes a negative offset big enough
+        // to underflow ts, apply_offset must clamp to 0 (never wrap).
+        assert_eq!(apply_offset(100, -500), 0);
+        assert_eq!(apply_offset(0, -1), 0);
+    }
+
+    #[test]
+    fn apply_offset_saturates_at_u32_max() {
+        // FLV 4-byte extended timestamp is u32. Saturate on overflow instead of
+        // wrapping, which would produce a backward DTS jump to 0.
+        assert_eq!(apply_offset(u32::MAX - 5, 100), u32::MAX);
+    }
+
+    #[test]
+    fn apply_offset_additive_identity() {
+        assert_eq!(apply_offset(12_345, 0), 12_345);
+        assert_eq!(apply_offset(0, 12_345), 12_345);
+    }
 }

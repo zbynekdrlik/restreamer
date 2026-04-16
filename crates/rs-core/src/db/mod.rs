@@ -757,12 +757,19 @@ pub async fn compute_target_start_chunk(
     event_id: i64,
     target_ms: i64,
 ) -> Result<i64> {
+    // Bounded walk: for any realistic target (up to 1000s = 17 min) and chunk
+    // size (≥100ms), 10_000 rows is far more than the accumulator needs.
+    // Capping prevents loading millions of rows on a multi-hour event.
+    const MAX_WALK_ROWS: i64 = 10_000;
+
     let rows: Vec<(i64, i64)> = sqlx::query_as(
         "SELECT sequence_number, duration_ms FROM chunk_records
          WHERE streaming_event_id = ?1 AND sent = 1
-         ORDER BY sequence_number DESC",
+         ORDER BY sequence_number DESC
+         LIMIT ?2",
     )
     .bind(event_id)
+    .bind(MAX_WALK_ROWS)
     .fetch_all(pool)
     .await?;
 
