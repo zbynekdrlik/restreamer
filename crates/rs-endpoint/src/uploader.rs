@@ -293,7 +293,7 @@ async fn run_worker(
                 // Resolve event identifier; if parent is gone, mark as sent and drop out of queue
                 let event_id =
                     match db::get_streaming_event_by_id(&pool, chunk.streaming_event_id).await {
-                        Ok(Some(ev)) => format!("{}/{}", client_uuid, ev.name),
+                        Ok(Some(ev)) => format!("{client_uuid}/{}", ev.name),
                         _ => {
                             warn!(
                                 "Chunk {} references missing/deleted event {}, marking complete",

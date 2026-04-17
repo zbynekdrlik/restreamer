@@ -2,7 +2,7 @@
 //! with a mock S3 server.
 //!
 //! These tests exercise:
-//! - S3 upload with correct key format (`{event_id}/{sequence_number}.bin`)
+//! - S3 upload with correct key format (`{client_uuid}/{event_id}/{sequence_number}.bin`)
 //! - Database state transitions (sent=1 after success)
 //! - Local file cleanup after successful upload
 
@@ -171,8 +171,8 @@ async fn uploader_full_flow_success() {
     assert_eq!(s3_state.upload_count.load(Ordering::SeqCst), 1);
     let last_key = s3_state.last_key.lock().clone();
     assert!(
-        last_key.contains("test-client-uuid/evt-integration-test/1.bin"),
-        "S3 key should match format {{client_uuid}}/{{event_id}}/{{seq}}.bin: {last_key}"
+        last_key.ends_with("test-client-uuid/evt-integration-test/1.bin"),
+        "S3 key should end with {{client_uuid}}/{{event_name}}/{{seq}}.bin: {last_key}"
     );
 
     // Verify chunk is marked as sent in DB
