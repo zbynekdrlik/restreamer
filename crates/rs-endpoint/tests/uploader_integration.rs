@@ -526,16 +526,26 @@ async fn two_clients_same_event_name_produce_disjoint_keys() {
     )
     .await;
 
+    assert_eq!(
+        s3_state_a.upload_count.load(Ordering::SeqCst),
+        1,
+        "uploader A did not complete upload before timeout"
+    );
+    assert_eq!(
+        s3_state_b.upload_count.load(Ordering::SeqCst),
+        1,
+        "uploader B did not complete upload before timeout"
+    );
     let key_a = s3_state_a.last_key.lock().clone();
     let key_b = s3_state_b.last_key.lock().clone();
 
     assert!(
-        key_a.contains("client-a-uuid/shared-event-name/"),
-        "client A should land under its own uuid prefix: {key_a}"
+        key_a.ends_with("client-a-uuid/shared-event-name/10.bin"),
+        "client A S3 key should end with {{client_uuid}}/{{event_name}}/{{seq}}.bin: {key_a}"
     );
     assert!(
-        key_b.contains("client-b-uuid/shared-event-name/"),
-        "client B should land under its own uuid prefix: {key_b}"
+        key_b.ends_with("client-b-uuid/shared-event-name/11.bin"),
+        "client B S3 key should end with {{client_uuid}}/{{event_name}}/{{seq}}.bin: {key_b}"
     );
     assert_ne!(
         key_a, key_b,
