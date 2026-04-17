@@ -143,7 +143,7 @@ async fn uploader_full_flow_success() {
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
+    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx, "test-client-uuid".to_string());
 
     let s3_state_check = s3_state.clone();
     let pool_check = pool.clone();
@@ -171,8 +171,8 @@ async fn uploader_full_flow_success() {
     assert_eq!(s3_state.upload_count.load(Ordering::SeqCst), 1);
     let last_key = s3_state.last_key.lock().clone();
     assert!(
-        last_key.contains("evt-integration-test/1.bin"),
-        "S3 key should match format {{event_id}}/{{seq}}.bin: {last_key}"
+        last_key.contains("test-client-uuid/evt-integration-test/1.bin"),
+        "S3 key should match format {{client_uuid}}/{{event_id}}/{{seq}}.bin: {last_key}"
     );
 
     // Verify chunk is marked as sent in DB
@@ -214,7 +214,7 @@ async fn uploader_s3_failure_keeps_chunk_unsent() {
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
+    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx, "test-client-uuid".to_string());
 
     // Let the uploader attempt one upload cycle (first attempt will fail and schedule retry)
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
@@ -293,7 +293,7 @@ async fn uploader_multiple_chunks_uploads_concurrently() {
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
+    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx, "test-client-uuid".to_string());
 
     let s3_state_check = s3_state.clone();
     let pool_check = pool.clone();
@@ -357,7 +357,7 @@ async fn uploader_chunk_without_event_skipped() {
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
+    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx, "test-client-uuid".to_string());
 
     // Run for a short time; no chunks exist so no uploads should happen
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
@@ -402,7 +402,7 @@ async fn uploader_ws_event_sent_on_upload() {
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(32);
-    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
+    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx, "test-client-uuid".to_string());
 
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
     let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
