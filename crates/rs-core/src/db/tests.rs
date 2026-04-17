@@ -971,6 +971,18 @@ async fn update_event_rescue_video_url() {
     );
 }
 
+#[tokio::test]
+async fn fresh_database_reaches_max_schema_version() {
+    let pool = create_memory_pool().await.unwrap();
+    run_migrations(&pool).await.unwrap();
+
+    let current: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_version")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(current, MAX_SCHEMA_VERSION);
+}
+
 // Template and create-event-from-template tests are in template_tests.rs
 // Delivery log capture tests are in delivery_log_tests.rs
 // Upload telemetry tests are in upload_tests.rs

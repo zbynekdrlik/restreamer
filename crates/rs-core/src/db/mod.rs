@@ -59,6 +59,10 @@ pub async fn create_memory_pool() -> Result<SqlitePool> {
     Ok(pool)
 }
 
+/// Maximum schema version. Must equal the highest version in the migration list.
+/// Tests assert that `run_migrations` reaches this exact value.
+pub const MAX_SCHEMA_VERSION: i32 = 17;
+
 /// Run database migrations.
 ///
 /// Uses a version tracking table to support incremental schema changes.
