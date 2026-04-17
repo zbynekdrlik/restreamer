@@ -743,15 +743,22 @@ pub async fn get_latest_sequence_number_for_event(
     Ok(row.get::<Option<i64>, _>("max_seq"))
 }
 
-/// Compute the start chunk that gives exactly `target_ms` of buffer from the
-/// latest sent chunk. Walks backwards from the newest sent chunk, accumulating
-/// `duration_ms` until the target is reached.
+/// Compute the start chunk that gives approximately `target_ms` of buffer
+/// from the latest sent chunk. Walks backwards from the newest sent chunk,
+/// accumulating `duration_ms` until the target is reached.
 ///
-/// Returns `first_seq` when total sent content is less than or equal to the
-/// target (the normal warmup path — VPS starts from the beginning and warmup
-/// waits for more content). Returns a later sequence number when content
-/// exceeds the target (VPS boot took longer than the cache target, or OBS was
-/// started early).
+/// Return values:
+/// - **Content ≤ target (within the scanned window):** returns the oldest
+///   seq in the scanned window. Normally that is the event's `first_seq`,
+///   so VPS starts from the beginning and warmup waits for more content.
+/// - **Content > target:** returns a later seq so the VPS starts with
+///   exactly the target window of buffer (VPS boot took longer than the
+///   cache target, or OBS was started early).
+/// - **Scanned window exhausted without reaching target** (very long
+///   event with >MAX_WALK_ROWS sent chunks but short per-chunk duration):
+///   returns the oldest seq in the scanned window, not the event's true
+///   first_seq. Those older chunks are well past the live edge and
+///   irrelevant anyway.
 pub async fn compute_target_start_chunk(
     pool: &SqlitePool,
     event_id: i64,

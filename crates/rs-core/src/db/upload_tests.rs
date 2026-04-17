@@ -482,3 +482,36 @@ async fn compute_target_start_chunk_exact_match() {
         .unwrap();
     assert_eq!(start, 1, "exact match: should return first seq");
 }
+
+/// 100 chunks x 1000 ms each, target 30 s -> start at seq 71 (chunks 71..100 = 30 s).
+/// Exercises the live-edge walk at a row count deep enough that the arithmetic
+/// can't accidentally pass: any off-by-one would land on 70 or 72 instead of 71.
+#[tokio::test]
+async fn compute_target_start_chunk_picks_exact_boundary_in_large_event() {
+    let pool = setup_db_for_start_chunk().await;
+    let event_id = upsert_streaming_event(&pool, "start-chunk-100")
+        .await
+        .unwrap();
+
+    for i in 1..=100 {
+        let id = insert_chunk(
+            &pool,
+            event_id,
+            &format!("/tmp/big{i}.ts"),
+            1000,
+            &format!("big{i}"),
+            1000,
+        )
+        .await
+        .unwrap();
+        set_chunk_sent(&pool, id).await.unwrap();
+    }
+
+    let start = db::compute_target_start_chunk(&pool, event_id, 30_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        start, 71,
+        "100 chunks x 1s, 30s target: should start at seq 71 (chunks 71..100 = 30s)"
+    );
+}
