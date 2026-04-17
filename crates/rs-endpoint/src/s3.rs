@@ -47,7 +47,12 @@ impl S3Client {
     }
 
     /// Generate an S3 key for a chunk file.
-    /// Format: `{event_id}/{sequence_number}.bin`
+    ///
+    /// `event_identifier` is expected to be of the form
+    /// `{client_uuid}/{event_name}` so the final key is
+    /// `{client_uuid}/{event_name}/{sequence_number}.bin`. This prevents
+    /// cross-installation collisions when multiple Restreamer installs
+    /// share one S3 bucket (#114).
     pub fn chunk_key(event_identifier: &str, sequence_number: i64) -> String {
         format!("{event_identifier}/{sequence_number}.bin")
     }
@@ -247,6 +252,15 @@ mod tests {
     fn chunk_key_format() {
         let key = S3Client::chunk_key("evt-123", 1);
         assert_eq!(key, "evt-123/1.bin");
+    }
+
+    #[test]
+    fn chunk_key_with_client_uuid_prefix() {
+        // With the #114 format, the caller passes a composite identifier
+        // `{client_uuid}/{event_name}` so the key nests naturally under the
+        // client UUID.
+        let key = S3Client::chunk_key("abc-uuid/sunday-service", 7);
+        assert_eq!(key, "abc-uuid/sunday-service/7.bin");
     }
 
     #[test]
