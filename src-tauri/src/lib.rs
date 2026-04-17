@@ -183,10 +183,15 @@ pub fn run() {
                     }
                 };
 
-                // Run migrations
+                // Run migrations — hard-exit on failure so the operator sees
+                // the crash instead of a silently-broken tray app. Issue #112.
                 if let Err(e) = db::run_migrations(&pool).await {
                     tracing::error!("Failed to run migrations: {e}");
-                    return;
+                    eprintln!("FATAL: database migration failed: {e}");
+                    eprintln!(
+                        "See log file at C:\\ProgramData\\Restreamer\\logs\\ for details."
+                    );
+                    std::process::exit(1);
                 }
 
                 // Seed templates from existing events (idempotent one-shot)
