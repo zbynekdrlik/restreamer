@@ -426,3 +426,119 @@ async fn uploader_ws_event_sent_on_upload() {
     let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
     let _ = chunk_path;
 }
+
+#[tokio::test]
+async fn two_clients_same_event_name_produce_disjoint_keys() {
+    // Regression test for issue #114: two Restreamer installs sharing an S3
+    // bucket must not collide on identically-named events.
+    let s3_state_a = Arc::new(MockS3State::default());
+    let s3_url_a = start_mock_s3_server(s3_state_a.clone()).await;
+
+    let s3_state_b = Arc::new(MockS3State::default());
+    let s3_url_b = start_mock_s3_server(s3_state_b.clone()).await;
+
+    let pool_a = setup_test_db().await;
+    let pool_b = setup_test_db().await;
+
+    // Both instances use the SAME event name.
+    let event_name = "shared-event-name";
+    db::upsert_streaming_event(&pool_a, event_name)
+        .await
+        .unwrap();
+    db::upsert_streaming_event(&pool_b, event_name)
+        .await
+        .unwrap();
+    let event_a = db::get_streaming_event(&pool_a).await.unwrap().unwrap();
+    let event_b = db::get_streaming_event(&pool_b).await.unwrap().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+    let chunk_path_a = create_test_chunk_file(&temp_dir, "a.bin", b"client-a-chunk");
+    let chunk_path_b = create_test_chunk_file(&temp_dir, "b.bin", b"client-b-chunk");
+
+    db::insert_chunk(
+        &pool_a,
+        event_a.id,
+        chunk_path_a.to_str().unwrap(),
+        10,
+        "aaa",
+        0,
+    )
+    .await
+    .unwrap();
+    db::insert_chunk(
+        &pool_b,
+        event_b.id,
+        chunk_path_b.to_str().unwrap(),
+        11,
+        "bbb",
+        0,
+    )
+    .await
+    .unwrap();
+
+    let s3_a = S3Client::new(&create_s3_config(&s3_url_a)).unwrap();
+    let s3_b = S3Client::new(&create_s3_config(&s3_url_b)).unwrap();
+    let (ws_tx_a, _) = broadcast::channel::<WsEvent>(16);
+    let (ws_tx_b, _) = broadcast::channel::<WsEvent>(16);
+
+    let uploader_a = ChunkUploader::new(pool_a.clone(), s3_a, ws_tx_a, "client-a-uuid".to_string());
+    let uploader_b = ChunkUploader::new(pool_b.clone(), s3_b, ws_tx_b, "client-b-uuid".to_string());
+
+    let s3_state_a_check = s3_state_a.clone();
+    let pool_a_check = pool_a.clone();
+    run_until(
+        uploader_a,
+        &pool_a,
+        move || {
+            let s3_state = s3_state_a_check.clone();
+            let pool = pool_a_check.clone();
+            Box::pin(async move {
+                if s3_state.upload_count.load(Ordering::SeqCst) >= 1 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let chunks = db::get_unsent_chunks(&pool, 10).await.unwrap();
+                    return chunks.is_empty();
+                }
+                false
+            })
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let s3_state_b_check = s3_state_b.clone();
+    let pool_b_check = pool_b.clone();
+    run_until(
+        uploader_b,
+        &pool_b,
+        move || {
+            let s3_state = s3_state_b_check.clone();
+            let pool = pool_b_check.clone();
+            Box::pin(async move {
+                if s3_state.upload_count.load(Ordering::SeqCst) >= 1 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let chunks = db::get_unsent_chunks(&pool, 10).await.unwrap();
+                    return chunks.is_empty();
+                }
+                false
+            })
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let key_a = s3_state_a.last_key.lock().clone();
+    let key_b = s3_state_b.last_key.lock().clone();
+
+    assert!(
+        key_a.contains("client-a-uuid/shared-event-name/"),
+        "client A should land under its own uuid prefix: {key_a}"
+    );
+    assert!(
+        key_b.contains("client-b-uuid/shared-event-name/"),
+        "client B should land under its own uuid prefix: {key_b}"
+    );
+    assert_ne!(
+        key_a, key_b,
+        "two clients with same event name must have disjoint S3 keys"
+    );
+}
