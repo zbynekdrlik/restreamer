@@ -483,7 +483,7 @@ impl DeliveryOrchestrator {
                 "access_key_id": "from-env",
                 "secret_access_key": "from-env",
             },
-            "event_identifier": event_name,
+            "event_identifier": format!("{}/{}", self.config.client_uuid, event_name),
             "start_chunk_id": start_chunk_id,
             "delivery_delay_ms": target_delay_ms,
             "rescue_video_url": event.rescue_video_url,
