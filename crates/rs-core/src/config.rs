@@ -253,6 +253,17 @@ impl Config {
         }
     }
 
+    /// Directory where delivery VPS logs are persisted to disk as a backup
+    /// to the `delivery_logs` DB table. Survives DB truncation and can be
+    /// inspected with a plain text editor (no sqlite tooling needed).
+    pub fn delivery_log_dir() -> PathBuf {
+        let base = Self::default_path()
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        base.join("delivery-logs")
+    }
+
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("RESTREAMER_CLIENT_UUID") {
             self.client_uuid = v;

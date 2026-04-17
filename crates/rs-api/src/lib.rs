@@ -301,10 +301,14 @@ async fn delivery_broadcast_loop(
                     .unwrap_or(0);
                 let s3_queue = (sent_chunks - max_delivery_chunk).max(0);
 
-                let cache_duration =
-                    db::get_cache_duration_secs(&pool, event.id, max_delivery_chunk)
-                        .await
-                        .unwrap_or(0.0);
+                let cache_duration = db::get_cache_duration_secs(
+                    &pool,
+                    event.id,
+                    max_delivery_chunk,
+                    target_delay as f64,
+                )
+                .await
+                .unwrap_or(0.0);
 
                 let _ = ws_tx.send(WsEvent::PipelineState {
                     state: state_str.to_string(),
@@ -348,9 +352,14 @@ async fn delivery_broadcast_loop(
                     let sent = db::get_sent_chunk_count_for_event(&pool, eid)
                         .await
                         .unwrap_or(0);
-                    let cache_duration = db::get_cache_duration_secs(&pool, eid, 0)
-                        .await
-                        .unwrap_or(0.0);
+                    let cache_duration = db::get_cache_duration_secs(
+                        &pool,
+                        eid,
+                        0,
+                        config.delivery.delivery_delay_secs as f64,
+                    )
+                    .await
+                    .unwrap_or(0.0);
                     let _ = ws_tx.send(WsEvent::PipelineState {
                         state: last_state_str.clone(),
                         event_id: Some(eid),

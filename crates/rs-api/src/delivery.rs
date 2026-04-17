@@ -12,7 +12,7 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::models::{DeliveryEndpointMetrics, DeliveryInstance};
 
-pub(crate) use crate::delivery_helpers::is_delivery_active;
+pub(crate) use crate::delivery_helpers::{is_delivery_active, persist_delivery_log_to_disk};
 
 /// Orchestrates Hetzner VPS delivery instances and YouTube status checks.
 ///
@@ -413,19 +413,15 @@ impl DeliveryOrchestrator {
                 start_chunk_id, "Resuming delivery after crash recovery"
             );
         } else {
-            // When rescue_video_url is configured, skip the full cache-fill
-            // pre-wait and initialize the VPS as soon as the first chunk
-            // exists. The VPS-side endpoint_loop handles warmup by playing
-            // the rescue video while its own buffer fills.
-            //
-            // When rescue_video_url is None, wait for the full target delay
-            // (legacy behaviour) — nothing can play to viewers anyway.
-            let has_rescue_video = event.rescue_video_url.is_some();
-            let wait_target_ms = if has_rescue_video {
-                1 // First chunk is enough; VPS plays rescue video during its own fill
-            } else {
-                target_delay_ms
-            };
+            // Wait for the full target duration of content on S3 before
+            // creating the VPS. The previous "rescue video bridges the
+            // gap, so wait for 1 chunk" shortcut produced non-deterministic
+            // cache at delivery start because VPS-side warmup can exit
+            // with fewer real seconds of content than the duration sum
+            // suggests (zero-duration chunks on session reset). Waiting
+            // orchestrator-side guarantees target content exists before
+            // the VPS boots.
+            let wait_target_ms = target_delay_ms;
 
             let max_wait_secs = 900;
             for attempt in 0..max_wait_secs {
@@ -435,10 +431,7 @@ impl DeliveryOrchestrator {
                 if sent_ms >= wait_target_ms {
                     info!(
                         event_id,
-                        sent_ms,
-                        wait_target_ms,
-                        has_rescue_video,
-                        "Sent content duration meets target (init VPS)"
+                        sent_ms, wait_target_ms, "Sent content duration meets target (init VPS)"
                     );
                     break;
                 }
@@ -453,15 +446,17 @@ impl DeliveryOrchestrator {
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            let first_seq_val = db::get_first_sequence_number_for_event(&self.pool, event_id)
-                .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("No chunks found for event {event_id} after wait")
-                })?;
-            start_chunk_id = first_seq_val;
+            // Compute the start chunk that gives exactly target_delay_ms of
+            // buffer from the latest sent chunk. If total content <= target
+            // (normal case), this returns first_seq and VPS warmup waits for
+            // more. If content > target (VPS boot exceeded target, or OBS was
+            // started early), this returns a later chunk so cache starts at
+            // exactly the target instead of overshooting.
+            start_chunk_id =
+                db::compute_target_start_chunk(&self.pool, event_id, target_delay_ms).await?;
             info!(
                 event_id,
-                start_chunk_id, "Starting delivery from first chunk"
+                start_chunk_id, "Starting delivery (live-edge computed)"
             );
         }
 
@@ -604,10 +599,15 @@ impl DeliveryOrchestrator {
                             }
 
                             // Compute cache delay using actual content duration from DB
-                            let chunk_delay_secs =
-                                db::get_cache_duration_secs(&self.pool, event_id, chunk_id)
-                                    .await
-                                    .unwrap_or(0.0);
+                            let target_secs = self.config.delivery.delivery_delay_secs as f64;
+                            let chunk_delay_secs = db::get_cache_duration_secs(
+                                &self.pool,
+                                event_id,
+                                chunk_id,
+                                target_secs,
+                            )
+                            .await
+                            .unwrap_or(0.0);
 
                             // Update DB with latest status
                             if let Err(e) = db::upsert_delivery_endpoint_status(
@@ -810,6 +810,11 @@ impl DeliveryOrchestrator {
                                         "Captured VPS logs before deletion"
                                     );
                                 }
+                                persist_delivery_log_to_disk(
+                                    instance.id,
+                                    instance.event_id,
+                                    &log_text,
+                                );
                             }
                         }
                         Err(e) => warn!("Failed to parse VPS log response: {e}"),

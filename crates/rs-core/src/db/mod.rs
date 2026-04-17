@@ -743,6 +743,59 @@ pub async fn get_latest_sequence_number_for_event(
     Ok(row.get::<Option<i64>, _>("max_seq"))
 }
 
+/// Compute the start chunk that gives approximately `target_ms` of buffer
+/// from the latest sent chunk. Walks backwards from the newest sent chunk,
+/// accumulating `duration_ms` until the target is reached.
+///
+/// Return values:
+/// - **Content ≤ target (within the scanned window):** returns the oldest
+///   seq in the scanned window. Normally that is the event's `first_seq`,
+///   so VPS starts from the beginning and warmup waits for more content.
+/// - **Content > target:** returns a later seq so the VPS starts with
+///   exactly the target window of buffer (VPS boot took longer than the
+///   cache target, or OBS was started early).
+/// - **Scanned window exhausted without reaching target** (very long
+///   event with >MAX_WALK_ROWS sent chunks but short per-chunk duration):
+///   returns the oldest seq in the scanned window, not the event's true
+///   first_seq. Those older chunks are well past the live edge and
+///   irrelevant anyway.
+pub async fn compute_target_start_chunk(
+    pool: &SqlitePool,
+    event_id: i64,
+    target_ms: i64,
+) -> Result<i64> {
+    // Bounded walk: for any realistic target (up to 1000s = 17 min) and chunk
+    // size (≥100ms), 10_000 rows is far more than the accumulator needs.
+    // Capping prevents loading millions of rows on a multi-hour event.
+    const MAX_WALK_ROWS: i64 = 10_000;
+
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT sequence_number, duration_ms FROM chunk_records
+         WHERE streaming_event_id = ?1 AND sent = 1
+         ORDER BY sequence_number DESC
+         LIMIT ?2",
+    )
+    .bind(event_id)
+    .bind(MAX_WALK_ROWS)
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(1);
+    }
+
+    let mut accum: i64 = 0;
+    let mut start = rows[0].0; // latest seq as default
+    for (seq, dur) in &rows {
+        accum += dur;
+        start = *seq;
+        if accum >= target_ms {
+            break;
+        }
+    }
+    Ok(start)
+}
+
 /// Get all chunks for a specific streaming event, ordered by sequence number.
 pub async fn get_chunks_for_event(
     pool: &SqlitePool,
@@ -793,11 +846,17 @@ pub async fn get_pending_chunk_count_for_event(
 
 /// Compute the cache duration: total content on S3 that has NOT yet been delivered.
 /// Only counts sent chunks with sequence_number above the delivery position.
-/// During buffering (delivered_up_to = 0), this equals the total sent duration.
+///
+/// During warmup (`delivered_up_to == 0`) the VPS hasn't started consuming yet,
+/// so the raw sum equals total sent duration and keeps growing past the target.
+/// To prevent dashboard overshoot, the result is capped at `target_secs` when
+/// `delivered_up_to == 0`. Once the VPS starts playing (`delivered_up_to > 0`),
+/// the raw value is returned uncapped.
 pub async fn get_cache_duration_secs(
     pool: &SqlitePool,
     event_id: i64,
     delivered_up_to: i64,
+    target_secs: f64,
 ) -> Result<f64> {
     let row = sqlx::query(
         "SELECT COALESCE(SUM(duration_ms), 0) as total_ms FROM chunk_records
@@ -807,7 +866,12 @@ pub async fn get_cache_duration_secs(
     .bind(delivered_up_to)
     .fetch_one(pool)
     .await?;
-    Ok(row.get::<i64, _>("total_ms") as f64 / 1000.0)
+    let raw = row.get::<i64, _>("total_ms") as f64 / 1000.0;
+    if delivered_up_to == 0 {
+        Ok(raw.min(target_secs))
+    } else {
+        Ok(raw)
+    }
 }
 
 /// Total content duration of chunks uploaded to S3 for an event.

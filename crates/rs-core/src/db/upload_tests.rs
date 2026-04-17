@@ -1,4 +1,4 @@
-use crate::db;
+use crate::db::{self, insert_chunk, set_chunk_sent, upsert_streaming_event};
 
 #[tokio::test]
 async fn reset_orphaned_in_process_clears_abandoned_claims() {
@@ -327,5 +327,191 @@ async fn list_recent_uploads_attempts_gt_zero_no_last_error_is_retrying() {
     assert!(
         row.last_error.is_none(),
         "last_error must be NULL so only attempts > 0 drives the classification"
+    );
+}
+
+// --- cache metric cap + compute_target_start_chunk tests ---
+
+#[tokio::test]
+async fn cache_duration_capped_at_target_during_warmup() {
+    let pool = setup_db_for_start_chunk().await;
+    let event_id = upsert_streaming_event(&pool, "cache-cap-test")
+        .await
+        .unwrap();
+
+    // Insert 5 chunks with 1000ms each (5s total)
+    let mut ids = Vec::new();
+    for i in 1..=5 {
+        let id = insert_chunk(
+            &pool,
+            event_id,
+            &format!("/tmp/cap{i}.ts"),
+            1000,
+            &format!("md5cap{i}"),
+            1000,
+        )
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    for &id in &ids {
+        set_chunk_sent(&pool, id).await.unwrap();
+    }
+
+    // delivered_up_to=0 (warmup), target=2.0s → capped at 2.0 (raw=5.0)
+    let dur = db::get_cache_duration_secs(&pool, event_id, 0, 2.0)
+        .await
+        .unwrap();
+    assert!((dur - 2.0).abs() < 0.001, "warmup: expected 2.0, got {dur}");
+
+    // delivered_up_to=0 (warmup), target=10.0s → raw 5.0 < target, no cap
+    let dur = db::get_cache_duration_secs(&pool, event_id, 0, 10.0)
+        .await
+        .unwrap();
+    assert!(
+        (dur - 5.0).abs() < 0.001,
+        "warmup below target: expected 5.0, got {dur}"
+    );
+
+    // delivered_up_to=1 (VPS playing), target=2.0s → NO cap, raw = 4.0
+    let dur = db::get_cache_duration_secs(&pool, event_id, 1, 2.0)
+        .await
+        .unwrap();
+    assert!(
+        (dur - 4.0).abs() < 0.001,
+        "playing: expected 4.0 (uncapped), got {dur}"
+    );
+}
+
+async fn setup_db_for_start_chunk() -> db::SqlitePool {
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+    db::upsert_client_profile(&pool, "test-uuid").await.unwrap();
+    pool
+}
+
+#[tokio::test]
+async fn compute_target_start_chunk_returns_first_when_content_below_target() {
+    let pool = setup_db_for_start_chunk().await;
+    let event_id = upsert_streaming_event(&pool, "start-chunk-below")
+        .await
+        .unwrap();
+
+    // No chunks → default 1
+    let start = db::compute_target_start_chunk(&pool, event_id, 120_000)
+        .await
+        .unwrap();
+    assert_eq!(start, 1);
+
+    // 3 chunks × 4000ms = 12s total, target 120s → returns first_seq (not enough content)
+    for i in 1..=3 {
+        let id = insert_chunk(
+            &pool,
+            event_id,
+            &format!("/tmp/b{i}.ts"),
+            1000,
+            &format!("b{i}"),
+            4000,
+        )
+        .await
+        .unwrap();
+        set_chunk_sent(&pool, id).await.unwrap();
+    }
+    let start = db::compute_target_start_chunk(&pool, event_id, 120_000)
+        .await
+        .unwrap();
+    assert_eq!(start, 1, "content < target: should return first seq");
+}
+
+#[tokio::test]
+async fn compute_target_start_chunk_skips_old_when_content_exceeds_target() {
+    let pool = setup_db_for_start_chunk().await;
+    let event_id = upsert_streaming_event(&pool, "start-chunk-above")
+        .await
+        .unwrap();
+
+    // 10 chunks × 4000ms = 40s total, target = 12s → should start at chunk 8
+    // (chunks 8,9,10 = 12s)
+    for i in 1..=10 {
+        let id = insert_chunk(
+            &pool,
+            event_id,
+            &format!("/tmp/a{i}.ts"),
+            1000,
+            &format!("a{i}"),
+            4000,
+        )
+        .await
+        .unwrap();
+        set_chunk_sent(&pool, id).await.unwrap();
+    }
+
+    let start = db::compute_target_start_chunk(&pool, event_id, 12_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        start, 8,
+        "40s content, 12s target: should start at seq 8 (chunks 8,9,10 = 12s)"
+    );
+}
+
+#[tokio::test]
+async fn compute_target_start_chunk_exact_match() {
+    let pool = setup_db_for_start_chunk().await;
+    let event_id = upsert_streaming_event(&pool, "start-chunk-exact")
+        .await
+        .unwrap();
+
+    // 5 chunks × 4000ms = 20s, target = 20s → returns first seq (exact match)
+    for i in 1..=5 {
+        let id = insert_chunk(
+            &pool,
+            event_id,
+            &format!("/tmp/e{i}.ts"),
+            1000,
+            &format!("e{i}"),
+            4000,
+        )
+        .await
+        .unwrap();
+        set_chunk_sent(&pool, id).await.unwrap();
+    }
+
+    let start = db::compute_target_start_chunk(&pool, event_id, 20_000)
+        .await
+        .unwrap();
+    assert_eq!(start, 1, "exact match: should return first seq");
+}
+
+/// 100 chunks x 1000 ms each, target 30 s -> start at seq 71 (chunks 71..100 = 30 s).
+/// Exercises the live-edge walk at a row count deep enough that the arithmetic
+/// can't accidentally pass: any off-by-one would land on 70 or 72 instead of 71.
+#[tokio::test]
+async fn compute_target_start_chunk_picks_exact_boundary_in_large_event() {
+    let pool = setup_db_for_start_chunk().await;
+    let event_id = upsert_streaming_event(&pool, "start-chunk-100")
+        .await
+        .unwrap();
+
+    for i in 1..=100 {
+        let id = insert_chunk(
+            &pool,
+            event_id,
+            &format!("/tmp/big{i}.ts"),
+            1000,
+            &format!("big{i}"),
+            1000,
+        )
+        .await
+        .unwrap();
+        set_chunk_sent(&pool, id).await.unwrap();
+    }
+
+    let start = db::compute_target_start_chunk(&pool, event_id, 30_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        start, 71,
+        "100 chunks x 1s, 30s target: should start at seq 71 (chunks 71..100 = 30s)"
     );
 }
