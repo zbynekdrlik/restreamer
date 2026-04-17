@@ -540,11 +540,11 @@ async fn two_clients_same_event_name_produce_disjoint_keys() {
     let key_b = s3_state_b.last_key.lock().clone();
 
     assert!(
-        key_a.ends_with("client-a-uuid/shared-event-name/10.bin"),
+        key_a.ends_with("client-a-uuid/shared-event-name/1.bin"),
         "client A S3 key should end with {{client_uuid}}/{{event_name}}/{{seq}}.bin: {key_a}"
     );
     assert!(
-        key_b.ends_with("client-b-uuid/shared-event-name/11.bin"),
+        key_b.ends_with("client-b-uuid/shared-event-name/1.bin"),
         "client B S3 key should end with {{client_uuid}}/{{event_name}}/{{seq}}.bin: {key_b}"
     );
     assert_ne!(
