@@ -460,9 +460,14 @@ async fn run_endpoint_loop(
         let (component_shutdown_tx, _) = broadcast::channel::<()>(1);
         let component_rx = component_shutdown_tx.subscribe();
 
-        let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx.clone())
-            .with_upload_blocked(Arc::clone(&s3_upload_blocked))
-            .with_metrics(Arc::clone(&upload_metrics));
+        let uploader = ChunkUploader::new(
+            pool.clone(),
+            s3,
+            ws_tx.clone(),
+            self.config.client_uuid.clone(),
+        )
+        .with_upload_blocked(Arc::clone(&s3_upload_blocked))
+        .with_metrics(Arc::clone(&upload_metrics));
         let mut handle = tokio::spawn(async move { uploader.run(component_rx).await });
 
         info!("Endpoint uploader started");
