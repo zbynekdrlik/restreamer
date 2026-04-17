@@ -88,17 +88,23 @@ fn init_tracing(log_buffer: &LogBuffer) -> Option<tracing_appender::non_blocking
 }
 
 /// Load configuration from the default path.
+///
+/// Refuses to start if the file is missing. A silent fall-through to
+/// `Config::default()` could run migrations on a fresh DB with default
+/// values, and if that run was interrupted (process kill, antivirus lock,
+/// reboot) it would leak partial schema state. On the next startup with a
+/// real config, migrations would see the leaked state and fail — the
+/// original #112 failure mode.
 fn load_config() -> anyhow::Result<Config> {
     let config_path = Config::default_path();
-    if config_path.exists() {
-        Config::load(&config_path).map_err(|e| anyhow::anyhow!("failed to load config: {e}"))
-    } else {
-        tracing::warn!(
-            "Config file not found at {}, using defaults",
+    if !config_path.exists() {
+        anyhow::bail!(
+            "Config file not found at {}. Create it before starting Restreamer — \
+             the app will not run migrations on a default config. Issue #112.",
             config_path.display()
         );
-        Ok(Config::default())
     }
+    Config::load(&config_path).map_err(|e| anyhow::anyhow!("failed to load config: {e}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -183,10 +189,15 @@ pub fn run() {
                     }
                 };
 
-                // Run migrations
+                // Run migrations — hard-exit on failure so the operator sees
+                // the crash instead of a silently-broken tray app. Issue #112.
                 if let Err(e) = db::run_migrations(&pool).await {
                     tracing::error!("Failed to run migrations: {e}");
-                    return;
+                    eprintln!("FATAL: database migration failed: {e}");
+                    eprintln!(
+                        "See log file at C:\\ProgramData\\Restreamer\\logs\\ for details."
+                    );
+                    std::process::exit(1);
                 }
 
                 // Seed templates from existing events (idempotent one-shot)
