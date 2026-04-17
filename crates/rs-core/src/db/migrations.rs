@@ -1,0 +1,546 @@
+//! Database migration runner.
+//!
+//! All schema migrations are idempotent — ALTER TABLE ADD COLUMN and
+//! RENAME COLUMN go through helpers that check `pragma_table_info` first.
+//! This allows a rerun to recover from an interrupted previous migration
+//! (e.g. the DB was fully advanced but schema_version was rolled back).
+//! See issue #112.
+
+use sqlx::Row;
+use sqlx::sqlite::SqlitePool;
+
+use crate::error::Result;
+
+/// Maximum schema version. Must equal the highest version in the migration list.
+/// Tests assert that `run_migrations` reaches this exact value.
+pub const MAX_SCHEMA_VERSION: i32 = 17;
+
+/// Returns true if the column exists on the table, false otherwise.
+///
+/// Uses `pragma_table_info` as a table-valued function so the table name
+/// can be interpolated safely (sqlx cannot bind PRAGMA arguments).
+/// Table names must come from trusted code constants — never user input.
+async fn column_exists(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &str,
+    column: &str,
+) -> sqlx::Result<bool> {
+    let query = format!("SELECT name FROM pragma_table_info('{table}') WHERE name = ?1");
+    let row: Option<String> = sqlx::query_scalar(&query)
+        .bind(column)
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(row.is_some())
+}
+
+/// Idempotent `ALTER TABLE ... ADD COLUMN`. No-ops if the column already
+/// exists. `col_def` is the full column definition including the column
+/// name and type (e.g. `"auth_token TEXT NOT NULL DEFAULT ''"`).
+async fn add_column_if_missing(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &str,
+    column: &str,
+    col_def: &str,
+) -> sqlx::Result<()> {
+    if column_exists(tx, table, column).await? {
+        return Ok(());
+    }
+    sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {col_def}"))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Idempotent `ALTER TABLE ... RENAME COLUMN`. No-ops if `new_name`
+/// already exists on the table.
+async fn rename_column_if_old_exists(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &str,
+    old_name: &str,
+    new_name: &str,
+) -> sqlx::Result<()> {
+    if column_exists(tx, table, new_name).await? {
+        return Ok(());
+    }
+    sqlx::query(&format!(
+        "ALTER TABLE {table} RENAME COLUMN {old_name} TO {new_name}"
+    ))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Execute a multi-statement SQL script inside a transaction.
+/// Splits on `;` and skips empty statements.
+/// Used for pure-DDL migrations that only contain CREATE TABLE / CREATE INDEX
+/// (already idempotent via IF NOT EXISTS).
+async fn execute_sql_statements(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    sql: &str,
+) -> sqlx::Result<()> {
+    for statement in sql.split(';') {
+        let trimmed = statement.trim();
+        if !trimmed.is_empty() {
+            sqlx::query(trimmed).execute(&mut **tx).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn migrate_v5(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(
+        tx,
+        "delivery_instances",
+        "auth_token",
+        "auth_token TEXT NOT NULL DEFAULT ''",
+    )
+    .await
+}
+
+async fn migrate_v6(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(tx, "chunk_records", "sent_at", "sent_at TEXT").await?;
+    add_column_if_missing(
+        tx,
+        "delivery_endpoint_status",
+        "bytes_processed_total",
+        "bytes_processed_total INTEGER NOT NULL DEFAULT 0",
+    )
+    .await
+}
+
+async fn migrate_v7(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    rename_column_if_old_exists(
+        tx,
+        "delivery_endpoint_status",
+        "buff_size_bytes",
+        "chunks_processed",
+    )
+    .await
+}
+
+async fn migrate_v8(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "sequence_number",
+        "sequence_number INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    // Backfill is safe to re-run: deterministic sequence from IDs.
+    sqlx::query(
+        "UPDATE chunk_records SET sequence_number = (
+            SELECT COUNT(*) FROM chunk_records c2
+            WHERE c2.streaming_event_id = chunk_records.streaming_event_id
+            AND c2.id <= chunk_records.id
+        )",
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_chunks_event_sequence ON chunk_records(streaming_event_id, sequence_number)",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn migrate_v9(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(
+        tx,
+        "streaming_events",
+        "cache_delay_secs",
+        "cache_delay_secs INTEGER",
+    )
+    .await
+}
+
+async fn migrate_v10(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "chunk_format",
+        "chunk_format TEXT NOT NULL DEFAULT 'ts'",
+    )
+    .await
+}
+
+async fn migrate_v11(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "duration_ms",
+        "duration_ms INTEGER NOT NULL DEFAULT 0",
+    )
+    .await
+}
+
+async fn migrate_v12(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS event_templates (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            name             TEXT NOT NULL UNIQUE,
+            cache_delay_secs INTEGER
+        )
+        "#,
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS template_endpoints (
+            template_id INTEGER NOT NULL REFERENCES event_templates(id) ON DELETE CASCADE,
+            endpoint_id INTEGER NOT NULL REFERENCES endpoint_configs(id) ON DELETE CASCADE,
+            PRIMARY KEY (template_id, endpoint_id)
+        )
+        "#,
+    )
+    .execute(&mut **tx)
+    .await?;
+    add_column_if_missing(tx, "streaming_events", "created_from", "created_from TEXT").await
+}
+
+async fn migrate_v14(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(
+        tx,
+        "streaming_events",
+        "rescue_video_url",
+        "rescue_video_url TEXT",
+    )
+    .await
+}
+
+async fn migrate_v15(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(
+        tx,
+        "event_templates",
+        "rescue_video_url",
+        "rescue_video_url TEXT",
+    )
+    .await
+}
+
+async fn migrate_v17(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "upload_attempts",
+        "upload_attempts INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "upload_first_attempt_at",
+        "upload_first_attempt_at INTEGER",
+    )
+    .await?;
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "upload_completed_at",
+        "upload_completed_at INTEGER",
+    )
+    .await?;
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "upload_duration_ms",
+        "upload_duration_ms INTEGER",
+    )
+    .await?;
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "upload_last_error",
+        "upload_last_error TEXT",
+    )
+    .await?;
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "upload_next_retry_at",
+        "upload_next_retry_at INTEGER",
+    )
+    .await?;
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "upload_failed_permanently",
+        "upload_failed_permanently INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_chunks_upload_queue
+          ON chunk_records(upload_failed_permanently, sent, in_process, upload_next_retry_at, id)
+          WHERE sent = 0 AND in_process = 0 AND upload_failed_permanently = 0
+        "#,
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Run database migrations.
+///
+/// Each migration is wrapped in its own transaction so a failure rolls
+/// back that one migration and halts startup with an error. ALTER TABLE
+/// ADD COLUMN / RENAME COLUMN statements go through idempotent helpers
+/// so partial prior state does not break resumption.
+pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
+        .execute(pool)
+        .await?;
+
+    let current: i32 = sqlx::query("SELECT COALESCE(MAX(version), 0) as v FROM schema_version")
+        .fetch_one(pool)
+        .await
+        .map(|r| r.get("v"))?;
+
+    for version in (current + 1)..=MAX_SCHEMA_VERSION {
+        let mut tx = pool.begin().await?;
+        match version {
+            1 => execute_sql_statements(&mut tx, MIGRATION_V1_SQL).await?,
+            2 => execute_sql_statements(&mut tx, MIGRATION_V2_SQL).await?,
+            3 => execute_sql_statements(&mut tx, MIGRATION_V3_SQL).await?,
+            4 => execute_sql_statements(&mut tx, MIGRATION_V4_SQL).await?,
+            5 => migrate_v5(&mut tx).await?,
+            6 => migrate_v6(&mut tx).await?,
+            7 => migrate_v7(&mut tx).await?,
+            8 => migrate_v8(&mut tx).await?,
+            9 => migrate_v9(&mut tx).await?,
+            10 => migrate_v10(&mut tx).await?,
+            11 => migrate_v11(&mut tx).await?,
+            12 => migrate_v12(&mut tx).await?,
+            13 => execute_sql_statements(&mut tx, MIGRATION_V13_SQL).await?,
+            14 => migrate_v14(&mut tx).await?,
+            15 => migrate_v15(&mut tx).await?,
+            16 => execute_sql_statements(&mut tx, MIGRATION_V16_SQL).await?,
+            17 => migrate_v17(&mut tx).await?,
+            _ => unreachable!("unhandled migration version {version}"),
+        }
+        sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
+            .bind(version)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
+
+    // Startup cleanup: delete old sent chunk records to keep the DB fast.
+    // Without this, CI runs accumulate 100K+ rows making startup take >30s.
+    let deleted: i64 = sqlx::query(
+        "DELETE FROM chunk_records WHERE sent = 1 AND created_at < datetime('now', '-1 hour')",
+    )
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected() as i64)
+    .unwrap_or(0);
+    if deleted > 0 {
+        tracing::info!("Cleaned {deleted} old chunk records from database");
+    }
+
+    Ok(())
+}
+
+const MIGRATION_V1_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS client_profile (
+    id        INTEGER PRIMARY KEY,
+    user_uuid TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS streaming_events (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    identifier           TEXT UNIQUE,
+    short_description    TEXT,
+    date_of_event        TEXT NOT NULL DEFAULT (datetime('now')),
+    server_ip            TEXT DEFAULT '',
+    received_bytes       INTEGER NOT NULL DEFAULT 0,
+    receiving_activated  INTEGER NOT NULL DEFAULT 0,
+    delivering_activated INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS chunk_records (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    streaming_event_id INTEGER NOT NULL REFERENCES streaming_events(id) ON DELETE CASCADE,
+    chunk_file_path    TEXT NOT NULL,
+    data_size          INTEGER NOT NULL,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    md5                TEXT NOT NULL DEFAULT '',
+    in_process         INTEGER NOT NULL DEFAULT 0,
+    sent               INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_unsent ON chunk_records(streaming_event_id, sent, in_process)
+    WHERE sent = 0 AND in_process = 0
+"#;
+
+const MIGRATION_V2_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS endpoint_configs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    alias          TEXT NOT NULL UNIQUE,
+    service_type   TEXT NOT NULL CHECK(service_type IN ('YT_HLS','FB','YT_RTMP','VIMEO','INSTAGRAM','TEST_FILE')),
+    stream_key     TEXT NOT NULL DEFAULT '',
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    position_last  INTEGER NOT NULL DEFAULT 0,
+    delivered_bytes INTEGER NOT NULL DEFAULT 0,
+    is_fast        INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS event_endpoints (
+    event_id    INTEGER NOT NULL REFERENCES streaming_events(id) ON DELETE CASCADE,
+    endpoint_id INTEGER NOT NULL REFERENCES endpoint_configs(id) ON DELETE CASCADE,
+    PRIMARY KEY (event_id, endpoint_id)
+);
+
+CREATE TABLE IF NOT EXISTS delivery_instances (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    hetzner_id     INTEGER NOT NULL UNIQUE,
+    name           TEXT NOT NULL,
+    ipv4           TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT 'creating' CHECK(status IN ('creating','running','stopping','deleted')),
+    server_type    TEXT NOT NULL DEFAULT 'cx23',
+    event_id       INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    last_health_at TEXT,
+    auth_token     TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS delivery_endpoint_status (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id     INTEGER NOT NULL REFERENCES delivery_instances(id) ON DELETE CASCADE,
+    alias           TEXT NOT NULL,
+    alive           INTEGER NOT NULL DEFAULT 0,
+    buff_size_bytes INTEGER NOT NULL DEFAULT 0,
+    current_chunk_id INTEGER NOT NULL DEFAULT 0,
+    last_check_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS youtube_oauth (
+    id             INTEGER PRIMARY KEY DEFAULT 1,
+    access_token   TEXT NOT NULL DEFAULT '',
+    refresh_token  TEXT NOT NULL DEFAULT '',
+    token_uri      TEXT NOT NULL DEFAULT 'https://oauth2.googleapis.com/token',
+    client_id      TEXT NOT NULL DEFAULT '',
+    client_secret  TEXT NOT NULL DEFAULT '',
+    scopes         TEXT NOT NULL DEFAULT '',
+    expires_at     TEXT
+);
+
+"#;
+
+const MIGRATION_V3_SQL: &str = r#"
+DROP TABLE IF EXISTS scheduled_streams;
+
+CREATE TABLE IF NOT EXISTS streaming_events_new (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                 TEXT NOT NULL UNIQUE,
+    received_bytes       INTEGER NOT NULL DEFAULT 0,
+    receiving_activated  INTEGER NOT NULL DEFAULT 0,
+    delivering_activated INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT INTO streaming_events_new (id, name, received_bytes, receiving_activated, delivering_activated)
+    SELECT id, COALESCE(identifier, 'Event-' || id), received_bytes, receiving_activated, delivering_activated
+    FROM streaming_events;
+
+DROP TABLE streaming_events;
+
+ALTER TABLE streaming_events_new RENAME TO streaming_events
+"#;
+
+const MIGRATION_V4_SQL: &str = r#"
+CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_endpoint_status_instance_alias
+    ON delivery_endpoint_status(instance_id, alias);
+
+PRAGMA foreign_keys = OFF;
+
+CREATE TABLE IF NOT EXISTS delivery_instances_new (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    hetzner_id     INTEGER NOT NULL UNIQUE,
+    name           TEXT NOT NULL,
+    ipv4           TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT 'creating' CHECK(status IN ('creating','running','stopping','deleted','failed')),
+    server_type    TEXT NOT NULL DEFAULT 'cx23',
+    event_id       INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    last_health_at TEXT
+);
+
+INSERT INTO delivery_instances_new (id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at)
+    SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at
+    FROM delivery_instances;
+
+DROP TABLE delivery_instances;
+
+ALTER TABLE delivery_instances_new RENAME TO delivery_instances;
+
+PRAGMA foreign_keys = ON
+"#;
+
+const MIGRATION_V13_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS delivery_logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id INTEGER NOT NULL,
+    event_id    INTEGER,
+    captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+    log_text    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS delivery_restart_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id   INTEGER NOT NULL,
+    event_id      INTEGER,
+    alias         TEXT NOT NULL,
+    timestamp_ms  INTEGER NOT NULL,
+    chunk_id      INTEGER NOT NULL,
+    lifetime_secs INTEGER NOT NULL,
+    reason        TEXT NOT NULL,
+    stderr_tail   TEXT,
+    backoff_secs  INTEGER NOT NULL
+);
+
+CREATE INDEX idx_delivery_restart_log_instance
+    ON delivery_restart_log(instance_id);
+
+CREATE INDEX idx_delivery_logs_instance
+    ON delivery_logs(instance_id)
+"#;
+
+// V16: widen the delivery_instances.status CHECK constraint to allow the
+// new orchestrator phases (booting, initializing, delivering). Without
+// this, writes from poll_and_init to "booting" fail with
+//   CHECK constraint failed: status IN ('creating','running',...)
+// which then sets the instance to "failed" and leaves the operator
+// staring at a broken dashboard.
+//
+// SQLite doesn't support ALTER TABLE ... DROP CONSTRAINT so we have to
+// recreate the table, copying rows over.
+const MIGRATION_V16_SQL: &str = r#"
+CREATE TABLE delivery_instances_v16 (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    hetzner_id      INTEGER NOT NULL UNIQUE,
+    name            TEXT NOT NULL,
+    ipv4            TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'creating' CHECK(status IN (
+        'creating', 'running', 'stopping', 'deleted', 'failed',
+        'booting', 'initializing', 'delivering'
+    )),
+    server_type     TEXT NOT NULL,
+    event_id        INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    last_health_at  TEXT,
+    auth_token      TEXT NOT NULL DEFAULT ''
+);
+
+INSERT INTO delivery_instances_v16
+    (id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token)
+SELECT
+    id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token
+FROM delivery_instances;
+
+DROP TABLE delivery_instances;
+ALTER TABLE delivery_instances_v16 RENAME TO delivery_instances
+"#;
