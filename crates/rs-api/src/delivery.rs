@@ -191,6 +191,7 @@ impl DeliveryOrchestrator {
         let mut labels = HashMap::new();
         labels.insert("app".to_string(), "restreamer".to_string());
         labels.insert("event_id".to_string(), event_id.to_string());
+        labels.insert("client_uuid".to_string(), self.config.client_uuid.clone());
 
         // S3 credentials are passed via cloud-init (written to env file on disk)
         // so they never travel over plaintext HTTP to the delivery VPS.
