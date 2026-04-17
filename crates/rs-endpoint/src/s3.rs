@@ -220,12 +220,17 @@ impl S3Client {
         Ok((total_bytes, object_count))
     }
 
-    /// List all top-level "directories" (CommonPrefixes) in the bucket.
-    /// Each entry corresponds to one event_identifier folder.
-    pub async fn list_event_prefixes(&self) -> Result<Vec<String>, EndpointError> {
+    /// List "subdirectories" (CommonPrefixes) under `base_prefix`.
+    /// With the #114 layout, callers pass `{client_uuid}/` to enumerate
+    /// events for a single installation. The returned names have the
+    /// base prefix stripped, so the caller gets just event names.
+    pub async fn list_event_prefixes(
+        &self,
+        base_prefix: &str,
+    ) -> Result<Vec<String>, EndpointError> {
         let list = self
             .bucket
-            .list("".to_string(), Some("/".to_string()))
+            .list(base_prefix.to_string(), Some("/".to_string()))
             .await
             .map_err(|e| EndpointError::S3(format!("list failed: {e}")))?;
 
@@ -233,9 +238,10 @@ impl S3Client {
         for page in &list {
             if let Some(common) = &page.common_prefixes {
                 for cp in common {
-                    let prefix = cp.prefix.trim_end_matches('/').to_string();
-                    if !prefix.is_empty() {
-                        prefixes.push(prefix);
+                    let full = cp.prefix.trim_end_matches('/');
+                    let event = full.strip_prefix(base_prefix).unwrap_or(full);
+                    if !event.is_empty() {
+                        prefixes.push(event.to_string());
                     }
                 }
             }

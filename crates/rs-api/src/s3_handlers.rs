@@ -117,9 +117,10 @@ pub async fn clear_event_s3_chunks(
     };
 
     let event_name = event.name.clone();
+    let event_prefix = format!("{}/{}", config.client_uuid, event_name);
     let delete_result = tokio::time::timeout(
         S3_OPERATION_TIMEOUT,
-        s3_client.delete_event_chunks(&event_name),
+        s3_client.delete_event_chunks(&event_prefix),
     )
     .await;
 
@@ -203,21 +204,24 @@ pub async fn get_s3_usage(State(state): State<AppState>) -> S3Result<S3UsageResp
         }
     };
 
-    let usage_future = async {
-        let prefixes = s3_client.list_event_prefixes().await?;
+    let client_uuid = config.client_uuid.clone();
+    let base_prefix = format!("{client_uuid}/");
+    let usage_future = async move {
+        let prefixes = s3_client.list_event_prefixes(&base_prefix).await?;
 
         // Measure every prefix in parallel. Each measurement is one S3
         // LIST call, so MEASURE_CONCURRENCY parallel calls keeps the
         // endpoint under a second even for tens of events.
         let entries: Vec<Result<S3UsageEntry, rs_endpoint::EndpointError>> =
             futures::stream::iter(prefixes)
-                .map(|prefix| {
+                .map(|event_name| {
                     let client = Arc::clone(&s3_client);
+                    let base = base_prefix.clone();
                     async move {
-                        let with_slash = format!("{prefix}/");
-                        let (bytes, objects) = client.measure_prefix(&with_slash).await?;
+                        let full = format!("{base}{event_name}/");
+                        let (bytes, objects) = client.measure_prefix(&full).await?;
                         Ok(S3UsageEntry {
-                            event_name: prefix,
+                            event_name,
                             bytes,
                             objects,
                         })
