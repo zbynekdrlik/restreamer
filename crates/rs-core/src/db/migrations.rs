@@ -502,10 +502,10 @@ CREATE TABLE IF NOT EXISTS delivery_restart_log (
     backoff_secs  INTEGER NOT NULL
 );
 
-CREATE INDEX idx_delivery_restart_log_instance
+CREATE INDEX IF NOT EXISTS idx_delivery_restart_log_instance
     ON delivery_restart_log(instance_id);
 
-CREATE INDEX idx_delivery_logs_instance
+CREATE INDEX IF NOT EXISTS idx_delivery_logs_instance
     ON delivery_logs(instance_id)
 "#;
 
