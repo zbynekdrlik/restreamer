@@ -18,11 +18,11 @@ use crate::EndpointError;
 const DELETE_CONCURRENCY: usize = 20;
 
 /// Given a raw S3 CommonPrefix string like `"{base}event/"`, trim the
-/// trailing slash and the `base` prefix. Returns `None` if the resulting
+/// base prefix and the trailing slash. Returns `None` if the resulting
 /// event name is empty. Pure function, unit-testable without S3.
 fn strip_event_from_common_prefix(raw: &str, base: &str) -> Option<String> {
-    let trimmed = raw.trim_end_matches('/');
-    let event = trimmed.strip_prefix(base).unwrap_or(trimmed);
+    let after_base = raw.strip_prefix(base).unwrap_or(raw);
+    let event = after_base.trim_end_matches('/');
     if event.is_empty() {
         None
     } else {
