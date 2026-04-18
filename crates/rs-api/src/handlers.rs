@@ -489,7 +489,8 @@ pub async fn delete_event_by_id(
     //
     // Wrapped in a timeout so we can't hang a reverse proxy on a slow S3
     // endpoint (same bound as S3_OPERATION_TIMEOUT in s3_handlers.rs).
-    let delete_future = s3_client.delete_event_chunks(&event.name);
+    let event_prefix = config.event_s3_prefix(&event.name);
+    let delete_future = s3_client.delete_event_chunks(&event_prefix);
     match tokio::time::timeout(std::time::Duration::from_secs(60), delete_future).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {

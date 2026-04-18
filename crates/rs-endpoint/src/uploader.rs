@@ -25,6 +25,10 @@ struct WorkerCtx {
     /// Number of workers that should voluntarily exit on their next iteration
     /// (used by the adaptive controller to scale down).
     drain_needed: Arc<AtomicUsize>,
+    /// Per-installation UUID used to prefix S3 chunk keys, preventing cross-instance
+    /// collisions when multiple Restreamer installations share one S3 bucket.
+    /// See issue #114.
+    client_uuid: String,
 }
 
 /// Pure gate: should the spawner spawn another worker?
@@ -71,10 +75,17 @@ pub struct ChunkUploader {
     in_flight: Arc<AtomicUsize>,
     /// Workers that should voluntarily exit on next iteration (scale-down).
     drain_needed: Arc<AtomicUsize>,
+    /// Per-installation UUID used to prefix S3 chunk keys (#114).
+    client_uuid: String,
 }
 
 impl ChunkUploader {
-    pub fn new(pool: SqlitePool, s3: S3Client, ws_tx: broadcast::Sender<WsEvent>) -> Self {
+    pub fn new(
+        pool: SqlitePool,
+        s3: S3Client,
+        ws_tx: broadcast::Sender<WsEvent>,
+        client_uuid: String,
+    ) -> Self {
         Self {
             pool,
             s3: Arc::new(s3),
@@ -83,6 +94,7 @@ impl ChunkUploader {
             metrics: Arc::new(UploadMetrics::default()),
             in_flight: Arc::new(AtomicUsize::new(0)),
             drain_needed: Arc::new(AtomicUsize::new(0)),
+            client_uuid,
         }
     }
 
@@ -168,6 +180,7 @@ impl ChunkUploader {
             in_flight: Arc::clone(&self.in_flight),
             blocked: Arc::clone(&self.upload_blocked),
             drain_needed: Arc::clone(&drain_needed),
+            client_uuid: self.client_uuid.clone(),
         };
         let mut worker_id_counter: usize = 0;
         let mut rx = target_rx.clone();
@@ -231,6 +244,7 @@ async fn run_worker(
         in_flight,
         blocked: upload_blocked,
         drain_needed,
+        client_uuid,
     } = ctx;
     loop {
         // Voluntary drain: if the adaptive controller requested a scale-down,
@@ -279,7 +293,7 @@ async fn run_worker(
                 // Resolve event identifier; if parent is gone, mark as sent and drop out of queue
                 let event_id =
                     match db::get_streaming_event_by_id(&pool, chunk.streaming_event_id).await {
-                        Ok(Some(ev)) => ev.name,
+                        Ok(Some(ev)) => format!("{client_uuid}/{}", ev.name),
                         _ => {
                             warn!(
                                 "Chunk {} references missing/deleted event {}, marking complete",
@@ -400,7 +414,7 @@ mod tests {
         let s3 = S3Client::new(&test_s3_config()).unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
 
-        let uploader = ChunkUploader::new(pool, s3, ws_tx);
+        let uploader = ChunkUploader::new(pool, s3, ws_tx, "test-client-uuid".to_string());
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
         let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
@@ -485,7 +499,7 @@ mod tests {
         let pool = setup_db().await;
         let s3 = S3Client::new(&test_s3_config()).unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let uploader = ChunkUploader::new(pool, s3, ws_tx);
+        let uploader = ChunkUploader::new(pool, s3, ws_tx, "test-client-uuid".to_string());
 
         let a = uploader.metrics();
         let b = uploader.metrics();

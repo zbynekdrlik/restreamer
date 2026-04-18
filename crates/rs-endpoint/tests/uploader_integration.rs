@@ -2,7 +2,7 @@
 //! with a mock S3 server.
 //!
 //! These tests exercise:
-//! - S3 upload with correct key format (`{event_id}/{sequence_number}.bin`)
+//! - S3 upload with correct key format (`{client_uuid}/{event_id}/{sequence_number}.bin`)
 //! - Database state transitions (sent=1 after success)
 //! - Local file cleanup after successful upload
 
@@ -143,7 +143,7 @@ async fn uploader_full_flow_success() {
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
+    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx, "test-client-uuid".to_string());
 
     let s3_state_check = s3_state.clone();
     let pool_check = pool.clone();
@@ -171,8 +171,8 @@ async fn uploader_full_flow_success() {
     assert_eq!(s3_state.upload_count.load(Ordering::SeqCst), 1);
     let last_key = s3_state.last_key.lock().clone();
     assert!(
-        last_key.contains("evt-integration-test/1.bin"),
-        "S3 key should match format {{event_id}}/{{seq}}.bin: {last_key}"
+        last_key.ends_with("test-client-uuid/evt-integration-test/1.bin"),
+        "S3 key should end with {{client_uuid}}/{{event_name}}/{{seq}}.bin: {last_key}"
     );
 
     // Verify chunk is marked as sent in DB
@@ -214,7 +214,7 @@ async fn uploader_s3_failure_keeps_chunk_unsent() {
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
+    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx, "test-client-uuid".to_string());
 
     // Let the uploader attempt one upload cycle (first attempt will fail and schedule retry)
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
@@ -293,7 +293,7 @@ async fn uploader_multiple_chunks_uploads_concurrently() {
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
+    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx, "test-client-uuid".to_string());
 
     let s3_state_check = s3_state.clone();
     let pool_check = pool.clone();
@@ -357,7 +357,7 @@ async fn uploader_chunk_without_event_skipped() {
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
+    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx, "test-client-uuid".to_string());
 
     // Run for a short time; no chunks exist so no uploads should happen
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
@@ -402,7 +402,7 @@ async fn uploader_ws_event_sent_on_upload() {
 
     let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
     let (ws_tx, mut ws_rx) = broadcast::channel::<WsEvent>(32);
-    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx);
+    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx, "test-client-uuid".to_string());
 
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
     let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
@@ -425,4 +425,130 @@ async fn uploader_ws_event_sent_on_upload() {
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
     let _ = chunk_path;
+}
+
+#[tokio::test]
+async fn two_clients_same_event_name_produce_disjoint_keys() {
+    // Regression test for issue #114: two Restreamer installs sharing an S3
+    // bucket must not collide on identically-named events.
+    let s3_state_a = Arc::new(MockS3State::default());
+    let s3_url_a = start_mock_s3_server(s3_state_a.clone()).await;
+
+    let s3_state_b = Arc::new(MockS3State::default());
+    let s3_url_b = start_mock_s3_server(s3_state_b.clone()).await;
+
+    let pool_a = setup_test_db().await;
+    let pool_b = setup_test_db().await;
+
+    // Both instances use the SAME event name.
+    let event_name = "shared-event-name";
+    db::upsert_streaming_event(&pool_a, event_name)
+        .await
+        .unwrap();
+    db::upsert_streaming_event(&pool_b, event_name)
+        .await
+        .unwrap();
+    let event_a = db::get_streaming_event(&pool_a).await.unwrap().unwrap();
+    let event_b = db::get_streaming_event(&pool_b).await.unwrap().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+    let chunk_path_a = create_test_chunk_file(&temp_dir, "a.bin", b"client-a-chunk");
+    let chunk_path_b = create_test_chunk_file(&temp_dir, "b.bin", b"client-b-chunk");
+
+    db::insert_chunk(
+        &pool_a,
+        event_a.id,
+        chunk_path_a.to_str().unwrap(),
+        10,
+        "aaa",
+        0,
+    )
+    .await
+    .unwrap();
+    db::insert_chunk(
+        &pool_b,
+        event_b.id,
+        chunk_path_b.to_str().unwrap(),
+        11,
+        "bbb",
+        0,
+    )
+    .await
+    .unwrap();
+
+    let s3_a = S3Client::new(&create_s3_config(&s3_url_a)).unwrap();
+    let s3_b = S3Client::new(&create_s3_config(&s3_url_b)).unwrap();
+    let (ws_tx_a, _) = broadcast::channel::<WsEvent>(16);
+    let (ws_tx_b, _) = broadcast::channel::<WsEvent>(16);
+
+    let uploader_a = ChunkUploader::new(pool_a.clone(), s3_a, ws_tx_a, "client-a-uuid".to_string());
+    let uploader_b = ChunkUploader::new(pool_b.clone(), s3_b, ws_tx_b, "client-b-uuid".to_string());
+
+    let s3_state_a_check = s3_state_a.clone();
+    let pool_a_check = pool_a.clone();
+    run_until(
+        uploader_a,
+        &pool_a,
+        move || {
+            let s3_state = s3_state_a_check.clone();
+            let pool = pool_a_check.clone();
+            Box::pin(async move {
+                if s3_state.upload_count.load(Ordering::SeqCst) >= 1 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let chunks = db::get_unsent_chunks(&pool, 10).await.unwrap();
+                    return chunks.is_empty();
+                }
+                false
+            })
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let s3_state_b_check = s3_state_b.clone();
+    let pool_b_check = pool_b.clone();
+    run_until(
+        uploader_b,
+        &pool_b,
+        move || {
+            let s3_state = s3_state_b_check.clone();
+            let pool = pool_b_check.clone();
+            Box::pin(async move {
+                if s3_state.upload_count.load(Ordering::SeqCst) >= 1 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let chunks = db::get_unsent_chunks(&pool, 10).await.unwrap();
+                    return chunks.is_empty();
+                }
+                false
+            })
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+
+    assert_eq!(
+        s3_state_a.upload_count.load(Ordering::SeqCst),
+        1,
+        "uploader A did not complete upload before timeout"
+    );
+    assert_eq!(
+        s3_state_b.upload_count.load(Ordering::SeqCst),
+        1,
+        "uploader B did not complete upload before timeout"
+    );
+    let key_a = s3_state_a.last_key.lock().clone();
+    let key_b = s3_state_b.last_key.lock().clone();
+
+    assert!(
+        key_a.ends_with("client-a-uuid/shared-event-name/1.bin"),
+        "client A S3 key should end with {{client_uuid}}/{{event_name}}/{{seq}}.bin: {key_a}"
+    );
+    assert!(
+        key_b.ends_with("client-b-uuid/shared-event-name/1.bin"),
+        "client B S3 key should end with {{client_uuid}}/{{event_name}}/{{seq}}.bin: {key_b}"
+    );
+    assert_ne!(
+        key_a, key_b,
+        "two clients with same event name must have disjoint S3 keys"
+    );
 }

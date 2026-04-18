@@ -17,6 +17,19 @@ use crate::EndpointError;
 /// enough not to flood the S3 endpoint.
 const DELETE_CONCURRENCY: usize = 20;
 
+/// Given a raw S3 CommonPrefix string like `"{base}event/"`, trim the
+/// base prefix and the trailing slash. Returns `None` if the resulting
+/// event name is empty. Pure function, unit-testable without S3.
+fn strip_event_from_common_prefix(raw: &str, base: &str) -> Option<String> {
+    let after_base = raw.strip_prefix(base).unwrap_or(raw);
+    let event = after_base.trim_end_matches('/');
+    if event.is_empty() {
+        None
+    } else {
+        Some(event.to_string())
+    }
+}
+
 /// S3 client wrapper for uploading chunk files.
 pub struct S3Client {
     bucket: Box<Bucket>,
@@ -47,7 +60,12 @@ impl S3Client {
     }
 
     /// Generate an S3 key for a chunk file.
-    /// Format: `{event_id}/{sequence_number}.bin`
+    ///
+    /// `event_identifier` is expected to be of the form
+    /// `{client_uuid}/{event_name}` so the final key is
+    /// `{client_uuid}/{event_name}/{sequence_number}.bin`. This prevents
+    /// cross-installation collisions when multiple Restreamer installs
+    /// share one S3 bucket (#114).
     pub fn chunk_key(event_identifier: &str, sequence_number: i64) -> String {
         format!("{event_identifier}/{sequence_number}.bin")
     }
@@ -215,12 +233,17 @@ impl S3Client {
         Ok((total_bytes, object_count))
     }
 
-    /// List all top-level "directories" (CommonPrefixes) in the bucket.
-    /// Each entry corresponds to one event_identifier folder.
-    pub async fn list_event_prefixes(&self) -> Result<Vec<String>, EndpointError> {
+    /// List "subdirectories" (CommonPrefixes) under `base_prefix`.
+    /// With the #114 layout, callers pass `{client_uuid}/` to enumerate
+    /// events for a single installation. The returned names have the
+    /// base prefix stripped, so the caller gets just event names.
+    pub async fn list_event_prefixes(
+        &self,
+        base_prefix: &str,
+    ) -> Result<Vec<String>, EndpointError> {
         let list = self
             .bucket
-            .list("".to_string(), Some("/".to_string()))
+            .list(base_prefix.to_string(), Some("/".to_string()))
             .await
             .map_err(|e| EndpointError::S3(format!("list failed: {e}")))?;
 
@@ -228,9 +251,8 @@ impl S3Client {
         for page in &list {
             if let Some(common) = &page.common_prefixes {
                 for cp in common {
-                    let prefix = cp.prefix.trim_end_matches('/').to_string();
-                    if !prefix.is_empty() {
-                        prefixes.push(prefix);
+                    if let Some(event) = strip_event_from_common_prefix(&cp.prefix, base_prefix) {
+                        prefixes.push(event);
                     }
                 }
             }
@@ -250,10 +272,41 @@ mod tests {
     }
 
     #[test]
+    fn chunk_key_with_client_uuid_prefix() {
+        // With the #114 format, the caller passes a composite identifier
+        // `{client_uuid}/{event_name}` so the key nests naturally under the
+        // client UUID.
+        let key = S3Client::chunk_key("abc-uuid/sunday-service", 7);
+        assert_eq!(key, "abc-uuid/sunday-service/7.bin");
+    }
+
+    #[test]
     fn upload_chunk_key_is_simple() {
         let key = S3Client::chunk_key("sunday-service-2026", 42);
         assert!(!key.contains('_'), "key should have no underscores: {key}");
         assert!(key.ends_with(".bin"), "key should end with .bin: {key}");
+    }
+
+    #[test]
+    fn strip_event_from_common_prefix_removes_base_and_slash() {
+        let out = strip_event_from_common_prefix("abc-uuid/sunday-service/", "abc-uuid/");
+        assert_eq!(out, Some("sunday-service".to_string()));
+    }
+
+    #[test]
+    fn strip_event_from_common_prefix_no_match_returns_full() {
+        // If S3 returns a prefix outside the base (e.g. another installation
+        // in a shared bucket), we return the full name rather than silently
+        // dropping it — the caller can decide.
+        let out = strip_event_from_common_prefix("other-uuid/event/", "abc-uuid/");
+        assert_eq!(out, Some("other-uuid/event".to_string()));
+    }
+
+    #[test]
+    fn strip_event_from_common_prefix_empty_after_strip_is_none() {
+        // The base prefix itself (no event underneath) should yield None.
+        let out = strip_event_from_common_prefix("abc-uuid/", "abc-uuid/");
+        assert_eq!(out, None);
     }
 
     #[test]

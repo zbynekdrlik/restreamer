@@ -265,6 +265,7 @@ impl ServiceCore {
         let s3_config = self.config.s3.clone();
         let endpoint_pool = pool.clone();
         let endpoint_ws_tx = ws_tx.clone();
+        let endpoint_client_uuid = self.config.client_uuid.clone();
         let endpoint_task = tokio::spawn(async move {
             run_endpoint_loop(
                 endpoint_pool,
@@ -274,6 +275,7 @@ impl ServiceCore {
                 endpoint_shutdown_rx,
                 s3_upload_blocked,
                 upload_metrics,
+                endpoint_client_uuid,
             )
             .await;
         });
@@ -447,6 +449,7 @@ async fn run_endpoint_loop(
     mut shutdown_rx: broadcast::Receiver<()>,
     s3_upload_blocked: Arc<std::sync::atomic::AtomicBool>,
     upload_metrics: Arc<UploadMetrics>,
+    client_uuid: String,
 ) {
     loop {
         let s3 = match S3Client::new(&s3_config) {
@@ -460,7 +463,7 @@ async fn run_endpoint_loop(
         let (component_shutdown_tx, _) = broadcast::channel::<()>(1);
         let component_rx = component_shutdown_tx.subscribe();
 
-        let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx.clone())
+        let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx.clone(), client_uuid.clone())
             .with_upload_blocked(Arc::clone(&s3_upload_blocked))
             .with_metrics(Arc::clone(&upload_metrics));
         let mut handle = tokio::spawn(async move { uploader.run(component_rx).await });
