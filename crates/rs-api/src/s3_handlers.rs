@@ -117,7 +117,7 @@ pub async fn clear_event_s3_chunks(
     };
 
     let event_name = event.name.clone();
-    let event_prefix = format!("{}/{}", config.client_uuid, event_name);
+    let event_prefix = config.event_s3_prefix(&event_name);
     let delete_result = tokio::time::timeout(
         S3_OPERATION_TIMEOUT,
         s3_client.delete_event_chunks(&event_prefix),
@@ -204,8 +204,7 @@ pub async fn get_s3_usage(State(state): State<AppState>) -> S3Result<S3UsageResp
         }
     };
 
-    let client_uuid = config.client_uuid.clone();
-    let base_prefix = format!("{client_uuid}/");
+    let base_prefix = config.client_s3_base();
     let usage_future = async move {
         let prefixes = s3_client.list_event_prefixes(&base_prefix).await?;
 

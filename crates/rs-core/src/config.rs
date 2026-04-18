@@ -321,6 +321,19 @@ impl Config {
         }
     }
 
+    /// Build the S3 prefix for an event's chunks: `{client_uuid}/{event_name}`.
+    /// All chunk keys nest under this prefix so two Restreamer installations
+    /// sharing one S3 bucket can't collide on identically-named events (#114).
+    pub fn event_s3_prefix(&self, event_name: &str) -> String {
+        format!("{}/{}", self.client_uuid, event_name)
+    }
+
+    /// Top-level S3 prefix for all of this installation's chunks: `{client_uuid}/`.
+    /// Used by dashboard listings to enumerate this installation's events (#114).
+    pub fn client_s3_base(&self) -> String {
+        format!("{}/", self.client_uuid)
+    }
+
     /// Validate that required configuration fields are present.
     pub fn validate(&self) -> std::result::Result<(), String> {
         if self.client_uuid.is_empty() {
@@ -538,6 +551,23 @@ mod tests {
             config.api.https_domain.as_deref(),
             Some("streamsnv.newlevel.media")
         );
+    }
+
+    #[test]
+    fn event_s3_prefix_composes_client_uuid_and_event_name() {
+        let mut config = Config::default();
+        config.client_uuid = "abc-uuid".to_string();
+        assert_eq!(
+            config.event_s3_prefix("sunday-service"),
+            "abc-uuid/sunday-service"
+        );
+    }
+
+    #[test]
+    fn client_s3_base_is_client_uuid_slash() {
+        let mut config = Config::default();
+        config.client_uuid = "abc-uuid".to_string();
+        assert_eq!(config.client_s3_base(), "abc-uuid/");
     }
 
     #[test]
