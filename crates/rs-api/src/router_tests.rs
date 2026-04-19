@@ -452,3 +452,117 @@ mod youtube_oauth_tests {
         assert!(text.contains("Authorization Failed"));
     }
 }
+
+#[cfg(test)]
+mod audit_tests {
+    use crate::router::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::db;
+    use rs_core::models::WsEvent;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let config = Config::for_testing();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        AppState::new(pool, config, ws_tx)
+    }
+
+    async fn body_to_bytes(body: Body) -> Vec<u8> {
+        axum::body::to_bytes(body, 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn audit_list_returns_empty_on_fresh_db() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/v1/audit")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["rows"].as_array().unwrap().len(), 0);
+        assert_eq!(json["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn audit_list_returns_inserted_rows() {
+        let state = test_state().await;
+        sqlx::query("INSERT INTO audit_log (severity, source, action, detail) VALUES ('info','operator','event_started','{\"n\":1}')")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(json["rows"][0]["action"], "event_started");
+    }
+
+    #[tokio::test]
+    async fn audit_get_by_id_returns_row() {
+        let state = test_state().await;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO audit_log (severity, source, action, detail) VALUES ('error','ffmpeg','endpoint_ffmpeg_died','{\"reason_class\":\"youtube_rtmp_closed\"}') RETURNING id"
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/audit/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["id"], id);
+        assert_eq!(json["detail"]["reason_class"], "youtube_rtmp_closed");
+    }
+
+    #[tokio::test]
+    async fn audit_get_by_id_returns_404_on_missing() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit/9999999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}

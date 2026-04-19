@@ -1,3 +1,4 @@
+pub mod audit_handlers;
 pub mod delivery;
 pub mod delivery_endpoints;
 pub mod delivery_handlers;

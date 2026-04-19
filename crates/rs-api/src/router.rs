@@ -56,6 +56,9 @@ pub fn build_router(state: AppState) -> Router {
         // Logs
         .route("/logs/inpoint", get(handlers::get_logs_inpoint))
         .route("/logs/endpoint", get(handlers::get_logs_endpoint))
+        // Audit log
+        .route("/audit", get(crate::audit_handlers::list))
+        .route("/audit/{id}", get(crate::audit_handlers::get_one))
         // WebSocket
         .route("/ws", get(websocket::ws_handler))
         // Events CRUD
