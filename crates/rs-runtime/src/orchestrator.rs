@@ -159,10 +159,48 @@ impl ServiceCore {
             .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked))
             .with_upload_metrics(Arc::clone(&upload_metrics));
 
+        // Task 27: replace the throwaway audit channel created by
+        // `AppState::new` with a real one, spawn the audit writer that
+        // drains the receiver and batches INSERTs + WS broadcasts, and
+        // schedule nightly rotation of the audit_log and metrics tables.
+        //
+        // NOTE: the `DeliveryOrchestrator` was already constructed by
+        // `AppState::new` with a clone of the throwaway sender. Its audit
+        // rows continue to be dropped. Plumbing the real sender into the
+        // orchestrator requires a follow-up refactor to make `AppState::new`
+        // accept an external `audit_tx`. All handlers, `inpoint_state`, and
+        // the uploader below are updated to use the real sender because
+        // their clones are taken AFTER this line.
+        let (audit_tx, audit_rx) = mpsc::channel::<AuditRow>(1024);
+        api_state = api_state.with_audit_tx(audit_tx);
+        {
+            let pool = pool.clone();
+            let ws_tx = ws_tx.clone();
+            tokio::spawn(async move {
+                rs_core::audit::audit_writer_task(pool, ws_tx, audit_rx).await;
+            });
+        }
+        {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                loop {
+                    let now = chrono::Utc::now();
+                    // Next 02:00 UTC.
+                    let mut next = now.date_naive().and_hms_opt(2, 0, 0).unwrap().and_utc();
+                    if next <= now {
+                        next += chrono::Duration::hours(24);
+                    }
+                    let sleep_secs = (next - now).num_seconds().max(60) as u64;
+                    tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+                    let _ = rs_core::db::audit::rotate(&pool, 90).await;
+                    let _ = rs_core::db::metrics::rotate(&pool, 7).await;
+                }
+            });
+        }
+
         // Share the AppState's audit_tx with downstream components so they
-        // feed into the same audit pipeline (real writer wiring lands in
-        // Task 27; until then the receiver is dropped and rows are lost,
-        // which is acceptable for the throwaway-channel default).
+        // feed into the same audit pipeline. The sender now flows to the
+        // real writer task spawned above.
         let uploader_audit_tx = api_state.audit_tx.clone();
 
         // Re-wire the inpoint_state so the MediaReceiver can write the
