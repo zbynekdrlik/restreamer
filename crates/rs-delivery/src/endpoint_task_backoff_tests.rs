@@ -116,8 +116,9 @@ fn backoff_test_ep_cfg() -> EndpointConfig {
 
 /// Reproduces the FB stale-key restart loop. Without exponential backoff
 /// on death-after-running, the consumer respawns ffmpeg every ~1 second
-/// forever. With proper backoff (1s -> 2s -> 4s -> 8s -> ... capped at
-/// 60s), spawns are rate-limited so only ~6-8 occur in 60 seconds.
+/// forever. With proper class-aware backoff (RemoteBrokenPipe: 30s ->
+/// 60s -> 120s -> 240s -> 300s cap), spawns are rate-limited so only
+/// ~5 occur in 600 seconds.
 #[tokio::test]
 async fn test_consumer_backs_off_exponentially_on_repeated_deaths() {
     tokio::time::pause();
