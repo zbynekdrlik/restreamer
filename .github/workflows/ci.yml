@@ -1896,9 +1896,16 @@ jobs:
                 Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
                 Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 3
-                Remove-Item -Force "$env:APPDATA\obs-studio\.sentinel" -ErrorAction SilentlyContinue
-                Remove-Item -Force "$env:APPDATA\obs-studio\safe_mode" -ErrorAction SilentlyContinue
               }
+              # ALWAYS clean leftover child processes + sentinel/safe_mode
+              # markers before relaunch. Even with a "graceful" CloseMainWindow,
+              # OBS doesn't reliably delete .sentinel on Windows when child
+              # browser-page processes are still alive at exit, and the
+              # next launch then shows the crash-recovery dialog (OBS hung
+              # at 25 MB with WS port closed).
+              Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+              Remove-Item -Force "$env:APPDATA\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+              Remove-Item -Force "$env:APPDATA\obs-studio\safe_mode" -ErrorAction SilentlyContinue
               schtasks.exe /run /tn "Start OBS Studio"
               if ($LASTEXITCODE -ne 0) { throw "Failed to restart OBS after bitrate change" }
 
