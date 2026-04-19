@@ -34,7 +34,9 @@ async fn setup_with_status(status: &str) -> (DeliveryOrchestrator, SqlitePool, C
     .await
     .unwrap();
 
-    let event_id: i64 = 42;
+    let event_id = db::create_streaming_event(&pool, "test-event")
+        .await
+        .unwrap();
 
     let instance_id = db::create_delivery_instance(
         &pool,
