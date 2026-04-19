@@ -1,0 +1,18 @@
+size=13996599kB time=03:03:48.92 bitrate=10396.5kbits/s speed=   1x
+size=13997181kB time=03:03:49.45 bitrate=10396.2kbits/s speed=   1x
+size=13997660kB time=03:03:49.95 bitrate=10396.1kbits/s speed=   1x
+size=13998371kB time=03:03:50.46 bitrate=10396.2kbits/s speed=   1x
+size=13999323kB time=03:03:50.95 bitrate=10396.4kbits/s speed=   1x
+size=13999666kB time=03:03:51.46 bitrate=10396.2kbits/s speed=   1x
+size=13999985kB time=03:03:51.97 bitrate=10395.9kbits/s speed=   1x
+[tls @ 0x5bbdce9c2280] Error in the push function.
+[tls @ 0x5bbdce9c2280] IO error: Broken pipe
+[aost#0:1/copy @ 0x5bbdcea4ef40] Error submitting a packet to the muxer: Broken pipe
+[out#0/flv @ 0x5bbdce9c20c0] Error muxing a packet
+[out#0/flv @ 0x5bbdce9c20c0] Error writing trailer: Broken pipe
+[tls @ 0x5bbdce9c2280] The specified session has been invalidated for some reason.
+    Last message repeated 1 times
+[out#0/flv @ 0x5bbdce9c20c0] Error closing file: Input/output error
+[out#0/flv @ 0x5bbdce9c20c0] video:13604020kB audio:381007kB subtitle:0kB other streams:0kB global headers:0kB muxing overhead: 0.107570%
+size=14000071kB time=03:03:52.12 bitrate=10395.9kbits/s speed=   1x
+Conversion failed

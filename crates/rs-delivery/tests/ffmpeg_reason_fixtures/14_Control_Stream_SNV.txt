@@ -1,0 +1,21 @@
+size= 4307570kB time=00:47:45.08 bitrate=12316.4kbits/s speed=   1x
+size= 4308486kB time=00:47:45.62 bitrate=12316.7kbits/s speed=   1x
+size= 4309230kB time=00:47:46.12 bitrate=12316.7kbits/s speed=   1x
+size= 4309953kB time=00:47:46.62 bitrate=12316.6kbits/s speed=   1x
+size= 4310675kB time=00:47:47.15 bitrate=12316.4kbits/s speed=   1x
+size= 4311521kB time=00:47:47.65 bitrate=12316.7kbits/s speed=   1x
+size= 4312280kB time=00:47:48.15 bitrate=12316.7kbits/s speed=   1x
+size= 4312946kB time=00:47:48.68 bitrate=12316.3kbits/s speed=   1x
+size= 4313812kB time=00:47:49.18 bitrate=12316.6kbits/s speed=   1x
+size= 4314640kB time=00:47:49.69 bitrate=12316.8kbits/s speed=   1x
+size= 4315340kB time=00:47:50.22 bitrate=12316.6kbits/s speed=   1x
+size= 4316091kB time=00:47:50.72 bitrate=12316.6kbits/s speed=   1x
+size= 4316769kB time=00:47:51.23 bitrate=12316.3kbits/s speed=   1x
+size= 4317283kB time=00:47:51.53 bitrate=12316.5kbits/s speed=0.99x
+[aost#0:1/copy @ 0x5a39b27c6f40] Error submitting a packet to the muxer: Broken pipe
+[out#0/flv @ 0x5a39b273a0c0] Error muxing a packet
+[out#0/flv @ 0x5a39b273a0c0] Error writing trailer: Broken pipe
+[out#0/flv @ 0x5a39b273a0c0] Error closing file: Broken pipe
+[out#0/flv @ 0x5a39b273a0c0] video:4206882kB audio:106679kB subtitle:0kB other streams:0kB global headers:0kB muxing overhead: 0.090775%
+size= 4317477kB time=00:47:51.65 bitrate=12316.5kbits/s speed=0.99x
+Conversion failed
