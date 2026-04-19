@@ -50,6 +50,9 @@ mod audit_tests;
 #[cfg(test)]
 mod metrics_tests;
 
+#[cfg(test)]
+mod pool_tests;
+
 /// Create a SQLite connection pool.
 pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());

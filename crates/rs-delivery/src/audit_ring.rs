@@ -55,6 +55,7 @@ impl AuditRing {
         self.push_ts(ts, severity, source, endpoint, action, detail)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn push_ts(
         &self,
         ts: String,
