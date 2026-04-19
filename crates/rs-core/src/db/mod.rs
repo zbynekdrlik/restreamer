@@ -21,6 +21,8 @@ pub use upload::{
     record_upload_attempt, record_upload_failure, record_upload_success, reset_orphaned_in_process,
 };
 
+pub mod audit;
+
 #[cfg(test)]
 mod tests;
 
@@ -38,6 +40,9 @@ mod delivery_status_tests;
 
 #[cfg(test)]
 mod migration_tests;
+
+#[cfg(test)]
+mod audit_tests;
 
 /// Create a SQLite connection pool.
 pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
