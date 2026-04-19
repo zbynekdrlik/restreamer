@@ -6,6 +6,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use super::audit_panel::AuditPanel;
 use super::confirm_modal::ConfirmModal;
+use super::endpoint_remove_confirm_modal::EndpointRemoveConfirmModal;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
 use crate::store::DashboardStore;
@@ -482,10 +483,21 @@ fn EndpointTree() -> impl IntoView {
     let confirm_remove_alias: RwSignal<Option<String>> = RwSignal::new(None);
     let show_remove_confirm = RwSignal::new(false);
 
+    // Last-endpoint confirm modal (type-to-confirm). Separate from the
+    // generic confirm modal because it requires the operator to type the
+    // event name to prevent accidental audience-offline clicks.
+    let last_remove_alias: RwSignal<Option<String>> = RwSignal::new(None);
+    let show_last_remove_modal = RwSignal::new(false);
+
     // When modal is dismissed, clear the alias
     Effect::new(move |_| {
         if !show_remove_confirm.get() {
             confirm_remove_alias.set(None);
+        }
+    });
+    Effect::new(move |_| {
+        if !show_last_remove_modal.get() {
+            last_remove_alias.set(None);
         }
     });
 
@@ -502,6 +514,28 @@ fn EndpointTree() -> impl IntoView {
             });
         }
     });
+
+    // Props for the last-endpoint modal. Signals are derived from the
+    // `last_remove_alias` and pipeline_state so the modal body updates
+    // reactively while it's mounted.
+    let last_modal_alias: Signal<String> =
+        Signal::derive(move || last_remove_alias.get().unwrap_or_default());
+    let last_modal_event_name: Signal<String> =
+        Signal::derive(move || store.pipeline_state.get().event_name.unwrap_or_default());
+    let last_modal_visible: Signal<bool> = Signal::derive(move || show_last_remove_modal.get());
+
+    let on_last_cancel = move || {
+        show_last_remove_modal.set(false);
+    };
+    let on_last_confirm = move || {
+        if let Some(alias) = last_remove_alias.get_untracked() {
+            let event_id = store.pipeline_state.get().event_id.unwrap_or(0);
+            spawn_local(async move {
+                let _ = api::delivery_remove_endpoint(event_id, &alias).await;
+            });
+        }
+        show_last_remove_modal.set(false);
+    };
 
     // YouTube health polling: fast initial poll, then every 30s
     let yt_has_polled = RwSignal::new(false);
@@ -710,8 +744,23 @@ fn EndpointTree() -> impl IntoView {
                                                 title="Remove endpoint"
                                                 on:click=move |_| {
                                                     let alias = remove_alias.clone();
-                                                    confirm_remove_alias.set(Some(alias));
-                                                    show_remove_confirm.set(true);
+                                                    // If this is the last endpoint on an
+                                                    // active delivery, show the
+                                                    // type-to-confirm last-endpoint modal
+                                                    // instead of the generic one.
+                                                    let d = store.delivery.get();
+                                                    let is_last = d.endpoints.len() <= 1;
+                                                    let ps_state =
+                                                        store.pipeline_state.get().state.clone();
+                                                    let pipeline_active = ps_state != "idle"
+                                                        && ps_state != "stopping";
+                                                    if is_last && pipeline_active {
+                                                        last_remove_alias.set(Some(alias));
+                                                        show_last_remove_modal.set(true);
+                                                    } else {
+                                                        confirm_remove_alias.set(Some(alias));
+                                                        show_remove_confirm.set(true);
+                                                    }
                                                 }
                                             >
                                                 {"\u{00D7}"}
@@ -790,6 +839,13 @@ fn EndpointTree() -> impl IntoView {
                 message=remove_confirm_message
                 confirm_label="Remove"
                 on_confirm=on_remove_confirmed
+            />
+            <EndpointRemoveConfirmModal
+                alias=last_modal_alias
+                event_name=last_modal_event_name
+                visible=last_modal_visible
+                on_cancel=on_last_cancel
+                on_confirm=on_last_confirm
             />
         </div>
     }
