@@ -13,6 +13,7 @@ mod api;
 pub mod buffer_state;
 pub mod db;
 pub mod endpoint_task;
+mod ffmpeg_reason;
 pub mod rescue;
 mod s3_fetch;
 

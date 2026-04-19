@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::api::{EndpointConfig, S3Config};
 pub use crate::buffer_state::{BufferState, initial_delivery_mode};
+use crate::ffmpeg_reason::{self, ReasonClass};
 use crate::s3_fetch::S3Fetcher;
 
 #[path = "flv_normalizer.rs"]
@@ -125,29 +126,50 @@ impl OutputProcessFactory for FfmpegProcessFactory {
     }
 }
 
-/// One row in the ffmpeg restart audit log. Captures everything we know
-/// about a process death so the operator can diagnose patterns (e.g. all
-/// restarts after exactly 65s = upstream session timeout).
+/// One row in the ffmpeg restart audit log. Captures process-death
+/// details so operators can diagnose patterns (e.g. all restarts after
+/// exactly 65s = upstream session timeout).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FfmpegRestartRecord {
-    /// Wall-clock unix epoch (ms) of the death.
     pub timestamp_ms: i64,
-    /// chunk_id the process was on when it died.
     pub chunk_id: i64,
-    /// How long the ffmpeg process lived before dying.
     pub lifetime_secs: u64,
-    /// Reason classification: "stdin_closed", "spawn_failed", "write_error",
-    /// "killed", "init_failed".
+    /// Serialized `ReasonClass` (e.g. "youtube_rtmp_closed").
     pub reason: String,
-    /// Last few stderr lines from ffmpeg (if available).
     pub stderr_tail: Option<String>,
-    /// Backoff applied before the next spawn attempt.
     pub backoff_secs: u64,
 }
 
-/// Cap on the per-endpoint restart history ring buffer. Keeps the API
-/// payload bounded while still showing operators a useful pattern.
+/// Cap on the per-endpoint restart history ring buffer.
 pub const RESTART_HISTORY_CAP: usize = 100;
+
+/// Per-class consecutive-death counter feeding `ffmpeg_reason::reconnect_floor`.
+/// Resets to 1 when the class changes so (e.g.) `NetworkTimeout` -> `YoutubeRtmpClosed`
+/// starts a fresh backoff ladder instead of carrying the old exponent.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EndpointRestartState {
+    pub consecutive_same_class: u32,
+    pub last_class: Option<ReasonClass>,
+}
+
+impl EndpointRestartState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Called after each ffmpeg death. Returns updated state.
+    pub fn advance(self, class: ReasonClass) -> Self {
+        let count = if self.last_class == Some(class) {
+            self.consecutive_same_class.saturating_add(1)
+        } else {
+            1
+        };
+        Self {
+            consecutive_same_class: count,
+            last_class: Some(class),
+        }
+    }
+}
 
 /// Stats tracked per endpoint with diagnostics.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -475,6 +497,7 @@ async fn consumer_task<P: OutputProcessFactory>(
     buffer_state: Arc<BufferState>,
 ) {
     let alias = ep_cfg.alias.clone();
+    let service_type_str = ep_cfg.service_type.clone();
 
     let service_type: ServiceType = match ep_cfg.service_type.parse() {
         Ok(st) => st,
@@ -487,12 +510,9 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut flv_normalizer = FlvStreamNormalizer::new();
     let mut proc: Option<Box<dyn OutputProcess>> = None;
     let mut consecutive_ffmpeg_failures: u32 = 0;
-    // consecutive_ffmpeg_deaths counts ffmpeg processes that died AFTER
-    // spawning successfully (e.g. destination RTMP server rejected the
-    // stream key after accepting some bytes). consecutive_ffmpeg_failures
-    // only counts spawn errors, so without this separate counter the FB
-    // stale-key restart loop never backs off.
-    let mut consecutive_ffmpeg_deaths: u32 = 0;
+    // Class-aware backoff: tracks the ReasonClass of the most recent death
+    // and how many deaths in a row shared that class. See `ffmpeg_reason`.
+    let mut restart_state = EndpointRestartState::new();
     let mut proc_spawned_at: Option<tokio::time::Instant> = None;
     let mut circuit_trips: u32 = 0;
     let mut consecutive_write_failures: u32 = 0;
@@ -525,25 +545,35 @@ async fn consumer_task<P: OutputProcessFactory>(
         // Ensure output process is running
         if !proc.as_mut().is_some_and(|p| p.is_alive()) {
             if proc.is_some() {
-                // ffmpeg died after running. Track death and back off
-                // exponentially. If it lived a long time (>= LIFETIME_RESET
-                // secs), this was a real working session — reset the counter
-                // so a one-off death after hours doesn't trigger a 60s
-                // penalty.
+                // ffmpeg died. Classify from stderr, advance per-class counter,
+                // apply class-specific reconnect floor. Reset counter if
+                // process lived long enough to prove the session was real.
                 const LIFETIME_RESET_SECS: u64 = 60;
                 let lifetime_secs = proc_spawned_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
                 if lifetime_secs >= LIFETIME_RESET_SECS {
-                    consecutive_ffmpeg_deaths = 0;
+                    restart_state = EndpointRestartState::new();
                 }
 
                 let stderr_tail = proc.as_mut().and_then(|p| p.last_stderr_line());
+                let stderr_for_classify = stderr_tail.clone().unwrap_or_default();
+                let class = ffmpeg_reason::classify(&service_type_str, &stderr_for_classify);
+                restart_state = restart_state.advance(class);
 
-                // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s (cap).
-                // Without this, a stale stream key causes ~1 ffmpeg restart
-                // per minute for the lifetime of the stream (observed: 524
-                // restarts in 9.5h).
-                let backoff_secs = (1u64 << consecutive_ffmpeg_deaths.min(6)).min(60);
-                consecutive_ffmpeg_deaths = consecutive_ffmpeg_deaths.saturating_add(1);
+                let floor = ffmpeg_reason::reconnect_floor(
+                    class,
+                    restart_state.consecutive_same_class.saturating_sub(1),
+                );
+                let is_process_killed = floor == std::time::Duration::from_secs(u64::MAX);
+                // reason is the serialized ReasonClass (e.g. "youtube_rtmp_closed").
+                let reason_str = serde_json::to_string(&class)
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .to_string();
+                let backoff_secs = if is_process_killed {
+                    0
+                } else {
+                    floor.as_secs()
+                };
 
                 let current_chunk_id_for_record = {
                     let s = stats.lock().await;
@@ -557,7 +587,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                     timestamp_ms,
                     chunk_id: current_chunk_id_for_record,
                     lifetime_secs,
-                    reason: "stdin_closed".to_string(),
+                    reason: reason_str.clone(),
                     stderr_tail: stderr_tail.clone(),
                     backoff_secs,
                 };
@@ -570,10 +600,20 @@ async fn consumer_task<P: OutputProcessFactory>(
                 s.restart_history.push_back(record);
                 drop(s);
 
+                if is_process_killed {
+                    tracing::info!(
+                        alias = %alias,
+                        reason = %reason_str,
+                        "Consumer: ffmpeg was intentionally killed; not restarting"
+                    );
+                    break;
+                }
+
                 tracing::warn!(
                     alias = %alias,
                     lifetime_secs,
-                    consecutive_deaths = consecutive_ffmpeg_deaths,
+                    consecutive_same_class = restart_state.consecutive_same_class,
+                    reason = %reason_str,
                     backoff_secs,
                     "Consumer: ffmpeg died, backing off before restart"
                 );
@@ -707,24 +747,12 @@ async fn consumer_task<P: OutputProcessFactory>(
         let chunk_duration_ms = chunk.duration_ms;
         let processed = flv_normalizer.normalize(&chunk.data);
 
-        // Rust-side real-time pacing. We guarantee that over the lifetime of
-        // the consumer (across ffmpeg restarts), the total chunk duration
-        // pulled from the channel never runs ahead of wall-clock elapsed
-        // since the pacing anchor was set. If we would, sleep the
-        // difference. This prevents the producer-consumer buffer from being
-        // drained faster than real-time when ffmpeg misbehaves (e.g., just
-        // after a restart).
-        //
-        // The anchor is set lazily on the first chunk pulled from the
-        // channel so the initial buffer fill in endpoint_loop doesn't count
-        // against the real-time budget and the pipeline enters steady state
-        // cleanly.
-        //
-        // delivered_ms is incremented BEFORE the write (not after success).
-        // A chunk that fails to write still "consumed" its real-time budget
-        // — without this, failed chunks would let the consumer race past
-        // real time and the cache delay would collapse on endpoints whose
-        // ffmpeg crashes repeatedly (e.g., stale Facebook stream keys).
+        // Rust-side real-time pacing: total chunk duration pulled from the
+        // channel never runs ahead of wall-clock elapsed since the anchor.
+        // Anchor is set lazily on the first chunk so the initial buffer fill
+        // doesn't count against the real-time budget. delivered_ms is
+        // incremented BEFORE the write (not after success) — a chunk that
+        // fails to write still consumed its real-time budget.
         if pacing_anchor.is_none() {
             pacing_anchor = Some(tokio::time::Instant::now());
             tracing::info!(alias = %alias, "Consumer: pacing anchor set");

@@ -567,3 +567,28 @@ async fn test_restart_audit_log_is_bounded() {
     // chunk_id == 50.
     assert_eq!(s.restart_history[0].chunk_id, 50);
 }
+
+// --- Task 8 regression tests: reconnect_floor + EndpointRestartState ---
+
+#[test]
+fn backoff_uses_reconnect_floor_for_youtube_broken_pipe() {
+    // First failure of YT RTMP: must wait 30s before retry.
+    use crate::ffmpeg_reason::{ReasonClass, reconnect_floor};
+    assert_eq!(
+        reconnect_floor(ReasonClass::YoutubeRtmpClosed, 0),
+        std::time::Duration::from_secs(30)
+    );
+}
+
+#[test]
+fn restart_state_resets_consecutive_on_class_change() {
+    use crate::endpoint_task::EndpointRestartState;
+    use crate::ffmpeg_reason::ReasonClass;
+    let state = EndpointRestartState::new();
+    let s = state.advance(ReasonClass::YoutubeRtmpClosed);
+    assert_eq!(s.consecutive_same_class, 1);
+    let s = s.advance(ReasonClass::YoutubeRtmpClosed);
+    assert_eq!(s.consecutive_same_class, 2);
+    let s = s.advance(ReasonClass::NetworkTimeout);
+    assert_eq!(s.consecutive_same_class, 1);
+}
