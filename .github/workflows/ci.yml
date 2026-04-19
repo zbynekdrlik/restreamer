@@ -1875,18 +1875,27 @@ jobs:
               # suppresses the error message but not the interactive prompt).
               # WM_CLOSE lets OBS run its normal shutdown path which deletes
               # the sentinel — the next launch is clean.
-              Write-Host "Asking OBS to quit (WM_CLOSE)..."
-              taskkill.exe /IM obs64.exe /T 2>&1 | Write-Host
+              Write-Host "Asking OBS to quit (WM_CLOSE via Stop-Process)..."
+              # Stop-Process (no -Force) sends CloseMainWindow (WM_CLOSE) to
+              # OBS's main window. OBS runs its normal shutdown, deletes
+              # .sentinel. We do NOT use `taskkill /T` because it writes to
+              # stderr when child browser processes don't acknowledge in time,
+              # which PowerShell with $ErrorActionPreference=Stop treats as
+              # a step failure even though the main OBS process is exiting
+              # normally.
+              Get-Process obs64 -ErrorAction SilentlyContinue | ForEach-Object {
+                $null = $_.CloseMainWindow()
+              }
               $exited = $false
               for ($i = 1; $i -le 20; $i++) {
                 Start-Sleep -Seconds 1
                 if (-not (Get-Process obs64 -ErrorAction SilentlyContinue)) { $exited = $true; break }
               }
               if (-not $exited) {
-                Write-Host "WARNING: OBS did not exit gracefully in 20s, escalating to force-kill (will likely trigger crash dialog next run)"
-                taskkill.exe /IM obs64.exe /T /F 2>&1 | Write-Host
+                Write-Host "WARNING: OBS did not exit gracefully in 20s, escalating to force-kill"
+                Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+                Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 3
-                # Clean the sentinel so the next launch isn't blocked by recovery dialog.
                 Remove-Item -Force "$env:APPDATA\obs-studio\.sentinel" -ErrorAction SilentlyContinue
                 Remove-Item -Force "$env:APPDATA\obs-studio\safe_mode" -ErrorAction SilentlyContinue
               }
@@ -4104,8 +4113,10 @@ jobs:
 
               # Restart OBS to pick up restored bitrate. Graceful close —
               # force-kill triggers the crash-recovery dialog on next launch.
-              Write-Host "Asking OBS to quit (WM_CLOSE)..."
-              taskkill.exe /IM obs64.exe /T 2>&1 | Write-Host
+              Write-Host "Asking OBS to quit (WM_CLOSE via Stop-Process)..."
+              Get-Process obs64 -ErrorAction SilentlyContinue | ForEach-Object {
+                $null = $_.CloseMainWindow()
+              }
               $exited = $false
               for ($i = 1; $i -le 20; $i++) {
                 Start-Sleep -Seconds 1
@@ -4113,7 +4124,8 @@ jobs:
               }
               if (-not $exited) {
                 Write-Host "WARNING: OBS did not exit gracefully, escalating to force-kill"
-                taskkill.exe /IM obs64.exe /T /F 2>&1 | Write-Host
+                Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+                Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 3
                 Remove-Item -Force "$env:APPDATA\obs-studio\.sentinel" -ErrorAction SilentlyContinue
               }
