@@ -843,6 +843,23 @@ jobs:
             Write-Host "WebView2 installed: $version"
           }
 
+      - name: Refuse deploy during active live event
+        if: "!contains(github.event.head_commit.message, '[skip-live-check]')"
+        shell: powershell
+        run: |
+          try {
+            $s = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
+          } catch {
+            Write-Error "FAIL: stream.lan API unreachable - refusing to deploy (conservative)."
+            exit 1
+          }
+          if ($s.streaming_event.receiving_activated -eq $true) {
+            $name = $s.streaming_event.name
+            Write-Error "FAIL: stream.lan has active live event '$name'. Refusing to deploy. Use [skip-live-check] in commit message to override."
+            exit 1
+          }
+          Write-Host "OK: no active live event; deploy may proceed."
+
       - name: Deploy Tauri app
         shell: powershell
         run: |
