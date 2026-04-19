@@ -44,6 +44,8 @@ pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
     let options = SqliteConnectOptions::from_str(&url)?
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_millis(5000))
         .create_if_missing(true)
         .pragma("foreign_keys", "1");
 
@@ -57,7 +59,10 @@ pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
 
 /// Create an in-memory SQLite pool for testing.
 pub async fn create_memory_pool() -> Result<SqlitePool> {
-    let options = SqliteConnectOptions::from_str("sqlite::memory:")?.pragma("foreign_keys", "1");
+    let options = SqliteConnectOptions::from_str("sqlite::memory:")?
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_millis(5000))
+        .pragma("foreign_keys", "1");
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)
