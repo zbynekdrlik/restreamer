@@ -775,15 +775,9 @@ struct TimedMockFetcher {
 }
 
 impl TimedMockFetcher {
-    /// Create with pre-loaded chunk data. Chunks are only returned if
-    /// chunk_id <= available_up_to.
-    ///
-    /// Uses realistic 2000ms chunk duration because several tests that rely
-    /// on this fetcher verify buffer fill and chunk gap behaviour, which
-    /// depend on the interaction between chunk durations and delivery_delay.
-    /// Tests that exercise throughput with this fetcher must advance mock
-    /// time by at least `num_chunks * 2000ms` of real-time pacing budget to
-    /// account for the consumer's wall-clock pacing sleep.
+    /// Pre-loaded chunks; only returned when chunk_id <= available_up_to.
+    /// 2000ms chunk duration matches buffer-fill/chunk-gap tests — callers
+    /// must advance mock time >= num_chunks * 2000ms to cover consumer pacing.
     fn new(chunks: Vec<(i64, Vec<u8>)>, initially_available: i64) -> Self {
         let map: std::collections::HashMap<i64, Vec<u8>> = chunks.into_iter().collect();
         Self {
