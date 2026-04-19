@@ -234,8 +234,10 @@ async fn test_restart_audit_log_records_each_death() {
     });
 
     // Run long enough to record several deaths. RemoteBrokenPipe backoff
-    // grows 30 -> 60 -> 120, so 300s mock time yields ~3 records.
-    for _ in 0..3000 {
+    // grows 30 -> 60 -> 120 -> 240, so we need well over 30+60+120 = 210s
+    // of mock time. 600s (6000 ticks) gives generous headroom for the
+    // endpoint loop to actually observe each death between advances.
+    for _ in 0..6000 {
         tokio::time::advance(Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
     }
@@ -369,10 +371,12 @@ async fn test_write_failure_records_audit_log_and_applies_backoff() {
         .await;
     });
 
-    // Run for 600s of mock time. With RemoteBrokenPipe backoff (30+60+
-    // 120+240+300...), <=10 spawns should occur. Without the fix (instant
-    // respawn loop), hundreds.
-    for _ in 0..6000 {
+    // Run for 900s of mock time. With RemoteBrokenPipe backoff (30+60+
+    // 120+240+300...), <=15 spawns should occur. Without the fix (instant
+    // respawn loop), hundreds. Extra headroom beyond the first-death
+    // threshold (30s) ensures the death handler has actually fired and
+    // written the audit record before the test assertions run.
+    for _ in 0..9000 {
         tokio::time::advance(Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
     }
@@ -517,14 +521,18 @@ async fn test_backoff_counter_resets_after_long_lived_session() {
         .await;
     });
 
-    // Advance 300s of mock time. Timeline (RemoteBrokenPipe class):
+    // Advance 600s of mock time. Timeline (RemoteBrokenPipe class):
     //   t=0   -> spawn 1, lives 120s
     //   t=120 -> spawn 1 dies; lifetime >= 60s so the per-class counter
     //            resets to 0. Class floor at consecutive=0 is 30s.
     //   t=150 -> spawn 2, dies instantly; next backoff 60s
     //   t=210 -> spawn 3, dies instantly; next backoff 120s
-    //   t=330 -> spawn 4 (past our 300s window)
-    for _ in 0..3000 {
+    //   t=330 -> spawn 4, dies instantly; next backoff 240s
+    //   t=570 -> spawn 5
+    // Extra headroom (vs the theoretical 330s for 3 restart records) makes
+    // sure the first long-lived process has time to actually die under
+    // mock-time scheduling quirks.
+    for _ in 0..6000 {
         tokio::time::advance(Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
     }

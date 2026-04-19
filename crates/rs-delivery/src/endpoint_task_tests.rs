@@ -85,7 +85,11 @@ impl OutputProcess for MockProcess {
     }
 
     fn last_stderr_line(&self) -> Option<String> {
-        Some("mock stderr line".to_string())
+        // Classify as InvalidInput (1s backoff) so tests observe restarts
+        // quickly under the class-aware reconnect_floor policy. Using
+        // "mock stderr line" would classify as Unknown (15s flat), which
+        // blows past the short virtual-time windows these tests use.
+        Some("Invalid data found".to_string())
     }
 }
 
