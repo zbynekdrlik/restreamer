@@ -25,8 +25,18 @@ app.use(express.static(distDir));
 let scenario = "default";
 let rtmpStableSecs = 999; // default: stream has been stable plenty long
 let rtmpTickStartMs = null; // when the tick scenario started
+// Explicit override set via POST /api/v1/_test/set-rtmp-stable-secs.
+// When non-null, this takes precedence over the time-based tick and the
+// default `rtmpStableSecs`. This is the race-free way for tests to
+// control the RTMP-stable gate: parallel workers that reset scenario
+// state cannot clobber a value another worker has pinned, because each
+// test sets this explicitly between assertions.
+let rtmpStableSecsOverride = null;
 
 function currentRtmpStableSecs() {
+  if (rtmpStableSecsOverride !== null) {
+    return rtmpStableSecsOverride;
+  }
   if (scenario === "rtmp-gate-tick") {
     if (rtmpTickStartMs === null) rtmpTickStartMs = Date.now();
     // Advance 15 simulated seconds per real second so the button
@@ -625,6 +635,7 @@ app.post("/api/v1/__reset", (_req, res) => {
   scenario = "default";
   rtmpStableSecs = 999;
   rtmpTickStartMs = null;
+  rtmpStableSecsOverride = null;
   auditIdCounter = 0;
   res.json({ reset: true });
 });
@@ -686,6 +697,23 @@ app.post("/api/v1/_test/scenario", (req, res) => {
     };
   }
   res.json({ scenario });
+});
+
+// Test-only: explicit override for `rtmp_stable_secs` returned by /status.
+// Takes precedence over the scenario's time-based tick. Pass `secs: null`
+// or omit the body to clear the override. This lets tests pin an exact
+// value for the RTMP-stable gate without racing against a shared ticker
+// that other parallel workers can reset by changing the scenario.
+//
+// Body: { secs: number | null }
+app.post("/api/v1/_test/set-rtmp-stable-secs", (req, res) => {
+  const { secs } = req.body || {};
+  if (secs === null || secs === undefined) {
+    rtmpStableSecsOverride = null;
+  } else {
+    rtmpStableSecsOverride = Number(secs);
+  }
+  res.json({ rtmp_stable_secs_override: rtmpStableSecsOverride });
 });
 
 // Audit row broadcaster used by operator action handlers below.
