@@ -6,4 +6,5 @@
 //! modules (api, endpoint_task, …); this library only exports the pieces
 //! that need to be shared.
 
+pub mod audit_ring;
 pub mod ffmpeg_reason;
