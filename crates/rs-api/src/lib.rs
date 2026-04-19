@@ -181,6 +181,9 @@ async fn delivery_broadcast_loop(
     // Track session start time for display in dashboard
     let mut session_start_time: Option<String> = None;
 
+    // Tick counter — persist metrics every 3rd tick (every 6s at a 2s poll).
+    let mut tick_counter: u64 = 0;
+
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -350,6 +353,44 @@ async fn delivery_broadcast_loop(
                         });
                     }
                     prev_alive.insert(ep.alias.clone(), ep.alive);
+                }
+
+                // Persist per-endpoint metrics every 3rd tick (~6s) and broadcast
+                // MetricsSample so dashboards can draw live time-series charts.
+                tick_counter = tick_counter.wrapping_add(1);
+                if tick_counter % 3 == 0 {
+                    let ts_ms = chrono::Utc::now().timestamp_millis();
+                    if let Ok(Some(inst)) =
+                        db::get_delivery_instance_by_event(&pool, event.id).await
+                    {
+                        for m in &final_endpoints {
+                            let _ = rs_core::db::metrics::insert(
+                                &pool,
+                                ts_ms,
+                                inst.id,
+                                event.id,
+                                &m.alias,
+                                m.alive,
+                                m.current_chunk_id,
+                                m.chunks_processed,
+                                m.chunk_delay_secs,
+                                m.bytes_processed_total,
+                                m.ffmpeg_restart_count as i64,
+                                m.delivery_mode.as_deref(),
+                            )
+                            .await;
+                            let _ = ws_tx.send(WsEvent::MetricsSample {
+                                ts_ms,
+                                event_id: event.id,
+                                instance_id: inst.id,
+                                alias: m.alias.clone(),
+                                chunk_delay_secs: m.chunk_delay_secs,
+                                current_chunk_id: m.current_chunk_id,
+                                chunks_processed: m.chunks_processed,
+                                alive: m.alive,
+                            });
+                        }
+                    }
                 }
             }
             Err(e) => {

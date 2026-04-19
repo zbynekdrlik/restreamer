@@ -23,6 +23,8 @@ pub use upload::{
 
 pub mod audit;
 
+pub mod metrics;
+
 #[cfg(test)]
 mod tests;
 
@@ -43,6 +45,9 @@ mod migration_tests;
 
 #[cfg(test)]
 mod audit_tests;
+
+#[cfg(test)]
+mod metrics_tests;
 
 /// Create a SQLite connection pool.
 pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
