@@ -13,7 +13,7 @@ mod v2;
 pub use v2::*;
 
 mod migrations;
-pub use migrations::{MAX_SCHEMA_VERSION, run_migrations};
+pub use migrations::{MAX_SCHEMA_VERSION, current_schema_version, run_migrations};
 
 pub mod upload;
 pub use upload::{

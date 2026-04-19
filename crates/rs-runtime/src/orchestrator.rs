@@ -98,24 +98,30 @@ impl ServiceCore {
     ) -> anyhow::Result<()> {
         let shutdown = ShutdownCoordinator::new();
 
-        // Database: use provided pool or create a new one
-        let pool = match self.provided_pool.take() {
+        // Database: use provided pool or create a new one. For audit
+        // purposes we capture the schema version before and after
+        // running migrations so a `MigrationsApplied` row (emitted below,
+        // once the audit channel exists) records the actual delta.
+        let (pool, migration_from, migration_to) = match self.provided_pool.take() {
             Some(pool) => {
                 info!("Using externally provided database pool");
-                pool
+                let v = db::current_schema_version(&pool).await.unwrap_or(0);
+                (pool, v, v)
             }
             None => {
                 let pool = db::create_pool(&self.db_path)
                     .await
                     .context("failed to create database pool")?;
+                let from_v = db::current_schema_version(&pool).await.unwrap_or(0);
                 db::run_migrations(&pool)
                     .await
                     .context("failed to run database migrations")?;
+                let to_v = db::current_schema_version(&pool).await.unwrap_or(from_v);
                 db::seed_templates_from_events(&pool)
                     .await
                     .context("failed to seed templates from events")?;
                 info!("Database initialized at {}", self.db_path.display());
-                pool
+                (pool, from_v, to_v)
             }
         };
 
@@ -315,6 +321,44 @@ impl ServiceCore {
             )
             .await;
         });
+
+        // Audit: system-source startup rows. Emitted once all components
+        // have spawned so MigrationsApplied / RestreamerStarted land AFTER
+        // any error-during-migration would have bailed out of this fn.
+        if migration_to > migration_from {
+            rs_core::audit::record(
+                &uploader_audit_tx,
+                rs_core::audit::AuditRow {
+                    severity: rs_core::audit::Severity::Info,
+                    source: rs_core::audit::Source::System,
+                    event_id: None,
+                    instance_id: None,
+                    endpoint: None,
+                    action: rs_core::audit::Action::MigrationsApplied,
+                    detail: serde_json::json!({
+                        "from_version": migration_from,
+                        "to_version": migration_to,
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
+        rs_core::audit::record(
+            &uploader_audit_tx,
+            rs_core::audit::AuditRow {
+                severity: rs_core::audit::Severity::Info,
+                source: rs_core::audit::Source::System,
+                event_id: None,
+                instance_id: None,
+                endpoint: None,
+                action: rs_core::audit::Action::RestreamerStarted,
+                detail: serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "db_path": self.db_path.display().to_string(),
+                }),
+                ts_override: None,
+            },
+        );
 
         // Wait for shutdown signal
         info!("All services started.");

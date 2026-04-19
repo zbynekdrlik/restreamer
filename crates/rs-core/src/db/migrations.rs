@@ -282,6 +282,21 @@ async fn migrate_v17(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
     Ok(())
 }
 
+/// Return the highest schema version recorded in `schema_version`, or 0
+/// if the table does not yet exist or is empty. Used by the runtime to
+/// emit a `MigrationsApplied` audit row with `from_version` + `to_version`.
+pub async fn current_schema_version(pool: &SqlitePool) -> Result<i32> {
+    // Create table if missing so the query below succeeds on a fresh DB.
+    sqlx::query("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
+        .execute(pool)
+        .await?;
+    let v: i32 = sqlx::query("SELECT COALESCE(MAX(version), 0) as v FROM schema_version")
+        .fetch_one(pool)
+        .await
+        .map(|r| r.get("v"))?;
+    Ok(v)
+}
+
 /// Run database migrations.
 ///
 /// Each migration is wrapped in its own transaction so a failure rolls
