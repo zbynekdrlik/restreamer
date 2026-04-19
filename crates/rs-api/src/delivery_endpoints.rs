@@ -27,8 +27,9 @@ pub enum StartPosition {
 
 /// Resolve a StartPosition into a concrete start_chunk_id for an event.
 ///
-/// For `Live` and `Beginning`, returns the first sequence number for the event.
-/// For `Resume`, passes through the chunk_id directly.
+/// - `Live`      → latest sequence number (track the current live edge)
+/// - `Beginning` → first sequence number (replay from event start)
+/// - `Resume`    → passes through the chunk_id directly
 pub async fn resolve_start_chunk_id(
     pool: &SqlitePool,
     event_id: i64,
@@ -43,10 +44,13 @@ pub async fn resolve_start_chunk_id(
             Ok(first)
         }
         StartPosition::Live => {
-            let first_seq = db::get_first_sequence_number_for_event(pool, event_id)
+            // "Live" means the current live edge — latest chunk. Starting from
+            // here makes the endpoint track real-time ingest. (Historically
+            // this was identical to Beginning; see 2026-04-19 post-mortem.)
+            let last_seq = db::get_latest_sequence_number_for_event(pool, event_id)
                 .await?
                 .unwrap_or(1);
-            Ok(first_seq)
+            Ok(last_seq)
         }
     }
 }

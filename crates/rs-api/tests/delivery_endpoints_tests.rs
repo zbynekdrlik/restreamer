@@ -91,3 +91,44 @@ async fn remove_endpoint_from_delivery_rejects_inactive_delivery() {
         "unexpected error message: {err}"
     );
 }
+
+#[tokio::test]
+async fn start_position_live_returns_latest_sequence_not_first() {
+    use rs_api::delivery_endpoints::{StartPosition, resolve_start_chunk_id};
+
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+    let event_id = db::create_streaming_event(&pool, "evt-live-test")
+        .await
+        .unwrap();
+
+    // Insert 10 chunks with sequence_number 1..=10 manually.
+    for seq in 1i64..=10 {
+        let _id: i64 = sqlx::query_scalar(
+            "INSERT INTO chunk_records (streaming_event_id, chunk_file_path, data_size, md5, sequence_number)
+             VALUES (?1, ?2, ?3, '', ?4) RETURNING id",
+        )
+        .bind(event_id)
+        .bind(format!("c{seq}.bin"))
+        .bind(1024_i64)
+        .bind(seq)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    }
+
+    let live = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live)
+        .await
+        .unwrap();
+    assert_eq!(
+        live, 10,
+        "Live must resolve to latest sequence (10), got {live}"
+    );
+
+    let beg = resolve_start_chunk_id(&pool, event_id, &StartPosition::Beginning)
+        .await
+        .unwrap();
+    assert_eq!(beg, 1, "Beginning must resolve to first sequence (1)");
+
+    assert_ne!(live, beg, "Live and Beginning must differ");
+}
