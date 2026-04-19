@@ -17,8 +17,9 @@ pub use migrations::{MAX_SCHEMA_VERSION, run_migrations};
 
 pub mod upload;
 pub use upload::{
-    list_recent_uploads, mark_upload_permanently_failed, pick_next_uploadable_chunk,
-    record_upload_attempt, record_upload_failure, record_upload_success, reset_orphaned_in_process,
+    list_recent_uploads, mark_chunk_in_process, mark_upload_permanently_failed,
+    pick_next_uploadable_chunk, pick_next_uploadable_chunks, record_upload_attempt,
+    record_upload_failure, record_upload_success, reset_orphaned_in_process,
 };
 
 pub mod audit;

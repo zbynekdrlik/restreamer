@@ -552,3 +552,75 @@ async fn two_clients_same_event_name_produce_disjoint_keys() {
         "two clients with same event name must have disjoint S3 keys"
     );
 }
+
+/// Stress test for the claim-coordinator pattern (#120 post-mortem).
+///
+/// Seeds the DB with 100 pending chunks, runs the uploader against a
+/// fast mock S3, and asserts:
+///   1. All 100 chunks become `sent=1` within the time budget.
+///   2. No "database is locked" log line was emitted — proves the single
+///      claim-coordinator replaces the old N-workers-race-SELECT pattern.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn claim_coordinator_handles_100_chunks_without_busy_errors() {
+    let s3_state = Arc::new(MockS3State::default());
+    let s3_url = start_mock_s3_server(s3_state.clone()).await;
+
+    let pool = setup_test_db().await;
+    db::upsert_streaming_event(&pool, "stress").await.unwrap();
+    let event = db::get_streaming_event(&pool).await.unwrap().unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+    for i in 1..=100i64 {
+        let path = create_test_chunk_file(
+            &temp_dir,
+            &format!("chunk_{i}.bin"),
+            format!("stress-data-{i}").as_bytes(),
+        );
+        db::insert_chunk(
+            &pool,
+            event.id,
+            path.to_str().unwrap(),
+            1024,
+            &format!("md5_{i}"),
+            0,
+        )
+        .await
+        .unwrap();
+    }
+
+    let s3 = S3Client::new(&create_s3_config(&s3_url)).unwrap();
+    let (ws_tx, _rx) = broadcast::channel::<WsEvent>(16);
+    let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx, "stress-uuid".to_string());
+
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+    let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let sent: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chunk_records WHERE sent = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        if sent == 100 {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("only {sent}/100 uploaded in 30s");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+
+    assert!(
+        !logs_contain("database is locked"),
+        "claim coordinator must not BUSY-thrash"
+    );
+    assert_eq!(
+        s3_state.upload_count.load(Ordering::SeqCst),
+        100,
+        "all 100 chunks should have reached S3"
+    );
+}
