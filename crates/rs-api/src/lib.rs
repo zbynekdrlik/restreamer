@@ -224,6 +224,14 @@ async fn delivery_broadcast_loop(
             session_start_time = Some(chrono::Utc::now().to_rfc3339());
         }
 
+        // Mirror VPS audit rows into the host audit_log. Best-effort —
+        // the VPS may be unreachable for reasons outside our control, and
+        // the next tick retries. No audit_tx channel wired through
+        // AppState yet (see Task 27); synchronous-insert fallback is used.
+        if let Ok(Some(inst)) = db::get_delivery_instance_by_event(&pool, event.id).await {
+            let _ = delivery::mirror_vps_audit(&pool, inst.id, None).await;
+        }
+
         match orch.poll_delivery_metrics(event.id).await {
             Ok((name, status, server_ip, _endpoint_count, endpoints)) => {
                 // Supplement empty endpoints with configured placeholders

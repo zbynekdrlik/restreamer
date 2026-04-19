@@ -69,7 +69,9 @@ impl OutputProcess for DyingMockProcess {
     }
 
     fn last_stderr_line(&self) -> Option<String> {
-        Some("destination closed".to_string())
+        // Must match a RemoteBrokenPipe trigger so the class-aware backoff
+        // picks the 30s * 2^n exponential ladder (not Unknown=15s flat).
+        Some("Error submitting a packet to the muxer: Broken pipe".to_string())
     }
 }
 
@@ -99,9 +101,12 @@ impl OutputProcessFactory for RecordingFactory {
 }
 
 fn backoff_test_ep_cfg() -> EndpointConfig {
+    // CUSTOM_RTMP + "Broken pipe" stderr classifies as RemoteBrokenPipe,
+    // which has the 30s * 2^n exponential reconnect floor. Unknown class
+    // would return a flat 15s floor and break exponential-growth tests.
     EndpointConfig {
         alias: "backoff-test".to_string(),
-        service_type: "TEST_FILE".to_string(),
+        service_type: "CUSTOM_RTMP".to_string(),
         stream_key: "test-key".to_string(),
         is_fast: false,
         chunk_format: "flv".to_string(),
@@ -152,10 +157,11 @@ async fn test_consumer_backs_off_exponentially_on_repeated_deaths() {
         .await;
     });
 
-    // Advance 120 seconds of mock time. With proper backoff (1+2+4+8+16+
-    // 32+60+60 = 183s, the 60s cap kicks in early), we should see ~7 spawns
-    // in 120s. Without backoff (current bug), we'd see ~120 spawns.
-    for _ in 0..1200 {
+    // Advance 600 seconds of mock time. With RemoteBrokenPipe backoff
+    // (30+60+120+240+300+300... capped at 300s), spawns occur at roughly
+    // t=0, 30, 90, 210, 450, 750 — so we expect ~5 spawns in 600s.
+    // Without backoff (the pre-fix bug), we'd see hundreds.
+    for _ in 0..6000 {
         tokio::time::advance(Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
     }
@@ -163,19 +169,19 @@ async fn test_consumer_backs_off_exponentially_on_repeated_deaths() {
     let total_spawns = spawn_count.load(Ordering::Relaxed);
     let times = spawn_times_ms.lock().unwrap().clone();
 
-    // Hard upper bound: with proper backoff, no more than 10 spawns in 120s.
-    // Without backoff, this fails dramatically (typically 60-120 spawns).
+    // Hard upper bound: with proper backoff, no more than 10 spawns in 600s.
+    // Without backoff, this fails dramatically (hundreds of spawns).
     assert!(
         total_spawns <= 10,
-        "Consumer made too many spawns in 120s: {total_spawns} (expected <= 10 with \
+        "Consumer made too many spawns in 600s: {total_spawns} (expected <= 10 with \
          exponential backoff). Spawn timestamps (ms): {times:?}"
     );
 
-    // Sanity: backoff is at least growing. Check the gap between the 2nd
-    // and 5th spawn is bigger than the gap between the 1st and 2nd.
-    if times.len() >= 5 {
+    // Sanity: backoff is growing. The gap between spawn 2->3 (60s floor)
+    // must be strictly larger than the gap between spawn 1->2 (30s floor).
+    if times.len() >= 3 {
         let early_gap = times[1].saturating_sub(times[0]);
-        let later_gap = times[4].saturating_sub(times[3]);
+        let later_gap = times[2].saturating_sub(times[1]);
         assert!(
             later_gap > early_gap,
             "Backoff is not growing: early gap {early_gap}ms, later gap {later_gap}ms. \
@@ -226,8 +232,9 @@ async fn test_restart_audit_log_records_each_death() {
         .await;
     });
 
-    // Run long enough to record several deaths.
-    for _ in 0..600 {
+    // Run long enough to record several deaths. RemoteBrokenPipe backoff
+    // grows 30 -> 60 -> 120, so 300s mock time yields ~3 records.
+    for _ in 0..3000 {
         tokio::time::advance(Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
     }
@@ -256,10 +263,11 @@ async fn test_restart_audit_log_records_each_death() {
         "restart record missing reason classification"
     );
 
-    // Backoff in the records should be growing (exponential).
+    // Backoff in the records should be growing strictly (exponential).
+    // RemoteBrokenPipe sequence: 30 -> 60 -> 120 -> 240 -> 300 (capped).
     if history.len() >= 3 {
         assert!(
-            history[2].backoff_secs >= history[0].backoff_secs,
+            history[2].backoff_secs > history[0].backoff_secs,
             "backoff is not growing across records: {:?}",
             history.iter().map(|r| r.backoff_secs).collect::<Vec<_>>()
         );
@@ -291,7 +299,9 @@ impl OutputProcess for WriteFailMockProcess {
     }
 
     fn last_stderr_line(&self) -> Option<String> {
-        Some("destination rejected".to_string())
+        // Must match a RemoteBrokenPipe trigger so the class-aware backoff
+        // applies the 30s * 2^n exponential ladder.
+        Some("Error submitting a packet to the muxer: Broken pipe".to_string())
     }
 }
 
@@ -358,10 +368,10 @@ async fn test_write_failure_records_audit_log_and_applies_backoff() {
         .await;
     });
 
-    // Run for 120s of mock time. With proper backoff (1+2+4+8+16+32+60),
-    // <=10 spawns should occur. Without the fix (instant respawn loop),
-    // hundreds.
-    for _ in 0..1200 {
+    // Run for 600s of mock time. With RemoteBrokenPipe backoff (30+60+
+    // 120+240+300...), <=10 spawns should occur. Without the fix (instant
+    // respawn loop), hundreds.
+    for _ in 0..6000 {
         tokio::time::advance(Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
     }
@@ -369,7 +379,7 @@ async fn test_write_failure_records_audit_log_and_applies_backoff() {
     let total_spawns = spawn_count.load(Ordering::Relaxed);
     assert!(
         total_spawns <= 15,
-        "Write-failure path is not applying backoff: {total_spawns} spawns in 120s \
+        "Write-failure path is not applying backoff: {total_spawns} spawns in 600s \
          (expected <= 15 with exponential backoff)"
     );
 
@@ -420,7 +430,10 @@ impl OutputProcess for LongLivedProcess {
     }
 
     fn last_stderr_line(&self) -> Option<String> {
-        Some("scheduled exit".to_string())
+        // Must match RemoteBrokenPipe so the per-class counter path is
+        // exercised and the reset-to-0-after-long-lived-session is
+        // observable via the 30s first-death backoff.
+        Some("Error submitting a packet to the muxer: Broken pipe".to_string())
     }
 }
 
@@ -449,14 +462,18 @@ impl OutputProcessFactory for LongLivedFactory {
 }
 
 /// When ffmpeg lives longer than LIFETIME_RESET_SECS (60s) before dying,
-/// the `consecutive_ffmpeg_deaths` counter is reset so a one-off death
-/// after hours of successful streaming does not trigger a 60s backoff
-/// penalty. This test verifies that reset by running a sequence:
+/// the per-class `consecutive_same_class` counter is reset so a one-off
+/// death after hours of successful streaming does not carry the backoff
+/// exponent from earlier deaths. This test verifies that reset by running
+/// a sequence of deaths after a long-lived session and asserting the
+/// first recorded backoff equals the class's initial floor (30s for
+/// RemoteBrokenPipe, i.e. consecutive=0 path).
 ///
 ///   process 1 lives 120s then dies (long-lived session)
-///   process 2 spawns immediately with backoff=1s (reset proved)
-///   process 2 dies fast
-///   process 3 spawns with backoff=2s (counter now at 1, not 2)
+///   process 2 spawns immediately; first death backoff = 30s
+///           (proves the counter reset after the long-lived session)
+///   process 2 dies fast → next backoff 60s
+///   process 3 dies fast → next backoff 120s, …
 #[tokio::test]
 async fn test_backoff_counter_resets_after_long_lived_session() {
     tokio::time::pause();
@@ -499,15 +516,14 @@ async fn test_backoff_counter_resets_after_long_lived_session() {
         .await;
     });
 
-    // Advance 200s of mock time. Timeline:
+    // Advance 300s of mock time. Timeline (RemoteBrokenPipe class):
     //   t=0   -> spawn 1, lives 120s
-    //   t=120 -> spawn 1 dies, consecutive_deaths reset to 0 because
-    //            lifetime >= 60s. Backoff is (1 << 0).min(60) = 1s.
-    //   t=121 -> spawn 2, dies instantly
-    //   t=122 -> backoff 2s applied (consecutive_deaths now 1)
-    //   t=124 -> spawn 3, dies instantly
-    //   ...continues with exponential backoff
-    for _ in 0..2000 {
+    //   t=120 -> spawn 1 dies; lifetime >= 60s so the per-class counter
+    //            resets to 0. Class floor at consecutive=0 is 30s.
+    //   t=150 -> spawn 2, dies instantly; next backoff 60s
+    //   t=210 -> spawn 3, dies instantly; next backoff 120s
+    //   t=330 -> spawn 4 (past our 300s window)
+    for _ in 0..3000 {
         tokio::time::advance(Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
     }
@@ -521,13 +537,13 @@ async fn test_backoff_counter_resets_after_long_lived_session() {
         "No restart records — long-lived process never died?"
     );
 
-    // First recorded backoff should be 1s because the counter reset to 0
-    // after the 120s long-lived process. Without the reset, the backoff
-    // sequence would carry the counter from earlier deaths (if any) and
-    // this assertion would catch a regression.
+    // First recorded backoff equals the class's first-death floor (30s
+    // for RemoteBrokenPipe) because the per-class counter reset after
+    // the 120s long-lived session. Without the reset, the counter would
+    // carry a higher exponent and this assertion would catch the regression.
     assert_eq!(
-        history[0].backoff_secs, 1,
-        "After a long-lived session (>= LIFETIME_RESET_SECS), the backoff \
+        history[0].backoff_secs, 30,
+        "After a long-lived session (>= LIFETIME_RESET_SECS), the class \
          counter must reset so the next death is treated as the first. \
          First record: {:?}",
         history[0]
