@@ -568,6 +568,114 @@ mod audit_tests {
 }
 
 #[cfg(test)]
+mod metrics_tests {
+    use crate::router::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::db;
+    use rs_core::models::WsEvent;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let config = Config::for_testing();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        AppState::new(pool, config, ws_tx)
+    }
+
+    async fn body_to_bytes(body: Body) -> Vec<u8> {
+        axum::body::to_bytes(body, 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_inserted_rows() {
+        let state = test_state().await;
+        let ts_ms = chrono::Utc::now().timestamp_millis();
+        rs_core::db::metrics::insert(
+            &state.pool,
+            ts_ms,
+            1,
+            1,
+            "yt1",
+            true,
+            10,
+            10,
+            5.5,
+            1000,
+            0,
+            Some("normal"),
+        )
+        .await
+        .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/metrics?event_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = json["rows"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        assert_eq!(rows[0]["alias"], "yt1");
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_filters_by_alias() {
+        let state = test_state().await;
+        let ts_ms = chrono::Utc::now().timestamp_millis();
+        for alias in &["yt1", "yt2"] {
+            rs_core::db::metrics::insert(
+                &state.pool,
+                ts_ms,
+                1,
+                1,
+                alias,
+                true,
+                10,
+                10,
+                5.0,
+                1000,
+                0,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/metrics?event_id=1&alias=yt1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = json["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["alias"], "yt1");
+    }
+}
+
+#[cfg(test)]
 mod rtmp_stable_gate_tests {
     use crate::delivery_handlers::RTMP_STABLE_REQUIRED_SECS;
     use crate::router::build_router;

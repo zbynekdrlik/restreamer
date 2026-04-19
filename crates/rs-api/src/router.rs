@@ -157,6 +157,7 @@ pub fn build_router(state: AppState) -> Router {
             "/delivery/endpoints/remove",
             post(delivery_handlers::delivery_remove_endpoint),
         )
+        .route("/delivery/metrics", get(crate::metrics_handlers::list))
         // OBS WebSocket
         .route("/obs/status", get(handlers::obs_status))
         .route("/obs/start-stream", post(handlers::obs_start_stream))
