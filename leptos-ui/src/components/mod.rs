@@ -1,5 +1,6 @@
 //! UI components for the Restreamer dashboard.
 
+pub mod audit_panel;
 mod confirm_modal;
 mod endpoints;
 mod header;

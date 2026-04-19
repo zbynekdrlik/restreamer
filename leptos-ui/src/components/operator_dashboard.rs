@@ -4,6 +4,7 @@ use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use super::audit_panel::AuditPanel;
 use super::confirm_modal::ConfirmModal;
 use crate::api;
 use crate::store::DashboardStore;
@@ -17,8 +18,15 @@ pub fn OperatorDashboard() -> impl IntoView {
 
     view! {
         <div class="operator-dashboard">
-            <ControlBar />
-            <Pipeline />
+            <div class="operator-dashboard__layout">
+                <div class="operator-dashboard__main">
+                    <ControlBar />
+                    <Pipeline />
+                </div>
+                <aside class="operator-dashboard__sidebar">
+                    <AuditPanel />
+                </aside>
+            </div>
             <AddEndpointModal show=show_add_modal />
         </div>
     }
