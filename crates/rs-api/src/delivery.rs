@@ -61,6 +61,87 @@ pub struct EndpointRestartRecord {
     pub reason: String,
     pub stderr_tail: Option<String>,
     pub backoff_secs: u64,
+    /// Extracted last error-looking line from `stderr_tail`. Populated only
+    /// when the record is sourced from the local DB (post-mortem path) to
+    /// spare the dashboard from re-parsing stderr every render.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_last_error_line: Option<String>,
+}
+
+/// Mirror of `rs_delivery::ffmpeg_reason::pick_last_error_line` to avoid a
+/// cross-crate dependency cycle. Keep logic identical.
+pub(crate) fn pick_last_error_line_inline(stderr_tail: &str) -> Option<String> {
+    stderr_tail
+        .lines()
+        .rev()
+        .filter(|l| {
+            let l = l.trim();
+            !l.is_empty()
+                && !l.starts_with("size=")
+                && !l.starts_with("frame=")
+                && !l.starts_with("ffmpeg version ")
+                && !l.starts_with("  built with ")
+                && !l.starts_with("  configuration: ")
+                && !l.starts_with("  lib")
+        })
+        .find(|l| {
+            let l = l.to_ascii_lowercase();
+            l.contains("error")
+                || l.contains("broken pipe")
+                || l.contains("fatal")
+                || l.contains("invalid")
+                || l.contains("failed")
+                || l.contains("timeout")
+        })
+        .map(|s| s.trim().to_string())
+}
+
+/// Load the most recent `limit` restart records for an endpoint from the
+/// local `delivery_restart_log` table. Newest row first. The DB is the
+/// durable source of truth for post-mortem analysis — the VPS may be
+/// unreachable or rebuilt, but the host keeps the history.
+pub(crate) async fn load_restart_history_from_db(
+    pool: &sqlx::SqlitePool,
+    instance_id: i64,
+    alias: &str,
+    limit: i64,
+) -> Vec<EndpointRestartRecord> {
+    use sqlx::Row;
+    let rows = match sqlx::query(
+        "SELECT timestamp_ms, chunk_id, lifetime_secs, reason, backoff_secs, stderr_tail
+         FROM delivery_restart_log
+         WHERE instance_id = ?1 AND alias = ?2
+         ORDER BY timestamp_ms DESC
+         LIMIT ?3",
+    )
+    .bind(instance_id)
+    .bind(alias)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!("Failed to load restart history from DB: {e}");
+            return Vec::new();
+        }
+    };
+    rows.into_iter()
+        .map(|row| {
+            let stderr_tail: Option<String> = row.try_get("stderr_tail").ok().flatten();
+            let stderr_last_error_line =
+                stderr_tail.as_deref().and_then(pick_last_error_line_inline);
+            EndpointRestartRecord {
+                timestamp_ms: row.get("timestamp_ms"),
+                chunk_id: row.get("chunk_id"),
+                lifetime_secs: row.get::<i64, _>("lifetime_secs") as u64,
+                reason: row.get("reason"),
+                stderr_tail,
+                backoff_secs: row.get::<i64, _>("backoff_secs") as u64,
+                stderr_last_error_line,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -563,7 +644,7 @@ impl DeliveryOrchestrator {
                             let delivery_mode =
                                 entry["delivery_mode"].as_str().map(|s| s.to_string());
                             let rescue_eta_secs = entry["rescue_eta_secs"].as_u64();
-                            let restart_history: Vec<EndpointRestartRecord> =
+                            let restart_history_from_vps: Vec<EndpointRestartRecord> =
                                 entry["restart_history"]
                                     .as_array()
                                     .map(|arr| {
@@ -580,7 +661,7 @@ impl DeliveryOrchestrator {
 
                             // Persist restart records to DB for post-mortem analysis.
                             // The dedup INSERT ignores records already saved from previous polls.
-                            for record in &restart_history {
+                            for record in &restart_history_from_vps {
                                 if let Err(e) = db::insert_delivery_restart_record(
                                     &self.pool,
                                     inst.id,
@@ -598,6 +679,13 @@ impl DeliveryOrchestrator {
                                     warn!("Failed to persist restart record: {e}");
                                 }
                             }
+
+                            // Source restart_history from the DB (durable local store)
+                            // rather than the VPS response. The VPS can be rebuilt or
+                            // unreachable, but the host keeps every record we've ever
+                            // ingested. This is the post-mortem-grade source of truth.
+                            let restart_history =
+                                load_restart_history_from_db(&self.pool, inst.id, &alias, 10).await;
 
                             // Compute cache delay using actual content duration from DB
                             let target_secs = self.config.delivery.delivery_delay_secs as f64;
