@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 17;
+pub const MAX_SCHEMA_VERSION: i32 = 19;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -318,6 +318,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             15 => migrate_v15(&mut tx).await?,
             16 => execute_sql_statements(&mut tx, MIGRATION_V16_SQL).await?,
             17 => migrate_v17(&mut tx).await?,
+            18 => execute_sql_statements(&mut tx, MIGRATION_V18_SQL).await?,
+            19 => migrate_v19(&mut tx).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -544,3 +546,53 @@ FROM delivery_instances;
 DROP TABLE delivery_instances;
 ALTER TABLE delivery_instances_v16 RENAME TO delivery_instances
 "#;
+
+const MIGRATION_V18_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    severity    TEXT    NOT NULL,
+    source      TEXT    NOT NULL,
+    event_id    INTEGER,
+    instance_id INTEGER,
+    endpoint    TEXT,
+    action      TEXT    NOT NULL,
+    detail      TEXT    NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts    ON audit_log(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_event ON audit_log(event_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_sev   ON audit_log(severity, ts DESC);
+"#;
+
+const MIGRATION_V19_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS delivery_endpoint_metrics (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms                 INTEGER NOT NULL,
+    instance_id           INTEGER NOT NULL,
+    event_id              INTEGER NOT NULL,
+    alias                 TEXT    NOT NULL,
+    alive                 INTEGER NOT NULL,
+    current_chunk_id      INTEGER NOT NULL,
+    chunks_processed      INTEGER NOT NULL,
+    chunk_delay_secs      REAL    NOT NULL,
+    bytes_processed_total INTEGER NOT NULL,
+    ffmpeg_restart_count  INTEGER NOT NULL,
+    delivery_mode         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_dem_event_alias
+    ON delivery_endpoint_metrics(event_id, alias, ts_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_dem_ts
+    ON delivery_endpoint_metrics(ts_ms DESC);
+"#;
+
+async fn migrate_v19(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    execute_sql_statements(tx, MIGRATION_V19_SQL).await?;
+    add_column_if_missing(
+        tx,
+        "delivery_instances",
+        "last_audit_cursor",
+        "last_audit_cursor INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    Ok(())
+}
