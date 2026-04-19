@@ -78,6 +78,7 @@ pub fn reconnect_floor(class: ReasonClass, consecutive: u32) -> Duration {
 /// Pick a single display-worthy line from stderr tail.
 /// Skips progress lines (size=…, frame=…) and banner lines.
 /// Returns the last line containing error-like keywords.
+#[allow(dead_code)]
 pub fn pick_last_error_line(stderr_tail: &str) -> Option<String> {
     stderr_tail
         .lines()

@@ -29,14 +29,10 @@ pub fn EndpointRemoveConfirmModal(
     let match_ok =
         Memo::new(move |_| typed.get() == event_name.get() && !event_name.get().is_empty());
 
-    let on_cancel_click = {
-        let on_cancel = on_cancel.clone();
-        move |_| on_cancel()
-    };
-    let on_confirm_click = {
-        let on_confirm = on_confirm.clone();
-        move |_| on_confirm()
-    };
+    // Store callbacks so the `<Show>` children closure (which must be Fn,
+    // not FnOnce) can re-capture them without moving the original.
+    let on_cancel_stored = StoredValue::new(on_cancel);
+    let on_confirm_stored = StoredValue::new(on_confirm);
 
     view! {
         <Show when=move || visible.get()>
@@ -60,11 +56,11 @@ pub fn EndpointRemoveConfirmModal(
                         on:input=move |ev| set_typed.set(event_target_value(&ev))
                     />
                     <div class="endpoint-remove-modal__actions">
-                        <button on:click=on_cancel_click>"Cancel"</button>
+                        <button on:click=move |_| on_cancel_stored.with_value(|f| f())>"Cancel"</button>
                         <button
                             class="confirm-btn-danger"
                             prop:disabled=move || !match_ok.get()
-                            on:click=on_confirm_click
+                            on:click=move |_| on_confirm_stored.with_value(|f| f())
                         >
                             "Remove anyway"
                         </button>

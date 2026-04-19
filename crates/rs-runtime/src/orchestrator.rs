@@ -328,6 +328,7 @@ impl ServiceCore {
         let endpoint_pool = pool.clone();
         let endpoint_ws_tx = ws_tx.clone();
         let endpoint_client_uuid = self.config.client_uuid.clone();
+        let endpoint_audit_tx = uploader_audit_tx.clone();
         let endpoint_task = tokio::spawn(async move {
             run_endpoint_loop(
                 endpoint_pool,
@@ -338,7 +339,7 @@ impl ServiceCore {
                 s3_upload_blocked,
                 upload_metrics,
                 endpoint_client_uuid,
-                uploader_audit_tx,
+                endpoint_audit_tx,
             )
             .await;
         });

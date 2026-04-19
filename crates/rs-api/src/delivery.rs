@@ -109,6 +109,7 @@ impl DeliveryOrchestrator {
     }
 
     /// Access the audit sender for internal emit helpers.
+    #[allow(dead_code)]
     pub(crate) fn audit_tx(&self) -> Option<&mpsc::Sender<AuditRow>> {
         self.audit_tx.as_ref()
     }
