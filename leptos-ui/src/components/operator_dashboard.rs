@@ -6,6 +6,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use super::audit_panel::AuditPanel;
 use super::confirm_modal::ConfirmModal;
+use super::endpoint_history::EndpointHistory;
 use super::endpoint_remove_confirm_modal::EndpointRemoveConfirmModal;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
@@ -594,6 +595,12 @@ fn EndpointTree() -> impl IntoView {
                     };
                     let remove_alias = alias.clone();
                     let ep_alias_key = alias.clone();
+                    // Per-card toggle for the EndpointHistory sparkline.
+                    let show_history = RwSignal::new(false);
+                    let history_alias_signal: Signal<String> = Signal::derive({
+                        let ep_alias_key = ep_alias_key.clone();
+                        move || ep_alias_key.clone()
+                    });
 
                     // Derive per-endpoint reactive data from the delivery signal
                     let ep_data = Memo::new(move |_| {
@@ -817,6 +824,16 @@ fn EndpointTree() -> impl IntoView {
                                         </div>
                                     })
                                 }}
+                                <button
+                                    class="btn-endpoint-history"
+                                    title="Toggle chunk_delay history"
+                                    on:click=move |_| show_history.update(|v| *v = !*v)
+                                >
+                                    "History"
+                                </button>
+                                <Show when=move || show_history.get()>
+                                    <EndpointHistory alias=history_alias_signal />
+                                </Show>
                             </div>
                         </div>
                     }

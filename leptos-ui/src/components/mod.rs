@@ -2,6 +2,7 @@
 
 pub mod audit_panel;
 mod confirm_modal;
+pub mod endpoint_history;
 pub mod endpoint_remove_confirm_modal;
 mod endpoints;
 mod header;
