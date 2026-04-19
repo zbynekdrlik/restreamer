@@ -58,11 +58,16 @@ fn ControlBar() -> impl IntoView {
 
     // Poll /status every 2s so rtmp_stable_secs updates even when the
     // WebSocket only emits InpointStatus on byte-count ticks.
+    //
+    // Only `rtmp_stable_secs` is pulled from the poll. `inpoint_connected`
+    // stays WebSocket-authoritative — the InpointStatus event on the WS is
+    // the single source of truth for the RTMP connection indicator, so
+    // overwriting it here would cause the pipeline display to flip back to
+    // "connected" within a poll cycle after a disconnect event.
     let _status_poll = Interval::new(2_000, move || {
         spawn_local(async move {
             if let Ok(s) = api::get_status().await {
                 store.rtmp_stable_secs.set(s.rtmp_stable_secs);
-                store.inpoint_connected.set(s.inpoint_connected);
             }
         });
     });

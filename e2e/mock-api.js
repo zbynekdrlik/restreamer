@@ -38,11 +38,27 @@ function currentRtmpStableSecs() {
 }
 
 function buildStatusResponse() {
+  // The DEFAULT scenario simulates an IDLE dashboard (no RTMP connection,
+  // no streaming event active) so the pipeline tests for "Disconnected" /
+  // "RTMP Idle" / gray dots pass. Non-default scenarios opt into an active
+  // RTMP stream by setting `scenario` via /api/v1/_test/scenario.
+  //
+  // `rtmp_stable_secs` is kept at its non-zero default (999s) even when
+  // `rtmp_connected` is false so legacy tests that click `.start-btn`
+  // without a WebSocket broadcast still pass the RTMP-stable gate. The
+  // backend would never return this combination, but the Start button's
+  // gate only reads `rtmp_stable_secs`, not `rtmp_connected`, so this
+  // "loose" mock keeps pre-gate tests green without forcing every
+  // `.start-btn` test to first broadcast an InpointStatus event.
+  const rtmpActive =
+    scenario === "zero-endpoints" ||
+    scenario === "last-endpoint" ||
+    scenario === "rtmp-gate-tick";
   return {
     inpoint: {
-      state: "connected",
+      state: rtmpActive ? "connected" : "idle",
       details: {
-        rtmp_connected: true,
+        rtmp_connected: rtmpActive,
         rtmp_stable_secs: currentRtmpStableSecs(),
       },
     },
