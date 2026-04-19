@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
 use rs_api::state::AppState;
+use rs_core::audit::AuditRow;
 use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
@@ -152,6 +153,12 @@ impl ServiceCore {
             .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked))
             .with_upload_metrics(Arc::clone(&upload_metrics));
 
+        // Share the AppState's audit_tx with downstream components so they
+        // feed into the same audit pipeline (real writer wiring lands in
+        // Task 27; until then the receiver is dropped and rows are lost,
+        // which is acceptable for the throwaway-channel default).
+        let uploader_audit_tx = api_state.audit_tx.clone();
+
         // Serve the WASM frontend from a "www" directory next to the binary,
         // so LAN browsers can access the dashboard at http://<host>:8910/
         if let Ok(exe) = std::env::current_exe() {
@@ -276,6 +283,7 @@ impl ServiceCore {
                 s3_upload_blocked,
                 upload_metrics,
                 endpoint_client_uuid,
+                uploader_audit_tx,
             )
             .await;
         });
@@ -450,6 +458,7 @@ async fn run_endpoint_loop(
     s3_upload_blocked: Arc<std::sync::atomic::AtomicBool>,
     upload_metrics: Arc<UploadMetrics>,
     client_uuid: String,
+    audit_tx: mpsc::Sender<AuditRow>,
 ) {
     loop {
         let s3 = match S3Client::new(&s3_config) {
@@ -465,7 +474,8 @@ async fn run_endpoint_loop(
 
         let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx.clone(), client_uuid.clone())
             .with_upload_blocked(Arc::clone(&s3_upload_blocked))
-            .with_metrics(Arc::clone(&upload_metrics));
+            .with_metrics(Arc::clone(&upload_metrics))
+            .with_audit_tx(audit_tx.clone());
         let mut handle = tokio::spawn(async move { uploader.run(component_rx).await });
 
         info!("Endpoint uploader started");

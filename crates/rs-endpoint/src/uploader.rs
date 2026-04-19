@@ -7,11 +7,42 @@ use sqlx::SqlitePool;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing::{debug, error, warn};
 
+use rs_core::audit::{Action, AuditRow, RateLimiter, Severity, Source};
 use rs_core::db;
 use rs_core::models::{ChunkRecord, WsEvent};
 
 use crate::metrics::{UploadEvent, UploadMetrics};
 use crate::s3::S3Client;
+
+/// Process-wide rate limiter for uploader audit rows. Emits at most one
+/// row per minute per (Action, error_class) key so a sustained outage
+/// doesn't swamp `audit_log`. See `rs_core::audit::RateLimiter`.
+static UPLOAD_RL: std::sync::LazyLock<RateLimiter> = std::sync::LazyLock::new(RateLimiter::new);
+
+/// Bucket the free-text upload error into a small set of durable classes
+/// so the rate-limiter has a stable key (and the audit row has an
+/// at-a-glance category).
+fn classify_upload_error(msg: &str) -> &'static str {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("timeout") || m.contains("timed out") {
+        "timeout"
+    } else if m.contains(" 403") || m.contains("forbidden") {
+        "403"
+    } else if m.contains(" 404") || m.contains("not found") {
+        "404"
+    } else if m.contains(" 500")
+        || m.contains(" 502")
+        || m.contains(" 503")
+        || m.contains(" 504")
+        || m.contains("5xx")
+    {
+        "5xx"
+    } else if m.contains("connection") || m.contains("reset") || m.contains("refused") {
+        "conn"
+    } else {
+        "other"
+    }
+}
 
 /// One unit of work dispatched from the claim-coordinator to a worker.
 #[derive(Debug)]
@@ -35,6 +66,9 @@ struct WorkerCtx {
     /// collisions when multiple Restreamer installations share one S3 bucket.
     /// See issue #114.
     client_uuid: String,
+    /// Optional audit channel. `None` in tests; set via
+    /// `ChunkUploader::with_audit_tx`.
+    audit_tx: Option<mpsc::Sender<AuditRow>>,
 }
 
 /// Pure gate: should the spawner spawn another worker?
@@ -108,6 +142,9 @@ pub struct ChunkUploader {
     drain_needed: Arc<AtomicUsize>,
     /// Per-installation UUID used to prefix S3 chunk keys (#114).
     client_uuid: String,
+    /// Audit channel — `None` means no audit rows are emitted from the
+    /// uploader (default; tests).
+    audit_tx: Option<mpsc::Sender<AuditRow>>,
 }
 
 impl ChunkUploader {
@@ -126,6 +163,7 @@ impl ChunkUploader {
             in_flight: Arc::new(AtomicUsize::new(0)),
             drain_needed: Arc::new(AtomicUsize::new(0)),
             client_uuid,
+            audit_tx: None,
         }
     }
 
@@ -138,6 +176,13 @@ impl ChunkUploader {
     /// Replace the default internal metrics with a shared instance.
     pub fn with_metrics(mut self, m: Arc<UploadMetrics>) -> Self {
         self.metrics = m;
+        self
+    }
+
+    /// Attach an audit channel. Rate-limited S3UploadFailed rows will be
+    /// emitted when a chunk upload fails.
+    pub fn with_audit_tx(mut self, tx: mpsc::Sender<AuditRow>) -> Self {
+        self.audit_tx = Some(tx);
         self
     }
 
@@ -281,6 +326,7 @@ impl ChunkUploader {
             blocked: Arc::clone(&self.upload_blocked),
             drain_needed: Arc::clone(&drain_needed),
             client_uuid: self.client_uuid.clone(),
+            audit_tx: self.audit_tx.clone(),
         };
         let mut worker_id_counter: usize = 0;
         let mut rx = target_rx.clone();
@@ -462,6 +508,7 @@ async fn upload_one(ctx: &WorkerCtx, job: ChunkJob) {
             let _ = ws_tx.send(WsEvent::ChunkUploaded { chunk_id: chunk.id });
         }
         Err(e) => {
+            let err_msg = e.to_string();
             let wall_clock_ms = chrono::Utc::now().timestamp_millis()
                 - chunk.upload_first_attempt_at.unwrap_or(now_ms);
             let permanent = attempt >= MAX_ATTEMPTS || wall_clock_ms >= MAX_WALL_CLOCK_MS;
@@ -473,7 +520,7 @@ async fn upload_one(ctx: &WorkerCtx, job: ChunkJob) {
                 let _ = db::record_upload_failure(
                     pool,
                     chunk.id,
-                    &e.to_string(),
+                    &err_msg,
                     next_retry,
                     duration.as_millis() as i64,
                 )
@@ -481,7 +528,7 @@ async fn upload_one(ctx: &WorkerCtx, job: ChunkJob) {
             }
             let _ = ws_tx.send(WsEvent::ChunkUploadFailed {
                 chunk_id: chunk.id,
-                error: e.to_string(),
+                error: err_msg.clone(),
                 permanent,
             });
             metrics.record(UploadEvent {
@@ -489,6 +536,39 @@ async fn upload_one(ctx: &WorkerCtx, job: ChunkJob) {
                 duration_ms: duration.as_millis() as u32,
                 success: false,
             });
+
+            // Audit: rate-limited S3UploadFailed keyed on error_class so a
+            // long outage doesn't flood audit_log (1 row/min per class).
+            // Permanent failures always emit (bypass rate limit) because
+            // they are terminal for the chunk and worth surfacing.
+            if let Some(tx) = &ctx.audit_tx {
+                let class = classify_upload_error(&err_msg);
+                if permanent || UPLOAD_RL.allow(Action::S3UploadFailed, class) {
+                    rs_core::audit::record(
+                        tx,
+                        AuditRow {
+                            severity: if permanent {
+                                Severity::Error
+                            } else {
+                                Severity::Warn
+                            },
+                            source: Source::Uploader,
+                            event_id: Some(chunk.streaming_event_id),
+                            instance_id: None,
+                            endpoint: None,
+                            action: Action::S3UploadFailed,
+                            detail: serde_json::json!({
+                                "chunk_id": chunk.id,
+                                "error_class": class,
+                                "error_msg": err_msg,
+                                "permanent": permanent,
+                                "attempt": attempt,
+                            }),
+                            ts_override: None,
+                        },
+                    );
+                }
+            }
         }
     }
 }
