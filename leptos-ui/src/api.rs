@@ -62,6 +62,11 @@ pub struct StatusResponse {
     pub streaming_event: Option<StreamingEvent>,
     pub chunk_stats: ChunkStats,
     pub inpoint_connected: bool,
+    /// Seconds the RTMP publisher has been stably connected. Used by the
+    /// dashboard to gate Start-Delivery until the ingest has been up for
+    /// at least 15 seconds.
+    #[serde(default)]
+    pub rtmp_stable_secs: u64,
 }
 
 /// Log entry from the backend.
@@ -104,10 +109,14 @@ pub async fn get_status() -> Result<StatusResponse, String> {
     let inpoint_connected = status["inpoint"]["details"]["rtmp_connected"]
         .as_bool()
         .unwrap_or(false);
+    let rtmp_stable_secs = status["inpoint"]["details"]["rtmp_stable_secs"]
+        .as_u64()
+        .unwrap_or(0);
     Ok(StatusResponse {
         streaming_event: event,
         chunk_stats,
         inpoint_connected,
+        rtmp_stable_secs,
     })
 }
 

@@ -12,6 +12,13 @@ use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
 use crate::store::DashboardStore;
 
+/// Minimum seconds the RTMP publisher must be connected before the
+/// operator can start delivery. Mirrors
+/// `rs_api::delivery_handlers::RTMP_STABLE_REQUIRED_SECS` but kept as a
+/// client-side constant because the WASM target cannot depend on
+/// `rs-api`.
+const RTMP_STABLE_REQUIRED_SECS: u64 = 15;
+
 /// Main operator dashboard view.
 #[component]
 pub fn OperatorDashboard() -> impl IntoView {
@@ -46,6 +53,18 @@ fn ControlBar() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let loading = RwSignal::new(false);
     let show_stop_confirm = RwSignal::new(false);
+
+    // Poll /status every 2s so rtmp_stable_secs updates even when the
+    // WebSocket only emits InpointStatus on byte-count ticks.
+    let _status_poll = Interval::new(2_000, move || {
+        spawn_local(async move {
+            if let Ok(s) = api::get_status().await {
+                store.rtmp_stable_secs.set(s.rtmp_stable_secs);
+                store.inpoint_connected.set(s.inpoint_connected);
+            }
+        });
+    });
+    std::mem::forget(_status_poll);
 
     let pipeline_state = move || store.pipeline_state.get().state.clone();
     let is_active = move || {
@@ -184,7 +203,22 @@ fn ControlBar() -> impl IntoView {
                 <button
                     class="start-btn"
                     on:click=on_start
-                    disabled=move || loading.get() || store.selected_event_id.get().is_none() || is_active()
+                    disabled=move || {
+                        loading.get()
+                            || store.selected_event_id.get().is_none()
+                            || is_active()
+                            || store.rtmp_stable_secs.get() < RTMP_STABLE_REQUIRED_SECS
+                    }
+                    title=move || {
+                        let stable = store.rtmp_stable_secs.get();
+                        if stable < RTMP_STABLE_REQUIRED_SECS {
+                            format!(
+                                "Waiting for OBS stream to stabilize ({stable}/{RTMP_STABLE_REQUIRED_SECS}s)"
+                            )
+                        } else {
+                            "Start delivering".to_string()
+                        }
+                    }
                 >
                     "Start Delivering"
                 </button>

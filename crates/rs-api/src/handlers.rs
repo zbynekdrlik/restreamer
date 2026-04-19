@@ -29,13 +29,26 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
     })?;
 
     let rtmp_connected = state.inpoint_state.is_connected();
+    // Compute how long the RTMP publisher has been "stable". Used by the
+    // dashboard to gate the Start-Delivering button until the ingest has
+    // been up for `RTMP_STABLE_REQUIRED_SECS` (15s). Zero when no
+    // publisher is connected.
+    let rtmp_stable_secs = state
+        .rtmp_stable_since
+        .lock()
+        .await
+        .map(|t| t.elapsed().as_secs())
+        .unwrap_or(0);
     let inpoint = ComponentStatus {
         state: if rtmp_connected {
             "connected".into()
         } else {
             "disconnected".into()
         },
-        details: serde_json::json!({ "rtmp_connected": rtmp_connected }),
+        details: serde_json::json!({
+            "rtmp_connected": rtmp_connected,
+            "rtmp_stable_secs": rtmp_stable_secs,
+        }),
     };
 
     Ok(Json(ServiceStatus {
