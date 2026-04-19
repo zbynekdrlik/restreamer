@@ -159,6 +159,17 @@ impl ServiceCore {
         // which is acceptable for the throwaway-channel default).
         let uploader_audit_tx = api_state.audit_tx.clone();
 
+        // Re-wire the inpoint_state so the MediaReceiver can write the
+        // shared `rtmp_stable_since` cell read by `POST /delivery/start`,
+        // and emit RtmpConnected/Disconnected audit rows.
+        let wired_inpoint = api_state
+            .inpoint_state
+            .clone()
+            .with_audit_tx(api_state.audit_tx.clone())
+            .with_stable_since(Arc::clone(&api_state.rtmp_stable_since));
+        api_state = api_state.with_inpoint_state(wired_inpoint.clone());
+        let inpoint_state = wired_inpoint;
+
         // Serve the WASM frontend from a "www" directory next to the binary,
         // so LAN browsers can access the dashboard at http://<host>:8910/
         if let Ok(exe) = std::env::current_exe() {
