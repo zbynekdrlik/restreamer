@@ -1,5 +1,6 @@
 //! UI components for the Restreamer dashboard.
 
+pub mod add_endpoint_modal;
 pub mod audit_panel;
 mod confirm_modal;
 pub mod endpoint_history;
@@ -9,6 +10,7 @@ mod header;
 mod operator_dashboard;
 mod settings;
 mod templates;
+pub mod upload_strip;
 mod uploads;
 pub mod zero_endpoint_banner;
 

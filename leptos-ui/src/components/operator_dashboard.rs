@@ -4,10 +4,12 @@ use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use super::add_endpoint_modal::AddEndpointModal;
 use super::audit_panel::AuditPanel;
 use super::confirm_modal::ConfirmModal;
 use super::endpoint_history::EndpointHistory;
 use super::endpoint_remove_confirm_modal::EndpointRemoveConfirmModal;
+use super::upload_strip::UploadStrip;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
 use crate::store::DashboardStore;
@@ -898,169 +900,6 @@ fn EndpointTree() -> impl IntoView {
                 on_cancel=on_last_cancel
                 on_confirm=on_last_confirm
             />
-        </div>
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AddEndpointModal — mounted at dashboard root, immune to endpoint tree re-renders
-// ---------------------------------------------------------------------------
-
-#[component]
-fn AddEndpointModal(show: RwSignal<bool>) -> impl IntoView {
-    let store = use_context::<DashboardStore>().expect("DashboardStore");
-    let selected_ep_id = RwSignal::new(Option::<i64>::None);
-    let start_position = RwSignal::new("Live".to_string());
-    let available_eps = RwSignal::new(Vec::<(i64, String, String)>::new());
-
-    // Snapshot available endpoints when modal opens (non-reactive)
-    Effect::new(move |_| {
-        if show.get() {
-            let all = store.endpoints_list.get_untracked();
-            let active_aliases: Vec<String> = store
-                .delivery
-                .get_untracked()
-                .endpoints
-                .iter()
-                .map(|e| e.alias.clone())
-                .collect();
-            let opts: Vec<(i64, String, String)> = all
-                .iter()
-                .filter(|ep| !active_aliases.contains(&ep.alias))
-                .map(|ep| (ep.id, ep.alias.clone(), ep.service_type.clone()))
-                .collect();
-            available_eps.set(opts);
-            selected_ep_id.set(None);
-            start_position.set("Live".to_string());
-        }
-    });
-
-    let on_add = move |_| {
-        if let Some(ep_id) = selected_ep_id.get() {
-            let pos = start_position.get();
-            if let Some(event_id) = store.selected_event_id.get() {
-                spawn_local(async move {
-                    let _ = api::delivery_add_endpoint(event_id, ep_id, &pos).await;
-                });
-            }
-            show.set(false);
-        }
-    };
-
-    let on_cancel = move |_| {
-        show.set(false);
-    };
-
-    let on_overlay_click = move |_| {
-        show.set(false);
-    };
-
-    view! {
-        <Show when=move || show.get() fallback=|| ()>
-            <div class="modal-overlay" on:click=on_overlay_click>
-                <div class="add-endpoint-modal" on:click=move |ev| ev.stop_propagation()>
-                    <h3>"Add Endpoint"</h3>
-                    <div class="modal-endpoint-list">
-                        {move || {
-                            available_eps.get().iter().map(|(id, alias, stype)| {
-                                let ep_id = *id;
-                                let is_selected = move || selected_ep_id.get() == Some(ep_id);
-                                let alias = alias.clone();
-                                let stype = stype.clone();
-                                view! {
-                                    <div
-                                        class="modal-endpoint-row"
-                                        class:selected=is_selected
-                                        on:click=move |_| selected_ep_id.set(Some(ep_id))
-                                    >
-                                        <span class="modal-ep-alias">{alias}</span>
-                                        <span class="modal-ep-type">{stype}</span>
-                                    </div>
-                                }
-                            }).collect::<Vec<_>>()
-                        }}
-                    </div>
-                    <div class="modal-position">
-                        <label>"Start position:"</label>
-                        <select
-                            class="start-position-select"
-                            on:change=move |ev| start_position.set(event_target_value(&ev))
-                        >
-                            <option value="Live">"Live"</option>
-                            <option value="Beginning">"From Beginning"</option>
-                        </select>
-                    </div>
-                    <div class="modal-actions">
-                        <button
-                            class="modal-add-btn btn-small"
-                            on:click=on_add
-                            disabled=move || selected_ep_id.get().is_none()
-                        >
-                            "Add"
-                        </button>
-                        <button class="modal-cancel-btn" on:click=on_cancel>
-                            "Cancel"
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </Show>
-    }
-}
-
-// ---------------------------------------------------------------------------
-// UploadStrip — live S3 upload telemetry strip under the S3→VPS node
-// ---------------------------------------------------------------------------
-
-#[component]
-fn UploadStrip() -> impl IntoView {
-    let stats: RwSignal<crate::api::UploadStats> = RwSignal::new(Default::default());
-
-    // Poll every 2s — even when idle, the strip should update adaptive_target
-    // and in_flight (both default to 0/0 so rendering stays stable).
-    let _interval = Interval::new(2_000, move || {
-        spawn_local(async move {
-            if let Ok(s) = crate::api::fetch_upload_stats().await {
-                stats.set(s);
-            }
-        });
-    });
-    std::mem::forget(_interval);
-
-    // Fire one immediate fetch so the strip isn't blank for 2s on load.
-    spawn_local(async move {
-        if let Ok(s) = crate::api::fetch_upload_stats().await {
-            stats.set(s);
-        }
-    });
-
-    let on_click = move |_| {
-        if let Some(w) = web_sys::window() {
-            let _ = w.location().set_href("/uploads");
-        }
-    };
-
-    view! {
-        <div class="upload-strip" on:click=on_click title="S3 upload telemetry — click for detail">
-            <span class="upload-strip__rate">
-                {move || format!("Upload: {:.1} c/s", stats.get().chunks_per_sec)}
-            </span>
-            <span class="upload-strip__median">
-                {move || format!("median {}ms", stats.get().median_ms)}
-            </span>
-            <span class="upload-strip__inflight">
-                {move || format!("in-flight {}/{}", stats.get().in_flight, stats.get().adaptive_target)}
-            </span>
-            <span class=move || {
-                let s = stats.get();
-                if s.error_rate > 0.0 {
-                    "upload-strip__errors upload-strip__errors--alert"
-                } else {
-                    "upload-strip__errors"
-                }
-            }>
-                {move || format!("errors {:.0}%", stats.get().error_rate * 100.0)}
-            </span>
         </div>
     }
 }
