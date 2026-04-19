@@ -203,6 +203,27 @@ pub enum WsEvent {
         stream_timecode: Option<String>,
         summary: String,
     },
+    AuditAppended {
+        id: i64,
+        ts: String,
+        severity: String,
+        source: String,
+        event_id: Option<i64>,
+        instance_id: Option<i64>,
+        endpoint: Option<String>,
+        action: String,
+        detail: serde_json::Value,
+    },
+    MetricsSample {
+        ts_ms: i64,
+        event_id: i64,
+        instance_id: i64,
+        alias: String,
+        chunk_delay_secs: f64,
+        current_chunk_id: i64,
+        chunks_processed: i64,
+        alive: bool,
+    },
 }
 
 /// Per-endpoint delivery metrics broadcast via WebSocket.
@@ -396,6 +417,27 @@ mod tests {
                 recording: false,
                 stream_timecode: Some("00:05:23".to_string()),
                 summary: "streaming".to_string(),
+            },
+            WsEvent::AuditAppended {
+                id: 1,
+                ts: "2026-01-01T00:00:00.000Z".to_string(),
+                severity: "info".to_string(),
+                source: "operator".to_string(),
+                event_id: Some(1),
+                instance_id: None,
+                endpoint: None,
+                action: "event_started".to_string(),
+                detail: serde_json::json!({}),
+            },
+            WsEvent::MetricsSample {
+                ts_ms: 0,
+                event_id: 1,
+                instance_id: 1,
+                alias: "ep".to_string(),
+                chunk_delay_secs: 0.0,
+                current_chunk_id: 0,
+                chunks_processed: 0,
+                alive: true,
             },
         ];
 

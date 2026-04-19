@@ -88,6 +88,27 @@ enum WsEvent {
         stream_timecode: Option<String>,
         summary: String,
     },
+    AuditAppended {
+        id: i64,
+        ts: String,
+        severity: String,
+        source: String,
+        event_id: Option<i64>,
+        instance_id: Option<i64>,
+        endpoint: Option<String>,
+        action: String,
+        detail: serde_json::Value,
+    },
+    MetricsSample {
+        ts_ms: i64,
+        event_id: i64,
+        instance_id: i64,
+        alias: String,
+        chunk_delay_secs: f64,
+        current_chunk_id: i64,
+        chunks_processed: i64,
+        alive: bool,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -315,8 +336,75 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
         WsEvent::Error { service, message } => {
             store.push_error(service, message);
         }
-        WsEvent::ActivityFeed { .. } => {
-            // Backend still sends these events; we just ignore them now.
+        WsEvent::ActivityFeed {
+            timestamp,
+            severity,
+            message,
+            source,
+        } => {
+            store.activity_feed.update(|feed| {
+                feed.push(crate::store::ActivityEntry {
+                    timestamp,
+                    severity,
+                    message,
+                    source,
+                });
+                if feed.len() > 200 {
+                    feed.remove(0);
+                }
+            });
+        }
+        WsEvent::AuditAppended {
+            id,
+            ts,
+            severity,
+            source,
+            event_id,
+            instance_id,
+            endpoint,
+            action,
+            detail,
+        } => {
+            store.audit_feed.update(|feed| {
+                feed.push(crate::store::AuditEntry {
+                    id,
+                    ts,
+                    severity,
+                    source,
+                    event_id,
+                    instance_id,
+                    endpoint,
+                    action,
+                    detail,
+                });
+                if feed.len() > 500 {
+                    feed.remove(0);
+                }
+            });
+        }
+        WsEvent::MetricsSample {
+            ts_ms,
+            event_id,
+            instance_id,
+            alias,
+            chunk_delay_secs,
+            current_chunk_id,
+            chunks_processed,
+            alive,
+        } => {
+            store.endpoint_metrics_history.update(|hist| {
+                let entry = crate::store::MetricsSample {
+                    ts_ms,
+                    event_id,
+                    instance_id,
+                    alias: alias.clone(),
+                    chunk_delay_secs,
+                    current_chunk_id,
+                    chunks_processed,
+                    alive,
+                };
+                hist.entry(alias).or_default().push(entry);
+            });
         }
         WsEvent::PipelineState {
             state,
