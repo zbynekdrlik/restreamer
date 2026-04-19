@@ -244,6 +244,14 @@ pub async fn patch_config(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // Capture the list of top-level sections patched for the audit row.
+    // We only record top-level keys (e.g. "obs", "s3") rather than deep
+    // paths because the per-leaf diff is surfaced via WsEvent elsewhere.
+    let patched_fields: Vec<String> = match &updates {
+        serde_json::Value::Object(map) => map.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
+
     let merged = merge_json(current, updates);
 
     let mut new_config: Config = serde_json::from_value(merged).map_err(|e| {
@@ -305,6 +313,22 @@ pub async fn patch_config(
     new_config.hetzner.api_token = REDACTED.to_string();
     new_config.youtube.client_secret = REDACTED.to_string();
     new_config.obs.ws_password = REDACTED.to_string();
+
+    // Audit: record config change. Redaction is already applied above so
+    // patched_fields is safe to emit (just names of top-level sections).
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: None,
+            instance_id: None,
+            endpoint: None,
+            action: rs_core::audit::Action::ConfigChanged,
+            detail: serde_json::json!({ "patched_fields": patched_fields }),
+            ts_override: None,
+        },
+    );
 
     Ok(Json(new_config))
 }

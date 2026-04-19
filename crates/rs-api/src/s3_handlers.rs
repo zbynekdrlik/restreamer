@@ -164,6 +164,26 @@ pub async fn clear_event_s3_chunks(
         }
     }
 
+    // Audit: record per-event S3 cleanup so post-mortem can correlate
+    // operator cleanup actions with chunk-counter changes.
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: Some(id),
+            instance_id: None,
+            endpoint: None,
+            action: rs_core::audit::Action::S3Cleared,
+            detail: serde_json::json!({
+                "event_id": id,
+                "event_name": event_name,
+                "chunks_deleted": deleted,
+            }),
+            ts_override: None,
+        },
+    );
+
     S3Result::Ok(Json(ClearChunksResponse { deleted }))
 }
 

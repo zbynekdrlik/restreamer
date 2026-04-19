@@ -70,6 +70,27 @@ pub async fn delivery_start(
         )
     })?;
 
+    // Audit: record DeliveryStarted with instance + IP so post-mortem can
+    // correlate operator action with VPS lifecycle.
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: Some(event_id),
+            instance_id: Some(result.instance_id),
+            endpoint: None,
+            action: rs_core::audit::Action::DeliveryStarted,
+            detail: serde_json::json!({
+                "event_id": event_id,
+                "instance_id": result.instance_id,
+                "hetzner_id": result.hetzner_id,
+                "name": result.name,
+            }),
+            ts_override: None,
+        },
+    );
+
     // Look up event details for poll_and_init
     let event = db::get_streaming_event_by_id(&state.pool, event_id)
         .await
@@ -234,6 +255,21 @@ pub async fn delivery_stop(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // Audit: operator-triggered delivery stop.
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: Some(req.event_id),
+            instance_id: None,
+            endpoint: None,
+            action: rs_core::audit::Action::DeliveryStopped,
+            detail: serde_json::json!({ "event_id": req.event_id }),
+            ts_override: None,
+        },
+    );
+
     Ok(StatusCode::OK)
 }
 
@@ -281,7 +317,16 @@ pub async fn delivery_add_endpoint(
         )
     })?;
 
-    crate::delivery_endpoints::add_endpoint_to_delivery(
+    // Stringify start_position for the audit row *before* consuming it.
+    let start_position_label = match &req.start_position {
+        crate::delivery_endpoints::StartPosition::Live => "live".to_string(),
+        crate::delivery_endpoints::StartPosition::Beginning => "beginning".to_string(),
+        crate::delivery_endpoints::StartPosition::Resume { chunk_id } => {
+            format!("resume:{chunk_id}")
+        }
+    };
+
+    let outcome = crate::delivery_endpoints::add_endpoint_to_delivery(
         orch,
         &state.pool,
         &state.config,
@@ -294,6 +339,26 @@ pub async fn delivery_add_endpoint(
         error!("Failed to add endpoint to delivery: {e}");
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
+
+    // Audit: record successful mid-stream endpoint add.
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: Some(req.event_id),
+            instance_id: None,
+            endpoint: Some(outcome.alias.clone()),
+            action: rs_core::audit::Action::EndpointAdded,
+            detail: serde_json::json!({
+                "event_id": req.event_id,
+                "endpoint": outcome.alias,
+                "start_position": start_position_label,
+                "resolved_start_chunk_id": outcome.start_chunk_id,
+            }),
+            ts_override: None,
+        },
+    );
 
     Ok(StatusCode::OK)
 }
@@ -320,7 +385,7 @@ pub async fn delivery_remove_endpoint(
     // remove-last-endpoint guard (e.g. during a deliberate teardown).
     let force = headers.get("x-force-remove").and_then(|v| v.to_str().ok()) == Some("true");
 
-    crate::delivery_endpoints::remove_endpoint_from_delivery(
+    let was_last_endpoint = crate::delivery_endpoints::remove_endpoint_from_delivery(
         orch,
         &state.pool,
         req.event_id,
@@ -337,6 +402,26 @@ pub async fn delivery_remove_endpoint(
         error!("Failed to remove endpoint from delivery: {e}");
         (StatusCode::INTERNAL_SERVER_ERROR, msg)
     })?;
+
+    // Audit: record successful mid-stream endpoint remove.
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: Some(req.event_id),
+            instance_id: None,
+            endpoint: Some(req.alias.clone()),
+            action: rs_core::audit::Action::EndpointRemoved,
+            detail: serde_json::json!({
+                "event_id": req.event_id,
+                "endpoint": req.alias,
+                "was_last_endpoint": was_last_endpoint,
+                "forced": force,
+            }),
+            ts_override: None,
+        },
+    );
 
     Ok(StatusCode::OK)
 }

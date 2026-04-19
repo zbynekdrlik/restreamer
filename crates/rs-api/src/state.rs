@@ -5,6 +5,7 @@ use std::time::Instant;
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
+use rs_core::audit::AuditRow;
 use rs_core::config::{Config, ObsConfig};
 use rs_core::log_buffer::LogBuffer;
 use rs_core::models::{InpointState, WsEvent};
@@ -66,6 +67,13 @@ pub struct AppState {
     /// inpoint MediaReceiver lands in Task 18; for now the field exists so
     /// the handler and its tests can exercise the gate directly.
     pub rtmp_stable_since: Arc<Mutex<Option<Instant>>>,
+    /// Fire-and-forget sender for audit rows. Handlers push `AuditRow` via
+    /// `rs_core::audit::record(&state.audit_tx, row)` and the audit writer
+    /// task batches INSERTs + broadcasts `WsEvent::AuditAppended`.
+    /// The default constructor creates a throwaway channel whose receiver
+    /// is dropped immediately — real wiring (spawning `audit_writer_task`
+    /// against the receiver) lands in Task 27.
+    pub audit_tx: mpsc::Sender<AuditRow>,
 }
 
 impl AppState {
@@ -80,6 +88,8 @@ impl AppState {
             None
         };
         let config = Arc::new(config);
+        // Throwaway audit channel; real wire-up is Task 27.
+        let (audit_tx, _audit_rx) = mpsc::channel::<AuditRow>(1024);
         Self {
             pool,
             config_live: Arc::new(std::sync::RwLock::new(config.clone())),
@@ -98,7 +108,16 @@ impl AppState {
             s3_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             upload_metrics: Arc::new(UploadMetrics::default()),
             rtmp_stable_since: Arc::new(Mutex::new(None)),
+            audit_tx,
         }
+    }
+
+    /// Replace the audit channel with a shared sender (used when the
+    /// runtime spawns the `audit_writer_task` and wants handlers to feed
+    /// into the real writer).
+    pub fn with_audit_tx(mut self, tx: mpsc::Sender<AuditRow>) -> Self {
+        self.audit_tx = tx;
+        self
     }
 
     /// Replace the upload metrics with a shared instance (set before ChunkUploader is spawned).
