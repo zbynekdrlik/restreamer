@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use sqlx::SqlitePool;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 use rs_core::config::{Config, ObsConfig};
 use rs_core::log_buffer::LogBuffer;
@@ -58,6 +59,13 @@ pub struct AppState {
     pub s3_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     /// Upload metrics shared with ChunkUploader for /uploads/stats API.
     pub upload_metrics: Arc<UploadMetrics>,
+    /// When the RTMP publisher last became "connected". Used by the
+    /// `POST /delivery/start` handler to gate creation of a VPS until the
+    /// ingest has been stable for `RTMP_STABLE_REQUIRED_SECS` seconds.
+    /// `None` means no publisher is currently connected. Wire-up to the
+    /// inpoint MediaReceiver lands in Task 18; for now the field exists so
+    /// the handler and its tests can exercise the gate directly.
+    pub rtmp_stable_since: Arc<Mutex<Option<Instant>>>,
 }
 
 impl AppState {
@@ -89,6 +97,7 @@ impl AppState {
             s3_upload_blocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             s3_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             upload_metrics: Arc::new(UploadMetrics::default()),
+            rtmp_stable_since: Arc::new(Mutex::new(None)),
         }
     }
 

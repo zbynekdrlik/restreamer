@@ -566,3 +566,76 @@ mod audit_tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
+
+#[cfg(test)]
+mod rtmp_stable_gate_tests {
+    use crate::delivery_handlers::RTMP_STABLE_REQUIRED_SECS;
+    use crate::router::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::db;
+    use rs_core::models::WsEvent;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let config = Config::for_testing();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        AppState::new(pool, config, ws_tx)
+    }
+
+    async fn body_to_bytes(body: Body) -> Vec<u8> {
+        axum::body::to_bytes(body, 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn start_delivery_rejects_when_rtmp_unstable() {
+        let state = test_state().await;
+        // RTMP has been "connected" for only 5s — below the 15s threshold.
+        *state.rtmp_stable_since.lock().await =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+        let app = build_router(state);
+
+        let body = serde_json::json!({"event_id": 1}).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/delivery/start")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "rtmp_not_stable");
+        assert_eq!(json["need_secs"], RTMP_STABLE_REQUIRED_SECS);
+    }
+
+    #[tokio::test]
+    async fn start_delivery_rejects_when_rtmp_never_connected() {
+        let state = test_state().await;
+        // rtmp_stable_since == None: publisher never connected. Must reject.
+        let app = build_router(state);
+
+        let body = serde_json::json!({"event_id": 1}).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/delivery/start")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "rtmp_not_stable");
+        assert_eq!(json["current_secs"], 0);
+    }
+}

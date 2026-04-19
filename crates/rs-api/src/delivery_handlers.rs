@@ -27,19 +27,47 @@ pub struct DeliveryStartResponse {
     pub status: String,
 }
 
+/// Minimum seconds the RTMP publisher must have been connected before
+/// `POST /delivery/start` is allowed to create a VPS. Prevents the
+/// "operator hits Start before OBS has handshaken" failure mode where
+/// delivery boots against an empty/flapping ingest.
+pub const RTMP_STABLE_REQUIRED_SECS: u64 = 15;
+
 pub async fn delivery_start(
     State(state): State<AppState>,
     Json(req): Json<DeliveryStartRequest>,
-) -> Result<Json<DeliveryStartResponse>, StatusCode> {
+) -> Result<Json<DeliveryStartResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // RTMP-stable gate: refuse to spin up a VPS until the ingest has been
+    // publishing for at least RTMP_STABLE_REQUIRED_SECS. See `state.rs` for
+    // wire-up status (Task 18 plumbs set/clear into MediaReceiver).
+    let stable_since = *state.rtmp_stable_since.lock().await;
+    let current_secs = stable_since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+    if current_secs < RTMP_STABLE_REQUIRED_SECS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "rtmp_not_stable",
+                "current_secs": current_secs,
+                "need_secs": RTMP_STABLE_REQUIRED_SECS,
+            })),
+        ));
+    }
+
     let orch = state.delivery_orchestrator.as_ref().ok_or_else(|| {
         error!("Delivery orchestrator not configured (missing Hetzner API token)");
-        StatusCode::SERVICE_UNAVAILABLE
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "hetzner_not_configured"})),
+        )
     })?;
 
     let event_id = req.event_id;
     let result = orch.start_delivery(event_id).await.map_err(|e| {
         error!("Failed to start delivery: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "start_delivery_failed", "message": e.to_string()})),
+        )
     })?;
 
     // Look up event details for poll_and_init
@@ -47,11 +75,17 @@ pub async fn delivery_start(
         .await
         .map_err(|e| {
             error!("Failed to get event {event_id}: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "db_error", "message": e.to_string()})),
+            )
         })?
         .ok_or_else(|| {
             error!("Event {event_id} not found");
-            StatusCode::NOT_FOUND
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "event_not_found"})),
+            )
         })?;
 
     // Spawn background task to poll Hetzner and init rs-delivery
