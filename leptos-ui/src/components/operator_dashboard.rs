@@ -6,6 +6,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use super::audit_panel::AuditPanel;
 use super::confirm_modal::ConfirmModal;
+use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
 use crate::store::DashboardStore;
 
@@ -18,6 +19,7 @@ pub fn OperatorDashboard() -> impl IntoView {
 
     view! {
         <div class="operator-dashboard">
+            <ZeroEndpointBanner />
             <div class="operator-dashboard__layout">
                 <div class="operator-dashboard__main">
                     <ControlBar />

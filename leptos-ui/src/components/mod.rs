@@ -8,6 +8,7 @@ mod operator_dashboard;
 mod settings;
 mod templates;
 mod uploads;
+pub mod zero_endpoint_banner;
 
 pub use confirm_modal::ConfirmModal;
 pub use endpoints::EndpointsView;
