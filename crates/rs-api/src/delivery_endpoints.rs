@@ -137,11 +137,16 @@ pub async fn add_endpoint_to_delivery(
 }
 
 /// Remove a single endpoint from a running delivery VPS mid-stream.
+///
+/// Pass `force=true` to bypass the remove-last-endpoint guard (used by the
+/// cleanup/stop-delivery path, or by the HTTP handler when `x-force-remove:
+/// true` is present).
 pub async fn remove_endpoint_from_delivery(
     orch: &DeliveryOrchestrator,
     pool: &SqlitePool,
     event_id: i64,
     alias: &str,
+    force: bool,
 ) -> anyhow::Result<()> {
     let instance = db::get_delivery_instance_by_event(pool, event_id)
         .await?
@@ -152,6 +157,28 @@ pub async fn remove_endpoint_from_delivery(
             "Delivery instance is in state '{}', not in an active delivery state",
             instance.status
         ));
+    }
+
+    // Remove-last-endpoint guard: if delivery is currently active and this
+    // is the only endpoint left, refuse unless the caller explicitly forced.
+    if !force {
+        let endpoint_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM delivery_endpoint_status WHERE instance_id = ?1",
+        )
+        .bind(instance.id)
+        .fetch_one(pool)
+        .await?;
+        let delivering_activated: i64 =
+            sqlx::query_scalar("SELECT delivering_activated FROM streaming_events WHERE id = ?1")
+                .bind(event_id)
+                .fetch_one(pool)
+                .await?;
+        if delivering_activated != 0 && endpoint_count <= 1 {
+            return Err(anyhow::anyhow!(
+                "would_leave_zero_endpoints: delivery active and removing '{alias}' leaves 0 endpoints; \
+                 pass x-force-remove:true header to override"
+            ));
+        }
     }
 
     let delivery_url = format!("http://{}:8000", instance.ipv4);

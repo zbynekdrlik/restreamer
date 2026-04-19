@@ -83,12 +83,72 @@ async fn add_endpoint_to_delivery_rejects_inactive_delivery() {
 #[tokio::test]
 async fn remove_endpoint_from_delivery_rejects_inactive_delivery() {
     let (orch, pool, _config, event_id, _endpoint_id) = setup_with_status("creating").await;
-    let err = remove_endpoint_from_delivery(&orch, &pool, event_id, "yt")
+    let err = remove_endpoint_from_delivery(&orch, &pool, event_id, "yt", /*force*/ false)
         .await
         .expect_err("creating state must be rejected by guard clause");
     assert!(
         err.to_string().contains("not in an active delivery state"),
         "unexpected error message: {err}"
+    );
+}
+
+#[tokio::test]
+async fn remove_endpoint_rejects_when_would_leave_zero_and_delivery_active() {
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+    let event_id = db::create_streaming_event(&pool, "t").await.unwrap();
+    sqlx::query("UPDATE streaming_events SET delivering_activated = 1 WHERE id = ?1")
+        .bind(event_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let instance_id = db::create_delivery_instance(
+        &pool,
+        /* hetzner_id */ 1,
+        /* name */ "x",
+        /* ipv4 */ "192.0.2.1",
+        /* server_type */ "cx22",
+        Some(event_id),
+        /* auth_token */ "tok",
+    )
+    .await
+    .unwrap();
+    db::update_delivery_instance_status(&pool, instance_id, "delivering")
+        .await
+        .unwrap();
+
+    // Seed delivery_endpoint_status with exactly 1 endpoint so removing it
+    // would leave 0 endpoints under active delivery.
+    sqlx::query(
+        "INSERT INTO delivery_endpoint_status (instance_id, alias, alive, chunks_processed, current_chunk_id, bytes_processed_total)
+         VALUES (?1, 'yt1', 1, 0, 0, 0)",
+    )
+    .bind(instance_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut cfg = Config::for_testing();
+    cfg.hetzner.api_token = "tok".into();
+    let orch = DeliveryOrchestrator::new(pool.clone(), cfg).unwrap();
+
+    let err = remove_endpoint_from_delivery(&orch, &pool, event_id, "yt1", /*force*/ false)
+        .await
+        .expect_err("must reject last-endpoint removal under active delivery");
+    assert!(
+        err.to_string().contains("would_leave_zero_endpoints"),
+        "unexpected error: {err}"
+    );
+
+    // force=true passes the guard. The HTTP call to the bogus ipv4 fails,
+    // but crucially the guard is no longer the reason.
+    let err2 = remove_endpoint_from_delivery(&orch, &pool, event_id, "yt1", /*force*/ true)
+        .await
+        .expect_err("HTTP call to 192.0.2.1 must fail");
+    assert!(
+        !err2.to_string().contains("would_leave_zero_endpoints"),
+        "force=true should bypass the guard, got: {err2}"
     );
 }
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -272,6 +272,7 @@ pub struct RemoveEndpointFromDeliveryRequest {
 
 pub async fn delivery_remove_endpoint(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<RemoveEndpointFromDeliveryRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let orch = state.delivery_orchestrator.as_ref().ok_or_else(|| {
@@ -281,16 +282,26 @@ pub async fn delivery_remove_endpoint(
         )
     })?;
 
+    // Operator may pass x-force-remove: true to bypass the
+    // remove-last-endpoint guard (e.g. during a deliberate teardown).
+    let force = headers.get("x-force-remove").and_then(|v| v.to_str().ok()) == Some("true");
+
     crate::delivery_endpoints::remove_endpoint_from_delivery(
         orch,
         &state.pool,
         req.event_id,
         &req.alias,
+        force,
     )
     .await
     .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("would_leave_zero_endpoints") {
+            error!("Refusing remove-last-endpoint without force: {msg}");
+            return (StatusCode::CONFLICT, msg);
+        }
         error!("Failed to remove endpoint from delivery: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        (StatusCode::INTERNAL_SERVER_ERROR, msg)
     })?;
 
     Ok(StatusCode::OK)
