@@ -3,11 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::SqlitePool;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use rs_cloud::hetzner::HetznerClient;
+use rs_core::audit::{Action, AuditRow, RateLimiter, Severity, Source};
 use rs_core::config::Config;
 use rs_core::db;
 use rs_core::models::{DeliveryEndpointMetrics, DeliveryInstance};
@@ -30,7 +31,16 @@ pub struct DeliveryOrchestrator {
     /// Resume positions for auto-restart after VPS crash.
     /// Key: event_id, Value: HashMap<alias, last_known_chunk_id>
     resume_positions: Arc<Mutex<HashMap<i64, HashMap<String, i64>>>>,
+    /// Audit channel. `None` in tests and any call site that has not yet been
+    /// plumbed to `AppState.audit_tx` (Task 27 will wire the real channel
+    /// from runtime startup). Every emit is `if let Some(tx) = ...` so this
+    /// is a no-op when absent.
+    audit_tx: Option<mpsc::Sender<AuditRow>>,
 }
+
+/// Rate limiter for noisy delivery audit rows (VpsUnreachable). Emits at
+/// most 1 row per minute per (action, key) pair — see `RateLimiter`.
+static DELIVERY_RL: std::sync::LazyLock<RateLimiter> = std::sync::LazyLock::new(RateLimiter::new);
 
 /// Result of starting a delivery instance.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -198,6 +208,7 @@ impl DeliveryOrchestrator {
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
             endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
             resume_positions: Arc::new(Mutex::new(HashMap::new())),
+            audit_tx: None,
         })
     }
 
@@ -210,7 +221,21 @@ impl DeliveryOrchestrator {
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
             endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
             resume_positions: Arc::new(Mutex::new(HashMap::new())),
+            audit_tx: None,
         }
+    }
+
+    /// Attach an audit channel. Every lifecycle event (VpsCreating, VpsReady,
+    /// VpsDeleted, VpsUnreachable, DeliveryInitSent, DeliveryInitResponse)
+    /// emits through this channel. Call once at construction.
+    pub fn with_audit_tx(mut self, tx: mpsc::Sender<AuditRow>) -> Self {
+        self.audit_tx = Some(tx);
+        self
+    }
+
+    /// Access the audit sender for internal emit helpers.
+    pub(crate) fn audit_tx(&self) -> Option<&mpsc::Sender<AuditRow>> {
+        self.audit_tx.as_ref()
     }
 
     /// Returns the poll_handles map for tracking background tasks.
@@ -306,6 +331,26 @@ impl DeliveryOrchestrator {
             }
         };
 
+        // Audit: VPS creation request sent to Hetzner.
+        if let Some(tx) = &self.audit_tx {
+            rs_core::audit::record(
+                tx,
+                AuditRow {
+                    severity: Severity::Info,
+                    source: Source::Delivery,
+                    event_id: Some(event_id),
+                    instance_id: None,
+                    endpoint: None,
+                    action: Action::VpsCreating,
+                    detail: serde_json::json!({
+                        "server_type": server_type,
+                        "datacenter": self.config.hetzner.location,
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
+
         let server = self
             .hetzner
             .create_server(
@@ -357,6 +402,7 @@ impl DeliveryOrchestrator {
         event_name: &str,
         auth_token: &str,
     ) -> anyhow::Result<()> {
+        let boot_start = std::time::Instant::now();
         let instance = db::get_delivery_instance(&self.pool, instance_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("delivery instance {instance_id} not found"))?;
@@ -422,6 +468,26 @@ impl DeliveryOrchestrator {
                     // operator can see this is normal startup, not a hang.
                     db::update_delivery_instance_status(&self.pool, instance_id, "initializing")
                         .await?;
+                    // Audit: VPS booted + rs-delivery answered health check.
+                    if let Some(tx) = &self.audit_tx {
+                        rs_core::audit::record(
+                            tx,
+                            AuditRow {
+                                severity: Severity::Info,
+                                source: Source::Delivery,
+                                event_id: Some(event_id),
+                                instance_id: Some(instance_id),
+                                endpoint: None,
+                                action: Action::VpsReady,
+                                detail: serde_json::json!({
+                                    "hetzner_id": hetzner_id,
+                                    "ipv4": instance.ipv4,
+                                    "boot_secs": boot_start.elapsed().as_secs(),
+                                }),
+                                ts_override: None,
+                            },
+                        );
+                    }
                     break;
                 }
                 Ok(resp) => {
@@ -571,6 +637,27 @@ impl DeliveryOrchestrator {
             "rescue_video_url": event.rescue_video_url,
         });
 
+        // Audit: init payload dispatched to rs-delivery.
+        if let Some(tx) = &self.audit_tx {
+            rs_core::audit::record(
+                tx,
+                AuditRow {
+                    severity: Severity::Info,
+                    source: Source::Delivery,
+                    event_id: Some(event_id),
+                    instance_id: Some(instance_id),
+                    endpoint: None,
+                    action: Action::DeliveryInitSent,
+                    detail: serde_json::json!({
+                        "event_id": event_id,
+                        "endpoints_count": endpoints.len(),
+                        "start_chunk_id": start_chunk_id,
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
+
         let resp = client
             .post(format!("{delivery_url}/api/init"))
             .bearer_auth(auth_token)
@@ -579,16 +666,57 @@ impl DeliveryOrchestrator {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let init_status = resp.status();
+        if !init_status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            // Audit: init failed. Severity Error so it survives back-pressure.
+            if let Some(tx) = &self.audit_tx {
+                rs_core::audit::record(
+                    tx,
+                    AuditRow {
+                        severity: Severity::Error,
+                        source: Source::Delivery,
+                        event_id: Some(event_id),
+                        instance_id: Some(instance_id),
+                        endpoint: None,
+                        action: Action::DeliveryInitResponse,
+                        detail: serde_json::json!({
+                            "event_id": event_id,
+                            "status": format!("{init_status}"),
+                            "body": body,
+                        }),
+                        ts_override: None,
+                    },
+                );
+            }
             return Err(anyhow::anyhow!(
-                "rs-delivery /api/init failed: {status} - {body}"
+                "rs-delivery /api/init failed: {init_status} - {body}"
             ));
         }
 
         let init_resp = resp.text().await.unwrap_or_default();
         info!(event_id, init_resp = %init_resp, "Init response received");
+
+        // Audit: init succeeded.
+        if let Some(tx) = &self.audit_tx {
+            rs_core::audit::record(
+                tx,
+                AuditRow {
+                    severity: Severity::Info,
+                    source: Source::Delivery,
+                    event_id: Some(event_id),
+                    instance_id: Some(instance_id),
+                    endpoint: None,
+                    action: Action::DeliveryInitResponse,
+                    detail: serde_json::json!({
+                        "event_id": event_id,
+                        "endpoints_started": endpoints.len(),
+                        "status": "ok",
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
 
         db::update_delivery_instance_health(&self.pool, instance_id).await?;
         // Init succeeded — endpoints are now warming up / delivering.
@@ -919,11 +1047,13 @@ impl DeliveryOrchestrator {
         }
 
         // Delete Hetzner server
+        let mut delete_reason = "operator_stop";
         if let Err(e) = self.hetzner.delete_server(instance.hetzner_id).await {
             error!(
                 hetzner_id = instance.hetzner_id,
                 "Failed to delete Hetzner server: {e}"
             );
+            delete_reason = "delete_error";
         }
 
         db::update_delivery_instance_status(&self.pool, instance.id, "deleted").await?;
@@ -931,6 +1061,27 @@ impl DeliveryOrchestrator {
             hetzner_id = instance.hetzner_id,
             event_id, "Delivery instance stopped and deleted"
         );
+
+        // Audit: VPS destroyed.
+        if let Some(tx) = &self.audit_tx {
+            rs_core::audit::record(
+                tx,
+                AuditRow {
+                    severity: Severity::Info,
+                    source: Source::Delivery,
+                    event_id: Some(event_id),
+                    instance_id: Some(instance.id),
+                    endpoint: None,
+                    action: Action::VpsDeleted,
+                    detail: serde_json::json!({
+                        "hetzner_id": instance.hetzner_id,
+                        "ipv4": instance.ipv4,
+                        "reason": delete_reason,
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
 
         Ok(())
     }
@@ -996,7 +1147,9 @@ impl DeliveryOrchestrator {
                 }
             };
 
-            // Check health
+            // Check health. `last_error` is captured so audit rows carry a
+            // useful message instead of just `false`.
+            let mut last_error: Option<String> = None;
             let healthy = match client
                 .get(format!("http://{}:8000/api/health", instance.ipv4))
                 .bearer_auth(&instance.auth_token)
@@ -1006,15 +1159,18 @@ impl DeliveryOrchestrator {
             {
                 Ok(resp) if resp.status().is_success() => true,
                 Ok(resp) => {
+                    let status = resp.status();
                     warn!(
                         event_id,
-                        status = %resp.status(),
+                        status = %status,
                         "Delivery VPS health returned non-success"
                     );
+                    last_error = Some(format!("http_{status}"));
                     false
                 }
                 Err(e) => {
                     warn!(event_id, "Delivery VPS health check failed: {e}");
+                    last_error = Some(e.to_string());
                     false
                 }
             };
@@ -1038,6 +1194,30 @@ impl DeliveryOrchestrator {
                     consecutive_failures,
                     "Delivery VPS health check failed ({consecutive_failures}/3)"
                 );
+
+                // Audit (rate-limited): one row per minute per failure class
+                // so a persistent outage doesn't flood `audit_log`.
+                if let Some(tx) = &self.audit_tx {
+                    let class = last_error.as_deref().unwrap_or("unknown");
+                    if DELIVERY_RL.allow(Action::VpsUnreachable, class) {
+                        rs_core::audit::record(
+                            tx,
+                            AuditRow {
+                                severity: Severity::Warn,
+                                source: Source::Delivery,
+                                event_id: Some(event_id),
+                                instance_id: Some(instance_id),
+                                endpoint: None,
+                                action: Action::VpsUnreachable,
+                                detail: serde_json::json!({
+                                    "consecutive_failures": consecutive_failures,
+                                    "last_error": last_error,
+                                }),
+                                ts_override: None,
+                            },
+                        );
+                    }
+                }
 
                 if consecutive_failures >= 3 {
                     // DO NOT restart VPS — "unreachable" usually means stream.lan

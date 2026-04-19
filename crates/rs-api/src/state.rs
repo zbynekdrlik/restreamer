@@ -78,7 +78,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(pool: SqlitePool, config: Config, ws_tx: broadcast::Sender<WsEvent>) -> Self {
-        let delivery = DeliveryOrchestrator::new(pool.clone(), config.clone());
+        // Throwaway audit channel; real wire-up is Task 27.
+        let (audit_tx, _audit_rx) = mpsc::channel::<AuditRow>(1024);
+        let delivery = DeliveryOrchestrator::new(pool.clone(), config.clone())
+            .map(|o| o.with_audit_tx(audit_tx.clone()));
         let obs_client = if config.obs.enabled {
             Some(Arc::new(ObsClient::spawn(
                 config.obs.clone(),
@@ -88,8 +91,6 @@ impl AppState {
             None
         };
         let config = Arc::new(config);
-        // Throwaway audit channel; real wire-up is Task 27.
-        let (audit_tx, _audit_rx) = mpsc::channel::<AuditRow>(1024);
         Self {
             pool,
             config_live: Arc::new(std::sync::RwLock::new(config.clone())),
