@@ -1680,7 +1680,7 @@ jobs:
           $mem = $obs.WorkingSet64 / 1MB
           Write-Host "OBS PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
           if ($mem -lt 500) {
-            Write-Host "OBS at ${mem}MB — likely stuck on crash-recovery dialog. Attempting UI auto-dismiss..."
+            Write-Host "OBS at ${mem}MB - likely stuck on crash-recovery dialog. Attempting UI auto-dismiss..."
             try {
               Add-Type -AssemblyName UIAutomationClient
               $root = [System.Windows.Automation.AutomationElement]::RootElement
