@@ -717,6 +717,16 @@ app.post("/api/v1/_test/set-rtmp-stable-secs", (req, res) => {
 });
 
 // Audit row broadcaster used by operator action handlers below.
+// Mock audit query endpoint to match the real backend. Returns an empty
+// rows list — tests that want pre-populated audit data can drive it via
+// `/api/v1/_test/ws-broadcast`. Without this route the frontend's
+// `AuditPanel` mount-time backfill `GET /api/v1/audit?limit=50` returns
+// HTML (Express 404) → JSON parse error → console warning → every
+// Playwright test's zero-warnings assertion trips.
+app.get("/api/v1/audit", (_req, res) => {
+  res.json({ rows: [] });
+});
+
 let auditIdCounter = 0;
 function broadcastAudit(action, source = "operator", severity = "info", endpoint = null, detail = {}) {
   auditIdCounter += 1;
