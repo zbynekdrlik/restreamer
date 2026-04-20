@@ -1,7 +1,5 @@
 /// Per-endpoint delivery task: S3 poll -> normalize -> ffmpeg pipe.
-///
-/// Architecture: producer-consumer pipeline with pre-fetch buffer.
-///   Producer (S3 fetcher) -> bounded channel (10 chunks ~20s) -> Consumer (ffmpeg writer)
+/// Producer -> bounded channel (~20s) -> Consumer (ffmpeg writer).
 use async_trait::async_trait;
 use rs_ffmpeg::{FfmpegProcess, ServiceType};
 use std::sync::Arc;
@@ -486,11 +484,15 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut consecutive_write_failures: u32 = 0;
     let mut last_heartbeat = std::time::Instant::now();
 
-    // Pacing anchor: set when the first successful write completes. Maintained
-    // across ffmpeg restarts so the configured cache delay survives restarts.
-    // Uses tokio::time::Instant so it respects paused/mock time in tests.
+    // Pacing anchor: reset on ffmpeg death so post-restart the consumer
+    // re-anchors against wall-clock NOW, not the stale anchor from before
+    // the death (which would permanently add backoff_secs to the cache
+    // depth — 2026-04-20 cascading drift bug).
     let mut pacing_anchor: Option<tokio::time::Instant> = None;
     let mut delivered_ms: u64 = 0;
+    // Catchup budget: drain N chunks after ffmpeg restart without pacing
+    // so the producer can re-sync to the S3 live-edge.
+    let mut catchup_chunks_remaining: u32 = 0;
 
     tracing::info!(alias = %alias, "Consumer: endpoint delivery configured (FLV-only)");
 
@@ -600,6 +602,13 @@ async fn consumer_task<P: OutputProcessFactory>(
                     }
                 }
                 flv_normalizer = FlvStreamNormalizer::new();
+
+                // Break the 2026-04-20 cascading-drift: reset pacing so
+                // post-restart the consumer re-anchors against NOW and
+                // catchup-drains the backlog before resuming real-time.
+                pacing_anchor = None;
+                delivered_ms = 0;
+                catchup_chunks_remaining = PREFETCH_BUFFER_SIZE as u32;
             }
 
             match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {
@@ -753,7 +762,17 @@ async fn consumer_task<P: OutputProcessFactory>(
             pacing_anchor = Some(tokio::time::Instant::now());
             tracing::info!(alias = %alias, "Consumer: pacing anchor set");
         }
-        if let Some(anchor) = pacing_anchor {
+        // Catchup mode: drain accumulated buffer chunks without pacing
+        // so the producer can re-sync to the S3 live-edge. Each chunk
+        // decrements the budget; on exhaustion we re-anchor pacing.
+        if catchup_chunks_remaining > 0 {
+            catchup_chunks_remaining -= 1;
+            if catchup_chunks_remaining == 0 {
+                pacing_anchor = Some(tokio::time::Instant::now());
+                delivered_ms = 0;
+                tracing::info!(alias = %alias, "Consumer: catchup complete, pacing re-anchored");
+            }
+        } else if let Some(anchor) = pacing_anchor {
             let elapsed_ms = anchor.elapsed().as_millis() as u64;
             if delivered_ms > elapsed_ms {
                 let ahead_ms = delivered_ms - elapsed_ms;

@@ -237,6 +237,38 @@ fn is_tauri() -> bool {
     js_is_tauri()
 }
 
+/// One audit log row from `GET /api/v1/audit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditRow {
+    pub id: i64,
+    pub ts: String,
+    pub severity: String,
+    pub source: String,
+    #[serde(default)]
+    pub event_id: Option<i64>,
+    #[serde(default)]
+    pub instance_id: Option<i64>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    pub action: String,
+    #[serde(default)]
+    pub detail: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuditQueryResponse {
+    pub rows: Vec<AuditRow>,
+}
+
+/// Fetch the most recent audit rows for the dashboard backfill on mount.
+/// The live `WsEvent::AuditAppended` WebSocket events only deliver rows
+/// that land AFTER the client connects, so without this fetch the panel
+/// is empty until the next backend audit write.
+pub async fn fetch_recent_audit(limit: u32) -> Result<Vec<AuditRow>, String> {
+    let body: AuditQueryResponse = http_get(&format!("/audit?limit={limit}")).await?;
+    Ok(body.rows)
+}
+
 /// Endpoint configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EndpointConfig {
