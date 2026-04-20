@@ -243,8 +243,14 @@ fn test_write_failure_records_audit_log_and_applies_backoff() {
     let stderr = "[aost#0:1/copy] Error submitting a packet to the muxer: Broken pipe";
     let class = classify("CUSTOM_RTMP", stderr);
     assert_eq!(class, ReasonClass::RemoteBrokenPipe);
-    assert_eq!(reconnect_floor(class, 0).as_secs(), 30);
-    assert_eq!(reconnect_floor(class, 1).as_secs(), 60);
+    assert_eq!(
+        reconnect_floor(class, 0),
+        Some(std::time::Duration::from_secs(30))
+    );
+    assert_eq!(
+        reconnect_floor(class, 1),
+        Some(std::time::Duration::from_secs(60))
+    );
 }
 
 /// When ffmpeg lives longer than LIFETIME_RESET_SECS before dying, the
@@ -313,7 +319,7 @@ fn backoff_uses_reconnect_floor_for_youtube_broken_pipe() {
     use crate::ffmpeg_reason::{ReasonClass, reconnect_floor};
     assert_eq!(
         reconnect_floor(ReasonClass::YoutubeRtmpClosed, 0),
-        std::time::Duration::from_secs(30)
+        Some(std::time::Duration::from_secs(30))
     );
 }
 
