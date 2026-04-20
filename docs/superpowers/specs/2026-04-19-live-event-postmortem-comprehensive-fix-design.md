@@ -552,66 +552,55 @@ async fn get_status(Query(q): Query<StatusQuery>) -> Json<StatusResponse> {
 
 ---
 
-## Fix H — SQLite WAL + worker dedup
+## Fix H — SQLite hardening (pragmas only)
+
+> **Implementation note (2026-04-20, post-review):** The design originally
+> prescribed a claim-coordinator + worker-pool redesign. That implementation
+> regressed upload throughput catastrophically in the E2E streaming test
+> (310 pending chunks over a 10-minute window) and was reverted in commit
+> `bd13c0d` before PR #129 shipped. The pragma-only mitigation alone
+> satisfies the BUSY-reduction goal in practice because WAL allows
+> concurrent readers during a writer transaction and `busy_timeout=5000`
+> lets SQLite retry internally instead of surfacing SQLITE_BUSY. See the
+> stress test in `crates/rs-endpoint/tests/uploader_busy_stress.rs` — it
+> asserts that the per-worker picker pattern with WAL + busy_timeout holds
+> BUSY errors to a tight bound even under concurrent load.
 
 ### Pragmas on pool init
 
-New `crates/rs-core/src/db/pragmas.rs`:
+Both `db::create_pool()` and `db::create_memory_pool()` apply:
 ```rust
-pub async fn apply_pragmas(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("PRAGMA journal_mode=WAL").execute(pool).await?;
-    sqlx::query("PRAGMA busy_timeout=5000").execute(pool).await?;
-    sqlx::query("PRAGMA synchronous=NORMAL").execute(pool).await?;
-    sqlx::query("PRAGMA foreign_keys=ON").execute(pool).await?;
-    Ok(())
-}
+SqliteConnectOptions::new()
+    .journal_mode(SqliteJournalMode::Wal)
+    .busy_timeout(Duration::from_millis(5000))
+    .synchronous(SqliteSynchronous::Normal)
+    .foreign_keys(true);
 ```
 
-Called from `db::create_memory_pool()` AND `db::create_file_pool(path)` (both must apply the same pragmas). Existing call sites (`rs-service` startup, test helpers) don't change since pragmas are applied inside pool-creation helpers.
+(Inlined on the `SqliteConnectOptions` builder rather than via a separate
+`pragmas.rs` module because sqlx honours these options at connection
+time — no need for a post-connect `PRAGMA` round-trip.)
 
-### Uploader worker dedup
+### Uploader workers — per-worker picker (unchanged)
 
-Current `crates/rs-endpoint/src/uploader.rs` spawns N workers each running:
-```rust
-loop {
-    let Some(chunk) = db::pick_next_uploadable_chunk(pool).await? else { ... };
-    upload(chunk).await?;
-    db::mark_chunk_sent(pool, chunk.id).await?;
-}
-```
+`crates/rs-endpoint/src/uploader.rs` keeps its N-worker pattern, each
+running `db::pick_next_uploadable_chunk(pool)` → `upload(chunk)` →
+`db::mark_chunk_sent(pool, chunk.id)`. Under WAL + `busy_timeout=5000`,
+SQLITE_BUSY errors that would surface under rollback-journal mode are
+either serialised transparently or retried internally. Stress test
+verifies the BUSY-error rate under 8 concurrent workers stays under a
+defined threshold.
 
-When N workers all hit the same row on `SELECT … LIMIT 1`, SQLite serialises them → BUSY errors.
+### Acceptance criteria (updated)
 
-Replace with single **claim-coordinator** task + worker pool:
-
-```rust
-// Single task that owns picking.
-async fn claim_coordinator(pool: SqlitePool, dispatch: mpsc::Sender<ChunkJob>) {
-    loop {
-        let batch = db::pick_next_uploadable_chunks(&pool, /* limit */ 16).await?;
-        if batch.is_empty() {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            continue;
-        }
-        for chunk in batch {
-            db::mark_chunk_in_process(&pool, chunk.id).await?;
-            dispatch.send(ChunkJob { chunk }).await?;
-        }
-    }
-}
-
-// Existing N workers consume from dispatch channel:
-async fn worker(mut rx: mpsc::Receiver<ChunkJob>, ...) {
-    while let Some(job) = rx.recv().await {
-        upload(job.chunk).await?;
-        db::mark_chunk_sent(...).await?;
-    }
-}
-```
-
-One `SELECT` per batch of 16, serialized. BUSY errors collapse to near-zero.
-
-New DB helper `db::pick_next_uploadable_chunks(pool, limit)` returns `Vec<ChunkRecord>` via `SELECT … WHERE sent=0 AND in_process=0 AND upload_failed_permanently=0 ORDER BY upload_next_retry_at ASC, id ASC LIMIT ?1`.
+- `PRAGMA journal_mode=WAL`, `PRAGMA busy_timeout`, `PRAGMA synchronous`
+  all assertable from a freshly-created pool (see
+  `crates/rs-core/src/db/pool_tests.rs`).
+- `crates/rs-endpoint/tests/uploader_busy_stress.rs` — 8 concurrent
+  workers contending for the same `chunks` table hold BUSY-error count
+  under the threshold in the test body.
+- E2E streaming test throughput matches pre-v0.3.66 baseline (no ≥100-chunk
+  pending backlog after 10 minutes of streaming).
 
 ---
 
