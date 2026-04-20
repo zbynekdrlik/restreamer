@@ -1690,10 +1690,10 @@ jobs:
             Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
             Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
-            Remove-Item -Force "$env:APPDATA\obs-studio\.sentinel" -ErrorAction SilentlyContinue
-            Remove-Item -Force "$env:USERPROFILE\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
-            Remove-Item -Force "C:\Users\newlevel\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
-            Remove-Item -Force "C:\Users\newlevel\AppData\Roaming\obs-studio\safe_mode" -ErrorAction SilentlyContinue
+            Remove-Item -Force -Recurse "$env:APPDATA\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+            Remove-Item -Force -Recurse "$env:USERPROFILE\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+            Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+            Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\safe_mode" -ErrorAction SilentlyContinue
             schtasks.exe /run /tn "StartOBS"
             if ($LASTEXITCODE -ne 0) {
               Write-Host "StartOBS task not found; trying 'Start OBS Studio'"
@@ -1936,8 +1936,8 @@ jobs:
               # next launch then shows the crash-recovery dialog (OBS hung
               # at 25 MB with WS port closed).
               Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
-              Remove-Item -Force "C:\Users\newlevel\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
-              Remove-Item -Force "C:\Users\newlevel\AppData\Roaming\obs-studio\safe_mode" -ErrorAction SilentlyContinue
+              Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+              Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\safe_mode" -ErrorAction SilentlyContinue
               # Relaunch via StartOBS task (runs in newlevel's interactive
               # session and has its own UI-Automation fallback that dismisses
               # any residual crash-recovery dialog). The "Start OBS Studio"
@@ -4178,8 +4178,8 @@ jobs:
               # Always clean sentinels + relaunch via StartOBS (which runs
               # in user session and has in-session dialog-dismiss).
               Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
-              Remove-Item -Force "C:\Users\newlevel\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
-              Remove-Item -Force "C:\Users\newlevel\AppData\Roaming\obs-studio\safe_mode" -ErrorAction SilentlyContinue
+              Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+              Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\safe_mode" -ErrorAction SilentlyContinue
               schtasks.exe /run /tn "StartOBS"
               if ($LASTEXITCODE -ne 0) { schtasks.exe /run /tn "Start OBS Studio" }
               Start-Sleep -Seconds 20
