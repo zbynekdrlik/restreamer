@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, warn};
 
 use rs_core::audit::{Action, AuditRow, RateLimiter, Severity, Source};
@@ -44,12 +44,6 @@ fn classify_upload_error(msg: &str) -> &'static str {
     }
 }
 
-/// One unit of work dispatched from the claim-coordinator to a worker.
-#[derive(Debug)]
-struct ChunkJob {
-    chunk: ChunkRecord,
-}
-
 /// Shared long-lived context passed to every upload worker.
 #[derive(Clone)]
 struct WorkerCtx {
@@ -82,16 +76,6 @@ const MAX_WALL_CLOCK_MS: i64 = 600_000; // 10 min total retry budget
 const MIN_CONCURRENCY: usize = 4;
 pub(crate) const MAX_CONCURRENCY: usize = 32;
 
-/// Batch size for the coordinator's SELECT. Small enough that workers never
-/// wait long for work, large enough to avoid SELECT thrash.
-const COORD_BATCH: i64 = 16;
-
-/// Capacity of the coordinator→worker mpsc job channel.
-const JOB_CHANNEL_CAP: usize = 32;
-
-/// Coordinator sleep between idle polls (DB had nothing to dispatch).
-const COORD_IDLE_SLEEP_MS: u64 = 200;
-
 pub(crate) fn backoff_ms(attempt: i64) -> u64 {
     // 1s, 2s, 4s, 8s, 16s, 30s (cap)
     let base = 1000u64;
@@ -113,23 +97,17 @@ pub(crate) fn adjust_target(current: usize, error_rate: f64, median_ms: u32) -> 
     }
 }
 
-/// Watches for unsent chunks and uploads them to S3.
+/// Watches for unsent chunks and uploads them to S3 using a continuous worker pool.
 ///
-/// Architecture (post-#120):
-/// * A single **claim-coordinator** task batch-SELECTs eligible chunks every
-///   `COORD_IDLE_SLEEP_MS` and marks each `in_process=1` before dispatching
-///   it to a worker via mpsc.
-/// * A pool of **uploader workers** (sized by the adaptive controller) pull
-///   `ChunkJob`s from a shared `Arc<Mutex<mpsc::Receiver>>` and do the S3
-///   PUT + DB finalisation.
+/// Each worker independently atomically SELECT+UPDATEs (`in_process=1`) the
+/// oldest eligible chunk via `db::pick_next_uploadable_chunk` and uploads it.
+/// Retries live in the DB via `record_upload_failure` (writes
+/// `upload_next_retry_at`) so workers naturally re-pick them on a later poll.
 ///
-/// This replaces the pre-#120 pattern where N workers each raced an
-/// atomic `SELECT…UPDATE in_process=1` transaction — under load that was
-/// responsible for 25k+ "database is locked" errors in a single 5-hour event.
-///
-/// Retries still live in the DB via `record_upload_failure` (writes
-/// `upload_next_retry_at`) so the coordinator will naturally re-pick them
-/// on a later poll.
+/// The claim-coordinator pattern (see commit ff86526) was reverted because it
+/// regressed upload throughput catastrophically under real load; SQLite BUSY
+/// pressure is now mitigated by WAL mode + `busy_timeout` pragmas in
+/// `rs-core::db`.
 pub struct ChunkUploader {
     pool: SqlitePool,
     s3: Arc<S3Client>,
@@ -191,12 +169,9 @@ impl ChunkUploader {
         Arc::clone(&self.metrics)
     }
 
-    /// Run the claim-coordinator + adaptive worker pool until shutdown.
-    ///
-    /// Starts with `MIN_CONCURRENCY` workers and scales up to
-    /// `MAX_CONCURRENCY` based on observed error_rate / median upload
-    /// latency. Only the coordinator polls the DB for new work —
-    /// workers receive dispatches via mpsc so there is no SELECT race.
+    /// Run the worker pool until shutdown signal.
+    /// Starts with MIN_CONCURRENCY workers and scales up to MAX_CONCURRENCY
+    /// based on observed error_rate and median upload latency.
     pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) {
         // Reset any in_process=1 rows orphaned by a prior crash.
         match db::reset_orphaned_in_process(&self.pool).await {
@@ -211,16 +186,11 @@ impl ChunkUploader {
         let (target_tx, target_rx) = watch::channel::<usize>(MIN_CONCURRENCY);
         self.metrics.set_adaptive_target(MIN_CONCURRENCY);
 
-        // Coordinator → workers job channel (single producer, N consumers
-        // pulling via a shared Mutex so the mpsc acts as a fair work queue).
-        let (job_tx, job_rx) = mpsc::channel::<ChunkJob>(JOB_CHANNEL_CAP);
-        let shared_rx: Arc<Mutex<mpsc::Receiver<ChunkJob>>> = Arc::new(Mutex::new(job_rx));
-
         // Shared live-worker counter and drain signal.
         let live = Arc::new(AtomicUsize::new(0));
         let drain_needed = Arc::clone(&self.drain_needed);
 
-        // 1. Adaptive controller (resizes target every 10s).
+        // 1. Spawn controller task (adaptive resizing every 10s)
         {
             let metrics = Arc::clone(&self.metrics);
             let tx = target_tx.clone();
@@ -238,6 +208,7 @@ impl ChunkUploader {
                             let next = adjust_target(current, snap.error_rate, snap.median_ms);
                             if next != current {
                                 if next < current {
+                                    // Tell (current - next) workers to exit voluntarily.
                                     drain.fetch_add(current - next, Ordering::SeqCst);
                                 }
                                 tracing::info!(
@@ -254,69 +225,7 @@ impl ChunkUploader {
             });
         }
 
-        // 2. Single claim-coordinator — the ONLY task that SELECTs.
-        let coord_handle = {
-            let pool = self.pool.clone();
-            let blocked = Arc::clone(&self.upload_blocked);
-            let mut shutdown_c = shutdown.resubscribe();
-            let job_tx = job_tx.clone();
-            tokio::spawn(async move {
-                loop {
-                    if shutdown_c.try_recv().is_ok() {
-                        break;
-                    }
-                    // Respect test-only upload-blocked flag: if set, the
-                    // coordinator stops dispatching (workers will idle).
-                    if blocked.load(Ordering::Relaxed) {
-                        tokio::select! {
-                            _ = shutdown_c.recv() => break,
-                            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
-                        }
-                        continue;
-                    }
-                    let now_ms = chrono::Utc::now().timestamp_millis();
-                    match db::pick_next_uploadable_chunks(&pool, now_ms, COORD_BATCH).await {
-                        Ok(batch) if !batch.is_empty() => {
-                            for chunk in batch {
-                                // Claim atomically — skip if somebody else
-                                // already flipped in_process (shouldn't happen
-                                // with a single coordinator, but defensive).
-                                match db::mark_chunk_in_process(&pool, chunk.id).await {
-                                    Ok(true) => {
-                                        if job_tx.send(ChunkJob { chunk }).await.is_err() {
-                                            // Workers all dropped.
-                                            return;
-                                        }
-                                    }
-                                    Ok(false) => {
-                                        // Already claimed / no longer eligible — skip.
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        error!("mark_chunk_in_process failed: {e}");
-                                    }
-                                }
-                            }
-                        }
-                        Ok(_) => {
-                            tokio::select! {
-                                _ = shutdown_c.recv() => break,
-                                _ = tokio::time::sleep(Duration::from_millis(COORD_IDLE_SLEEP_MS)) => {}
-                            }
-                        }
-                        Err(e) => {
-                            error!("claim-coordinator pick failed: {e}");
-                            tokio::select! {
-                                _ = shutdown_c.recv() => break,
-                                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-                            }
-                        }
-                    }
-                }
-            })
-        };
-
-        // 3. Worker spawner — grows the pool toward the adaptive target.
+        // 2. Spawner loop: spawn when live < target (allows regrowth after scale-down).
         let shared_ctx = WorkerCtx {
             pool: self.pool.clone(),
             s3: Arc::clone(&self.s3),
@@ -337,11 +246,10 @@ impl ChunkUploader {
                 worker_id_counter += 1;
                 let ctx = shared_ctx.clone();
                 let live_for_worker = Arc::clone(&live);
-                let job_rx = Arc::clone(&shared_rx);
                 live.fetch_add(1, Ordering::SeqCst);
                 let mut worker_shutdown = shutdown.resubscribe();
                 tokio::spawn(async move {
-                    supervise_future(idx, run_worker(idx, ctx, job_rx, &mut worker_shutdown)).await;
+                    supervise_future(idx, run_worker(idx, ctx, &mut worker_shutdown)).await;
                     live_for_worker.fetch_sub(1, Ordering::SeqCst);
                 });
             }
@@ -352,11 +260,6 @@ impl ChunkUploader {
                 }
             }
         }
-
-        // Shutdown: drop the job sender so idle workers exit, and abort the
-        // coordinator so it stops issuing new claims.
-        drop(job_tx);
-        coord_handle.abort();
     }
 }
 
@@ -377,14 +280,10 @@ async fn supervise_future<F: std::future::Future<Output = ()>>(label: usize, fut
     }
 }
 
-/// Worker loop: pull a `ChunkJob` from the shared mpsc and call `upload_one`.
-/// Voluntarily exits when the adaptive controller signals a scale-down.
-async fn run_worker(
-    idx: usize,
-    ctx: WorkerCtx,
-    job_rx: Arc<Mutex<mpsc::Receiver<ChunkJob>>>,
-    shutdown: &mut broadcast::Receiver<()>,
-) {
+/// Worker loop: independently pick the next eligible chunk from the DB
+/// (atomic SELECT+UPDATE `in_process=1`) and upload it. Voluntarily exits
+/// when the adaptive controller signals a scale-down.
+async fn run_worker(idx: usize, ctx: WorkerCtx, shutdown: &mut broadcast::Receiver<()>) {
     loop {
         // Voluntary drain: if the adaptive controller requested a scale-down,
         // one worker per iteration claims a drain token and exits.
@@ -399,56 +298,58 @@ async fn run_worker(
             return;
         }
 
+        // Check shutdown at the top of each iteration
         if shutdown.try_recv().is_ok() {
             return;
         }
 
-        // Wait for a job or shutdown. The mutex is held only long enough to
-        // call `recv().await` — that's the fair-queue pattern for multi-
-        // consumer mpsc.
-        let job_opt = {
-            let mut rx = job_rx.lock().await;
+        // Test-only gate: if the uploader is "blocked" (simulated S3 outage),
+        // sleep briefly and retry.
+        if ctx.blocked.load(Ordering::Relaxed) {
             tokio::select! {
                 _ = shutdown.recv() => return,
-                j = rx.recv() => j,
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {}
             }
-        };
+            continue;
+        }
 
-        match job_opt {
-            Some(job) => {
-                upload_one(&ctx, job).await;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        match db::pick_next_uploadable_chunk(&ctx.pool, now_ms).await {
+            Ok(None) => {
+                tokio::select! {
+                    _ = shutdown.recv() => return,
+                    _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                }
+                continue;
             }
-            None => {
-                // Coordinator dropped the sender — shutdown path.
-                return;
+            Err(e) => {
+                error!("Failed to pick next uploadable chunk: {e}");
+                tokio::select! {
+                    _ = shutdown.recv() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                }
+                continue;
+            }
+            Ok(Some(chunk)) => {
+                upload_one(&ctx, chunk).await;
             }
         }
     }
 }
 
 /// Perform a single chunk upload: record attempt → PUT to S3 → record
-/// success OR failure. Free function so the coordinator can dispatch a
-/// job and the worker that picks it up can run this uniformly.
-async fn upload_one(ctx: &WorkerCtx, job: ChunkJob) {
+/// success OR failure. Called by `run_worker` after it has atomically
+/// claimed a chunk via `pick_next_uploadable_chunk`.
+async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
     let WorkerCtx {
         pool,
         s3,
         ws_tx,
         metrics,
         in_flight,
-        blocked: upload_blocked,
         client_uuid,
         ..
     } = ctx;
-    let chunk = job.chunk;
-
-    // Test-only gate: if the uploader is "blocked" (simulated S3 outage),
-    // release the claim and stop — the coordinator will re-pick this chunk
-    // once the flag clears.
-    if upload_blocked.load(Ordering::Relaxed) {
-        let _ = db::set_chunk_in_process(pool, chunk.id, false).await;
-        return;
-    }
 
     let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -610,7 +511,7 @@ mod tests {
 
         let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
 
-        // Let coordinator + workers spin once.
+        // Let workers spin once (should find no chunks and sleep 200ms)
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         // Signal shutdown
