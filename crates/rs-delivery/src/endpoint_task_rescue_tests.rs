@@ -2,7 +2,7 @@
 //!
 //! Buffer state and initial_delivery_mode tests live in buffer_state.rs
 //! next to the code they test.
-use super::*;
+use super::super::*;
 
 #[tokio::test]
 async fn endpoint_stats_start_in_warmup_mode() {

@@ -1,5 +1,5 @@
 //! Tests for FlvStreamNormalizer and write-failure chunk-skip behavior.
-use super::*;
+use super::super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex as TokioMutex;
 

@@ -3,7 +3,7 @@
 //! These tests live in a separate file because the main endpoint_task_tests.rs
 //! is already at the project's 1000-line per-file cap.
 
-use super::*;
+use super::super::*;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::sync::Mutex as TokioMutex;
 

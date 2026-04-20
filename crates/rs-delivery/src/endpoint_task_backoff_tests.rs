@@ -8,7 +8,7 @@
 //! ~1 ffmpeg restart per minute for the lifetime of the stream — observed
 //! 524 restarts in a 9.5h overnight test.
 
-use super::*;
+use super::super::*;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
