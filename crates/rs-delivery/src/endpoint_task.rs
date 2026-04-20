@@ -603,12 +603,11 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
                 flv_normalizer = FlvStreamNormalizer::new();
                 // 2026-04-20 cascade fix: reset pacing + catchup drain
-                // (buffer + backoff-worth) to regain target cache after
-                // ffmpeg restart, not +backoff_secs permanent drift.
+                // to regain target cache after ffmpeg restart.
                 pacing_anchor = None;
                 delivered_ms = 0;
                 catchup_chunks_remaining =
-                    (backoff_secs as u32).saturating_add(PREFETCH_BUFFER_SIZE as u32);
+                    endpoint_audit::catchup_budget_for_backoff(backoff_secs, PREFETCH_BUFFER_SIZE);
             }
 
             match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {

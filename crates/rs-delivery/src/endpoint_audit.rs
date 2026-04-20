@@ -11,6 +11,23 @@ use rs_core::audit::{Action, Severity, Source};
 use crate::audit_ring::AuditRing;
 use crate::ffmpeg_reason::ReasonClass;
 
+/// Catchup budget for the consumer after ffmpeg restart.
+///
+/// During the backoff window between death and respawn, S3 kept uploading
+/// chunks while the producer was blocked on channel backpressure. When
+/// the consumer resumes, it must drain both the 10-chunk pre-fetch buffer
+/// AND the chunks that accumulated on S3 during the backoff, otherwise the
+/// cache depth stays stuck at `target + backoff_secs` forever (the
+/// 2026-04-20 cascading-drift bug).
+///
+/// The ~0.95 factor in the catchup math (consumer gains 0.95 chunks per
+/// catchup tick, because producer also advances during catchup) means this
+/// budget slightly overshoots — the cache briefly dips below target after
+/// catchup, then stabilises back at target as normal pacing resumes.
+pub fn catchup_budget_for_backoff(backoff_secs: u64, buffer_size: usize) -> u32 {
+    (backoff_secs as u32).saturating_add(buffer_size as u32)
+}
+
 /// One row in the ffmpeg restart audit log. Captures process-death
 /// details so operators can diagnose patterns (e.g. all restarts after
 /// exactly 65s = upstream session timeout).

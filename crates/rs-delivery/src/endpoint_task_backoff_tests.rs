@@ -335,3 +335,50 @@ fn restart_state_resets_consecutive_on_class_change() {
     let s = s.advance(ReasonClass::NetworkTimeout);
     assert_eq!(s.consecutive_same_class, 1);
 }
+
+// --- 2026-04-20 cascade-drift fix regression tests ---
+
+/// The catchup budget must scale with backoff duration. A 30s backoff
+/// (typical YT_RTMP first death) gives 40 chunks (30 + 10 buffer); a
+/// 300s backoff (maxed-out repeat death) gives 310. Without the scaled
+/// budget the cache stuck at target+30s after each death and compounded
+/// across a multi-hour live event — observed 2026-04-20.
+#[test]
+fn catchup_budget_scales_with_backoff_30s() {
+    use crate::endpoint_audit::catchup_budget_for_backoff;
+    // 30s backoff (first YT_RTMP close), 10-chunk buffer.
+    assert_eq!(catchup_budget_for_backoff(30, 10), 40);
+}
+
+#[test]
+fn catchup_budget_scales_with_backoff_60s() {
+    use crate::endpoint_audit::catchup_budget_for_backoff;
+    // 60s backoff (2nd consecutive YT_RTMP close).
+    assert_eq!(catchup_budget_for_backoff(60, 10), 70);
+}
+
+#[test]
+fn catchup_budget_scales_with_backoff_maxed() {
+    use crate::endpoint_audit::catchup_budget_for_backoff;
+    // 300s backoff (5th+ consecutive close, capped by reconnect_floor).
+    assert_eq!(catchup_budget_for_backoff(300, 10), 310);
+}
+
+#[test]
+fn catchup_budget_zero_backoff_still_drains_buffer() {
+    use crate::endpoint_audit::catchup_budget_for_backoff;
+    // Pathological case: hypothetical 0s backoff still drains the
+    // pre-restart buffer content so pacing re-anchors cleanly.
+    assert_eq!(catchup_budget_for_backoff(0, 10), 10);
+}
+
+#[test]
+fn catchup_budget_saturates_on_huge_backoff() {
+    use crate::endpoint_audit::catchup_budget_for_backoff;
+    // Defensive: u64 backoff huge but realistic clamp keeps it u32.
+    assert_eq!(
+        catchup_budget_for_backoff(u64::MAX, 10),
+        u32::MAX,
+        "must not overflow"
+    );
+}
