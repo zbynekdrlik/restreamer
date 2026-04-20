@@ -1680,34 +1680,34 @@ jobs:
           $mem = $obs.WorkingSet64 / 1MB
           Write-Host "OBS PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
           if ($mem -lt 500) {
-            Write-Host "OBS at ${mem}MB - likely stuck on crash-recovery dialog. Attempting UI auto-dismiss..."
-            try {
-              Add-Type -AssemblyName UIAutomationClient
-              $root = [System.Windows.Automation.AutomationElement]::RootElement
-              $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $obs.Id)
-              $btnCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
-              foreach ($w in $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)) {
-                Write-Host "  Window: $($w.Current.Name)"
-                foreach ($b in $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $btnCond)) {
-                  $name = $b.Current.Name
-                  if ($name -match "Normal" -and $name -notmatch "Safe") {
-                    $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-                    Write-Host "  Auto-clicked: $name"
-                  }
-                }
-              }
-            } catch {
-              Write-Host "  UI auto-dismiss failed: $_"
+            Write-Host "OBS at ${mem}MB - stuck on crash-recovery dialog. Killing + clearing sentinel + relaunching via StartOBS (which has in-session dialog-dismiss logic)..."
+            # SYSTEM (runner) can't see newlevel session's UI windows, so UI
+            # Automation from here won't find the dialog. Instead: force-kill
+            # the stuck process, clear the .sentinel marker so the next
+            # launch is clean, then relaunch via the StartOBS scheduled task
+            # (runs in newlevel's interactive session and has its own UI-
+            # Automation fallback dismissing any residual dialogs).
+            Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+            Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            Remove-Item -Force "$env:APPDATA\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+            Remove-Item -Force "$env:USERPROFILE\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+            Remove-Item -Force "C:\Users\newlevel\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+            Remove-Item -Force "C:\Users\newlevel\AppData\Roaming\obs-studio\safe_mode" -ErrorAction SilentlyContinue
+            schtasks.exe /run /tn "StartOBS"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "StartOBS task not found; trying 'Start OBS Studio'"
+              schtasks.exe /run /tn "Start OBS Studio"
             }
-            # Wait up to 30 s for OBS to reach healthy memory after the click.
-            for ($i = 1; $i -le 30; $i++) {
+            # Wait up to 45 s for OBS to fully start.
+            for ($i = 1; $i -le 45; $i++) {
               Start-Sleep -Seconds 1
               $obs = Get-Process obs64 -ErrorAction SilentlyContinue
               if ($obs -and ($obs.WorkingSet64 / 1MB) -ge 500) { break }
             }
             $mem = if ($obs) { $obs.WorkingSet64 / 1MB } else { 0 }
             if ($mem -lt 500) {
-              throw "FAILED: OBS in broken state ($([math]::Round($mem))MB) after auto-dismiss attempt"
+              throw "FAILED: OBS in broken state ($([math]::Round($mem))MB) after kill+clean+relaunch"
             }
             Write-Host "OBS recovered: PID=$($obs.Id) Memory=$([math]::Round($mem))MB"
           }
