@@ -238,7 +238,7 @@ async fn delivery_broadcast_loop(
         // so they reach the writer task and broadcast live via
         // `WsEvent::AuditAppended` — same pipeline as host-originated rows.
         if let Ok(Some(inst)) = db::get_delivery_instance_by_event(&pool, event.id).await {
-            let _ = delivery::mirror_vps_audit(&pool, inst.id, Some(&audit_tx)).await;
+            let _ = delivery::mirror_vps_audit(&pool, inst.id, &audit_tx).await;
         }
 
         match orch.poll_delivery_metrics(event.id).await {

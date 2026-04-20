@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use crate::api::{EndpointConfig, S3Config};
 use crate::audit_ring::AuditRing;
 pub use crate::buffer_state::{BufferState, initial_delivery_mode};
+use crate::endpoint_audit;
 use crate::ffmpeg_reason::{self, ReasonClass};
 use crate::s3_fetch::S3Fetcher;
 
@@ -127,50 +128,7 @@ impl OutputProcessFactory for FfmpegProcessFactory {
     }
 }
 
-/// One row in the ffmpeg restart audit log. Captures process-death
-/// details so operators can diagnose patterns (e.g. all restarts after
-/// exactly 65s = upstream session timeout).
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct FfmpegRestartRecord {
-    pub timestamp_ms: i64,
-    pub chunk_id: i64,
-    pub lifetime_secs: u64,
-    /// Serialized `ReasonClass` (e.g. "youtube_rtmp_closed").
-    pub reason: String,
-    pub stderr_tail: Option<String>,
-    pub backoff_secs: u64,
-}
-
-/// Cap on the per-endpoint restart history ring buffer.
-pub const RESTART_HISTORY_CAP: usize = 100;
-
-/// Per-class consecutive-death counter feeding `ffmpeg_reason::reconnect_floor`.
-/// Resets to 1 when the class changes so (e.g.) `NetworkTimeout` -> `YoutubeRtmpClosed`
-/// starts a fresh backoff ladder instead of carrying the old exponent.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct EndpointRestartState {
-    pub consecutive_same_class: u32,
-    pub last_class: Option<ReasonClass>,
-}
-
-impl EndpointRestartState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Called after each ffmpeg death. Returns updated state.
-    pub fn advance(self, class: ReasonClass) -> Self {
-        let count = if self.last_class == Some(class) {
-            self.consecutive_same_class.saturating_add(1)
-        } else {
-            1
-        };
-        Self {
-            consecutive_same_class: count,
-            last_class: Some(class),
-        }
-    }
-}
+pub use crate::endpoint_audit::{EndpointRestartState, FfmpegRestartRecord, RESTART_HISTORY_CAP};
 
 /// Stats tracked per endpoint with diagnostics.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -270,18 +228,11 @@ impl EndpointHandle {
             Ok(f) => f,
             Err(e) => {
                 tracing::error!(alias = %ep_cfg.alias, "Failed to create S3 fetcher: {e}");
-                if let Some(ring) = &audit_ring {
-                    ring.push(
-                        rs_core::audit::Severity::Error,
-                        rs_core::audit::Source::Vps,
-                        Some(ep_cfg.alias.clone()),
-                        rs_core::audit::Action::EndpointFfmpegRestartFailed,
-                        serde_json::json!({
-                            "phase": "s3_fetcher_init",
-                            "error": e.to_string(),
-                        }),
-                    );
-                }
+                endpoint_audit::emit_s3_fetcher_init_failed(
+                    &audit_ring,
+                    &ep_cfg.alias,
+                    &e.to_string(),
+                );
                 let stats_clone = stats.clone();
                 let task = tokio::spawn(async move {
                     let mut s = stats_clone.lock().await;
@@ -596,6 +547,18 @@ async fn consumer_task<P: OutputProcessFactory>(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
+                // The host mirror pulls these rows next tick — persisted
+                // evidence is what the 2026-04-19 post-mortem lacked.
+                endpoint_audit::emit_ffmpeg_died(
+                    &audit_ring,
+                    &alias,
+                    lifetime_secs,
+                    &reason_str,
+                    stderr_tail.as_deref(),
+                    backoff_secs,
+                    restart_state.consecutive_same_class,
+                );
+
                 let record = FfmpegRestartRecord {
                     timestamp_ms,
                     chunk_id: current_chunk_id_for_record,
@@ -612,26 +575,6 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
                 s.restart_history.push_back(record);
                 drop(s);
-
-                // Emit EndpointFfmpegDied audit row so the host mirror
-                // can pull it next tick. Persisted evidence is what the
-                // 2026-04-19 post-mortem lacked; this is the primary
-                // sink for per-endpoint death diagnostics.
-                if let Some(ring) = &audit_ring {
-                    ring.push(
-                        rs_core::audit::Severity::Warn,
-                        rs_core::audit::Source::Ffmpeg,
-                        Some(alias.clone()),
-                        rs_core::audit::Action::EndpointFfmpegDied,
-                        serde_json::json!({
-                            "lifetime_secs": lifetime_secs,
-                            "reason": reason_str,
-                            "stderr_tail": record.stderr_tail,
-                            "backoff_secs": backoff_secs,
-                            "consecutive_same_class": restart_state.consecutive_same_class,
-                        }),
-                    );
-                }
 
                 if is_process_killed {
                     tracing::info!(
@@ -676,26 +619,13 @@ async fn consumer_task<P: OutputProcessFactory>(
                         s.stall_reason = None;
                     }
                     drop(s);
-                    // Audit: first spawn OR recovery after restart. This is
-                    // the VPS-side equivalent of host's "endpoint alive
-                    // transition" — a visible post-event milestone.
-                    if let Some(ring) = &audit_ring {
-                        let action = if was_dead {
-                            rs_core::audit::Action::EndpointAliveTransition
-                        } else {
-                            rs_core::audit::Action::EndpointStarted
-                        };
-                        ring.push(
-                            rs_core::audit::Severity::Info,
-                            rs_core::audit::Source::Ffmpeg,
-                            Some(alias.clone()),
-                            action,
-                            serde_json::json!({
-                                "service_type": ep_cfg.service_type,
-                                "stream_key_len": ep_cfg.stream_key.len(),
-                            }),
-                        );
-                    }
+                    endpoint_audit::emit_spawn_success(
+                        &audit_ring,
+                        &alias,
+                        &ep_cfg.service_type,
+                        ep_cfg.stream_key.len(),
+                        was_dead,
+                    );
                 }
                 Err(e) => {
                     consecutive_ffmpeg_failures += 1;
@@ -703,21 +633,12 @@ async fn consumer_task<P: OutputProcessFactory>(
                     s.consecutive_ffmpeg_failures = consecutive_ffmpeg_failures;
                     s.last_error = Some(e.clone());
                     drop(s);
-                    // Audit: spawn failed — operator sees the actual
-                    // ffmpeg spawn error (missing binary, permission
-                    // denied, etc.) instead of just "endpoint red".
-                    if let Some(ring) = &audit_ring {
-                        ring.push(
-                            rs_core::audit::Severity::Error,
-                            rs_core::audit::Source::Ffmpeg,
-                            Some(alias.clone()),
-                            rs_core::audit::Action::EndpointFfmpegRestartFailed,
-                            serde_json::json!({
-                                "consecutive_failures": consecutive_ffmpeg_failures,
-                                "error": e,
-                            }),
-                        );
-                    }
+                    endpoint_audit::emit_spawn_failed(
+                        &audit_ring,
+                        &alias,
+                        consecutive_ffmpeg_failures,
+                        &e,
+                    );
 
                     if consecutive_ffmpeg_failures >= MAX_FFMPEG_RESTARTS {
                         circuit_trips += 1;
@@ -1055,21 +976,5 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
 }
 
 #[cfg(test)]
-#[path = "endpoint_task_tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "endpoint_task_pacing_tests.rs"]
-mod pacing_tests;
-
-#[cfg(test)]
-#[path = "endpoint_task_backoff_tests.rs"]
-mod backoff_tests;
-
-#[cfg(test)]
-#[path = "endpoint_task_rescue_tests.rs"]
-mod rescue_tests;
-
-#[cfg(test)]
-#[path = "endpoint_task_flv_tests.rs"]
-mod flv_tests;
+#[path = "endpoint_task_test_root.rs"]
+mod test_root;

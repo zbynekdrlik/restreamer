@@ -8,12 +8,9 @@ struct MockFetcher {
 }
 
 impl MockFetcher {
-    // Default 20ms per chunk so consumer pacing doesn't dominate throughput
-    // tests. Pacing-specific tests construct with a larger value explicitly.
     fn new(chunks: Vec<(i64, Vec<u8>)>) -> Self {
-        let map: std::collections::HashMap<i64, Vec<u8>> = chunks.into_iter().collect();
         Self {
-            chunks: Arc::new(TokioMutex::new(map)),
+            chunks: Arc::new(TokioMutex::new(chunks.into_iter().collect())),
             duration_ms_per_chunk: 20,
         }
     }
@@ -85,10 +82,8 @@ impl OutputProcess for MockProcess {
     }
 
     fn last_stderr_line(&self) -> Option<String> {
-        // Classify as InvalidInput (1s backoff) so tests observe restarts
-        // quickly under the class-aware reconnect_floor policy. Using
-        // "mock stderr line" would classify as Unknown (15s flat), which
-        // blows past the short virtual-time windows these tests use.
+        // "Invalid data found" classifies as InvalidInput (1s backoff) so
+        // tests observe restarts within their virtual-time windows.
         Some("Invalid data found".to_string())
     }
 }
@@ -747,11 +742,7 @@ async fn test_processes_100_sequential_chunks() {
     drop(s);
 
     let w = writes.lock().await;
-    assert!(
-        w.len() >= 100,
-        "Should have writes (1 per chunk): {}",
-        w.len()
-    );
+    assert!(w.len() >= 100, "expected >=100 writes, got {}", w.len());
     drop(w);
 
     let _ = stop_tx.send(true);
@@ -779,7 +770,8 @@ async fn test_stats_struct_serializes() {
     assert!(json.contains("\"ffmpeg_restart_count\":2"));
 }
 
-// TimedMockFetcher: chunks available at configured rate
+// TimedMockFetcher: chunks available at configured rate.
+// 2000ms chunk duration matches buffer-fill/chunk-gap tests.
 struct TimedMockFetcher {
     chunks: Arc<TokioMutex<std::collections::HashMap<i64, Vec<u8>>>>,
     available_up_to: Arc<AtomicI64>,
@@ -787,13 +779,9 @@ struct TimedMockFetcher {
 }
 
 impl TimedMockFetcher {
-    /// Pre-loaded chunks; only returned when chunk_id <= available_up_to.
-    /// 2000ms chunk duration matches buffer-fill/chunk-gap tests — callers
-    /// must advance mock time >= num_chunks * 2000ms to cover consumer pacing.
     fn new(chunks: Vec<(i64, Vec<u8>)>, initially_available: i64) -> Self {
-        let map: std::collections::HashMap<i64, Vec<u8>> = chunks.into_iter().collect();
         Self {
-            chunks: Arc::new(TokioMutex::new(map)),
+            chunks: Arc::new(TokioMutex::new(chunks.into_iter().collect())),
             available_up_to: Arc::new(AtomicI64::new(initially_available)),
             duration_ms_per_chunk: 2000,
         }

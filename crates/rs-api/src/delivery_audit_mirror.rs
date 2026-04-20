@@ -56,7 +56,7 @@ pub async fn mirror_vps_audit(
                 audit_tx,
                 AuditRow {
                     severity: Severity::Warn,
-                    source: Source::Host,
+                    source: Source::System,
                     event_id: instance.event_id,
                     instance_id: Some(instance_id),
                     endpoint: None,

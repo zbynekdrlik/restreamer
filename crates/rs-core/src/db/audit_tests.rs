@@ -99,6 +99,143 @@ async fn query_filters_event_and_severity() {
     assert_eq!(filtered[0].event_id, Some(1));
 }
 
+/// End-to-end audit flow: `record()` → `audit_writer_task` → `audit_log` row
+/// persisted AND `WsEvent::AuditAppended` broadcast. This is the pipeline
+/// that PR #129 wired up but left partially connected; we assert the full
+/// loop works so a future regression can't silently drop audit rows again.
+#[tokio::test]
+async fn record_through_writer_task_persists_and_broadcasts() {
+    use crate::audit;
+    use tokio::sync::mpsc;
+
+    let pool = create_memory_pool().await.unwrap();
+    run_migrations(&pool).await.unwrap();
+    let (ws_tx, mut ws_rx) = broadcast::channel(16);
+    let (audit_tx, audit_rx) = mpsc::channel::<AuditRow>(1024);
+
+    // Spawn the writer exactly as the runtime does.
+    let writer_pool = pool.clone();
+    let writer_ws_tx = ws_tx.clone();
+    let writer = tokio::spawn(async move {
+        audit::audit_writer_task(writer_pool, writer_ws_tx, audit_rx).await;
+    });
+
+    // Fire a VPS-sourced row through the fire-and-forget API, exactly as
+    // mirror_vps_audit does after the C3 wire-up.
+    audit::record(
+        &audit_tx,
+        AuditRow {
+            severity: Severity::Warn,
+            source: Source::Ffmpeg,
+            event_id: Some(101),
+            instance_id: Some(42),
+            endpoint: Some("YT NLW 4k".into()),
+            action: Action::EndpointFfmpegDied,
+            detail: serde_json::json!({
+                "lifetime_secs": 47,
+                "reason": "youtube_rtmp_closed",
+            }),
+            ts_override: None,
+        },
+    );
+
+    // Writer batches for up to 100ms, so give it room. Poll for up to 2s.
+    let mut count: i64 = 0;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        count = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        if count > 0 {
+            break;
+        }
+    }
+    assert_eq!(count, 1, "row must be persisted end-to-end");
+
+    // Matching WS broadcast must have fired.
+    let ev = tokio::time::timeout(std::time::Duration::from_secs(1), ws_rx.recv())
+        .await
+        .expect("broadcast timed out")
+        .unwrap();
+    match ev {
+        crate::models::WsEvent::AuditAppended {
+            source,
+            action,
+            endpoint,
+            event_id,
+            ..
+        } => {
+            assert_eq!(source, "ffmpeg");
+            assert_eq!(action, "endpoint_ffmpeg_died");
+            assert_eq!(endpoint.as_deref(), Some("YT NLW 4k"));
+            assert_eq!(event_id, Some(101));
+        }
+        other => panic!("expected AuditAppended, got {other:?}"),
+    }
+
+    // Drop the sender so the writer task exits cleanly.
+    drop(audit_tx);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), writer).await;
+}
+
+/// `audit_writer_task` must flush on the time deadline even if the batch
+/// is nowhere near 32 rows. Single-row submission should still land in
+/// the DB within ~100 ms (the FLUSH_AFTER constant).
+#[tokio::test]
+async fn writer_task_flushes_on_time_deadline() {
+    use crate::audit;
+    use tokio::sync::mpsc;
+
+    let pool = create_memory_pool().await.unwrap();
+    run_migrations(&pool).await.unwrap();
+    let (ws_tx, _ws_rx) = broadcast::channel(16);
+    let (audit_tx, audit_rx) = mpsc::channel::<AuditRow>(16);
+
+    let writer_pool = pool.clone();
+    let writer = tokio::spawn(async move {
+        audit::audit_writer_task(writer_pool, ws_tx, audit_rx).await;
+    });
+
+    let start = std::time::Instant::now();
+    audit::record(
+        &audit_tx,
+        AuditRow {
+            severity: Severity::Info,
+            source: Source::Operator,
+            event_id: Some(7),
+            instance_id: None,
+            endpoint: None,
+            action: Action::EventStarted,
+            detail: serde_json::json!({}),
+            ts_override: None,
+        },
+    );
+
+    // Time-based flush: should land within a few hundred ms, not wait
+    // for batch to fill. Wait up to 500 ms and assert.
+    let mut count: i64 = 0;
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        count = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        if count > 0 {
+            break;
+        }
+    }
+    assert_eq!(count, 1, "single row must be flushed on time deadline");
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(600),
+        "time-based flush took {:?} — must be <600 ms",
+        start.elapsed()
+    );
+
+    drop(audit_tx);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), writer).await;
+}
+
 #[tokio::test]
 async fn get_by_id_roundtrip() {
     let pool = create_memory_pool().await.unwrap();

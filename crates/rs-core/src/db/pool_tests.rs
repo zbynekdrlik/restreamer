@@ -21,6 +21,25 @@ async fn create_pool_sets_busy_timeout_and_synchronous() {
 }
 
 #[tokio::test]
+async fn create_pool_enables_wal_journal_mode() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let pool = crate::db::create_pool(tmp.path()).await.unwrap();
+
+    // WAL is the whole point of the SQLite hardening for the uploader —
+    // it allows concurrent readers during a writer transaction and is
+    // required for the pragma-only BUSY mitigation to hold under load.
+    let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        journal_mode.to_ascii_lowercase(),
+        "wal",
+        "journal_mode must be WAL, got {journal_mode}"
+    );
+}
+
+#[tokio::test]
 async fn create_memory_pool_sets_busy_timeout() {
     let pool = crate::db::create_memory_pool().await.unwrap();
     let busy_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")

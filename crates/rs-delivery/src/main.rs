@@ -13,6 +13,7 @@ mod api;
 mod audit_ring;
 pub mod buffer_state;
 pub mod db;
+pub mod endpoint_audit;
 pub mod endpoint_task;
 mod ffmpeg_reason;
 pub mod rescue;
