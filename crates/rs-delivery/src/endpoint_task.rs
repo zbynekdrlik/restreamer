@@ -13,7 +13,7 @@ use crate::api::{EndpointConfig, S3Config};
 use crate::audit_ring::AuditRing;
 pub use crate::buffer_state::{BufferState, initial_delivery_mode};
 use crate::endpoint_audit;
-use crate::ffmpeg_reason::{self, ReasonClass};
+use crate::ffmpeg_reason;
 use crate::s3_fetch::S3Fetcher;
 
 #[path = "flv_normalizer.rs"]
