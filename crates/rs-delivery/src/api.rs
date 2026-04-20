@@ -181,6 +181,7 @@ async fn init_endpoints(
             start_id,
             req.delivery_delay_ms,
             req.rescue_video_url.clone(),
+            Some(Arc::clone(&state.audit_ring)),
         );
 
         endpoints.insert(ep_cfg.alias.clone(), handle);
@@ -380,6 +381,7 @@ async fn add_endpoint(
         start_id,
         delivery_delay_ms,
         rescue_video_url,
+        Some(Arc::clone(&state.audit_ring)),
     );
 
     let alias = req.endpoint.alias.clone();

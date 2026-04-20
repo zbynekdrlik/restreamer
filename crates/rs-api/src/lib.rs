@@ -85,8 +85,9 @@ pub async fn serve(
         let ws_tx = state.ws_tx.clone();
         let cached = Arc::clone(&state.cached_delivery);
         let config = state.config.clone();
+        let audit_tx = state.audit_tx.clone();
         tokio::spawn(async move {
-            delivery_broadcast_loop(orch, pool, ws_tx, cached, config).await;
+            delivery_broadcast_loop(orch, pool, ws_tx, cached, config, audit_tx).await;
         });
     }
 
@@ -173,6 +174,7 @@ async fn delivery_broadcast_loop(
     ws_tx: tokio::sync::broadcast::Sender<WsEvent>,
     cached: std::sync::Arc<std::sync::RwLock<state::CachedDeliveryStatus>>,
     config: std::sync::Arc<rs_core::config::Config>,
+    audit_tx: tokio::sync::mpsc::Sender<rs_core::audit::AuditRow>,
 ) {
     // Track previous endpoint alive state for ActivityFeed transitions
     let mut prev_alive: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
@@ -232,10 +234,11 @@ async fn delivery_broadcast_loop(
 
         // Mirror VPS audit rows into the host audit_log. Best-effort —
         // the VPS may be unreachable for reasons outside our control, and
-        // the next tick retries. No audit_tx channel wired through
-        // AppState yet (see Task 27); synchronous-insert fallback is used.
+        // the next tick retries. Rows are sent through the real audit_tx
+        // so they reach the writer task and broadcast live via
+        // `WsEvent::AuditAppended` — same pipeline as host-originated rows.
         if let Ok(Some(inst)) = db::get_delivery_instance_by_event(&pool, event.id).await {
-            let _ = delivery::mirror_vps_audit(&pool, inst.id, None).await;
+            let _ = delivery::mirror_vps_audit(&pool, inst.id, Some(&audit_tx)).await;
         }
 
         match orch.poll_delivery_metrics(event.id).await {

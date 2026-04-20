@@ -154,6 +154,7 @@ async fn test_consumer_backs_off_exponentially_on_repeated_deaths() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });

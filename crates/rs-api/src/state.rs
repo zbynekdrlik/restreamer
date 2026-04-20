@@ -70,16 +70,23 @@ pub struct AppState {
     /// Fire-and-forget sender for audit rows. Handlers push `AuditRow` via
     /// `rs_core::audit::record(&state.audit_tx, row)` and the audit writer
     /// task batches INSERTs + broadcasts `WsEvent::AuditAppended`.
-    /// The default constructor creates a throwaway channel whose receiver
-    /// is dropped immediately — real wiring (spawning `audit_writer_task`
-    /// against the receiver) lands in Task 27.
+    /// Constructed by the runtime together with the writer task; tests use
+    /// [`AppState::new_for_tests`] which wires a dummy channel.
     pub audit_tx: mpsc::Sender<AuditRow>,
 }
 
 impl AppState {
-    pub fn new(pool: SqlitePool, config: Config, ws_tx: broadcast::Sender<WsEvent>) -> Self {
-        // Throwaway audit channel; real wire-up is Task 27.
-        let (audit_tx, _audit_rx) = mpsc::channel::<AuditRow>(1024);
+    /// Construct `AppState` with the real audit channel. The caller is
+    /// responsible for also spawning `audit_writer_task` against the
+    /// matching receiver. The audit sender is threaded into the
+    /// `DeliveryOrchestrator` so all its lifecycle emissions land in the
+    /// `audit_log` table — no throwaway sender, no post-construction wiring.
+    pub fn new(
+        pool: SqlitePool,
+        config: Config,
+        ws_tx: broadcast::Sender<WsEvent>,
+        audit_tx: mpsc::Sender<AuditRow>,
+    ) -> Self {
         let delivery = DeliveryOrchestrator::new(pool.clone(), config.clone())
             .map(|o| o.with_audit_tx(audit_tx.clone()));
         let obs_client = if config.obs.enabled {
@@ -113,12 +120,18 @@ impl AppState {
         }
     }
 
-    /// Replace the audit channel with a shared sender (used when the
-    /// runtime spawns the `audit_writer_task` and wants handlers to feed
-    /// into the real writer).
-    pub fn with_audit_tx(mut self, tx: mpsc::Sender<AuditRow>) -> Self {
-        self.audit_tx = tx;
-        self
+    /// Test helper: construct `AppState` with a dummy audit channel whose
+    /// receiver is dropped immediately. Safe because `audit::record` is
+    /// fire-and-forget (`try_send` on a closed channel just drops the row).
+    /// Production code MUST use [`AppState::new`] with a live writer task
+    /// so audit rows actually reach the database and WebSocket broadcast.
+    pub fn new_for_tests(
+        pool: SqlitePool,
+        config: Config,
+        ws_tx: broadcast::Sender<WsEvent>,
+    ) -> Self {
+        let (audit_tx, _audit_rx) = mpsc::channel::<AuditRow>(1024);
+        Self::new(pool, config, ws_tx, audit_tx)
     }
 
     /// Replace the upload metrics with a shared instance (set before ChunkUploader is spawned).
@@ -188,7 +201,7 @@ mod tests {
     async fn new_defaults() {
         let pool = db::create_memory_pool().await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx);
 
         assert!(state.config_path.is_none());
         assert!(state.inpoint_restart_tx.is_none());
@@ -201,7 +214,7 @@ mod tests {
     async fn with_config_path_sets_path() {
         let pool = db::create_memory_pool().await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, Config::for_testing(), ws_tx)
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx)
             .with_config_path(PathBuf::from("/tmp/test.json"));
 
         assert_eq!(state.config_path, Some(PathBuf::from("/tmp/test.json")));
@@ -218,7 +231,8 @@ mod tests {
             message: "hello".into(),
         });
 
-        let state = AppState::new(pool, Config::for_testing(), ws_tx).with_log_buffer(buffer);
+        let state =
+            AppState::new_for_tests(pool, Config::for_testing(), ws_tx).with_log_buffer(buffer);
 
         let entries = state.log_buffer.recent("test", 10);
         assert_eq!(entries.len(), 1);
@@ -232,7 +246,7 @@ mod tests {
         let (inpoint_tx, _) = mpsc::channel(1);
         let (endpoint_tx, _) = mpsc::channel(1);
 
-        let state = AppState::new(pool, Config::for_testing(), ws_tx)
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx)
             .with_restart_channels(inpoint_tx, endpoint_tx);
 
         assert!(state.inpoint_restart_tx.is_some());

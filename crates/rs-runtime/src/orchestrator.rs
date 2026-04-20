@@ -151,28 +151,29 @@ impl ServiceCore {
         // API server
         let api_addr: SocketAddr =
             format!("{}:{}", self.config.api.bind, self.config.api.port).parse()?;
-        let mut api_state = AppState::new(pool.clone(), self.config.clone(), ws_tx.clone())
-            .with_config_path(self.config_path)
-            .with_log_buffer(self.log_buffer)
-            .with_inpoint_state(inpoint_state.clone())
-            .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx)
-            .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked))
-            .with_upload_metrics(Arc::clone(&upload_metrics));
 
-        // Task 27: replace the throwaway audit channel created by
-        // `AppState::new` with a real one, spawn the audit writer that
-        // drains the receiver and batches INSERTs + WS broadcasts, and
-        // schedule nightly rotation of the audit_log and metrics tables.
-        //
-        // NOTE: the `DeliveryOrchestrator` was already constructed by
-        // `AppState::new` with a clone of the throwaway sender. Its audit
-        // rows continue to be dropped. Plumbing the real sender into the
-        // orchestrator requires a follow-up refactor to make `AppState::new`
-        // accept an external `audit_tx`. All handlers, `inpoint_state`, and
-        // the uploader below are updated to use the real sender because
-        // their clones are taken AFTER this line.
+        // Create the audit channel BEFORE `AppState::new` so the real
+        // sender is wired into the `DeliveryOrchestrator` at construction
+        // (it was previously a throwaway sender and all VPS-lifecycle
+        // audit rows were silently dropped — see the 2026-04-19 post-mortem).
         let (audit_tx, audit_rx) = mpsc::channel::<AuditRow>(1024);
-        api_state = api_state.with_audit_tx(audit_tx);
+
+        let mut api_state = AppState::new(
+            pool.clone(),
+            self.config.clone(),
+            ws_tx.clone(),
+            audit_tx.clone(),
+        )
+        .with_config_path(self.config_path)
+        .with_log_buffer(self.log_buffer)
+        .with_inpoint_state(inpoint_state.clone())
+        .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx)
+        .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked))
+        .with_upload_metrics(Arc::clone(&upload_metrics));
+
+        // Spawn the audit writer that drains the receiver and batches
+        // INSERTs + WS broadcasts, and schedule nightly rotation of the
+        // audit_log and metrics tables.
         {
             let pool = pool.clone();
             let ws_tx = ws_tx.clone();

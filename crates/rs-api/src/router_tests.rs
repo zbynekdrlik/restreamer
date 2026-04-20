@@ -18,7 +18,7 @@ mod stream_tests {
         db::run_migrations(&pool).await.unwrap();
         let config = Config::for_testing();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new(pool, config, ws_tx)
+        AppState::new_for_tests(pool, config, ws_tx)
     }
 
     #[tokio::test]
@@ -273,7 +273,7 @@ mod obs_tests {
         let pool = db::create_memory_pool().await.unwrap();
         db::run_migrations(&pool).await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx);
         let app = build_router(state);
 
         let resp = app
@@ -294,7 +294,7 @@ mod obs_tests {
         let pool = db::create_memory_pool().await.unwrap();
         db::run_migrations(&pool).await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx);
         let app = build_router(state);
 
         let resp = app
@@ -316,7 +316,7 @@ mod obs_tests {
         let pool = db::create_memory_pool().await.unwrap();
         db::run_migrations(&pool).await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx);
         let app = build_router(state);
 
         let resp = app
@@ -357,14 +357,14 @@ mod youtube_oauth_tests {
         let pool = db::create_memory_pool().await.unwrap();
         db::run_migrations(&pool).await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new(pool, yt_config(), ws_tx)
+        AppState::new_for_tests(pool, yt_config(), ws_tx)
     }
 
     async fn test_state_no_yt() -> AppState {
         let pool = db::create_memory_pool().await.unwrap();
         db::run_migrations(&pool).await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new(pool, Config::for_testing(), ws_tx)
+        AppState::new_for_tests(pool, Config::for_testing(), ws_tx)
     }
 
     #[tokio::test]
@@ -470,7 +470,7 @@ mod audit_tests {
         db::run_migrations(&pool).await.unwrap();
         let config = Config::for_testing();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new(pool, config, ws_tx)
+        AppState::new_for_tests(pool, config, ws_tx)
     }
 
     async fn body_to_bytes(body: Body) -> Vec<u8> {
@@ -584,7 +584,7 @@ mod metrics_tests {
         db::run_migrations(&pool).await.unwrap();
         let config = Config::for_testing();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new(pool, config, ws_tx)
+        AppState::new_for_tests(pool, config, ws_tx)
     }
 
     async fn body_to_bytes(body: Body) -> Vec<u8> {
@@ -693,7 +693,7 @@ mod rtmp_stable_gate_tests {
         db::run_migrations(&pool).await.unwrap();
         let config = Config::for_testing();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new(pool, config, ws_tx)
+        AppState::new_for_tests(pool, config, ws_tx)
     }
 
     async fn body_to_bytes(body: Body) -> Vec<u8> {

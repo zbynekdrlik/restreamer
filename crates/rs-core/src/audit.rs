@@ -116,20 +116,25 @@ impl Default for RateLimiter {
 }
 
 /// Push an audit row into the writer channel. Non-blocking.
-/// On channel-full, Info/Warn rows are dropped; Error/Critical blocking-send
-/// via a spawned task so we never lose them.
+/// On channel-full: Info rows are dropped; Warn/Error/Critical rows are
+/// preserved via an async retry on a spawned task so operator-actionable
+/// evidence is never lost under load (the 2026-04-19 post-mortem required
+/// `Warn` rows — e.g. `EndpointFfmpegDied` — to be present after the fact).
 pub fn record(tx: &mpsc::Sender<AuditRow>, row: AuditRow) {
     match tx.try_send(row.clone()) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(r))
-            if matches!(r.severity, Severity::Error | Severity::Critical) =>
+            if matches!(
+                r.severity,
+                Severity::Warn | Severity::Error | Severity::Critical
+            ) =>
         {
             let tx2 = tx.clone();
             tokio::spawn(async move {
                 let _ = tx2.send(r).await;
             });
         }
-        Err(_) => { /* drop Info/Warn under pressure */ }
+        Err(_) => { /* drop Info under pressure */ }
     }
 }
 

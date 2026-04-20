@@ -167,6 +167,7 @@ async fn test_processes_sequential_chunks() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -211,6 +212,7 @@ async fn test_stops_on_signal() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -248,6 +250,7 @@ async fn test_restarts_ffmpeg_on_death() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -302,6 +305,7 @@ async fn test_tracks_ffmpeg_restart_count() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -343,6 +347,7 @@ async fn test_tracks_consecutive_chunk_misses() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -387,6 +392,7 @@ async fn test_tracks_last_error() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -427,6 +433,7 @@ async fn test_ffmpeg_circuit_breaker_triggers() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -477,6 +484,7 @@ async fn test_chunk_gap_skip_ahead() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -524,6 +532,7 @@ async fn test_chunk_gap_detected_when_no_skip_found() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -575,6 +584,7 @@ async fn test_drought_mode_recovers_when_chunks_resume() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -662,6 +672,7 @@ async fn test_write_timeout_kills_ffmpeg() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -710,6 +721,7 @@ async fn test_processes_100_sequential_chunks() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -845,6 +857,7 @@ async fn test_buffer_fill_waits_for_target_chunk() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -918,6 +931,7 @@ async fn test_chunk_gap_maintained_at_delay_target() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -968,6 +982,7 @@ async fn test_buffer_fill_stops_on_signal() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });

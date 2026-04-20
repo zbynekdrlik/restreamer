@@ -57,21 +57,26 @@ pub fn classify(service_type: &str, stderr_tail: &str) -> ReasonClass {
 }
 
 /// Minimum wait before next restart, given reason + consecutive count in this class.
-pub fn reconnect_floor(class: ReasonClass, consecutive: u32) -> Duration {
+///
+/// Returns `None` when the class means "do not restart" (currently only
+/// `ProcessKilled`, which indicates a deliberate operator-requested kill).
+/// The previous sentinel `Duration::from_secs(u64::MAX)` relied on the
+/// caller knowing the magic number; an `Option` makes the contract explicit
+/// and prevents a naive `tokio::time::sleep(floor)` from hanging forever.
+pub fn reconnect_floor(class: ReasonClass, consecutive: u32) -> Option<Duration> {
     use ReasonClass::*;
     match class {
-        // Never restart — caller suppresses.
-        ProcessKilled => Duration::from_secs(u64::MAX),
+        ProcessKilled => None,
         YoutubeRtmpClosed | FacebookTlsInvalidated | RemoteBrokenPipe => {
             // 30s * 2^consecutive, capped at 5 min.
             let base: u64 = 30;
             let mul = 2u64.saturating_pow(consecutive.min(10));
-            Duration::from_secs(base.saturating_mul(mul).min(300))
+            Some(Duration::from_secs(base.saturating_mul(mul).min(300)))
         }
-        NetworkTimeout => Duration::from_secs(10),
-        InvalidInput => Duration::from_secs(1),
-        S3FetchError => Duration::from_secs(5),
-        Unknown => Duration::from_secs(15),
+        NetworkTimeout => Some(Duration::from_secs(10)),
+        InvalidInput => Some(Duration::from_secs(1)),
+        S3FetchError => Some(Duration::from_secs(5)),
+        Unknown => Some(Duration::from_secs(15)),
     }
 }
 
@@ -113,7 +118,7 @@ mod tests {
     fn reconnect_floor_remote_close_starts_at_30s() {
         assert_eq!(
             reconnect_floor(ReasonClass::YoutubeRtmpClosed, 0),
-            Duration::from_secs(30)
+            Some(Duration::from_secs(30))
         );
     }
 
@@ -121,23 +126,23 @@ mod tests {
     fn reconnect_floor_remote_close_doubles_and_caps() {
         assert_eq!(
             reconnect_floor(ReasonClass::YoutubeRtmpClosed, 1),
-            Duration::from_secs(60)
+            Some(Duration::from_secs(60))
         );
         assert_eq!(
             reconnect_floor(ReasonClass::YoutubeRtmpClosed, 2),
-            Duration::from_secs(120)
+            Some(Duration::from_secs(120))
         );
         assert_eq!(
             reconnect_floor(ReasonClass::YoutubeRtmpClosed, 3),
-            Duration::from_secs(240)
+            Some(Duration::from_secs(240))
         );
         assert_eq!(
             reconnect_floor(ReasonClass::YoutubeRtmpClosed, 10),
-            Duration::from_secs(300)
+            Some(Duration::from_secs(300))
         );
         assert_eq!(
             reconnect_floor(ReasonClass::YoutubeRtmpClosed, 100),
-            Duration::from_secs(300)
+            Some(Duration::from_secs(300))
         );
     }
 
@@ -145,20 +150,18 @@ mod tests {
     fn reconnect_floor_network_timeout_fixed_10s() {
         assert_eq!(
             reconnect_floor(ReasonClass::NetworkTimeout, 0),
-            Duration::from_secs(10)
+            Some(Duration::from_secs(10))
         );
         assert_eq!(
             reconnect_floor(ReasonClass::NetworkTimeout, 5),
-            Duration::from_secs(10)
+            Some(Duration::from_secs(10))
         );
     }
 
     #[test]
-    fn reconnect_floor_process_killed_infinite() {
-        assert_eq!(
-            reconnect_floor(ReasonClass::ProcessKilled, 0),
-            Duration::from_secs(u64::MAX)
-        );
+    fn reconnect_floor_process_killed_is_none() {
+        assert_eq!(reconnect_floor(ReasonClass::ProcessKilled, 0), None);
+        assert_eq!(reconnect_floor(ReasonClass::ProcessKilled, 99), None);
     }
 
     #[test]

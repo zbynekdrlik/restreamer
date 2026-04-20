@@ -245,6 +245,7 @@ async fn test_write_failure_skips_chunk_after_retries() {
         sc,
         None,
         Arc::new(BufferState::new()),
+        None,
     ));
     for _ in 0..80 {
         tokio::time::advance(std::time::Duration::from_secs(1)).await;

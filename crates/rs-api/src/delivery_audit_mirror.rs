@@ -14,12 +14,17 @@ use sqlx::SqlitePool;
 ///
 /// Errors are best-effort: caller should swallow with `.ok()` because the
 /// VPS may be unreachable for reasons outside our control, and the next
-/// poll tick will retry. Successful mirrors fire `WsEvent::AuditAppended`
-/// for each inserted row when `audit_tx` is `Some` (preferred path).
+/// poll tick will retry. Rows are sent through the provided `audit_tx` so
+/// they land in the `audit_log` table AND broadcast live via
+/// `WsEvent::AuditAppended` through the shared writer pipeline.
+///
+/// On unreachable VPS a single `VpsAuditMirrorFailed` diagnostic row is
+/// emitted (rate-limited by the writer's dedup key) so operators see why
+/// the VPS panel is not updating, instead of a silent `Ok(())`.
 pub async fn mirror_vps_audit(
     pool: &SqlitePool,
     instance_id: i64,
-    audit_tx: Option<&tokio::sync::mpsc::Sender<rs_core::audit::AuditRow>>,
+    audit_tx: &tokio::sync::mpsc::Sender<rs_core::audit::AuditRow>,
 ) -> anyhow::Result<()> {
     use rs_core::audit::{Action, AuditRow, Severity, Source};
 
@@ -34,12 +39,38 @@ pub async fn mirror_vps_audit(
 
     let url = format!("http://{}:8000/api/status?since={cursor}", instance.ipv4);
     let client = reqwest::Client::new();
-    let resp = client
+    let resp = match client
         .get(&url)
         .bearer_auth(&instance.auth_token)
         .timeout(Duration::from_secs(5))
         .send()
-        .await?;
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Emit one diagnostic row per unreachable instance so the
+            // operator sees WHY the VPS panel is frozen. The writer's
+            // rate-limiter dedups by (instance_id, action) so a persistent
+            // outage does not flood the audit log.
+            rs_core::audit::record(
+                audit_tx,
+                AuditRow {
+                    severity: Severity::Warn,
+                    source: Source::Host,
+                    event_id: instance.event_id,
+                    instance_id: Some(instance_id),
+                    endpoint: None,
+                    action: Action::VpsUnreachable,
+                    detail: serde_json::json!({
+                        "phase": "mirror",
+                        "error": e.to_string(),
+                    }),
+                    ts_override: None,
+                },
+            );
+            return Ok(());
+        }
+    };
     if !resp.status().is_success() {
         return Ok(());
     }
@@ -58,33 +89,28 @@ pub async fn mirror_vps_audit(
 
     for r in &body.recent_audit {
         let ts = r["ts"].as_str().unwrap_or("").to_string();
-        let severity: Severity =
-            serde_json::from_value(r["severity"].clone()).unwrap_or(Severity::Info);
-        let source: Source = serde_json::from_value(r["source"].clone()).unwrap_or(Source::Vps);
-        let action: Action =
-            serde_json::from_value(r["action"].clone()).unwrap_or(Action::EndpointStarted);
+        // Strict parse: skip rows the host can't interpret rather than
+        // silently coercing to default variants (which would corrupt the
+        // audit log with rows that look legitimate but misclassify the
+        // source event).
+        let Ok(severity) = serde_json::from_value::<Severity>(r["severity"].clone()) else {
+            tracing::warn!(row = ?r, "mirror_vps_audit: unknown severity, skipping row");
+            continue;
+        };
+        let Ok(source) = serde_json::from_value::<Source>(r["source"].clone()) else {
+            tracing::warn!(row = ?r, "mirror_vps_audit: unknown source, skipping row");
+            continue;
+        };
+        let Ok(action) = serde_json::from_value::<Action>(r["action"].clone()) else {
+            tracing::warn!(row = ?r, "mirror_vps_audit: unknown action, skipping row");
+            continue;
+        };
         let endpoint = r["endpoint"].as_str().map(|s| s.to_string());
         let detail = r["detail"].clone();
 
-        if let Some(tx) = audit_tx {
-            rs_core::audit::record(
-                tx,
-                AuditRow {
-                    severity,
-                    source,
-                    event_id: instance.event_id,
-                    instance_id: Some(instance_id),
-                    endpoint,
-                    action,
-                    detail,
-                    ts_override: if ts.is_empty() { None } else { Some(ts) },
-                },
-            );
-        } else {
-            // Synchronous insert fallback (used when AppState does not yet
-            // carry an audit channel — see Task 27 wire-up).
-            let (ws_tx, _rx) = tokio::sync::broadcast::channel::<rs_core::models::WsEvent>(16);
-            let rows = vec![AuditRow {
+        rs_core::audit::record(
+            audit_tx,
+            AuditRow {
                 severity,
                 source,
                 event_id: instance.event_id,
@@ -93,9 +119,8 @@ pub async fn mirror_vps_audit(
                 action,
                 detail,
                 ts_override: if ts.is_empty() { None } else { Some(ts) },
-            }];
-            rs_core::db::audit::insert_batch(pool, &rows, &ws_tx).await?;
-        }
+            },
+        );
     }
 
     sqlx::query("UPDATE delivery_instances SET last_audit_cursor = ?1 WHERE id = ?2")
