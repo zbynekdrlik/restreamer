@@ -602,13 +602,13 @@ async fn consumer_task<P: OutputProcessFactory>(
                     }
                 }
                 flv_normalizer = FlvStreamNormalizer::new();
-
-                // Break the 2026-04-20 cascading-drift: reset pacing so
-                // post-restart the consumer re-anchors against NOW and
-                // catchup-drains the backlog before resuming real-time.
+                // 2026-04-20 cascade fix: reset pacing + catchup drain
+                // (buffer + backoff-worth) to regain target cache after
+                // ffmpeg restart, not +backoff_secs permanent drift.
                 pacing_anchor = None;
                 delivered_ms = 0;
-                catchup_chunks_remaining = PREFETCH_BUFFER_SIZE as u32;
+                catchup_chunks_remaining =
+                    (backoff_secs as u32).saturating_add(PREFETCH_BUFFER_SIZE as u32);
             }
 
             match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {
