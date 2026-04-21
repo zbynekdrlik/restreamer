@@ -443,45 +443,43 @@ mod tests {
         // xiu chunks carry absolute session PTS (e.g. 2_226_799 for a
         // 37-minute session). The FlvStreamNormalizer must shift EVERY
         // subsequent chunk by a compatible negative offset so the combined
-        // output stream advances by ~(chunk_duration) ms per chunk, not by
-        // the absolute-PTS delta. Without the fix, ffmpeg `-re` would sleep
-        // for many minutes between chunks, blocking the stdin pipe.
+        // output stream advances across the chunk BOUNDARY by roughly the
+        // original inter-chunk gap (~86ms), not by the absolute-PTS delta
+        // (~2_226_885ms). Without the fix, ffmpeg `-re` would sleep for
+        // many minutes between chunks, blocking the stdin pipe.
         let mut norm = FlvStreamNormalizer::new();
         let chunk1 = build_flv(&[
             (9, 2_226_799, NALU_VIDEO.to_vec()),
-            (9, 2_228_780, NALU_VIDEO.to_vec()), // ~1981ms span
+            (9, 2_228_780, NALU_VIDEO.to_vec()),
         ]);
         let chunk2 = build_flv(&[
             (9, 2_228_866, NALU_VIDEO.to_vec()),
-            (9, 2_230_800, NALU_VIDEO.to_vec()), // ~1934ms span
+            (9, 2_230_800, NALU_VIDEO.to_vec()),
         ]);
         let out1 = norm.normalize(&chunk1);
         let out2 = norm.normalize(&chunk2);
 
-        let mut combined = Vec::new();
-        combined.extend_from_slice(&out1);
-        combined.extend_from_slice(&out2);
-        let ts = extract_timestamps(&combined, true);
+        let ts1 = extract_timestamps(&out1, true);
+        let ts2 = extract_timestamps(&out2, false);
 
-        // All tags must be monotonic, and the gap between chunk 1's last
-        // tag and chunk 2's first tag must be small (< 1 second), not the
-        // absolute-PTS delta (2_228_866 - 2_228_780 = 86ms is fine; what we
-        // specifically reject is a jump like 1981 -> 2_228_866).
-        for w in ts.windows(2) {
-            assert!(
-                w[1] > w[0],
-                "non-monotonic: {} -> {} (ts={ts:?})",
-                w[0],
-                w[1]
-            );
-            assert!(
-                w[1] - w[0] < 1000,
-                "forward PTS jump of {}ms between {} and {} would make ffmpeg -re sleep (ts={ts:?})",
-                w[1] - w[0],
-                w[0],
-                w[1]
-            );
-        }
+        // Chunk 1 must rebase to start at 0.
+        assert_eq!(ts1[0], 0, "chunk1 first tag rebased to 0 (got {ts1:?})");
+
+        // Chunk boundary: chunk 2's first tag must be at last_output_ts+1,
+        // not at the raw absolute PTS. Specifically reject the >1000ms
+        // forward jump that would make ffmpeg `-re` sleep.
+        let chunk1_last = *ts1.last().unwrap();
+        let chunk2_first = ts2[0];
+        assert!(
+            chunk2_first > chunk1_last,
+            "non-monotonic across chunk boundary: {chunk1_last} -> {chunk2_first}"
+        );
+        assert!(
+            chunk2_first - chunk1_last < 1000,
+            "forward PTS jump of {}ms across chunk boundary \
+             ({chunk1_last} -> {chunk2_first}) would make ffmpeg -re sleep",
+            chunk2_first - chunk1_last,
+        );
     }
 
     #[test]
