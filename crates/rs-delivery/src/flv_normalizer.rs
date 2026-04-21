@@ -203,9 +203,13 @@ fn find_last_data_ts(data: &[u8]) -> Option<u32> {
 }
 
 /// Compute the ms offset to add to every data-tag timestamp in this chunk
-/// so the first non-sequence tag lands at `last_output_ts + 1`. Returns 0
-/// if the chunk's timestamps are already monotonic with the previous
-/// chunk (no rebase needed).
+/// so the first non-sequence tag lands at `last_output_ts + 1`. Returns a
+/// negative offset when the chunk's absolute timestamps are FORWARD of the
+/// previous rebased stream (the common xiu case, where chunk N+1 carries
+/// absolute session PTS while chunk 1 was already rebased to start at 0).
+/// Without this negative offset, ffmpeg's `-re` pacer would see a huge
+/// forward PTS jump between chunks and sleep for many minutes, eventually
+/// causing the consumer's write to time out.
 fn compute_rebase_offset(data: &[u8], body_start: usize, last_output_ts: u32) -> i64 {
     let mut offset = body_start;
     while offset + 11 <= data.len() {
@@ -226,7 +230,7 @@ fn compute_rebase_offset(data: &[u8], body_start: usize, last_output_ts: u32) ->
         if !is_seq_header {
             let first_ts = read_tag_timestamp(&data[offset..offset + tag_total]);
             let target = (last_output_ts as i64) + 1;
-            return (target - first_ts as i64).max(0);
+            return target - first_ts as i64;
         }
         offset += tag_total;
     }
@@ -403,7 +407,13 @@ mod tests {
     }
 
     #[test]
-    fn no_rebase_when_chunks_already_monotonic() {
+    fn subsequent_chunk_rebased_to_continue_from_chunk1_end() {
+        // After chunk 1 is rebased to start at ts=0, subsequent chunks MUST
+        // also be shifted by the same (or similar) negative offset so the
+        // overall stream stays close to wall-clock time. Otherwise ffmpeg's
+        // `-re` pacer sees a huge forward PTS jump between chunks and sleeps
+        // for many minutes, blocking the consumer's pipe write until it
+        // times out (observed in production as a 30-32s ffmpeg death cycle).
         let mut norm = FlvStreamNormalizer::new();
 
         let chunk1 = build_flv(&[(9, 5000, NALU_VIDEO.to_vec())]);
@@ -416,13 +426,62 @@ mod tests {
         ]);
         let out2 = norm.normalize(&chunk2);
 
-        // Rebased output should preserve the original timestamps (no artificial shift).
+        // Chunk 1's last output ts=0 (was 5000, rebased by -5000).
+        // Chunk 2 targets last_output_ts+1 = 1; offset = 1 - 5020 = -5019.
+        // Chunk 2 tags land at [1, 21], seamlessly continuing from chunk 1.
         let ts = extract_timestamps(&out2, false);
         assert_eq!(
             ts,
-            vec![5020, 5040],
-            "monotonic-continuation chunks must not be shifted"
+            vec![1, 21],
+            "chunk 2 must rebase to land at last_output_ts+1 (was {ts:?})"
         );
+    }
+
+    #[test]
+    fn ffmpeg_re_sees_no_large_forward_pts_jump_across_chunks() {
+        // Regression for the production 30-32s death cycle:
+        // xiu chunks carry absolute session PTS (e.g. 2_226_799 for a
+        // 37-minute session). The FlvStreamNormalizer must shift EVERY
+        // subsequent chunk by a compatible negative offset so the combined
+        // output stream advances by ~(chunk_duration) ms per chunk, not by
+        // the absolute-PTS delta. Without the fix, ffmpeg `-re` would sleep
+        // for many minutes between chunks, blocking the stdin pipe.
+        let mut norm = FlvStreamNormalizer::new();
+        let chunk1 = build_flv(&[
+            (9, 2_226_799, NALU_VIDEO.to_vec()),
+            (9, 2_228_780, NALU_VIDEO.to_vec()), // ~1981ms span
+        ]);
+        let chunk2 = build_flv(&[
+            (9, 2_228_866, NALU_VIDEO.to_vec()),
+            (9, 2_230_800, NALU_VIDEO.to_vec()), // ~1934ms span
+        ]);
+        let out1 = norm.normalize(&chunk1);
+        let out2 = norm.normalize(&chunk2);
+
+        let mut combined = Vec::new();
+        combined.extend_from_slice(&out1);
+        combined.extend_from_slice(&out2);
+        let ts = extract_timestamps(&combined, true);
+
+        // All tags must be monotonic, and the gap between chunk 1's last
+        // tag and chunk 2's first tag must be small (< 1 second), not the
+        // absolute-PTS delta (2_228_866 - 2_228_780 = 86ms is fine; what we
+        // specifically reject is a jump like 1981 -> 2_228_866).
+        for w in ts.windows(2) {
+            assert!(
+                w[1] > w[0],
+                "non-monotonic: {} -> {} (ts={ts:?})",
+                w[0],
+                w[1]
+            );
+            assert!(
+                w[1] - w[0] < 1000,
+                "forward PTS jump of {}ms between {} and {} would make ffmpeg -re sleep (ts={ts:?})",
+                w[1] - w[0],
+                w[0],
+                w[1]
+            );
+        }
     }
 
     #[test]
@@ -450,7 +509,10 @@ mod tests {
             1,
             "sequence header must be stripped, got ts={ts:?}"
         );
-        assert_eq!(ts[0], 80);
+        // Chunk 1 was rebased with offset -40 (first_ts=40 → 0).
+        // Chunk 2 targets last_output_ts+1 = 1; offset = 1 - 80 = -79.
+        // Stripped seq hdr; remaining NALU tag lands at 1.
+        assert_eq!(ts[0], 1);
     }
 
     #[test]
