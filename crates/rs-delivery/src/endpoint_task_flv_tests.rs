@@ -160,11 +160,22 @@ fn write_flv_tag(buf: &mut Vec<u8>, tag_type: u8, timestamp: u32, data: &[u8]) {
 }
 
 #[test]
-fn flv_normalizer_passes_first_chunk_through() {
+fn flv_normalizer_rebases_first_chunk_to_ts_zero() {
+    // First chunk is rebased so the first data tag lands at ts=0, letting
+    // ffmpeg's `-re` pace from process start. Pre-2026-04-21 this was a
+    // pass-through — see flv_normalizer.rs for full rationale.
     let mut norm = FlvStreamNormalizer::new();
     let chunk = build_test_flv_chunk(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA], 100);
     let result = norm.normalize(&chunk);
-    assert_eq!(result, chunk, "First chunk should pass through unchanged");
+    // FLV header preserved.
+    assert_eq!(&result[..3], b"FLV", "FLV header preserved");
+    // First tag's timestamp (at byte offset 13 + 4, with FLV tag ts field
+    // split as [byte13..=15] ts[23:0] | byte16 ts[31:24]) was rebased to 0.
+    let ts = ((result[9 + 4 + 4] as u32) << 16)
+        | ((result[9 + 4 + 5] as u32) << 8)
+        | (result[9 + 4 + 6] as u32)
+        | ((result[9 + 4 + 7] as u32) << 24);
+    assert_eq!(ts, 0, "First tag rebased to ts=0 (was {ts})");
 }
 
 #[test]
