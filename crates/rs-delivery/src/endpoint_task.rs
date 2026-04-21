@@ -477,13 +477,16 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut consecutive_write_failures: u32 = 0;
     let mut last_heartbeat = std::time::Instant::now();
 
-    // Rust-side pacing was removed 2026-04-21. It fought against ffmpeg
-    // `-re`: consumer tried to sleep between writes, but ffmpeg pipe
-    // backpressure from `-re` already throttled consumer writes, and the
-    // two layers together caused (a) cumulative drift as pacing errors
-    // accumulated, (b) broken catchup after ffmpeg restart. With the FLV
-    // normalizer now rebasing each ffmpeg process's input stream to
-    // PTS=0, ffmpeg `-re` alone paces correctly.
+    // Rust-side pacing: bounds consumer writes to real-time so ffmpeg's
+    // internal buffers don't absorb a startup burst (observed +39s cache
+    // overshoot without this). Works in lockstep with ffmpeg's `-re`
+    // because the FlvStreamNormalizer rebases each ffmpeg process's
+    // input to PTS=0 — both layers target the same wall-clock cadence
+    // and no longer fight. Anchor is RESET on every ffmpeg restart so
+    // pacing re-engages cleanly (prevents the 2026-04-20 cascade).
+    let mut pacing_anchor: Option<tokio::time::Instant> = None;
+    let mut delivered_ms: u64 = 0;
+
     tracing::info!(alias = %alias, "Consumer: endpoint delivery configured (FLV-only)");
 
     loop {
@@ -591,11 +594,13 @@ async fn consumer_task<P: OutputProcessFactory>(
                         if *stop_rx.borrow() { break; }
                     }
                 }
-                // The new FlvStreamNormalizer will rebase the next chunk's
-                // FLV timestamps to start at 0, so the freshly-spawned
-                // ffmpeg's `-re` pacer works natively. No Rust-side pacing
-                // state to reset — that layer was removed.
+                // Fresh normalizer rebases the next chunk's FLV timestamps
+                // to 0 so the new ffmpeg's -re paces from process start.
+                // Reset Rust pacing anchor to match — both layers restart
+                // in lockstep, no cascade drift.
                 flv_normalizer = FlvStreamNormalizer::new();
+                pacing_anchor = None;
+                delivered_ms = 0;
             }
 
             match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {
@@ -738,11 +743,30 @@ async fn consumer_task<P: OutputProcessFactory>(
         let chunk_id = chunk.chunk_id;
         let chunk_duration_ms = chunk.duration_ms;
         let processed = flv_normalizer.normalize(&chunk.data);
-        // Pacing is handled by ffmpeg's `-re` flag alone. The FLV
-        // normalizer rebases each ffmpeg process's input to start at
-        // PTS=0 so `-re` paces correctly from process start; consumer
-        // writes as fast as the pipe accepts and is naturally throttled
-        // by ffmpeg's stdin read rate.
+
+        // Rust-side pacing: sleep so `delivered_ms` never runs ahead of
+        // wall-clock elapsed since the anchor. Anchor is set lazily on
+        // the first chunk post-restart so warmup buffer-fill doesn't
+        // count against the real-time budget. Works together with
+        // ffmpeg `-re` because FLV is rebased to PTS=0 per process.
+        if pacing_anchor.is_none() {
+            pacing_anchor = Some(tokio::time::Instant::now());
+        }
+        if let Some(anchor) = pacing_anchor {
+            let elapsed_ms = anchor.elapsed().as_millis() as u64;
+            if delivered_ms > elapsed_ms {
+                let ahead_ms = delivered_ms - elapsed_ms;
+                let sleep_fut = tokio::time::sleep(std::time::Duration::from_millis(ahead_ms));
+                tokio::pin!(sleep_fut);
+                tokio::select! {
+                    _ = &mut sleep_fut => {}
+                    _ = stop_rx.changed() => {
+                        if *stop_rx.borrow() { break; }
+                    }
+                }
+            }
+        }
+        delivered_ms += chunk_duration_ms.max(0) as u64;
 
         if let Some(ref mut p) = proc {
             let write_result = tokio::time::timeout(
