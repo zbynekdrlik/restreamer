@@ -236,6 +236,13 @@ impl DeliveryOrchestrator {
             );
         }
 
+        // Combine primary SSH key with any extra debug/operator keys so a
+        // single VPS can be accessed by CI (primary) AND humans (extras)
+        // without key rotation or rebuild. Order matters only for cloud-init
+        // display; Hetzner installs all listed keys into /root/.ssh/authorized_keys.
+        let mut ssh_key_names: Vec<String> = vec![self.config.hetzner.ssh_key_name.clone()];
+        ssh_key_names.extend(self.config.hetzner.extra_ssh_key_names.iter().cloned());
+
         let server = self
             .hetzner
             .create_server(
@@ -243,7 +250,7 @@ impl DeliveryOrchestrator {
                 server_type,
                 &self.config.hetzner.location,
                 &image,
-                std::slice::from_ref(&self.config.hetzner.ssh_key_name),
+                &ssh_key_names,
                 &user_data,
                 labels,
             )

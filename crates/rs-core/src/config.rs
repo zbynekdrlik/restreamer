@@ -33,6 +33,11 @@ pub struct HetznerConfig {
     pub snapshot_label: String,
     #[serde(default = "default_hetzner_ssh_key_name")]
     pub ssh_key_name: String,
+    /// Additional SSH key names (registered in Hetzner Cloud) to install on
+    /// every new delivery VPS, alongside `ssh_key_name`. Useful for ad-hoc
+    /// debugging access without rotating the primary CI key.
+    #[serde(default)]
+    pub extra_ssh_key_names: Vec<String>,
 }
 
 fn default_hetzner_location() -> String {
@@ -56,6 +61,7 @@ impl Default for HetznerConfig {
             default_server_type: default_hetzner_server_type(),
             snapshot_label: default_hetzner_snapshot_label(),
             ssh_key_name: default_hetzner_ssh_key_name(),
+            extra_ssh_key_names: Vec::new(),
         }
     }
 }
