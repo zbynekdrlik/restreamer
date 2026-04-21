@@ -1,16 +1,26 @@
-/// FLV stream normalizer: strips duplicate FLV headers and sequence headers
-/// from concatenated FLV chunks, producing a single continuous FLV stream
-/// with monotonically non-decreasing tag timestamps.
+/// FLV stream normalizer: produces a single continuous FLV byte stream
+/// suitable for piping into a fresh `ffmpeg -re` process.
 ///
-/// When xiu's RTMP timestamp counter resets mid-stream (OBS reconnect,
-/// server restart, session reset), the next chunk's tags start at ts=0
-/// again. The FLV muxer on the output side (piped to ffmpeg → YouTube RTMP)
-/// is strict about monotonic DTS — a backward jump produces
-///     "Non-monotonic DTS ... Broken pipe ... Conversion failed!"
-/// which kills the ffmpeg process and forces a restart.
+/// Two responsibilities:
 ///
-/// This normalizer rewrites the 4-byte timestamp field of every non-sequence
-/// tag so the output stream is always monotonic.
+/// 1. **Rebase-to-zero on first chunk** — xiu writes absolute RTMP session
+///    timestamps, so a mid-session chunk has FLV PTS values like 1_457_000ms.
+///    ffmpeg's `-re` pacer compares frame PTS to wall-clock since process
+///    start; if the first frame's PTS is far in the past, `-re` concludes
+///    "stream is way behind" and drains stdin as fast as possible,
+///    bypassing its real-time pacing. The normalizer rebases the first
+///    chunk so its first data tag lands at ts=0, letting `-re` pace
+///    correctly from process start.
+///
+/// 2. **Monotonic continuation across chunk boundaries** — subsequent
+///    chunks are rebased so their first data tag lands at
+///    `last_output_ts + 1`, absorbing any xiu-side session resets
+///    (which would otherwise manifest as a backward DTS jump → "Broken
+///    pipe ... Conversion failed!" in ffmpeg stderr).
+///
+/// Also strips duplicate sequence headers on chunks after the first
+/// (xiu re-emits them on every chunk boundary; ffmpeg treats repeated
+/// codec config as malformed input).
 pub struct FlvStreamNormalizer {
     pub sent_header: bool,
     /// Last timestamp we emitted into the output stream (ms).
@@ -32,28 +42,59 @@ impl FlvStreamNormalizer {
     }
 
     /// Normalize an FLV chunk for continuous streaming.
-    /// First chunk: pass through as-is (has FLV header + sequence headers).
-    /// Subsequent chunks: strip FLV header (9+4 bytes) and sequence header tags,
-    /// keeping only data tags, and rebase their timestamps onto the previous
-    /// chunk's last emitted timestamp so the combined stream is monotonic.
+    /// First chunk: rebase all tags so the first data tag lands at ts=0
+    /// (so ffmpeg -re paces correctly from process start).
+    /// Subsequent chunks: strip FLV header + duplicate sequence headers,
+    /// rebase so the first data tag lands at `last_output_ts + 1`.
     pub fn normalize(&mut self, data: &[u8]) -> Vec<u8> {
         if data.len() < 13 || &data[0..3] != b"FLV" {
             return data.to_vec();
         }
 
+        let body_start = 9 + 4;
+
+        // On the FIRST chunk of a fresh normalizer (= fresh ffmpeg process),
+        // rebase intra-chunk timestamps so the first data tag lands at ts=0.
+        // Without this, ffmpeg -re sees FLV timestamps deep in the past
+        // (xiu writes absolute timestamps that grow for the lifetime of the
+        // ingest — e.g. 1_457_000ms for a 24-minute session). ffmpeg treats
+        // such input as "way behind real time" and drains stdin as fast as
+        // possible, bypassing its own real-time pacer. Starting each ffmpeg
+        // process at PTS=0 restores ffmpeg's native -re pacing and makes
+        // the separate Rust-side pacing layer unnecessary.
         if !self.sent_header {
             self.sent_header = true;
-            if let Some(last) = find_last_data_ts(data) {
-                self.last_output_ts = last;
-            }
-            return data.to_vec();
+            let Some(first_ts) = find_first_data_ts(data) else {
+                // No data tags in first chunk — pass through, normalizer
+                // will pick up the base on the next chunk.
+                return data.to_vec();
+            };
+            let rebase_offset = -(first_ts as i64);
+            return self.rebase_chunk(data, body_start, rebase_offset, true);
         }
 
-        let body_start = 9 + 4;
         let rebase_offset = compute_rebase_offset(data, body_start, self.last_output_ts);
+        self.rebase_chunk(data, body_start, rebase_offset, false)
+    }
 
+    /// Walk the FLV tags in `data[body_start..]`, rebase timestamps by
+    /// `rebase_offset`, and emit to an output `Vec`. `include_header`
+    /// prepends the 9-byte FLV header + 4-byte PreviousTagSize0 so the
+    /// first chunk after a new normalizer starts a valid FLV stream for
+    /// ffmpeg. Sequence headers are stripped on subsequent chunks
+    /// (include_header=false) but preserved on the first chunk.
+    fn rebase_chunk(
+        &mut self,
+        data: &[u8],
+        body_start: usize,
+        rebase_offset: i64,
+        include_header: bool,
+    ) -> Vec<u8> {
         let mut offset = body_start;
         let mut result = Vec::with_capacity(data.len());
+        if include_header {
+            result.extend_from_slice(&data[..body_start]);
+        }
 
         while offset + 11 <= data.len() {
             let tag_type = data[offset];
@@ -74,12 +115,19 @@ impl FlvStreamNormalizer {
                 && offset + 12 < data.len()
                 && data[offset + 12] == 0x00;
 
-            if !is_seq_header {
+            // On the first chunk we MUST keep sequence headers so ffmpeg
+            // can decode the stream. On subsequent chunks xiu re-emits
+            // the same sequence headers that ffmpeg has already seen —
+            // stripping them avoids the "invalid packet" / muxer issues
+            // caused by duplicate codec config packets.
+            let keep = include_header || !is_seq_header;
+
+            if keep {
                 let mut tag = data[offset..offset + tag_total].to_vec();
                 let orig_ts = read_tag_timestamp(&tag);
                 let new_ts = apply_offset(orig_ts, rebase_offset);
                 write_tag_timestamp(&mut tag, new_ts);
-                if new_ts > self.last_output_ts {
+                if !is_seq_header && new_ts > self.last_output_ts {
                     self.last_output_ts = new_ts;
                 }
                 result.extend_from_slice(&tag);
@@ -92,7 +140,39 @@ impl FlvStreamNormalizer {
     }
 }
 
+/// Scan an FLV chunk and return the timestamp of its FIRST non-sequence tag.
+/// Used to determine the rebase offset that makes the first chunk start at
+/// ts=0 for each new ffmpeg process.
+fn find_first_data_ts(data: &[u8]) -> Option<u32> {
+    if data.len() < 13 || &data[0..3] != b"FLV" {
+        return None;
+    }
+    let mut offset = 9 + 4;
+    while offset + 11 <= data.len() {
+        let tag_type = data[offset];
+        if tag_type != 8 && tag_type != 9 && tag_type != 18 {
+            break;
+        }
+        let data_size = ((data[offset + 1] as u32) << 16)
+            | ((data[offset + 2] as u32) << 8)
+            | (data[offset + 3] as u32);
+        let tag_total = 11 + data_size as usize + 4;
+        if offset + tag_total > data.len() {
+            break;
+        }
+        let is_seq_header = (tag_type == 9 || tag_type == 8)
+            && offset + 12 < data.len()
+            && data[offset + 12] == 0x00;
+        if !is_seq_header {
+            return Some(read_tag_timestamp(&data[offset..offset + tag_total]));
+        }
+        offset += tag_total;
+    }
+    None
+}
+
 /// Scan an FLV chunk and return the timestamp of its last non-sequence tag.
+#[allow(dead_code)]
 fn find_last_data_ts(data: &[u8]) -> Option<u32> {
     if data.len() < 13 || &data[0..3] != b"FLV" {
         return None;
@@ -246,11 +326,30 @@ mod tests {
     const RAW_AUDIO: [u8; 3] = [0xAF, 0x01, 0x00];
 
     #[test]
-    fn passes_through_first_chunk_unchanged() {
+    fn first_chunk_rebased_to_start_at_zero() {
+        // xiu writes absolute RTMP session timestamps; a chunk that lands
+        // mid-session will have PTS values deep in the past (e.g. 1_457_000
+        // for a 24-min session). The normalizer MUST rebase the first chunk
+        // so the first data tag lands at ts=0, otherwise ffmpeg `-re` sees
+        // "stream way behind real time" and drains stdin as fast as
+        // possible, bypassing its real-time pacer.
         let mut norm = FlvStreamNormalizer::new();
-        let chunk = build_flv(&[(9, 1000, NALU_VIDEO.to_vec())]);
+        let chunk = build_flv(&[
+            (9, 1_457_000, NALU_VIDEO.to_vec()),
+            (8, 1_457_020, RAW_AUDIO.to_vec()),
+            (9, 1_457_040, NALU_VIDEO.to_vec()),
+        ]);
         let out = norm.normalize(&chunk);
-        assert_eq!(out, chunk, "first chunk should pass through byte-for-byte");
+
+        // Output must be valid FLV (header preserved) with timestamps
+        // rebased to start at 0.
+        assert_eq!(&out[..3], b"FLV", "FLV header must be preserved");
+        let ts = extract_timestamps(&out, true);
+        assert_eq!(
+            ts,
+            vec![0, 20, 40],
+            "first chunk must rebase to start at ts=0"
+        );
     }
 
     #[test]
@@ -293,10 +392,13 @@ mod tests {
             );
         }
 
-        // The rebased tags must be strictly after chunk 1's last timestamp.
+        // First chunk rebased to start at 0 (first_ts=1_457_000 → 0).
+        // Chunk 2 first_ts=0 must land at chunk1's last_output_ts + 1 to
+        // preserve monotonicity (was 0, so chunk2's tags shift by +1).
+        assert_eq!(ts[0], 0, "chunk1 first tag rebased to 0, got {}", ts[0]);
         assert!(
-            ts.last().unwrap() > &1_457_000,
-            "rebased tags should land after prior chunk's last ts; got {ts:?}"
+            ts[1] > ts[0],
+            "chunk2 tags must land strictly after chunk1 (got {ts:?})"
         );
     }
 

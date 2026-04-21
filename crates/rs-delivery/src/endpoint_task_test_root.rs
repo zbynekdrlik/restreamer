@@ -6,8 +6,6 @@
 mod backoff_tests;
 #[path = "endpoint_task_flv_tests.rs"]
 mod flv_tests;
-#[path = "endpoint_task_pacing_tests.rs"]
-mod pacing_tests;
 #[path = "endpoint_task_rescue_tests.rs"]
 mod rescue_tests;
 #[path = "endpoint_task_tests.rs"]

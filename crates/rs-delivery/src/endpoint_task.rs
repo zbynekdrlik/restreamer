@@ -437,20 +437,13 @@ async fn producer_task<F: ChunkFetcher>(
 /// Consumer task: pulls pre-fetched chunks from the channel, normalizes FLV, writes to ffmpeg.
 /// Never makes S3 calls -- zero network I/O.
 ///
-/// Paces chunk delivery to real time using a wall-clock anchor:
-///
-///   pacing_anchor + delivered_ms == wall_now
-///
-/// If we are ahead of the anchor, the consumer sleeps the difference BEFORE
-/// writing the next chunk. This is essential because ffmpeg's `-re` pacing
-/// re-anchors on every process start — after an ffmpeg restart the fresh
-/// process sees FLV timestamps deep in the past (xiu writes absolute
-/// timestamps that grow for the lifetime of the ingest), treats the stream
-/// as "behind", and drains stdin as fast as possible. Without Rust-side
-/// pacing, that would burn through the pre-fetch buffer in seconds, the
-/// producer would catch up to the latest S3 chunk, skip-ahead would fire,
-/// and the configured cache delay would collapse to ~0s permanently. The
-/// anchor is preserved across ffmpeg restarts so the delay is maintained.
+/// Pacing is done by ffmpeg's `-re` flag alone. The `FlvStreamNormalizer`
+/// rebases every ffmpeg process's input to start at PTS=0 so `-re` paces
+/// correctly from process start, and consumer writes are naturally
+/// throttled by ffmpeg's stdin read rate. The previous Rust-side pacing
+/// layer (removed 2026-04-21) was a workaround for the normalizer not
+/// rebasing the first chunk per process — it fought `-re` and caused
+/// cumulative drift + cascading cache growth after ffmpeg restarts.
 #[allow(clippy::too_many_arguments)]
 async fn consumer_task<P: OutputProcessFactory>(
     mut rx: mpsc::Receiver<PrefetchedChunk>,
@@ -484,16 +477,13 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut consecutive_write_failures: u32 = 0;
     let mut last_heartbeat = std::time::Instant::now();
 
-    // Pacing anchor: reset on ffmpeg death so post-restart the consumer
-    // re-anchors against wall-clock NOW, not the stale anchor from before
-    // the death (which would permanently add backoff_secs to the cache
-    // depth — 2026-04-20 cascading drift bug).
-    let mut pacing_anchor: Option<tokio::time::Instant> = None;
-    let mut delivered_ms: u64 = 0;
-    // Catchup budget: drain N chunks after ffmpeg restart without pacing
-    // so the producer can re-sync to the S3 live-edge.
-    let mut catchup_chunks_remaining: u32 = 0;
-
+    // Rust-side pacing was removed 2026-04-21. It fought against ffmpeg
+    // `-re`: consumer tried to sleep between writes, but ffmpeg pipe
+    // backpressure from `-re` already throttled consumer writes, and the
+    // two layers together caused (a) cumulative drift as pacing errors
+    // accumulated, (b) broken catchup after ffmpeg restart. With the FLV
+    // normalizer now rebasing each ffmpeg process's input stream to
+    // PTS=0, ffmpeg `-re` alone paces correctly.
     tracing::info!(alias = %alias, "Consumer: endpoint delivery configured (FLV-only)");
 
     loop {
@@ -601,13 +591,11 @@ async fn consumer_task<P: OutputProcessFactory>(
                         if *stop_rx.borrow() { break; }
                     }
                 }
+                // The new FlvStreamNormalizer will rebase the next chunk's
+                // FLV timestamps to start at 0, so the freshly-spawned
+                // ffmpeg's `-re` pacer works natively. No Rust-side pacing
+                // state to reset — that layer was removed.
                 flv_normalizer = FlvStreamNormalizer::new();
-                // 2026-04-20 cascade fix: reset pacing + catchup drain
-                // to regain target cache after ffmpeg restart.
-                pacing_anchor = None;
-                delivered_ms = 0;
-                catchup_chunks_remaining =
-                    endpoint_audit::catchup_budget_for_backoff(backoff_secs, PREFETCH_BUFFER_SIZE);
             }
 
             match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {
@@ -750,43 +738,11 @@ async fn consumer_task<P: OutputProcessFactory>(
         let chunk_id = chunk.chunk_id;
         let chunk_duration_ms = chunk.duration_ms;
         let processed = flv_normalizer.normalize(&chunk.data);
-
-        // Rust-side real-time pacing: total chunk duration pulled from the
-        // channel never runs ahead of wall-clock elapsed since the anchor.
-        // Anchor is set lazily on the first chunk so the initial buffer fill
-        // doesn't count against the real-time budget. delivered_ms is
-        // incremented BEFORE the write (not after success) — a chunk that
-        // fails to write still consumed its real-time budget.
-        if pacing_anchor.is_none() {
-            pacing_anchor = Some(tokio::time::Instant::now());
-            tracing::info!(alias = %alias, "Consumer: pacing anchor set");
-        }
-        // Catchup mode: drain accumulated buffer chunks without pacing
-        // so the producer can re-sync to the S3 live-edge. Each chunk
-        // decrements the budget; on exhaustion we re-anchor pacing.
-        if catchup_chunks_remaining > 0 {
-            catchup_chunks_remaining -= 1;
-            if catchup_chunks_remaining == 0 {
-                pacing_anchor = Some(tokio::time::Instant::now());
-                delivered_ms = 0;
-                tracing::info!(alias = %alias, "Consumer: catchup complete, pacing re-anchored");
-            }
-        } else if let Some(anchor) = pacing_anchor {
-            let elapsed_ms = anchor.elapsed().as_millis() as u64;
-            if delivered_ms > elapsed_ms {
-                let ahead_ms = delivered_ms - elapsed_ms;
-                // Be interruptible so stop signals don't wait for the sleep.
-                let sleep_fut = tokio::time::sleep(std::time::Duration::from_millis(ahead_ms));
-                tokio::pin!(sleep_fut);
-                tokio::select! {
-                    _ = &mut sleep_fut => {}
-                    _ = stop_rx.changed() => {
-                        if *stop_rx.borrow() { break; }
-                    }
-                }
-            }
-        }
-        delivered_ms += chunk_duration_ms.max(0) as u64;
+        // Pacing is handled by ffmpeg's `-re` flag alone. The FLV
+        // normalizer rebases each ffmpeg process's input to start at
+        // PTS=0 so `-re` paces correctly from process start; consumer
+        // writes as fast as the pipe accepts and is naturally throttled
+        // by ffmpeg's stdin read rate.
 
         if let Some(ref mut p) = proc {
             let write_result = tokio::time::timeout(
