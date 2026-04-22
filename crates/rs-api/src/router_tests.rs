@@ -18,7 +18,7 @@ mod stream_tests {
         db::run_migrations(&pool).await.unwrap();
         let config = Config::for_testing();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new(pool, config, ws_tx)
+        AppState::new_for_tests(pool, config, ws_tx)
     }
 
     #[tokio::test]
@@ -273,7 +273,7 @@ mod obs_tests {
         let pool = db::create_memory_pool().await.unwrap();
         db::run_migrations(&pool).await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx);
         let app = build_router(state);
 
         let resp = app
@@ -294,7 +294,7 @@ mod obs_tests {
         let pool = db::create_memory_pool().await.unwrap();
         db::run_migrations(&pool).await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx);
         let app = build_router(state);
 
         let resp = app
@@ -316,7 +316,7 @@ mod obs_tests {
         let pool = db::create_memory_pool().await.unwrap();
         db::run_migrations(&pool).await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx);
         let app = build_router(state);
 
         let resp = app
@@ -357,14 +357,14 @@ mod youtube_oauth_tests {
         let pool = db::create_memory_pool().await.unwrap();
         db::run_migrations(&pool).await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new(pool, yt_config(), ws_tx)
+        AppState::new_for_tests(pool, yt_config(), ws_tx)
     }
 
     async fn test_state_no_yt() -> AppState {
         let pool = db::create_memory_pool().await.unwrap();
         db::run_migrations(&pool).await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new(pool, Config::for_testing(), ws_tx)
+        AppState::new_for_tests(pool, Config::for_testing(), ws_tx)
     }
 
     #[tokio::test]
@@ -450,5 +450,300 @@ mod youtube_oauth_tests {
             .unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("Authorization Failed"));
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use crate::router::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::db;
+    use rs_core::models::WsEvent;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let config = Config::for_testing();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        AppState::new_for_tests(pool, config, ws_tx)
+    }
+
+    async fn body_to_bytes(body: Body) -> Vec<u8> {
+        axum::body::to_bytes(body, 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn audit_list_returns_empty_on_fresh_db() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/v1/audit")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["rows"].as_array().unwrap().len(), 0);
+        assert_eq!(json["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn audit_list_returns_inserted_rows() {
+        let state = test_state().await;
+        sqlx::query("INSERT INTO audit_log (severity, source, action, detail) VALUES ('info','operator','event_started','{\"n\":1}')")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(json["rows"][0]["action"], "event_started");
+    }
+
+    #[tokio::test]
+    async fn audit_get_by_id_returns_row() {
+        let state = test_state().await;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO audit_log (severity, source, action, detail) VALUES ('error','ffmpeg','endpoint_ffmpeg_died','{\"reason_class\":\"youtube_rtmp_closed\"}') RETURNING id"
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/audit/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["id"], id);
+        assert_eq!(json["detail"]["reason_class"], "youtube_rtmp_closed");
+    }
+
+    #[tokio::test]
+    async fn audit_get_by_id_returns_404_on_missing() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit/9999999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod metrics_tests {
+    use crate::router::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::db;
+    use rs_core::models::WsEvent;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let config = Config::for_testing();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        AppState::new_for_tests(pool, config, ws_tx)
+    }
+
+    async fn body_to_bytes(body: Body) -> Vec<u8> {
+        axum::body::to_bytes(body, 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_inserted_rows() {
+        let state = test_state().await;
+        let ts_ms = chrono::Utc::now().timestamp_millis();
+        rs_core::db::metrics::insert(
+            &state.pool,
+            ts_ms,
+            1,
+            1,
+            "yt1",
+            true,
+            10,
+            10,
+            5.5,
+            1000,
+            0,
+            Some("normal"),
+        )
+        .await
+        .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/metrics?event_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = json["rows"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        assert_eq!(rows[0]["alias"], "yt1");
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_filters_by_alias() {
+        let state = test_state().await;
+        let ts_ms = chrono::Utc::now().timestamp_millis();
+        for alias in &["yt1", "yt2"] {
+            rs_core::db::metrics::insert(
+                &state.pool,
+                ts_ms,
+                1,
+                1,
+                alias,
+                true,
+                10,
+                10,
+                5.0,
+                1000,
+                0,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/metrics?event_id=1&alias=yt1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = json["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["alias"], "yt1");
+    }
+}
+
+#[cfg(test)]
+mod rtmp_stable_gate_tests {
+    use crate::delivery_handlers::RTMP_STABLE_REQUIRED_SECS;
+    use crate::router::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::db;
+    use rs_core::models::WsEvent;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let config = Config::for_testing();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        AppState::new_for_tests(pool, config, ws_tx)
+    }
+
+    async fn body_to_bytes(body: Body) -> Vec<u8> {
+        axum::body::to_bytes(body, 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn start_delivery_rejects_when_rtmp_unstable() {
+        let state = test_state().await;
+        // RTMP has been "connected" for only 5s — below the 15s threshold.
+        *state.rtmp_stable_since.lock().await =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+        let app = build_router(state);
+
+        let body = serde_json::json!({"event_id": 1}).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/delivery/start")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "rtmp_not_stable");
+        assert_eq!(json["need_secs"], RTMP_STABLE_REQUIRED_SECS);
+    }
+
+    #[tokio::test]
+    async fn start_delivery_rejects_when_rtmp_never_connected() {
+        let state = test_state().await;
+        // rtmp_stable_since == None: publisher never connected. Must reject.
+        let app = build_router(state);
+
+        let body = serde_json::json!({"event_id": 1}).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/delivery/start")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "rtmp_not_stable");
+        assert_eq!(json["current_secs"], 0);
     }
 }

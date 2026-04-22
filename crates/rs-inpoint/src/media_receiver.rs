@@ -70,7 +70,25 @@ impl MediaReceiver {
                 Ok(event) => match event {
                     BroadcastEvent::Publish { identifier } => {
                         info!("Stream published: {identifier}");
-                        self.inpoint_state.set_connected(true);
+                        self.inpoint_state.mark_connected().await;
+                        // Audit: RtmpConnected.
+                        if let Some(tx) = self.inpoint_state.audit_tx() {
+                            rs_core::audit::record(
+                                tx,
+                                rs_core::audit::AuditRow {
+                                    severity: rs_core::audit::Severity::Info,
+                                    source: rs_core::audit::Source::Inpoint,
+                                    event_id: None,
+                                    instance_id: None,
+                                    endpoint: None,
+                                    action: rs_core::audit::Action::RtmpConnected,
+                                    detail: serde_json::json!({
+                                        "stream_identifier": format!("{identifier}"),
+                                    }),
+                                    ts_override: None,
+                                },
+                            );
+                        }
 
                         // Subscribe and process frames with automatic re-subscribe on stall
                         let mut retry_count = 0u32;
@@ -100,12 +118,52 @@ impl MediaReceiver {
                         }
 
                         info!("Stream ended: {identifier}");
-                        self.inpoint_state.set_connected(false);
+                        let duration_secs = self.inpoint_state.mark_disconnected().await;
+                        // Audit: RtmpDisconnected with session duration.
+                        if let Some(tx) = self.inpoint_state.audit_tx() {
+                            rs_core::audit::record(
+                                tx,
+                                rs_core::audit::AuditRow {
+                                    severity: rs_core::audit::Severity::Info,
+                                    source: rs_core::audit::Source::Inpoint,
+                                    event_id: None,
+                                    instance_id: None,
+                                    endpoint: None,
+                                    action: rs_core::audit::Action::RtmpDisconnected,
+                                    detail: serde_json::json!({
+                                        "stream_identifier": format!("{identifier}"),
+                                        "duration_secs": duration_secs,
+                                    }),
+                                    ts_override: None,
+                                },
+                            );
+                        }
                     }
                     BroadcastEvent::UnPublish { identifier } => {
                         info!("Stream unpublished: {identifier}");
-                        self.inpoint_state.set_connected(false);
+                        let duration_secs = self.inpoint_state.mark_disconnected().await;
                         self.flv_chunk_sink.flush().await;
+                        // Audit: also record UnPublish as RtmpDisconnected so
+                        // operators see why the ingest dropped.
+                        if let Some(tx) = self.inpoint_state.audit_tx() {
+                            rs_core::audit::record(
+                                tx,
+                                rs_core::audit::AuditRow {
+                                    severity: rs_core::audit::Severity::Info,
+                                    source: rs_core::audit::Source::Inpoint,
+                                    event_id: None,
+                                    instance_id: None,
+                                    endpoint: None,
+                                    action: rs_core::audit::Action::RtmpDisconnected,
+                                    detail: serde_json::json!({
+                                        "stream_identifier": format!("{identifier}"),
+                                        "duration_secs": duration_secs,
+                                        "reason": "unpublish",
+                                    }),
+                                    ts_override: None,
+                                },
+                            );
+                        }
                     }
                     BroadcastEvent::Subscribe { identifier, .. } => {
                         debug!("New subscriber for stream: {identifier}");

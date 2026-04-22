@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
 use rs_api::state::AppState;
+use rs_core::audit::AuditRow;
 use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
@@ -97,24 +98,30 @@ impl ServiceCore {
     ) -> anyhow::Result<()> {
         let shutdown = ShutdownCoordinator::new();
 
-        // Database: use provided pool or create a new one
-        let pool = match self.provided_pool.take() {
+        // Database: use provided pool or create a new one. For audit
+        // purposes we capture the schema version before and after
+        // running migrations so a `MigrationsApplied` row (emitted below,
+        // once the audit channel exists) records the actual delta.
+        let (pool, migration_from, migration_to) = match self.provided_pool.take() {
             Some(pool) => {
                 info!("Using externally provided database pool");
-                pool
+                let v = db::current_schema_version(&pool).await.unwrap_or(0);
+                (pool, v, v)
             }
             None => {
                 let pool = db::create_pool(&self.db_path)
                     .await
                     .context("failed to create database pool")?;
+                let from_v = db::current_schema_version(&pool).await.unwrap_or(0);
                 db::run_migrations(&pool)
                     .await
                     .context("failed to run database migrations")?;
+                let to_v = db::current_schema_version(&pool).await.unwrap_or(from_v);
                 db::seed_templates_from_events(&pool)
                     .await
                     .context("failed to seed templates from events")?;
                 info!("Database initialized at {}", self.db_path.display());
-                pool
+                (pool, from_v, to_v)
             }
         };
 
@@ -144,13 +151,69 @@ impl ServiceCore {
         // API server
         let api_addr: SocketAddr =
             format!("{}:{}", self.config.api.bind, self.config.api.port).parse()?;
-        let mut api_state = AppState::new(pool.clone(), self.config.clone(), ws_tx.clone())
-            .with_config_path(self.config_path)
-            .with_log_buffer(self.log_buffer)
-            .with_inpoint_state(inpoint_state.clone())
-            .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx)
-            .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked))
-            .with_upload_metrics(Arc::clone(&upload_metrics));
+
+        // Create the audit channel BEFORE `AppState::new` so the real
+        // sender is wired into the `DeliveryOrchestrator` at construction
+        // (it was previously a throwaway sender and all VPS-lifecycle
+        // audit rows were silently dropped — see the 2026-04-19 post-mortem).
+        let (audit_tx, audit_rx) = mpsc::channel::<AuditRow>(1024);
+
+        let mut api_state = AppState::new(
+            pool.clone(),
+            self.config.clone(),
+            ws_tx.clone(),
+            audit_tx.clone(),
+        )
+        .with_config_path(self.config_path)
+        .with_log_buffer(self.log_buffer)
+        .with_inpoint_state(inpoint_state.clone())
+        .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx)
+        .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked))
+        .with_upload_metrics(Arc::clone(&upload_metrics));
+
+        // Spawn the audit writer that drains the receiver and batches
+        // INSERTs + WS broadcasts, and schedule nightly rotation of the
+        // audit_log and metrics tables.
+        {
+            let pool = pool.clone();
+            let ws_tx = ws_tx.clone();
+            tokio::spawn(async move {
+                rs_core::audit::audit_writer_task(pool, ws_tx, audit_rx).await;
+            });
+        }
+        {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                loop {
+                    let now = chrono::Utc::now();
+                    // Next 02:00 UTC.
+                    let mut next = now.date_naive().and_hms_opt(2, 0, 0).unwrap().and_utc();
+                    if next <= now {
+                        next += chrono::Duration::hours(24);
+                    }
+                    let sleep_secs = (next - now).num_seconds().max(60) as u64;
+                    tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+                    let _ = rs_core::db::audit::rotate(&pool, 90).await;
+                    let _ = rs_core::db::metrics::rotate(&pool, 7).await;
+                }
+            });
+        }
+
+        // Share the AppState's audit_tx with downstream components so they
+        // feed into the same audit pipeline. The sender now flows to the
+        // real writer task spawned above.
+        let uploader_audit_tx = api_state.audit_tx.clone();
+
+        // Re-wire the inpoint_state so the MediaReceiver can write the
+        // shared `rtmp_stable_since` cell read by `POST /delivery/start`,
+        // and emit RtmpConnected/Disconnected audit rows.
+        let wired_inpoint = api_state
+            .inpoint_state
+            .clone()
+            .with_audit_tx(api_state.audit_tx.clone())
+            .with_stable_since(Arc::clone(&api_state.rtmp_stable_since));
+        api_state = api_state.with_inpoint_state(wired_inpoint.clone());
+        let inpoint_state = wired_inpoint;
 
         // Serve the WASM frontend from a "www" directory next to the binary,
         // so LAN browsers can access the dashboard at http://<host>:8910/
@@ -266,6 +329,7 @@ impl ServiceCore {
         let endpoint_pool = pool.clone();
         let endpoint_ws_tx = ws_tx.clone();
         let endpoint_client_uuid = self.config.client_uuid.clone();
+        let endpoint_audit_tx = uploader_audit_tx.clone();
         let endpoint_task = tokio::spawn(async move {
             run_endpoint_loop(
                 endpoint_pool,
@@ -276,6 +340,7 @@ impl ServiceCore {
                 s3_upload_blocked,
                 upload_metrics,
                 endpoint_client_uuid,
+                endpoint_audit_tx,
             )
             .await;
         });
@@ -296,6 +361,44 @@ impl ServiceCore {
             )
             .await;
         });
+
+        // Audit: system-source startup rows. Emitted once all components
+        // have spawned so MigrationsApplied / RestreamerStarted land AFTER
+        // any error-during-migration would have bailed out of this fn.
+        if migration_to > migration_from {
+            rs_core::audit::record(
+                &uploader_audit_tx,
+                rs_core::audit::AuditRow {
+                    severity: rs_core::audit::Severity::Info,
+                    source: rs_core::audit::Source::System,
+                    event_id: None,
+                    instance_id: None,
+                    endpoint: None,
+                    action: rs_core::audit::Action::MigrationsApplied,
+                    detail: serde_json::json!({
+                        "from_version": migration_from,
+                        "to_version": migration_to,
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
+        rs_core::audit::record(
+            &uploader_audit_tx,
+            rs_core::audit::AuditRow {
+                severity: rs_core::audit::Severity::Info,
+                source: rs_core::audit::Source::System,
+                event_id: None,
+                instance_id: None,
+                endpoint: None,
+                action: rs_core::audit::Action::RestreamerStarted,
+                detail: serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "db_path": self.db_path.display().to_string(),
+                }),
+                ts_override: None,
+            },
+        );
 
         // Wait for shutdown signal
         info!("All services started.");
@@ -450,6 +553,7 @@ async fn run_endpoint_loop(
     s3_upload_blocked: Arc<std::sync::atomic::AtomicBool>,
     upload_metrics: Arc<UploadMetrics>,
     client_uuid: String,
+    audit_tx: mpsc::Sender<AuditRow>,
 ) {
     loop {
         let s3 = match S3Client::new(&s3_config) {
@@ -465,7 +569,8 @@ async fn run_endpoint_loop(
 
         let uploader = ChunkUploader::new(pool.clone(), s3, ws_tx.clone(), client_uuid.clone())
             .with_upload_blocked(Arc::clone(&s3_upload_blocked))
-            .with_metrics(Arc::clone(&upload_metrics));
+            .with_metrics(Arc::clone(&upload_metrics))
+            .with_audit_tx(audit_tx.clone());
         let mut handle = tokio::spawn(async move { uploader.run(component_rx).await });
 
         info!("Endpoint uploader started");

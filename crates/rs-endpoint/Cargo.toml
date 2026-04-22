@@ -26,6 +26,7 @@ tempfile = "3"
 axum.workspace = true
 tower.workspace = true
 parking_lot = "0.12"
+tracing-test = "0.2"
 
 [[bin]]
 name = "bench_s3_upload"

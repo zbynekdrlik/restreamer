@@ -30,12 +30,39 @@ pub struct PipelineState {
 }
 
 /// Activity feed entry from WebSocket.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ActivityEntry {
     pub timestamp: String,
     pub severity: String,
     pub message: String,
     pub source: String,
+}
+
+/// Audit log entry from WebSocket (`WsEvent::AuditAppended`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub ts: String,
+    pub severity: String,
+    pub source: String,
+    pub event_id: Option<i64>,
+    pub instance_id: Option<i64>,
+    pub endpoint: Option<String>,
+    pub action: String,
+    pub detail: serde_json::Value,
+}
+
+/// Per-endpoint live metrics sample (`WsEvent::MetricsSample`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetricsSample {
+    pub ts_ms: i64,
+    pub event_id: i64,
+    pub instance_id: i64,
+    pub alias: String,
+    pub chunk_delay_secs: f64,
+    pub current_chunk_id: i64,
+    pub chunks_processed: i64,
+    pub alive: bool,
 }
 
 /// Delivery VPS state tracked via WebSocket updates.
@@ -110,6 +137,16 @@ pub struct DashboardStore {
 
     // OBS status (from WebSocket)
     pub obs_status: RwSignal<ObsStatus>,
+
+    // Activity / audit feeds and per-endpoint metrics history.
+    // Fed by WebSocket events ActivityFeed, AuditAppended and MetricsSample.
+    pub activity_feed: RwSignal<Vec<ActivityEntry>>,
+    pub audit_feed: RwSignal<Vec<AuditEntry>>,
+    pub endpoint_metrics_history: RwSignal<std::collections::HashMap<String, Vec<MetricsSample>>>,
+
+    // RTMP stable-since (seconds the publisher has been connected, monotonic).
+    // Populated by polling `/status`; used to gate the Start-Delivery button.
+    pub rtmp_stable_secs: RwSignal<u64>,
 }
 
 impl DashboardStore {
@@ -130,6 +167,10 @@ impl DashboardStore {
             selected_event_id: RwSignal::new(None),
             youtube_health: RwSignal::new(None),
             obs_status: RwSignal::new(ObsStatus::default()),
+            activity_feed: RwSignal::new(Vec::new()),
+            audit_feed: RwSignal::new(Vec::new()),
+            endpoint_metrics_history: RwSignal::new(std::collections::HashMap::new()),
+            rtmp_stable_secs: RwSignal::new(0),
         }
     }
 

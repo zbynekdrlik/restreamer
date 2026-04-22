@@ -48,7 +48,7 @@ mod tests {
         let pool = rs_core::db::create_memory_pool().await.unwrap();
         rs_core::db::run_migrations(&pool).await.unwrap();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx);
         axum::Router::new()
             .route(
                 "/api/v1/uploads/stats",
@@ -135,7 +135,7 @@ mod tests {
             .unwrap();
 
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        let state = AppState::new(pool, Config::for_testing(), ws_tx);
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx);
         let app = axum::Router::new()
             .route(
                 "/api/v1/uploads/recent",

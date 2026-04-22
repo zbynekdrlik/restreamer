@@ -16,7 +16,7 @@ async fn test_state() -> AppState {
     db::run_migrations(&pool).await.unwrap();
     let config = Config::for_testing();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-    AppState::new(pool, config, ws_tx)
+    AppState::new_for_tests(pool, config, ws_tx)
 }
 
 /// Start a real HTTP server on a random port and return the base URL.

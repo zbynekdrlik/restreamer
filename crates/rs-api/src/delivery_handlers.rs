@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use rs_core::db;
-use rs_core::models::DeliveryInstance;
+use rs_core::models::{DeliveryInstance, WsEvent};
 
 use crate::state::AppState;
 
@@ -27,31 +27,134 @@ pub struct DeliveryStartResponse {
     pub status: String,
 }
 
+/// Minimum seconds the RTMP publisher must have been connected before
+/// `POST /delivery/start` is allowed to create a VPS. Prevents the
+/// "operator hits Start before OBS has handshaken" failure mode where
+/// delivery boots against an empty/flapping ingest.
+pub const RTMP_STABLE_REQUIRED_SECS: u64 = 15;
+
 pub async fn delivery_start(
     State(state): State<AppState>,
     Json(req): Json<DeliveryStartRequest>,
-) -> Result<Json<DeliveryStartResponse>, StatusCode> {
+) -> Result<Json<DeliveryStartResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // RTMP-stable gate: refuse to spin up a VPS until the ingest has been
+    // publishing for at least RTMP_STABLE_REQUIRED_SECS. See `state.rs` for
+    // wire-up status (Task 18 plumbs set/clear into MediaReceiver).
+    let stable_since = *state.rtmp_stable_since.lock().await;
+    let current_secs = stable_since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+    if current_secs < RTMP_STABLE_REQUIRED_SECS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "rtmp_not_stable",
+                "current_secs": current_secs,
+                "need_secs": RTMP_STABLE_REQUIRED_SECS,
+            })),
+        ));
+    }
+
     let orch = state.delivery_orchestrator.as_ref().ok_or_else(|| {
         error!("Delivery orchestrator not configured (missing Hetzner API token)");
-        StatusCode::SERVICE_UNAVAILABLE
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "hetzner_not_configured"})),
+        )
     })?;
 
     let event_id = req.event_id;
     let result = orch.start_delivery(event_id).await.map_err(|e| {
         error!("Failed to start delivery: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "start_delivery_failed", "message": e.to_string()})),
+        )
     })?;
+
+    // Flip delivering_activated so the frontend dashboard shows endpoint
+    // cards. Without this the dashboard sits at "IDLE" with no endpoints
+    // visible despite the VPS actually delivering — the most-reported
+    // dashboard bug. Best-effort: a DB error must NOT roll back the
+    // already-created VPS, so we log + emit an audit row and continue.
+    // The audit row lets operators tell "dashboard is wrong, backend is
+    // right" without paging anyone.
+    //
+    // On success, broadcast a WS StreamingEvent so connected dashboards
+    // flip from IDLE to STREAMING immediately instead of waiting for the
+    // next 2-second poll. Matches the pattern in stream_handlers::start_stream
+    // and handlers::action_toggle_delivering. The dashboard WS handler
+    // (leptos-ui/src/ws.rs:255) only reads receiving/delivering flags and
+    // ignores name, so passing None here is fine — the event is fetched
+    // further down for poll_and_init and we don't want to double-fetch.
+    match db::set_delivering_activated(&state.pool, event_id, true).await {
+        Ok(()) => {
+            if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
+                action: "delivering_activated".to_string(),
+                name: None,
+                receiving: true,
+                delivering: true,
+            }) {
+                tracing::debug!("No WS subscribers for delivering_activated: {e}");
+            }
+        }
+        Err(e) => {
+            error!("Failed to set delivering_activated for event {event_id}: {e}");
+            rs_core::audit::record(
+                &state.audit_tx,
+                rs_core::audit::AuditRow {
+                    severity: rs_core::audit::Severity::Warn,
+                    source: rs_core::audit::Source::System,
+                    event_id: Some(event_id),
+                    instance_id: Some(result.instance_id),
+                    endpoint: None,
+                    action: rs_core::audit::Action::DbUiFlagStale,
+                    detail: serde_json::json!({
+                        "flag": "delivering_activated",
+                        "intent": true,
+                        "error": e.to_string(),
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
+    }
+
+    // Audit: record DeliveryStarted with instance + IP so post-mortem can
+    // correlate operator action with VPS lifecycle.
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: Some(event_id),
+            instance_id: Some(result.instance_id),
+            endpoint: None,
+            action: rs_core::audit::Action::DeliveryStarted,
+            detail: serde_json::json!({
+                "event_id": event_id,
+                "instance_id": result.instance_id,
+                "hetzner_id": result.hetzner_id,
+                "name": result.name,
+            }),
+            ts_override: None,
+        },
+    );
 
     // Look up event details for poll_and_init
     let event = db::get_streaming_event_by_id(&state.pool, event_id)
         .await
         .map_err(|e| {
             error!("Failed to get event {event_id}: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "db_error", "message": e.to_string()})),
+            )
         })?
         .ok_or_else(|| {
             error!("Event {event_id} not found");
-            StatusCode::NOT_FOUND
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "event_not_found"})),
+            )
         })?;
 
     // Spawn background task to poll Hetzner and init rs-delivery
@@ -200,6 +303,67 @@ pub async fn delivery_stop(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // Mirror of the start-side fix: flip delivering_activated back so the
+    // dashboard returns to IDLE without the operator hitting refresh.
+    // Read current receiving state so the WS event reports it accurately —
+    // stop_delivery doesn't touch receiving_activated.
+    let still_receiving = db::get_streaming_event_by_id(&state.pool, req.event_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.receiving_activated)
+        .unwrap_or(false);
+    match db::set_delivering_activated(&state.pool, req.event_id, false).await {
+        Ok(()) => {
+            if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
+                action: "delivering_deactivated".to_string(),
+                name: None,
+                receiving: still_receiving,
+                delivering: false,
+            }) {
+                tracing::debug!("No WS subscribers for delivering_deactivated: {e}");
+            }
+        }
+        Err(e) => {
+            error!(
+                "Failed to clear delivering_activated for event {}: {e}",
+                req.event_id
+            );
+            rs_core::audit::record(
+                &state.audit_tx,
+                rs_core::audit::AuditRow {
+                    severity: rs_core::audit::Severity::Warn,
+                    source: rs_core::audit::Source::System,
+                    event_id: Some(req.event_id),
+                    instance_id: None,
+                    endpoint: None,
+                    action: rs_core::audit::Action::DbUiFlagStale,
+                    detail: serde_json::json!({
+                        "flag": "delivering_activated",
+                        "intent": false,
+                        "error": e.to_string(),
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
+    }
+
+    // Audit: operator-triggered delivery stop.
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: Some(req.event_id),
+            instance_id: None,
+            endpoint: None,
+            action: rs_core::audit::Action::DeliveryStopped,
+            detail: serde_json::json!({ "event_id": req.event_id }),
+            ts_override: None,
+        },
+    );
+
     Ok(StatusCode::OK)
 }
 
@@ -247,7 +411,16 @@ pub async fn delivery_add_endpoint(
         )
     })?;
 
-    crate::delivery_endpoints::add_endpoint_to_delivery(
+    // Stringify start_position for the audit row *before* consuming it.
+    let start_position_label = match &req.start_position {
+        crate::delivery_endpoints::StartPosition::Live => "live".to_string(),
+        crate::delivery_endpoints::StartPosition::Beginning => "beginning".to_string(),
+        crate::delivery_endpoints::StartPosition::Resume { chunk_id } => {
+            format!("resume:{chunk_id}")
+        }
+    };
+
+    let outcome = crate::delivery_endpoints::add_endpoint_to_delivery(
         orch,
         &state.pool,
         &state.config,
@@ -261,6 +434,26 @@ pub async fn delivery_add_endpoint(
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
+    // Audit: record successful mid-stream endpoint add.
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: Some(req.event_id),
+            instance_id: None,
+            endpoint: Some(outcome.alias.clone()),
+            action: rs_core::audit::Action::EndpointAdded,
+            detail: serde_json::json!({
+                "event_id": req.event_id,
+                "endpoint": outcome.alias,
+                "start_position": start_position_label,
+                "resolved_start_chunk_id": outcome.start_chunk_id,
+            }),
+            ts_override: None,
+        },
+    );
+
     Ok(StatusCode::OK)
 }
 
@@ -272,6 +465,7 @@ pub struct RemoveEndpointFromDeliveryRequest {
 
 pub async fn delivery_remove_endpoint(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<RemoveEndpointFromDeliveryRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let orch = state.delivery_orchestrator.as_ref().ok_or_else(|| {
@@ -281,17 +475,47 @@ pub async fn delivery_remove_endpoint(
         )
     })?;
 
-    crate::delivery_endpoints::remove_endpoint_from_delivery(
+    // Operator may pass x-force-remove: true to bypass the
+    // remove-last-endpoint guard (e.g. during a deliberate teardown).
+    let force = headers.get("x-force-remove").and_then(|v| v.to_str().ok()) == Some("true");
+
+    let was_last_endpoint = crate::delivery_endpoints::remove_endpoint_from_delivery(
         orch,
         &state.pool,
         req.event_id,
         &req.alias,
+        force,
     )
     .await
     .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("would_leave_zero_endpoints") {
+            error!("Refusing remove-last-endpoint without force: {msg}");
+            return (StatusCode::CONFLICT, msg);
+        }
         error!("Failed to remove endpoint from delivery: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        (StatusCode::INTERNAL_SERVER_ERROR, msg)
     })?;
+
+    // Audit: record successful mid-stream endpoint remove.
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: Some(req.event_id),
+            instance_id: None,
+            endpoint: Some(req.alias.clone()),
+            action: rs_core::audit::Action::EndpointRemoved,
+            detail: serde_json::json!({
+                "event_id": req.event_id,
+                "endpoint": req.alias,
+                "was_last_endpoint": was_last_endpoint,
+                "forced": force,
+            }),
+            ts_override: None,
+        },
+    );
 
     Ok(StatusCode::OK)
 }

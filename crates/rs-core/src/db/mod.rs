@@ -13,13 +13,18 @@ mod v2;
 pub use v2::*;
 
 mod migrations;
-pub use migrations::{MAX_SCHEMA_VERSION, run_migrations};
+pub use migrations::{MAX_SCHEMA_VERSION, current_schema_version, run_migrations};
 
 pub mod upload;
 pub use upload::{
-    list_recent_uploads, mark_upload_permanently_failed, pick_next_uploadable_chunk,
-    record_upload_attempt, record_upload_failure, record_upload_success, reset_orphaned_in_process,
+    list_recent_uploads, mark_chunk_in_process, mark_upload_permanently_failed,
+    pick_next_uploadable_chunk, pick_next_uploadable_chunks, record_upload_attempt,
+    record_upload_failure, record_upload_success, reset_orphaned_in_process,
 };
+
+pub mod audit;
+
+pub mod metrics;
 
 #[cfg(test)]
 mod tests;
@@ -39,11 +44,25 @@ mod delivery_status_tests;
 #[cfg(test)]
 mod migration_tests;
 
+#[cfg(test)]
+mod audit_tests;
+
+#[cfg(test)]
+mod metrics_tests;
+
+#[cfg(test)]
+mod pool_tests;
+
+#[cfg(test)]
+mod streaming_event_flag_tests;
+
 /// Create a SQLite connection pool.
 pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
     let options = SqliteConnectOptions::from_str(&url)?
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_millis(5000))
         .create_if_missing(true)
         .pragma("foreign_keys", "1");
 
@@ -57,7 +76,10 @@ pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {
 
 /// Create an in-memory SQLite pool for testing.
 pub async fn create_memory_pool() -> Result<SqlitePool> {
-    let options = SqliteConnectOptions::from_str("sqlite::memory:")?.pragma("foreign_keys", "1");
+    let options = SqliteConnectOptions::from_str("sqlite::memory:")?
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_millis(5000))
+        .pragma("foreign_keys", "1");
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)

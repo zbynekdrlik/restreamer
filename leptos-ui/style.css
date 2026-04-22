@@ -566,3 +566,51 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
     .create-form { flex-direction: column; }
     .create-form input, .create-form select { min-width: unset; }
 }
+
+/* --- Operator dashboard layout with sidebar --- */
+.operator-dashboard__layout { display: flex; gap: var(--spacing-md); align-items: flex-start; }
+.operator-dashboard__main { flex: 1; min-width: 0; }
+.operator-dashboard__sidebar { width: 360px; flex-shrink: 0; }
+@media (max-width: 900px) {
+    .operator-dashboard__layout { flex-direction: column; }
+    .operator-dashboard__sidebar { width: 100%; }
+}
+
+/* --- AuditPanel --- */
+.audit-panel { max-height: 600px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-secondary, #1a1a1a); padding: 8px; font-size: 11px; }
+.audit-panel__header { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
+.audit-panel__header h3 { margin: 0; font-size: 13px; }
+.audit-panel__filter { font-size: 11px; padding: 2px 6px; }
+.audit-panel__list { list-style: none; padding: 0; margin: 0; }
+.audit-row { display: flex; gap: 6px; flex-wrap: wrap; font-size: 11px; padding: 2px 4px; border-bottom: 1px solid #222; align-items: baseline; }
+.audit-row--info { color: #bbb; }
+.audit-row--warn { color: #e8c547; }
+.audit-row--error, .audit-row--critical { color: #e85c47; }
+.audit-row--critical { animation: auditPulse 1.2s infinite; }
+@keyframes auditPulse { 50% { background: rgba(232,92,71,0.2); } }
+.audit-row__time { font-family: var(--font-mono, monospace); min-width: 70px; }
+.audit-row__source { min-width: 70px; text-transform: uppercase; font-size: 10px; }
+.audit-row__action { flex: 1; font-weight: 600; }
+.audit-row__endpoint { color: #8ab4f8; }
+.audit-row__detail { flex-basis: 100%; }
+.audit-row__detail summary { cursor: pointer; font-size: 10px; color: #888; }
+.audit-row__detail pre { white-space: pre-wrap; word-break: break-all; font-size: 10px; margin: 4px 0 0 0; padding: 4px; background: rgba(0,0,0,0.3); border-radius: 3px; }
+
+/* --- ZeroEndpointBanner --- */
+.banner { padding: 12px; font-weight: 600; text-align: center; border-radius: var(--radius); margin-bottom: var(--spacing-sm); }
+.banner--critical { background: #4a1416; color: #ffdede; border: 1px solid #e85c47; animation: auditPulse 1.5s infinite; }
+
+/* --- EndpointRemoveConfirmModal --- */
+.modal__backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.endpoint-remove-modal { background: #1a1a1a; border: 1px solid #444; border-radius: 6px; padding: 20px; max-width: 500px; color: #eee; }
+.endpoint-remove-modal__actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.endpoint-remove-modal__actions button { padding: 6px 16px; }
+.endpoint-remove-modal__input { width: 100%; padding: 6px 8px; margin-top: 4px; background: #111; color: #eee; border: 1px solid #444; border-radius: 3px; font-family: var(--font-mono, monospace); }
+
+/* --- EndpointHistory sparkline --- */
+.endpoint-history { margin-top: 6px; padding: 6px; background: rgba(0,0,0,0.2); border-radius: 3px; }
+.endpoint-history h4 { margin: 0 0 4px 0; font-size: 11px; font-weight: 600; color: var(--text-secondary, #aaa); }
+.endpoint-history p { margin: 0; font-size: 11px; color: var(--text-secondary, #aaa); font-style: italic; }
+.endpoint-history svg { display: block; }
+.btn-endpoint-history { padding: 2px 6px; font-size: 11px; margin-left: 4px; background: transparent; border: 1px solid var(--border, #444); color: var(--text-secondary, #aaa); border-radius: var(--radius, 3px); cursor: pointer; }
+.btn-endpoint-history:hover { background: rgba(255,255,255,0.05); }

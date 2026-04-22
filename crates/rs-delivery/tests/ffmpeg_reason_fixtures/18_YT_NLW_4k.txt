@@ -1,0 +1,17 @@
+size= 1283638kB time=00:14:15.55 bitrate=12291.0kbits/s speed=   1x
+size= 1284672kB time=00:14:16.05 bitrate=12293.7kbits/s speed=   1x
+size= 1285274kB time=00:14:16.57 bitrate=12291.9kbits/s speed=   1x
+size= 1285919kB time=00:14:17.08 bitrate=12290.8kbits/s speed=   1x
+size= 1286649kB time=00:14:17.58 bitrate=12290.6kbits/s speed=   1x
+size= 1287599kB time=00:14:18.11 bitrate=12292.1kbits/s speed=   1x
+size= 1288236kB time=00:14:18.61 bitrate=12290.9kbits/s speed=   1x
+size= 1288985kB time=00:14:19.11 bitrate=12290.9kbits/s speed=   1x
+size= 1289636kB time=00:14:19.64 bitrate=12289.6kbits/s speed=   1x
+size= 1289677kB time=00:14:19.67 bitrate=12289.6kbits/s speed=0.95x
+[aost#0:1/copy @ 0x57cf2bb660c0] Error submitting a packet to the muxer: Broken pipe
+[out#0/flv @ 0x57cf2bb25bc0] Error muxing a packet
+[out#0/flv @ 0x57cf2bb25bc0] Error writing trailer: Broken pipe
+[out#0/flv @ 0x57cf2bb25bc0] Error closing file: Broken pipe
+[out#0/flv @ 0x57cf2bb25bc0] video:1259286kB audio:29481kB subtitle:0kB other streams:0kB global headers:0kB muxing overhead: 0.090671%
+size= 1289935kB time=00:14:19.79 bitrate=12290.3kbits/s speed=0.95x
+Conversion failed

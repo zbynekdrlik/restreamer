@@ -1,4 +1,4 @@
-use super::*;
+use super::super::*;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -8,12 +8,9 @@ struct MockFetcher {
 }
 
 impl MockFetcher {
-    // Default 20ms per chunk so consumer pacing doesn't dominate throughput
-    // tests. Pacing-specific tests construct with a larger value explicitly.
     fn new(chunks: Vec<(i64, Vec<u8>)>) -> Self {
-        let map: std::collections::HashMap<i64, Vec<u8>> = chunks.into_iter().collect();
         Self {
-            chunks: Arc::new(TokioMutex::new(map)),
+            chunks: Arc::new(TokioMutex::new(chunks.into_iter().collect())),
             duration_ms_per_chunk: 20,
         }
     }
@@ -85,7 +82,9 @@ impl OutputProcess for MockProcess {
     }
 
     fn last_stderr_line(&self) -> Option<String> {
-        Some("mock stderr line".to_string())
+        // "Invalid data found" classifies as InvalidInput (1s backoff) so
+        // tests observe restarts within their virtual-time windows.
+        Some("Invalid data found".to_string())
     }
 }
 
@@ -163,6 +162,7 @@ async fn test_processes_sequential_chunks() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -207,6 +207,7 @@ async fn test_stops_on_signal() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -244,6 +245,7 @@ async fn test_restarts_ffmpeg_on_death() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -298,6 +300,7 @@ async fn test_tracks_ffmpeg_restart_count() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -339,6 +342,7 @@ async fn test_tracks_consecutive_chunk_misses() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -383,6 +387,7 @@ async fn test_tracks_last_error() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -423,6 +428,7 @@ async fn test_ffmpeg_circuit_breaker_triggers() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -473,6 +479,7 @@ async fn test_chunk_gap_skip_ahead() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -520,6 +527,7 @@ async fn test_chunk_gap_detected_when_no_skip_found() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -571,6 +579,7 @@ async fn test_drought_mode_recovers_when_chunks_resume() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -658,6 +667,7 @@ async fn test_write_timeout_kills_ffmpeg() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -706,6 +716,7 @@ async fn test_processes_100_sequential_chunks() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -731,11 +742,7 @@ async fn test_processes_100_sequential_chunks() {
     drop(s);
 
     let w = writes.lock().await;
-    assert!(
-        w.len() >= 100,
-        "Should have writes (1 per chunk): {}",
-        w.len()
-    );
+    assert!(w.len() >= 100, "expected >=100 writes, got {}", w.len());
     drop(w);
 
     let _ = stop_tx.send(true);
@@ -763,7 +770,8 @@ async fn test_stats_struct_serializes() {
     assert!(json.contains("\"ffmpeg_restart_count\":2"));
 }
 
-// TimedMockFetcher: chunks available at configured rate
+// TimedMockFetcher: chunks available at configured rate.
+// 2000ms chunk duration matches buffer-fill/chunk-gap tests.
 struct TimedMockFetcher {
     chunks: Arc<TokioMutex<std::collections::HashMap<i64, Vec<u8>>>>,
     available_up_to: Arc<AtomicI64>,
@@ -771,19 +779,9 @@ struct TimedMockFetcher {
 }
 
 impl TimedMockFetcher {
-    /// Create with pre-loaded chunk data. Chunks are only returned if
-    /// chunk_id <= available_up_to.
-    ///
-    /// Uses realistic 2000ms chunk duration because several tests that rely
-    /// on this fetcher verify buffer fill and chunk gap behaviour, which
-    /// depend on the interaction between chunk durations and delivery_delay.
-    /// Tests that exercise throughput with this fetcher must advance mock
-    /// time by at least `num_chunks * 2000ms` of real-time pacing budget to
-    /// account for the consumer's wall-clock pacing sleep.
     fn new(chunks: Vec<(i64, Vec<u8>)>, initially_available: i64) -> Self {
-        let map: std::collections::HashMap<i64, Vec<u8>> = chunks.into_iter().collect();
         Self {
-            chunks: Arc::new(TokioMutex::new(map)),
+            chunks: Arc::new(TokioMutex::new(chunks.into_iter().collect())),
             available_up_to: Arc::new(AtomicI64::new(initially_available)),
             duration_ms_per_chunk: 2000,
         }
@@ -847,6 +845,7 @@ async fn test_buffer_fill_waits_for_target_chunk() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -920,6 +919,7 @@ async fn test_chunk_gap_maintained_at_delay_target() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });
@@ -970,6 +970,7 @@ async fn test_buffer_fill_stops_on_signal() {
             stats_clone,
             None,
             Arc::new(BufferState::new()),
+            None,
         )
         .await;
     });

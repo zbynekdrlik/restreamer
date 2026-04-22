@@ -14,6 +14,7 @@ tracing.workspace = true
 thiserror.workspace = true
 md-5.workspace = true
 log.workspace = true
+serde_json.workspace = true
 
 # xiu RTMP ecosystem
 rtmp.workspace = true

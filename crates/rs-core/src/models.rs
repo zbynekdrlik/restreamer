@@ -203,6 +203,27 @@ pub enum WsEvent {
         stream_timecode: Option<String>,
         summary: String,
     },
+    AuditAppended {
+        id: i64,
+        ts: String,
+        severity: String,
+        source: String,
+        event_id: Option<i64>,
+        instance_id: Option<i64>,
+        endpoint: Option<String>,
+        action: String,
+        detail: serde_json::Value,
+    },
+    MetricsSample {
+        ts_ms: i64,
+        event_id: i64,
+        instance_id: i64,
+        alias: String,
+        chunk_delay_secs: f64,
+        current_chunk_id: i64,
+        chunks_processed: i64,
+        alive: bool,
+    },
 }
 
 /// Per-endpoint delivery metrics broadcast via WebSocket.
@@ -256,20 +277,91 @@ impl Default for ComponentStatus {
 ///
 /// Uses `Arc<AtomicBool>` so clones share the same underlying state.
 /// Written by `MediaReceiver` on Publish/UnPublish, read by the API `/status` handler.
+///
+/// In addition to the connected-flag, the struct carries two optional
+/// hooks set by the runtime at construction time (absent in tests):
+/// - `audit_tx` — emit RtmpConnected/Disconnected/HandshakeFailed rows
+/// - `rtmp_stable_since` — Arc shared with `AppState.rtmp_stable_since`.
+///   MediaReceiver writes `Some(Instant::now())` on Publish and `None` on
+///   UnPublish; the `POST /delivery/start` handler reads it to gate VPS
+///   creation until the ingest has been stable for
+///   `RTMP_STABLE_REQUIRED_SECS`.
 #[derive(Debug, Clone)]
 pub struct InpointState {
     rtmp_connected: Arc<AtomicBool>,
+    /// Shared handle to the `AppState.rtmp_stable_since` cell. None in
+    /// stand-alone tests; Some in the runtime-wired path.
+    rtmp_stable_since: Option<Arc<tokio::sync::Mutex<Option<std::time::Instant>>>>,
+    /// Optional audit channel. None in tests; set by
+    /// `with_audit_tx(...)` at runtime wiring time.
+    audit_tx: Option<tokio::sync::mpsc::Sender<crate::audit::AuditRow>>,
+    /// Connect timestamp for computing session duration on disconnect.
+    connect_started_at: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 impl InpointState {
     pub fn new() -> Self {
         Self {
             rtmp_connected: Arc::new(AtomicBool::new(false)),
+            rtmp_stable_since: None,
+            audit_tx: None,
+            connect_started_at: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Wire the audit channel. Call once at runtime startup; all clones
+    /// share the same sender. `None` means no audit rows are emitted.
+    pub fn with_audit_tx(mut self, tx: tokio::sync::mpsc::Sender<crate::audit::AuditRow>) -> Self {
+        self.audit_tx = Some(tx);
+        self
+    }
+
+    /// Wire the shared `rtmp_stable_since` cell. Required for
+    /// `POST /delivery/start` to see the publisher-stable timestamp.
+    pub fn with_stable_since(
+        mut self,
+        cell: Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
+    ) -> Self {
+        self.rtmp_stable_since = Some(cell);
+        self
+    }
+
+    pub fn audit_tx(&self) -> Option<&tokio::sync::mpsc::Sender<crate::audit::AuditRow>> {
+        self.audit_tx.as_ref()
     }
 
     pub fn set_connected(&self, connected: bool) {
         self.rtmp_connected.store(connected, Ordering::Relaxed);
+    }
+
+    /// Mark publisher connected. Sets `rtmp_stable_since` (if wired) and
+    /// records the connect instant so `mark_disconnected` can emit a
+    /// duration-accurate audit row.
+    pub async fn mark_connected(&self) {
+        let now = std::time::Instant::now();
+        self.rtmp_connected.store(true, Ordering::Relaxed);
+        if let Some(cell) = &self.rtmp_stable_since {
+            *cell.lock().await = Some(now);
+        }
+        if let Ok(mut g) = self.connect_started_at.lock() {
+            *g = Some(now);
+        }
+    }
+
+    /// Mark publisher disconnected. Clears `rtmp_stable_since` (if wired)
+    /// and returns the session duration in seconds (None if not
+    /// previously connected).
+    pub async fn mark_disconnected(&self) -> Option<u64> {
+        self.rtmp_connected.store(false, Ordering::Relaxed);
+        if let Some(cell) = &self.rtmp_stable_since {
+            *cell.lock().await = None;
+        }
+        let started = self
+            .connect_started_at
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        started.map(|s| s.elapsed().as_secs())
     }
 
     pub fn is_connected(&self) -> bool {
@@ -396,6 +488,27 @@ mod tests {
                 recording: false,
                 stream_timecode: Some("00:05:23".to_string()),
                 summary: "streaming".to_string(),
+            },
+            WsEvent::AuditAppended {
+                id: 1,
+                ts: "2026-01-01T00:00:00.000Z".to_string(),
+                severity: "info".to_string(),
+                source: "operator".to_string(),
+                event_id: Some(1),
+                instance_id: None,
+                endpoint: None,
+                action: "event_started".to_string(),
+                detail: serde_json::json!({}),
+            },
+            WsEvent::MetricsSample {
+                ts_ms: 0,
+                event_id: 1,
+                instance_id: 1,
+                alias: "ep".to_string(),
+                chunk_delay_secs: 0.0,
+                current_chunk_id: 0,
+                chunks_processed: 0,
+                alive: true,
             },
         ];
 

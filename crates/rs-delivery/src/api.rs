@@ -181,6 +181,7 @@ async fn init_endpoints(
             start_id,
             req.delivery_delay_ms,
             req.rescue_video_url.clone(),
+            Some(Arc::clone(&state.audit_ring)),
         );
 
         endpoints.insert(ep_cfg.alias.clone(), handle);
@@ -204,6 +205,19 @@ struct StatusResponse {
     status: String,
     endpoint_count: usize,
     endpoints: Vec<EndpointStatusEntry>,
+    /// Audit rows since the requested cursor (up to AUDIT_RING_CAP). The
+    /// host-side poller uses `next_audit_cursor` to mirror rows into the
+    /// host `audit_log` without polling twice.
+    #[serde(default)]
+    recent_audit: Vec<crate::audit_ring::RingRow>,
+    #[serde(default)]
+    next_audit_cursor: i64,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct StatusQuery {
+    #[serde(default)]
+    pub since: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -234,7 +248,10 @@ struct EndpointStatusEntry {
     rescue_eta_secs: Option<u64>,
 }
 
-async fn endpoint_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
+async fn endpoint_status(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<StatusQuery>,
+) -> Json<StatusResponse> {
     let endpoints = state.endpoints.read().await;
     let mut entries = Vec::new();
 
@@ -258,10 +275,14 @@ async fn endpoint_status(State(state): State<Arc<AppState>>) -> Json<StatusRespo
         });
     }
 
+    let (recent_audit, next_audit_cursor) = state.audit_ring.since(q.since.unwrap_or(0));
+
     Json(StatusResponse {
         status: "ok".to_string(),
         endpoint_count: entries.len(),
         endpoints: entries,
+        recent_audit,
+        next_audit_cursor,
     })
 }
 
@@ -360,6 +381,7 @@ async fn add_endpoint(
         start_id,
         delivery_delay_ms,
         rescue_video_url,
+        Some(Arc::clone(&state.audit_ring)),
     );
 
     let alias = req.endpoint.alias.clone();

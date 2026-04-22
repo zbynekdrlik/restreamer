@@ -74,6 +74,21 @@ pub async fn start_stream(
         tracing::debug!("No WS subscribers for ActivityFeed: {e}");
     }
 
+    // Audit: record EventStarted. Fires even if delivery fails downstream.
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: Some(id),
+            instance_id: None,
+            endpoint: None,
+            action: rs_core::audit::Action::EventStarted,
+            detail: serde_json::json!({ "event_name": event.name }),
+            ts_override: None,
+        },
+    );
+
     // Start delivery VPS if orchestrator is available
     if let Some(orch) = state.delivery_orchestrator.as_ref() {
         match orch.start_delivery(id).await {
@@ -228,6 +243,21 @@ pub async fn stop_stream(
     }) {
         tracing::debug!("No WS subscribers for ActivityFeed: {e}");
     }
+
+    // Audit: record EventStopped after successful deactivation.
+    rs_core::audit::record(
+        &state.audit_tx,
+        rs_core::audit::AuditRow {
+            severity: rs_core::audit::Severity::Info,
+            source: rs_core::audit::Source::Operator,
+            event_id: Some(id),
+            instance_id: None,
+            endpoint: None,
+            action: rs_core::audit::Action::EventStopped,
+            detail: serde_json::json!({ "event_name": event.name }),
+            ts_override: None,
+        },
+    );
 
     Ok(StatusCode::OK)
 }

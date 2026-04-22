@@ -310,7 +310,9 @@ test.describe("Operator Dashboard", () => {
       { timeout: 5000 },
     );
 
-    // Simulate delivery with endpoint
+    // Simulate delivery with TWO endpoints so removing the first one hits
+    // the regular ConfirmModal (the last-endpoint type-to-confirm modal
+    // only triggers when endpoints.len() <= 1 during active delivery).
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "DeliveryStatus",
@@ -318,10 +320,22 @@ test.describe("Operator Dashboard", () => {
           instance_name: "test-vps",
           status: "running",
           server_ip: "1.2.3.4",
-          endpoint_count: 1,
+          endpoint_count: 2,
           endpoints: [
             {
               alias: "YouTube Main",
+              alive: true,
+              current_chunk_id: 10,
+              bytes_processed_total: 1000,
+              chunks_processed: 10,
+              chunk_delay_secs: 5.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+              is_fast: false,
+            },
+            {
+              alias: "Facebook Page",
               alive: true,
               current_chunk_id: 10,
               bytes_processed_total: 1000,
@@ -337,10 +351,10 @@ test.describe("Operator Dashboard", () => {
       },
     });
 
-    await expect(page.locator(".btn-remove-endpoint")).toBeVisible({
+    await expect(page.locator(".btn-remove-endpoint").first()).toBeVisible({
       timeout: 5000,
     });
-    await page.locator(".btn-remove-endpoint").click();
+    await page.locator(".btn-remove-endpoint").first().click();
 
     // Confirm modal appears with endpoint name
     await expect(page.locator(".confirm-modal")).toBeVisible();
@@ -368,6 +382,8 @@ test.describe("Operator Dashboard", () => {
       { timeout: 5000 },
     );
 
+    // Two endpoints so removing the first one uses the regular confirm
+    // flow, not the last-endpoint type-to-confirm flow.
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "DeliveryStatus",
@@ -375,10 +391,22 @@ test.describe("Operator Dashboard", () => {
           instance_name: "test-vps",
           status: "running",
           server_ip: "1.2.3.4",
-          endpoint_count: 1,
+          endpoint_count: 2,
           endpoints: [
             {
               alias: "YouTube Main",
+              alive: true,
+              current_chunk_id: 10,
+              bytes_processed_total: 1000,
+              chunks_processed: 10,
+              chunk_delay_secs: 5.0,
+              stall_reason: null,
+              ffmpeg_restart_count: 0,
+              last_error: null,
+              is_fast: false,
+            },
+            {
+              alias: "Facebook Page",
               alive: true,
               current_chunk_id: 10,
               bytes_processed_total: 1000,
@@ -394,10 +422,10 @@ test.describe("Operator Dashboard", () => {
       },
     });
 
-    await expect(page.locator(".btn-remove-endpoint")).toBeVisible({
+    await expect(page.locator(".btn-remove-endpoint").first()).toBeVisible({
       timeout: 5000,
     });
-    await page.locator(".btn-remove-endpoint").click();
+    await page.locator(".btn-remove-endpoint").first().click();
     await expect(page.locator(".confirm-modal")).toBeVisible();
 
     const [request] = await Promise.all([

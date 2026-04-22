@@ -3,16 +3,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::SqlitePool;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use rs_cloud::hetzner::HetznerClient;
+use rs_core::audit::{Action, AuditRow, RateLimiter, Severity, Source};
 use rs_core::config::Config;
 use rs_core::db;
-use rs_core::models::{DeliveryEndpointMetrics, DeliveryInstance};
 
 pub(crate) use crate::delivery_helpers::{is_delivery_active, persist_delivery_log_to_disk};
+
+// Re-exports so existing call sites (`crate::delivery::Foo`, test modules,
+// external uses of `rs_api::delivery::Foo`) keep working after the split.
+pub use crate::delivery_audit_mirror::mirror_vps_audit;
+pub use crate::delivery_status::{
+    DeliveryStatus, EndpointDeliveryStatus, EndpointRestartRecord, YouTubeStatus,
+};
+#[cfg(test)]
+pub(crate) use crate::delivery_status::{
+    load_restart_history_from_db, pick_last_error_line_inline,
+};
 
 /// Orchestrates Hetzner VPS delivery instances and YouTube status checks.
 ///
@@ -30,7 +41,16 @@ pub struct DeliveryOrchestrator {
     /// Resume positions for auto-restart after VPS crash.
     /// Key: event_id, Value: HashMap<alias, last_known_chunk_id>
     resume_positions: Arc<Mutex<HashMap<i64, HashMap<String, i64>>>>,
+    /// Audit channel. `None` in tests and any call site that has not yet been
+    /// plumbed to `AppState.audit_tx` (Task 27 will wire the real channel
+    /// from runtime startup). Every emit is `if let Some(tx) = ...` so this
+    /// is a no-op when absent.
+    audit_tx: Option<mpsc::Sender<AuditRow>>,
 }
+
+/// Rate limiter for noisy delivery audit rows (VpsUnreachable). Emits at
+/// most 1 row per minute per (action, key) pair — see `RateLimiter`.
+static DELIVERY_RL: std::sync::LazyLock<RateLimiter> = std::sync::LazyLock::new(RateLimiter::new);
 
 /// Result of starting a delivery instance.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -43,60 +63,6 @@ pub struct StartDeliveryResult {
     /// Auth token generated for this delivery instance (used for API auth).
     #[serde(skip)]
     pub auth_token: String,
-}
-
-/// Result of querying delivery status.
-#[derive(Debug, serde::Serialize)]
-pub struct DeliveryStatus {
-    pub instance: Option<DeliveryInstance>,
-    pub server_ready: bool,
-    pub endpoints: Vec<EndpointDeliveryStatus>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct EndpointRestartRecord {
-    pub timestamp_ms: i64,
-    pub chunk_id: i64,
-    pub lifetime_secs: u64,
-    pub reason: String,
-    pub stderr_tail: Option<String>,
-    pub backoff_secs: u64,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct EndpointDeliveryStatus {
-    pub alias: String,
-    pub alive: bool,
-    pub current_chunk_id: i64,
-    pub bytes_processed_total: i64,
-    pub chunks_processed: i64,
-    pub chunk_delay_secs: f64,
-    pub stall_reason: Option<String>,
-    pub ffmpeg_restart_count: u32,
-    pub last_error: Option<String>,
-    pub ffmpeg_last_stderr: Option<String>,
-    pub is_fast: bool,
-    /// Per-endpoint audit log of recent ffmpeg restarts (capped at 100).
-    /// Empty when the rs-delivery binary on the VPS is older than this
-    /// field's introduction.
-    #[serde(default)]
-    pub restart_history: Vec<EndpointRestartRecord>,
-    /// Current delivery mode: "normal", "warmup", "rescue", or "recovering".
-    /// None when the rs-delivery binary on the VPS is older than the
-    /// rescue-mode feature.
-    #[serde(default)]
-    pub delivery_mode: Option<String>,
-    /// ETA in seconds until rescue mode exits. None when not in rescue mode.
-    #[serde(default)]
-    pub rescue_eta_secs: Option<u64>,
-}
-
-/// Result of querying YouTube status.
-#[derive(Debug, serde::Serialize)]
-pub struct YouTubeStatus {
-    pub authenticated: bool,
-    pub stream_receiving: Option<bool>,
-    pub error: Option<String>,
 }
 
 impl DeliveryOrchestrator {
@@ -117,6 +83,7 @@ impl DeliveryOrchestrator {
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
             endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
             resume_positions: Arc::new(Mutex::new(HashMap::new())),
+            audit_tx: None,
         })
     }
 
@@ -129,12 +96,36 @@ impl DeliveryOrchestrator {
             poll_handles: Arc::new(Mutex::new(HashMap::new())),
             endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
             resume_positions: Arc::new(Mutex::new(HashMap::new())),
+            audit_tx: None,
         }
+    }
+
+    /// Attach an audit channel. Every lifecycle event (VpsCreating, VpsReady,
+    /// VpsDeleted, VpsUnreachable, DeliveryInitSent, DeliveryInitResponse)
+    /// emits through this channel. Call once at construction.
+    pub fn with_audit_tx(mut self, tx: mpsc::Sender<AuditRow>) -> Self {
+        self.audit_tx = Some(tx);
+        self
+    }
+
+    /// Access the audit sender for internal emit helpers.
+    #[allow(dead_code)]
+    pub(crate) fn audit_tx(&self) -> Option<&mpsc::Sender<AuditRow>> {
+        self.audit_tx.as_ref()
     }
 
     /// Returns the poll_handles map for tracking background tasks.
     pub fn poll_handles(&self) -> Arc<Mutex<HashMap<i64, JoinHandle<()>>>> {
         Arc::clone(&self.poll_handles)
+    }
+
+    /// Lock and return the endpoint fast cache. Used by `delivery_status.rs`
+    /// (sibling module) because that file lives outside `delivery.rs` and
+    /// can't access the private field directly.
+    pub(crate) async fn endpoint_fast_cache_lock(
+        &self,
+    ) -> MutexGuard<'_, HashMap<i64, HashMap<String, bool>>> {
+        self.endpoint_fast_cache.lock().await
     }
 
     /// Update fast cache for a single endpoint (used by mid-stream add).
@@ -225,6 +216,33 @@ impl DeliveryOrchestrator {
             }
         };
 
+        // Audit: VPS creation request sent to Hetzner.
+        if let Some(tx) = &self.audit_tx {
+            rs_core::audit::record(
+                tx,
+                AuditRow {
+                    severity: Severity::Info,
+                    source: Source::Delivery,
+                    event_id: Some(event_id),
+                    instance_id: None,
+                    endpoint: None,
+                    action: Action::VpsCreating,
+                    detail: serde_json::json!({
+                        "server_type": server_type,
+                        "datacenter": self.config.hetzner.location,
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
+
+        // Combine primary SSH key with any extra debug/operator keys so a
+        // single VPS can be accessed by CI (primary) AND humans (extras)
+        // without key rotation or rebuild. Order matters only for cloud-init
+        // display; Hetzner installs all listed keys into /root/.ssh/authorized_keys.
+        let mut ssh_key_names: Vec<String> = vec![self.config.hetzner.ssh_key_name.clone()];
+        ssh_key_names.extend(self.config.hetzner.extra_ssh_key_names.iter().cloned());
+
         let server = self
             .hetzner
             .create_server(
@@ -232,7 +250,7 @@ impl DeliveryOrchestrator {
                 server_type,
                 &self.config.hetzner.location,
                 &image,
-                std::slice::from_ref(&self.config.hetzner.ssh_key_name),
+                &ssh_key_names,
                 &user_data,
                 labels,
             )
@@ -276,6 +294,7 @@ impl DeliveryOrchestrator {
         event_name: &str,
         auth_token: &str,
     ) -> anyhow::Result<()> {
+        let boot_start = std::time::Instant::now();
         let instance = db::get_delivery_instance(&self.pool, instance_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("delivery instance {instance_id} not found"))?;
@@ -341,6 +360,26 @@ impl DeliveryOrchestrator {
                     // operator can see this is normal startup, not a hang.
                     db::update_delivery_instance_status(&self.pool, instance_id, "initializing")
                         .await?;
+                    // Audit: VPS booted + rs-delivery answered health check.
+                    if let Some(tx) = &self.audit_tx {
+                        rs_core::audit::record(
+                            tx,
+                            AuditRow {
+                                severity: Severity::Info,
+                                source: Source::Delivery,
+                                event_id: Some(event_id),
+                                instance_id: Some(instance_id),
+                                endpoint: None,
+                                action: Action::VpsReady,
+                                detail: serde_json::json!({
+                                    "hetzner_id": hetzner_id,
+                                    "ipv4": instance.ipv4,
+                                    "boot_secs": boot_start.elapsed().as_secs(),
+                                }),
+                                ts_override: None,
+                            },
+                        );
+                    }
                     break;
                 }
                 Ok(resp) => {
@@ -490,6 +529,27 @@ impl DeliveryOrchestrator {
             "rescue_video_url": event.rescue_video_url,
         });
 
+        // Audit: init payload dispatched to rs-delivery.
+        if let Some(tx) = &self.audit_tx {
+            rs_core::audit::record(
+                tx,
+                AuditRow {
+                    severity: Severity::Info,
+                    source: Source::Delivery,
+                    event_id: Some(event_id),
+                    instance_id: Some(instance_id),
+                    endpoint: None,
+                    action: Action::DeliveryInitSent,
+                    detail: serde_json::json!({
+                        "event_id": event_id,
+                        "endpoints_count": endpoints.len(),
+                        "start_chunk_id": start_chunk_id,
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
+
         let resp = client
             .post(format!("{delivery_url}/api/init"))
             .bearer_auth(auth_token)
@@ -498,16 +558,57 @@ impl DeliveryOrchestrator {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let init_status = resp.status();
+        if !init_status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            // Audit: init failed. Severity Error so it survives back-pressure.
+            if let Some(tx) = &self.audit_tx {
+                rs_core::audit::record(
+                    tx,
+                    AuditRow {
+                        severity: Severity::Error,
+                        source: Source::Delivery,
+                        event_id: Some(event_id),
+                        instance_id: Some(instance_id),
+                        endpoint: None,
+                        action: Action::DeliveryInitResponse,
+                        detail: serde_json::json!({
+                            "event_id": event_id,
+                            "status": format!("{init_status}"),
+                            "body": body,
+                        }),
+                        ts_override: None,
+                    },
+                );
+            }
             return Err(anyhow::anyhow!(
-                "rs-delivery /api/init failed: {status} - {body}"
+                "rs-delivery /api/init failed: {init_status} - {body}"
             ));
         }
 
         let init_resp = resp.text().await.unwrap_or_default();
         info!(event_id, init_resp = %init_resp, "Init response received");
+
+        // Audit: init succeeded.
+        if let Some(tx) = &self.audit_tx {
+            rs_core::audit::record(
+                tx,
+                AuditRow {
+                    severity: Severity::Info,
+                    source: Source::Delivery,
+                    event_id: Some(event_id),
+                    instance_id: Some(instance_id),
+                    endpoint: None,
+                    action: Action::DeliveryInitResponse,
+                    detail: serde_json::json!({
+                        "event_id": event_id,
+                        "endpoints_started": endpoints.len(),
+                        "status": "ok",
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
 
         db::update_delivery_instance_health(&self.pool, instance_id).await?;
         // Init succeeded — endpoints are now warming up / delivering.
@@ -517,212 +618,6 @@ impl DeliveryOrchestrator {
         info!(event_id, "Delivery endpoints initialized successfully");
 
         Ok(())
-    }
-
-    /// Get delivery status for an event.
-    pub async fn get_delivery_status(&self, event_id: i64) -> anyhow::Result<DeliveryStatus> {
-        let instance = db::get_delivery_instance_by_event(&self.pool, event_id).await?;
-
-        // Read cached is_fast map (populated in init_endpoints, empty before init)
-        let fast_map = {
-            let cache = self.endpoint_fast_cache.lock().await;
-            cache.get(&event_id).cloned().unwrap_or_default()
-        };
-
-        let (server_ready, endpoints) = match &instance {
-            Some(inst) if is_delivery_active(&inst.status) => {
-                // Fetch live status from rs-delivery
-                let delivery_url = format!("http://{}:8000", inst.ipv4);
-                let client = reqwest::Client::new();
-
-                match client
-                    .get(format!("{delivery_url}/api/status"))
-                    .bearer_auth(&inst.auth_token)
-                    .timeout(Duration::from_secs(5))
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-                        let ep_entries = body["endpoints"].as_array().cloned().unwrap_or_default();
-
-                        let mut statuses = Vec::new();
-                        for entry in ep_entries {
-                            let alias = entry["alias"].as_str().unwrap_or("").to_string();
-                            let alive = entry["alive"].as_bool().unwrap_or(false);
-                            let chunk_id = entry["current_chunk_id"].as_i64().unwrap_or(0);
-                            let bytes_total = entry["bytes_processed_total"].as_i64().unwrap_or(0);
-                            let chunks_processed = entry["chunks_processed"].as_i64().unwrap_or(0);
-                            let stall_reason =
-                                entry["stall_reason"].as_str().map(|s| s.to_string());
-                            let ffmpeg_restart_count =
-                                entry["ffmpeg_restart_count"].as_u64().unwrap_or(0) as u32;
-                            let last_error = entry["last_error"].as_str().map(|s| s.to_string());
-                            let ffmpeg_last_stderr =
-                                entry["ffmpeg_last_stderr"].as_str().map(|s| s.to_string());
-                            let delivery_mode =
-                                entry["delivery_mode"].as_str().map(|s| s.to_string());
-                            let rescue_eta_secs = entry["rescue_eta_secs"].as_u64();
-                            let restart_history: Vec<EndpointRestartRecord> =
-                                entry["restart_history"]
-                                    .as_array()
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|v| {
-                                                serde_json::from_value::<EndpointRestartRecord>(
-                                                    v.clone(),
-                                                )
-                                                .ok()
-                                            })
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
-
-                            // Persist restart records to DB for post-mortem analysis.
-                            // The dedup INSERT ignores records already saved from previous polls.
-                            for record in &restart_history {
-                                if let Err(e) = db::insert_delivery_restart_record(
-                                    &self.pool,
-                                    inst.id,
-                                    inst.event_id,
-                                    &alias,
-                                    record.timestamp_ms,
-                                    record.chunk_id,
-                                    record.lifetime_secs as i64,
-                                    &record.reason,
-                                    record.stderr_tail.as_deref(),
-                                    record.backoff_secs as i64,
-                                )
-                                .await
-                                {
-                                    warn!("Failed to persist restart record: {e}");
-                                }
-                            }
-
-                            // Compute cache delay using actual content duration from DB
-                            let target_secs = self.config.delivery.delivery_delay_secs as f64;
-                            let chunk_delay_secs = db::get_cache_duration_secs(
-                                &self.pool,
-                                event_id,
-                                chunk_id,
-                                target_secs,
-                            )
-                            .await
-                            .unwrap_or(0.0);
-
-                            // Update DB with latest status
-                            if let Err(e) = db::upsert_delivery_endpoint_status(
-                                &self.pool,
-                                inst.id,
-                                &alias,
-                                alive,
-                                chunks_processed,
-                                chunk_id,
-                                bytes_total,
-                            )
-                            .await
-                            {
-                                warn!("Failed to update endpoint status: {e}");
-                            }
-
-                            statuses.push(EndpointDeliveryStatus {
-                                alias: alias.clone(),
-                                alive,
-                                current_chunk_id: chunk_id,
-                                bytes_processed_total: bytes_total,
-                                chunks_processed,
-                                chunk_delay_secs,
-                                stall_reason,
-                                ffmpeg_restart_count,
-                                last_error,
-                                ffmpeg_last_stderr,
-                                is_fast: fast_map.get(&alias).copied().unwrap_or(false),
-                                restart_history,
-                                delivery_mode,
-                                rescue_eta_secs,
-                            });
-                        }
-
-                        db::update_delivery_instance_health(&self.pool, inst.id)
-                            .await
-                            .ok();
-
-                        (true, statuses)
-                    }
-                    Ok(resp) => {
-                        warn!(
-                            status = %resp.status(),
-                            "Delivery status check returned non-success"
-                        );
-                        (false, Vec::new())
-                    }
-                    Err(e) => {
-                        warn!("Delivery status check failed: {e}");
-                        (false, Vec::new())
-                    }
-                }
-            }
-            Some(inst) => {
-                info!(
-                    status = %inst.status,
-                    "Delivery instance not in running state"
-                );
-                (false, Vec::new())
-            }
-            _ => (false, Vec::new()),
-        };
-
-        Ok(DeliveryStatus {
-            instance,
-            server_ready,
-            endpoints,
-        })
-    }
-
-    /// Poll delivery metrics and return data suitable for WsEvent broadcast.
-    /// Returns (instance_name, status, server_ip, endpoint_count, Vec<DeliveryEndpointMetrics>).
-    pub async fn poll_delivery_metrics(
-        &self,
-        event_id: i64,
-    ) -> anyhow::Result<(
-        String,
-        String,
-        Option<String>,
-        u32,
-        Vec<DeliveryEndpointMetrics>,
-    )> {
-        let status = self.get_delivery_status(event_id).await?;
-
-        let (name, inst_status, server_ip) = match &status.instance {
-            Some(inst) => (
-                inst.name.clone(),
-                inst.status.clone(),
-                Some(inst.ipv4.clone()),
-            ),
-            None => ("none".to_string(), "none".to_string(), None),
-        };
-
-        let metrics: Vec<DeliveryEndpointMetrics> = status
-            .endpoints
-            .into_iter()
-            .map(|ep| DeliveryEndpointMetrics {
-                alias: ep.alias,
-                alive: ep.alive,
-                current_chunk_id: ep.current_chunk_id,
-                bytes_processed_total: ep.bytes_processed_total,
-                chunks_processed: ep.chunks_processed,
-                chunk_delay_secs: ep.chunk_delay_secs,
-                stall_reason: ep.stall_reason,
-                ffmpeg_restart_count: ep.ffmpeg_restart_count,
-                last_error: ep.last_error,
-                is_fast: ep.is_fast,
-                delivery_mode: ep.delivery_mode,
-                rescue_eta_secs: ep.rescue_eta_secs,
-            })
-            .collect();
-
-        let endpoint_count = metrics.len() as u32;
-        Ok((name, inst_status, server_ip, endpoint_count, metrics))
     }
 
     /// Stop delivery for an event: POST /api/stop, then delete Hetzner server.
@@ -831,11 +726,13 @@ impl DeliveryOrchestrator {
         }
 
         // Delete Hetzner server
+        let mut delete_reason = "operator_stop";
         if let Err(e) = self.hetzner.delete_server(instance.hetzner_id).await {
             error!(
                 hetzner_id = instance.hetzner_id,
                 "Failed to delete Hetzner server: {e}"
             );
+            delete_reason = "delete_error";
         }
 
         db::update_delivery_instance_status(&self.pool, instance.id, "deleted").await?;
@@ -843,6 +740,27 @@ impl DeliveryOrchestrator {
             hetzner_id = instance.hetzner_id,
             event_id, "Delivery instance stopped and deleted"
         );
+
+        // Audit: VPS destroyed.
+        if let Some(tx) = &self.audit_tx {
+            rs_core::audit::record(
+                tx,
+                AuditRow {
+                    severity: Severity::Info,
+                    source: Source::Delivery,
+                    event_id: Some(event_id),
+                    instance_id: Some(instance.id),
+                    endpoint: None,
+                    action: Action::VpsDeleted,
+                    detail: serde_json::json!({
+                        "hetzner_id": instance.hetzner_id,
+                        "ipv4": instance.ipv4,
+                        "reason": delete_reason,
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
 
         Ok(())
     }
@@ -908,7 +826,9 @@ impl DeliveryOrchestrator {
                 }
             };
 
-            // Check health
+            // Check health. `last_error` is captured so audit rows carry a
+            // useful message instead of just `false`.
+            let mut last_error: Option<String> = None;
             let healthy = match client
                 .get(format!("http://{}:8000/api/health", instance.ipv4))
                 .bearer_auth(&instance.auth_token)
@@ -918,15 +838,18 @@ impl DeliveryOrchestrator {
             {
                 Ok(resp) if resp.status().is_success() => true,
                 Ok(resp) => {
+                    let status = resp.status();
                     warn!(
                         event_id,
-                        status = %resp.status(),
+                        status = %status,
                         "Delivery VPS health returned non-success"
                     );
+                    last_error = Some(format!("http_{status}"));
                     false
                 }
                 Err(e) => {
                     warn!(event_id, "Delivery VPS health check failed: {e}");
+                    last_error = Some(e.to_string());
                     false
                 }
             };
@@ -950,6 +873,30 @@ impl DeliveryOrchestrator {
                     consecutive_failures,
                     "Delivery VPS health check failed ({consecutive_failures}/3)"
                 );
+
+                // Audit (rate-limited): one row per minute per failure class
+                // so a persistent outage doesn't flood `audit_log`.
+                if let Some(tx) = &self.audit_tx {
+                    let class = last_error.as_deref().unwrap_or("unknown");
+                    if DELIVERY_RL.allow(Action::VpsUnreachable, class) {
+                        rs_core::audit::record(
+                            tx,
+                            AuditRow {
+                                severity: Severity::Warn,
+                                source: Source::Delivery,
+                                event_id: Some(event_id),
+                                instance_id: Some(instance_id),
+                                endpoint: None,
+                                action: Action::VpsUnreachable,
+                                detail: serde_json::json!({
+                                    "consecutive_failures": consecutive_failures,
+                                    "last_error": last_error,
+                                }),
+                                ts_override: None,
+                            },
+                        );
+                    }
+                }
 
                 if consecutive_failures >= 3 {
                     // DO NOT restart VPS — "unreachable" usually means stream.lan
@@ -989,4 +936,6 @@ impl DeliveryOrchestrator {
     }
 }
 
-// Helpers moved to delivery_helpers.rs; tests live in delivery_tests.rs.
+// Helpers moved to delivery_helpers.rs; status assembly + restart-history
+// helpers live in delivery_status.rs; mirror_vps_audit lives in
+// delivery_audit_mirror.rs. Tests remain in delivery_tests.rs.

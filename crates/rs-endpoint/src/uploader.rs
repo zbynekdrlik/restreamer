@@ -4,14 +4,45 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use sqlx::SqlitePool;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, warn};
 
+use rs_core::audit::{Action, AuditRow, RateLimiter, Severity, Source};
 use rs_core::db;
-use rs_core::models::WsEvent;
+use rs_core::models::{ChunkRecord, WsEvent};
 
 use crate::metrics::{UploadEvent, UploadMetrics};
 use crate::s3::S3Client;
+
+/// Process-wide rate limiter for uploader audit rows. Emits at most one
+/// row per minute per (Action, error_class) key so a sustained outage
+/// doesn't swamp `audit_log`. See `rs_core::audit::RateLimiter`.
+static UPLOAD_RL: std::sync::LazyLock<RateLimiter> = std::sync::LazyLock::new(RateLimiter::new);
+
+/// Bucket the free-text upload error into a small set of durable classes
+/// so the rate-limiter has a stable key (and the audit row has an
+/// at-a-glance category).
+fn classify_upload_error(msg: &str) -> &'static str {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("timeout") || m.contains("timed out") {
+        "timeout"
+    } else if m.contains(" 403") || m.contains("forbidden") {
+        "403"
+    } else if m.contains(" 404") || m.contains("not found") {
+        "404"
+    } else if m.contains(" 500")
+        || m.contains(" 502")
+        || m.contains(" 503")
+        || m.contains(" 504")
+        || m.contains("5xx")
+    {
+        "5xx"
+    } else if m.contains("connection") || m.contains("reset") || m.contains("refused") {
+        "conn"
+    } else {
+        "other"
+    }
+}
 
 /// Shared long-lived context passed to every upload worker.
 #[derive(Clone)]
@@ -29,6 +60,9 @@ struct WorkerCtx {
     /// collisions when multiple Restreamer installations share one S3 bucket.
     /// See issue #114.
     client_uuid: String,
+    /// Optional audit channel. `None` in tests; set via
+    /// `ChunkUploader::with_audit_tx`.
+    audit_tx: Option<mpsc::Sender<AuditRow>>,
 }
 
 /// Pure gate: should the spawner spawn another worker?
@@ -64,7 +98,16 @@ pub(crate) fn adjust_target(current: usize, error_rate: f64, median_ms: u32) -> 
 }
 
 /// Watches for unsent chunks and uploads them to S3 using a continuous worker pool.
-/// Retries live in the DB via `record_upload_failure` (writes `upload_next_retry_at`).
+///
+/// Each worker independently atomically SELECT+UPDATEs (`in_process=1`) the
+/// oldest eligible chunk via `db::pick_next_uploadable_chunk` and uploads it.
+/// Retries live in the DB via `record_upload_failure` (writes
+/// `upload_next_retry_at`) so workers naturally re-pick them on a later poll.
+///
+/// The claim-coordinator pattern (see commit ff86526) was reverted because it
+/// regressed upload throughput catastrophically under real load; SQLite BUSY
+/// pressure is now mitigated by WAL mode + `busy_timeout` pragmas in
+/// `rs-core::db`.
 pub struct ChunkUploader {
     pool: SqlitePool,
     s3: Arc<S3Client>,
@@ -77,6 +120,9 @@ pub struct ChunkUploader {
     drain_needed: Arc<AtomicUsize>,
     /// Per-installation UUID used to prefix S3 chunk keys (#114).
     client_uuid: String,
+    /// Audit channel — `None` means no audit rows are emitted from the
+    /// uploader (default; tests).
+    audit_tx: Option<mpsc::Sender<AuditRow>>,
 }
 
 impl ChunkUploader {
@@ -95,6 +141,7 @@ impl ChunkUploader {
             in_flight: Arc::new(AtomicUsize::new(0)),
             drain_needed: Arc::new(AtomicUsize::new(0)),
             client_uuid,
+            audit_tx: None,
         }
     }
 
@@ -107,6 +154,13 @@ impl ChunkUploader {
     /// Replace the default internal metrics with a shared instance.
     pub fn with_metrics(mut self, m: Arc<UploadMetrics>) -> Self {
         self.metrics = m;
+        self
+    }
+
+    /// Attach an audit channel. Rate-limited S3UploadFailed rows will be
+    /// emitted when a chunk upload fails.
+    pub fn with_audit_tx(mut self, tx: mpsc::Sender<AuditRow>) -> Self {
+        self.audit_tx = Some(tx);
         self
     }
 
@@ -181,6 +235,7 @@ impl ChunkUploader {
             blocked: Arc::clone(&self.upload_blocked),
             drain_needed: Arc::clone(&drain_needed),
             client_uuid: self.client_uuid.clone(),
+            audit_tx: self.audit_tx.clone(),
         };
         let mut worker_id_counter: usize = 0;
         let mut rx = target_rx.clone();
@@ -193,13 +248,8 @@ impl ChunkUploader {
                 let live_for_worker = Arc::clone(&live);
                 live.fetch_add(1, Ordering::SeqCst);
                 let mut worker_shutdown = shutdown.resubscribe();
-                let mut worker_rx = target_rx.clone();
                 tokio::spawn(async move {
-                    supervise_future(
-                        idx,
-                        run_worker(idx, ctx, &mut worker_shutdown, &mut worker_rx),
-                    )
-                    .await;
+                    supervise_future(idx, run_worker(idx, ctx, &mut worker_shutdown)).await;
                     live_for_worker.fetch_sub(1, Ordering::SeqCst);
                 });
             }
@@ -230,28 +280,17 @@ async fn supervise_future<F: std::future::Future<Output = ()>>(label: usize, fut
     }
 }
 
-async fn run_worker(
-    idx: usize,
-    ctx: WorkerCtx,
-    shutdown: &mut broadcast::Receiver<()>,
-    _target_rx: &mut tokio::sync::watch::Receiver<usize>,
-) {
-    let WorkerCtx {
-        pool,
-        s3,
-        ws_tx,
-        metrics,
-        in_flight,
-        blocked: upload_blocked,
-        drain_needed,
-        client_uuid,
-    } = ctx;
+/// Worker loop: independently pick the next eligible chunk from the DB
+/// (atomic SELECT+UPDATE `in_process=1`) and upload it. Voluntarily exits
+/// when the adaptive controller signals a scale-down.
+async fn run_worker(idx: usize, ctx: WorkerCtx, shutdown: &mut broadcast::Receiver<()>) {
     loop {
         // Voluntary drain: if the adaptive controller requested a scale-down,
         // one worker per iteration claims a drain token and exits.
-        let want = drain_needed.load(Ordering::SeqCst);
+        let want = ctx.drain_needed.load(Ordering::SeqCst);
         if want > 0
-            && drain_needed
+            && ctx
+                .drain_needed
                 .compare_exchange(want, want - 1, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
         {
@@ -261,121 +300,174 @@ async fn run_worker(
 
         // Check shutdown at the top of each iteration
         if shutdown.try_recv().is_ok() {
-            break;
+            return;
         }
 
-        if upload_blocked.load(Ordering::Relaxed) {
+        // Test-only gate: if the uploader is "blocked" (simulated S3 outage),
+        // sleep briefly and retry.
+        if ctx.blocked.load(Ordering::Relaxed) {
             tokio::select! {
-                _ = shutdown.recv() => break,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                _ = shutdown.recv() => return,
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {}
             }
             continue;
         }
 
         let now_ms = chrono::Utc::now().timestamp_millis();
-        match db::pick_next_uploadable_chunk(&pool, now_ms).await {
+        match db::pick_next_uploadable_chunk(&ctx.pool, now_ms).await {
             Ok(None) => {
                 tokio::select! {
-                    _ = shutdown.recv() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                    _ = shutdown.recv() => return,
+                    _ = tokio::time::sleep(Duration::from_millis(200)) => {}
                 }
                 continue;
             }
             Err(e) => {
                 error!("Failed to pick next uploadable chunk: {e}");
                 tokio::select! {
-                    _ = shutdown.recv() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                    _ = shutdown.recv() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
                 continue;
             }
             Ok(Some(chunk)) => {
-                // Resolve event identifier; if parent is gone, mark as sent and drop out of queue
-                let event_id =
-                    match db::get_streaming_event_by_id(&pool, chunk.streaming_event_id).await {
-                        Ok(Some(ev)) => format!("{client_uuid}/{}", ev.name),
-                        _ => {
-                            warn!(
-                                "Chunk {} references missing/deleted event {}, marking complete",
-                                chunk.id, chunk.streaming_event_id
-                            );
-                            let _ = db::record_upload_success(&pool, chunk.id, now_ms, 0).await;
-                            continue;
-                        }
-                    };
+                upload_one(&ctx, chunk).await;
+            }
+        }
+    }
+}
 
-                let _ = db::record_upload_attempt(&pool, chunk.id, now_ms).await;
-                let attempt = chunk.upload_attempts + 1;
-                let _ = ws_tx.send(WsEvent::ChunkUploadAttempt {
-                    chunk_id: chunk.id,
-                    attempt,
-                });
+/// Perform a single chunk upload: record attempt → PUT to S3 → record
+/// success OR failure. Called by `run_worker` after it has atomically
+/// claimed a chunk via `pick_next_uploadable_chunk`.
+async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
+    let WorkerCtx {
+        pool,
+        s3,
+        ws_tx,
+        metrics,
+        in_flight,
+        client_uuid,
+        ..
+    } = ctx;
 
-                let n = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                metrics.set_in_flight(n);
+    let now_ms = chrono::Utc::now().timestamp_millis();
 
-                let started = Instant::now();
-                let result = s3
-                    .upload_chunk(
-                        Path::new(&chunk.chunk_file_path),
-                        &event_id,
-                        chunk.sequence_number,
-                        chunk.duration_ms,
-                    )
-                    .await;
-                let duration = started.elapsed();
-                let n = in_flight.fetch_sub(1, Ordering::SeqCst) - 1;
-                metrics.set_in_flight(n);
+    // Resolve event identifier; if parent is gone, mark as sent and drop out of queue.
+    let event_id = match db::get_streaming_event_by_id(pool, chunk.streaming_event_id).await {
+        Ok(Some(ev)) => format!("{client_uuid}/{}", ev.name),
+        _ => {
+            warn!(
+                "Chunk {} references missing/deleted event {}, marking complete",
+                chunk.id, chunk.streaming_event_id
+            );
+            let _ = db::record_upload_success(pool, chunk.id, now_ms, 0).await;
+            return;
+        }
+    };
 
-                match result {
-                    Ok(()) => {
-                        let completed_at = chrono::Utc::now().timestamp_millis();
-                        let _ = db::record_upload_success(
-                            &pool,
-                            chunk.id,
-                            completed_at,
-                            duration.as_millis() as i64,
-                        )
-                        .await;
-                        let _ = tokio::fs::remove_file(&chunk.chunk_file_path).await;
-                        metrics.record(UploadEvent {
-                            at: Instant::now(),
-                            duration_ms: duration.as_millis() as u32,
-                            success: true,
-                        });
-                        debug!("Chunk {} uploaded to S3", chunk.id);
-                        let _ = ws_tx.send(WsEvent::ChunkUploaded { chunk_id: chunk.id });
-                    }
-                    Err(e) => {
-                        let wall_clock_ms = chrono::Utc::now().timestamp_millis()
-                            - chunk.upload_first_attempt_at.unwrap_or(now_ms);
-                        let permanent =
-                            attempt >= MAX_ATTEMPTS || wall_clock_ms >= MAX_WALL_CLOCK_MS;
-                        if permanent {
-                            let _ = db::mark_upload_permanently_failed(&pool, chunk.id).await;
-                        } else {
-                            let backoff = backoff_ms(attempt) as i64;
-                            let next_retry = chrono::Utc::now().timestamp_millis() + backoff;
-                            let _ = db::record_upload_failure(
-                                &pool,
-                                chunk.id,
-                                &e.to_string(),
-                                next_retry,
-                                duration.as_millis() as i64,
-                            )
-                            .await;
-                        }
-                        let _ = ws_tx.send(WsEvent::ChunkUploadFailed {
-                            chunk_id: chunk.id,
-                            error: e.to_string(),
-                            permanent,
-                        });
-                        metrics.record(UploadEvent {
-                            at: Instant::now(),
-                            duration_ms: duration.as_millis() as u32,
-                            success: false,
-                        });
-                    }
+    let _ = db::record_upload_attempt(pool, chunk.id, now_ms).await;
+    let attempt = chunk.upload_attempts + 1;
+    let _ = ws_tx.send(WsEvent::ChunkUploadAttempt {
+        chunk_id: chunk.id,
+        attempt,
+    });
+
+    let n = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+    metrics.set_in_flight(n);
+
+    let started = Instant::now();
+    let result = s3
+        .upload_chunk(
+            Path::new(&chunk.chunk_file_path),
+            &event_id,
+            chunk.sequence_number,
+            chunk.duration_ms,
+        )
+        .await;
+    let duration = started.elapsed();
+    let n = in_flight.fetch_sub(1, Ordering::SeqCst) - 1;
+    metrics.set_in_flight(n);
+
+    match result {
+        Ok(()) => {
+            let completed_at = chrono::Utc::now().timestamp_millis();
+            let _ = db::record_upload_success(
+                pool,
+                chunk.id,
+                completed_at,
+                duration.as_millis() as i64,
+            )
+            .await;
+            let _ = tokio::fs::remove_file(&chunk.chunk_file_path).await;
+            metrics.record(UploadEvent {
+                at: Instant::now(),
+                duration_ms: duration.as_millis() as u32,
+                success: true,
+            });
+            debug!("Chunk {} uploaded to S3", chunk.id);
+            let _ = ws_tx.send(WsEvent::ChunkUploaded { chunk_id: chunk.id });
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            let wall_clock_ms = chrono::Utc::now().timestamp_millis()
+                - chunk.upload_first_attempt_at.unwrap_or(now_ms);
+            let permanent = attempt >= MAX_ATTEMPTS || wall_clock_ms >= MAX_WALL_CLOCK_MS;
+            if permanent {
+                let _ = db::mark_upload_permanently_failed(pool, chunk.id).await;
+            } else {
+                let backoff = backoff_ms(attempt) as i64;
+                let next_retry = chrono::Utc::now().timestamp_millis() + backoff;
+                let _ = db::record_upload_failure(
+                    pool,
+                    chunk.id,
+                    &err_msg,
+                    next_retry,
+                    duration.as_millis() as i64,
+                )
+                .await;
+            }
+            let _ = ws_tx.send(WsEvent::ChunkUploadFailed {
+                chunk_id: chunk.id,
+                error: err_msg.clone(),
+                permanent,
+            });
+            metrics.record(UploadEvent {
+                at: Instant::now(),
+                duration_ms: duration.as_millis() as u32,
+                success: false,
+            });
+
+            // Audit: rate-limited S3UploadFailed keyed on error_class so a
+            // long outage doesn't flood audit_log (1 row/min per class).
+            // Permanent failures always emit (bypass rate limit) because
+            // they are terminal for the chunk and worth surfacing.
+            if let Some(tx) = &ctx.audit_tx {
+                let class = classify_upload_error(&err_msg);
+                if permanent || UPLOAD_RL.allow(Action::S3UploadFailed, class) {
+                    rs_core::audit::record(
+                        tx,
+                        AuditRow {
+                            severity: if permanent {
+                                Severity::Error
+                            } else {
+                                Severity::Warn
+                            },
+                            source: Source::Uploader,
+                            event_id: Some(chunk.streaming_event_id),
+                            instance_id: None,
+                            endpoint: None,
+                            action: Action::S3UploadFailed,
+                            detail: serde_json::json!({
+                                "chunk_id": chunk.id,
+                                "error_class": class,
+                                "error_msg": err_msg,
+                                "permanent": permanent,
+                                "attempt": attempt,
+                            }),
+                            ts_override: None,
+                        },
+                    );
                 }
             }
         }
@@ -419,8 +511,8 @@ mod tests {
 
         let handle = tokio::spawn(async move { uploader.run(shutdown_rx).await });
 
-        // Let workers spin once (should find no chunks and sleep 100ms)
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Let workers spin once (should find no chunks and sleep 200ms)
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
         // Signal shutdown
         let _ = shutdown_tx.send(());
@@ -517,7 +609,7 @@ mod tests {
         );
     }
 
-    // --- Blocker 2: supervise_future ---
+    // --- supervise_future ---
 
     #[tokio::test]
     async fn supervise_future_catches_string_panic() {
@@ -530,7 +622,7 @@ mod tests {
         supervise_future(0, async {}).await;
     }
 
-    // --- Blocker 3: should_spawn_worker / spawn gate ---
+    // --- should_spawn_worker / spawn gate ---
 
     #[test]
     fn spawn_gate_requests_new_worker_when_live_below_target() {

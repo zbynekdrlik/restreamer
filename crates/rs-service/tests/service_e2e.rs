@@ -117,7 +117,7 @@ async fn start_test_service(
 
     // API server on random port
     let api_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let api_state = AppState::new(pool.clone(), config, ws_tx.clone());
+    let api_state = AppState::new_for_tests(pool.clone(), config, ws_tx.clone());
     let (actual_addr, _api_handle) = rs_api::serve(api_state, api_addr).await.unwrap();
     let api_base = format!("http://{actual_addr}/api/v1");
 

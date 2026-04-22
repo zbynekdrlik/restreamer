@@ -27,8 +27,9 @@ pub enum StartPosition {
 
 /// Resolve a StartPosition into a concrete start_chunk_id for an event.
 ///
-/// For `Live` and `Beginning`, returns the first sequence number for the event.
-/// For `Resume`, passes through the chunk_id directly.
+/// - `Live`      → latest sequence number (track the current live edge)
+/// - `Beginning` → first sequence number (replay from event start)
+/// - `Resume`    → passes through the chunk_id directly
 pub async fn resolve_start_chunk_id(
     pool: &SqlitePool,
     event_id: i64,
@@ -43,10 +44,13 @@ pub async fn resolve_start_chunk_id(
             Ok(first)
         }
         StartPosition::Live => {
-            let first_seq = db::get_first_sequence_number_for_event(pool, event_id)
+            // "Live" means the current live edge — latest chunk. Starting from
+            // here makes the endpoint track real-time ingest. (Historically
+            // this was identical to Beginning; see 2026-04-19 post-mortem.)
+            let last_seq = db::get_latest_sequence_number_for_event(pool, event_id)
                 .await?
                 .unwrap_or(1);
-            Ok(first_seq)
+            Ok(last_seq)
         }
     }
 }
@@ -59,6 +63,14 @@ pub fn compute_delivery_delay_ms(config: &Config, event_cache_delay_secs: Option
     delay_secs * 1000
 }
 
+/// Summary returned by `add_endpoint_to_delivery` so the HTTP handler can
+/// emit an audit row with the resolved alias + start chunk.
+#[derive(Debug, Clone)]
+pub struct AddEndpointOutcome {
+    pub alias: String,
+    pub start_chunk_id: i64,
+}
+
 /// Add a single endpoint to a running delivery VPS mid-stream.
 pub async fn add_endpoint_to_delivery(
     orch: &DeliveryOrchestrator,
@@ -67,7 +79,7 @@ pub async fn add_endpoint_to_delivery(
     event_id: i64,
     endpoint_id: i64,
     start_position: StartPosition,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<AddEndpointOutcome> {
     // Look up the endpoint config from DB
     let ep = db::get_endpoint_config(pool, endpoint_id)
         .await?
@@ -129,16 +141,24 @@ pub async fn add_endpoint_to_delivery(
         "Added endpoint to running delivery"
     );
 
-    Ok(())
+    Ok(AddEndpointOutcome {
+        alias: ep.alias,
+        start_chunk_id,
+    })
 }
 
 /// Remove a single endpoint from a running delivery VPS mid-stream.
+///
+/// Pass `force=true` to bypass the remove-last-endpoint guard (used by the
+/// cleanup/stop-delivery path, or by the HTTP handler when `x-force-remove:
+/// true` is present).
 pub async fn remove_endpoint_from_delivery(
     orch: &DeliveryOrchestrator,
     pool: &SqlitePool,
     event_id: i64,
     alias: &str,
-) -> anyhow::Result<()> {
+    force: bool,
+) -> anyhow::Result<bool> {
     let instance = db::get_delivery_instance_by_event(pool, event_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("No active delivery instance for event {event_id}"))?;
@@ -148,6 +168,31 @@ pub async fn remove_endpoint_from_delivery(
             "Delivery instance is in state '{}', not in an active delivery state",
             instance.status
         ));
+    }
+
+    // Always compute the endpoint count so callers (and the audit row)
+    // know whether this removal left zero endpoints behind.
+    let endpoint_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM delivery_endpoint_status WHERE instance_id = ?1")
+            .bind(instance.id)
+            .fetch_one(pool)
+            .await?;
+    let was_last_endpoint = endpoint_count <= 1;
+
+    // Remove-last-endpoint guard: if delivery is currently active and this
+    // is the only endpoint left, refuse unless the caller explicitly forced.
+    if !force {
+        let delivering_activated: i64 =
+            sqlx::query_scalar("SELECT delivering_activated FROM streaming_events WHERE id = ?1")
+                .bind(event_id)
+                .fetch_one(pool)
+                .await?;
+        if delivering_activated != 0 && was_last_endpoint {
+            return Err(anyhow::anyhow!(
+                "would_leave_zero_endpoints: delivery active and removing '{alias}' leaves 0 endpoints; \
+                 pass x-force-remove:true header to override"
+            ));
+        }
     }
 
     let delivery_url = format!("http://{}:8000", instance.ipv4);
@@ -178,7 +223,7 @@ pub async fn remove_endpoint_from_delivery(
         "Removed endpoint from running delivery"
     );
 
-    Ok(())
+    Ok(was_last_endpoint)
 }
 
 #[cfg(test)]

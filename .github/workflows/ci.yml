@@ -228,8 +228,6 @@ jobs:
             --exclude-re 'snapshot_cloud_init' \
             --exclude-re 'delivery_env_file' \
             --exclude-re 'DeliveryOrchestrator::monitor_delivery_health' \
-            --exclude-re 'add_endpoint_to_delivery' \
-            --exclude-re 'remove_endpoint_from_delivery' \
             --exclude-re 'MAX_RESCUE_VIDEO_BYTES' \
             --exclude-re 'write_countdown_file' \
             --exclude-re 'cleanup_countdown_file' \
@@ -844,6 +842,23 @@ jobs:
             }
             Write-Host "WebView2 installed: $version"
           }
+
+      - name: Refuse deploy during active live event
+        if: "!contains(github.event.head_commit.message, '[skip-live-check]')"
+        shell: powershell
+        run: |
+          try {
+            $s = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
+          } catch {
+            Write-Error "FAIL: stream.lan API unreachable - refusing to deploy (conservative)."
+            exit 1
+          }
+          if ($s.streaming_event.receiving_activated -eq $true) {
+            $name = $s.streaming_event.name
+            Write-Error "FAIL: stream.lan has active live event '$name'. Refusing to deploy. Use [skip-live-check] in commit message to override."
+            exit 1
+          }
+          Write-Host "OK: no active live event; deploy may proceed."
 
       - name: Deploy Tauri app
         shell: powershell
@@ -1658,11 +1673,43 @@ jobs:
             }
           }
 
-          # Verify OBS is healthy
+          # Verify OBS is healthy. If memory < 500 MB it's likely stuck on the
+          # crash-recovery dialog from a previous force-kill. Auto-dismiss
+          # by clicking the "Run in Normal Mode" button via UI Automation
+          # so CI is self-healing and doesn't need manual intervention.
           $mem = $obs.WorkingSet64 / 1MB
           Write-Host "OBS PID: $($obs.Id), Memory: $([math]::Round($mem))MB"
-          if ($mem -lt 50) {
-            throw "FAILED: OBS in broken state ($([math]::Round($mem))MB) - please restart OBS manually on stream.lan"
+          if ($mem -lt 500) {
+            Write-Host "OBS at ${mem}MB - stuck on crash-recovery dialog. Killing + clearing sentinel + relaunching via StartOBS (which has in-session dialog-dismiss logic)..."
+            # SYSTEM (runner) can't see newlevel session's UI windows, so UI
+            # Automation from here won't find the dialog. Instead: force-kill
+            # the stuck process, clear the .sentinel marker so the next
+            # launch is clean, then relaunch via the StartOBS scheduled task
+            # (runs in newlevel's interactive session and has its own UI-
+            # Automation fallback dismissing any residual dialogs).
+            Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+            Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            Remove-Item -Force -Recurse "$env:APPDATA\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+            Remove-Item -Force -Recurse "$env:USERPROFILE\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+            Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+            Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\safe_mode" -ErrorAction SilentlyContinue
+            schtasks.exe /run /tn "StartOBS"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "StartOBS task not found; trying 'Start OBS Studio'"
+              schtasks.exe /run /tn "Start OBS Studio"
+            }
+            # Wait up to 45 s for OBS to fully start.
+            for ($i = 1; $i -le 45; $i++) {
+              Start-Sleep -Seconds 1
+              $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+              if ($obs -and ($obs.WorkingSet64 / 1MB) -ge 500) { break }
+            }
+            $mem = if ($obs) { $obs.WorkingSet64 / 1MB } else { 0 }
+            if ($mem -lt 500) {
+              throw "FAILED: OBS in broken state ($([math]::Round($mem))MB) after kill+clean+relaunch"
+            }
+            Write-Host "OBS recovered: PID=$($obs.Id) Memory=$([math]::Round($mem))MB"
           }
           Write-Host "OBS is running and healthy (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
 
@@ -1850,18 +1897,78 @@ jobs:
               Write-Host "Bitrate set to 12000 for CI (was $origBitrate)"
 
               # OBS reads streamEncoder.json on stream start, so restart OBS
-              # to ensure the new bitrate takes effect
-              Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
-              Start-Sleep -Seconds 5
-              schtasks.exe /run /tn "Start OBS Studio"
+              # to ensure the new bitrate takes effect.
+              #
+              # CRITICAL: gracefully close OBS (WM_CLOSE) — NOT force-kill.
+              # Force-kill leaves OBS's .sentinel file on disk and OBS shows
+              # the "last session did not shut down cleanly" recovery dialog
+              # on the next launch, which hangs OBS at ~18 MB. The dialog
+              # blocks startup EVEN WITH --disable-shutdown-check (flag
+              # suppresses the error message but not the interactive prompt).
+              # WM_CLOSE lets OBS run its normal shutdown path which deletes
+              # the sentinel — the next launch is clean.
+              Write-Host "Asking OBS to quit (WM_CLOSE via Stop-Process)..."
+              # Stop-Process (no -Force) sends CloseMainWindow (WM_CLOSE) to
+              # OBS's main window. OBS runs its normal shutdown, deletes
+              # .sentinel. We do NOT use `taskkill /T` because it writes to
+              # stderr when child browser processes don't acknowledge in time,
+              # which PowerShell with $ErrorActionPreference=Stop treats as
+              # a step failure even though the main OBS process is exiting
+              # normally.
+              Get-Process obs64 -ErrorAction SilentlyContinue | ForEach-Object {
+                $null = $_.CloseMainWindow()
+              }
+              $exited = $false
+              for ($i = 1; $i -le 20; $i++) {
+                Start-Sleep -Seconds 1
+                if (-not (Get-Process obs64 -ErrorAction SilentlyContinue)) { $exited = $true; break }
+              }
+              if (-not $exited) {
+                Write-Host "WARNING: OBS did not exit gracefully in 20s, escalating to force-kill"
+                Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+                Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 3
+              }
+              # ALWAYS clean leftover child processes + sentinel/safe_mode
+              # markers before relaunch. Even with a "graceful" CloseMainWindow,
+              # OBS doesn't reliably delete .sentinel on Windows when child
+              # browser-page processes are still alive at exit, and the
+              # next launch then shows the crash-recovery dialog (OBS hung
+              # at 25 MB with WS port closed).
+              Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+              Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+              Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\safe_mode" -ErrorAction SilentlyContinue
+              # Relaunch via StartOBS task (runs in newlevel's interactive
+              # session and has its own UI-Automation fallback that dismisses
+              # any residual crash-recovery dialog). The "Start OBS Studio"
+              # task is a plain obs64.exe launch that leaves the dialog stuck.
+              schtasks.exe /run /tn "StartOBS"
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "StartOBS task not found; trying 'Start OBS Studio'"
+                schtasks.exe /run /tn "Start OBS Studio"
+              }
               if ($LASTEXITCODE -ne 0) { throw "Failed to restart OBS after bitrate change" }
-              Start-Sleep -Seconds 20
 
-              $obs = Get-Process obs64 -ErrorAction SilentlyContinue
-              if (-not $obs) { throw "OBS did not restart after bitrate change" }
-              $mem = $obs.WorkingSet64 / 1MB
-              if ($mem -lt 50) { throw "OBS in broken state after restart ($([math]::Round($mem))MB)" }
-              Write-Host "OBS restarted with 12000 kbps bitrate (PID: $($obs.Id), Memory: $([math]::Round($mem))MB)"
+              # Wait for OBS to be fully up: memory > 500MB AND WebSocket
+              # port 4455 open. Healthy OBS on stream.lan reports ~1.3 GB;
+              # the old 50MB threshold let partial/crash-dialog states pass
+              # and the next test step then failed on WS-connect.
+              $ready = $false
+              for ($i = 1; $i -le 60; $i++) {
+                Start-Sleep -Seconds 2
+                $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+                if (-not $obs) { continue }
+                $mem = [math]::Round($obs.WorkingSet64 / 1MB)
+                $wsOpen = (Test-NetConnection -ComputerName 127.0.0.1 -Port 4455 -WarningAction SilentlyContinue -InformationLevel Quiet)
+                Write-Host "OBS startup wait ${i}/60: mem=${mem}MB ws4455=$wsOpen"
+                if ($mem -ge 500 -and $wsOpen) { $ready = $true; break }
+              }
+              if (-not $ready) {
+                $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+                $mem = if ($obs) { [math]::Round($obs.WorkingSet64 / 1MB) } else { 0 }
+                throw "OBS did not fully start after bitrate change (mem=${mem}MB, ws4455 not reachable). Recovery dialog may be blocking startup."
+              }
+              Write-Host "OBS restarted with 12000 kbps bitrate (PID: $($obs.Id), Memory: $([math]::Round($obs.WorkingSet64/1MB))MB)"
             } else {
               Write-Host "Bitrate already 12000, no change needed"
               "ORIG_BITRATE=12000" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -4051,10 +4158,30 @@ jobs:
               $encoder | ConvertTo-Json | Set-Content $encoderFile -Encoding UTF8
               Write-Host "Restored bitrate to $origBitrateInt (was $ciBitrate)"
 
-              # Restart OBS to pick up restored bitrate
-              Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
-              Start-Sleep -Seconds 5
-              schtasks.exe /run /tn "Start OBS Studio"
+              # Restart OBS to pick up restored bitrate. Graceful close —
+              # force-kill triggers the crash-recovery dialog on next launch.
+              Write-Host "Asking OBS to quit (WM_CLOSE via Stop-Process)..."
+              Get-Process obs64 -ErrorAction SilentlyContinue | ForEach-Object {
+                $null = $_.CloseMainWindow()
+              }
+              $exited = $false
+              for ($i = 1; $i -le 20; $i++) {
+                Start-Sleep -Seconds 1
+                if (-not (Get-Process obs64 -ErrorAction SilentlyContinue)) { $exited = $true; break }
+              }
+              if (-not $exited) {
+                Write-Host "WARNING: OBS did not exit gracefully, escalating to force-kill"
+                Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+                Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 3
+              }
+              # Always clean sentinels + relaunch via StartOBS (which runs
+              # in user session and has in-session dialog-dismiss).
+              Get-Process | Where-Object { $_.ProcessName -like "obs-*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+              Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\.sentinel" -ErrorAction SilentlyContinue
+              Remove-Item -Force -Recurse "C:\Users\newlevel\AppData\Roaming\obs-studio\safe_mode" -ErrorAction SilentlyContinue
+              schtasks.exe /run /tn "StartOBS"
+              if ($LASTEXITCODE -ne 0) { schtasks.exe /run /tn "Start OBS Studio" }
               Start-Sleep -Seconds 20
               $obs = Get-Process obs64 -ErrorAction SilentlyContinue
               if ($obs) {

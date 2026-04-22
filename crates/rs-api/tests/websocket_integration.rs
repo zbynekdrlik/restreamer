@@ -20,7 +20,7 @@ async fn test_state() -> (AppState, broadcast::Sender<WsEvent>) {
     db::run_migrations(&pool).await.unwrap();
     let config = Config::for_testing();
     let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-    let state = AppState::new(pool, config, ws_tx.clone());
+    let state = AppState::new_for_tests(pool, config, ws_tx.clone());
     (state, ws_tx)
 }
 

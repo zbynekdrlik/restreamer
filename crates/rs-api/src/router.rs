@@ -56,6 +56,9 @@ pub fn build_router(state: AppState) -> Router {
         // Logs
         .route("/logs/inpoint", get(handlers::get_logs_inpoint))
         .route("/logs/endpoint", get(handlers::get_logs_endpoint))
+        // Audit log
+        .route("/audit", get(crate::audit_handlers::list))
+        .route("/audit/{id}", get(crate::audit_handlers::get_one))
         // WebSocket
         .route("/ws", get(websocket::ws_handler))
         // Events CRUD
@@ -154,6 +157,7 @@ pub fn build_router(state: AppState) -> Router {
             "/delivery/endpoints/remove",
             post(delivery_handlers::delivery_remove_endpoint),
         )
+        .route("/delivery/metrics", get(crate::metrics_handlers::list))
         // OBS WebSocket
         .route("/obs/status", get(handlers::obs_status))
         .route("/obs/start-stream", post(handlers::obs_start_stream))
@@ -223,7 +227,7 @@ mod tests {
         db::run_migrations(&pool).await.unwrap();
         let config = Config::for_testing();
         let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new(pool, config, ws_tx)
+        AppState::new_for_tests(pool, config, ws_tx)
     }
 
     #[tokio::test]
@@ -794,6 +798,13 @@ mod tests {
     #[tokio::test]
     async fn delivery_start_returns_503_without_hetzner_token() {
         let state = test_state().await;
+        // Satisfy the RTMP-stable gate so we reach the Hetzner-missing check.
+        *state.rtmp_stable_since.lock().await = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(
+                    crate::delivery_handlers::RTMP_STABLE_REQUIRED_SECS + 5,
+                ),
+        );
         let app = build_router(state);
 
         let response = app

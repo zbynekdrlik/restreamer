@@ -4,9 +4,22 @@ use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use super::add_endpoint_modal::AddEndpointModal;
+use super::audit_panel::AuditPanel;
 use super::confirm_modal::ConfirmModal;
+use super::endpoint_history::EndpointHistory;
+use super::endpoint_remove_confirm_modal::EndpointRemoveConfirmModal;
+use super::upload_strip::UploadStrip;
+use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
 use crate::store::DashboardStore;
+
+/// Minimum seconds the RTMP publisher must be connected before the
+/// operator can start delivery. Mirrors
+/// `rs_api::delivery_handlers::RTMP_STABLE_REQUIRED_SECS` but kept as a
+/// client-side constant because the WASM target cannot depend on
+/// `rs-api`.
+const RTMP_STABLE_REQUIRED_SECS: u64 = 15;
 
 /// Main operator dashboard view.
 #[component]
@@ -17,8 +30,16 @@ pub fn OperatorDashboard() -> impl IntoView {
 
     view! {
         <div class="operator-dashboard">
-            <ControlBar />
-            <Pipeline />
+            <ZeroEndpointBanner />
+            <div class="operator-dashboard__layout">
+                <div class="operator-dashboard__main">
+                    <ControlBar />
+                    <Pipeline />
+                </div>
+                <aside class="operator-dashboard__sidebar">
+                    <AuditPanel />
+                </aside>
+            </div>
             <AddEndpointModal show=show_add_modal />
         </div>
     }
@@ -34,6 +55,23 @@ fn ControlBar() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let loading = RwSignal::new(false);
     let show_stop_confirm = RwSignal::new(false);
+
+    // Poll /status every 2s so rtmp_stable_secs updates even when the
+    // WebSocket only emits InpointStatus on byte-count ticks.
+    //
+    // Only `rtmp_stable_secs` is pulled from the poll. `inpoint_connected`
+    // stays WebSocket-authoritative — the InpointStatus event on the WS is
+    // the single source of truth for the RTMP connection indicator, so
+    // overwriting it here would cause the pipeline display to flip back to
+    // "connected" within a poll cycle after a disconnect event.
+    let _status_poll = Interval::new(2_000, move || {
+        spawn_local(async move {
+            if let Ok(s) = api::get_status().await {
+                store.rtmp_stable_secs.set(s.rtmp_stable_secs);
+            }
+        });
+    });
+    std::mem::forget(_status_poll);
 
     let pipeline_state = move || store.pipeline_state.get().state.clone();
     let is_active = move || {
@@ -172,7 +210,22 @@ fn ControlBar() -> impl IntoView {
                 <button
                     class="start-btn"
                     on:click=on_start
-                    disabled=move || loading.get() || store.selected_event_id.get().is_none() || is_active()
+                    disabled=move || {
+                        loading.get()
+                            || store.selected_event_id.get().is_none()
+                            || is_active()
+                            || store.rtmp_stable_secs.get() < RTMP_STABLE_REQUIRED_SECS
+                    }
+                    title=move || {
+                        let stable = store.rtmp_stable_secs.get();
+                        if stable < RTMP_STABLE_REQUIRED_SECS {
+                            format!(
+                                "Waiting for OBS stream to stabilize ({stable}/{RTMP_STABLE_REQUIRED_SECS}s)"
+                            )
+                        } else {
+                            "Start delivering".to_string()
+                        }
+                    }
                 >
                     "Start Delivering"
                 </button>
@@ -472,10 +525,21 @@ fn EndpointTree() -> impl IntoView {
     let confirm_remove_alias: RwSignal<Option<String>> = RwSignal::new(None);
     let show_remove_confirm = RwSignal::new(false);
 
+    // Last-endpoint confirm modal (type-to-confirm). Separate from the
+    // generic confirm modal because it requires the operator to type the
+    // event name to prevent accidental audience-offline clicks.
+    let last_remove_alias: RwSignal<Option<String>> = RwSignal::new(None);
+    let show_last_remove_modal = RwSignal::new(false);
+
     // When modal is dismissed, clear the alias
     Effect::new(move |_| {
         if !show_remove_confirm.get() {
             confirm_remove_alias.set(None);
+        }
+    });
+    Effect::new(move |_| {
+        if !show_last_remove_modal.get() {
+            last_remove_alias.set(None);
         }
     });
 
@@ -492,6 +556,28 @@ fn EndpointTree() -> impl IntoView {
             });
         }
     });
+
+    // Props for the last-endpoint modal. Signals are derived from the
+    // `last_remove_alias` and pipeline_state so the modal body updates
+    // reactively while it's mounted.
+    let last_modal_alias: Signal<String> =
+        Signal::derive(move || last_remove_alias.get().unwrap_or_default());
+    let last_modal_event_name: Signal<String> =
+        Signal::derive(move || store.pipeline_state.get().event_name.unwrap_or_default());
+    let last_modal_visible: Signal<bool> = Signal::derive(move || show_last_remove_modal.get());
+
+    let on_last_cancel = move || {
+        show_last_remove_modal.set(false);
+    };
+    let on_last_confirm = move || {
+        if let Some(alias) = last_remove_alias.get_untracked() {
+            let event_id = store.pipeline_state.get().event_id.unwrap_or(0);
+            spawn_local(async move {
+                let _ = api::delivery_remove_endpoint(event_id, &alias).await;
+            });
+        }
+        show_last_remove_modal.set(false);
+    };
 
     // YouTube health polling: fast initial poll, then every 30s
     let yt_has_polled = RwSignal::new(false);
@@ -550,6 +636,12 @@ fn EndpointTree() -> impl IntoView {
                     };
                     let remove_alias = alias.clone();
                     let ep_alias_key = alias.clone();
+                    // Per-card toggle for the EndpointHistory sparkline.
+                    let show_history = RwSignal::new(false);
+                    let history_alias_signal: Signal<String> = Signal::derive({
+                        let ep_alias_key = ep_alias_key.clone();
+                        move || ep_alias_key.clone()
+                    });
 
                     // Derive per-endpoint reactive data from the delivery signal
                     let ep_data = Memo::new(move |_| {
@@ -700,8 +792,23 @@ fn EndpointTree() -> impl IntoView {
                                                 title="Remove endpoint"
                                                 on:click=move |_| {
                                                     let alias = remove_alias.clone();
-                                                    confirm_remove_alias.set(Some(alias));
-                                                    show_remove_confirm.set(true);
+                                                    // If this is the last endpoint on an
+                                                    // active delivery, show the
+                                                    // type-to-confirm last-endpoint modal
+                                                    // instead of the generic one.
+                                                    let d = store.delivery.get();
+                                                    let is_last = d.endpoints.len() <= 1;
+                                                    let ps_state =
+                                                        store.pipeline_state.get().state.clone();
+                                                    let pipeline_active = ps_state != "idle"
+                                                        && ps_state != "stopping";
+                                                    if is_last && pipeline_active {
+                                                        last_remove_alias.set(Some(alias));
+                                                        show_last_remove_modal.set(true);
+                                                    } else {
+                                                        confirm_remove_alias.set(Some(alias));
+                                                        show_remove_confirm.set(true);
+                                                    }
                                                 }
                                             >
                                                 {"\u{00D7}"}
@@ -758,6 +865,16 @@ fn EndpointTree() -> impl IntoView {
                                         </div>
                                     })
                                 }}
+                                <button
+                                    class="btn-endpoint-history"
+                                    title="Toggle chunk_delay history"
+                                    on:click=move |_| show_history.update(|v| *v = !*v)
+                                >
+                                    "History"
+                                </button>
+                                <Show when=move || show_history.get()>
+                                    <EndpointHistory alias=history_alias_signal />
+                                </Show>
                             </div>
                         </div>
                     }
@@ -781,169 +898,13 @@ fn EndpointTree() -> impl IntoView {
                 confirm_label="Remove"
                 on_confirm=on_remove_confirmed
             />
-        </div>
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AddEndpointModal — mounted at dashboard root, immune to endpoint tree re-renders
-// ---------------------------------------------------------------------------
-
-#[component]
-fn AddEndpointModal(show: RwSignal<bool>) -> impl IntoView {
-    let store = use_context::<DashboardStore>().expect("DashboardStore");
-    let selected_ep_id = RwSignal::new(Option::<i64>::None);
-    let start_position = RwSignal::new("Live".to_string());
-    let available_eps = RwSignal::new(Vec::<(i64, String, String)>::new());
-
-    // Snapshot available endpoints when modal opens (non-reactive)
-    Effect::new(move |_| {
-        if show.get() {
-            let all = store.endpoints_list.get_untracked();
-            let active_aliases: Vec<String> = store
-                .delivery
-                .get_untracked()
-                .endpoints
-                .iter()
-                .map(|e| e.alias.clone())
-                .collect();
-            let opts: Vec<(i64, String, String)> = all
-                .iter()
-                .filter(|ep| !active_aliases.contains(&ep.alias))
-                .map(|ep| (ep.id, ep.alias.clone(), ep.service_type.clone()))
-                .collect();
-            available_eps.set(opts);
-            selected_ep_id.set(None);
-            start_position.set("Live".to_string());
-        }
-    });
-
-    let on_add = move |_| {
-        if let Some(ep_id) = selected_ep_id.get() {
-            let pos = start_position.get();
-            if let Some(event_id) = store.selected_event_id.get() {
-                spawn_local(async move {
-                    let _ = api::delivery_add_endpoint(event_id, ep_id, &pos).await;
-                });
-            }
-            show.set(false);
-        }
-    };
-
-    let on_cancel = move |_| {
-        show.set(false);
-    };
-
-    let on_overlay_click = move |_| {
-        show.set(false);
-    };
-
-    view! {
-        <Show when=move || show.get() fallback=|| ()>
-            <div class="modal-overlay" on:click=on_overlay_click>
-                <div class="add-endpoint-modal" on:click=move |ev| ev.stop_propagation()>
-                    <h3>"Add Endpoint"</h3>
-                    <div class="modal-endpoint-list">
-                        {move || {
-                            available_eps.get().iter().map(|(id, alias, stype)| {
-                                let ep_id = *id;
-                                let is_selected = move || selected_ep_id.get() == Some(ep_id);
-                                let alias = alias.clone();
-                                let stype = stype.clone();
-                                view! {
-                                    <div
-                                        class="modal-endpoint-row"
-                                        class:selected=is_selected
-                                        on:click=move |_| selected_ep_id.set(Some(ep_id))
-                                    >
-                                        <span class="modal-ep-alias">{alias}</span>
-                                        <span class="modal-ep-type">{stype}</span>
-                                    </div>
-                                }
-                            }).collect::<Vec<_>>()
-                        }}
-                    </div>
-                    <div class="modal-position">
-                        <label>"Start position:"</label>
-                        <select
-                            class="start-position-select"
-                            on:change=move |ev| start_position.set(event_target_value(&ev))
-                        >
-                            <option value="Live">"Live"</option>
-                            <option value="Beginning">"From Beginning"</option>
-                        </select>
-                    </div>
-                    <div class="modal-actions">
-                        <button
-                            class="modal-add-btn btn-small"
-                            on:click=on_add
-                            disabled=move || selected_ep_id.get().is_none()
-                        >
-                            "Add"
-                        </button>
-                        <button class="modal-cancel-btn" on:click=on_cancel>
-                            "Cancel"
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </Show>
-    }
-}
-
-// ---------------------------------------------------------------------------
-// UploadStrip — live S3 upload telemetry strip under the S3→VPS node
-// ---------------------------------------------------------------------------
-
-#[component]
-fn UploadStrip() -> impl IntoView {
-    let stats: RwSignal<crate::api::UploadStats> = RwSignal::new(Default::default());
-
-    // Poll every 2s — even when idle, the strip should update adaptive_target
-    // and in_flight (both default to 0/0 so rendering stays stable).
-    let _interval = Interval::new(2_000, move || {
-        spawn_local(async move {
-            if let Ok(s) = crate::api::fetch_upload_stats().await {
-                stats.set(s);
-            }
-        });
-    });
-    std::mem::forget(_interval);
-
-    // Fire one immediate fetch so the strip isn't blank for 2s on load.
-    spawn_local(async move {
-        if let Ok(s) = crate::api::fetch_upload_stats().await {
-            stats.set(s);
-        }
-    });
-
-    let on_click = move |_| {
-        if let Some(w) = web_sys::window() {
-            let _ = w.location().set_href("/uploads");
-        }
-    };
-
-    view! {
-        <div class="upload-strip" on:click=on_click title="S3 upload telemetry — click for detail">
-            <span class="upload-strip__rate">
-                {move || format!("Upload: {:.1} c/s", stats.get().chunks_per_sec)}
-            </span>
-            <span class="upload-strip__median">
-                {move || format!("median {}ms", stats.get().median_ms)}
-            </span>
-            <span class="upload-strip__inflight">
-                {move || format!("in-flight {}/{}", stats.get().in_flight, stats.get().adaptive_target)}
-            </span>
-            <span class=move || {
-                let s = stats.get();
-                if s.error_rate > 0.0 {
-                    "upload-strip__errors upload-strip__errors--alert"
-                } else {
-                    "upload-strip__errors"
-                }
-            }>
-                {move || format!("errors {:.0}%", stats.get().error_rate * 100.0)}
-            </span>
+            <EndpointRemoveConfirmModal
+                alias=last_modal_alias
+                event_name=last_modal_event_name
+                visible=last_modal_visible
+                on_cancel=on_last_cancel
+                on_confirm=on_last_confirm
+            />
         </div>
     }
 }

@@ -1,0 +1,18 @@
+size=14013395kB time=03:04:04.07 bitrate=10394.7kbits/s speed=   1x
+size=14013939kB time=03:04:04.39 bitrate=10394.6kbits/s speed=   1x
+size=14015013kB time=03:04:04.92 bitrate=10394.9kbits/s speed=   1x
+size=14015386kB time=03:04:05.42 bitrate=10394.7kbits/s speed=   1x
+size=14015912kB time=03:04:05.93 bitrate=10394.6kbits/s speed=   1x
+size=14016205kB time=03:04:06.44 bitrate=10394.4kbits/s speed=   1x
+size=14017316kB time=03:04:06.95 bitrate=10394.7kbits/s speed=   1x
+size=14017700kB time=03:04:07.45 bitrate=10394.5kbits/s speed=   1x
+[tls @ 0x561b0076b280] A TLS fatal alert has been received.
+[vost#0:0/copy @ 0x561b009b1800] Error submitting a packet to the muxer: Input/output error
+[out#0/flv @ 0x561b0076b0c0] Error muxing a packet
+[out#0/flv @ 0x561b0076b0c0] Error writing trailer: Input/output error
+[tls @ 0x561b0076b280] The specified session has been invalidated for some reason.
+    Last message repeated 1 times
+[out#0/flv @ 0x561b0076b0c0] Error closing file: Input/output error
+[out#0/flv @ 0x561b0076b0c0] video:13621240kB audio:381508kB subtitle:0kB other streams:0kB global headers:0kB muxing overhead: 0.107268%
+size=14017768kB time=03:04:07.65 bitrate=10394.4kbits/s speed=   1x
+Conversion failed
