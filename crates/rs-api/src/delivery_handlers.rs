@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use rs_core::db;
-use rs_core::models::DeliveryInstance;
+use rs_core::models::{DeliveryInstance, WsEvent};
 
 use crate::state::AppState;
 
@@ -77,25 +77,45 @@ pub async fn delivery_start(
     // already-created VPS, so we log + emit an audit row and continue.
     // The audit row lets operators tell "dashboard is wrong, backend is
     // right" without paging anyone.
-    if let Err(e) = db::set_delivering_activated(&state.pool, event_id, true).await {
-        error!("Failed to set delivering_activated for event {event_id}: {e}");
-        rs_core::audit::record(
-            &state.audit_tx,
-            rs_core::audit::AuditRow {
-                severity: rs_core::audit::Severity::Warn,
-                source: rs_core::audit::Source::System,
-                event_id: Some(event_id),
-                instance_id: Some(result.instance_id),
-                endpoint: None,
-                action: rs_core::audit::Action::DbUiFlagStale,
-                detail: serde_json::json!({
-                    "flag": "delivering_activated",
-                    "intent": true,
-                    "error": e.to_string(),
-                }),
-                ts_override: None,
-            },
-        );
+    //
+    // On success, broadcast a WS StreamingEvent so connected dashboards
+    // flip from IDLE to STREAMING immediately instead of waiting for the
+    // next 2-second poll. Matches the pattern in stream_handlers::start_stream
+    // and handlers::action_toggle_delivering. The dashboard WS handler
+    // (leptos-ui/src/ws.rs:255) only reads receiving/delivering flags and
+    // ignores name, so passing None here is fine — the event is fetched
+    // further down for poll_and_init and we don't want to double-fetch.
+    match db::set_delivering_activated(&state.pool, event_id, true).await {
+        Ok(()) => {
+            if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
+                action: "delivering_activated".to_string(),
+                name: None,
+                receiving: true,
+                delivering: true,
+            }) {
+                tracing::debug!("No WS subscribers for delivering_activated: {e}");
+            }
+        }
+        Err(e) => {
+            error!("Failed to set delivering_activated for event {event_id}: {e}");
+            rs_core::audit::record(
+                &state.audit_tx,
+                rs_core::audit::AuditRow {
+                    severity: rs_core::audit::Severity::Warn,
+                    source: rs_core::audit::Source::System,
+                    event_id: Some(event_id),
+                    instance_id: Some(result.instance_id),
+                    endpoint: None,
+                    action: rs_core::audit::Action::DbUiFlagStale,
+                    detail: serde_json::json!({
+                        "flag": "delivering_activated",
+                        "intent": true,
+                        "error": e.to_string(),
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
     }
 
     // Audit: record DeliveryStarted with instance + IP so post-mortem can
@@ -285,28 +305,48 @@ pub async fn delivery_stop(
 
     // Mirror of the start-side fix: flip delivering_activated back so the
     // dashboard returns to IDLE without the operator hitting refresh.
-    if let Err(e) = db::set_delivering_activated(&state.pool, req.event_id, false).await {
-        error!(
-            "Failed to clear delivering_activated for event {}: {e}",
-            req.event_id
-        );
-        rs_core::audit::record(
-            &state.audit_tx,
-            rs_core::audit::AuditRow {
-                severity: rs_core::audit::Severity::Warn,
-                source: rs_core::audit::Source::System,
-                event_id: Some(req.event_id),
-                instance_id: None,
-                endpoint: None,
-                action: rs_core::audit::Action::DbUiFlagStale,
-                detail: serde_json::json!({
-                    "flag": "delivering_activated",
-                    "intent": false,
-                    "error": e.to_string(),
-                }),
-                ts_override: None,
-            },
-        );
+    // Read current receiving state so the WS event reports it accurately —
+    // stop_delivery doesn't touch receiving_activated.
+    let still_receiving = db::get_streaming_event_by_id(&state.pool, req.event_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.receiving_activated)
+        .unwrap_or(false);
+    match db::set_delivering_activated(&state.pool, req.event_id, false).await {
+        Ok(()) => {
+            if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {
+                action: "delivering_deactivated".to_string(),
+                name: None,
+                receiving: still_receiving,
+                delivering: false,
+            }) {
+                tracing::debug!("No WS subscribers for delivering_deactivated: {e}");
+            }
+        }
+        Err(e) => {
+            error!(
+                "Failed to clear delivering_activated for event {}: {e}",
+                req.event_id
+            );
+            rs_core::audit::record(
+                &state.audit_tx,
+                rs_core::audit::AuditRow {
+                    severity: rs_core::audit::Severity::Warn,
+                    source: rs_core::audit::Source::System,
+                    event_id: Some(req.event_id),
+                    instance_id: None,
+                    endpoint: None,
+                    action: rs_core::audit::Action::DbUiFlagStale,
+                    detail: serde_json::json!({
+                        "flag": "delivering_activated",
+                        "intent": false,
+                        "error": e.to_string(),
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
     }
 
     // Audit: operator-triggered delivery stop.
