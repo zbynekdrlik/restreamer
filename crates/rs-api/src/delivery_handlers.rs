@@ -74,9 +74,28 @@ pub async fn delivery_start(
     // cards. Without this the dashboard sits at "IDLE" with no endpoints
     // visible despite the VPS actually delivering — the most-reported
     // dashboard bug. Best-effort: a DB error must NOT roll back the
-    // already-created VPS, so we log and continue.
+    // already-created VPS, so we log + emit an audit row and continue.
+    // The audit row lets operators tell "dashboard is wrong, backend is
+    // right" without paging anyone.
     if let Err(e) = db::set_delivering_activated(&state.pool, event_id, true).await {
         error!("Failed to set delivering_activated for event {event_id}: {e}");
+        rs_core::audit::record(
+            &state.audit_tx,
+            rs_core::audit::AuditRow {
+                severity: rs_core::audit::Severity::Warn,
+                source: rs_core::audit::Source::System,
+                event_id: Some(event_id),
+                instance_id: Some(result.instance_id),
+                endpoint: None,
+                action: rs_core::audit::Action::DbUiFlagStale,
+                detail: serde_json::json!({
+                    "flag": "delivering_activated",
+                    "intent": true,
+                    "error": e.to_string(),
+                }),
+                ts_override: None,
+            },
+        );
     }
 
     // Audit: record DeliveryStarted with instance + IP so post-mortem can
@@ -270,6 +289,23 @@ pub async fn delivery_stop(
         error!(
             "Failed to clear delivering_activated for event {}: {e}",
             req.event_id
+        );
+        rs_core::audit::record(
+            &state.audit_tx,
+            rs_core::audit::AuditRow {
+                severity: rs_core::audit::Severity::Warn,
+                source: rs_core::audit::Source::System,
+                event_id: Some(req.event_id),
+                instance_id: None,
+                endpoint: None,
+                action: rs_core::audit::Action::DbUiFlagStale,
+                detail: serde_json::json!({
+                    "flag": "delivering_activated",
+                    "intent": false,
+                    "error": e.to_string(),
+                }),
+                ts_override: None,
+            },
         );
     }
 

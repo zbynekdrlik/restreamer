@@ -62,6 +62,12 @@ pub enum Action {
     S3FetchFailed,
     RestreamerStarted,
     MigrationsApplied,
+    /// DB write that drives UI state failed. Emitted when e.g.
+    /// `delivering_activated` couldn't be flipped — the backend keeps
+    /// running but the dashboard will show stale state until the next
+    /// successful poll. Operators watching the audit feed can tell
+    /// "dashboard is wrong, backend is right" without paging anyone.
+    DbUiFlagStale,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
