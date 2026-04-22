@@ -466,6 +466,35 @@ jobs:
             exit 1
           fi
           echo "OK: No trivial assertions found."
+      - name: Scan for unscoped Hetzner label_selector
+        run: |
+          # Assemble the regex in pieces so this step's own source does NOT
+          # match (otherwise the check would fail on itself). The real usages
+          # in workflow code always have the full literal on one line.
+          PREFIX='label_selector=app='
+          SUFFIX='restreamer(?!,client_uuid=)'
+          BAD=$(grep -Prn "${PREFIX}${SUFFIX}" .github/workflows/ || true)
+          if [ -n "$BAD" ]; then
+            echo "ERROR: Hetzner label_selector must include ,client_uuid=<uuid> scope to protect other installations:"
+            echo "$BAD"
+            exit 1
+          fi
+          echo "OK: All Hetzner label_selector usages are client_uuid-scoped."
+      - name: Scan for destructive Hetzner config overwrite
+        run: |
+          # CI must use Add-Member -Force per-field to preserve operator-set
+          # fields such as extra_ssh_key_names (fixes #132). The destructive
+          # pattern is a whole-object assignment opening a multi-line hashtable.
+          # Assembled from PREFIX+SUFFIX so this step's own source does not match.
+          PREFIX='\$config\.hetzner\s*='
+          SUFFIX='\s*@\{\s*$'
+          BAD=$(grep -Prn "${PREFIX}${SUFFIX}" .github/workflows/ || true)
+          if [ -n "$BAD" ]; then
+            echo "ERROR: Hetzner config must use Add-Member -Force per-field to preserve operator fields (e.g. extra_ssh_key_names). Full-overwrite detected:"
+            echo "$BAD"
+            exit 1
+          fi
+          echo "OK: No destructive Hetzner config overwrites found."
       - name: Verify zero ignored tests in cargo test output
         run: |
           # Run tests and capture output
@@ -1587,20 +1616,21 @@ jobs:
           if (-not $env:HETZNER_API_TOKEN) {
             throw "HETZNER_API_TOKEN secret not set"
           }
-          # Write Hetzner token directly into config file and restart service
+          # Merge Hetzner secrets into existing hetzner config section.
+          # Preserves operator-set fields like `extra_ssh_key_names` that
+          # aren't secret-managed here (was getting wiped on every deploy).
           $configPath = "C:\ProgramData\Restreamer\config.json"
           $config = Get-Content $configPath -Raw | ConvertFrom-Json
           if (-not $config.hetzner) {
-            $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue @{}
+            $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue ([pscustomobject]@{})
           }
-          $config.hetzner = @{
-            api_token = $env:HETZNER_API_TOKEN
-            location = "nbg1"
-            default_server_type = "cpx22"
-            snapshot_label = "rs-delivery"
-            ssh_key_name = "restreamer-ci"
-          }
-          $json = $config | ConvertTo-Json -Depth 5
+          # Overwrite CI-owned fields only — do not touch the rest.
+          $config.hetzner | Add-Member -NotePropertyName "api_token" -NotePropertyValue $env:HETZNER_API_TOKEN -Force
+          $config.hetzner | Add-Member -NotePropertyName "location" -NotePropertyValue "nbg1" -Force
+          $config.hetzner | Add-Member -NotePropertyName "default_server_type" -NotePropertyValue "cpx22" -Force
+          $config.hetzner | Add-Member -NotePropertyName "snapshot_label" -NotePropertyValue "rs-delivery" -Force
+          $config.hetzner | Add-Member -NotePropertyName "ssh_key_name" -NotePropertyValue "restreamer-ci" -Force
+          $json = $config | ConvertTo-Json -Depth 10
           [System.IO.File]::WriteAllText($configPath, $json)
           Write-Host "Config file updated with Hetzner settings"
 
@@ -2319,17 +2349,32 @@ jobs:
             Write-Host "Could not check delivery instances via API: $_"
           }
 
-          # Step 2: Clean up orphaned Hetzner VPS directly (survives Restreamer restarts)
-          # This catches VPS instances left behind by cancelled CI runs.
+          # Step 2: Clean up orphaned Hetzner VPS directly (scoped to this installation).
+          # Filters by client_uuid so a CI run on one Restreamer install can never
+          # delete another install's VPS sharing the same Hetzner account (fixes #137).
           if ($env:HETZNER_API_TOKEN) {
-            Write-Host "Checking Hetzner API for orphaned rs-delivery VPS instances..."
+            $clientUuid = $null
+            try {
+              $cfg = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/config" -TimeoutSec 10
+              $clientUuid = $cfg.client_uuid
+            } catch {
+              Write-Host "  Could not read local client_uuid: $_"
+            }
+
+            if (-not $clientUuid) {
+              Write-Host "ERROR: client_uuid not available - refusing to run Hetzner cleanup (fail-closed to protect other installations)"
+              exit 1
+            }
+
+            Write-Host "Checking Hetzner API for orphaned rs-delivery VPS for client_uuid=$clientUuid ..."
             try {
               $headers = @{ Authorization = "Bearer $($env:HETZNER_API_TOKEN)" }
-              $resp = Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers?label_selector=app=restreamer" `
+              $selector = "app=restreamer,client_uuid=$clientUuid"
+              $resp = Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers?label_selector=$selector" `
                 -Headers $headers -TimeoutSec 15
               if ($resp.servers -and $resp.servers.Count -gt 0) {
                 foreach ($srv in $resp.servers) {
-                  Write-Host "  Deleting orphaned Hetzner VPS: id=$($srv.id) name=$($srv.name) status=$($srv.status) ip=$($srv.public_net.ipv4.ip)"
+                  Write-Host "  Deleting orphaned VPS (this installation): id=$($srv.id) name=$($srv.name) status=$($srv.status) ip=$($srv.public_net.ipv4.ip)"
                   try {
                     Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers/$($srv.id)" `
                       -Method DELETE -Headers $headers -TimeoutSec 15
@@ -2340,7 +2385,7 @@ jobs:
                 }
                 Start-Sleep -Seconds 3
               } else {
-                Write-Host "  No orphaned Hetzner VPS found"
+                Write-Host "  No orphaned VPS found for this installation"
               }
             } catch {
               Write-Host "  Hetzner API check failed: $_"
