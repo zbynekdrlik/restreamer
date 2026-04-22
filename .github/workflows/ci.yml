@@ -466,6 +466,20 @@ jobs:
             exit 1
           fi
           echo "OK: No trivial assertions found."
+      - name: Scan for unscoped Hetzner label_selector
+        run: |
+          # Assemble the regex in pieces so this step's own source does NOT
+          # match (otherwise the check would fail on itself). The real usages
+          # in workflow code always have the full literal on one line.
+          PREFIX='label_selector=app='
+          SUFFIX='restreamer(?!,client_uuid=)'
+          BAD=$(grep -Prn "${PREFIX}${SUFFIX}" .github/workflows/ || true)
+          if [ -n "$BAD" ]; then
+            echo "ERROR: Hetzner label_selector must include ,client_uuid=<uuid> scope to protect other installations:"
+            echo "$BAD"
+            exit 1
+          fi
+          echo "OK: All Hetzner label_selector usages are client_uuid-scoped."
       - name: Verify zero ignored tests in cargo test output
         run: |
           # Run tests and capture output
@@ -1587,20 +1601,21 @@ jobs:
           if (-not $env:HETZNER_API_TOKEN) {
             throw "HETZNER_API_TOKEN secret not set"
           }
-          # Write Hetzner token directly into config file and restart service
+          # Merge Hetzner secrets into existing hetzner config section.
+          # Preserves operator-set fields like `extra_ssh_key_names` that
+          # aren't secret-managed here (was getting wiped on every deploy).
           $configPath = "C:\ProgramData\Restreamer\config.json"
           $config = Get-Content $configPath -Raw | ConvertFrom-Json
           if (-not $config.hetzner) {
-            $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue @{}
+            $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue ([pscustomobject]@{})
           }
-          $config.hetzner = @{
-            api_token = $env:HETZNER_API_TOKEN
-            location = "nbg1"
-            default_server_type = "cpx22"
-            snapshot_label = "rs-delivery"
-            ssh_key_name = "restreamer-ci"
-          }
-          $json = $config | ConvertTo-Json -Depth 5
+          # Overwrite CI-owned fields only — do not touch the rest.
+          $config.hetzner | Add-Member -NotePropertyName "api_token" -NotePropertyValue $env:HETZNER_API_TOKEN -Force
+          $config.hetzner | Add-Member -NotePropertyName "location" -NotePropertyValue "nbg1" -Force
+          $config.hetzner | Add-Member -NotePropertyName "default_server_type" -NotePropertyValue "cpx22" -Force
+          $config.hetzner | Add-Member -NotePropertyName "snapshot_label" -NotePropertyValue "rs-delivery" -Force
+          $config.hetzner | Add-Member -NotePropertyName "ssh_key_name" -NotePropertyValue "restreamer-ci" -Force
+          $json = $config | ConvertTo-Json -Depth 10
           [System.IO.File]::WriteAllText($configPath, $json)
           Write-Host "Config file updated with Hetzner settings"
 
