@@ -2334,17 +2334,32 @@ jobs:
             Write-Host "Could not check delivery instances via API: $_"
           }
 
-          # Step 2: Clean up orphaned Hetzner VPS directly (survives Restreamer restarts)
-          # This catches VPS instances left behind by cancelled CI runs.
+          # Step 2: Clean up orphaned Hetzner VPS directly (scoped to this installation).
+          # Filters by client_uuid so a CI run on one Restreamer install can never
+          # delete another install's VPS sharing the same Hetzner account (fixes #137).
           if ($env:HETZNER_API_TOKEN) {
-            Write-Host "Checking Hetzner API for orphaned rs-delivery VPS instances..."
+            $clientUuid = $null
+            try {
+              $cfg = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/config" -TimeoutSec 10
+              $clientUuid = $cfg.client_uuid
+            } catch {
+              Write-Host "  Could not read local client_uuid: $_"
+            }
+
+            if (-not $clientUuid) {
+              Write-Host "ERROR: client_uuid not available - refusing to run Hetzner cleanup (fail-closed to protect other installations)"
+              exit 1
+            }
+
+            Write-Host "Checking Hetzner API for orphaned rs-delivery VPS for client_uuid=$clientUuid ..."
             try {
               $headers = @{ Authorization = "Bearer $($env:HETZNER_API_TOKEN)" }
-              $resp = Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers?label_selector=app=restreamer" `
+              $selector = "app=restreamer,client_uuid=$clientUuid"
+              $resp = Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers?label_selector=$selector" `
                 -Headers $headers -TimeoutSec 15
               if ($resp.servers -and $resp.servers.Count -gt 0) {
                 foreach ($srv in $resp.servers) {
-                  Write-Host "  Deleting orphaned Hetzner VPS: id=$($srv.id) name=$($srv.name) status=$($srv.status) ip=$($srv.public_net.ipv4.ip)"
+                  Write-Host "  Deleting orphaned VPS (this installation): id=$($srv.id) name=$($srv.name) status=$($srv.status) ip=$($srv.public_net.ipv4.ip)"
                   try {
                     Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers/$($srv.id)" `
                       -Method DELETE -Headers $headers -TimeoutSec 15
@@ -2355,7 +2370,7 @@ jobs:
                 }
                 Start-Sleep -Seconds 3
               } else {
-                Write-Host "  No orphaned Hetzner VPS found"
+                Write-Host "  No orphaned VPS found for this installation"
               }
             } catch {
               Write-Host "  Hetzner API check failed: $_"
