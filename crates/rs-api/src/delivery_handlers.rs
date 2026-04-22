@@ -70,6 +70,15 @@ pub async fn delivery_start(
         )
     })?;
 
+    // Flip delivering_activated so the frontend dashboard shows endpoint
+    // cards. Without this the dashboard sits at "IDLE" with no endpoints
+    // visible despite the VPS actually delivering — the most-reported
+    // dashboard bug. Best-effort: a DB error must NOT roll back the
+    // already-created VPS, so we log and continue.
+    if let Err(e) = db::set_delivering_activated(&state.pool, event_id, true).await {
+        error!("Failed to set delivering_activated for event {event_id}: {e}");
+    }
+
     // Audit: record DeliveryStarted with instance + IP so post-mortem can
     // correlate operator action with VPS lifecycle.
     rs_core::audit::record(
@@ -254,6 +263,15 @@ pub async fn delivery_stop(
         error!("Failed to stop delivery: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Mirror of the start-side fix: flip delivering_activated back so the
+    // dashboard returns to IDLE without the operator hitting refresh.
+    if let Err(e) = db::set_delivering_activated(&state.pool, req.event_id, false).await {
+        error!(
+            "Failed to clear delivering_activated for event {}: {e}",
+            req.event_id
+        );
+    }
 
     // Audit: operator-triggered delivery stop.
     rs_core::audit::record(
