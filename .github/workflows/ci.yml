@@ -480,6 +480,21 @@ jobs:
             exit 1
           fi
           echo "OK: All Hetzner label_selector usages are client_uuid-scoped."
+      - name: Scan for destructive Hetzner config overwrite
+        run: |
+          # CI must use Add-Member -Force per-field to preserve operator-set
+          # fields such as extra_ssh_key_names (fixes #132). The destructive
+          # pattern is a whole-object assignment opening a multi-line hashtable.
+          # Assembled from PREFIX+SUFFIX so this step's own source does not match.
+          PREFIX='\$config\.hetzner\s*='
+          SUFFIX='\s*@\{\s*$'
+          BAD=$(grep -Prn "${PREFIX}${SUFFIX}" .github/workflows/ || true)
+          if [ -n "$BAD" ]; then
+            echo "ERROR: Hetzner config must use Add-Member -Force per-field to preserve operator fields (e.g. extra_ssh_key_names). Full-overwrite detected:"
+            echo "$BAD"
+            exit 1
+          fi
+          echo "OK: No destructive Hetzner config overwrites found."
       - name: Verify zero ignored tests in cargo test output
         run: |
           # Run tests and capture output
