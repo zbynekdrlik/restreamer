@@ -203,16 +203,71 @@ pub struct FfmpegProgress {
 
 /// Parse an ffmpeg stderr progress line and extract the `time=HH:MM:SS.xx` value in ms.
 /// Returns `None` if the line has no `time=` field or the value is unparseable.
+///
+/// Only matches `time=` as a standalone whitespace-delimited token so that
+/// fields like `out_time=` or `xtime=` are not mistakenly parsed.
+/// Negative time values (e.g. `time=-00:00:05.00`) are rejected and return `None`.
+/// Arithmetic that would overflow `i64` also returns `None`.
 pub fn parse_ffmpeg_time_ms(line: &str) -> Option<i64> {
-    let idx = line.find("time=")?;
-    let rest = &line[idx + 5..];
-    let field = rest.split_whitespace().next()?; // "HH:MM:SS.xx"
+    // I3: token-based search — only match "time=" as a standalone token.
+    let field = line.split_whitespace().find(|f| f.starts_with("time="))?;
+    let field = &field[5..]; // strip "time="
+    // I2: reject negative times.
+    if field.starts_with('-') {
+        return None;
+    }
     let field = field.replace(',', ".");
     let mut it = field.split(':');
     let h: i64 = it.next()?.parse().ok()?;
     let m: i64 = it.next()?.parse().ok()?;
     let s: f64 = it.next()?.parse().ok()?;
-    Some(h * 3_600_000 + m * 60_000 + (s * 1000.0) as i64)
+    // I1: use checked arithmetic to avoid overflow panic.
+    let h_ms = h.checked_mul(3_600_000)?;
+    let m_ms = m.checked_mul(60_000)?;
+    let s_ms = (s * 1000.0) as i64;
+    h_ms.checked_add(m_ms)?.checked_add(s_ms)
+}
+
+/// Drain an ffmpeg-like stderr stream line-by-line.
+///
+/// Each line is appended to the ring buffer and, if it parses as a
+/// `time=...` progress line and `progress_tx` is `Some`, forwarded as an
+/// [`FfmpegProgress`] event on the channel.  Events are sent with
+/// `try_send`; if the channel is full the sample is dropped silently
+/// (best-effort telemetry).  Exits when the reader reaches EOF.
+///
+/// Extracted as a public function so it can be unit-tested without
+/// spawning a real ffmpeg process (C1 wiring test).
+pub async fn drain_ffmpeg_stderr<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: R,
+    stderr_lines: Arc<Mutex<VecDeque<String>>>,
+    progress_tx: Option<tokio::sync::mpsc::Sender<FfmpegProgress>>,
+    alias_for_log: &str,
+) {
+    let mut lines = reader.lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        // Ring buffer (existing behaviour).
+        if let Ok(mut buf) = stderr_lines.lock() {
+            if buf.len() >= STDERR_BUFFER_SIZE {
+                buf.pop_front();
+            }
+            buf.push_back(line.clone());
+        }
+        // Progress events (new).
+        if let Some(tx) = &progress_tx {
+            if let Some(media_time_ms) = parse_ffmpeg_time_ms(&line) {
+                let wall_clock_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let _ = tx.try_send(FfmpegProgress {
+                    media_time_ms,
+                    wall_clock_ms,
+                });
+            }
+        }
+    }
+    tracing::debug!(alias = %alias_for_log, "ffmpeg stderr drain task finished");
 }
 
 /// Managed ffmpeg process with stdin pipe for writing data.
@@ -238,11 +293,13 @@ impl FfmpegProcess {
     ///
     /// Each time ffmpeg writes a `time=HH:MM:SS.xx` progress line to stderr,
     /// a `FfmpegProgress` sample is sent on the channel (if provided).
+    /// The channel is bounded; if the receiver is slow, events are dropped
+    /// (best-effort telemetry semantics — `try_send` with silent drop on full).
     pub fn spawn_with_progress(
         service_type: ServiceType,
         stream_key: &str,
         alias: &str,
-        progress_tx: Option<tokio::sync::mpsc::UnboundedSender<FfmpegProgress>>,
+        progress_tx: Option<tokio::sync::mpsc::Sender<FfmpegProgress>>,
     ) -> Result<Self, FfmpegError> {
         let args = build_ffmpeg_args(service_type, stream_key, alias);
         tracing::info!(
@@ -261,38 +318,18 @@ impl FfmpegProcess {
 
         // Spawn a background task to drain stderr and capture last N lines.
         let stderr = child.stderr.take();
-        let alias_clone = alias.to_string();
         let stderr_lines: Arc<Mutex<VecDeque<String>>> =
             Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_SIZE)));
         let stderr_lines_clone = Arc::clone(&stderr_lines);
+        let alias_owned = alias.to_string();
         tokio::spawn(async move {
-            if let Some(stderr) = stderr {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    // Ring buffer (existing behaviour).
-                    if let Ok(mut buf) = stderr_lines_clone.lock() {
-                        if buf.len() >= STDERR_BUFFER_SIZE {
-                            buf.pop_front();
-                        }
-                        buf.push_back(line.clone());
-                    }
-                    // Progress events (new).
-                    if let Some(tx) = &progress_tx {
-                        if let Some(media_time_ms) = parse_ffmpeg_time_ms(&line) {
-                            let wall_clock_ms = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as i64;
-                            let _ = tx.send(FfmpegProgress {
-                                media_time_ms,
-                                wall_clock_ms,
-                            });
-                        }
-                    }
-                }
-                tracing::debug!(alias = %alias_clone, "ffmpeg stderr drain task finished");
-            }
+            drain_ffmpeg_stderr(
+                BufReader::new(stderr.expect("stderr is piped")),
+                stderr_lines_clone,
+                progress_tx,
+                &alias_owned,
+            )
+            .await;
         });
 
         Ok(Self {
@@ -657,5 +694,76 @@ mod progress_tests {
         // Some locales emit "time=00:00:05,00"
         let ms = parse_ffmpeg_time_ms("time=00:00:05,00");
         assert_eq!(ms, Some(5_000));
+    }
+
+    // I2: negative time values must be rejected.
+    #[test]
+    fn parse_ffmpeg_time_rejects_negative() {
+        assert_eq!(parse_ffmpeg_time_ms("time=-00:00:05.00"), None);
+    }
+
+    // I3: "time=" must be a standalone whitespace-delimited token.
+    #[test]
+    fn parse_ffmpeg_time_rejects_substring_match() {
+        assert_eq!(parse_ffmpeg_time_ms("xtime=00:00:05.00"), None);
+        assert_eq!(parse_ffmpeg_time_ms("out_time=00:00:05.00"), None);
+    }
+
+    // I1: overflow must return None, not panic.
+    #[test]
+    fn parse_ffmpeg_time_rejects_overflow() {
+        assert_eq!(parse_ffmpeg_time_ms("time=9999999999999:00:00.00"), None);
+    }
+
+    #[test]
+    fn parse_ffmpeg_time_handles_empty_value() {
+        assert_eq!(parse_ffmpeg_time_ms("time="), None);
+        assert_eq!(parse_ffmpeg_time_ms("time=abc"), None);
+    }
+
+    // C1: channel-wiring tests — exercise drain_ffmpeg_stderr without ffmpeg.
+    #[tokio::test]
+    async fn drain_ffmpeg_stderr_emits_progress_on_time_line() {
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::BufReader;
+
+        let input = b"frame= 30 fps=30 time=00:00:01.00 bitrate=1000kbits/s\n\
+                      Stream #0:0 info\n\
+                      frame= 60 fps=30 time=00:00:02.00 bitrate=1000kbits/s\n";
+        let reader = BufReader::new(&input[..]);
+        let ring: Arc<Mutex<VecDeque<String>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_SIZE)));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+        drain_ffmpeg_stderr(reader, Arc::clone(&ring), Some(tx), "test_alias").await;
+
+        // Ring buffer got all three lines.
+        let buf = ring.lock().unwrap();
+        assert_eq!(buf.len(), 3);
+        drop(buf);
+
+        // Two progress events (the info line between them has no time=).
+        let first = rx.recv().await.expect("first event");
+        assert_eq!(first.media_time_ms, 1_000);
+        let second = rx.recv().await.expect("second event");
+        assert_eq!(second.media_time_ms, 2_000);
+        // Channel should be empty after drain finishes.
+        assert!(rx.try_recv().is_err(), "no more events expected");
+    }
+
+    #[tokio::test]
+    async fn drain_ffmpeg_stderr_does_not_emit_when_no_progress_tx() {
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::BufReader;
+
+        let input = b"frame= 30 fps=30 time=00:00:01.00\n";
+        let reader = BufReader::new(&input[..]);
+        let ring = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_SIZE)));
+
+        // None progress_tx — no panic, just ring buffering.
+        drain_ffmpeg_stderr(reader, Arc::clone(&ring), None, "test_alias").await;
+        assert_eq!(ring.lock().unwrap().len(), 1);
     }
 }
