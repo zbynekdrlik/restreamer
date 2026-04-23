@@ -25,8 +25,13 @@ fn now_ms() -> i64 {
 /// Perform a single clock-skew probe against the VPS `/clock` endpoint.
 /// Returns RTT-compensated skew: positive means VPS clock is ahead of stream.lan.
 pub async fn probe_clock_skew(vps_base_url: &str) -> Result<ClockSkewSample, reqwest::Error> {
+    #[derive(serde::Deserialize)]
+    struct ClockResp {
+        vps_ms: i64,
+    }
+
     let local_before_ms = now_ms();
-    let resp: serde_json::Value = reqwest::Client::new()
+    let resp: ClockResp = reqwest::Client::new()
         .get(format!("{vps_base_url}/clock"))
         .timeout(Duration::from_secs(5))
         .send()
@@ -34,7 +39,7 @@ pub async fn probe_clock_skew(vps_base_url: &str) -> Result<ClockSkewSample, req
         .json()
         .await?;
     let local_after_ms = now_ms();
-    let vps_reported_ms = resp.get("vps_ms").and_then(|v| v.as_i64()).unwrap_or(0);
+    let vps_reported_ms = resp.vps_ms;
     let midpoint = (local_before_ms + local_after_ms) / 2;
     Ok(ClockSkewSample {
         measured_at_ms: local_after_ms,
