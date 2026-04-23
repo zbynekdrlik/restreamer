@@ -68,28 +68,6 @@ impl std::str::FromStr for ServiceType {
     }
 }
 
-/// Consumer read rate for ffmpeg, tuned to match measured producer FLV-timestamp
-/// rate (OBS encodes ~30.30 fps but stamps FLV tags at 1/30 s increments, causing
-/// producer timestamps to advance ~0.6% slower than wall-clock).
-///
-/// At `-re` (= `-readrate 1.0`), ffmpeg drains 1000 ms of timestamp per wall-clock
-/// second while producer fills only ~994 ms — cache shrinks at ~20 s/hour on
-/// multi-hour streams. Setting to 0.994 matches producer and holds cache stable.
-///
-/// See `docs/superpowers/specs/2026-04-23-phase2-evidence/analysis.md` (issue #135).
-/// If OBS profile changes (e.g. 60 fps, 24 fps NTSC), re-measure producer rate
-/// via `/api/v1/diagnostics/pacing` and re-tune this constant.
-const CONSUMER_READRATE: &str = "0.994";
-
-/// Initial burst duration (seconds) before `-readrate` throttling kicks in.
-/// YouTube HLS ingest flags "videoIngestionStarved: Video output low" when the
-/// initial few seconds of bitrate fall below the declared stream bitrate.
-/// With pure `-readrate 0.994`, the 0.6% slowdown trips YouTube at warmup. The
-/// burst lets ffmpeg ship the first 10 seconds of media at native rate (matches
-/// old `-re` behavior during warmup) before settling into the drift-corrected
-/// steady state.
-const CONSUMER_INITIAL_BURST_SECS: &str = "10";
-
 /// Build the ffmpeg command arguments for a given service type and stream key.
 /// All endpoints use FLV input from pipe.
 pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &str) -> Vec<String> {
@@ -117,16 +95,7 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
         "https://a.upload.youtube.com/http_upload_hls?cid={stream_key}&copy=0&file=out1248.ts"
     );
     vec![
-        // -readrate 0.994: steady-state drain 0.6% below -re nominal, matching
-        //   the producer's measured FLV-tag-advance rate (see #135 Phase 2
-        //   evidence). Prevents cache from drifting down on multi-hour streams.
-        // -readrate_initial_burst 10: 10s initial burst at full rate so YouTube
-        //   HLS ingest sees expected bitrate at warmup (avoids
-        //   "videoIngestionStarved" flag in the first seconds).
-        "-readrate".into(),
-        CONSUMER_READRATE.into(),
-        "-readrate_initial_burst".into(),
-        CONSUMER_INITIAL_BURST_SECS.into(),
+        "-re".into(),
         "-f".into(),
         "flv".into(),
         "-loglevel".into(),
@@ -170,11 +139,7 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
 /// No genpts, no avoid_negative_ts, no copytb, no bsf needed.
 fn build_flv_rtmp_args(url: &str) -> Vec<String> {
     vec![
-        // -readrate / -readrate_initial_burst: see build_yt_hls_args for rationale.
-        "-readrate".into(),
-        CONSUMER_READRATE.into(),
-        "-readrate_initial_burst".into(),
-        CONSUMER_INITIAL_BURST_SECS.into(),
+        "-re".into(),
         "-f".into(),
         "flv".into(),
         "-loglevel".into(),
@@ -200,9 +165,6 @@ fn build_test_file_args(alias: &str) -> Vec<String> {
         .to_string_lossy()
         .to_string();
     vec![
-        // TEST_FILE uses -re for precise 1.0x rate because test suites compare
-        // output file length to expected duration. Don't apply the 0.994
-        // steady-state throttle here (it's a live-stream drift compensation).
         "-re".into(),
         "-f".into(),
         "flv".into(),
@@ -533,9 +495,8 @@ mod tests {
         // YT_HLS now uses FLV input
         let f_idx = args.iter().position(|a| a == "-f").unwrap();
         assert_eq!(args[f_idx + 1], "flv", "YT_HLS should use FLV input");
-        // Should use -readrate + -readrate_initial_burst for drift-compensated pacing
-        assert!(args.contains(&"-readrate".to_string()));
-        assert!(args.contains(&"-readrate_initial_burst".to_string()));
+        // Should use -re for pacing
+        assert!(args.contains(&"-re".to_string()));
     }
 
     #[test]
@@ -649,61 +610,31 @@ mod tests {
         }
     }
 
-    /// Live-stream endpoints use `-readrate 0.994 -readrate_initial_burst 10`
-    /// to match measured producer FLV-tag-advance rate (see #135 Phase 2).
-    /// TEST_FILE keeps `-re` for exact-duration output file length.
+    /// All FLV paths use `-re` for real-time pacing. The producer-side
+    /// `rescale_flv_timestamps` in rs-inpoint ensures FLV tag timestamps
+    /// match wall-clock span before the chunk is written, so `-re` drains
+    /// at the correct rate. See #135.
     #[test]
-    fn live_paths_use_readrate_flag() {
+    fn flv_paths_use_re_flag() {
         let types = [
             ServiceType::YtHls,
             ServiceType::Facebook,
             ServiceType::YtRtmp,
             ServiceType::Vimeo,
             ServiceType::Instagram,
+            ServiceType::TestFile,
         ];
         for st in types {
             let args = build_ffmpeg_args(st, "key", "alias");
             assert!(
-                args.contains(&"-readrate".to_string()),
-                "{st} must have -readrate for drift-compensated pacing"
-            );
-            let idx = args.iter().position(|a| a == "-readrate").unwrap();
-            assert_eq!(
-                args[idx + 1],
-                CONSUMER_READRATE,
-                "{st} readrate must equal CONSUMER_READRATE"
+                args.contains(&"-re".to_string()),
+                "{st} must have -re for real-time pacing"
             );
             assert!(
-                args.contains(&"-readrate_initial_burst".to_string()),
-                "{st} must have -readrate_initial_burst for YouTube warmup"
-            );
-            let burst_idx = args
-                .iter()
-                .position(|a| a == "-readrate_initial_burst")
-                .unwrap();
-            assert_eq!(
-                args[burst_idx + 1],
-                CONSUMER_INITIAL_BURST_SECS,
-                "{st} initial-burst secs must equal CONSUMER_INITIAL_BURST_SECS"
-            );
-            assert!(
-                !args.contains(&"-re".to_string()),
-                "{st} must NOT have bare -re (use -readrate instead)"
+                !args.contains(&"-readrate".to_string()),
+                "{st} must NOT have -readrate (use -re instead)"
             );
         }
-    }
-
-    #[test]
-    fn test_file_keeps_re_for_exact_duration() {
-        let args = build_ffmpeg_args(ServiceType::TestFile, "", "alias");
-        assert!(
-            args.contains(&"-re".to_string()),
-            "TEST_FILE must keep -re for exact duration match"
-        );
-        assert!(
-            !args.contains(&"-readrate".to_string()),
-            "TEST_FILE must not apply live-stream drift compensation"
-        );
     }
 
     #[test]
