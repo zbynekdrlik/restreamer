@@ -5,6 +5,11 @@ use std::time::Duration;
 
 use sqlx::SqlitePool;
 
+/// Poll interval for clock-skew samples. Longer than the progress poll (10s)
+/// because RTT-compensated skew changes slowly; back-to-back probes on a
+/// missed tick would exaggerate skew variance without adding signal.
+const SKEW_PROBE_INTERVAL_SECS: u64 = 30;
+
 #[derive(Debug, Clone)]
 pub struct ClockSkewSample {
     pub measured_at_ms: i64,
@@ -56,7 +61,8 @@ pub async fn probe_clock_skew(vps_base_url: &str) -> Result<ClockSkewSample, req
 /// pattern used by `monitor_delivery_health`).
 pub fn spawn_skew_probe(pool: SqlitePool, event_id: i64, vps_base_url: String) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        let mut tick = tokio::time::interval(Duration::from_secs(SKEW_PROBE_INTERVAL_SECS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await; // skip immediate first tick
         loop {
             tick.tick().await;

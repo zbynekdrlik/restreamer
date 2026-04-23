@@ -30,7 +30,7 @@ const AUDIT_RING_CAP: usize = 500;
 
 /// In-memory progress ring capacity (last N ffmpeg progress samples retained
 /// for host-side polling via `/api/status`).
-const PROGRESS_RING_CAP: usize = 200;
+const PROGRESS_RING_CAP: usize = 500;
 
 /// Application state shared across API handlers.
 pub struct AppState {

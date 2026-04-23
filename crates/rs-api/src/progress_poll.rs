@@ -9,6 +9,11 @@ use std::time::Duration;
 
 use sqlx::SqlitePool;
 
+/// Poll interval for drift progress samples. Shorter than the skew probe (30s)
+/// because ffmpeg emits progress at ~2 samples/sec/endpoint; with 4 endpoints
+/// and a 500-cap ring, any poll gap > ~1 minute risks silent sample loss.
+const POLL_INTERVAL_SECS: u64 = 10;
+
 /// Spawn a background task that polls the VPS for ffmpeg progress samples and
 /// persists them to `ffmpeg_progress_samples`.
 ///
@@ -22,7 +27,8 @@ pub fn spawn_progress_poll(
 ) {
     tokio::spawn(async move {
         let mut cursor: i64 = 0;
-        let mut tick = tokio::time::interval(Duration::from_secs(10));
+        let mut tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await; // skip immediate first tick
 
         loop {
@@ -97,6 +103,8 @@ async fn poll_once(
         return Ok(cursor);
     }
 
+    // measured_at_ms = stream.lan receive time (SQL ORDER BY key).
+    // wall_clock_ms = VPS emit time (used by list_ffmpeg_consumer_rate for Δ).
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
