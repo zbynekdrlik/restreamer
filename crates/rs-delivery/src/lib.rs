@@ -7,4 +7,5 @@
 //! that need to be shared.
 
 pub mod audit_ring;
+pub mod clock_endpoint;
 pub mod ffmpeg_reason;

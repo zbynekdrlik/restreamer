@@ -1,5 +1,5 @@
-/// Delivery API routes: /api/health, /api/init, /api/status, /api/stop, /api/logs
-use crate::{AppState, EndpointHandle};
+/// Delivery API routes: /api/health, /api/init, /api/status, /api/stop, /api/logs, /clock
+use crate::{AppState, EndpointHandle, clock_endpoint::get_clock};
 use axum::{
     Json, Router,
     extract::State,
@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    // Health endpoint is public (used for readiness probes)
-    let public = Router::new().route("/api/health", get(health));
+    // Health endpoint and clock probe are public (no auth required)
+    let public = Router::new()
+        .route("/api/health", get(health))
+        .route("/clock", get(get_clock));
 
     // All other endpoints require bearer token authentication
     let protected = Router::new()
