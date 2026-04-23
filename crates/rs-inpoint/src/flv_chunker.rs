@@ -933,16 +933,18 @@ mod rescale_tests {
             0,
             "script tag timestamp must not be changed"
         );
-        // Data tags: tag 1 = first data (33→0), tag 2 = last data (66→100).
+        // Data tags: first_ts=33 is preserved as the reference; rescale
+        // only stretches the gap between first and last. So tag 1 stays
+        // at 33, tag 2 becomes 33 + target_span_ms = 33 + 100 = 133.
         assert_eq!(
             read_tag_timestamp_at(&buf, 13, 1),
-            0,
-            "first data tag must be rescaled to 0"
+            33,
+            "first data tag must stay at its original timestamp (reference point)"
         );
         assert_eq!(
             read_tag_timestamp_at(&buf, 13, 2),
-            100,
-            "last data tag must be rescaled to 100"
+            133,
+            "last data tag must be at first_ts + target_span_ms"
         );
     }
 
