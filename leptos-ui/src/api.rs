@@ -851,6 +851,42 @@ pub async fn delivery_add_endpoint(
         .map(|_| ())
 }
 
+// --- Diagnostics API ---
+
+/// A single drift telemetry data point.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DriftSample {
+    pub t_ms: i64,
+    pub value: f64,
+}
+
+/// Response from GET /api/v1/diagnostics/pacing.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PacingResponse {
+    pub producer_rate: Vec<DriftSample>,
+    pub consumer_rate: Vec<DriftSample>,
+    pub clock_skew: Vec<DriftSample>,
+}
+
+/// Fetch pacing diagnostics for a streaming event.
+///
+/// `endpoint_alias` is optional; when `None`, `consumer_rate` is empty in
+/// the response. `since_ms` defaults to 0 (all samples) when `None`.
+pub async fn fetch_pacing(
+    event_id: i64,
+    since_ms: Option<i64>,
+    endpoint_alias: Option<&str>,
+) -> Result<PacingResponse, String> {
+    let mut path = format!("/diagnostics/pacing?event_id={event_id}");
+    if let Some(ms) = since_ms {
+        path.push_str(&format!("&since_ms={ms}"));
+    }
+    if let Some(alias) = endpoint_alias {
+        path.push_str(&format!("&endpoint_alias={alias}"));
+    }
+    http_get(&path).await
+}
+
 /// Remove an endpoint from a running delivery VPS mid-stream.
 pub async fn delivery_remove_endpoint(event_id: i64, alias: &str) -> Result<(), String> {
     let body = serde_json::json!({

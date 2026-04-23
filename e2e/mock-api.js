@@ -625,6 +625,17 @@ app.get("/api/v1/youtube/status", (_req, res) => {
   });
 });
 
+// Diagnostics: pacing time-series (empty series for all E2E tests — no real
+// chunks exist in the mock, but the endpoint must return a valid response so
+// the panel renders without errors).
+app.get("/api/v1/diagnostics/pacing", (_req, res) => {
+  res.json({
+    producer_rate: [],
+    consumer_rate: [],
+    clock_skew: [],
+  });
+});
+
 // Test-only: reset all mock data to initial state between tests
 app.post("/api/v1/__reset", (_req, res) => {
   events = JSON.parse(JSON.stringify(initialEvents));

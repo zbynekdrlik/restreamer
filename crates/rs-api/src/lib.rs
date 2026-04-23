@@ -9,6 +9,7 @@ pub(crate) mod delivery_status;
 #[cfg(test)]
 mod delivery_tests;
 mod delivery_youtube;
+pub mod diagnostics_pacing;
 pub mod handlers;
 pub mod metrics_handlers;
 pub mod obs;
