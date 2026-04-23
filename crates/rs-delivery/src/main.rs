@@ -12,6 +12,7 @@ use tracing_subscriber::prelude::*;
 mod api;
 mod audit_ring;
 pub mod buffer_state;
+mod clock_endpoint;
 pub mod db;
 pub mod endpoint_audit;
 pub mod endpoint_task;

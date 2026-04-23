@@ -6,6 +6,7 @@ use crate::error::Result;
 ///
 /// Wraps the existing `insert_chunk` and updates the `wall_clock_written_at_ms` column
 /// added in migration V20.
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_chunk_with_walltime(
     pool: &SqlitePool,
     streaming_event_id: i64,
@@ -33,6 +34,7 @@ pub async fn insert_chunk_with_walltime(
 }
 
 /// Insert one clock-skew sample (producer vs VPS wall-clock).
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_clock_skew_sample(
     pool: &SqlitePool,
     event_id: i64,
