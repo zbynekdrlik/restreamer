@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 19;
+pub const MAX_SCHEMA_VERSION: i32 = 20;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -335,6 +335,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             17 => migrate_v17(&mut tx).await?,
             18 => execute_sql_statements(&mut tx, MIGRATION_V18_SQL).await?,
             19 => migrate_v19(&mut tx).await?,
+            20 => migrate_v20(&mut tx).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -609,5 +610,64 @@ async fn migrate_v19(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
         "last_audit_cursor INTEGER NOT NULL DEFAULT 0",
     )
     .await?;
+    Ok(())
+}
+
+async fn migrate_v20(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    // Producer wall-clock per chunk
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "wall_clock_written_at_ms",
+        "wall_clock_written_at_ms INTEGER",
+    )
+    .await?;
+
+    // Clock-skew samples (stream.lan <-> VPS)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS clock_skew_samples (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id        INTEGER NOT NULL,
+            measured_at_ms  INTEGER NOT NULL,
+            local_before_ms INTEGER NOT NULL,
+            vps_reported_ms INTEGER NOT NULL,
+            local_after_ms  INTEGER NOT NULL,
+            skew_ms         INTEGER NOT NULL,
+            rtt_ms          INTEGER NOT NULL
+        )
+        "#,
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_clock_skew_event_time
+         ON clock_skew_samples(event_id, measured_at_ms)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    // ffmpeg consumer-rate samples (one per stderr `time=` line, sampled)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS ffmpeg_progress_samples (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id             INTEGER NOT NULL,
+            endpoint_alias       TEXT    NOT NULL,
+            measured_at_ms       INTEGER NOT NULL,
+            ffmpeg_media_time_ms INTEGER NOT NULL,
+            wall_clock_ms        INTEGER NOT NULL
+        )
+        "#,
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_ffmpeg_progress_event_time
+         ON ffmpeg_progress_samples(event_id, measured_at_ms)",
+    )
+    .execute(&mut **tx)
+    .await?;
+
     Ok(())
 }
