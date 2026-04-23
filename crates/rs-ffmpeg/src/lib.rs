@@ -68,27 +68,6 @@ impl std::str::FromStr for ServiceType {
     }
 }
 
-/// Consumer read rate for ffmpeg `-readrate`, tuned to match the measured
-/// producer FLV-timestamp rate on stream.lan.
-///
-/// Root cause: OBS encodes video at ~30.30 fps wall-clock but FLV tags
-/// declare 1/30 s (33.33 ms) inter-frame timestamps. Per wall-clock second,
-/// ~30.30 frames carry only 30 × 33.33 = 1000 ms of timestamp-content while
-/// 1010 ms of wall-clock content was produced. xiu records
-/// `duration_ms = last_ts − first_ts`, so chunks carry ~0.6% fewer ms than
-/// the real time they took to produce. ffmpeg `-re` (= `-readrate 1.0`) drains
-/// at 1000 ms/s while the producer fills at ~994 ms/s → cache shrinks at
-/// ~20 s/hour.
-///
-/// Setting `-readrate 0.994` slows ffmpeg drain to match the producer rate,
-/// stabilising cache at the target level.
-///
-/// **Re-tuning**: if OBS or the encoder changes (e.g., switching to 60 fps),
-/// re-run the Phase 2 diagnostics (`/api/v1/diagnostics/pacing`) and update
-/// this constant to the new measured producer-rate mean.
-/// See: docs/superpowers/specs/2026-04-23-phase2-evidence/analysis.md (#135)
-const CONSUMER_READRATE: &str = "0.994";
-
 /// Build the ffmpeg command arguments for a given service type and stream key.
 /// All endpoints use FLV input from pipe.
 pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &str) -> Vec<String> {
@@ -111,16 +90,12 @@ pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &st
 }
 
 /// YT_HLS: FLV input, HLS output via HTTPS PUT.
-/// Uses -readrate CONSUMER_READRATE for pacing so the consumer drains at the
-/// measured producer FLV-timestamp rate, keeping cache stable over multi-hour
-/// streams. See CONSUMER_READRATE constant for detailed rationale and #135.
 fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
     let output_url = format!(
         "https://a.upload.youtube.com/http_upload_hls?cid={stream_key}&copy=0&file=out1248.ts"
     );
     vec![
-        "-readrate".into(),
-        CONSUMER_READRATE.into(),
+        "-re".into(),
         "-f".into(),
         "flv".into(),
         "-loglevel".into(),
@@ -162,14 +137,9 @@ fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
 /// FLV->FLV passthrough for RTMP/RTMPS endpoints.
 /// Minimal flags: input is already valid FLV, just forward bytes.
 /// No genpts, no avoid_negative_ts, no copytb, no bsf needed.
-///
-/// Uses -readrate CONSUMER_READRATE rather than bare -re so the consumer
-/// drains at the measured producer FLV-timestamp rate. See CONSUMER_READRATE
-/// constant for detailed rationale and #135.
 fn build_flv_rtmp_args(url: &str) -> Vec<String> {
     vec![
-        "-readrate".into(),
-        CONSUMER_READRATE.into(),
+        "-re".into(),
         "-f".into(),
         "flv".into(),
         "-loglevel".into(),
@@ -195,8 +165,7 @@ fn build_test_file_args(alias: &str) -> Vec<String> {
         .to_string_lossy()
         .to_string();
     vec![
-        "-readrate".into(),
-        CONSUMER_READRATE.into(),
+        "-re".into(),
         "-f".into(),
         "flv".into(),
         "-loglevel".into(),
@@ -526,9 +495,8 @@ mod tests {
         // YT_HLS now uses FLV input
         let f_idx = args.iter().position(|a| a == "-f").unwrap();
         assert_eq!(args[f_idx + 1], "flv", "YT_HLS should use FLV input");
-        // Should use -readrate CONSUMER_READRATE (not bare -re) for pacing
-        assert!(args.contains(&"-readrate".to_string()));
-        assert!(args.contains(&CONSUMER_READRATE.to_string()));
+        // Should use -re for pacing
+        assert!(args.contains(&"-re".to_string()));
     }
 
     #[test]
@@ -642,15 +610,12 @@ mod tests {
         }
     }
 
-    /// All FLV paths use `-readrate CONSUMER_READRATE` (not bare `-re`) so
-    /// ffmpeg drains at the measured producer FLV-timestamp rate (~0.994×
-    /// wall-clock), keeping cache stable over multi-hour streams.
-    ///
-    /// Bare `-re` (= `-readrate 1.0`) drains faster than the producer fills
-    /// because OBS stamps FLV tags at 1/30 s each but encodes at ~30.30 fps,
-    /// causing cache to shrink at ~20 s/hour. See CONSUMER_READRATE and #135.
+    /// All FLV paths use `-re` for real-time pacing. The producer-side
+    /// `rescale_flv_timestamps` in rs-inpoint ensures FLV tag timestamps
+    /// match wall-clock span before the chunk is written, so `-re` drains
+    /// at the correct rate. See #135.
     #[test]
-    fn flv_paths_use_readrate_flag() {
+    fn flv_paths_use_re_flag() {
         let types = [
             ServiceType::YtHls,
             ServiceType::Facebook,
@@ -661,20 +626,13 @@ mod tests {
         ];
         for st in types {
             let args = build_ffmpeg_args(st, "key", "alias");
-            let pos = args
-                .iter()
-                .position(|a| a == "-readrate")
-                .unwrap_or_else(|| {
-                    panic!("{st} must have -readrate for ffmpeg-side pacing (not bare -re)")
-                });
-            assert_eq!(
-                args[pos + 1],
-                CONSUMER_READRATE,
-                "{st} -readrate must equal CONSUMER_READRATE={CONSUMER_READRATE}"
+            assert!(
+                args.contains(&"-re".to_string()),
+                "{st} must have -re for real-time pacing"
             );
             assert!(
-                !args.contains(&"-re".to_string()),
-                "{st} must NOT have bare -re (use -readrate {CONSUMER_READRATE} instead)"
+                !args.contains(&"-readrate".to_string()),
+                "{st} must NOT have -readrate (use -re instead)"
             );
         }
     }

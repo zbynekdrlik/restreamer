@@ -451,15 +451,13 @@ async fn producer_task<F: ChunkFetcher>(
 /// Consumer task: pulls pre-fetched chunks from the channel, normalizes FLV, writes to ffmpeg.
 /// Never makes S3 calls -- zero network I/O.
 ///
-/// Pacing is done by ffmpeg's `-readrate 0.994` flag. The `FlvStreamNormalizer`
-/// rebases every ffmpeg process's input to start at PTS=0 so `-readrate` paces
+/// Pacing is done by ffmpeg's `-re` flag alone. The `FlvStreamNormalizer`
+/// rebases every ffmpeg process's input to start at PTS=0 so `-re` paces
 /// correctly from process start, and consumer writes are naturally
 /// throttled by ffmpeg's stdin read rate. The previous Rust-side pacing
 /// layer (removed 2026-04-21) was a workaround for the normalizer not
-/// rebasing the first chunk per process — it fought `-readrate` and caused
+/// rebasing the first chunk per process — it fought `-re` and caused
 /// cumulative drift + cascading cache growth after ffmpeg restarts.
-/// The 0.994 rate matches the measured producer FLV-timestamp rate (xiu
-/// stamps at 1/30s but OBS encodes at ~30.30fps). See rs-ffmpeg CONSUMER_READRATE.
 #[allow(clippy::too_many_arguments)]
 async fn consumer_task<P: OutputProcessFactory>(
     mut rx: mpsc::Receiver<PrefetchedChunk>,
@@ -494,12 +492,12 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut last_heartbeat = std::time::Instant::now();
 
     // Rust-side pacing was removed 2026-04-21. It fought against ffmpeg
-    // `-readrate`: consumer tried to sleep between writes, but ffmpeg pipe
-    // backpressure from `-readrate` already throttled consumer writes, and the
+    // `-re`: consumer tried to sleep between writes, but ffmpeg pipe
+    // backpressure from `-re` already throttled consumer writes, and the
     // two layers together caused (a) cumulative drift as pacing errors
     // accumulated, (b) broken catchup after ffmpeg restart. With the FLV
     // normalizer now rebasing each ffmpeg process's input stream to
-    // PTS=0, ffmpeg `-readrate 0.994` alone paces correctly.
+    // PTS=0, ffmpeg `-re` alone paces correctly.
     tracing::info!(alias = %alias, "Consumer: endpoint delivery configured (FLV-only)");
 
     loop {
@@ -609,8 +607,8 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
                 // The new FlvStreamNormalizer will rebase the next chunk's
                 // FLV timestamps to start at 0, so the freshly-spawned
-                // ffmpeg's `-readrate 0.994` pacer works natively. No
-                // Rust-side pacing state to reset — that layer was removed.
+                // ffmpeg's `-re` pacer works natively. No Rust-side pacing
+                // state to reset — that layer was removed.
                 flv_normalizer = FlvStreamNormalizer::new();
             }
 
@@ -754,9 +752,9 @@ async fn consumer_task<P: OutputProcessFactory>(
         let chunk_id = chunk.chunk_id;
         let chunk_duration_ms = chunk.duration_ms;
         let processed = flv_normalizer.normalize(&chunk.data);
-        // Pacing is handled by ffmpeg's `-readrate 0.994` flag alone. The FLV
+        // Pacing is handled by ffmpeg's `-re` flag alone. The FLV
         // normalizer rebases each ffmpeg process's input to start at
-        // PTS=0 so `-readrate` paces correctly from process start; consumer
+        // PTS=0 so `-re` paces correctly from process start; consumer
         // writes as fast as the pipe accepts and is naturally throttled
         // by ffmpeg's stdin read rate.
 
