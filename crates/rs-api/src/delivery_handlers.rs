@@ -181,6 +181,19 @@ pub async fn delivery_start(
             return;
         }
 
+        // Spawn per-delivery clock-skew probe now that VPS is initialised.
+        // The instance ipv4 is available in the DB after poll_and_init.
+        if let Ok(Some(inst)) = db::get_delivery_instance(orch.pool(), instance_id).await {
+            let vps_base_url = format!("http://{}:8000", inst.ipv4);
+            crate::clock_skew_probe::spawn_skew_probe(orch.pool().clone(), event_id, vps_base_url);
+            tracing::info!(event_id, "Clock-skew probe started");
+        } else {
+            tracing::warn!(
+                event_id,
+                "Clock-skew probe not started: instance {instance_id} not found in DB"
+            );
+        }
+
         // Transition to health monitoring loop with auto-restart
         tracing::info!(event_id, "Delivery health monitor started");
         orch.monitor_delivery_health(event_id, instance_id, cached_delivery, ws_tx_clone)
