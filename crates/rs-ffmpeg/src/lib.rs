@@ -192,6 +192,29 @@ fn build_test_file_args(alias: &str) -> Vec<String> {
 /// Max stderr lines to keep in the ring buffer.
 const STDERR_BUFFER_SIZE: usize = 30;
 
+/// A sample of ffmpeg's internal media-time progress, captured from stderr.
+/// `media_time_ms`: ffmpeg's `time=` field parsed to milliseconds.
+/// `wall_clock_ms`: Unix epoch ms when we received that progress line.
+#[derive(Debug, Clone)]
+pub struct FfmpegProgress {
+    pub media_time_ms: i64,
+    pub wall_clock_ms: i64,
+}
+
+/// Parse an ffmpeg stderr progress line and extract the `time=HH:MM:SS.xx` value in ms.
+/// Returns `None` if the line has no `time=` field or the value is unparseable.
+pub fn parse_ffmpeg_time_ms(line: &str) -> Option<i64> {
+    let idx = line.find("time=")?;
+    let rest = &line[idx + 5..];
+    let field = rest.split_whitespace().next()?; // "HH:MM:SS.xx"
+    let field = field.replace(',', ".");
+    let mut it = field.split(':');
+    let h: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let s: f64 = it.next()?.parse().ok()?;
+    Some(h * 3_600_000 + m * 60_000 + (s * 1000.0) as i64)
+}
+
 /// Managed ffmpeg process with stdin pipe for writing data.
 pub struct FfmpegProcess {
     child: Child,
@@ -202,10 +225,24 @@ pub struct FfmpegProcess {
 
 impl FfmpegProcess {
     /// Spawn a new ffmpeg process for the given service type.
+    /// Backwards-compatible wrapper around [`spawn_with_progress`] with no progress channel.
     pub fn spawn(
         service_type: ServiceType,
         stream_key: &str,
         alias: &str,
+    ) -> Result<Self, FfmpegError> {
+        Self::spawn_with_progress(service_type, stream_key, alias, None)
+    }
+
+    /// Spawn a new ffmpeg process, optionally emitting [`FfmpegProgress`] events on `progress_tx`.
+    ///
+    /// Each time ffmpeg writes a `time=HH:MM:SS.xx` progress line to stderr,
+    /// a `FfmpegProgress` sample is sent on the channel (if provided).
+    pub fn spawn_with_progress(
+        service_type: ServiceType,
+        stream_key: &str,
+        alias: &str,
+        progress_tx: Option<tokio::sync::mpsc::UnboundedSender<FfmpegProgress>>,
     ) -> Result<Self, FfmpegError> {
         let args = build_ffmpeg_args(service_type, stream_key, alias);
         tracing::info!(
@@ -233,11 +270,25 @@ impl FfmpegProcess {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    // Ring buffer (existing behaviour).
                     if let Ok(mut buf) = stderr_lines_clone.lock() {
                         if buf.len() >= STDERR_BUFFER_SIZE {
                             buf.pop_front();
                         }
-                        buf.push_back(line);
+                        buf.push_back(line.clone());
+                    }
+                    // Progress events (new).
+                    if let Some(tx) = &progress_tx {
+                        if let Some(media_time_ms) = parse_ffmpeg_time_ms(&line) {
+                            let wall_clock_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as i64;
+                            let _ = tx.send(FfmpegProgress {
+                                media_time_ms,
+                                wall_clock_ms,
+                            });
+                        }
                     }
                 }
                 tracing::debug!(alias = %alias_clone, "ffmpeg stderr drain task finished");
@@ -571,5 +622,40 @@ mod tests {
                 "{st} should not have bsf"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn parse_ffmpeg_time_simple() {
+        // Typical ffmpeg progress line:
+        // "frame=  150 fps= 30 q=28.0 size=  1024kB time=00:00:05.00 bitrate=..."
+        let ms = parse_ffmpeg_time_ms(
+            "frame=  150 fps= 30 q=28.0 size=  1024kB time=00:00:05.00 bitrate=1024kbits/s",
+        );
+        assert_eq!(ms, Some(5_000));
+    }
+
+    #[test]
+    fn parse_ffmpeg_time_hhmmss_fractional() {
+        let ms = parse_ffmpeg_time_ms("time=01:23:45.67");
+        // 1h*3600 + 23m*60 + 45 = 5025s; + 0.67s = 5025.67s = 5_025_670 ms
+        assert_eq!(ms, Some(5_025_670));
+    }
+
+    #[test]
+    fn parse_ffmpeg_time_none_when_missing() {
+        let ms = parse_ffmpeg_time_ms("frame= 100 fps=30 bitrate=N/A");
+        assert_eq!(ms, None);
+    }
+
+    #[test]
+    fn parse_ffmpeg_time_tolerates_dot_comma() {
+        // Some locales emit "time=00:00:05,00"
+        let ms = parse_ffmpeg_time_ms("time=00:00:05,00");
+        assert_eq!(ms, Some(5_000));
     }
 }
