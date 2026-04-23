@@ -25,12 +25,8 @@ const RTMP_STABLE_REQUIRED_SECS: u64 = 15;
 /// Main operator dashboard view.
 #[component]
 pub fn OperatorDashboard() -> impl IntoView {
-    let store = use_context::<DashboardStore>().expect("DashboardStore");
     let show_add_modal = RwSignal::new(false);
     provide_context(show_add_modal);
-
-    // Derive event_id for PacingPanel: 0 means no event selected.
-    let pacing_event_id = move || store.selected_event_id.get().unwrap_or(0);
 
     view! {
         <div class="operator-dashboard">
@@ -42,7 +38,7 @@ pub fn OperatorDashboard() -> impl IntoView {
                 </div>
                 <aside class="operator-dashboard__sidebar">
                     <AuditPanel />
-                    <PacingPanel event_id=pacing_event_id() />
+                    <PacingPanel />
                 </aside>
             </div>
             <AddEndpointModal show=show_add_modal />

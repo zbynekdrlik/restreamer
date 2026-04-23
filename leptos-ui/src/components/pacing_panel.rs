@@ -1,31 +1,37 @@
 //! Pacing diagnostics panel.
 //!
 //! Fetches the three drift telemetry time-series from
-//! `GET /api/v1/diagnostics/pacing` on mount and renders sample counts for
-//! each series. Chart rendering is out of scope for Phase 1 — this panel
-//! provides operator-visible confirmation that the drift instrumentation is
-//! collecting data.
+//! `GET /api/v1/diagnostics/pacing` on mount and re-fetches whenever the
+//! operator switches events via the dropdown. Chart rendering is out of scope
+//! for Phase 1 — this panel provides operator-visible confirmation that the
+//! drift instrumentation is collecting data.
 
 use crate::api::{self, PacingResponse};
+use crate::store::DashboardStore;
 use leptos::prelude::*;
-use wasm_bindgen_futures::spawn_local;
 
 /// Panel that displays pacing diagnostics sample counts for a streaming event.
 ///
-/// `event_id` should be the ID of the currently active streaming event.
-/// When `event_id` is 0 (no event selected) the panel shows a placeholder.
+/// Reads the currently selected event from `DashboardStore` and re-fetches
+/// reactively whenever the operator switches events.
 #[component]
-pub fn PacingPanel(event_id: i64) -> impl IntoView {
+pub fn PacingPanel() -> impl IntoView {
+    let store = use_context::<DashboardStore>().expect("DashboardStore must be provided");
+    let event_id = move || store.selected_event_id.get().unwrap_or(0);
+
     let data: RwSignal<Option<PacingResponse>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
 
-    // Fetch on mount. event_id is i64 (Copy), no clone needed.
+    // Re-fetch whenever the selected event changes.
     Effect::new(move |_| {
-        if event_id == 0 {
+        let id = event_id();
+        if id == 0 {
+            data.set(None);
+            error.set(None);
             return;
         }
-        spawn_local(async move {
-            match api::fetch_pacing(event_id, Some(0), None).await {
+        leptos::task::spawn_local(async move {
+            match api::fetch_pacing(id, Some(0), None).await {
                 Ok(resp) => {
                     data.set(Some(resp));
                     error.set(None);
@@ -45,7 +51,7 @@ pub fn PacingPanel(event_id: i64) -> impl IntoView {
                 <p class="pacing-panel__error">{format!("Error: {e}")}</p>
             })}
             {move || {
-                if event_id == 0 {
+                if event_id() == 0 {
                     return view! {
                         <p class="pacing-panel__placeholder">"No event selected"</p>
                     }.into_any();
@@ -61,7 +67,7 @@ pub fn PacingPanel(event_id: i64) -> impl IntoView {
                         </div>
                         <div class="pacing-series" data-testid="consumer-rate">
                             <h4>"Consumer rate (ffmpeg_time/wall)"</h4>
-                            <p>{format!("{} samples", r.consumer_rate.len())}</p>
+                            <p class="pacing-panel__placeholder">"Select an endpoint to see per-endpoint drain rate"</p>
                         </div>
                         <div class="pacing-series" data-testid="clock-skew">
                             <h4>"Clock skew (ms)"</h4>
