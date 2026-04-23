@@ -68,23 +68,26 @@ impl std::str::FromStr for ServiceType {
     }
 }
 
-/// Consumer read rate for ffmpeg, tuned as a compromise between drift correction
-/// and YouTube ingest-bitrate tolerance.
+/// Consumer read rate for ffmpeg, tuned to match measured producer FLV-timestamp
+/// rate (see `docs/superpowers/specs/2026-04-23-phase2-evidence/` for #135).
 ///
-/// Producer measurement (see `docs/superpowers/specs/2026-04-23-phase2-evidence/`
-/// for #135): FLV tag timestamps advance ~0.6% slower than wall-clock because OBS
-/// encodes ~30.30 fps but stamps tags at 1/30 s increments. Setting this to 0.994
-/// would fully match producer but drops delivered bitrate 0.6% below OBS's native
-/// ~9 Mbps — which trips YouTube's `videoIngestionStarved` check for 2160p30.
+/// OBS encodes ~30.30 fps but stamps FLV tags at 1/30 s increments, causing
+/// producer timestamps to advance ~0.6% slower than wall-clock. At `-re`
+/// (= `-readrate 1.0`) consumer drains 1000 ms of timestamp per wall-clock
+/// second while producer fills only ~994 ms — cache shrinks at ~20 s/hour on
+/// multi-hour streams. Setting this to 0.994 matches producer and holds cache
+/// stable.
 ///
-/// 0.998 is a partial correction: ~0.2% below nominal. Net drift becomes
-/// ~0.4%/s = 14 s/hour instead of 20 s/hour uncorrected. That keeps cache safer
-/// on a typical 4 h stream (~56 s drift vs ~80 s) while staying within YouTube's
-/// bitrate tolerance.
+/// 0.994 drops delivered bitrate 0.6% below OBS nominal. This is safe at
+/// 12 Mbps for 2160p30 (= 11.93 Mbps, still within YouTube's recommended
+/// 13-34 Mbps minus minor tolerance). If OBS is temporarily reduced (e.g. to
+/// 9 Mbps as an emergency workaround), YouTube may flag `videoIngestionStarved`
+/// because 9 Mbps × 0.994 = 8.95 Mbps falls below ingest threshold. Keep OBS
+/// bitrate ≥ 12 Mbps for normal operation.
 ///
-/// If OBS bitrate is bumped (e.g. to 12000 kbps for 2160p30, above YouTube's min),
-/// this can safely move toward 0.994 for full drift cancellation.
-const CONSUMER_READRATE: &str = "0.998";
+/// If OBS profile changes (e.g. 60 fps, 24 fps NTSC), re-measure producer rate
+/// via `/api/v1/diagnostics/pacing` and re-tune this constant.
+const CONSUMER_READRATE: &str = "0.994";
 
 /// Initial burst duration (seconds) before `-readrate` throttling kicks in.
 /// YouTube HLS ingest flags "videoIngestionStarved: Video output low" when the
