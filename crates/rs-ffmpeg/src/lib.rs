@@ -236,6 +236,14 @@ pub fn parse_ffmpeg_time_ms(line: &str) -> Option<i64> {
 /// `try_send`; if the channel is full the sample is dropped silently
 /// (best-effort telemetry).  Exits when the reader reaches EOF.
 ///
+/// ffmpeg uses `\r` (carriage return) to overwrite progress stats in a
+/// terminal: multiple stat updates accumulate in a single `\n`-terminated
+/// output line, separated by `\r`.  To capture EVERY stat update (not
+/// just the first in each burst), each `\n`-line is split on `\r` before
+/// parsing.  This multiplies consumer-rate sample density from
+/// ~1/output-burst to ~1/stat-update (~0.5 s cadence on typical HLS/RTMP
+/// streams).
+///
 /// Extracted as a public function so it can be unit-tested without
 /// spawning a real ffmpeg process (C1 wiring test).
 pub async fn drain_ffmpeg_stderr<R: tokio::io::AsyncBufRead + Unpin>(
@@ -246,24 +254,27 @@ pub async fn drain_ffmpeg_stderr<R: tokio::io::AsyncBufRead + Unpin>(
 ) {
     let mut lines = reader.lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        // Ring buffer (existing behaviour).
+        // Ring buffer (existing behaviour): store the raw line.
         if let Ok(mut buf) = stderr_lines.lock() {
             if buf.len() >= STDERR_BUFFER_SIZE {
                 buf.pop_front();
             }
             buf.push_back(line.clone());
         }
-        // Progress events (new).
+        // Progress events: split on \r so every stat update within a
+        // \n-terminated output burst emits its own FfmpegProgress event.
         if let Some(tx) = &progress_tx {
-            if let Some(media_time_ms) = parse_ffmpeg_time_ms(&line) {
-                let wall_clock_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-                let _ = tx.try_send(FfmpegProgress {
-                    media_time_ms,
-                    wall_clock_ms,
-                });
+            for segment in line.split('\r') {
+                if let Some(media_time_ms) = parse_ffmpeg_time_ms(segment) {
+                    let wall_clock_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    let _ = tx.try_send(FfmpegProgress {
+                        media_time_ms,
+                        wall_clock_ms,
+                    });
+                }
             }
         }
     }
@@ -765,5 +776,55 @@ mod progress_tests {
         // None progress_tx — no panic, just ring buffering.
         drain_ffmpeg_stderr(reader, Arc::clone(&ring), None, "test_alias").await;
         assert_eq!(ring.lock().unwrap().len(), 1);
+    }
+
+    // C2: ffmpeg uses \r to overwrite progress stats in a terminal — multiple
+    // stat updates accumulate in a single \n-terminated line separated by \r.
+    // drain_ffmpeg_stderr MUST split on \r so every stat update emits its own
+    // FfmpegProgress event, not just the first one in each burst.
+    // This ensures Phase 4 consumer-rate samples are dense enough to measure
+    // the 0.994 drift ratio accurately.
+    #[tokio::test]
+    async fn drain_ffmpeg_stderr_splits_cr_separated_stats_into_separate_events() {
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::BufReader;
+
+        // A single \n-terminated line with three \r-separated stat updates —
+        // exactly what ffmpeg produces when stdout is a terminal or a pipe.
+        let input = b"frame=  0 fps=0.0 size=0kB time=00:00:00.00 bitrate=N/A\r\
+                      frame=  6 fps=0.0 size= 6kB time=00:00:01.00 bitrate= 40kbits/s\r\
+                      frame= 12 fps=6.0 size=12kB time=00:00:02.00 bitrate= 40kbits/s\n";
+        let reader = BufReader::new(&input[..]);
+        let ring: Arc<Mutex<VecDeque<String>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_SIZE)));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+        drain_ffmpeg_stderr(reader, Arc::clone(&ring), Some(tx), "test_alias").await;
+
+        // Ring buffer received the raw (unsplit) line — one entry for the \n.
+        assert_eq!(ring.lock().unwrap().len(), 1);
+
+        // Three separate FfmpegProgress events, one per \r-segment.
+        let first = rx.recv().await.expect("first event from segment 1");
+        assert_eq!(
+            first.media_time_ms, 0,
+            "first segment: time=00:00:00.00 → 0 ms"
+        );
+        let second = rx.recv().await.expect("second event from segment 2");
+        assert_eq!(
+            second.media_time_ms, 1_000,
+            "second segment: time=00:00:01.00 → 1000 ms"
+        );
+        let third = rx.recv().await.expect("third event from segment 3");
+        assert_eq!(
+            third.media_time_ms, 2_000,
+            "third segment: time=00:00:02.00 → 2000 ms"
+        );
+        // No further events.
+        assert!(
+            rx.try_recv().is_err(),
+            "no more events expected after three segments"
+        );
     }
 }
