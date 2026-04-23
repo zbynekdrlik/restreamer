@@ -621,8 +621,21 @@ impl DeliveryOrchestrator {
         // healthy and delivering. Single spawn point — do NOT spawn this probe
         // from delivery_handlers.rs or stream_handlers.rs.
         let vps_base_url = format!("http://{}:8000", instance.ipv4);
-        crate::clock_skew_probe::spawn_skew_probe(self.pool.clone(), event_id, vps_base_url);
+        crate::clock_skew_probe::spawn_skew_probe(
+            self.pool.clone(),
+            event_id,
+            vps_base_url.clone(),
+        );
         info!(event_id, "Clock-skew probe started");
+
+        // Spawn the ffmpeg progress poller alongside the clock-skew probe.
+        crate::progress_poll::spawn_progress_poll(
+            self.pool.clone(),
+            event_id,
+            vps_base_url,
+            auth_token.to_string(),
+        );
+        info!(event_id, "Ffmpeg progress poll started");
 
         Ok(())
     }

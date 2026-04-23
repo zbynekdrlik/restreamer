@@ -1,5 +1,5 @@
 /// Delivery API routes: /api/health, /api/init, /api/status, /api/stop, /api/logs, /clock
-use crate::{AppState, EndpointHandle, clock_endpoint::get_clock};
+use crate::{AppState, EndpointHandle, clock_endpoint::get_clock, progress_capture::ProgressRow};
 use axum::{
     Json, Router,
     extract::State,
@@ -184,6 +184,7 @@ async fn init_endpoints(
             req.delivery_delay_ms,
             req.rescue_video_url.clone(),
             Some(Arc::clone(&state.audit_ring)),
+            Some(Arc::clone(&state.progress_ring)),
         );
 
         endpoints.insert(ep_cfg.alias.clone(), handle);
@@ -214,12 +215,22 @@ struct StatusResponse {
     recent_audit: Vec<crate::audit_ring::RingRow>,
     #[serde(default)]
     next_audit_cursor: i64,
+    /// Ffmpeg progress samples since the requested cursor. The host-side
+    /// poller uses `next_progress_cursor` to persist new samples without
+    /// re-processing rows it has already seen.
+    #[serde(default)]
+    recent_progress: Vec<ProgressRow>,
+    #[serde(default)]
+    next_progress_cursor: i64,
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct StatusQuery {
     #[serde(default)]
     pub since: Option<i64>,
+    /// Cursor for `recent_progress` pagination (analogous to `since` for audit).
+    #[serde(default)]
+    pub progress_since: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -278,6 +289,8 @@ async fn endpoint_status(
     }
 
     let (recent_audit, next_audit_cursor) = state.audit_ring.since(q.since.unwrap_or(0));
+    let (recent_progress, next_progress_cursor) =
+        state.progress_ring.since(q.progress_since.unwrap_or(0));
 
     Json(StatusResponse {
         status: "ok".to_string(),
@@ -285,6 +298,8 @@ async fn endpoint_status(
         endpoints: entries,
         recent_audit,
         next_audit_cursor,
+        recent_progress,
+        next_progress_cursor,
     })
 }
 
@@ -384,6 +399,7 @@ async fn add_endpoint(
         delivery_delay_ms,
         rescue_video_url,
         Some(Arc::clone(&state.audit_ring)),
+        Some(Arc::clone(&state.progress_ring)),
     );
 
     let alias = req.endpoint.alias.clone();

@@ -111,7 +111,11 @@ impl OutputProcess for FfmpegProcess {
 }
 
 /// Real ffmpeg process factory.
-pub struct FfmpegProcessFactory;
+///
+/// Holds an optional `ProgressRing` reference. When present, each spawned
+/// ffmpeg process is wired to a bounded `mpsc` channel and a background
+/// task routes `FfmpegProgress` events into the ring (for host-side polling).
+pub struct FfmpegProcessFactory(pub Option<Arc<crate::progress_capture::ProgressRing>>);
 
 impl OutputProcessFactory for FfmpegProcessFactory {
     fn spawn(
@@ -120,7 +124,16 @@ impl OutputProcessFactory for FfmpegProcessFactory {
         stream_key: &str,
         alias: &str,
     ) -> Result<Box<dyn OutputProcess>, String> {
-        FfmpegProcess::spawn(service_type, stream_key, alias)
+        let progress_tx = self.0.as_ref().map(|ring| {
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            crate::progress_capture::spawn_progress_capture(
+                rx,
+                alias.to_string(),
+                Arc::clone(ring),
+            );
+            tx
+        });
+        FfmpegProcess::spawn_with_progress(service_type, stream_key, alias, progress_tx)
             .map(|p| Box::new(p) as Box<dyn OutputProcess>)
             .map_err(|e| e.to_string())
     }
@@ -206,6 +219,7 @@ impl EndpointHandle {
         delivery_delay_ms: u64,
         rescue_video_url: Option<String>,
         audit_ring: Option<Arc<AuditRing>>,
+        progress_ring: Option<Arc<crate::progress_capture::ProgressRing>>,
     ) -> Self {
         let (stop_tx, stop_rx) = watch::channel(false);
 
@@ -249,7 +263,7 @@ impl EndpointHandle {
 
         let task = tokio::spawn(endpoint_loop(
             fetcher,
-            FfmpegProcessFactory,
+            FfmpegProcessFactory(progress_ring),
             ep_cfg,
             start_chunk_id,
             effective_delay,
