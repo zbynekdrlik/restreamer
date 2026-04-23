@@ -24,6 +24,8 @@ pub use upload::{
 
 pub mod audit;
 
+pub mod drift;
+
 pub mod metrics;
 
 #[cfg(test)]
@@ -46,6 +48,9 @@ mod migration_tests;
 
 #[cfg(test)]
 mod audit_tests;
+
+#[cfg(test)]
+mod drift_tests;
 
 #[cfg(test)]
 mod metrics_tests;

@@ -15,6 +15,8 @@ pub struct ChunkInfo {
     pub md5: String,
     pub index: u64,
     pub duration_ms: u64,
+    /// Unix epoch milliseconds at which the producer wrote the chunk to disk.
+    pub wall_clock_written_at_ms: i64,
 }
 
 /// Maximum buffer size before a forced flush (50 MB).
@@ -65,6 +67,8 @@ struct PendingChunkWrite {
     md5: String,
     index: u64,
     duration_ms: u64,
+    /// Unix epoch milliseconds stamped at the moment the chunk data was extracted.
+    wall_clock_written_at_ms: i64,
 }
 
 impl FlvChunkSink {
@@ -342,6 +346,11 @@ impl FlvChunkSink {
         };
         inner.chunk_start = None;
 
+        let wall_clock_written_at_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
         Some(PendingChunkWrite {
             data,
             path,
@@ -349,6 +358,7 @@ impl FlvChunkSink {
             md5,
             index,
             duration_ms,
+            wall_clock_written_at_ms,
         })
     }
 
@@ -417,6 +427,7 @@ impl FlvChunkSink {
             md5: pending.md5,
             index: pending.index,
             duration_ms: pending.duration_ms,
+            wall_clock_written_at_ms: pending.wall_clock_written_at_ms,
         };
 
         if let Err(e) = chunk_tx.send(chunk_info) {
@@ -428,6 +439,56 @@ impl FlvChunkSink {
     async fn write_and_notify(&self, pending: PendingChunkWrite) {
         let chunk_tx = self.chunk_tx.clone();
         Self::do_write_and_notify(pending, chunk_tx).await;
+    }
+}
+
+#[cfg(test)]
+impl FlvChunkSinkInner {
+    fn new_for_test(chunk_dir: PathBuf) -> Self {
+        Self {
+            buffer: Vec::new(),
+            chunk_dir,
+            chunk_duration: Duration::from_secs(60),
+            chunk_start: None,
+            chunk_index: 0,
+            null_mode: false,
+            video_sequence_header: None,
+            audio_sequence_header: None,
+            chunk_first_ts: 0,
+            chunk_last_ts: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod wall_clock_tests {
+    use super::*;
+
+    #[test]
+    fn pending_chunk_write_carries_wall_clock_ms() {
+        let before_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut inner = FlvChunkSinkInner::new_for_test(std::path::PathBuf::from("/tmp/x"));
+        // Seed inner with a non-empty buffer so extract_chunk emits.
+        inner.buffer = vec![0x46, 0x4C, 0x56]; // "FLV"
+        inner.chunk_first_ts = 0;
+        inner.chunk_last_ts = 1000;
+
+        let pending = FlvChunkSink::extract_chunk(&mut inner).expect("chunk emitted");
+        let after_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        assert!(
+            pending.wall_clock_written_at_ms >= before_ms
+                && pending.wall_clock_written_at_ms <= after_ms,
+            "wall_clock_written_at_ms {} outside [{before_ms}, {after_ms}]",
+            pending.wall_clock_written_at_ms
+        );
     }
 }
 
