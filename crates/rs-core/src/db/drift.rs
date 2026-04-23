@@ -89,7 +89,7 @@ pub async fn insert_ffmpeg_progress_sample(
 }
 
 /// A time-series data point used by the diagnostics API.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DriftSample {
     /// Wall-clock epoch milliseconds for this sample.
     pub t_ms: i64,

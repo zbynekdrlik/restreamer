@@ -19,7 +19,7 @@ pub struct PacingQuery {
     pub endpoint_alias: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PacingResponse {
     pub producer_rate: Vec<DriftSample>,
     pub consumer_rate: Vec<DriftSample>,
