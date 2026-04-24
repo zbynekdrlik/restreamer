@@ -193,13 +193,6 @@ impl FlvChunkSink {
             let mut pending = None;
 
             if should_flush && is_keyframe {
-                // Extend current chunk's last_ts to the keyframe's ts so the
-                // chunk's declared duration covers the full inter-keyframe
-                // interval (not just up to the last non-keyframe tag). Without
-                // this, each chunk reports ~1 frame less than its real
-                // wall-clock span, producing a spurious ~0.5-1% underbitrate
-                // reported to consumers. See #135.
-                inner.chunk_last_ts = ts;
                 pending = Self::extract_chunk(&mut inner);
                 Self::write_chunk_header(&mut inner, ts);
             } else if inner.chunk_start.is_none() {
