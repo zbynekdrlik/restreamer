@@ -2966,15 +2966,10 @@ jobs:
           # The 172s->120s jump bug happens in the FIRST 60s after warmup ends.
           # Take rapid samples (every 5s for 60s) and fail on:
           #   - overshoot: any reading > target * 1.3 (= 156s for 120s target)
-          #   - impossible jump: drop > 40s between 5s-apart readings
-          # 40s threshold accommodates:
-          #  - 2s chunks (OBS keyframe interval = 2s → chunks are 2s each)
-          #  - Init-phase catch-up bursts (VPS may consume ~20 chunks quickly
-          #    to reach target cache depth; at 2s each = 40s drop)
-          # True steady-state stability is enforced by the later progression check.
+          #   - impossible jump: drop > 20s between 5s-apart readings
           $targetDelay = if ($targetEvent.cache_delay_secs) { $targetEvent.cache_delay_secs } else { 120 }
           $maxInitCache = [math]::Round($targetDelay * 1.3)
-          Write-Host "INIT-PHASE CHECK: 12 samples, 5s apart (max cache=${maxInitCache}s, max drop=40s)"
+          Write-Host "INIT-PHASE CHECK: 12 samples, 5s apart (max cache=${maxInitCache}s, max drop=20s)"
           $initSeries = @{}
           for ($s = 1; $s -le 12; $s++) {
             Start-Sleep -Seconds 5
@@ -2993,13 +2988,12 @@ jobs:
                   throw "FAILED: [$alias] cache ${delay}s exceeds init max ${maxInitCache}s (target=${targetDelay}s) -- overshoot during initialization"
                 }
 
-                # Impossible jump check (drop > 40s in 5s interval)
-                # 40s accommodates 2s chunks + init-phase catch-up burst.
+                # Impossible jump check (drop > 20s in 5s interval)
                 $series = $initSeries[$alias]
                 if ($series.Count -ge 2) {
                   $prev = $series[$series.Count - 2]
                   $drop = $prev - $delay
-                  if ($drop -gt 40) {
+                  if ($drop -gt 20) {
                     throw "FAILED: [$alias] cache JUMPED from ${prev}s to ${delay}s (drop=${drop}s in 5s) -- physically impossible at real-time playback"
                   }
                 }
