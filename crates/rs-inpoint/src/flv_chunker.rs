@@ -967,23 +967,15 @@ mod rescale_tests {
 
     #[test]
     fn rescale_applied_even_for_short_wall_span() {
-        // Even short wall_span → rescale fires. Chunks with short wall-span
+        // Even wall_span=100ms → rescale fires. Chunks with short wall-span
         // legitimately reflect OBS burst arrival; consumer at -re naturally
         // drains them fast, keeping cache accounting consistent.
-        let start_ms = now_ms() - 100;
-        let mut inner = make_inner(0, 990, start_ms);
+        let mut inner = make_inner(0, 990, now_ms() - 100);
         let pending = FlvChunkSink::extract_chunk(&mut inner).unwrap();
-        let last = last_ts(&pending.data);
-        // wall_span is ~100ms but may drift a few ms between make_inner and
-        // extract_chunk due to test scheduling. Accept 95..200ms (well below
-        // the original tag_span of 990, confirming rescale fired).
-        assert!(
-            last >= 95 && last <= 200,
-            "last ts {last} not in [95..200] — rescale either didn't fire or wall_span was weird"
-        );
-        assert!(
-            last < 990,
-            "last ts {last} should be less than original tag_span 990"
+        assert_eq!(
+            last_ts(&pending.data),
+            100,
+            "rescale to wall_span=100 makes last_ts = first_ts + 100"
         );
     }
 }
