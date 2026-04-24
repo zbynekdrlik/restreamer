@@ -332,22 +332,35 @@ impl FlvChunkSink {
 
         let index = inner.chunk_index;
 
-        // Diagnostic logging for drift analysis (#135).
-        {
-            let now_ms = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
-            let wall_span_ms = (now_ms - inner.chunk_first_wall_clock_ms).max(0);
-            let tag_span_ms = (inner.chunk_last_ts as i64) - (inner.chunk_first_ts as i64);
-            tracing::info!(
-                target: "drift_debug",
-                chunk_index = index,
-                tag_span_ms,
-                wall_span_ms,
-                buffer_size = inner.buffer.len(),
-                "FLV chunk emit"
-            );
+        // Compute wall-clock span for drift correction and diagnostics (#135).
+        // FLV header (9 bytes) + PreviousTagSize0 (4 bytes) = 13 bytes.
+        let header_size: usize = 13;
+        let now_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let wall_span_ms = (now_ms - inner.chunk_first_wall_clock_ms).max(0);
+        let tag_span_ms = (inner.chunk_last_ts as i64) - (inner.chunk_first_ts as i64);
+
+        tracing::info!(
+            target: "drift_debug",
+            chunk_index = index,
+            tag_span_ms,
+            wall_span_ms,
+            buffer_size = inner.buffer.len(),
+            "FLV chunk emit"
+        );
+
+        // Producer-side timestamp rescale with edge-case guards (#135).
+        // Guard 1: wall_span < 500ms → OBS warmup burst, timestamps are
+        //           meaningless; skip rescale to avoid inflating duration_ms.
+        // Guard 2: wall_span > 3× tag_span → keyframe-wait stall; rescaling
+        //          would inflate duration_ms far beyond content duration.
+        let should_rescale = wall_span_ms >= 500 && wall_span_ms <= (tag_span_ms * 3).max(5000);
+
+        if should_rescale && tag_span_ms > 0 {
+            rescale_flv_timestamps(&mut inner.buffer, header_size, wall_span_ms as u32);
+            inner.chunk_last_ts = inner.chunk_first_ts.saturating_add(wall_span_ms as u32);
         }
 
         let mut hasher = Md5::new();
@@ -364,7 +377,7 @@ impl FlvChunkSink {
         let size = inner.buffer.len();
         let data = std::mem::replace(&mut inner.buffer, Vec::with_capacity(128 * 1024));
 
-        // Use RTMP frame timestamps for accurate content duration
+        // Use RTMP frame timestamps for content duration (rescaled when guards pass)
         let duration_ms = if inner.chunk_last_ts >= inner.chunk_first_ts {
             (inner.chunk_last_ts - inner.chunk_first_ts) as u64
         } else {
@@ -467,6 +480,103 @@ impl FlvChunkSink {
         let chunk_tx = self.chunk_tx.clone();
         Self::do_write_and_notify(pending, chunk_tx).await;
     }
+}
+
+/// Rewrite FLV tag timestamps in `buf[header_size..]` so the span from the
+/// first to the last data tag (non-script) equals `target_span_ms`, preserving
+/// relative inter-tag spacing via linear interpolation.
+///
+/// **Motivation** (Phase 3, #135): OBS encodes at ~30.30 fps wall-clock but
+/// stamps FLV tags at 1/30 s (33.33 ms) each, so chunks carry ~0.6% fewer ms
+/// than the real time they took to produce. ffmpeg `-re` (1.000×) then drains
+/// faster than the producer fills, causing cache to shrink at ~20 s/hour.
+///
+/// **Rules**:
+/// - Script tags (0x12, e.g. onMetaData) are skipped — not rescaled.
+/// - No-op when `first_ts == last_ts` (single-tag or zero-span chunk).
+/// - No-op when `target_span_ms == orig_span` (already correct).
+/// - Two-pass in-place rewrite; no heap allocation.
+pub(crate) fn rescale_flv_timestamps(buf: &mut [u8], header_size: usize, target_span_ms: u32) {
+    if buf.len() <= header_size {
+        return;
+    }
+
+    // --- Pass 1: find first_ts and last_ts of data (non-script) tags ---
+    let mut first_ts: Option<u32> = None;
+    let mut last_ts: u32 = 0;
+
+    let mut ofs = header_size;
+    while ofs + 11 <= buf.len() {
+        let tag_type = buf[ofs];
+        if tag_type != 8 && tag_type != 9 && tag_type != 18 {
+            break;
+        }
+        let data_size =
+            ((buf[ofs + 1] as u32) << 16) | ((buf[ofs + 2] as u32) << 8) | (buf[ofs + 3] as u32);
+        let tag_total = 11 + data_size as usize + 4;
+        if ofs + tag_total > buf.len() {
+            break;
+        }
+        // Skip script tags (onMetaData at ts=0 — must not be rescaled).
+        if tag_type != 18 {
+            let ts = read_flv_ts(&buf[ofs..]);
+            if first_ts.is_none() {
+                first_ts = Some(ts);
+            }
+            last_ts = ts;
+        }
+        ofs += tag_total;
+    }
+
+    let first_ts = match first_ts {
+        Some(f) => f,
+        None => return, // no data tags found
+    };
+
+    let orig_span = last_ts.saturating_sub(first_ts);
+    // No-op: single tag, zero span, or target already matches.
+    if orig_span == 0 || orig_span == target_span_ms {
+        return;
+    }
+
+    // --- Pass 2: rewrite timestamps via linear interpolation ---
+    let mut ofs = header_size;
+    while ofs + 11 <= buf.len() {
+        let tag_type = buf[ofs];
+        if tag_type != 8 && tag_type != 9 && tag_type != 18 {
+            break;
+        }
+        let data_size =
+            ((buf[ofs + 1] as u32) << 16) | ((buf[ofs + 2] as u32) << 8) | (buf[ofs + 3] as u32);
+        let tag_total = 11 + data_size as usize + 4;
+        if ofs + tag_total > buf.len() {
+            break;
+        }
+        if tag_type != 18 {
+            let orig_ts = read_flv_ts(&buf[ofs..]);
+            let delta = orig_ts.saturating_sub(first_ts) as u64;
+            // new_ts = first_ts + delta * target_span_ms / orig_span
+            let new_ts = first_ts + ((delta * target_span_ms as u64) / orig_span as u64) as u32;
+            write_flv_ts(&mut buf[ofs..], new_ts);
+        }
+        ofs += tag_total;
+    }
+}
+
+/// Read the 32-bit FLV tag timestamp from a tag slice starting at offset 0.
+/// Layout: bytes [4..7] = lower 24 bits (big-endian), byte [7] = upper 8 bits.
+#[inline]
+fn read_flv_ts(tag: &[u8]) -> u32 {
+    ((tag[4] as u32) << 16) | ((tag[5] as u32) << 8) | (tag[6] as u32) | ((tag[7] as u32) << 24)
+}
+
+/// Write a 32-bit FLV tag timestamp into a tag slice starting at offset 0.
+#[inline]
+fn write_flv_ts(tag: &mut [u8], ts: u32) {
+    tag[4] = (ts >> 16) as u8;
+    tag[5] = (ts >> 8) as u8;
+    tag[6] = ts as u8;
+    tag[7] = (ts >> 24) as u8;
 }
 
 #[cfg(test)]
@@ -683,5 +793,185 @@ mod tests {
             | ((file_data[kf_offset + 2] as u32) << 8)
             | (file_data[kf_offset + 3] as u32);
         assert_eq!(data_size, payload.len() as u32);
+    }
+}
+
+#[cfg(test)]
+mod rescale_tests {
+    use super::*;
+
+    // FLV header (9) + PreviousTagSize0 (4) = 13 bytes.
+    const HDR: usize = 13;
+    const FLV_HDR: [u8; 9] = [0x46, 0x4C, 0x56, 0x01, 0x05, 0x00, 0x00, 0x00, 0x09];
+
+    fn flv_buf(timestamps: Vec<u32>) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&FLV_HDR);
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        for ts in timestamps {
+            push_nalu(&mut b, ts);
+        }
+        b
+    }
+
+    fn flv_buf_mixed(script_ts: u32, data_ts: Vec<u32>) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&FLV_HDR);
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        push_script(&mut b, script_ts);
+        for ts in data_ts {
+            push_nalu(&mut b, ts);
+        }
+        b
+    }
+
+    fn push_nalu(b: &mut Vec<u8>, ts: u32) {
+        let p: [u8; 4] = [0x27, 0x01, 0x00, 0x00];
+        b.push(9);
+        b.extend_from_slice(&[0, 0, p.len() as u8]);
+        b.push((ts >> 16) as u8);
+        b.push((ts >> 8) as u8);
+        b.push(ts as u8);
+        b.push((ts >> 24) as u8);
+        b.extend_from_slice(&[0, 0, 0]);
+        b.extend_from_slice(&p);
+        b.extend_from_slice(&(11u32 + p.len() as u32).to_be_bytes());
+    }
+
+    fn push_script(b: &mut Vec<u8>, ts: u32) {
+        let p: [u8; 2] = [0x02, 0x00];
+        b.push(0x12);
+        b.extend_from_slice(&[0, 0, p.len() as u8]);
+        b.push((ts >> 16) as u8);
+        b.push((ts >> 8) as u8);
+        b.push(ts as u8);
+        b.push((ts >> 24) as u8);
+        b.extend_from_slice(&[0, 0, 0]);
+        b.extend_from_slice(&p);
+        b.extend_from_slice(&(11u32 + p.len() as u32).to_be_bytes());
+    }
+
+    fn ts_at(buf: &[u8], nth: usize) -> u32 {
+        let mut ofs = HDR;
+        let mut n = 0;
+        while ofs + 11 <= buf.len() {
+            let tt = buf[ofs];
+            if tt != 8 && tt != 9 && tt != 18 {
+                break;
+            }
+            let ds = ((buf[ofs + 1] as u32) << 16)
+                | ((buf[ofs + 2] as u32) << 8)
+                | (buf[ofs + 3] as u32);
+            let tot = 11 + ds as usize + 4;
+            if ofs + tot > buf.len() {
+                break;
+            }
+            if n == nth {
+                return read_flv_ts(&buf[ofs..]);
+            }
+            n += 1;
+            ofs += tot;
+        }
+        panic!("tag {nth} not found");
+    }
+
+    fn last_ts(buf: &[u8]) -> u32 {
+        let mut ofs = HDR;
+        let mut t = 0u32;
+        while ofs + 11 <= buf.len() {
+            let tt = buf[ofs];
+            if tt != 8 && tt != 9 {
+                break;
+            }
+            let ds = ((buf[ofs + 1] as u32) << 16)
+                | ((buf[ofs + 2] as u32) << 8)
+                | (buf[ofs + 3] as u32);
+            let tot = 11 + ds as usize + 4;
+            if ofs + tot > buf.len() {
+                break;
+            }
+            t = read_flv_ts(&buf[ofs..]);
+            ofs += tot;
+        }
+        t
+    }
+
+    fn make_inner(first_ts: u32, last_ts_v: u32, wall_origin_ms: i64) -> FlvChunkSinkInner {
+        let mut i = FlvChunkSinkInner::new_for_test(std::path::PathBuf::from("/tmp/x"));
+        i.chunk_first_ts = first_ts;
+        i.chunk_last_ts = last_ts_v;
+        i.chunk_first_wall_clock_ms = wall_origin_ms;
+        i.buffer = flv_buf(vec![first_ts, last_ts_v]);
+        i
+    }
+
+    fn now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64
+    }
+
+    // --- rescale_flv_timestamps unit tests ---
+
+    #[test]
+    fn rescale_expands() {
+        let mut buf = flv_buf(vec![0, 33, 66]);
+        rescale_flv_timestamps(&mut buf, HDR, 100);
+        assert_eq!(ts_at(&buf, 0), 0);
+        assert_eq!(ts_at(&buf, 1), 50);
+        assert_eq!(ts_at(&buf, 2), 100);
+    }
+
+    #[test]
+    fn rescale_preserves_script() {
+        let mut buf = flv_buf_mixed(0, vec![33, 66]);
+        rescale_flv_timestamps(&mut buf, HDR, 100);
+        assert_eq!(ts_at(&buf, 0), 0, "script unchanged");
+        assert_eq!(ts_at(&buf, 1), 0, "first data → 0");
+        assert_eq!(ts_at(&buf, 2), 100, "last data → 100");
+    }
+
+    #[test]
+    fn rescale_is_noop_when_span_matches() {
+        let original = flv_buf(vec![0, 33, 66]);
+        let mut rescaled = original.clone();
+        rescale_flv_timestamps(&mut rescaled, HDR, 66);
+        assert_eq!(original, rescaled);
+    }
+
+    #[test]
+    fn rescale_is_noop_for_single_tag() {
+        let original = flv_buf(vec![500]);
+        let mut rescaled = original.clone();
+        rescale_flv_timestamps(&mut rescaled, HDR, 100);
+        assert_eq!(original, rescaled);
+    }
+
+    // --- extract_chunk edge-case guard tests ---
+
+    #[test]
+    fn rescale_applied_when_span_reasonable() {
+        // wall_span=1010ms, tag_span=994ms → within guards → rescale fires.
+        let mut inner = make_inner(1000, 1994, now_ms() - 1010);
+        assert_eq!(last_ts(&inner.buffer), 1994);
+        let pending = FlvChunkSink::extract_chunk(&mut inner).unwrap();
+        assert_ne!(last_ts(&pending.data), 1994, "rescale must change last ts");
+    }
+
+    #[test]
+    fn rescale_skipped_on_short_wall_span() {
+        // wall_span=100ms < 500ms → no rescale.
+        let mut inner = make_inner(0, 990, now_ms() - 100);
+        let pending = FlvChunkSink::extract_chunk(&mut inner).unwrap();
+        assert_eq!(last_ts(&pending.data), 990);
+    }
+
+    #[test]
+    fn rescale_skipped_on_long_wall_span() {
+        // wall_span=5001ms > max(990*3, 5000)=5000 → no rescale.
+        let mut inner = make_inner(0, 990, now_ms() - 5001);
+        let pending = FlvChunkSink::extract_chunk(&mut inner).unwrap();
+        assert_eq!(last_ts(&pending.data), 990);
     }
 }
