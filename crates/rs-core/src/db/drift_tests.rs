@@ -93,28 +93,3 @@ async fn list_clock_skew_returns_samples() {
     assert_eq!(series[1].t_ms, 2_000);
     assert!((series[1].value - 60.0).abs() < f64::EPSILON);
 }
-
-#[tokio::test]
-async fn list_ffmpeg_consumer_rate_computes_ratio() {
-    let pool = setup_db().await;
-    let event_id = upsert_streaming_event(&pool, "evt-drift-5").await.unwrap();
-
-    // Two progress samples: media time advances 990ms while wall-clock advances 1000ms.
-    drift::insert_ffmpeg_progress_sample(&pool, event_id, "YT_RTMP", 1_000, 0, 1_000_000)
-        .await
-        .unwrap();
-    drift::insert_ffmpeg_progress_sample(&pool, event_id, "YT_RTMP", 2_000, 990, 1_001_000)
-        .await
-        .unwrap();
-
-    let series = drift::list_ffmpeg_consumer_rate(&pool, event_id, "YT_RTMP", 0)
-        .await
-        .unwrap();
-    assert_eq!(series.len(), 1);
-    // 990ms media / 1000ms wall = 0.990 ratio (consumer slightly slow)
-    assert!(
-        (series[0].value - 0.990).abs() < 0.001,
-        "ratio {} not near 0.990",
-        series[0].value
-    );
-}

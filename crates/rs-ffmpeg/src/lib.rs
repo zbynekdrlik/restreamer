@@ -11,6 +11,23 @@ use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
+async fn drain_stderr<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: R,
+    stderr_lines: Arc<Mutex<VecDeque<String>>>,
+    alias_for_log: &str,
+) {
+    let mut lines = reader.lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Ok(mut buf) = stderr_lines.lock() {
+            if buf.len() >= STDERR_BUFFER_SIZE {
+                buf.pop_front();
+            }
+            buf.push_back(line);
+        }
+    }
+    tracing::debug!(alias = %alias_for_log, "ffmpeg stderr drain task finished");
+}
+
 #[derive(Debug, Error)]
 pub enum FfmpegError {
     #[error("ffmpeg spawn failed: {0}")]
@@ -133,95 +150,6 @@ fn build_test_file_args(alias: &str) -> Vec<String> {
 /// Max stderr lines to keep in the ring buffer.
 const STDERR_BUFFER_SIZE: usize = 30;
 
-/// A sample of ffmpeg's internal media-time progress, captured from stderr.
-/// `media_time_ms`: ffmpeg's `time=` field parsed to milliseconds.
-/// `wall_clock_ms`: Unix epoch ms when we received that progress line.
-#[derive(Debug, Clone)]
-pub struct FfmpegProgress {
-    pub media_time_ms: i64,
-    pub wall_clock_ms: i64,
-}
-
-/// Parse an ffmpeg stderr progress line and extract the `time=HH:MM:SS.xx` value in ms.
-/// Returns `None` if the line has no `time=` field or the value is unparseable.
-///
-/// Only matches `time=` as a standalone whitespace-delimited token so that
-/// fields like `out_time=` or `xtime=` are not mistakenly parsed.
-/// Negative time values (e.g. `time=-00:00:05.00`) are rejected and return `None`.
-/// Arithmetic that would overflow `i64` also returns `None`.
-pub fn parse_ffmpeg_time_ms(line: &str) -> Option<i64> {
-    // I3: token-based search — only match "time=" as a standalone token.
-    let field = line.split_whitespace().find(|f| f.starts_with("time="))?;
-    let field = &field[5..]; // strip "time="
-    // I2: reject negative times.
-    if field.starts_with('-') {
-        return None;
-    }
-    let field = field.replace(',', ".");
-    let mut it = field.split(':');
-    let h: i64 = it.next()?.parse().ok()?;
-    let m: i64 = it.next()?.parse().ok()?;
-    let s: f64 = it.next()?.parse().ok()?;
-    // I1: use checked arithmetic to avoid overflow panic.
-    let h_ms = h.checked_mul(3_600_000)?;
-    let m_ms = m.checked_mul(60_000)?;
-    let s_ms = (s * 1000.0) as i64;
-    h_ms.checked_add(m_ms)?.checked_add(s_ms)
-}
-
-/// Drain an ffmpeg-like stderr stream line-by-line.
-///
-/// Each line is appended to the ring buffer and, if it parses as a
-/// `time=...` progress line and `progress_tx` is `Some`, forwarded as an
-/// [`FfmpegProgress`] event on the channel.  Events are sent with
-/// `try_send`; if the channel is full the sample is dropped silently
-/// (best-effort telemetry).  Exits when the reader reaches EOF.
-///
-/// ffmpeg uses `\r` (carriage return) to overwrite progress stats in a
-/// terminal: multiple stat updates accumulate in a single `\n`-terminated
-/// output line, separated by `\r`.  To capture EVERY stat update (not
-/// just the first in each burst), each `\n`-line is split on `\r` before
-/// parsing.  This multiplies consumer-rate sample density from
-/// ~1/output-burst to ~1/stat-update (~0.5 s cadence on typical HLS/RTMP
-/// streams).
-///
-/// Extracted as a public function so it can be unit-tested without
-/// spawning a real ffmpeg process (C1 wiring test).
-pub async fn drain_ffmpeg_stderr<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: R,
-    stderr_lines: Arc<Mutex<VecDeque<String>>>,
-    progress_tx: Option<tokio::sync::mpsc::Sender<FfmpegProgress>>,
-    alias_for_log: &str,
-) {
-    let mut lines = reader.lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        // Ring buffer (existing behaviour): store the raw line.
-        if let Ok(mut buf) = stderr_lines.lock() {
-            if buf.len() >= STDERR_BUFFER_SIZE {
-                buf.pop_front();
-            }
-            buf.push_back(line.clone());
-        }
-        // Progress events: split on \r so every stat update within a
-        // \n-terminated output burst emits its own FfmpegProgress event.
-        if let Some(tx) = &progress_tx {
-            for segment in line.split('\r') {
-                if let Some(media_time_ms) = parse_ffmpeg_time_ms(segment) {
-                    let wall_clock_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64;
-                    let _ = tx.try_send(FfmpegProgress {
-                        media_time_ms,
-                        wall_clock_ms,
-                    });
-                }
-            }
-        }
-    }
-    tracing::debug!(alias = %alias_for_log, "ffmpeg stderr drain task finished");
-}
-
 /// Managed ffmpeg process with stdin pipe for writing data.
 pub struct FfmpegProcess {
     child: Child,
@@ -232,26 +160,10 @@ pub struct FfmpegProcess {
 
 impl FfmpegProcess {
     /// Spawn a new ffmpeg process for the given service type.
-    /// Backwards-compatible wrapper around [`spawn_with_progress`] with no progress channel.
     pub fn spawn(
         service_type: ServiceType,
         stream_key: &str,
         alias: &str,
-    ) -> Result<Self, FfmpegError> {
-        Self::spawn_with_progress(service_type, stream_key, alias, None)
-    }
-
-    /// Spawn a new ffmpeg process, optionally emitting [`FfmpegProgress`] events on `progress_tx`.
-    ///
-    /// Each time ffmpeg writes a `time=HH:MM:SS.xx` progress line to stderr,
-    /// a `FfmpegProgress` sample is sent on the channel (if provided).
-    /// The channel is bounded; if the receiver is slow, events are dropped
-    /// (best-effort telemetry semantics — `try_send` with silent drop on full).
-    pub fn spawn_with_progress(
-        service_type: ServiceType,
-        stream_key: &str,
-        alias: &str,
-        progress_tx: Option<tokio::sync::mpsc::Sender<FfmpegProgress>>,
     ) -> Result<Self, FfmpegError> {
         let args = build_ffmpeg_args(service_type, stream_key, alias);
         tracing::info!(
@@ -275,10 +187,9 @@ impl FfmpegProcess {
         let stderr_lines_clone = Arc::clone(&stderr_lines);
         let alias_owned = alias.to_string();
         tokio::spawn(async move {
-            drain_ffmpeg_stderr(
+            drain_stderr(
                 BufReader::new(stderr.expect("stderr is piped")),
                 stderr_lines_clone,
-                progress_tx,
                 &alias_owned,
             )
             .await;
@@ -590,161 +501,5 @@ mod tests {
                 "{st} should not have bsf"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod progress_tests {
-    use super::*;
-
-    #[test]
-    fn parse_ffmpeg_time_simple() {
-        // Typical ffmpeg progress line:
-        // "frame=  150 fps= 30 q=28.0 size=  1024kB time=00:00:05.00 bitrate=..."
-        let ms = parse_ffmpeg_time_ms(
-            "frame=  150 fps= 30 q=28.0 size=  1024kB time=00:00:05.00 bitrate=1024kbits/s",
-        );
-        assert_eq!(ms, Some(5_000));
-    }
-
-    #[test]
-    fn parse_ffmpeg_time_hhmmss_fractional() {
-        let ms = parse_ffmpeg_time_ms("time=01:23:45.67");
-        // 1h*3600 + 23m*60 + 45 = 5025s; + 0.67s = 5025.67s = 5_025_670 ms
-        assert_eq!(ms, Some(5_025_670));
-    }
-
-    #[test]
-    fn parse_ffmpeg_time_none_when_missing() {
-        let ms = parse_ffmpeg_time_ms("frame= 100 fps=30 bitrate=N/A");
-        assert_eq!(ms, None);
-    }
-
-    #[test]
-    fn parse_ffmpeg_time_tolerates_dot_comma() {
-        // Some locales emit "time=00:00:05,00"
-        let ms = parse_ffmpeg_time_ms("time=00:00:05,00");
-        assert_eq!(ms, Some(5_000));
-    }
-
-    // I2: negative time values must be rejected.
-    #[test]
-    fn parse_ffmpeg_time_rejects_negative() {
-        assert_eq!(parse_ffmpeg_time_ms("time=-00:00:05.00"), None);
-    }
-
-    // I3: "time=" must be a standalone whitespace-delimited token.
-    #[test]
-    fn parse_ffmpeg_time_rejects_substring_match() {
-        assert_eq!(parse_ffmpeg_time_ms("xtime=00:00:05.00"), None);
-        assert_eq!(parse_ffmpeg_time_ms("out_time=00:00:05.00"), None);
-    }
-
-    // I1: overflow must return None, not panic.
-    #[test]
-    fn parse_ffmpeg_time_rejects_overflow() {
-        assert_eq!(parse_ffmpeg_time_ms("time=9999999999999:00:00.00"), None);
-    }
-
-    #[test]
-    fn parse_ffmpeg_time_handles_empty_value() {
-        assert_eq!(parse_ffmpeg_time_ms("time="), None);
-        assert_eq!(parse_ffmpeg_time_ms("time=abc"), None);
-    }
-
-    // C1: channel-wiring tests — exercise drain_ffmpeg_stderr without ffmpeg.
-    #[tokio::test]
-    async fn drain_ffmpeg_stderr_emits_progress_on_time_line() {
-        use std::collections::VecDeque;
-        use std::sync::{Arc, Mutex};
-        use tokio::io::BufReader;
-
-        let input = b"frame= 30 fps=30 time=00:00:01.00 bitrate=1000kbits/s\n\
-                      Stream #0:0 info\n\
-                      frame= 60 fps=30 time=00:00:02.00 bitrate=1000kbits/s\n";
-        let reader = BufReader::new(&input[..]);
-        let ring: Arc<Mutex<VecDeque<String>>> =
-            Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_SIZE)));
-        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-
-        drain_ffmpeg_stderr(reader, Arc::clone(&ring), Some(tx), "test_alias").await;
-
-        // Ring buffer got all three lines.
-        let buf = ring.lock().unwrap();
-        assert_eq!(buf.len(), 3);
-        drop(buf);
-
-        // Two progress events (the info line between them has no time=).
-        let first = rx.recv().await.expect("first event");
-        assert_eq!(first.media_time_ms, 1_000);
-        let second = rx.recv().await.expect("second event");
-        assert_eq!(second.media_time_ms, 2_000);
-        // Channel should be empty after drain finishes.
-        assert!(rx.try_recv().is_err(), "no more events expected");
-    }
-
-    #[tokio::test]
-    async fn drain_ffmpeg_stderr_does_not_emit_when_no_progress_tx() {
-        use std::collections::VecDeque;
-        use std::sync::{Arc, Mutex};
-        use tokio::io::BufReader;
-
-        let input = b"frame= 30 fps=30 time=00:00:01.00\n";
-        let reader = BufReader::new(&input[..]);
-        let ring = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_SIZE)));
-
-        // None progress_tx — no panic, just ring buffering.
-        drain_ffmpeg_stderr(reader, Arc::clone(&ring), None, "test_alias").await;
-        assert_eq!(ring.lock().unwrap().len(), 1);
-    }
-
-    // C2: ffmpeg uses \r to overwrite progress stats in a terminal — multiple
-    // stat updates accumulate in a single \n-terminated line separated by \r.
-    // drain_ffmpeg_stderr MUST split on \r so every stat update emits its own
-    // FfmpegProgress event, not just the first one in each burst.
-    // This ensures Phase 4 consumer-rate samples are dense enough to measure
-    // the 0.994 drift ratio accurately.
-    #[tokio::test]
-    async fn drain_ffmpeg_stderr_splits_cr_separated_stats_into_separate_events() {
-        use std::collections::VecDeque;
-        use std::sync::{Arc, Mutex};
-        use tokio::io::BufReader;
-
-        // A single \n-terminated line with three \r-separated stat updates —
-        // exactly what ffmpeg produces when stdout is a terminal or a pipe.
-        let input = b"frame=  0 fps=0.0 size=0kB time=00:00:00.00 bitrate=N/A\r\
-                      frame=  6 fps=0.0 size= 6kB time=00:00:01.00 bitrate= 40kbits/s\r\
-                      frame= 12 fps=6.0 size=12kB time=00:00:02.00 bitrate= 40kbits/s\n";
-        let reader = BufReader::new(&input[..]);
-        let ring: Arc<Mutex<VecDeque<String>>> =
-            Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_SIZE)));
-        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-
-        drain_ffmpeg_stderr(reader, Arc::clone(&ring), Some(tx), "test_alias").await;
-
-        // Ring buffer received the raw (unsplit) line — one entry for the \n.
-        assert_eq!(ring.lock().unwrap().len(), 1);
-
-        // Three separate FfmpegProgress events, one per \r-segment.
-        let first = rx.recv().await.expect("first event from segment 1");
-        assert_eq!(
-            first.media_time_ms, 0,
-            "first segment: time=00:00:00.00 → 0 ms"
-        );
-        let second = rx.recv().await.expect("second event from segment 2");
-        assert_eq!(
-            second.media_time_ms, 1_000,
-            "second segment: time=00:00:01.00 → 1000 ms"
-        );
-        let third = rx.recv().await.expect("third event from segment 3");
-        assert_eq!(
-            third.media_time_ms, 2_000,
-            "third segment: time=00:00:02.00 → 2000 ms"
-        );
-        // No further events.
-        assert!(
-            rx.try_recv().is_err(),
-            "no more events expected after three segments"
-        );
     }
 }

@@ -36,20 +36,18 @@ pub async fn get_pacing(
     Query(q): Query<PacingQuery>,
 ) -> Result<Json<PacingResponse>, (axum::http::StatusCode, String)> {
     let since_ms = q.since_ms.unwrap_or(0);
-    let endpoint_alias = q.endpoint_alias.as_deref().unwrap_or("");
     let pool = &state.pool;
 
     let producer_rate = rs_core::db::drift::list_chunk_producer_rate(pool, q.event_id, since_ms)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let consumer_rate = if endpoint_alias.is_empty() {
-        Vec::new()
-    } else {
-        rs_core::db::drift::list_ffmpeg_consumer_rate(pool, q.event_id, endpoint_alias, since_ms)
-            .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    };
+    // consumer_rate is always empty until rs-rtmp-push lands and writes its own
+    // progress rows into ffmpeg_progress_samples. The collection pipeline
+    // (FfmpegProgress mpsc + ProgressRing + progress_poll) was stripped in #135
+    // because it was specific to ffmpeg stderr parsing; the native RTMP push
+    // client will emit progress directly.
+    let consumer_rate: Vec<DriftSample> = Vec::new();
 
     let clock_skew = rs_core::db::drift::list_clock_skew(pool, q.event_id, since_ms)
         .await
@@ -167,19 +165,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pacing_endpoint_returns_consumer_rate_when_alias_provided() {
+    async fn pacing_endpoint_consumer_rate_always_empty_until_rtmp_push() {
+        // consumer_rate is always empty after the ffmpeg-progress pipeline was
+        // stripped in #135. This test documents the expected empty state until
+        // rs-rtmp-push lands.
         let state = test_state().await;
         let pool = &state.pool.clone();
 
         let event_id = db::upsert_streaming_event(pool, "evt-pacing-t7b")
-            .await
-            .unwrap();
-
-        // Two ffmpeg progress samples → consumer_rate has 1 sample
-        db::drift::insert_ffmpeg_progress_sample(pool, event_id, "YT_RTMP", 1_000, 0, 1_000_000)
-            .await
-            .unwrap();
-        db::drift::insert_ffmpeg_progress_sample(pool, event_id, "YT_RTMP", 2_000, 990, 1_001_000)
             .await
             .unwrap();
 
@@ -202,10 +195,9 @@ mod tests {
             .await
             .unwrap();
         let resp: super::PacingResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            resp.consumer_rate.len(),
-            1,
-            "expected 1 consumer_rate sample"
+        assert!(
+            resp.consumer_rate.is_empty(),
+            "consumer_rate must be empty until rs-rtmp-push lands"
         );
     }
 }

@@ -13,7 +13,6 @@ pub mod diagnostics_pacing;
 pub mod handlers;
 pub mod metrics_handlers;
 pub mod obs;
-pub mod progress_poll;
 pub mod rescue_video_handlers;
 pub mod router;
 #[cfg(test)]

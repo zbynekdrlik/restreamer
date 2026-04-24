@@ -17,21 +17,15 @@ pub mod db;
 pub mod endpoint_audit;
 pub mod endpoint_task;
 mod ffmpeg_reason;
-mod progress_capture;
 pub mod rescue;
 mod s3_fetch;
 
 pub use audit_ring::AuditRing;
 pub use endpoint_task::EndpointHandle;
-pub use progress_capture::ProgressRing;
 
 /// In-memory audit ring capacity (last N rows retained for /api/status
 /// `?since=<cursor>` polling).
 const AUDIT_RING_CAP: usize = 500;
-
-/// In-memory progress ring capacity (last N ffmpeg progress samples retained
-/// for host-side polling via `/api/status`).
-const PROGRESS_RING_CAP: usize = 500;
 
 /// Application state shared across API handlers.
 pub struct AppState {
@@ -55,8 +49,6 @@ pub struct AppState {
     pub db_pool: SqlitePool,
     /// In-memory audit ring for host-side `?since=<cursor>` polling.
     pub audit_ring: Arc<AuditRing>,
-    /// In-memory progress ring for host-side ffmpeg progress polling.
-    pub progress_ring: Arc<ProgressRing>,
 }
 
 impl AppState {
@@ -68,7 +60,6 @@ impl AppState {
         let audit_ring = AuditRing::new(AUDIT_RING_CAP);
         // Best-effort JSONL persistence (ignored on systems without /var/log).
         audit_ring.set_jsonl_path("/var/log/rs-delivery/audit.jsonl");
-        let progress_ring = ProgressRing::new(PROGRESS_RING_CAP);
         Self {
             endpoints: RwLock::new(HashMap::new()),
             version: env!("CARGO_PKG_VERSION"),
@@ -81,7 +72,6 @@ impl AppState {
             log_buffer: LogBuffer::new(5000),
             db_pool,
             audit_ring,
-            progress_ring,
         }
     }
 }
