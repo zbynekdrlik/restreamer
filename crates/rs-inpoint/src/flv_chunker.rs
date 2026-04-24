@@ -61,8 +61,11 @@ struct FlvChunkSinkInner {
     /// Used to compute wall-clock span vs FLV tag span for drift diagnostics.
     chunk_first_wall_clock_ms: i64,
     /// Unix epoch ms at first tag of current session. 0 = not yet set.
-    /// Reset when reset_session() is called (RTMP disconnect / new session).
+    /// Reset when reset() is called (RTMP disconnect / new session).
     session_start_wall_clock_ms: i64,
+    /// Highest output timestamp emitted in the current session. Enforces
+    /// monotonic stamping under OS clock skew or wall-clock anomalies.
+    last_session_ts: u32,
 }
 
 /// Data extracted from the buffer, ready to be written to disk outside the lock.
@@ -94,6 +97,7 @@ impl FlvChunkSink {
                 chunk_last_ts: 0,
                 chunk_first_wall_clock_ms: 0,
                 session_start_wall_clock_ms: 0,
+                last_session_ts: 0,
             }),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
@@ -117,6 +121,7 @@ impl FlvChunkSink {
                 chunk_last_ts: 0,
                 chunk_first_wall_clock_ms: 0,
                 session_start_wall_clock_ms: 0,
+                last_session_ts: 0,
             }),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
@@ -131,10 +136,20 @@ impl FlvChunkSink {
     /// Compute a wall-clock-derived session timestamp in milliseconds.
     ///
     /// On the first call after a session reset, records `now` as the session
-    /// anchor and returns 0. On subsequent calls, returns `now - anchor`.
+    /// anchor and returns 0. On subsequent calls, returns `now - anchor`,
+    /// clamped to be non-decreasing across the session.
+    ///
     /// This replaces OBS's declared-fps-based timestamps (which produce 994ms
     /// of tag time per wall-clock second at 30fps) with actual arrival timing,
     /// fixing the cache-drift described in issue #135.
+    ///
+    /// **A/V sync note:** audio and video tags get stamped with their respective
+    /// arrival wall-clock, so network jitter between the two streams (typically
+    /// <50ms on TCP RTMP) maps directly to A/V offset in the output. This is
+    /// well below the perceptible threshold (~150ms) and acceptable for our
+    /// use case of OBS-on-LAN ingest. A future revision may introduce
+    /// OBS-PTS-relative stamping with a smoothed rate factor for environments
+    /// where ingest jitter is higher (e.g. cellular bonded encoders).
     fn current_session_ts(inner: &mut FlvChunkSinkInner) -> u32 {
         let now_ms = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -142,12 +157,18 @@ impl FlvChunkSink {
             .as_millis() as i64;
         if inner.session_start_wall_clock_ms == 0 {
             inner.session_start_wall_clock_ms = now_ms;
-            0
-        } else {
-            let delta = (now_ms - inner.session_start_wall_clock_ms).max(0);
-            // u32 overflows after ~49 days — clamp rather than truncate.
-            delta.min(u32::MAX as i64) as u32
+            inner.last_session_ts = 0;
+            return 0;
         }
+        let delta = (now_ms - inner.session_start_wall_clock_ms).max(0);
+        // u32 overflows after ~49 days — clamp rather than truncate.
+        let candidate = delta.min(u32::MAX as i64) as u32;
+        // Monotonic guard: if the OS clock jumped backward (NTP step,
+        // suspend/resume) or `now_ms` regressed, clamp to the highest stamp
+        // we've already emitted so the FLV stream stays monotonic.
+        let out = candidate.max(inner.last_session_ts);
+        inner.last_session_ts = out;
+        out
     }
 
     /// Process a video frame from xiu's FrameData::Video.
@@ -298,6 +319,7 @@ impl FlvChunkSink {
         inner.chunk_last_ts = 0;
         inner.chunk_first_wall_clock_ms = 0;
         inner.session_start_wall_clock_ms = 0;
+        inner.last_session_ts = 0;
     }
 
     /// Get the total number of chunks produced.
@@ -384,7 +406,10 @@ impl FlvChunkSink {
                 .as_millis() as i64;
             let wall_span_ms = (now_ms - inner.chunk_first_wall_clock_ms).max(0);
             let tag_span_ms = (inner.chunk_last_ts as i64) - (inner.chunk_first_ts as i64);
-            tracing::info!(
+            // debug! (not info!) — the chunk-emit cadence is hot-path-frequent
+            // and only of interest when investigating drift; operators enable
+            // it via RUST_LOG=drift_debug=debug.
+            tracing::debug!(
                 target: "drift_debug",
                 chunk_index = index,
                 tag_span_ms,
@@ -529,7 +554,78 @@ impl FlvChunkSinkInner {
             chunk_last_ts: 0,
             chunk_first_wall_clock_ms: 0,
             session_start_wall_clock_ms: 0,
+            last_session_ts: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod session_ts_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn first_call_returns_zero_and_anchors() {
+        let mut inner = FlvChunkSinkInner::new_for_test(PathBuf::from("/tmp/x"));
+        let t = FlvChunkSink::current_session_ts(&mut inner);
+        assert_eq!(t, 0, "first call must return 0");
+        assert_ne!(
+            inner.session_start_wall_clock_ms, 0,
+            "anchor must be recorded"
+        );
+        assert_eq!(inner.last_session_ts, 0, "monotonic guard initialized");
+    }
+
+    #[test]
+    fn subsequent_calls_advance_with_wall_clock() {
+        let mut inner = FlvChunkSinkInner::new_for_test(PathBuf::from("/tmp/x"));
+        let t0 = FlvChunkSink::current_session_ts(&mut inner);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let t1 = FlvChunkSink::current_session_ts(&mut inner);
+        assert_eq!(t0, 0);
+        assert!(
+            t1 >= 20 && t1 < 1000,
+            "second stamp ({t1}) must reflect ~20ms elapsed"
+        );
+    }
+
+    #[test]
+    fn monotonic_guard_clamps_backward_jumps() {
+        // Simulate an OS clock step backward by manipulating the anchor:
+        // set anchor in the future, so the next call would compute a negative
+        // delta. The guard must return last_session_ts (5000), not regress.
+        let mut inner = FlvChunkSinkInner::new_for_test(PathBuf::from("/tmp/x"));
+        FlvChunkSink::current_session_ts(&mut inner); // anchor
+        inner.last_session_ts = 5000;
+        // Move the anchor far into the future to simulate `now < anchor`.
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 60_000;
+        inner.session_start_wall_clock_ms = future;
+
+        let t = FlvChunkSink::current_session_ts(&mut inner);
+        assert_eq!(t, 5000, "monotonic guard must hold output at last value");
+        assert_eq!(inner.last_session_ts, 5000);
+    }
+
+    #[test]
+    fn reset_clears_session_anchor_and_monotonic_state() {
+        // First session: stamp a few values.
+        let mut inner = FlvChunkSinkInner::new_for_test(PathBuf::from("/tmp/x"));
+        FlvChunkSink::current_session_ts(&mut inner);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t1 = FlvChunkSink::current_session_ts(&mut inner);
+        assert!(t1 > 0);
+
+        // Manually reset (mirrors what reset() does on the public sink).
+        inner.session_start_wall_clock_ms = 0;
+        inner.last_session_ts = 0;
+
+        // New session: first stamp must be 0 again.
+        let t0 = FlvChunkSink::current_session_ts(&mut inner);
+        assert_eq!(t0, 0, "post-reset first stamp must restart at 0");
     }
 }
 

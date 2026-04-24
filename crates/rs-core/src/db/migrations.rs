@@ -398,7 +398,7 @@ const MIGRATION_V2_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS endpoint_configs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     alias          TEXT NOT NULL UNIQUE,
-    service_type   TEXT NOT NULL CHECK(service_type IN ('FB','YT_RTMP','VIMEO','INSTAGRAM','TEST_FILE')),
+    service_type   TEXT NOT NULL CHECK(service_type IN ('YT_HLS','FB','YT_RTMP','VIMEO','INSTAGRAM','TEST_FILE')),
     stream_key     TEXT NOT NULL DEFAULT '',
     enabled        INTEGER NOT NULL DEFAULT 1,
     position_last  INTEGER NOT NULL DEFAULT 0,
@@ -614,18 +614,6 @@ async fn migrate_v19(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
     Ok(())
 }
 
-async fn migrate_v21(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
-    // YT_HLS endpoint type removed (#135): the HLS muxer interacted badly
-    // with the producer-side timestamp corrections needed to fix long-running
-    // cache drift. The operator confirmed HLS was not used in production.
-    // Delete any lingering rows so the DB constraint can be tightened and
-    // production databases are left in a consistent state on upgrade.
-    sqlx::query("DELETE FROM endpoint_configs WHERE service_type = 'YT_HLS'")
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
-}
-
 async fn migrate_v20(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
     // Producer wall-clock per chunk
     add_column_if_missing(
@@ -682,5 +670,23 @@ async fn migrate_v20(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
     .execute(&mut **tx)
     .await?;
 
+    Ok(())
+}
+
+async fn migrate_v21(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    // YT_HLS endpoint type removed (#135): the HLS muxer interacted badly
+    // with the producer-side timestamp corrections needed to fix long-running
+    // cache drift. The operator confirmed HLS was not used in production.
+    //
+    // V2's CHECK constraint intentionally still lists YT_HLS. SQLite does not
+    // support altering CHECK constraints in place, and the workarounds
+    // (table rebuild, writable_schema hack) trade complexity for no behavioural
+    // gain — the application no longer constructs YT_HLS endpoints, so the
+    // constraint widening is dead code in practice. Leaving V2 unchanged keeps
+    // production schemas (where V2 already ran) byte-identical to fresh dev
+    // schemas.
+    sqlx::query("DELETE FROM endpoint_configs WHERE service_type = 'YT_HLS'")
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
