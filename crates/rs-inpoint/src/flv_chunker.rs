@@ -928,8 +928,10 @@ mod rescale_tests {
         let mut buf = flv_buf_mixed(0, vec![33, 66]);
         rescale_flv_timestamps(&mut buf, HDR, 100);
         assert_eq!(ts_at(&buf, 0), 0, "script unchanged");
-        assert_eq!(ts_at(&buf, 1), 0, "first data → 0");
-        assert_eq!(ts_at(&buf, 2), 100, "last data → 100");
+        // Rescale preserves first_ts (33) as reference and scales last_ts to
+        // first_ts + target_span_ms = 33 + 100 = 133.
+        assert_eq!(ts_at(&buf, 1), 33, "first data stays at first_ts");
+        assert_eq!(ts_at(&buf, 2), 133, "last data → first_ts + target_span");
     }
 
     #[test]
