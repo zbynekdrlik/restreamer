@@ -57,6 +57,9 @@ struct FlvChunkSinkInner {
     chunk_first_ts: u32,
     /// RTMP timestamp of the last frame written to current chunk (milliseconds).
     chunk_last_ts: u32,
+    /// Unix epoch ms when write_chunk_header was called for the current chunk.
+    /// Used to compute wall-clock span vs FLV tag span for drift diagnostics.
+    chunk_first_wall_clock_ms: i64,
 }
 
 /// Data extracted from the buffer, ready to be written to disk outside the lock.
@@ -86,6 +89,7 @@ impl FlvChunkSink {
                 audio_sequence_header: None,
                 chunk_first_ts: 0,
                 chunk_last_ts: 0,
+                chunk_first_wall_clock_ms: 0,
             }),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
@@ -107,6 +111,7 @@ impl FlvChunkSink {
                 audio_sequence_header: None,
                 chunk_first_ts: 0,
                 chunk_last_ts: 0,
+                chunk_first_wall_clock_ms: 0,
             }),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
@@ -281,6 +286,10 @@ impl FlvChunkSink {
         inner.chunk_start = Some(Instant::now());
         inner.chunk_first_ts = timestamp;
         inner.chunk_last_ts = timestamp;
+        inner.chunk_first_wall_clock_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
     }
 
     /// Write an FLV tag (11-byte header + data + 4-byte previous tag size).
@@ -322,6 +331,24 @@ impl FlvChunkSink {
         }
 
         let index = inner.chunk_index;
+
+        // Diagnostic logging for drift analysis (#135).
+        {
+            let now_ms = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            let wall_span_ms = (now_ms - inner.chunk_first_wall_clock_ms).max(0);
+            let tag_span_ms = (inner.chunk_last_ts as i64) - (inner.chunk_first_ts as i64);
+            tracing::info!(
+                target: "drift_debug",
+                chunk_index = index,
+                tag_span_ms,
+                wall_span_ms,
+                buffer_size = inner.buffer.len(),
+                "FLV chunk emit"
+            );
+        }
 
         let mut hasher = Md5::new();
         hasher.update(&inner.buffer);
@@ -456,6 +483,7 @@ impl FlvChunkSinkInner {
             audio_sequence_header: None,
             chunk_first_ts: 0,
             chunk_last_ts: 0,
+            chunk_first_wall_clock_ms: 0,
         }
     }
 }
