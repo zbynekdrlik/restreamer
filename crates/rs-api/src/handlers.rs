@@ -15,8 +15,7 @@ use rs_endpoint::s3::S3Client;
 use crate::state::AppState;
 
 const REDACTED: &str = "***";
-const VALID_SERVICE_TYPES: &[&str] =
-    &["YT_HLS", "FB", "YT_RTMP", "VIMEO", "INSTAGRAM", "TEST_FILE"];
+const VALID_SERVICE_TYPES: &[&str] = &["FB", "YT_RTMP", "VIMEO", "INSTAGRAM", "TEST_FILE"];
 
 pub async fn health() -> StatusCode {
     StatusCode::OK

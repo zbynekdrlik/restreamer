@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 20;
+pub const MAX_SCHEMA_VERSION: i32 = 21;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -336,6 +336,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             18 => execute_sql_statements(&mut tx, MIGRATION_V18_SQL).await?,
             19 => migrate_v19(&mut tx).await?,
             20 => migrate_v20(&mut tx).await?,
+            21 => migrate_v21(&mut tx).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -397,7 +398,7 @@ const MIGRATION_V2_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS endpoint_configs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     alias          TEXT NOT NULL UNIQUE,
-    service_type   TEXT NOT NULL CHECK(service_type IN ('YT_HLS','FB','YT_RTMP','VIMEO','INSTAGRAM','TEST_FILE')),
+    service_type   TEXT NOT NULL CHECK(service_type IN ('FB','YT_RTMP','VIMEO','INSTAGRAM','TEST_FILE')),
     stream_key     TEXT NOT NULL DEFAULT '',
     enabled        INTEGER NOT NULL DEFAULT 1,
     position_last  INTEGER NOT NULL DEFAULT 0,
@@ -610,6 +611,18 @@ async fn migrate_v19(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
         "last_audit_cursor INTEGER NOT NULL DEFAULT 0",
     )
     .await?;
+    Ok(())
+}
+
+async fn migrate_v21(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    // YT_HLS endpoint type removed (#135): the HLS muxer interacted badly
+    // with the producer-side timestamp corrections needed to fix long-running
+    // cache drift. The operator confirmed HLS was not used in production.
+    // Delete any lingering rows so the DB constraint can be tightened and
+    // production databases are left in a consistent state on upgrade.
+    sqlx::query("DELETE FROM endpoint_configs WHERE service_type = 'YT_HLS'")
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 

@@ -31,10 +31,10 @@ pub enum RescueReason {
 }
 
 /// Build ffmpeg arguments for the rescue video loop with drawtext overlay.
+/// All service types use FLV output (YT_HLS removed in #135).
 pub fn build_rescue_ffmpeg_args(
     rescue_video_url: &str,
     endpoint_url: &str,
-    output_format: &str,
     alias: &str,
 ) -> Vec<String> {
     let countdown_path = countdown_file_path(alias);
@@ -110,44 +110,14 @@ pub fn build_rescue_ffmpeg_args(
         "2".into(),
     ];
 
-    match output_format {
-        "hls" => {
-            args.extend_from_slice(&[
-                "-f".into(),
-                "hls".into(),
-                "-hls_segment_type".into(),
-                "mpegts".into(),
-                "-hls_list_size".into(),
-                "5".into(),
-                "-hls_time".into(),
-                "2".into(),
-                "-hls_flags".into(),
-                "delete_segments".into(),
-                "-start_number".into(),
-                "0".into(),
-                "-method".into(),
-                "PUT".into(),
-                "-flags".into(),
-                "+cgop".into(),
-                "-muxdelay".into(),
-                "0".into(),
-                "-muxpreload".into(),
-                "0".into(),
-                "-reset_timestamps".into(),
-                "1".into(),
-                endpoint_url.to_string(),
-            ]);
-        }
-        _ => {
-            args.extend_from_slice(&[
-                "-f".into(),
-                "flv".into(),
-                "-flvflags".into(),
-                "no_duration_filesize".into(),
-                endpoint_url.to_string(),
-            ]);
-        }
-    }
+    // All service types use FLV output (YT_HLS removed in #135).
+    args.extend_from_slice(&[
+        "-f".into(),
+        "flv".into(),
+        "-flvflags".into(),
+        "no_duration_filesize".into(),
+        endpoint_url.to_string(),
+    ]);
 
     args
 }
@@ -203,19 +173,14 @@ pub fn cleanup_countdown_file(alias: &str) {
 }
 
 /// Determine the output format string based on service type.
-pub fn output_format_for_service(service_type: ServiceType) -> &'static str {
-    match service_type {
-        ServiceType::YtHls => "hls",
-        _ => "flv",
-    }
+/// All supported service types use FLV output.
+pub fn output_format_for_service(_service_type: ServiceType) -> &'static str {
+    "flv"
 }
 
 /// Build the endpoint URL for a given service type and stream key.
 pub fn endpoint_url_for_service(service_type: ServiceType, stream_key: &str) -> String {
     match service_type {
-        ServiceType::YtHls => format!(
-            "https://a.upload.youtube.com/http_upload_hls?cid={stream_key}&copy=0&file=out1248.ts"
-        ),
         ServiceType::YtRtmp => format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}"),
         ServiceType::Facebook => format!("rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}"),
         ServiceType::Vimeo => format!("rtmps://rtmp-global.cloud.vimeo.com:443/live/{stream_key}"),
@@ -247,8 +212,7 @@ pub async fn run_rescue_loop(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
 ) -> bool {
     let ep_url = endpoint_url_for_service(service_type, stream_key);
-    let out_fmt = output_format_for_service(service_type);
-    let rescue_args = build_rescue_ffmpeg_args(rescue_url, &ep_url, out_fmt, alias);
+    let rescue_args = build_rescue_ffmpeg_args(rescue_url, &ep_url, alias);
 
     let initial_text = format_countdown_text(
         &DeliveryMode::Rescue {
@@ -365,8 +329,7 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
                 .parse()
                 .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
             let ep_url = endpoint_url_for_service(svc_type, &ep_cfg.stream_key);
-            let out_fmt = output_format_for_service(svc_type);
-            let rescue_args = build_rescue_ffmpeg_args(rescue_url, &ep_url, out_fmt, alias);
+            let rescue_args = build_rescue_ffmpeg_args(rescue_url, &ep_url, alias);
 
             let initial_text = format_countdown_text(
                 &DeliveryMode::Rescue {

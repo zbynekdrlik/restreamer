@@ -576,7 +576,7 @@ mod tests {
         let body = serde_json::json!({
             "endpoint": {
                 "alias": "test-yt",
-                "service_type": "YT_HLS",
+                "service_type": "YT_RTMP",
                 "stream_key": "fake-key"
             }
         });

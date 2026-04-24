@@ -176,10 +176,10 @@ mod tests {
             .unwrap();
 
         // Two ffmpeg progress samples → consumer_rate has 1 sample
-        db::drift::insert_ffmpeg_progress_sample(pool, event_id, "YT_HLS", 1_000, 0, 1_000_000)
+        db::drift::insert_ffmpeg_progress_sample(pool, event_id, "YT_RTMP", 1_000, 0, 1_000_000)
             .await
             .unwrap();
-        db::drift::insert_ffmpeg_progress_sample(pool, event_id, "YT_HLS", 2_000, 990, 1_001_000)
+        db::drift::insert_ffmpeg_progress_sample(pool, event_id, "YT_RTMP", 2_000, 990, 1_001_000)
             .await
             .unwrap();
 
@@ -189,7 +189,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(&format!(
-                        "/api/v1/diagnostics/pacing?event_id={event_id}&endpoint_alias=YT_HLS"
+                        "/api/v1/diagnostics/pacing?event_id={event_id}&endpoint_alias=YT_RTMP"
                     ))
                     .body(Body::empty())
                     .unwrap(),

@@ -1,7 +1,7 @@
 /// FFmpeg process management for streaming endpoints.
 ///
 /// Spawns and manages ffmpeg processes for different streaming service types.
-/// Each service type (YouTube HLS, Facebook, etc.) has a specific ffmpeg
+/// Each service type (Facebook, YouTube RTMP, etc.) has a specific ffmpeg
 /// command configuration.
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -26,8 +26,6 @@ pub enum FfmpegError {
 /// Supported streaming service types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ServiceType {
-    #[serde(rename = "YT_HLS")]
-    YtHls,
     #[serde(rename = "FB")]
     Facebook,
     #[serde(rename = "YT_RTMP")]
@@ -43,7 +41,6 @@ pub enum ServiceType {
 impl std::fmt::Display for ServiceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::YtHls => write!(f, "YT_HLS"),
             Self::Facebook => write!(f, "FB"),
             Self::YtRtmp => write!(f, "YT_RTMP"),
             Self::Vimeo => write!(f, "VIMEO"),
@@ -57,7 +54,6 @@ impl std::str::FromStr for ServiceType {
     type Err = String;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "YT_HLS" => Ok(Self::YtHls),
             "FB" => Ok(Self::Facebook),
             "YT_RTMP" => Ok(Self::YtRtmp),
             "VIMEO" => Ok(Self::Vimeo),
@@ -72,7 +68,6 @@ impl std::str::FromStr for ServiceType {
 /// All endpoints use FLV input from pipe.
 pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &str) -> Vec<String> {
     match service_type {
-        ServiceType::YtHls => build_yt_hls_args(stream_key),
         ServiceType::YtRtmp => {
             build_flv_rtmp_args(&format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}"))
         }
@@ -87,51 +82,6 @@ pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &st
         )),
         ServiceType::TestFile => build_test_file_args(alias),
     }
-}
-
-/// YT_HLS: FLV input, HLS output via HTTPS PUT.
-fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
-    let output_url = format!(
-        "https://a.upload.youtube.com/http_upload_hls?cid={stream_key}&copy=0&file=out1248.ts"
-    );
-    vec![
-        "-re".into(),
-        "-f".into(),
-        "flv".into(),
-        "-loglevel".into(),
-        "info".into(),
-        "-i".into(),
-        "pipe:".into(),
-        "-avoid_negative_ts".into(),
-        "make_zero".into(),
-        "-f".into(),
-        "hls".into(),
-        "-hls_segment_type".into(),
-        "mpegts".into(),
-        "-hls_segment_options".into(),
-        "mpegts_flags=+pat_pmt_at_frames+resend_headers".into(),
-        "-hls_list_size".into(),
-        "5".into(),
-        "-hls_time".into(),
-        "2".into(),
-        "-hls_flags".into(),
-        "delete_segments".into(),
-        "-start_number".into(),
-        "0".into(),
-        "-method".into(),
-        "PUT".into(),
-        "-c".into(),
-        "copy".into(),
-        "-flags".into(),
-        "+cgop".into(),
-        "-muxdelay".into(),
-        "0".into(),
-        "-muxpreload".into(),
-        "0".into(),
-        "-reset_timestamps".into(),
-        "1".into(),
-        output_url,
-    ]
 }
 
 /// FLV->FLV passthrough for RTMP/RTMPS endpoints.
@@ -452,7 +402,6 @@ mod tests {
     #[test]
     fn service_type_display_roundtrip() {
         let types = [
-            ServiceType::YtHls,
             ServiceType::Facebook,
             ServiceType::YtRtmp,
             ServiceType::Vimeo,
@@ -469,7 +418,6 @@ mod tests {
     #[test]
     fn service_type_serde_roundtrip() {
         let types = [
-            ServiceType::YtHls,
             ServiceType::Facebook,
             ServiceType::YtRtmp,
             ServiceType::Vimeo,
@@ -481,22 +429,6 @@ mod tests {
             let parsed: ServiceType = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, st);
         }
-    }
-
-    #[test]
-    fn build_yt_hls_args_correct() {
-        let args = build_ffmpeg_args(ServiceType::YtHls, "test-key", "YouTube");
-        assert!(args.iter().any(|a| a.contains("a.upload.youtube.com")));
-        assert!(args.iter().any(|a| a.contains("test-key")));
-        assert!(args.contains(&"hls".to_string()));
-        assert!(args.contains(&"PUT".to_string()));
-        assert!(args.contains(&"1".to_string())); // reset_timestamps
-        assert!(args.contains(&"+cgop".to_string()));
-        // YT_HLS now uses FLV input
-        let f_idx = args.iter().position(|a| a == "-f").unwrap();
-        assert_eq!(args[f_idx + 1], "flv", "YT_HLS should use FLV input");
-        // Should use -re for pacing
-        assert!(args.contains(&"-re".to_string()));
     }
 
     #[test]
@@ -577,7 +509,6 @@ mod tests {
     #[test]
     fn all_commands_have_pipe_input() {
         let types = [
-            ServiceType::YtHls,
             ServiceType::Facebook,
             ServiceType::YtRtmp,
             ServiceType::Vimeo,
@@ -596,7 +527,6 @@ mod tests {
     #[test]
     fn all_commands_have_flv_input() {
         let types = [
-            ServiceType::YtHls,
             ServiceType::Facebook,
             ServiceType::YtRtmp,
             ServiceType::Vimeo,
@@ -617,7 +547,6 @@ mod tests {
     #[test]
     fn flv_paths_use_re_flag() {
         let types = [
-            ServiceType::YtHls,
             ServiceType::Facebook,
             ServiceType::YtRtmp,
             ServiceType::Vimeo,

@@ -861,7 +861,7 @@ test.describe("Endpoint Editing", () => {
     await expect(section.locator(".endpoint-edit-form")).toBeVisible({
       timeout: 5000,
     });
-    // The type dropdown MUST show "FB", not "YT_HLS"
+    // The type dropdown MUST show "FB", not any other type
     const typeSelect = section.locator(
       '.edit-row:has(label:text("Type")) select',
     );
@@ -888,7 +888,7 @@ test.describe("Endpoint Editing", () => {
     );
     await aliasInput.clear();
     await aliasInput.fill("Facebook Updated");
-    // Intercept the PUT — service_type MUST be "FB", not "YT_HLS"
+    // Intercept the PUT — service_type MUST be "FB", unchanged
     const [request] = await Promise.all([
       page.waitForRequest(
         (req) => req.url().includes("/endpoints/") && req.method() === "PUT",

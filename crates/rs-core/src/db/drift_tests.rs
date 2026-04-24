@@ -100,14 +100,14 @@ async fn list_ffmpeg_consumer_rate_computes_ratio() {
     let event_id = upsert_streaming_event(&pool, "evt-drift-5").await.unwrap();
 
     // Two progress samples: media time advances 990ms while wall-clock advances 1000ms.
-    drift::insert_ffmpeg_progress_sample(&pool, event_id, "YT_HLS", 1_000, 0, 1_000_000)
+    drift::insert_ffmpeg_progress_sample(&pool, event_id, "YT_RTMP", 1_000, 0, 1_000_000)
         .await
         .unwrap();
-    drift::insert_ffmpeg_progress_sample(&pool, event_id, "YT_HLS", 2_000, 990, 1_001_000)
+    drift::insert_ffmpeg_progress_sample(&pool, event_id, "YT_RTMP", 2_000, 990, 1_001_000)
         .await
         .unwrap();
 
-    let series = drift::list_ffmpeg_consumer_rate(&pool, event_id, "YT_HLS", 0)
+    let series = drift::list_ffmpeg_consumer_rate(&pool, event_id, "YT_RTMP", 0)
         .await
         .unwrap();
     assert_eq!(series.len(), 1);
