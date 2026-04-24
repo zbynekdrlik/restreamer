@@ -351,14 +351,17 @@ impl FlvChunkSink {
             "FLV chunk emit"
         );
 
-        // Producer-side timestamp rescale with edge-case guards (#135).
-        // Guard 1: wall_span < 500ms → OBS warmup burst, timestamps are
-        //           meaningless; skip rescale to avoid inflating duration_ms.
-        // Guard 2: wall_span > 3× tag_span → keyframe-wait stall; rescaling
-        //          would inflate duration_ms far beyond content duration.
-        let should_rescale = wall_span_ms >= 500 && wall_span_ms <= (tag_span_ms * 3).max(5000);
-
-        if should_rescale && tag_span_ms > 0 {
+        // Producer-side timestamp rescale (#135). Rewrite tag timestamps so the
+        // chunk's declared timestamp span equals its actual wall-clock span.
+        // This makes consumer ffmpeg -re (= 1.0x timestamps per wall-clock sec)
+        // drain at the correct real-time rate, eliminating the drift caused
+        // by OBS stamping at 1/30 s while actually capturing at 30.30 fps
+        // (see docs/superpowers/specs/2026-04-23-phase2-evidence/).
+        //
+        // Single guard: tag_span_ms > 0 (skip single-tag chunks).
+        // Previous guards on wall_span_ms created inconsistent duration_ms
+        // values that broke downstream cache accounting.
+        if tag_span_ms > 0 && wall_span_ms > 0 {
             rescale_flv_timestamps(&mut inner.buffer, header_size, wall_span_ms as u32);
             inner.chunk_last_ts = inner.chunk_first_ts.saturating_add(wall_span_ms as u32);
         }
@@ -950,11 +953,12 @@ mod rescale_tests {
         assert_eq!(original, rescaled);
     }
 
-    // --- extract_chunk edge-case guard tests ---
+    // --- extract_chunk rescale tests ---
 
     #[test]
-    fn rescale_applied_when_span_reasonable() {
-        // wall_span=1010ms, tag_span=994ms → within guards → rescale fires.
+    fn rescale_rewrites_last_tag_to_wall_span() {
+        // tag_span=994ms, wall_span=1010ms → rescale fires; last ts becomes
+        // first_ts + wall_span_ms = 1000 + 1010 = 2010.
         let mut inner = make_inner(1000, 1994, now_ms() - 1010);
         assert_eq!(last_ts(&inner.buffer), 1994);
         let pending = FlvChunkSink::extract_chunk(&mut inner).unwrap();
@@ -962,18 +966,16 @@ mod rescale_tests {
     }
 
     #[test]
-    fn rescale_skipped_on_short_wall_span() {
-        // wall_span=100ms < 500ms → no rescale.
+    fn rescale_applied_even_for_short_wall_span() {
+        // Even wall_span=100ms → rescale fires. Chunks with short wall-span
+        // legitimately reflect OBS burst arrival; consumer at -re naturally
+        // drains them fast, keeping cache accounting consistent.
         let mut inner = make_inner(0, 990, now_ms() - 100);
         let pending = FlvChunkSink::extract_chunk(&mut inner).unwrap();
-        assert_eq!(last_ts(&pending.data), 990);
-    }
-
-    #[test]
-    fn rescale_skipped_on_long_wall_span() {
-        // wall_span=5001ms > max(990*3, 5000)=5000 → no rescale.
-        let mut inner = make_inner(0, 990, now_ms() - 5001);
-        let pending = FlvChunkSink::extract_chunk(&mut inner).unwrap();
-        assert_eq!(last_ts(&pending.data), 990);
+        assert_eq!(
+            last_ts(&pending.data),
+            100,
+            "rescale to wall_span=100 makes last_ts = first_ts + 100"
+        );
     }
 }
