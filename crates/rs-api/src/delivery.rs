@@ -617,6 +617,13 @@ impl DeliveryOrchestrator {
         db::update_delivery_instance_status(&self.pool, instance_id, "delivering").await?;
         info!(event_id, "Delivery endpoints initialized successfully");
 
+        // Spawn the per-delivery clock-skew probe now that the VPS is confirmed
+        // healthy and delivering. Single spawn point — do NOT spawn this probe
+        // from delivery_handlers.rs or stream_handlers.rs.
+        let vps_base_url = format!("http://{}:8000", instance.ipv4);
+        crate::clock_skew_probe::spawn_skew_probe(self.pool.clone(), event_id, vps_base_url);
+        info!(event_id, "Clock-skew probe started");
+
         Ok(())
     }
 

@@ -18,7 +18,7 @@ pub enum ReasonClass {
 
 /// Classify the last portion of ffmpeg stderr into a reason class.
 ///
-/// `service_type` is one of "YT_RTMP", "YT_HLS", "FB", "CUSTOM_RTMP", etc.
+/// `service_type` is one of "YT_RTMP", "FB", "VIMEO", "INSTAGRAM", "TEST_FILE", etc.
 pub fn classify(service_type: &str, stderr_tail: &str) -> ReasonClass {
     // Cheap: look at the last 4 KB only.
     let start = stderr_tail.len().saturating_sub(4096);

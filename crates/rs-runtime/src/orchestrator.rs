@@ -250,13 +250,14 @@ impl ServiceCore {
                         match db::get_streaming_event(&chunk_pool).await {
                             Ok(Some(event)) => {
                                 let path_str = chunk_info.path.to_string_lossy().to_string();
-                                match db::insert_chunk(
+                                match db::drift::insert_chunk_with_walltime(
                                     &chunk_pool,
                                     event.id,
                                     &path_str,
                                     chunk_info.size as i64,
                                     &chunk_info.md5,
                                     chunk_info.duration_ms as i64,
+                                    chunk_info.wall_clock_written_at_ms,
                                 )
                                 .await
                                 {

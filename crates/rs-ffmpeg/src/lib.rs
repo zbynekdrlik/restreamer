@@ -1,7 +1,7 @@
 /// FFmpeg process management for streaming endpoints.
 ///
 /// Spawns and manages ffmpeg processes for different streaming service types.
-/// Each service type (YouTube HLS, Facebook, etc.) has a specific ffmpeg
+/// Each service type (Facebook, YouTube RTMP, etc.) has a specific ffmpeg
 /// command configuration.
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -10,6 +10,23 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
+
+async fn drain_stderr<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: R,
+    stderr_lines: Arc<Mutex<VecDeque<String>>>,
+    alias_for_log: &str,
+) {
+    let mut lines = reader.lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Ok(mut buf) = stderr_lines.lock() {
+            if buf.len() >= STDERR_BUFFER_SIZE {
+                buf.pop_front();
+            }
+            buf.push_back(line);
+        }
+    }
+    tracing::debug!(alias = %alias_for_log, "ffmpeg stderr drain task finished");
+}
 
 #[derive(Debug, Error)]
 pub enum FfmpegError {
@@ -26,8 +43,6 @@ pub enum FfmpegError {
 /// Supported streaming service types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ServiceType {
-    #[serde(rename = "YT_HLS")]
-    YtHls,
     #[serde(rename = "FB")]
     Facebook,
     #[serde(rename = "YT_RTMP")]
@@ -43,7 +58,6 @@ pub enum ServiceType {
 impl std::fmt::Display for ServiceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::YtHls => write!(f, "YT_HLS"),
             Self::Facebook => write!(f, "FB"),
             Self::YtRtmp => write!(f, "YT_RTMP"),
             Self::Vimeo => write!(f, "VIMEO"),
@@ -57,7 +71,6 @@ impl std::str::FromStr for ServiceType {
     type Err = String;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "YT_HLS" => Ok(Self::YtHls),
             "FB" => Ok(Self::Facebook),
             "YT_RTMP" => Ok(Self::YtRtmp),
             "VIMEO" => Ok(Self::Vimeo),
@@ -72,7 +85,6 @@ impl std::str::FromStr for ServiceType {
 /// All endpoints use FLV input from pipe.
 pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &str) -> Vec<String> {
     match service_type {
-        ServiceType::YtHls => build_yt_hls_args(stream_key),
         ServiceType::YtRtmp => {
             build_flv_rtmp_args(&format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}"))
         }
@@ -89,63 +101,9 @@ pub fn build_ffmpeg_args(service_type: ServiceType, stream_key: &str, alias: &st
     }
 }
 
-/// YT_HLS: FLV input, HLS output via HTTPS PUT.
-/// Uses -re for pacing; real-time pacing is also enforced in the Rust
-/// consumer task in rs-delivery so that ffmpeg restarts cannot drain the
-/// pre-fetch buffer faster than real time.
-fn build_yt_hls_args(stream_key: &str) -> Vec<String> {
-    let output_url = format!(
-        "https://a.upload.youtube.com/http_upload_hls?cid={stream_key}&copy=0&file=out1248.ts"
-    );
-    vec![
-        "-re".into(),
-        "-f".into(),
-        "flv".into(),
-        "-loglevel".into(),
-        "info".into(),
-        "-i".into(),
-        "pipe:".into(),
-        "-avoid_negative_ts".into(),
-        "make_zero".into(),
-        "-f".into(),
-        "hls".into(),
-        "-hls_segment_type".into(),
-        "mpegts".into(),
-        "-hls_segment_options".into(),
-        "mpegts_flags=+pat_pmt_at_frames+resend_headers".into(),
-        "-hls_list_size".into(),
-        "5".into(),
-        "-hls_time".into(),
-        "2".into(),
-        "-hls_flags".into(),
-        "delete_segments".into(),
-        "-start_number".into(),
-        "0".into(),
-        "-method".into(),
-        "PUT".into(),
-        "-c".into(),
-        "copy".into(),
-        "-flags".into(),
-        "+cgop".into(),
-        "-muxdelay".into(),
-        "0".into(),
-        "-muxpreload".into(),
-        "0".into(),
-        "-reset_timestamps".into(),
-        "1".into(),
-        output_url,
-    ]
-}
-
 /// FLV->FLV passthrough for RTMP/RTMPS endpoints.
 /// Minimal flags: input is already valid FLV, just forward bytes.
 /// No genpts, no avoid_negative_ts, no copytb, no bsf needed.
-///
-/// Real-time pacing is enforced in the Rust consumer task in rs-delivery
-/// (see `consumer_task` pacing anchor). `-re` here is a secondary safety net;
-/// it alone is not sufficient because on ffmpeg restart the fresh process
-/// re-anchors on the absolute FLV timestamps from xiu, treats the old
-/// timestamps as "behind", and drains stdin as fast as possible.
 fn build_flv_rtmp_args(url: &str) -> Vec<String> {
     vec![
         "-re".into(),
@@ -224,24 +182,17 @@ impl FfmpegProcess {
 
         // Spawn a background task to drain stderr and capture last N lines.
         let stderr = child.stderr.take();
-        let alias_clone = alias.to_string();
         let stderr_lines: Arc<Mutex<VecDeque<String>>> =
             Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_SIZE)));
         let stderr_lines_clone = Arc::clone(&stderr_lines);
+        let alias_owned = alias.to_string();
         tokio::spawn(async move {
-            if let Some(stderr) = stderr {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if let Ok(mut buf) = stderr_lines_clone.lock() {
-                        if buf.len() >= STDERR_BUFFER_SIZE {
-                            buf.pop_front();
-                        }
-                        buf.push_back(line);
-                    }
-                }
-                tracing::debug!(alias = %alias_clone, "ffmpeg stderr drain task finished");
-            }
+            drain_stderr(
+                BufReader::new(stderr.expect("stderr is piped")),
+                stderr_lines_clone,
+                &alias_owned,
+            )
+            .await;
         });
 
         Ok(Self {
@@ -362,7 +313,6 @@ mod tests {
     #[test]
     fn service_type_display_roundtrip() {
         let types = [
-            ServiceType::YtHls,
             ServiceType::Facebook,
             ServiceType::YtRtmp,
             ServiceType::Vimeo,
@@ -379,7 +329,6 @@ mod tests {
     #[test]
     fn service_type_serde_roundtrip() {
         let types = [
-            ServiceType::YtHls,
             ServiceType::Facebook,
             ServiceType::YtRtmp,
             ServiceType::Vimeo,
@@ -391,22 +340,6 @@ mod tests {
             let parsed: ServiceType = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, st);
         }
-    }
-
-    #[test]
-    fn build_yt_hls_args_correct() {
-        let args = build_ffmpeg_args(ServiceType::YtHls, "test-key", "YouTube");
-        assert!(args.iter().any(|a| a.contains("a.upload.youtube.com")));
-        assert!(args.iter().any(|a| a.contains("test-key")));
-        assert!(args.contains(&"hls".to_string()));
-        assert!(args.contains(&"PUT".to_string()));
-        assert!(args.contains(&"1".to_string())); // reset_timestamps
-        assert!(args.contains(&"+cgop".to_string()));
-        // YT_HLS now uses FLV input
-        let f_idx = args.iter().position(|a| a == "-f").unwrap();
-        assert_eq!(args[f_idx + 1], "flv", "YT_HLS should use FLV input");
-        // Should use -re for pacing
-        assert!(args.contains(&"-re".to_string()));
     }
 
     #[test]
@@ -487,7 +420,6 @@ mod tests {
     #[test]
     fn all_commands_have_pipe_input() {
         let types = [
-            ServiceType::YtHls,
             ServiceType::Facebook,
             ServiceType::YtRtmp,
             ServiceType::Vimeo,
@@ -506,7 +438,6 @@ mod tests {
     #[test]
     fn all_commands_have_flv_input() {
         let types = [
-            ServiceType::YtHls,
             ServiceType::Facebook,
             ServiceType::YtRtmp,
             ServiceType::Vimeo,
@@ -520,18 +451,13 @@ mod tests {
         }
     }
 
-    /// All FLV paths keep `-re` so ffmpeg paces output approximately to
-    /// real time. Note that `-re` ALONE is not sufficient to prevent the
-    /// cache-collapse-on-restart bug — on ffmpeg restart the fresh process
-    /// re-anchors on the absolute FLV timestamps from xiu, sees them as
-    /// deep in the past, and drains stdin as fast as possible to catch up.
-    /// The real fix lives in the Rust consumer task in rs-delivery, which
-    /// enforces wall-clock real-time pacing across ffmpeg restarts. This
-    /// test just pins the `-re` flag so a careless removal is caught.
+    /// All FLV paths use `-re` for real-time pacing. The producer-side
+    /// `rescale_flv_timestamps` in rs-inpoint ensures FLV tag timestamps
+    /// match wall-clock span before the chunk is written, so `-re` drains
+    /// at the correct rate. See #135.
     #[test]
     fn flv_paths_use_re_flag() {
         let types = [
-            ServiceType::YtHls,
             ServiceType::Facebook,
             ServiceType::YtRtmp,
             ServiceType::Vimeo,
@@ -542,7 +468,11 @@ mod tests {
             let args = build_ffmpeg_args(st, "key", "alias");
             assert!(
                 args.contains(&"-re".to_string()),
-                "{st} must have -re for ffmpeg-side pacing"
+                "{st} must have -re for real-time pacing"
+            );
+            assert!(
+                !args.contains(&"-readrate".to_string()),
+                "{st} must NOT have -readrate (use -re instead)"
             );
         }
     }

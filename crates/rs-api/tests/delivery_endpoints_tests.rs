@@ -28,7 +28,7 @@ async fn setup_with_status(status: &str) -> (DeliveryOrchestrator, SqlitePool, C
 
     let endpoint_id: i64 = sqlx::query_scalar(
         "INSERT INTO endpoint_configs (alias, service_type, stream_key)
-         VALUES ('yt', 'YT_HLS', 'k') RETURNING id",
+         VALUES ('yt', 'YT_RTMP', 'k') RETURNING id",
     )
     .fetch_one(&pool)
     .await

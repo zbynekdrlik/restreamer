@@ -152,7 +152,7 @@ let endpoints = [
   {
     id: 1,
     alias: "YouTube Main",
-    service_type: "YT_HLS",
+    service_type: "YT_RTMP",
     stream_key: "xxxx-xxxx-xxxx",
     enabled: true,
     position_last: 0,
@@ -478,7 +478,7 @@ app.post("/api/v1/endpoints", (req, res) => {
   const newEp = {
     id: endpoints.length + 1,
     alias: req.body.alias || "New Endpoint",
-    service_type: req.body.service_type || "YT_HLS",
+    service_type: req.body.service_type || "YT_RTMP",
     stream_key: req.body.stream_key || "",
     enabled: true,
     position_last: 0,
@@ -622,6 +622,17 @@ app.get("/api/v1/youtube/status", (_req, res) => {
       },
     ],
     error: null,
+  });
+});
+
+// Diagnostics: pacing time-series (empty series for all E2E tests — no real
+// chunks exist in the mock, but the endpoint must return a valid response so
+// the panel renders without errors).
+app.get("/api/v1/diagnostics/pacing", (_req, res) => {
+  res.json({
+    producer_rate: [],
+    consumer_rate: [],
+    clock_skew: [],
   });
 });
 

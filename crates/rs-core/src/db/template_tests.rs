@@ -21,7 +21,7 @@ async fn migration_v12_creates_template_tables() {
 
     // template_endpoints table exists (FK to event_templates)
     let ep_id: i64 = sqlx::query(
-        "INSERT INTO endpoint_configs (alias, service_type, stream_key) VALUES ('yt', 'YT_HLS', 'k') RETURNING id",
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key) VALUES ('yt', 'YT_RTMP', 'k') RETURNING id",
     )
     .fetch_one(&pool)
     .await
@@ -112,7 +112,7 @@ async fn template_endpoint_linking() {
     let tmpl_id = create_template(&pool, "Multi-endpoint Template", Some(45), None)
         .await
         .unwrap();
-    let ep1 = create_endpoint_config(&pool, "YT-tmpl", "YT_HLS", "key-yt", false)
+    let ep1 = create_endpoint_config(&pool, "YT-tmpl", "YT_RTMP", "key-yt", false)
         .await
         .unwrap();
     let ep2 = create_endpoint_config(&pool, "FB-tmpl", "FB", "key-fb", false)
@@ -157,7 +157,7 @@ async fn template_cascade_deletes_endpoints() {
     let tmpl_id = create_template(&pool, "Cascade Test", None, None)
         .await
         .unwrap();
-    let ep_id = create_endpoint_config(&pool, "YT-cascade", "YT_HLS", "key", false)
+    let ep_id = create_endpoint_config(&pool, "YT-cascade", "YT_RTMP", "key", false)
         .await
         .unwrap();
     attach_endpoint_to_template(&pool, tmpl_id, ep_id)
@@ -189,7 +189,7 @@ async fn create_event_from_template_basic() {
     let tmpl_id = create_template(&pool, "Morning Service", Some(45), None)
         .await
         .unwrap();
-    let ep_id = create_endpoint_config(&pool, "YT-from-tmpl", "YT_HLS", "stream-key", false)
+    let ep_id = create_endpoint_config(&pool, "YT-from-tmpl", "YT_RTMP", "stream-key", false)
         .await
         .unwrap();
     attach_endpoint_to_template(&pool, tmpl_id, ep_id)
@@ -348,7 +348,7 @@ async fn seed_templates_converts_events() {
 
     // Create endpoint and assign to evt1
     let ep_id: i64 = sqlx::query(
-        "INSERT INTO endpoint_configs (alias, service_type, stream_key) VALUES ('yt', 'YT_HLS', 'k') RETURNING id",
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key) VALUES ('yt', 'YT_RTMP', 'k') RETURNING id",
     )
     .fetch_one(&pool)
     .await

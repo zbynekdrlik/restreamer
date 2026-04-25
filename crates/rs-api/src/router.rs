@@ -176,6 +176,11 @@ pub fn build_router(state: AppState) -> Router {
             "/uploads/recent",
             get(uploads_endpoints::get_recent_uploads),
         )
+        // Diagnostics
+        .route(
+            "/diagnostics/pacing",
+            get(crate::diagnostics_pacing::get_pacing),
+        )
         // Test hooks for CI E2E testing
         .route("/_test/s3-block", post(handlers::test_s3_block))
         .route("/_test/s3-unblock", post(handlers::test_s3_unblock));

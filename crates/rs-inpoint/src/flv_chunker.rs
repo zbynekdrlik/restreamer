@@ -15,6 +15,8 @@ pub struct ChunkInfo {
     pub md5: String,
     pub index: u64,
     pub duration_ms: u64,
+    /// Unix epoch milliseconds at which the producer wrote the chunk to disk.
+    pub wall_clock_written_at_ms: i64,
 }
 
 /// Maximum buffer size before a forced flush (50 MB).
@@ -51,10 +53,19 @@ struct FlvChunkSinkInner {
     /// Saved codec sequence headers for writing at chunk start.
     video_sequence_header: Option<BytesMut>,
     audio_sequence_header: Option<BytesMut>,
-    /// RTMP timestamp of the first frame in current chunk (milliseconds).
+    /// Wall-clock timestamp of the first frame in current chunk (milliseconds).
     chunk_first_ts: u32,
-    /// RTMP timestamp of the last frame written to current chunk (milliseconds).
+    /// Wall-clock timestamp of the last frame written to current chunk (milliseconds).
     chunk_last_ts: u32,
+    /// Unix epoch ms when write_chunk_header was called for the current chunk.
+    /// Used to compute wall-clock span vs FLV tag span for drift diagnostics.
+    chunk_first_wall_clock_ms: i64,
+    /// Unix epoch ms at first tag of current session. 0 = not yet set.
+    /// Reset when reset() is called (RTMP disconnect / new session).
+    session_start_wall_clock_ms: i64,
+    /// Highest output timestamp emitted in the current session. Enforces
+    /// monotonic stamping under OS clock skew or wall-clock anomalies.
+    last_session_ts: u32,
 }
 
 /// Data extracted from the buffer, ready to be written to disk outside the lock.
@@ -65,6 +76,8 @@ struct PendingChunkWrite {
     md5: String,
     index: u64,
     duration_ms: u64,
+    /// Unix epoch milliseconds stamped at the moment the chunk data was extracted.
+    wall_clock_written_at_ms: i64,
 }
 
 impl FlvChunkSink {
@@ -82,6 +95,9 @@ impl FlvChunkSink {
                 audio_sequence_header: None,
                 chunk_first_ts: 0,
                 chunk_last_ts: 0,
+                chunk_first_wall_clock_ms: 0,
+                session_start_wall_clock_ms: 0,
+                last_session_ts: 0,
             }),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
@@ -103,6 +119,9 @@ impl FlvChunkSink {
                 audio_sequence_header: None,
                 chunk_first_ts: 0,
                 chunk_last_ts: 0,
+                chunk_first_wall_clock_ms: 0,
+                session_start_wall_clock_ms: 0,
+                last_session_ts: 0,
             }),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
@@ -114,11 +133,51 @@ impl FlvChunkSink {
         self.chunk_tx.subscribe()
     }
 
+    /// Compute a wall-clock-derived session timestamp in milliseconds.
+    ///
+    /// On the first call after a session reset, records `now` as the session
+    /// anchor and returns 0. On subsequent calls, returns `now - anchor`,
+    /// clamped to be non-decreasing across the session.
+    ///
+    /// This replaces OBS's declared-fps-based timestamps (which produce 994ms
+    /// of tag time per wall-clock second at 30fps) with actual arrival timing,
+    /// fixing the cache-drift described in issue #135.
+    ///
+    /// **A/V sync note:** audio and video tags get stamped with their respective
+    /// arrival wall-clock, so network jitter between the two streams (typically
+    /// <50ms on TCP RTMP) maps directly to A/V offset in the output. This is
+    /// well below the perceptible threshold (~150ms) and acceptable for our
+    /// use case of OBS-on-LAN ingest. A future revision may introduce
+    /// OBS-PTS-relative stamping with a smoothed rate factor for environments
+    /// where ingest jitter is higher (e.g. cellular bonded encoders).
+    fn current_session_ts(inner: &mut FlvChunkSinkInner) -> u32 {
+        let now_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        if inner.session_start_wall_clock_ms == 0 {
+            inner.session_start_wall_clock_ms = now_ms;
+            inner.last_session_ts = 0;
+            return 0;
+        }
+        let delta = (now_ms - inner.session_start_wall_clock_ms).max(0);
+        // u32 overflows after ~49 days — clamp rather than truncate.
+        let candidate = delta.min(u32::MAX as i64) as u32;
+        // Monotonic guard: if the OS clock jumped backward (NTP step,
+        // suspend/resume) or `now_ms` regressed, clamp to the highest stamp
+        // we've already emitted so the FLV stream stays monotonic.
+        let out = candidate.max(inner.last_session_ts);
+        inner.last_session_ts = out;
+        out
+    }
+
     /// Process a video frame from xiu's FrameData::Video.
     ///
     /// `data` is the FLV tag body (codec header + payload) as provided by xiu.
-    /// `timestamp` is the absolute timestamp in milliseconds.
-    pub async fn write_video(&self, timestamp: u32, data: &BytesMut) {
+    /// `_xiu_timestamp` is the OBS-declared timestamp — intentionally ignored.
+    /// Frames are stamped using wall-clock time since session start instead,
+    /// which eliminates the 0.994× producer drift (#135).
+    pub async fn write_video(&self, _xiu_timestamp: u32, data: &BytesMut) {
         let is_sequence_header = data.len() > 1 && data[1] == 0x00;
 
         let pending = {
@@ -142,25 +201,28 @@ impl FlvChunkSink {
                 .map(|s| s.elapsed() >= inner.chunk_duration)
                 .unwrap_or(false);
 
+            // Drop non-keyframes before the first chunk has started.
+            // Do this BEFORE calling current_session_ts so we don't burn the
+            // session anchor on a frame we're about to discard.
+            if inner.chunk_start.is_none() && !is_keyframe {
+                return;
+            }
+
+            // Stamp this frame with wall-clock time since session start.
+            let ts = Self::current_session_ts(&mut inner);
+
             let mut pending = None;
 
             if should_flush && is_keyframe {
                 pending = Self::extract_chunk(&mut inner);
-                Self::write_chunk_header(&mut inner, timestamp);
+                Self::write_chunk_header(&mut inner, ts);
             } else if inner.chunk_start.is_none() {
-                // First chunk — wait for a keyframe to start
-                if !is_keyframe {
-                    return;
-                }
-                Self::write_chunk_header(&mut inner, timestamp);
+                // First keyframe — start the chunk.
+                Self::write_chunk_header(&mut inner, ts);
             }
 
-            // Write the xiu-assigned absolute timestamp. The delivery-side
-            // FlvStreamNormalizer rebases across chunk boundaries so the
-            // combined output to ffmpeg stays monotonic even when xiu's
-            // counter resets (OBS reconnect, session reset).
-            inner.chunk_last_ts = timestamp;
-            Self::write_tag(&mut inner, FLV_TAG_VIDEO, timestamp, data);
+            inner.chunk_last_ts = ts;
+            Self::write_tag(&mut inner, FLV_TAG_VIDEO, ts, data);
 
             // Force-flush if buffer exceeds max size
             if inner.buffer.len() >= MAX_BUFFER_SIZE {
@@ -186,7 +248,10 @@ impl FlvChunkSink {
     }
 
     /// Process an audio frame from xiu's FrameData::Audio.
-    pub async fn write_audio(&self, timestamp: u32, data: &BytesMut) {
+    ///
+    /// `_xiu_timestamp` is the OBS-declared timestamp — intentionally ignored.
+    /// See write_video for the reasoning.
+    pub async fn write_audio(&self, _xiu_timestamp: u32, data: &BytesMut) {
         let is_sequence_header = data.len() > 1 && (data[0] >> 4) == 0x0A && data[1] == 0x00;
 
         let pending = {
@@ -208,8 +273,9 @@ impl FlvChunkSink {
                 return;
             }
 
-            inner.chunk_last_ts = timestamp;
-            Self::write_tag(&mut inner, FLV_TAG_AUDIO, timestamp, data);
+            let ts = Self::current_session_ts(&mut inner);
+            inner.chunk_last_ts = ts;
+            Self::write_tag(&mut inner, FLV_TAG_AUDIO, ts, data);
             None
         };
 
@@ -241,10 +307,19 @@ impl FlvChunkSink {
     }
 
     /// Reset the chunker state.
+    ///
+    /// Resets the session wall-clock anchor so timestamps restart from 0
+    /// on the next incoming frame. Call this on RTMP disconnect or when a
+    /// new streaming session begins.
     pub async fn reset(&self) {
         let mut inner = self.inner.lock().await;
         inner.buffer.clear();
         inner.chunk_start = None;
+        inner.chunk_first_ts = 0;
+        inner.chunk_last_ts = 0;
+        inner.chunk_first_wall_clock_ms = 0;
+        inner.session_start_wall_clock_ms = 0;
+        inner.last_session_ts = 0;
     }
 
     /// Get the total number of chunks produced.
@@ -277,6 +352,10 @@ impl FlvChunkSink {
         inner.chunk_start = Some(Instant::now());
         inner.chunk_first_ts = timestamp;
         inner.chunk_last_ts = timestamp;
+        inner.chunk_first_wall_clock_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
     }
 
     /// Write an FLV tag (11-byte header + data + 4-byte previous tag size).
@@ -319,6 +398,27 @@ impl FlvChunkSink {
 
         let index = inner.chunk_index;
 
+        // Diagnostic logging for drift analysis (#135).
+        {
+            let now_ms = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            let wall_span_ms = (now_ms - inner.chunk_first_wall_clock_ms).max(0);
+            let tag_span_ms = (inner.chunk_last_ts as i64) - (inner.chunk_first_ts as i64);
+            // debug! (not info!) — the chunk-emit cadence is hot-path-frequent
+            // and only of interest when investigating drift; operators enable
+            // it via RUST_LOG=drift_debug=debug.
+            tracing::debug!(
+                target: "drift_debug",
+                chunk_index = index,
+                tag_span_ms,
+                wall_span_ms,
+                buffer_size = inner.buffer.len(),
+                "FLV chunk emit"
+            );
+        }
+
         let mut hasher = Md5::new();
         hasher.update(&inner.buffer);
         let md5 = format!("{:x}", hasher.finalize());
@@ -342,6 +442,11 @@ impl FlvChunkSink {
         };
         inner.chunk_start = None;
 
+        let wall_clock_written_at_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
         Some(PendingChunkWrite {
             data,
             path,
@@ -349,6 +454,7 @@ impl FlvChunkSink {
             md5,
             index,
             duration_ms,
+            wall_clock_written_at_ms,
         })
     }
 
@@ -417,6 +523,7 @@ impl FlvChunkSink {
             md5: pending.md5,
             index: pending.index,
             duration_ms: pending.duration_ms,
+            wall_clock_written_at_ms: pending.wall_clock_written_at_ms,
         };
 
         if let Err(e) = chunk_tx.send(chunk_info) {
@@ -428,6 +535,129 @@ impl FlvChunkSink {
     async fn write_and_notify(&self, pending: PendingChunkWrite) {
         let chunk_tx = self.chunk_tx.clone();
         Self::do_write_and_notify(pending, chunk_tx).await;
+    }
+}
+
+#[cfg(test)]
+impl FlvChunkSinkInner {
+    fn new_for_test(chunk_dir: PathBuf) -> Self {
+        Self {
+            buffer: Vec::new(),
+            chunk_dir,
+            chunk_duration: Duration::from_secs(60),
+            chunk_start: None,
+            chunk_index: 0,
+            null_mode: false,
+            video_sequence_header: None,
+            audio_sequence_header: None,
+            chunk_first_ts: 0,
+            chunk_last_ts: 0,
+            chunk_first_wall_clock_ms: 0,
+            session_start_wall_clock_ms: 0,
+            last_session_ts: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_ts_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn first_call_returns_zero_and_anchors() {
+        let mut inner = FlvChunkSinkInner::new_for_test(PathBuf::from("/tmp/x"));
+        let t = FlvChunkSink::current_session_ts(&mut inner);
+        assert_eq!(t, 0, "first call must return 0");
+        assert_ne!(
+            inner.session_start_wall_clock_ms, 0,
+            "anchor must be recorded"
+        );
+        assert_eq!(inner.last_session_ts, 0, "monotonic guard initialized");
+    }
+
+    #[test]
+    fn subsequent_calls_advance_with_wall_clock() {
+        let mut inner = FlvChunkSinkInner::new_for_test(PathBuf::from("/tmp/x"));
+        let t0 = FlvChunkSink::current_session_ts(&mut inner);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let t1 = FlvChunkSink::current_session_ts(&mut inner);
+        assert_eq!(t0, 0);
+        assert!(
+            t1 >= 20 && t1 < 1000,
+            "second stamp ({t1}) must reflect ~20ms elapsed"
+        );
+    }
+
+    #[test]
+    fn monotonic_guard_clamps_backward_jumps() {
+        // Simulate an OS clock step backward by manipulating the anchor:
+        // set anchor in the future, so the next call would compute a negative
+        // delta. The guard must return last_session_ts (5000), not regress.
+        let mut inner = FlvChunkSinkInner::new_for_test(PathBuf::from("/tmp/x"));
+        FlvChunkSink::current_session_ts(&mut inner); // anchor
+        inner.last_session_ts = 5000;
+        // Move the anchor far into the future to simulate `now < anchor`.
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 60_000;
+        inner.session_start_wall_clock_ms = future;
+
+        let t = FlvChunkSink::current_session_ts(&mut inner);
+        assert_eq!(t, 5000, "monotonic guard must hold output at last value");
+        assert_eq!(inner.last_session_ts, 5000);
+    }
+
+    #[test]
+    fn reset_clears_session_anchor_and_monotonic_state() {
+        // First session: stamp a few values.
+        let mut inner = FlvChunkSinkInner::new_for_test(PathBuf::from("/tmp/x"));
+        FlvChunkSink::current_session_ts(&mut inner);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t1 = FlvChunkSink::current_session_ts(&mut inner);
+        assert!(t1 > 0);
+
+        // Manually reset (mirrors what reset() does on the public sink).
+        inner.session_start_wall_clock_ms = 0;
+        inner.last_session_ts = 0;
+
+        // New session: first stamp must be 0 again.
+        let t0 = FlvChunkSink::current_session_ts(&mut inner);
+        assert_eq!(t0, 0, "post-reset first stamp must restart at 0");
+    }
+}
+
+#[cfg(test)]
+mod wall_clock_tests {
+    use super::*;
+
+    #[test]
+    fn pending_chunk_write_carries_wall_clock_ms() {
+        let before_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut inner = FlvChunkSinkInner::new_for_test(std::path::PathBuf::from("/tmp/x"));
+        // Seed inner with a non-empty buffer so extract_chunk emits.
+        inner.buffer = vec![0x46, 0x4C, 0x56]; // "FLV"
+        inner.chunk_first_ts = 0;
+        inner.chunk_last_ts = 1000;
+
+        let pending = FlvChunkSink::extract_chunk(&mut inner).expect("chunk emitted");
+        let after_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        assert!(
+            pending.wall_clock_written_at_ms >= before_ms
+                && pending.wall_clock_written_at_ms <= after_ms,
+            "wall_clock_written_at_ms {} outside [{before_ms}, {after_ms}]",
+            pending.wall_clock_written_at_ms
+        );
     }
 }
 
@@ -594,5 +824,96 @@ mod tests {
             | ((file_data[kf_offset + 2] as u32) << 8)
             | (file_data[kf_offset + 3] as u32);
         assert_eq!(data_size, payload.len() as u32);
+    }
+
+    /// First video frame after session reset must get timestamp = 0.
+    #[tokio::test]
+    async fn write_video_first_frame_stamps_ts_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_secs(60));
+
+        // Seed sequence header so the chunk starts immediately.
+        let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
+        sink.write_video(999_999, &video_seq).await;
+
+        // First keyframe — xiu timestamp ignored, wall-clock anchor is set.
+        let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
+        sink.write_video(999_999, &keyframe).await;
+
+        let inner = sink.inner.lock().await;
+        // chunk_first_ts is set by write_chunk_header from current_session_ts.
+        // The very first call sets anchor and returns 0.
+        assert_eq!(
+            inner.chunk_first_ts, 0,
+            "first frame must anchor session and produce ts=0"
+        );
+    }
+
+    /// After reset(), next frame must restart timestamp from 0.
+    #[tokio::test]
+    async fn session_start_resets_on_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_secs(60));
+
+        // Seed sequence header.
+        let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
+        sink.write_video(0, &video_seq).await;
+
+        // Write first frame to establish session anchor.
+        let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA][..]);
+        sink.write_video(0, &keyframe).await;
+
+        // Small delay so next frame would have a non-zero wall-clock ts.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Reset session — anchor must be cleared.
+        sink.reset().await;
+
+        {
+            let inner = sink.inner.lock().await;
+            assert_eq!(
+                inner.session_start_wall_clock_ms, 0,
+                "reset() must clear session_start_wall_clock_ms"
+            );
+        }
+
+        // Write the next keyframe — its ts should be 0 again.
+        sink.write_video(0, &keyframe).await;
+        let inner = sink.inner.lock().await;
+        assert_eq!(
+            inner.chunk_first_ts, 0,
+            "first frame after reset must produce ts=0"
+        );
+    }
+
+    /// Timestamps must be strictly non-decreasing across successive frames.
+    #[tokio::test]
+    async fn wall_clock_ts_monotonic_across_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_secs(60));
+
+        let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
+        sink.write_video(0, &video_seq).await;
+
+        let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA][..]);
+        let interframe = BytesMut::from(&[0x27, 0x01, 0x00, 0x00, 0x00, 0xBB][..]);
+
+        // First keyframe — starts chunk.
+        sink.write_video(0, &keyframe).await;
+        let ts0 = sink.inner.lock().await.chunk_last_ts;
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // Inter-frame — same chunk.
+        sink.write_video(0, &interframe).await;
+        let ts1 = sink.inner.lock().await.chunk_last_ts;
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        sink.write_video(0, &interframe).await;
+        let ts2 = sink.inner.lock().await.chunk_last_ts;
+
+        assert!(ts1 >= ts0, "ts1={ts1} should be >= ts0={ts0}");
+        assert!(ts2 >= ts1, "ts2={ts2} should be >= ts1={ts1}");
     }
 }

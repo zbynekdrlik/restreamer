@@ -5,7 +5,6 @@ fn build_rescue_ffmpeg_args_rtmp_endpoint() {
     let args = build_rescue_ffmpeg_args(
         "https://s3.example.com/rescue.mp4",
         "rtmps://live-api-s.facebook.com:443/rtmp/key123",
-        "flv",
         "FB-Test",
     );
     assert!(args.contains(&"-stream_loop".to_string()));
@@ -24,18 +23,6 @@ fn build_rescue_ffmpeg_args_rtmp_endpoint() {
     assert!(args.last().unwrap().contains("facebook.com"));
 }
 
-#[test]
-fn build_rescue_ffmpeg_args_hls_endpoint() {
-    let args = build_rescue_ffmpeg_args(
-        "https://s3.example.com/rescue.mp4",
-        "https://a.upload.youtube.com/http_upload_hls?cid=key123&copy=0&file=out1248.ts",
-        "hls",
-        "YT-Test",
-    );
-    assert!(args.iter().any(|a| a == "hls"));
-    assert!(args.iter().any(|a| a == "PUT"));
-}
-
 /// Rescue ffmpeg output MUST be stream-format-compatible with what OBS
 /// sends, otherwise switching between real content and rescue content
 /// confuses YouTube's ingestion. These tests pin the normalization so
@@ -45,7 +32,6 @@ fn build_rescue_ffmpeg_args_normalizes_to_1080p30() {
     let args = build_rescue_ffmpeg_args(
         "https://s3.example.com/src.mp4",
         "rtmp://a.rtmp.youtube.com/live2/key",
-        "flv",
         "YT",
     );
 
@@ -71,7 +57,6 @@ fn build_rescue_ffmpeg_args_uses_libx264_main_profile() {
     let args = build_rescue_ffmpeg_args(
         "https://s3.example.com/src.mp4",
         "rtmp://a.rtmp.youtube.com/live2/key",
-        "flv",
         "YT",
     );
 
@@ -100,7 +85,6 @@ fn build_rescue_ffmpeg_args_keyframe_every_2s() {
     let args = build_rescue_ffmpeg_args(
         "https://s3.example.com/src.mp4",
         "rtmp://a.rtmp.youtube.com/live2/key",
-        "flv",
         "YT",
     );
 
@@ -117,7 +101,6 @@ fn build_rescue_ffmpeg_args_aac_audio_48k_stereo() {
     let args = build_rescue_ffmpeg_args(
         "https://s3.example.com/src.mp4",
         "rtmp://a.rtmp.youtube.com/live2/key",
-        "flv",
         "YT",
     );
 
@@ -190,13 +173,6 @@ fn countdown_file_path_sanitizes() {
 }
 
 #[test]
-fn endpoint_url_youtube_hls() {
-    let url = endpoint_url_for_service(rs_ffmpeg::ServiceType::YtHls, "test-key");
-    assert!(url.contains("a.upload.youtube.com"));
-    assert!(url.contains("test-key"));
-}
-
-#[test]
 fn endpoint_url_facebook() {
     let url = endpoint_url_for_service(rs_ffmpeg::ServiceType::Facebook, "fb-key");
     assert!(url.contains("facebook.com"));
@@ -204,17 +180,13 @@ fn endpoint_url_facebook() {
 }
 
 #[test]
-fn output_format_yt_hls_is_hls() {
-    assert_eq!(
-        output_format_for_service(rs_ffmpeg::ServiceType::YtHls),
-        "hls"
-    );
-}
-
-#[test]
-fn output_format_facebook_is_flv() {
+fn output_format_all_services_is_flv() {
     assert_eq!(
         output_format_for_service(rs_ffmpeg::ServiceType::Facebook),
+        "flv"
+    );
+    assert_eq!(
+        output_format_for_service(rs_ffmpeg::ServiceType::YtRtmp),
         "flv"
     );
 }

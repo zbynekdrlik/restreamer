@@ -11,7 +11,7 @@ pub fn EndpointsView() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore not provided");
     let (error, set_error) = signal::<Option<String>>(None);
     let (new_alias, set_new_alias) = signal(String::new());
-    let (new_type, set_new_type) = signal("YT_HLS".to_string());
+    let (new_type, set_new_type) = signal("YT_RTMP".to_string());
     let (new_key, set_new_key) = signal(String::new());
 
     // Edit mode state
@@ -127,7 +127,6 @@ pub fn EndpointsView() -> impl IntoView {
                 <select
                     on:change=move |ev| set_new_type.set(event_target_value(&ev))
                 >
-                    <option value="YT_HLS" selected=move || new_type.get() == "YT_HLS">"YouTube HLS"</option>
                     <option value="YT_RTMP" selected=move || new_type.get() == "YT_RTMP">"YouTube RTMP"</option>
                     <option value="FB" selected=move || new_type.get() == "FB">"Facebook"</option>
                     <option value="VIMEO" selected=move || new_type.get() == "VIMEO">"Vimeo"</option>
@@ -171,7 +170,6 @@ pub fn EndpointsView() -> impl IntoView {
                                                 <select
                                                     on:change=move |ev| set_edit_type.set(event_target_value(&ev))
                                                 >
-                                                    <option value="YT_HLS" selected=move || edit_type.get() == "YT_HLS">"YouTube HLS"</option>
                                                     <option value="YT_RTMP" selected=move || edit_type.get() == "YT_RTMP">"YouTube RTMP"</option>
                                                     <option value="FB" selected=move || edit_type.get() == "FB">"Facebook"</option>
                                                     <option value="VIMEO" selected=move || edit_type.get() == "VIMEO">"Vimeo"</option>

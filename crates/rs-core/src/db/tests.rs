@@ -290,18 +290,18 @@ async fn endpoint_config_crud() {
     let list = list_endpoint_configs(&pool).await.unwrap();
     assert!(list.is_empty());
 
-    let id = create_endpoint_config(&pool, "YouTube", "YT_HLS", "yt-key-123", false)
+    let id = create_endpoint_config(&pool, "YouTube", "YT_RTMP", "yt-key-123", false)
         .await
         .unwrap();
     assert!(id > 0);
 
     let ep = get_endpoint_config(&pool, id).await.unwrap().unwrap();
     assert_eq!(ep.alias, "YouTube");
-    assert_eq!(ep.service_type, "YT_HLS");
+    assert_eq!(ep.service_type, "YT_RTMP");
     assert!(ep.enabled);
     assert!(!ep.is_fast);
 
-    update_endpoint_config(&pool, id, "YouTube HLS", "YT_HLS", "new-key", true, true)
+    update_endpoint_config(&pool, id, "YouTube HLS", "YT_RTMP", "new-key", true, true)
         .await
         .unwrap();
     let ep = get_endpoint_config(&pool, id).await.unwrap().unwrap();
@@ -317,7 +317,7 @@ async fn event_endpoint_attachment() {
     let pool = setup_db().await;
 
     let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
-    let ep1 = create_endpoint_config(&pool, "YT", "YT_HLS", "key1", false)
+    let ep1 = create_endpoint_config(&pool, "YT", "YT_RTMP", "key1", false)
         .await
         .unwrap();
     let ep2 = create_endpoint_config(&pool, "FB", "FB", "key2", false)
@@ -347,7 +347,7 @@ async fn get_event_endpoints_filters_disabled() {
     let pool = setup_db().await;
 
     let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
-    let ep1 = create_endpoint_config(&pool, "YouTube", "YT_HLS", "key1", false)
+    let ep1 = create_endpoint_config(&pool, "YouTube", "YT_RTMP", "key1", false)
         .await
         .unwrap();
     let ep2 = create_endpoint_config(&pool, "Facebook", "FB", "key2", false)
@@ -379,7 +379,7 @@ async fn event_endpoint_cascade_on_event_delete() {
     let pool = setup_db().await;
 
     let event_id = upsert_streaming_event(&pool, "evt-1").await.unwrap();
-    let ep_id = create_endpoint_config(&pool, "YT", "YT_HLS", "key1", false)
+    let ep_id = create_endpoint_config(&pool, "YT", "YT_RTMP", "key1", false)
         .await
         .unwrap();
     attach_endpoint_to_event(&pool, event_id, ep_id)
@@ -489,7 +489,7 @@ async fn list_streaming_events_and_create() {
 #[tokio::test]
 async fn endpoint_unique_alias_constraint() {
     let pool = setup_db().await;
-    create_endpoint_config(&pool, "YouTube", "YT_HLS", "key1", false)
+    create_endpoint_config(&pool, "YouTube", "YT_RTMP", "key1", false)
         .await
         .unwrap();
     let result = create_endpoint_config(&pool, "YouTube", "FB", "key2", false).await;

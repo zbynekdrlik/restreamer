@@ -9,6 +9,7 @@ use super::audit_panel::AuditPanel;
 use super::confirm_modal::ConfirmModal;
 use super::endpoint_history::EndpointHistory;
 use super::endpoint_remove_confirm_modal::EndpointRemoveConfirmModal;
+use super::pacing_panel::PacingPanel;
 use super::upload_strip::UploadStrip;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
@@ -24,7 +25,6 @@ const RTMP_STABLE_REQUIRED_SECS: u64 = 15;
 /// Main operator dashboard view.
 #[component]
 pub fn OperatorDashboard() -> impl IntoView {
-    let _store = use_context::<DashboardStore>().expect("DashboardStore");
     let show_add_modal = RwSignal::new(false);
     provide_context(show_add_modal);
 
@@ -38,6 +38,7 @@ pub fn OperatorDashboard() -> impl IntoView {
                 </div>
                 <aside class="operator-dashboard__sidebar">
                     <AuditPanel />
+                    <PacingPanel />
                 </aside>
             </div>
             <AddEndpointModal show=show_add_modal />

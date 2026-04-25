@@ -126,12 +126,79 @@ async fn migration_v19_creates_metrics_and_cursor_column() {
 }
 
 #[tokio::test]
-async fn run_migrations_reaches_v19() {
+async fn run_migrations_reaches_max_schema_version() {
     let pool = crate::db::create_memory_pool().await.unwrap();
     crate::db::run_migrations(&pool).await.unwrap();
     let v: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version),0) FROM schema_version")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(v, 19);
+    assert_eq!(v, crate::db::MAX_SCHEMA_VERSION as i64);
+}
+
+#[tokio::test]
+async fn migration_v20_adds_drift_telemetry_schema() {
+    let pool = crate::db::create_memory_pool().await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap(); // idempotent
+
+    // chunk_records.wall_clock_written_at_ms added
+    let cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('chunk_records')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        cols.iter().any(|c| c == "wall_clock_written_at_ms"),
+        "chunk_records must have wall_clock_written_at_ms column after V20"
+    );
+
+    // clock_skew_samples table exists with expected columns
+    let skew_cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('clock_skew_samples')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for expected in &[
+        "id",
+        "event_id",
+        "measured_at_ms",
+        "local_before_ms",
+        "vps_reported_ms",
+        "local_after_ms",
+        "skew_ms",
+        "rtt_ms",
+    ] {
+        assert!(
+            skew_cols.iter().any(|c| c == expected),
+            "clock_skew_samples missing column {expected}; got {skew_cols:?}"
+        );
+    }
+
+    // ffmpeg_progress_samples table exists with expected columns
+    let prog_cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('ffmpeg_progress_samples')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for expected in &[
+        "id",
+        "event_id",
+        "endpoint_alias",
+        "measured_at_ms",
+        "ffmpeg_media_time_ms",
+        "wall_clock_ms",
+    ] {
+        assert!(
+            prog_cols.iter().any(|c| c == expected),
+            "ffmpeg_progress_samples missing column {expected}; got {prog_cols:?}"
+        );
+    }
+
+    // Schema version matches MAX
+    let v: i32 = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(v, crate::db::MAX_SCHEMA_VERSION);
 }

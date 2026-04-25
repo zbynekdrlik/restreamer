@@ -614,3 +614,13 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 .endpoint-history svg { display: block; }
 .btn-endpoint-history { padding: 2px 6px; font-size: 11px; margin-left: 4px; background: transparent; border: 1px solid var(--border, #444); color: var(--text-secondary, #aaa); border-radius: var(--radius, 3px); cursor: pointer; }
 .btn-endpoint-history:hover { background: rgba(255,255,255,0.05); }
+
+/* --- PacingPanel --- */
+.pacing-panel { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-secondary, #1a1a1a); padding: 8px; font-size: 11px; margin-top: 1rem; }
+.pacing-panel h3 { margin: 0 0 4px 0; font-size: 13px; }
+.pacing-panel__error { color: var(--status-error, #d33); font-size: 0.85em; }
+.pacing-panel__placeholder { color: var(--text-secondary, #888); font-style: italic; }
+.pacing-panel__loading { color: var(--text-secondary, #888); }
+.pacing-series { padding: 0.25rem 0; border-top: 1px solid var(--border); }
+.pacing-series h4 { margin: 0.25rem 0; font-size: 0.9em; }
+.pacing-series p { margin: 0; font-size: 0.85em; color: var(--text-secondary, #888); }
