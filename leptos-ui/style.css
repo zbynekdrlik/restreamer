@@ -318,6 +318,12 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
     border-radius: var(--radius); background: transparent; color: var(--text-secondary);
     cursor: pointer; font-family: var(--font-mono); font-size: 12px;
 }
+.banner-dismiss-btn {
+    padding: var(--spacing-xs) var(--spacing-sm); border: 1px solid var(--border);
+    border-radius: var(--radius); background: transparent; color: var(--text-secondary);
+    cursor: pointer; font-family: var(--font-mono); font-size: 12px;
+    margin-left: var(--spacing-md);
+}
 
 /* Confirm Modal (reusable danger confirmation) */
 .confirm-modal {

@@ -531,8 +531,7 @@ fn EventsManagement() -> impl IntoView {
                 <div class="error-message">
                     {err}
                     <button
-                        class="modal-cancel-btn"
-                        style="margin-left: var(--spacing-md);"
+                        class="banner-dismiss-btn"
                         on:click=move |_| action_error.set(None)
                     >
                         "×"
