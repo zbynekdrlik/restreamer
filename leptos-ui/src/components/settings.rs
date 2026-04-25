@@ -425,6 +425,15 @@ fn EventsManagement() -> impl IntoView {
     let s3_usage = RwSignal::<Option<api::S3UsageResponse>>::new(None);
     let s3_usage_error = RwSignal::<Option<String>>::new(None);
 
+    // Busy and error state for destructive actions on event cards.
+    // `busy_event_id` is `Some(id)` while a delete or clear-S3 call is
+    // in flight for that event; the buttons on that card render disabled
+    // with a "Deleting…"/"Clearing…" label so the operator sees progress.
+    // `action_error` holds the most recent failure message from either
+    // action so it can render in a banner above the list.
+    let busy_event_id = RwSignal::<Option<i64>>::new(None);
+    let action_error = RwSignal::<Option<String>>::new(None);
+
     // Template picker modal state
     let show_template_modal = RwSignal::new(false);
     let (template_error, set_template_error) = signal::<Option<String>>(None);
@@ -450,24 +459,38 @@ fn EventsManagement() -> impl IntoView {
 
     let on_confirm_delete = Callback::new(move |_: ()| {
         let id = delete_target_id.get();
+        busy_event_id.set(Some(id));
+        action_error.set(None);
         spawn_local(async move {
-            let _ = api::delete_event(id).await;
-            if let Ok(events) = api::list_events().await {
-                store.events_list.set(events);
+            match api::delete_event(id).await {
+                Ok(_) => {
+                    if let Ok(events) = api::list_events().await {
+                        store.events_list.set(events);
+                    }
+                    if let Ok(u) = api::get_s3_usage().await {
+                        s3_usage.set(Some(u));
+                    }
+                }
+                Err(e) => action_error.set(Some(format!("Delete failed: {e}"))),
             }
-            if let Ok(u) = api::get_s3_usage().await {
-                s3_usage.set(Some(u));
-            }
+            busy_event_id.set(None);
         });
     });
 
     let on_confirm_clear = Callback::new(move |_: ()| {
         let id = clear_target_id.get();
+        busy_event_id.set(Some(id));
+        action_error.set(None);
         spawn_local(async move {
-            let _ = api::clear_event_s3_chunks(id).await;
-            if let Ok(u) = api::get_s3_usage().await {
-                s3_usage.set(Some(u));
+            match api::clear_event_s3_chunks(id).await {
+                Ok(_) => {
+                    if let Ok(u) = api::get_s3_usage().await {
+                        s3_usage.set(Some(u));
+                    }
+                }
+                Err(e) => action_error.set(Some(format!("Clear failed: {e}"))),
             }
+            busy_event_id.set(None);
         });
     });
 
@@ -501,6 +524,21 @@ fn EventsManagement() -> impl IntoView {
                     "+ New from Template"
                 </button>
             </div>
+
+            // Action error banner — surfaces the most recent failure from
+            // delete/clear actions. Dismissable with the "×" button.
+            {move || action_error.get().map(|err| view! {
+                <div class="error-message">
+                    {err}
+                    <button
+                        class="modal-cancel-btn"
+                        style="margin-left: var(--spacing-md);"
+                        on:click=move |_| action_error.set(None)
+                    >
+                        "×"
+                    </button>
+                </div>
+            })}
 
             // S3 storage usage banner. Shows total bucket usage and lets the
             // operator see at a glance which event is using the most space.
@@ -593,7 +631,7 @@ fn EventsManagement() -> impl IntoView {
                                 <div class="card-actions">
                                     <button
                                         class="btn-secondary"
-                                        disabled=is_streaming
+                                        disabled=move || is_streaming || busy_event_id.get() == Some(id)
                                         on:click=move |_| {
                                             clear_target_id.set(id);
                                             clear_target_name.set(name_for_clear.clone());
@@ -601,21 +639,31 @@ fn EventsManagement() -> impl IntoView {
                                         }
                                         title="Delete S3 chunks for this event but keep the event row"
                                     >
-                                        "Clear S3 chunks"
+                                        {move || {
+                                            if busy_event_id.get() == Some(id) {
+                                                "Clearing…"
+                                            } else {
+                                                "Clear S3 chunks"
+                                            }
+                                        }}
                                     </button>
                                     <button
                                         class="btn-danger"
-                                        disabled=is_streaming
+                                        disabled=move || is_streaming || busy_event_id.get() == Some(id)
                                         on:click=move |_| {
                                             delete_target_id.set(id);
                                             delete_target_name.set(name_for_modal.clone());
                                             show_delete_modal.set(true);
                                         }
                                     >
-                                        {if is_streaming {
-                                            "Delete (stop stream first)"
-                                        } else {
-                                            "Delete + Cleanup"
+                                        {move || {
+                                            if is_streaming {
+                                                "Delete (stop stream first)"
+                                            } else if busy_event_id.get() == Some(id) {
+                                                "Deleting…"
+                                            } else {
+                                                "Delete + Cleanup"
+                                            }
                                         }}
                                     </button>
                                 </div>
