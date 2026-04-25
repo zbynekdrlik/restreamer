@@ -608,6 +608,11 @@ fn EventsManagement() -> impl IntoView {
                         let name = evt.name.clone();
                         let recv = evt.receiving_activated;
                         let deliv = evt.delivering_activated;
+                        // Snapshot-at-render: this bool is captured by value
+                        // into the per-card reactive closures below. If a
+                        // future WebSocket push updates streaming state without
+                        // rebuilding `events_list`, those closures would read a
+                        // stale value — re-fetch the events list on such pushes.
                         let is_streaming = recv || deliv;
                         let created_from = evt.created_from.clone();
                         let name_for_modal = name.clone();
