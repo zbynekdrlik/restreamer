@@ -126,3 +126,61 @@ test("delete + cleanup shows error banner on API failure", async ({
   );
   expect(real).toEqual([]);
 });
+
+test("clear S3 chunks shows busy state and keeps event after success", async ({
+  page,
+  request,
+}) => {
+  const consoleMessages: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error" || msg.type() === "warning") {
+      consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
+    }
+  });
+
+  await page.addInitScript(tauriMockScript);
+  await request.post("http://127.0.0.1:8910/api/v1/__reset");
+
+  // Delay the clear-s3 POST so the busy state is observable.
+  await page.route("**/api/v1/events/1/clear-s3", async (route) => {
+    if (route.request().method() === "POST") {
+      await new Promise((r) => setTimeout(r, 1500));
+      await route.continue();
+    } else {
+      await route.continue();
+    }
+  });
+
+  await page.goto("/settings");
+  await page.locator(".settings-tabs .tab", { hasText: "Events" }).click();
+
+  const card = page.locator(".settings-card", { hasText: TARGET_EVENT_NAME });
+  const clearBtn = card.locator("button.btn-secondary");
+  const deleteBtn = card.locator("button.btn-danger");
+
+  await expect(clearBtn).toBeEnabled();
+  await clearBtn.click();
+
+  // Confirm in the clear-s3 modal (same modal class, different confirm label
+  // text but same confirm-btn-danger selector).
+  await page.locator(".confirm-modal .confirm-btn-danger").click();
+
+  // Modal closes immediately
+  await expect(page.locator(".confirm-modal")).toHaveCount(0);
+
+  // Busy state: clear button label flips to "Clearing…", both card buttons disabled
+  await expect(clearBtn).toHaveText(/Clearing/, { timeout: 1000 });
+  await expect(clearBtn).toBeDisabled();
+  await expect(deleteBtn).toBeDisabled();
+
+  // After the delay + POST + s3_usage refresh, the card stays (clear does
+  // not remove the event), but the busy label clears.
+  await expect(clearBtn).toHaveText(/Clear S3 chunks/, { timeout: 5000 });
+  await expect(clearBtn).toBeEnabled();
+  await expect(card).toBeVisible();
+
+  const real = consoleMessages.filter(
+    (m) => !ALLOWED_CONSOLE.some((r) => r.test(m)),
+  );
+  expect(real).toEqual([]);
+});
