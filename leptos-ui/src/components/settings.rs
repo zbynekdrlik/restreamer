@@ -464,11 +464,26 @@ fn EventsManagement() -> impl IntoView {
         spawn_local(async move {
             match api::delete_event(id).await {
                 Ok(_) => {
-                    if let Ok(events) = api::list_events().await {
-                        store.events_list.set(events);
+                    // Refresh both views; surface the FIRST refresh failure so
+                    // the operator knows the underlying delete succeeded but
+                    // the UI may be stale and a reload is needed.
+                    let mut refresh_err: Option<String> = None;
+                    match api::list_events().await {
+                        Ok(events) => store.events_list.set(events),
+                        Err(e) => refresh_err = Some(e),
                     }
-                    if let Ok(u) = api::get_s3_usage().await {
-                        s3_usage.set(Some(u));
+                    match api::get_s3_usage().await {
+                        Ok(u) => s3_usage.set(Some(u)),
+                        Err(e) => {
+                            if refresh_err.is_none() {
+                                refresh_err = Some(e);
+                            }
+                        }
+                    }
+                    if let Some(e) = refresh_err {
+                        action_error.set(Some(format!(
+                            "Event deleted but UI refresh failed: {e}. Reload the page."
+                        )));
                     }
                 }
                 Err(e) => action_error.set(Some(format!("Delete failed: {e}"))),
@@ -484,8 +499,14 @@ fn EventsManagement() -> impl IntoView {
         spawn_local(async move {
             match api::clear_event_s3_chunks(id).await {
                 Ok(_) => {
-                    if let Ok(u) = api::get_s3_usage().await {
-                        s3_usage.set(Some(u));
+                    // Surface S3 usage refresh failures: the chunks ARE cleared
+                    // but the banner numbers will be stale until reload, which
+                    // could mislead the operator into thinking the clear failed.
+                    match api::get_s3_usage().await {
+                        Ok(u) => s3_usage.set(Some(u)),
+                        Err(e) => action_error.set(Some(format!(
+                            "Chunks cleared but S3 usage refresh failed: {e}. Reload the page."
+                        ))),
                     }
                 }
                 Err(e) => action_error.set(Some(format!("Clear failed: {e}"))),
