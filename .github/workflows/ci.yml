@@ -1423,13 +1423,30 @@ jobs:
 
             # Snapshot one chunk for the audio cadence gate while files
             # still exist on disk -- the uploader deletes each chunk
-            # after S3 upload (rs-endpoint/uploader.rs ~line 402).
-            if ($elapsed -ge 60 -and -not (Test-Path "$env:TEMP\audio-test-chunk.bin")) {
-              $latestChunk = Get-ChildItem "C:\ProgramData\Restreamer\chunks\" -File -ErrorAction SilentlyContinue |
-                             Sort-Object LastWriteTime -Descending | Select-Object -First 1
-              if ($latestChunk) {
-                Copy-Item $latestChunk.FullName "$env:TEMP\audio-test-chunk.bin" -Force
-                Write-Host "Audio gate snapshot: $($latestChunk.Name) ($($latestChunk.Length) bytes) -> $env:TEMP\audio-test-chunk.bin"
+            # after S3 upload (rs-endpoint/uploader.rs ~line 402), and
+            # under low Hetzner latency the local-disk window is <50ms
+            # per chunk. Burst-poll up to 3s with 30ms gaps to reliably
+            # catch a transient file. Read bytes into memory before
+            # writing so a mid-read deletion can be retried instead of
+            # producing a corrupt snapshot.
+            if ($elapsed -ge 30 -and -not (Test-Path "$env:TEMP\audio-test-chunk.bin")) {
+              for ($attempt = 0; $attempt -lt 100; $attempt++) {
+                $latestChunk = Get-ChildItem "C:\ProgramData\Restreamer\chunks\" -File -ErrorAction SilentlyContinue |
+                               Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($latestChunk) {
+                  try {
+                    $bytes = [System.IO.File]::ReadAllBytes($latestChunk.FullName)
+                    [System.IO.File]::WriteAllBytes("$env:TEMP\audio-test-chunk.bin", $bytes)
+                    Write-Host "Audio gate snapshot at ${elapsed}s after $($attempt + 1) attempt(s): $($latestChunk.Name) ($($bytes.Length) bytes)"
+                    break
+                  } catch {
+                    # File got pruned between Get-ChildItem and ReadAllBytes -- retry.
+                  }
+                }
+                Start-Sleep -Milliseconds 30
+              }
+              if (-not (Test-Path "$env:TEMP\audio-test-chunk.bin")) {
+                Write-Host "Audio gate snapshot: no chunk caught at ${elapsed}s after 100 attempts (uploader may be saturating local disk); will retry next loop iteration"
               }
             }
           }
