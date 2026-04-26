@@ -1355,6 +1355,12 @@ jobs:
           $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
           $streamDuration = 600  # 10 minutes
 
+          # Clear any stale snapshot from a prior run -- self-hosted runner
+          # keeps $env:TEMP across runs, so a leftover audio-test-chunk.bin
+          # would let the audio cadence gate read a chunk produced by a
+          # different binary (false negative).
+          Remove-Item "$env:TEMP\audio-test-chunk.bin" -ErrorAction SilentlyContinue
+
           Write-Host "Starting ${streamDuration}s stability test stream..."
           Write-Host "This test catches freeze bugs that only appear after minutes of streaming."
 
