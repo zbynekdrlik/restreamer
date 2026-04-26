@@ -1483,7 +1483,7 @@ jobs:
           # ChunkRecord.chunk_file_path (absolute path on stream.lan).
           $chunks = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks?limit=5" -TimeoutSec 10
           if (-not $chunks -or $chunks.Count -eq 0) {
-            throw "FAILED: GET /api/v1/chunks returned no records — earlier streaming step did not produce chunks?"
+            throw "FAILED: GET /api/v1/chunks returned no records -- earlier streaming step did not produce chunks?"
           }
 
           # Pick the first chunk that exists on disk. Older chunks may have
@@ -1530,10 +1530,10 @@ jobs:
           Write-Host "Audio delta max:      ${maxGap} ms"
 
           if ($median -lt 20.0 -or $median -gt 22.0) {
-            throw "FAILED: median audio PTS delta ${median}ms outside [20, 22]ms — AAC cadence broken (chipmunk regression)"
+            throw "FAILED: median audio PTS delta ${median}ms outside [20, 22]ms -- AAC cadence broken (chipmunk regression)"
           }
           if ($maxGap -gt 50.0) {
-            throw "FAILED: max audio PTS delta ${maxGap}ms exceeds 50ms — audio drop/burst regression"
+            throw "FAILED: max audio PTS delta ${maxGap}ms exceeds 50ms -- audio drop/burst regression"
           }
 
           Write-Host "=== Audio PTS cadence GATE PASSED ==="
