@@ -1355,6 +1355,12 @@ jobs:
           $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
           $streamDuration = 600  # 10 minutes
 
+          # Clear any stale snapshot from a prior run -- self-hosted runner
+          # keeps $env:TEMP across runs, so a leftover audio-test-chunk.bin
+          # would let the audio cadence gate read a chunk produced by a
+          # different binary (false negative).
+          Remove-Item "$env:TEMP\audio-test-chunk.bin" -ErrorAction SilentlyContinue
+
           Write-Host "Starting ${streamDuration}s stability test stream..."
           Write-Host "This test catches freeze bugs that only appear after minutes of streaming."
 
@@ -1414,6 +1420,18 @@ jobs:
               if ($_.Exception.Message -match "STREAM FREEZE") { throw }
               Write-Host "WARNING: Status check failed at ${elapsed}s: $_"
             }
+
+            # Snapshot one chunk for the audio cadence gate while files
+            # still exist on disk -- the uploader deletes each chunk
+            # after S3 upload (rs-endpoint/uploader.rs ~line 402).
+            if ($elapsed -ge 60 -and -not (Test-Path "$env:TEMP\audio-test-chunk.bin")) {
+              $latestChunk = Get-ChildItem "C:\ProgramData\Restreamer\chunks\" -File -ErrorAction SilentlyContinue |
+                             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+              if ($latestChunk) {
+                Copy-Item $latestChunk.FullName "$env:TEMP\audio-test-chunk.bin" -Force
+                Write-Host "Audio gate snapshot: $($latestChunk.Name) ($($latestChunk.Length) bytes) -> $env:TEMP\audio-test-chunk.bin"
+              }
+            }
           }
 
           # Wait for ffmpeg to finish if still running
@@ -1456,19 +1474,114 @@ jobs:
           Write-Host "=== E2E Stability Test PASSED ==="
           Write-Host "10-minute stream: $($stats.total_chunks) chunks produced and uploaded without freeze"
 
-      - name: GATE clear-s3 endpoint deletes 250+ chunks within 25s
+      - name: GATE audio PTS cadence matches AAC sample clock
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          # Regression for the 2026-04-26 live-event failure: audio over
+          # restreamer was chipmunked because flv_chunker stamped AAC frames
+          # with wall-clock arrival time instead of xiu's RTMP timestamp.
+          # AAC frames have a fixed cadence of 1024 samples / sample_rate;
+          # any PTS deviation > a frame width forces the decoder to resample.
+          #
+          # The 10-minute streaming step pushed sine-wave audio encoded as
+          # AAC. The actual sample rate (44.1k vs 48k) is set by ffmpeg's
+          # default, so we read it from the chunk and derive expected
+          # cadence dynamically. We assert median delta is within +/-1 ms
+          # of the AAC frame duration and no individual gap exceeds 50 ms.
+          $ErrorActionPreference = 'Stop'
+          # ffprobe is installed next to ffmpeg on the stream-lan runner.
+          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
+          if (-not (Test-Path $ffprobe)) {
+            throw "FAILED: ffprobe not found at $ffprobe"
+          }
+
+          # The streaming step snapshots a chunk to this path while files
+          # still exist locally -- the uploader prunes each chunk after S3
+          # upload, so by the time this gate runs the chunks dir is empty.
+          $chunkPath = "$env:TEMP\audio-test-chunk.bin"
+          if (-not (Test-Path $chunkPath)) {
+            throw "FAILED: snapshot chunk not at $chunkPath -- streaming step did not capture one (check earlier log for 'Audio gate snapshot' line)"
+          }
+          Write-Host "Probing chunk: $chunkPath ($([math]::Round((Get-Item $chunkPath).Length / 1024.0, 1)) KB)"
+
+          # First read stream metadata to get the AAC sample rate.
+          $streamJson = & $ffprobe -v error -show_streams -select_streams a -of json $chunkPath 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            throw "FAILED: ffprobe -show_streams exited $LASTEXITCODE on ${chunkPath}: $streamJson"
+          }
+          $streamParsed = $streamJson | ConvertFrom-Json
+          if (-not $streamParsed.streams -or $streamParsed.streams.Count -eq 0) {
+            throw "FAILED: ffprobe found no audio stream in $chunkPath"
+          }
+          $sampleRate = [int]$streamParsed.streams[0].sample_rate
+          if ($sampleRate -lt 8000 -or $sampleRate -gt 192000) {
+            throw "FAILED: implausible audio sample rate ${sampleRate} Hz in $chunkPath"
+          }
+          # AAC encodes 1024 samples per frame.
+          $expectedMs = [math]::Round(1024.0 * 1000.0 / $sampleRate, 3)
+          Write-Host "Audio sample rate:    ${sampleRate} Hz"
+          Write-Host "Expected AAC cadence: ${expectedMs} ms (1024 samples / ${sampleRate} Hz)"
+
+          # Now show packets to compute per-frame PTS deltas.
+          $json = & $ffprobe -v error -show_packets -select_streams a -of json $chunkPath 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            throw "FAILED: ffprobe -show_packets exited $LASTEXITCODE on ${chunkPath}: $json"
+          }
+
+          $parsed = $json | ConvertFrom-Json
+          if (-not $parsed.packets -or $parsed.packets.Count -lt 10) {
+            throw "FAILED: ffprobe returned $($parsed.packets.Count) audio packets in $chunkPath, need >=10 for cadence stats"
+          }
+
+          # Compute consecutive pts_time deltas in milliseconds.
+          $ptsTimes = $parsed.packets | ForEach-Object { [double]$_.pts_time }
+          $deltasMs = @()
+          for ($i = 1; $i -lt $ptsTimes.Count; $i++) {
+            $deltasMs += [math]::Round(($ptsTimes[$i] - $ptsTimes[$i - 1]) * 1000.0, 3)
+          }
+
+          $sorted = $deltasMs | Sort-Object
+          $median = $sorted[[int]([math]::Floor($sorted.Count / 2))]
+          $maxGap = ($deltasMs | Measure-Object -Maximum).Maximum
+          $minGap = ($deltasMs | Measure-Object -Minimum).Minimum
+
+          Write-Host "Audio packet count:   $($parsed.packets.Count)"
+          Write-Host "Audio delta median:   ${median} ms"
+          Write-Host "Audio delta min:      ${minGap} ms"
+          Write-Host "Audio delta max:      ${maxGap} ms"
+
+          # Tolerate +/-1 ms around the expected cadence.
+          $lo = $expectedMs - 1.0
+          $hi = $expectedMs + 1.0
+          if ($median -lt $lo -or $median -gt $hi) {
+            throw "FAILED: median audio PTS delta ${median}ms outside [${lo}, ${hi}]ms (expected ~${expectedMs}ms at ${sampleRate}Hz) -- AAC cadence broken (chipmunk regression)"
+          }
+          if ($maxGap -gt 50.0) {
+            throw "FAILED: max audio PTS delta ${maxGap}ms exceeds 50ms -- audio drop/burst regression"
+          }
+
+          Write-Host "=== Audio PTS cadence GATE PASSED ==="
+
+      - name: GATE clear-s3 endpoint deletes 250+ chunks within server budget
         shell: powershell
         timeout-minutes: 2
         run: |
           # Regression for the bug where DELETE+CLEANUP did nothing in the
           # dashboard: delete_event_chunks ran S3 deletes serially, taking
-          # ~200ms per object. With 250 chunks that is ~50s, well past the
-          # frontend HTTP client timeout (~30s), so the user saw "nothing
-          # happens" while the server kept slogging.
+          # ~200ms per object. The fix parallelises with
+          # futures::stream::buffer_unordered(20) under a 60s server-side
+          # budget.
           #
-          # The fix parallelises with futures::stream::buffer_unordered(20).
-          # 250 chunks should now finish in ~3 seconds. We assert < 25s to
-          # leave headroom for runner / S3 latency variance.
+          # Threshold history: previous 25s client timeout was tighter
+          # than the server budget, so it kept aborting the call before
+          # the server could finish under elevated Hetzner S3 latency
+          # (chronic flake -- see issue #143). Bumped to 60s client +
+          # 50s perf assertion: client matches server budget so the
+          # server gets to complete; the perf assertion still flags
+          # genuine parallelism regressions (expected steady-state ~5s
+          # for 400 chunks at 200ms / 20-way).
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
           if (-not $e2eEvent) {
@@ -1502,7 +1615,7 @@ jobs:
           try {
             $resp = Invoke-RestMethod `
               -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)/clear-s3" `
-              -Method POST -TimeoutSec 25
+              -Method POST -TimeoutSec 60
           } catch {
             $sw.Stop()
             throw "FAILED: clear-s3 endpoint errored after $($sw.Elapsed.TotalSeconds)s: $_"
@@ -1511,8 +1624,8 @@ jobs:
           $elapsed = $sw.Elapsed.TotalSeconds
           Write-Host "clear-s3 elapsed: ${elapsed}s, deleted: $($resp.deleted)"
 
-          if ($elapsed -ge 25) {
-            throw "FAILED: clear-s3 took ${elapsed}s (limit 25s) - parallel delete regression"
+          if ($elapsed -ge 50) {
+            throw "FAILED: clear-s3 took ${elapsed}s (limit 50s) - parallel delete regression"
           }
           if ($resp.deleted -lt 1) {
             throw "FAILED: clear-s3 reported 0 objects deleted but stats showed $($statsBefore.total_chunks) chunks"
