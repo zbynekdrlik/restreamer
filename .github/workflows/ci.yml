@@ -1456,6 +1456,88 @@ jobs:
           Write-Host "=== E2E Stability Test PASSED ==="
           Write-Host "10-minute stream: $($stats.total_chunks) chunks produced and uploaded without freeze"
 
+      - name: GATE audio PTS cadence matches AAC sample clock
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          # Regression for the 2026-04-26 live-event failure: audio over
+          # restreamer was chipmunked because flv_chunker stamped AAC frames
+          # with wall-clock arrival time instead of xiu's RTMP timestamp.
+          # AAC at 48kHz has 1024 samples per frame = 21.333 ms cadence; any
+          # PTS deviation > a frame width forces the decoder to resample.
+          #
+          # The 10-minute streaming step pushed `sine=frequency=1000` audio
+          # encoded as AAC. After the fix, audio packet PTS deltas in any
+          # produced FLV chunk should be a tight cluster around 21.33 ms.
+          # We assert the median delta is in [20, 22] ms and no individual
+          # gap exceeds 50 ms.
+          $ErrorActionPreference = 'Stop'
+          # Sibling of the ffmpeg path used by the streaming step above.
+          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
+          if (-not (Test-Path $ffprobe)) {
+            throw "FAILED: ffprobe not found at $ffprobe"
+          }
+
+          # Fetch a recent chunk record. The local file lives at
+          # ChunkRecord.chunk_file_path (absolute path on stream.lan).
+          $chunks = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks?limit=5" -TimeoutSec 10
+          if (-not $chunks -or $chunks.Count -eq 0) {
+            throw "FAILED: GET /api/v1/chunks returned no records — earlier streaming step did not produce chunks?"
+          }
+
+          # Pick the first chunk that exists on disk. Older chunks may have
+          # been pruned after S3 upload depending on retention policy.
+          $chunkPath = $null
+          foreach ($c in $chunks) {
+            if (Test-Path $c.chunk_file_path) {
+              $chunkPath = $c.chunk_file_path
+              break
+            }
+          }
+          if (-not $chunkPath) {
+            throw "FAILED: none of the recent chunks exist on disk: $($chunks | ForEach-Object { $_.chunk_file_path } | Out-String)"
+          }
+          Write-Host "Probing chunk: $chunkPath"
+
+          # ffprobe -show_packets emits one packet per line in JSON form.
+          # We select audio only and compare consecutive pts_time values.
+          $json = & $ffprobe -v error -show_packets -select_streams a -of json $chunkPath 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            throw "FAILED: ffprobe exited $LASTEXITCODE on ${chunkPath}: $json"
+          }
+
+          $parsed = $json | ConvertFrom-Json
+          if (-not $parsed.packets -or $parsed.packets.Count -lt 10) {
+            throw "FAILED: ffprobe returned $($parsed.packets.Count) audio packets in $chunkPath, need >=10 for cadence stats"
+          }
+
+          # Compute consecutive pts_time deltas in milliseconds.
+          $ptsTimes = $parsed.packets | ForEach-Object { [double]$_.pts_time }
+          $deltasMs = @()
+          for ($i = 1; $i -lt $ptsTimes.Count; $i++) {
+            $deltasMs += [math]::Round(($ptsTimes[$i] - $ptsTimes[$i - 1]) * 1000.0, 3)
+          }
+
+          $sorted = $deltasMs | Sort-Object
+          $median = $sorted[[int]([math]::Floor($sorted.Count / 2))]
+          $maxGap = ($deltasMs | Measure-Object -Maximum).Maximum
+          $minGap = ($deltasMs | Measure-Object -Minimum).Minimum
+
+          Write-Host "Audio packet count:   $($parsed.packets.Count)"
+          Write-Host "Audio delta median:   ${median} ms"
+          Write-Host "Audio delta min:      ${minGap} ms"
+          Write-Host "Audio delta max:      ${maxGap} ms"
+
+          if ($median -lt 20.0 -or $median -gt 22.0) {
+            throw "FAILED: median audio PTS delta ${median}ms outside [20, 22]ms — AAC cadence broken (chipmunk regression)"
+          }
+          if ($maxGap -gt 50.0) {
+            throw "FAILED: max audio PTS delta ${maxGap}ms exceeds 50ms — audio drop/burst regression"
+          }
+
+          Write-Host "=== Audio PTS cadence GATE PASSED ==="
+
       - name: GATE clear-s3 endpoint deletes 250+ chunks within 25s
         shell: powershell
         timeout-minutes: 2
