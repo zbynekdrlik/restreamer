@@ -249,9 +249,13 @@ impl FlvChunkSink {
 
     /// Process an audio frame from xiu's FrameData::Audio.
     ///
-    /// `_xiu_timestamp` is the OBS-declared timestamp — intentionally ignored.
-    /// See write_video for the reasoning.
-    pub async fn write_audio(&self, _xiu_timestamp: u32, data: &BytesMut) {
+    /// `timestamp` is the xiu-forwarded RTMP timestamp (in milliseconds).
+    /// Audio uses xiu timestamps directly — unlike video, which is rewritten
+    /// to wall-clock to fix #135 cache drift. AAC frames have fixed cadence
+    /// (1024 samples / 48000 Hz = 21.333 ms), so the producer cannot drift,
+    /// and wall-clock stamping introduces RTMP delivery jitter into PTS,
+    /// causing decoder resampling artefacts (chipmunk pitch + glitches).
+    pub async fn write_audio(&self, timestamp: u32, data: &BytesMut) {
         let is_sequence_header = data.len() > 1 && (data[0] >> 4) == 0x0A && data[1] == 0x00;
 
         let pending = {
@@ -273,7 +277,7 @@ impl FlvChunkSink {
                 return;
             }
 
-            let ts = Self::current_session_ts(&mut inner);
+            let ts = timestamp;
             inner.chunk_last_ts = ts;
             Self::write_tag(&mut inner, FLV_TAG_AUDIO, ts, data);
             None
