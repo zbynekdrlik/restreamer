@@ -916,4 +916,50 @@ mod tests {
         assert!(ts1 >= ts0, "ts1={ts1} should be >= ts0={ts0}");
         assert!(ts2 >= ts1, "ts2={ts2} should be >= ts1={ts1}");
     }
+
+    /// Audio FLV tags must carry the xiu-supplied RTMP timestamp verbatim,
+    /// not a wall-clock-derived value. AAC at 48 kHz has fixed-cadence frames
+    /// (1024 samples / 48000 Hz = 21.333 ms). Wall-clock stamping introduces
+    /// RTMP jitter into PTS, which the downstream decoder interprets as
+    /// resampling cues — producing chipmunk pitch shift and glitches.
+    /// Regression test for the live-event failure on 2026-04-26.
+    #[tokio::test]
+    async fn audio_uses_xiu_timestamp_not_wall_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_secs(60));
+
+        // Seed sequence headers (audio + video) so the chunk machinery is ready.
+        let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
+        sink.write_video(0, &video_seq).await;
+        let audio_seq = BytesMut::from(&[0xAF, 0x00, 0x12, 0x10][..]);
+        sink.write_audio(0, &audio_seq).await;
+
+        // Start the chunk with a video keyframe.
+        let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
+        sink.write_video(0, &keyframe).await;
+
+        // Sleep long enough that wall-clock stamping would produce a clearly
+        // different value than the xiu timestamp we pass in.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Write two AAC payload tags with explicit xiu timestamps.
+        // Byte 0 = 0xAF (AAC + stereo + 16-bit + 44.1k indicator),
+        // byte 1 = 0x01 (raw frame, NOT sequence header).
+        let aac_frame = BytesMut::from(&[0xAF, 0x01, 0x12, 0x34, 0x56][..]);
+        sink.write_audio(21, &aac_frame).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        sink.write_audio(42, &aac_frame).await;
+
+        // chunk_last_ts is updated by every write_audio call. After the second
+        // call it must equal 42, the xiu timestamp we just supplied — NOT
+        // ~100 (wall-clock since session start) and NOT 0.
+        let inner = sink.inner.lock().await;
+        assert_eq!(
+            inner.chunk_last_ts, 42,
+            "audio FLV tag must carry xiu timestamp 42, got {}",
+            inner.chunk_last_ts
+        );
+    }
 }
