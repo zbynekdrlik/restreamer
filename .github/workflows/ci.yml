@@ -1463,20 +1463,18 @@ jobs:
           # Regression for the 2026-04-26 live-event failure: audio over
           # restreamer was chipmunked because flv_chunker stamped AAC frames
           # with wall-clock arrival time instead of xiu's RTMP timestamp.
-          # AAC at 48kHz has 1024 samples per frame = 21.333 ms cadence; any
-          # PTS deviation > a frame width forces the decoder to resample.
+          # AAC frames have a fixed cadence of 1024 samples / sample_rate;
+          # any PTS deviation > a frame width forces the decoder to resample.
           #
-          # The 10-minute streaming step pushed `sine=frequency=1000` audio
-          # encoded as AAC. After the fix, audio packet PTS deltas in any
-          # produced FLV chunk should be a tight cluster around 21.33 ms.
-          # We assert the median delta is in [20, 22] ms and no individual
-          # gap exceeds 50 ms.
+          # The 10-minute streaming step pushed sine-wave audio encoded as
+          # AAC. The actual sample rate (44.1k vs 48k) is set by ffmpeg's
+          # default, so we read it from the chunk and derive expected
+          # cadence dynamically. We assert median delta is within +/-1 ms
+          # of the AAC frame duration and no individual gap exceeds 50 ms.
           $ErrorActionPreference = 'Stop'
-          # Sibling of the ffmpeg path used by the streaming step above.
-          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
-          $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
-          if (-not (Test-Path $ffprobe)) {
-            throw "FAILED: ffprobe not found at $ffprobe"
+          # ffprobe is on PATH on the stream-lan runner (winget shim).
+          if (-not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            throw "FAILED: ffprobe not found on PATH"
           }
 
           # Fetch a recent chunk record. The local file lives at
@@ -1500,11 +1498,28 @@ jobs:
           }
           Write-Host "Probing chunk: $chunkPath"
 
-          # ffprobe -show_packets emits one packet per line in JSON form.
-          # We select audio only and compare consecutive pts_time values.
-          $json = & $ffprobe -v error -show_packets -select_streams a -of json $chunkPath 2>&1 | Out-String
+          # First read stream metadata to get the AAC sample rate.
+          $streamJson = & ffprobe -v error -show_streams -select_streams a -of json $chunkPath 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) {
-            throw "FAILED: ffprobe exited $LASTEXITCODE on ${chunkPath}: $json"
+            throw "FAILED: ffprobe -show_streams exited $LASTEXITCODE on ${chunkPath}: $streamJson"
+          }
+          $streamParsed = $streamJson | ConvertFrom-Json
+          if (-not $streamParsed.streams -or $streamParsed.streams.Count -eq 0) {
+            throw "FAILED: ffprobe found no audio stream in $chunkPath"
+          }
+          $sampleRate = [int]$streamParsed.streams[0].sample_rate
+          if ($sampleRate -lt 8000 -or $sampleRate -gt 192000) {
+            throw "FAILED: implausible audio sample rate ${sampleRate} Hz in $chunkPath"
+          }
+          # AAC encodes 1024 samples per frame.
+          $expectedMs = [math]::Round(1024.0 * 1000.0 / $sampleRate, 3)
+          Write-Host "Audio sample rate:    ${sampleRate} Hz"
+          Write-Host "Expected AAC cadence: ${expectedMs} ms (1024 samples / ${sampleRate} Hz)"
+
+          # Now show packets to compute per-frame PTS deltas.
+          $json = & ffprobe -v error -show_packets -select_streams a -of json $chunkPath 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            throw "FAILED: ffprobe -show_packets exited $LASTEXITCODE on ${chunkPath}: $json"
           }
 
           $parsed = $json | ConvertFrom-Json
@@ -1529,8 +1544,11 @@ jobs:
           Write-Host "Audio delta min:      ${minGap} ms"
           Write-Host "Audio delta max:      ${maxGap} ms"
 
-          if ($median -lt 20.0 -or $median -gt 22.0) {
-            throw "FAILED: median audio PTS delta ${median}ms outside [20, 22]ms -- AAC cadence broken (chipmunk regression)"
+          # Tolerate +/-1 ms around the expected cadence.
+          $lo = $expectedMs - 1.0
+          $hi = $expectedMs + 1.0
+          if ($median -lt $lo -or $median -gt $hi) {
+            throw "FAILED: median audio PTS delta ${median}ms outside [${lo}, ${hi}]ms (expected ~${expectedMs}ms at ${sampleRate}Hz) -- AAC cadence broken (chipmunk regression)"
           }
           if ($maxGap -gt 50.0) {
             throw "FAILED: max audio PTS delta ${maxGap}ms exceeds 50ms -- audio drop/burst regression"
