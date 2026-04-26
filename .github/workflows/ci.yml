@@ -1472,9 +1472,11 @@ jobs:
           # cadence dynamically. We assert median delta is within +/-1 ms
           # of the AAC frame duration and no individual gap exceeds 50 ms.
           $ErrorActionPreference = 'Stop'
-          # ffprobe is on PATH on the stream-lan runner (winget shim).
-          if (-not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
-            throw "FAILED: ffprobe not found on PATH"
+          # ffprobe is installed next to ffmpeg on the stream-lan runner.
+          $ffmpegPath = "C:\Users\newlevel\restreamer\local-client\ffmpeg.exe"
+          $ffprobe = Join-Path (Split-Path $ffmpegPath -Parent) "ffprobe.exe"
+          if (-not (Test-Path $ffprobe)) {
+            throw "FAILED: ffprobe not found at $ffprobe"
           }
 
           # Fetch a recent chunk record. The local file lives at
@@ -1499,7 +1501,7 @@ jobs:
           Write-Host "Probing chunk: $chunkPath"
 
           # First read stream metadata to get the AAC sample rate.
-          $streamJson = & ffprobe -v error -show_streams -select_streams a -of json $chunkPath 2>&1 | Out-String
+          $streamJson = & $ffprobe -v error -show_streams -select_streams a -of json $chunkPath 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) {
             throw "FAILED: ffprobe -show_streams exited $LASTEXITCODE on ${chunkPath}: $streamJson"
           }
@@ -1517,7 +1519,7 @@ jobs:
           Write-Host "Expected AAC cadence: ${expectedMs} ms (1024 samples / ${sampleRate} Hz)"
 
           # Now show packets to compute per-frame PTS deltas.
-          $json = & ffprobe -v error -show_packets -select_streams a -of json $chunkPath 2>&1 | Out-String
+          $json = & $ffprobe -v error -show_packets -select_streams a -of json $chunkPath 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) {
             throw "FAILED: ffprobe -show_packets exited $LASTEXITCODE on ${chunkPath}: $json"
           }
