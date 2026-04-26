@@ -1414,6 +1414,18 @@ jobs:
               if ($_.Exception.Message -match "STREAM FREEZE") { throw }
               Write-Host "WARNING: Status check failed at ${elapsed}s: $_"
             }
+
+            # Snapshot one chunk for the audio cadence gate while files
+            # still exist on disk -- the uploader deletes each chunk
+            # after S3 upload (rs-endpoint/uploader.rs ~line 402).
+            if ($elapsed -ge 60 -and -not (Test-Path "$env:TEMP\audio-test-chunk.bin")) {
+              $latestChunk = Get-ChildItem "C:\ProgramData\Restreamer\chunks\" -File -ErrorAction SilentlyContinue |
+                             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+              if ($latestChunk) {
+                Copy-Item $latestChunk.FullName "$env:TEMP\audio-test-chunk.bin" -Force
+                Write-Host "Audio gate snapshot: $($latestChunk.Name) ($($latestChunk.Length) bytes) -> $env:TEMP\audio-test-chunk.bin"
+              }
+            }
           }
 
           # Wait for ffmpeg to finish if still running
@@ -1479,26 +1491,14 @@ jobs:
             throw "FAILED: ffprobe not found at $ffprobe"
           }
 
-          # Fetch a recent chunk record. The local file lives at
-          # ChunkRecord.chunk_file_path (absolute path on stream.lan).
-          $chunks = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/chunks?limit=5" -TimeoutSec 10
-          if (-not $chunks -or $chunks.Count -eq 0) {
-            throw "FAILED: GET /api/v1/chunks returned no records -- earlier streaming step did not produce chunks?"
+          # The streaming step snapshots a chunk to this path while files
+          # still exist locally -- the uploader prunes each chunk after S3
+          # upload, so by the time this gate runs the chunks dir is empty.
+          $chunkPath = "$env:TEMP\audio-test-chunk.bin"
+          if (-not (Test-Path $chunkPath)) {
+            throw "FAILED: snapshot chunk not at $chunkPath -- streaming step did not capture one (check earlier log for 'Audio gate snapshot' line)"
           }
-
-          # Pick the first chunk that exists on disk. Older chunks may have
-          # been pruned after S3 upload depending on retention policy.
-          $chunkPath = $null
-          foreach ($c in $chunks) {
-            if (Test-Path $c.chunk_file_path) {
-              $chunkPath = $c.chunk_file_path
-              break
-            }
-          }
-          if (-not $chunkPath) {
-            throw "FAILED: none of the recent chunks exist on disk: $($chunks | ForEach-Object { $_.chunk_file_path } | Out-String)"
-          }
-          Write-Host "Probing chunk: $chunkPath"
+          Write-Host "Probing chunk: $chunkPath ($([math]::Round((Get-Item $chunkPath).Length / 1024.0, 1)) KB)"
 
           # First read stream metadata to get the AAC sample rate.
           $streamJson = & $ffprobe -v error -show_streams -select_streams a -of json $chunkPath 2>&1 | Out-String
