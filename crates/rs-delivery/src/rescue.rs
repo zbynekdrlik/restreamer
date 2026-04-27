@@ -384,12 +384,22 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
         "Warmup started — waiting for buffer target"
     );
 
+    // Hardening (#146): if the same chunk_id returns Ok(None) for too
+    // long, advance probe_id rather than spinning silently. Production
+    // bug: when start_chunk_id is below S3 live-edge (chunks pruned),
+    // the loop hung forever with no log output.
+    const CONSECUTIVE_NONE_THRESHOLD: u32 = 30; // 30 × 2s sleep ≈ 60s
+    let mut consecutive_none: u32 = 0;
+    let mut stuck_chunk: i64 = probe_id;
+
     let stopped = loop {
         if *stop_rx.borrow() {
             break true;
         }
         match fetcher.chunk_duration_ms(probe_id).await {
             Ok(Some(dur_ms)) => {
+                consecutive_none = 0;
+                stuck_chunk = probe_id;
                 accum_ms += dur_ms.max(0) as u64;
                 probe_id += 1;
 
@@ -423,6 +433,23 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
                 }
             }
             Ok(None) => {
+                if probe_id == stuck_chunk {
+                    consecutive_none += 1;
+                } else {
+                    stuck_chunk = probe_id;
+                    consecutive_none = 1;
+                }
+                if consecutive_none >= CONSECUTIVE_NONE_THRESHOLD {
+                    tracing::warn!(
+                        alias,
+                        stuck_chunk,
+                        consecutive_none,
+                        "Warmup stuck on missing chunk; advancing probe_id"
+                    );
+                    probe_id += 1;
+                    consecutive_none = 0;
+                    continue;
+                }
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
                     _ = stop_rx.changed() => {
