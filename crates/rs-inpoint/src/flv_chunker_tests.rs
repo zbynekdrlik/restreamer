@@ -283,17 +283,25 @@ async fn chunk_duration_tracks_video_wall_span_not_audio_xiu_ts() {
     let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
     sink.write_video(0, &keyframe).await;
 
-    // Audio frames carry small xiu timestamps. Pre-fix, each of these
-    // overwrites chunk_last_ts with the xiu value, breaking duration.
+    // Realistic frame mix: audio frames AND video P-frames (inter-frames)
+    // arrive between keyframes. P-frames advance chunk_last_ts via write_video
+    // (line 224); audio frames must NOT touch chunk_last_ts (the regression
+    // we are guarding against). The xiu timestamps on audio (20, 43, 66) are
+    // small values that, pre-fix, would underflow chunk_first_ts and produce
+    // duration_ms = 0.
     let aac = BytesMut::from(&[0xAF, 0x01, 0x12, 0x34, 0x56][..]);
+    let interframe = BytesMut::from(&[0x27, 0x01, 0x00, 0x00, 0x00, 0xBB][..]);
+
     sink.write_audio(20, &aac).await;
+    sink.write_video(0, &interframe).await; // advances chunk_last_ts
     sink.write_audio(43, &aac).await;
 
-    // Wait so the next video keyframe's wall-clock stamp is meaningfully
-    // later than the chunk's first frame.
     tokio::time::sleep(Duration::from_millis(100)).await;
+    sink.write_video(0, &interframe).await; // advances chunk_last_ts to ~100ms
     sink.write_audio(66, &aac).await;
+
     tokio::time::sleep(Duration::from_millis(100)).await;
+    sink.write_video(0, &interframe).await; // advances chunk_last_ts to ~200ms
 
     // Second keyframe flushes the chunk (50ms min duration was hit).
     let keyframe2 = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xCC, 0xDD][..]);
