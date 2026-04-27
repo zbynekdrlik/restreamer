@@ -13,7 +13,7 @@
 //!   5. `NetStream.publish` -> wait for `onStatus(NetStream.Publish.Start)`
 //!   6. Background read loop watches for mid-stream errors
 //!
-//! Tag writes (`send_audio_tag` / `send_video_tag`) are stubs for Task 4.
+//! Tag writes (`send_audio_tag` / `send_video_tag`) use ChunkPacketizer.
 //! Task 6 fills the actual chunk-packetize-and-send loop.
 
 use std::io;
@@ -23,7 +23,9 @@ use std::time::Duration;
 
 use bytesio::bytes_writer::AsyncBytesWriter;
 use bytesio::bytesio::{TNetIO, TcpIO};
+use rtmp::chunk::ChunkInfo;
 use rtmp::chunk::define::CHUNK_SIZE;
+use rtmp::chunk::packetizer::ChunkPacketizer;
 use rtmp::chunk::unpacketizer::{ChunkUnpacketizer, UnpackResult};
 use rtmp::handshake::define::ClientHandshakeState;
 use rtmp::handshake::handshake_client::SimpleHandshakeClient;
@@ -57,11 +59,18 @@ const NEGOTIATE_TIMEOUT_SECS: u64 = 30;
 /// server-initiated errors; if one is detected `poisoned` is set and
 /// subsequent `send_*_tag` calls return `Err(PushError::RemoteClosed(...))`.
 pub struct Session {
-    /// Shared I/O handle.  Writers (main task) and the read-loop (background
-    /// task) compete for this mutex.  On a live push the server sends almost
-    /// no data after publishing starts, so lock contention is negligible.
-    #[allow(dead_code)] // Held to keep TCP write half alive across send_*_tag calls (Task 6).
+    /// Shared I/O handle.  Held here so the `Arc` stays alive (and therefore
+    /// the `TcpIO` is not dropped) for as long as the session lives.  The
+    /// packetizer and the read-loop each hold their own `Arc` clones; this
+    /// field keeps the TCP socket open even if all other holders finish early.
+    #[allow(dead_code)]
     io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
+    /// Chunk packetizer for writing audio/video tags over the RTMP connection.
+    /// Set after `Session::connect` succeeds.
+    packetizer: ChunkPacketizer,
+    /// RTMP message stream id assigned by the server in the createStream response.
+    /// xiu typically assigns 1.
+    msg_stream_id: u32,
     /// Set by the background read-loop on any I/O error or server-side close.
     poisoned: Arc<AtomicBool>,
     /// Background task handle; aborted on `Drop` or `close`.
@@ -92,62 +101,73 @@ impl Session {
         let io = Arc::new(Mutex::new(net_io));
 
         // --- 3-5. Negotiate (handshake + connect + publish) ------------------
-        tokio::time::timeout(
+        let msg_stream_id = tokio::time::timeout(
             Duration::from_secs(NEGOTIATE_TIMEOUT_SECS),
             negotiate(Arc::clone(&io), &addr, &app, &stream_name),
         )
         .await
         .map_err(|_| PushError::Timeout)??;
 
-        // --- 6. Spawn background read-loop -----------------------------------
+        // --- 6. Build packetizer + spawn background read-loop ----------------
+        let packetizer = ChunkPacketizer::new(Arc::clone(&io));
         let poisoned = Arc::new(AtomicBool::new(false));
         let read_loop_handle = tokio::spawn(read_loop(Arc::clone(&io), Arc::clone(&poisoned)));
 
         Ok(Self {
             io,
+            packetizer,
+            msg_stream_id,
             poisoned,
             read_loop_handle: Some(read_loop_handle),
         })
     }
 
-    /// Send an audio FLV tag body.
-    ///
-    /// Task 4 stub: checks liveness, returns `Ok(())` without sending bytes.
-    /// Task 6 replaces this with actual `ChunkPacketizer` writes.
-    #[allow(dead_code)]
-    // Filled out in Task 6 (#103); reachable then.
+    /// Send an audio FLV tag body via ChunkPacketizer.
     pub async fn send_audio_tag(
         &mut self,
-        _timestamp_ms: u32,
-        _body: &[u8],
+        timestamp_ms: u32,
+        body: &[u8],
     ) -> Result<(), PushError> {
-        self.check_alive()
+        self.send_tag(rtmp::chunk::define::csid_type::AUDIO, 8, timestamp_ms, body)
+            .await
     }
 
-    /// Send a video FLV tag body.
-    ///
-    /// Task 4 stub: checks liveness, returns `Ok(())` without sending bytes.
-    /// Task 6 replaces this with actual `ChunkPacketizer` writes.
-    #[allow(dead_code)]
-    // Filled out in Task 6 (#103); reachable then.
+    /// Send a video FLV tag body via ChunkPacketizer.
     pub async fn send_video_tag(
         &mut self,
-        _timestamp_ms: u32,
-        _body: &[u8],
+        timestamp_ms: u32,
+        body: &[u8],
     ) -> Result<(), PushError> {
-        self.check_alive()
+        self.send_tag(rtmp::chunk::define::csid_type::VIDEO, 9, timestamp_ms, body)
+            .await
     }
 
-    /// Returns `Ok(())` if the session is still alive, or an error if the
-    /// background read-loop detected a server-side close.
-    fn check_alive(&self) -> Result<(), PushError> {
+    /// Packetize and write a single RTMP chunk for the given tag body.
+    async fn send_tag(
+        &mut self,
+        csid: u32,
+        msg_type_id: u8,
+        timestamp_ms: u32,
+        body: &[u8],
+    ) -> Result<(), PushError> {
         if self.poisoned.load(Ordering::Relaxed) {
-            Err(PushError::RemoteClosed(io::Error::from(
+            return Err(PushError::RemoteClosed(io::Error::from(
                 io::ErrorKind::ConnectionReset,
-            )))
-        } else {
-            Ok(())
+            )));
         }
+        let mut chunk_info = ChunkInfo::new(
+            csid,
+            0, // format; zip_chunk_header will optimize on subsequent chunks
+            timestamp_ms,
+            body.len() as u32,
+            msg_type_id,
+            self.msg_stream_id,
+            bytes::BytesMut::from(body),
+        );
+        self.packetizer
+            .write_chunk(&mut chunk_info)
+            .await
+            .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))
     }
 
     /// Gracefully shut down the session.
@@ -157,7 +177,7 @@ impl Session {
         }
         // `self.io` is intentionally held until here so the Arc stays alive
         // long enough for the read-loop abort to complete before the TcpIO
-        // is dropped.  Task 6 will also use this field for chunk writes.
+        // is dropped.
     }
 }
 
@@ -175,14 +195,15 @@ impl Drop for Session {
 
 /// Run the full RTMP client negotiation sequence on `io`.
 ///
-/// Returns once the server sends `NetStream.Publish.Start`, or errors on any
-/// rejection or unexpected close.
+/// Returns the RTMP message stream id assigned by the server in the
+/// `createStream` response (typically 1) once the server sends
+/// `NetStream.Publish.Start`, or errors on any rejection or unexpected close.
 async fn negotiate(
     io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
     raw_domain: &str,
     app: &str,
     stream_name: &str,
-) -> Result<(), PushError> {
+) -> Result<u32, PushError> {
     // --- Handshake ----------------------------------------------------------
     {
         let mut handshaker = SimpleHandshakeClient::new(Arc::clone(&io));
@@ -273,14 +294,8 @@ async fn negotiate(
             .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
     }
 
-    // Wait for _result (transaction 2 == createStream).
-    wait_for_result(
-        Arc::clone(&io),
-        &mut unpacketizer,
-        TRANSACTION_ID_CREATE_STREAM,
-        "createStream",
-    )
-    .await?;
+    // Wait for _result (transaction 2 == createStream) and capture stream_id.
+    let msg_stream_id = wait_for_create_stream_result(Arc::clone(&io), &mut unpacketizer).await?;
 
     // --- NetStream.publish --------------------------------------------------
     {
@@ -295,7 +310,7 @@ async fn negotiate(
     // Wait for onStatus(NetStream.Publish.Start).
     wait_for_publish_start(Arc::clone(&io), &mut unpacketizer).await?;
 
-    Ok(())
+    Ok(msg_stream_id)
 }
 
 // -------------------------------------------------------------------------
@@ -357,6 +372,90 @@ async fn wait_for_result(
                                 if cmd == "_error" {
                                     return Err(PushError::ConnectRejected {
                                         code: format!("error during {label}"),
+                                        description: "server returned _error".to_string(),
+                                    });
+                                }
+                            }
+                            RtmpMessageData::SetChunkSize { chunk_size } => {
+                                unpacketizer.update_max_chunk_size(chunk_size as usize);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    }
+}
+
+/// Read messages from `io` until we see the `_result` for the `createStream`
+/// command (transaction id 2).
+///
+/// Extracts and returns the RTMP message stream id from the AMF response.
+/// xiu's server sets stream_id = 1; if extraction fails we default to 1.
+async fn wait_for_create_stream_result(
+    io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
+    unpacketizer: &mut ChunkUnpacketizer,
+) -> Result<u32, PushError> {
+    loop {
+        let data = io
+            .lock()
+            .await
+            .read()
+            .await
+            .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
+        unpacketizer.extend_data(&data[..]);
+
+        loop {
+            match unpacketizer.read_chunks() {
+                Ok(UnpackResult::Chunks(chunks)) => {
+                    for chunk in chunks {
+                        if chunk.message_header.msg_type_id
+                            == rtmp::messages::define::msg_type_id::SET_CHUNK_SIZE
+                        {
+                            if let Some(RtmpMessageData::SetChunkSize { chunk_size }) =
+                                MessageParser::new(chunk).parse().ok().flatten()
+                            {
+                                unpacketizer.update_max_chunk_size(chunk_size as usize);
+                            }
+                            continue;
+                        }
+
+                        let msg = match MessageParser::new(chunk).parse() {
+                            Ok(Some(m)) => m,
+                            _ => continue,
+                        };
+
+                        match msg {
+                            RtmpMessageData::Amf0Command {
+                                command_name,
+                                transaction_id,
+                                others,
+                                ..
+                            } => {
+                                let cmd = amf_string(&command_name);
+                                let tid = amf_u8(&transaction_id);
+                                if cmd == "_result" && tid == TRANSACTION_ID_CREATE_STREAM {
+                                    // The stream_id is the first Number in `others`
+                                    // (the command object is the Null before it,
+                                    // consumed as `command_object` by the parser).
+                                    let stream_id = others
+                                        .iter()
+                                        .find_map(|v| {
+                                            if let Amf0ValueType::Number(n) = v {
+                                                Some(*n as u32)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .unwrap_or(1);
+                                    return Ok(stream_id);
+                                }
+                                if cmd == "_error" {
+                                    return Err(PushError::ConnectRejected {
+                                        code: "error during createStream".to_string(),
                                         description: "server returned _error".to_string(),
                                     });
                                 }

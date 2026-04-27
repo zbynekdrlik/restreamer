@@ -7,7 +7,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytesio::bytes_writer::AsyncBytesWriter;
+use bytesio::bytesio::{TNetIO, TcpIO};
 use rs_rtmp_push::{PusherConfig, RtmpPusher};
+use rtmp::chunk::unpacketizer::{ChunkUnpacketizer, UnpackResult};
+use rtmp::handshake::define::ServerHandshakeState;
+use rtmp::handshake::handshake_server::SimpleHandshakeServer;
+use rtmp::messages::define::RtmpMessageData;
+use rtmp::messages::parser::MessageParser;
+use rtmp::netconnection::writer::NetConnection;
+use rtmp::netstream::writer::NetStreamWriter;
 use streamhub::StreamsHub;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -120,75 +129,220 @@ struct RecordedTag {
 // Recording server helper
 // ---------------------------------------------------------------------------
 
-/// Spin up a real xiu RTMP server and a companion subscription loop that
-/// captures every audio/video tag that the publisher sends.
+/// Spin up a minimal hand-rolled RTMP server that accepts one publisher
+/// connection, performs the RTMP handshake + connect + createStream + publish
+/// negotiation, and captures every audio/video chunk payload.
+///
+/// This approach avoids streamhub entirely so there is no race between the
+/// subscriber registration and the first media frames from the pusher.
 ///
 /// Returns:
-/// - `url`      — `rtmp://…/live/test` for the pusher to connect to
-/// - `recorded` — shared accumulator; populated only AFTER Task 6 implements
-///                the tag-write loop in `push_flv_bytes` (see note below)
-/// - `_server`  — `JoinHandle` keeping the server alive for the test duration
-///
-/// # Task 6 note
-///
-/// The subscription loop below is a STUB.  It starts the xiu server exactly
-/// like `spawn_xiu_server` but does NOT yet subscribe a frame receiver from
-/// the hub.  As a result `recorded` will always be empty in Task 5.  This is
-/// intentional: `push_flv_bytes` returns `Err(MalformedInput { … "Task 6" })`
-/// before any frames flow, so the test fails at `expect("push_flv_bytes")`
-/// rather than at the SHA-256 assertion.
-///
-/// Task 6's implementer should replace the `/* TODO Task 6 */` block with a
-/// real `StreamHubEvent::Subscribe` subscription so that after `push_flv_bytes`
-/// returns `Ok(())` the received frames can be compared against the source.
+/// - `url`      — `rtmp://127.0.0.1:<port>/live/test` for the pusher
+/// - `recorded` — shared accumulator; filled after `push_flv_bytes` returns
+/// - `_server`  — `JoinHandle` keeping the listener alive
 async fn spawn_recording_xiu_server() -> (
     String,
     Arc<Mutex<Vec<RecordedTag>>>,
     tokio::task::JoinHandle<()>,
 ) {
-    // Discover an available ephemeral port (same TOCTOU caveat as spawn_xiu_server).
-    let addr = {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind 127.0.0.1:0");
-        let a = listener.local_addr().expect("local_addr");
-        drop(listener);
-        a
-    };
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind 127.0.0.1:0");
+    let addr = listener.local_addr().expect("local_addr");
+    let url = format!("rtmp://{}/live/test", addr);
 
-    // Shared accumulator for captured tags.
     let recorded: Arc<Mutex<Vec<RecordedTag>>> = Arc::new(Mutex::new(Vec::new()));
-
-    // Build the StreamsHub with rtmp_push_enabled so Publish events are emitted.
-    let mut hub = StreamsHub::new(None);
-    hub.set_rtmp_push_enabled(true);
-    let event_sender = hub.get_hub_event_sender();
-
-    let address = addr.to_string();
-
-    // Clone for the server task.
-    let _recorded_for_task6 = Arc::clone(&recorded);
-    // TODO Task 6: subscribe a FrameDataReceiver from the hub here and spawn
-    // a loop that pushes every FrameData::Audio / FrameData::Video into
-    // `_recorded_for_task6`.  The subscription must happen *after* the
-    // publisher announces itself (StreamHubEvent::Subscribe sent to
-    // `event_sender` once the stream identifier appears in the hub).
+    let recorded_for_task = Arc::clone(&recorded);
 
     let handle = tokio::spawn(async move {
-        let mut rtmp_server = rtmp::rtmp::RtmpServer::new(address, event_sender, 0, None);
-
-        tokio::select! {
-            _ = hub.run() => {}
-            result = rtmp_server.run() => {
-                if let Err(e) = result {
-                    log::debug!("xiu recording test server stopped: {e}");
-                }
+        // Accept exactly one publisher connection.
+        let (tcp_stream, _peer) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                log::debug!("recording server accept error: {e}");
+                return;
             }
+        };
+
+        let net_io: Box<dyn TNetIO + Send + Sync> = Box::new(TcpIO::new(tcp_stream));
+        let io = Arc::new(Mutex::new(net_io));
+
+        if let Err(e) = recording_session(io, recorded_for_task).await {
+            log::debug!("recording session ended: {e}");
         }
     });
 
-    let url = format!("rtmp://{}/live/test", addr);
     (url, recorded, handle)
+}
+
+/// Run the server-side RTMP negotiation and media capture loop.
+///
+/// Performs handshake, responds to connect/createStream/publish, then
+/// captures all audio and video chunk payloads into `recorded`.
+async fn recording_session(
+    io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
+    recorded: Arc<Mutex<Vec<RecordedTag>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // --- Handshake -----------------------------------------------------------
+    // Read at least RTMP_HANDSHAKE_SIZE bytes per phase to avoid hitting
+    // NotEnoughBytes on partial TCP segments.
+    // Phase 1: accumulate C0C1 (1537 bytes), call handshake -> writes S0S1S2,
+    //          state becomes ReadC2.
+    // Phase 2: accumulate C2 (1536 bytes), call handshake -> state Finish.
+    // Leftover bytes after C2 (e.g., bundled AMF connect) go into unpacketizer.
+    let mut unpacketizer = ChunkUnpacketizer::new();
+    {
+        use rtmp::handshake::define::RTMP_HANDSHAKE_SIZE;
+        let mut hs = SimpleHandshakeServer::new(Arc::clone(&io));
+
+        // Phase 1: read C0C1.
+        let mut accumulated = 0usize;
+        while accumulated < RTMP_HANDSHAKE_SIZE {
+            let data = io.lock().await.read().await?;
+            accumulated += data.len();
+            hs.extend_data(&data[..]);
+        }
+        hs.handshake().await?; // reads C0C1, writes S0S1S2, state=ReadC2
+
+        // Phase 2: read C2.
+        accumulated = 0;
+        while accumulated < RTMP_HANDSHAKE_SIZE {
+            let data = io.lock().await.read().await?;
+            accumulated += data.len();
+            hs.extend_data(&data[..]);
+        }
+        hs.handshake().await?; // reads C2, state=Finish
+
+        // Drain any bytes the handshaker did not consume (e.g., AMF connect
+        // bundled in the same read() as C2).
+        let leftover = hs.reader.get_remaining_bytes();
+        if !leftover.is_empty() {
+            unpacketizer.extend_data(&leftover[..]);
+        }
+    }
+
+    // --- Negotiate and capture ----------------------------------------------
+    // Track whether we have sent the publish start response.
+    let mut published = false;
+
+    loop {
+        let data = io.lock().await.read().await?;
+        if data.is_empty() {
+            break;
+        }
+        unpacketizer.extend_data(&data[..]);
+
+        loop {
+            match unpacketizer.read_chunks() {
+                Ok(UnpackResult::Chunks(chunks)) => {
+                    for chunk in chunks {
+                        let timestamp = chunk.message_header.timestamp;
+
+                        // Parse the chunk into a message; handle all variants below.
+                        let msg = match MessageParser::new(chunk).parse() {
+                            Ok(Some(m)) => m,
+                            _ => continue,
+                        };
+
+                        match msg {
+                            RtmpMessageData::SetChunkSize { chunk_size } => {
+                                unpacketizer.update_max_chunk_size(chunk_size as usize);
+                            }
+                            RtmpMessageData::Amf0Command {
+                                command_name,
+                                transaction_id,
+                                ..
+                            } => {
+                                let cmd = match &command_name {
+                                    xflv::amf0::define::Amf0ValueType::UTF8String(s) => s.clone(),
+                                    _ => String::new(),
+                                };
+                                let tid = match &transaction_id {
+                                    xflv::amf0::define::Amf0ValueType::Number(n) => *n,
+                                    _ => 0.0,
+                                };
+
+                                match cmd.as_str() {
+                                    "connect" => {
+                                        // Send window ack size + set peer bandwidth first.
+                                        {
+                                            use rtmp::protocol_control_messages::writer::ProtocolControlMessagesWriter;
+                                            let mut ctrl = ProtocolControlMessagesWriter::new(
+                                                AsyncBytesWriter::new(Arc::clone(&io)),
+                                            );
+                                            ctrl.write_window_acknowledgement_size(2500000)
+                                                .await
+                                                .ok();
+                                            ctrl.write_set_peer_bandwidth(2500000, 2).await.ok();
+                                            ctrl.write_set_chunk_size(
+                                                rtmp::chunk::define::CHUNK_SIZE,
+                                            )
+                                            .await
+                                            .ok();
+                                        }
+                                        let mut nc = NetConnection::new(Arc::clone(&io));
+                                        nc.write_connect_response(
+                                            &tid,
+                                            "FMS/3,0,1,123",
+                                            &31.0,
+                                            "NetConnection.Connect.Success",
+                                            "status",
+                                            "Connection succeeded",
+                                            &0.0,
+                                        )
+                                        .await
+                                        .ok();
+                                    }
+                                    "createStream" => {
+                                        let mut nc = NetConnection::new(Arc::clone(&io));
+                                        nc.write_create_stream_response(&tid, &1.0).await.ok();
+                                    }
+                                    "publish" => {
+                                        let mut ns = NetStreamWriter::new(Arc::clone(&io));
+                                        ns.write_on_status(
+                                            &0.0,
+                                            "status",
+                                            "NetStream.Publish.Start",
+                                            "Start publishing",
+                                        )
+                                        .await
+                                        .ok();
+                                        published = true;
+                                    }
+                                    _ => {
+                                        // releaseStream, FCPublish, etc. — ignore
+                                    }
+                                }
+                            }
+                            RtmpMessageData::AudioData { data } => {
+                                if published {
+                                    recorded.lock().await.push(RecordedTag {
+                                        tag_type: 8,
+                                        timestamp_ms: timestamp,
+                                        body: data.to_vec(),
+                                    });
+                                }
+                            }
+                            RtmpMessageData::VideoData { data } => {
+                                if published {
+                                    recorded.lock().await.push(RecordedTag {
+                                        tag_type: 9,
+                                        timestamp_ms: timestamp,
+                                        body: data.to_vec(),
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
