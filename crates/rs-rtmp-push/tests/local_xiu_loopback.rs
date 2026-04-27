@@ -4,11 +4,13 @@
 //! creates an `RtmpPusher` pointed at it, exercises the API, and asserts
 //! against either the wire-captured tags or the server's session state.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use rs_rtmp_push::{PusherConfig, RtmpPusher};
 use streamhub::StreamsHub;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 
 /// Spin up a real xiu RTMP server bound to `127.0.0.1:0`.
 ///
@@ -89,4 +91,219 @@ async fn handshake_completes_with_local_xiu_server() {
     // output TS (no media has been sent yet).
     assert_eq!(pusher.reconnect_count(), 0);
     assert_eq!(pusher.last_output_ts_ms(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Recording harness types
+// ---------------------------------------------------------------------------
+
+/// A single captured FLV tag as it arrived at the xiu server.
+///
+/// `body` holds the raw FLV tag body bytes — the bytes AFTER the 11-byte tag
+/// header and BEFORE the 4-byte PreviousTagSize trailer.  This is exactly the
+/// payload that `sha256_flv_bodies` reads from the source file, so the two
+/// SHA-256 digests can be compared directly.
+///
+/// `timestamp_ms` is included for debugging / future assertions; it is not
+/// consumed by the SHA-256 helpers.  Task 6 populates all three fields.
+#[allow(dead_code)]
+struct RecordedTag {
+    /// FLV tag type byte: 8 = audio, 9 = video.
+    tag_type: u8,
+    /// Composition timestamp in milliseconds from the FLV tag header.
+    timestamp_ms: u32,
+    /// Tag body bytes (after the 11-byte header, before PreviousTagSize).
+    body: Vec<u8>,
+}
+
+// ---------------------------------------------------------------------------
+// Recording server helper
+// ---------------------------------------------------------------------------
+
+/// Spin up a real xiu RTMP server and a companion subscription loop that
+/// captures every audio/video tag that the publisher sends.
+///
+/// Returns:
+/// - `url`      — `rtmp://…/live/test` for the pusher to connect to
+/// - `recorded` — shared accumulator; populated only AFTER Task 6 implements
+///                the tag-write loop in `push_flv_bytes` (see note below)
+/// - `_server`  — `JoinHandle` keeping the server alive for the test duration
+///
+/// # Task 6 note
+///
+/// The subscription loop below is a STUB.  It starts the xiu server exactly
+/// like `spawn_xiu_server` but does NOT yet subscribe a frame receiver from
+/// the hub.  As a result `recorded` will always be empty in Task 5.  This is
+/// intentional: `push_flv_bytes` returns `Err(MalformedInput { … "Task 6" })`
+/// before any frames flow, so the test fails at `expect("push_flv_bytes")`
+/// rather than at the SHA-256 assertion.
+///
+/// Task 6's implementer should replace the `/* TODO Task 6 */` block with a
+/// real `StreamHubEvent::Subscribe` subscription so that after `push_flv_bytes`
+/// returns `Ok(())` the received frames can be compared against the source.
+async fn spawn_recording_xiu_server() -> (
+    String,
+    Arc<Mutex<Vec<RecordedTag>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    // Discover an available ephemeral port (same TOCTOU caveat as spawn_xiu_server).
+    let addr = {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 127.0.0.1:0");
+        let a = listener.local_addr().expect("local_addr");
+        drop(listener);
+        a
+    };
+
+    // Shared accumulator for captured tags.
+    let recorded: Arc<Mutex<Vec<RecordedTag>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Build the StreamsHub with rtmp_push_enabled so Publish events are emitted.
+    let mut hub = StreamsHub::new(None);
+    hub.set_rtmp_push_enabled(true);
+    let event_sender = hub.get_hub_event_sender();
+
+    let address = addr.to_string();
+
+    // Clone for the server task.
+    let _recorded_for_task6 = Arc::clone(&recorded);
+    // TODO Task 6: subscribe a FrameDataReceiver from the hub here and spawn
+    // a loop that pushes every FrameData::Audio / FrameData::Video into
+    // `_recorded_for_task6`.  The subscription must happen *after* the
+    // publisher announces itself (StreamHubEvent::Subscribe sent to
+    // `event_sender` once the stream identifier appears in the hub).
+
+    let handle = tokio::spawn(async move {
+        let mut rtmp_server = rtmp::rtmp::RtmpServer::new(address, event_sender, 0, None);
+
+        tokio::select! {
+            _ = hub.run() => {}
+            result = rtmp_server.run() => {
+                if let Err(e) = result {
+                    log::debug!("xiu recording test server stopped: {e}");
+                }
+            }
+        }
+    });
+
+    let url = format!("rtmp://{}/live/test", addr);
+    (url, recorded, handle)
+}
+
+// ---------------------------------------------------------------------------
+// SHA-256 helpers
+// ---------------------------------------------------------------------------
+
+/// Walk `bytes` as raw FLV (header + tags) and feed every audio (type 8) and
+/// video (type 9) tag body into separate SHA-256 digests.
+///
+/// Returns `(audio_hex, video_hex)`.  Script tags (type 18) are skipped.
+fn sha256_flv_bodies(bytes: &[u8]) -> (String, String) {
+    use sha2::{Digest, Sha256};
+
+    let mut audio = Sha256::new();
+    let mut video = Sha256::new();
+
+    // FLV header is 9 bytes; immediately followed by PreviousTagSize0 (4 bytes
+    // = 0x00000000), so the first real tag starts at offset 13.
+    let mut offset = 9 + 4;
+
+    while offset + 11 <= bytes.len() {
+        let tag_type = bytes[offset];
+        let data_size = ((bytes[offset + 1] as usize) << 16)
+            | ((bytes[offset + 2] as usize) << 8)
+            | (bytes[offset + 3] as usize);
+
+        let body_start = offset + 11;
+        let body_end = body_start + data_size;
+        if body_end > bytes.len() {
+            break;
+        }
+
+        match tag_type {
+            8 => audio.update(&bytes[body_start..body_end]),
+            9 => video.update(&bytes[body_start..body_end]),
+            _ => {} // skip script / metadata tags
+        }
+
+        // Advance past body + 4-byte PreviousTagSize.
+        offset = body_end + 4;
+    }
+
+    (
+        format!("{:x}", audio.finalize()),
+        format!("{:x}", video.finalize()),
+    )
+}
+
+/// Feed every `RecordedTag` body from the server-side capture into separate
+/// SHA-256 digests and return `(audio_hex, video_hex)`.
+fn sha256_recorded_bodies(recorded: &[RecordedTag]) -> (String, String) {
+    use sha2::{Digest, Sha256};
+
+    let mut audio = Sha256::new();
+    let mut video = Sha256::new();
+
+    for tag in recorded {
+        match tag.tag_type {
+            8 => audio.update(&tag.body),
+            9 => video.update(&tag.body),
+            _ => {}
+        }
+    }
+
+    (
+        format!("{:x}", audio.finalize()),
+        format!("{:x}", video.finalize()),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// TDD-RED test (Task 5): fails until Task 6 implements the tag-write loop
+// ---------------------------------------------------------------------------
+
+/// Assert that every audio and video tag body byte that the pusher reads from
+/// the source FLV arrives unmodified at the xiu server side.
+///
+/// # Why this test is RED in Task 5
+///
+/// `pusher.push_flv_bytes(&source_bytes)` returns
+/// `Err(PushError::MalformedInput { … "tag-write loop unimplemented (Task 6)" })`
+/// before any tags are written to the server.  The `expect("push_flv_bytes")`
+/// panics, making the test fail.
+///
+/// Once Task 6 replaces that stub with real FLV-tag emission AND Task 6's
+/// implementer wires up the subscription loop in `spawn_recording_xiu_server`,
+/// all tags will flow through xiu and `recorded_guard` will contain the same
+/// body bytes as `source_bytes`, making this test GREEN.
+#[tokio::test]
+async fn media_payload_byte_identical_to_source() {
+    let source_bytes = std::fs::read("tests/data/short.flv").expect("read short.flv");
+
+    let (url, recorded, _server) = spawn_recording_xiu_server().await;
+
+    // Give the server a moment to bind and start listening.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut pusher = RtmpPusher::new(url, PusherConfig::default());
+
+    // This panics in Task 5 because push_flv_bytes returns MalformedInput
+    // ("tag-write loop unimplemented (Task 6)").  Task 6 makes it return Ok(()).
+    pusher
+        .push_flv_bytes(&source_bytes)
+        .await
+        .expect("push_flv_bytes");
+
+    // Give the server a moment to drain the last tag.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let recorded_guard = recorded.lock().await;
+    assert!(!recorded_guard.is_empty(), "no tags reached the server");
+
+    let (src_audio_sha, src_video_sha) = sha256_flv_bodies(&source_bytes);
+    let (rec_audio_sha, rec_video_sha) = sha256_recorded_bodies(&recorded_guard);
+
+    assert_eq!(rec_audio_sha, src_audio_sha, "audio body bytes diverged");
+    assert_eq!(rec_video_sha, src_video_sha, "video body bytes diverged");
 }
