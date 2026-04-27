@@ -60,6 +60,7 @@ pub struct Session {
     /// Shared I/O handle.  Writers (main task) and the read-loop (background
     /// task) compete for this mutex.  On a live push the server sends almost
     /// no data after publishing starts, so lock contention is negligible.
+    #[allow(dead_code)] // Held to keep TCP write half alive across send_*_tag calls (Task 6).
     io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
     /// Set by the background read-loop on any I/O error or server-side close.
     poisoned: Arc<AtomicBool>,
@@ -615,7 +616,7 @@ fn bad_url(reason: &str, url: &str) -> PushError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Session, parse_rtmp_url};
+    use super::parse_rtmp_url;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
