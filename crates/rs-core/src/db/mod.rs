@@ -473,8 +473,9 @@ pub async fn compute_target_start_chunk(
         return Ok(1);
     }
 
+    let latest_seq = rows[0].0;
     let mut accum: i64 = 0;
-    let mut start = rows[0].0; // latest seq as default
+    let mut start = latest_seq;
     for (seq, dur) in &rows {
         accum += dur;
         start = *seq;
@@ -482,6 +483,22 @@ pub async fn compute_target_start_chunk(
             break;
         }
     }
+
+    // Defense-in-depth (#146): if every walked row has duration_ms = 0
+    // (the PR #144 corruption pattern), the loop above walked all rows
+    // and returned the OLDEST seq -- which the orchestrator then sends
+    // as start_chunk_id to the VPS. That chunk has long been pruned
+    // from S3, hanging warmup. Fall back to live-edge so delivery
+    // starts (with empty buffer) instead of hanging.
+    if accum == 0 {
+        tracing::warn!(
+            event_id,
+            row_count = rows.len(),
+            "compute_target_start_chunk: all sent chunks have duration_ms=0; using latest seq as start_chunk_id"
+        );
+        return Ok(latest_seq);
+    }
+
     Ok(start)
 }
 

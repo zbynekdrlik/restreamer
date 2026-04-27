@@ -515,3 +515,46 @@ async fn compute_target_start_chunk_picks_exact_boundary_in_large_event() {
         "100 chunks x 1s, 30s target: should start at seq 71 (chunks 71..100 = 30s)"
     );
 }
+
+/// Defense-in-depth (#146): if every sent chunk has duration_ms = 0
+/// (data corruption from the PR #144 regression), the function previously
+/// walked all rows accumulating 0 and returned the OLDEST sequence_number.
+/// The orchestrator then sent that as start_chunk_id to the VPS, which
+/// pointed at a pruned chunk and hung warmup forever.
+///
+/// Post-fix: when the accumulator stays at 0 (every walked row has
+/// duration_ms = 0), return the LATEST sequence_number so the VPS starts
+/// at live-edge with an empty buffer. Degraded UX, but stream actually
+/// starts instead of hanging.
+#[tokio::test]
+async fn compute_target_start_chunk_returns_latest_when_all_durations_zero() {
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+
+    let event_id = upsert_streaming_event(&pool, "start-chunk-zero-dur")
+        .await
+        .unwrap();
+
+    // 100 chunks all with duration_ms = 0 (the corruption pattern).
+    for i in 1..=100 {
+        let id = insert_chunk(
+            &pool,
+            event_id,
+            &format!("/tmp/z{i}.ts"),
+            1000,
+            &format!("z{i}"),
+            0, // <-- the corruption
+        )
+        .await
+        .unwrap();
+        set_chunk_sent(&pool, id).await.unwrap();
+    }
+
+    let start = db::compute_target_start_chunk(&pool, event_id, 12_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        start, 100,
+        "all-zero-duration data: must return latest seq (live-edge fallback), got {start}"
+    );
+}
