@@ -6,7 +6,8 @@ license.workspace = true
 
 [dependencies]
 rtmp = { workspace = true }
-streamhub = { workspace = true }
+bytesio = "0.3"
+xflv = "0.4"
 tokio = { workspace = true, features = ["full"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -14,6 +15,7 @@ log = { workspace = true }
 bytes = { workspace = true }
 
 [dev-dependencies]
+streamhub = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 sha2 = { workspace = true }
 tracing-subscriber = { workspace = true }

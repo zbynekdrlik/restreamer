@@ -2614,6 +2614,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rs-rtmp-push"
+version = "0.3.74"
+dependencies = [
+ "bytes",
+ "log",
+ "rtmp",
+ "sha2 0.10.9",
+ "streamhub",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rs-runtime"
 version = "0.3.74"
 dependencies = [

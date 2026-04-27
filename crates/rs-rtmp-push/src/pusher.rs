@@ -57,7 +57,10 @@ impl RtmpPusher {
         }
 
         // Tag-write loop is filled in Task 6.
-        Err(PushError::LocalCancel)
+        Err(PushError::MalformedInput {
+            offset: 0,
+            reason: "tag-write loop unimplemented (Task 6)".to_string(),
+        })
     }
 
     pub async fn close(&mut self) {
