@@ -1439,8 +1439,9 @@ jobs:
                     [System.IO.File]::WriteAllBytes("$env:TEMP\audio-test-chunk.bin", $bytes)
                     Write-Host "Audio gate snapshot at ${elapsed}s after $($attempt + 1) attempt(s): $($latestChunk.Name) ($($bytes.Length) bytes)"
                     break
-                  } catch {
-                    # File got pruned between Get-ChildItem and ReadAllBytes -- retry.
+                  } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException], [System.UnauthorizedAccessException] {
+                    # File pruned between Get-ChildItem and ReadAllBytes (FNF / DNF)
+                    # or briefly locked by uploader (UnauthorizedAccess) -- retry.
                   }
                 }
                 Start-Sleep -Milliseconds 30
