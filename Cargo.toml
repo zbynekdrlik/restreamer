@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/rs-core",
     "crates/rs-inpoint",
+    "crates/rs-rtmp-push",
     "crates/rs-endpoint",
     "crates/rs-api",
     "crates/rs-runtime",
