@@ -255,49 +255,132 @@ async fn wall_clock_ts_monotonic_across_frames() {
     assert!(ts2 >= ts1, "ts2={ts2} should be >= ts1={ts1}");
 }
 
-/// Audio FLV tags must carry the xiu-supplied RTMP timestamp verbatim,
-/// not a wall-clock-derived value. AAC frames are 1024 samples; cadence
-/// = 1024 / sample_rate seconds (e.g. 21.3 ms at 48 kHz, 23.2 ms at
-/// 44.1 kHz). Wall-clock stamping introduces RTMP jitter into PTS,
-/// which the downstream decoder interprets as resampling cues —
-/// producing chipmunk pitch shift and glitches.
-/// Regression test for the live-event failure on 2026-04-26.
+/// REGRESSION (PR #144): write_audio used to overwrite chunk_last_ts with
+/// the xiu RTMP timestamp (small values) while chunk_first_ts held the
+/// larger wall-clock value from write_chunk_header. The subtraction
+/// underflowed -> duration_ms fell to the "wrapped around" else-branch and
+/// returned 0 for EVERY chunk. That cascaded into a 15-minute orchestrator
+/// wait, start_chunk_id=1 in the VPS init, and silent VPS warmup spin.
+///
+/// This test runs a realistic frame sequence and asserts the resulting
+/// chunk's duration_ms reflects video wall-clock span, not audio xiu_ts.
 #[tokio::test]
-async fn audio_uses_xiu_timestamp_not_wall_clock() {
+async fn chunk_duration_tracks_video_wall_span_not_audio_xiu_ts() {
     let dir = tempfile::tempdir().unwrap();
-    let sink = FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_secs(60));
+    let sink = Arc::new(FlvChunkSink::new(
+        dir.path().to_path_buf(),
+        Duration::from_millis(50),
+    ));
+    let mut rx = sink.subscribe();
 
-    // Seed sequence headers (audio + video) so the chunk machinery is ready.
+    // Seed sequence headers so chunks form correctly.
     let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
     sink.write_video(0, &video_seq).await;
     let audio_seq = BytesMut::from(&[0xAF, 0x00, 0x12, 0x10][..]);
     sink.write_audio(0, &audio_seq).await;
 
-    // Start the chunk with a video keyframe.
+    // First keyframe -- anchors the session, starts chunk #0.
     let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
     sink.write_video(0, &keyframe).await;
 
-    // Sleep long enough that wall-clock stamping would produce a clearly
-    // different value than the xiu timestamp we pass in.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Audio frames carry small xiu timestamps. Pre-fix, each of these
+    // overwrites chunk_last_ts with the xiu value, breaking duration.
+    let aac = BytesMut::from(&[0xAF, 0x01, 0x12, 0x34, 0x56][..]);
+    sink.write_audio(20, &aac).await;
+    sink.write_audio(43, &aac).await;
 
-    // Write two AAC payload tags with explicit xiu timestamps.
-    // Byte 0 = 0xAF (AAC + stereo + 16-bit + 44.1k indicator),
-    // byte 1 = 0x01 (raw frame, NOT sequence header).
-    let aac_frame = BytesMut::from(&[0xAF, 0x01, 0x12, 0x34, 0x56][..]);
-    sink.write_audio(21, &aac_frame).await;
+    // Wait so the next video keyframe's wall-clock stamp is meaningfully
+    // later than the chunk's first frame.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    sink.write_audio(66, &aac).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Second keyframe flushes the chunk (50ms min duration was hit).
+    let keyframe2 = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xCC, 0xDD][..]);
+    sink.write_video(0, &keyframe2).await;
 
-    sink.write_audio(42, &aac_frame).await;
+    let chunk = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        .await
+        .expect("chunk should be emitted within timeout")
+        .expect("recv should succeed");
 
-    // chunk_last_ts is updated by every write_audio call. After the second
-    // call it must equal 42, the xiu timestamp we just supplied — NOT
-    // ~100 (wall-clock since session start) and NOT 0.
-    let inner = sink.inner.lock().await;
+    // ~200 ms of wall-clock between first and second keyframes; allow
+    // generous slop for CI scheduling jitter. Pre-fix this is 0.
+    assert!(
+        chunk.duration_ms >= 150 && chunk.duration_ms <= 350,
+        "duration_ms must reflect video wall-clock span (~200ms), got {}",
+        chunk.duration_ms
+    );
+}
+
+/// Audio FLV tags must still carry the xiu RTMP timestamp in the FLV
+/// byte stream (PR #142 chipmunk fix preserved). This is the user-facing
+/// guarantee -- chunk_last_ts is an internal accounting variable that
+/// MUST NOT be confused with what gets written into the audio tag.
+#[tokio::test]
+async fn audio_flv_tag_carries_xiu_timestamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(FlvChunkSink::new(
+        dir.path().to_path_buf(),
+        Duration::from_secs(60),
+    ));
+    let mut rx = sink.subscribe();
+
+    let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
+    sink.write_video(0, &video_seq).await;
+    let audio_seq = BytesMut::from(&[0xAF, 0x00, 0x12, 0x10][..]);
+    sink.write_audio(0, &audio_seq).await;
+
+    let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
+    sink.write_video(0, &keyframe).await;
+
+    // AAC payload tag with xiu timestamp 42.
+    let aac = BytesMut::from(&[0xAF, 0x01, 0xDE, 0xAD][..]);
+    sink.write_audio(42, &aac).await;
+
+    sink.flush().await;
+
+    let chunk = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        .await
+        .expect("chunk should flush")
+        .expect("recv should succeed");
+
+    let bytes = std::fs::read(&chunk.path).unwrap();
+
+    // Walk the FLV byte stream looking for an audio tag (type 0x08) whose
+    // body starts with our AAC payload marker 0xAF 0x01 -- that's the tag
+    // we wrote (the audio sequence header has 0xAF 0x00). Read its
+    // 32-bit timestamp (24 bits low + 8 bits upper) and assert it's 42.
+    // FLV header is 9 bytes + 4 bytes "previous tag size 0".
+    let mut offset = 9 + 4;
+    let mut found = None;
+    while offset + 11 <= bytes.len() {
+        let tag_type = bytes[offset];
+        let data_size = ((bytes[offset + 1] as u32) << 16)
+            | ((bytes[offset + 2] as u32) << 8)
+            | (bytes[offset + 3] as u32);
+        let ts_low = ((bytes[offset + 4] as u32) << 16)
+            | ((bytes[offset + 5] as u32) << 8)
+            | (bytes[offset + 6] as u32);
+        let ts_high = bytes[offset + 7] as u32;
+        let ts = (ts_high << 24) | ts_low;
+
+        let body_start = offset + 11;
+        let body_end = body_start + data_size as usize;
+        if tag_type == FLV_TAG_AUDIO
+            && body_end <= bytes.len()
+            && bytes.get(body_start) == Some(&0xAF)
+            && bytes.get(body_start + 1) == Some(&0x01)
+        {
+            found = Some(ts);
+            break;
+        }
+        offset = body_end + 4; // skip body + 4-byte previous-tag-size trailer
+    }
+
     assert_eq!(
-        inner.chunk_last_ts, 42,
-        "audio FLV tag must carry xiu timestamp 42, got {}",
-        inner.chunk_last_ts
+        found,
+        Some(42),
+        "audio FLV tag must carry xiu timestamp 42 in the byte stream"
     );
 }
