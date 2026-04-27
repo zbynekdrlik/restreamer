@@ -13,7 +13,7 @@ Procedures for running live events with restreamer. Keep this file short — one
   If any of these fail — **do not go live.** Escalate to engineering. The 2026-04-26 live event was lost because this check was skipped after a restreamer version upgrade and audio was unusable from the start.
 
 - [ ] **Dashboard liveness:**
-  Open the dashboard. Confirm the deployed version banner matches the version you intended to run. Confirm the inpoint shows `disconnected` (no leftover stream) and there are no error banners.
+  Open the dashboard at <http://10.77.9.204:8910/>. Confirm the deployed version banner matches the version you intended to run. Confirm the inpoint shows `disconnected` (no leftover stream) and there are no error banners.
 
 - [ ] **No active leftover events:**
   On the dashboard's Events tab, confirm no event other than the one you are about to use shows `receiving_activated` or `delivering_activated`. Deactivate any leftovers.
