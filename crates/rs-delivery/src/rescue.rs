@@ -440,14 +440,56 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
                     consecutive_none = 1;
                 }
                 if consecutive_none >= CONSECUTIVE_NONE_THRESHOLD {
+                    // Exponential probe forward to find the live edge.
+                    // Bounded: jump grows 1, 2, 4, ..., capped so the worst
+                    // case is O(log n) probes for an n-chunk gap. Linear
+                    // increment alone would take 60s × n on a large gap
+                    // (e.g. 600 pruned chunks = 10 hours); exponential is
+                    // ~10 probes for the same gap, each a single S3 HEAD.
+                    const MAX_PROBE_JUMP: i64 = 4096;
                     tracing::warn!(
                         alias,
                         stuck_chunk,
                         consecutive_none,
-                        "Warmup stuck on missing chunk; advancing probe_id"
+                        "Warmup stuck on missing chunk; probing forward for live edge"
                     );
-                    probe_id += 1;
+                    let mut jump: i64 = 1;
+                    let mut new_probe = probe_id + jump;
+                    let mut found_live_edge = false;
+                    loop {
+                        match fetcher.chunk_duration_ms(new_probe).await {
+                            Ok(Some(_)) => {
+                                tracing::info!(
+                                    alias,
+                                    stuck_chunk,
+                                    new_probe,
+                                    jump,
+                                    "Warmup found live edge; resuming"
+                                );
+                                probe_id = new_probe;
+                                found_live_edge = true;
+                                break;
+                            }
+                            Ok(None) => {
+                                if jump >= MAX_PROBE_JUMP {
+                                    break;
+                                }
+                                jump *= 2;
+                                new_probe = probe_id + jump;
+                            }
+                            Err(e) => {
+                                tracing::warn!(alias, new_probe, "Probe-forward fetch error: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    if !found_live_edge {
+                        // Exponential probe gave up; fall back to +1 so we
+                        // still make progress (caller's existing recovery).
+                        probe_id += 1;
+                    }
                     consecutive_none = 0;
+                    stuck_chunk = probe_id;
                     continue;
                 }
                 tokio::select! {
