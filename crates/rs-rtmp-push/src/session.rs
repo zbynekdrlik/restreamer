@@ -113,6 +113,8 @@ impl Session {
     ///
     /// Task 4 stub: checks liveness, returns `Ok(())` without sending bytes.
     /// Task 6 replaces this with actual `ChunkPacketizer` writes.
+    #[allow(dead_code)]
+    // Filled out in Task 6 (#103); reachable then.
     pub async fn send_audio_tag(
         &mut self,
         _timestamp_ms: u32,
@@ -125,6 +127,8 @@ impl Session {
     ///
     /// Task 4 stub: checks liveness, returns `Ok(())` without sending bytes.
     /// Task 6 replaces this with actual `ChunkPacketizer` writes.
+    #[allow(dead_code)]
+    // Filled out in Task 6 (#103); reachable then.
     pub async fn send_video_tag(
         &mut self,
         _timestamp_ms: u32,
@@ -153,7 +157,6 @@ impl Session {
         // `self.io` is intentionally held until here so the Arc stays alive
         // long enough for the read-loop abort to complete before the TcpIO
         // is dropped.  Task 6 will also use this field for chunk writes.
-        drop(self.io);
     }
 }
 
@@ -211,7 +214,10 @@ async fn negotiate(
 
     // --- send SetChunkSize + NetConnection.connect --------------------------
     {
-        // Match xiu's ClientSession: send SetChunkSize before connect.
+        // Send SetChunkSize first so the rest of the connect-flow chunks fit
+        // without splitting. xiu's own client_session sends connect first; we
+        // pre-set chunk size here for simplicity. Both orderings are accepted
+        // by xiu's RtmpServer (verified by Task 3 loopback test).
         let mut ctrl = ProtocolControlMessagesWriter::new(AsyncBytesWriter::new(Arc::clone(&io)));
         ctrl.write_set_chunk_size(CHUNK_SIZE)
             .await
@@ -665,16 +671,5 @@ mod tests {
             flag.load(Ordering::Relaxed),
             "after store(true) flag is true"
         );
-    }
-
-    /// Dead-code suppression helper: references `send_audio_tag` and
-    /// `send_video_tag` so Rust's liveness checker marks them as used.
-    ///
-    /// This helper is never called at runtime; its sole purpose is to
-    /// make the async method names appear in compiled code.
-    #[allow(dead_code)]
-    async fn _use_stub_methods(s: &mut Session) {
-        let _ = s.send_audio_tag(0, b"").await;
-        let _ = s.send_video_tag(0, b"").await;
     }
 }
