@@ -256,6 +256,12 @@ impl FlvChunkSink {
     /// at 44.1 kHz), so the producer cannot drift. Wall-clock stamping would
     /// inject RTMP delivery jitter into PTS, causing decoder resampling
     /// artefacts (chipmunk pitch + glitches).
+    ///
+    /// Internally, this function writes the xiu timestamp into the FLV tag
+    /// only — it must NOT touch `chunk_last_ts`, which is an accounting
+    /// field owned by `write_video` for tracking wall-clock chunk duration.
+    /// Mixing the two domains causes `duration_ms` to underflow and produce
+    /// 0 for every chunk (#146, regression introduced by PR #144).
     pub async fn write_audio(&self, timestamp: u32, data: &BytesMut) {
         let is_sequence_header = data.len() > 1 && (data[0] >> 4) == 0x0A && data[1] == 0x00;
 
@@ -278,9 +284,14 @@ impl FlvChunkSink {
                 return;
             }
 
-            let ts = timestamp;
-            inner.chunk_last_ts = ts;
-            Self::write_tag(&mut inner, FLV_TAG_AUDIO, ts, data);
+            // Audio FLV tags carry the xiu RTMP timestamp directly so the
+            // decoder gets correct PTS (chipmunk fix from #142). The
+            // chunk_last_ts field is owned by write_video — it tracks the
+            // wall-clock span used for chunk-duration accounting. The two
+            // timestamp domains MUST NOT cross: writing the xiu value into
+            // chunk_last_ts here corrupts the duration computation
+            // (#146 follow-up regression).
+            Self::write_tag(&mut inner, FLV_TAG_AUDIO, timestamp, data);
             None
         };
 
