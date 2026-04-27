@@ -42,6 +42,7 @@ impl<'a> FlvTagIter<'a> {
         })
     }
 
+    #[allow(dead_code)]
     pub fn into_error(self) -> Option<PushError> {
         self.error
     }
@@ -112,18 +113,21 @@ mod tests {
 
     fn make_tag(tag_type: u8, timestamp_ms: u32, body: &[u8]) -> Vec<u8> {
         let data_size = body.len() as u32;
-        let mut tag = Vec::new();
-        tag.push(tag_type);
-        tag.push(((data_size >> 16) & 0xff) as u8);
-        tag.push(((data_size >> 8) & 0xff) as u8);
-        tag.push((data_size & 0xff) as u8);
-        // timestamp: low 24 bits then high 8 bits
-        tag.push(((timestamp_ms >> 16) & 0xff) as u8);
-        tag.push(((timestamp_ms >> 8) & 0xff) as u8);
-        tag.push((timestamp_ms & 0xff) as u8);
-        tag.push(((timestamp_ms >> 24) & 0xff) as u8);
-        // stream id (3 bytes, always 0)
-        tag.extend_from_slice(&[0x00, 0x00, 0x00]);
+        let mut tag = vec![
+            tag_type,
+            ((data_size >> 16) & 0xff) as u8,
+            ((data_size >> 8) & 0xff) as u8,
+            (data_size & 0xff) as u8,
+            // timestamp: low 24 bits then high 8 bits
+            ((timestamp_ms >> 16) & 0xff) as u8,
+            ((timestamp_ms >> 8) & 0xff) as u8,
+            (timestamp_ms & 0xff) as u8,
+            ((timestamp_ms >> 24) & 0xff) as u8,
+            // stream id (3 bytes, always 0)
+            0x00,
+            0x00,
+            0x00,
+        ];
         tag.extend_from_slice(body);
         // PreviousTagSize = 11 + data_size
         let pts = 11 + data_size;

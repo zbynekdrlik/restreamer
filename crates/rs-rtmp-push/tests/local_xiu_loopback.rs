@@ -11,7 +11,6 @@ use bytesio::bytes_writer::AsyncBytesWriter;
 use bytesio::bytesio::{TNetIO, TcpIO};
 use rs_rtmp_push::{PusherConfig, RtmpPusher};
 use rtmp::chunk::unpacketizer::{ChunkUnpacketizer, UnpackResult};
-use rtmp::handshake::define::ServerHandshakeState;
 use rtmp::handshake::handshake_server::SimpleHandshakeServer;
 use rtmp::messages::define::RtmpMessageData;
 use rtmp::messages::parser::MessageParser;
@@ -182,7 +181,7 @@ async fn spawn_recording_xiu_server() -> (
 async fn recording_session(
     io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
     recorded: Arc<Mutex<Vec<RecordedTag>>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), String> {
     // --- Handshake -----------------------------------------------------------
     // Read at least RTMP_HANDSHAKE_SIZE bytes per phase to avoid hitting
     // NotEnoughBytes on partial TCP segments.
@@ -198,20 +197,30 @@ async fn recording_session(
         // Phase 1: read C0C1.
         let mut accumulated = 0usize;
         while accumulated < RTMP_HANDSHAKE_SIZE {
-            let data = io.lock().await.read().await?;
+            let data = io
+                .lock()
+                .await
+                .read()
+                .await
+                .map_err(|e| format!("{:?}", e))?;
             accumulated += data.len();
             hs.extend_data(&data[..]);
         }
-        hs.handshake().await?; // reads C0C1, writes S0S1S2, state=ReadC2
+        hs.handshake().await.map_err(|e| format!("{:?}", e))?; // reads C0C1, writes S0S1S2, state=ReadC2
 
         // Phase 2: read C2.
         accumulated = 0;
         while accumulated < RTMP_HANDSHAKE_SIZE {
-            let data = io.lock().await.read().await?;
+            let data = io
+                .lock()
+                .await
+                .read()
+                .await
+                .map_err(|e| format!("{:?}", e))?;
             accumulated += data.len();
             hs.extend_data(&data[..]);
         }
-        hs.handshake().await?; // reads C2, state=Finish
+        hs.handshake().await.map_err(|e| format!("{:?}", e))?; // reads C2, state=Finish
 
         // Drain any bytes the handshaker did not consume (e.g., AMF connect
         // bundled in the same read() as C2).
@@ -226,7 +235,12 @@ async fn recording_session(
     let mut published = false;
 
     loop {
-        let data = io.lock().await.read().await?;
+        let data = io
+            .lock()
+            .await
+            .read()
+            .await
+            .map_err(|e| format!("{:?}", e))?;
         if data.is_empty() {
             break;
         }
