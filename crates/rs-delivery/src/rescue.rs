@@ -384,12 +384,22 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
         "Warmup started — waiting for buffer target"
     );
 
+    // Hardening (#146): if the same chunk_id returns Ok(None) for too
+    // long, advance probe_id rather than spinning silently. Production
+    // bug: when start_chunk_id is below S3 live-edge (chunks pruned),
+    // the loop hung forever with no log output.
+    const CONSECUTIVE_NONE_THRESHOLD: u32 = 30; // 30 × 2s sleep ≈ 60s
+    let mut consecutive_none: u32 = 0;
+    let mut stuck_chunk: i64 = probe_id;
+
     let stopped = loop {
         if *stop_rx.borrow() {
             break true;
         }
         match fetcher.chunk_duration_ms(probe_id).await {
             Ok(Some(dur_ms)) => {
+                consecutive_none = 0;
+                stuck_chunk = probe_id;
                 accum_ms += dur_ms.max(0) as u64;
                 probe_id += 1;
 
@@ -423,6 +433,79 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
                 }
             }
             Ok(None) => {
+                if probe_id == stuck_chunk {
+                    consecutive_none += 1;
+                } else {
+                    stuck_chunk = probe_id;
+                    consecutive_none = 1;
+                }
+                if consecutive_none >= CONSECUTIVE_NONE_THRESHOLD {
+                    // Exponential probe forward to find the live edge.
+                    // Bounded: jump grows 1, 2, 4, ..., capped so the worst
+                    // case is O(log n) probes for an n-chunk gap. Linear
+                    // increment alone would take 60s × n on a large gap
+                    // (e.g. 600 pruned chunks = 10 hours); exponential is
+                    // ~10 probes for the same gap, each a single S3 HEAD.
+                    //
+                    // Overshoot is intentional: for a 600-chunk gap the
+                    // probe lands at +1024 (the first power of two past
+                    // the gap), skipping ~424 chunks of available history.
+                    // Warmup only needs to find ANY live chunk to start
+                    // filling the buffer; missing old history doesn't
+                    // affect time-to-stream-start (still ~target_delay_ms
+                    // wall time of fresh content needed).
+                    //
+                    // MAX_PROBE_JUMP = 4096 ≈ 2h 16m at 2s/chunk. Beyond
+                    // that we degrade to `+= 1` (60s/chunk). 4th line of
+                    // defense — the chunker fix (#146), DB fallback, and
+                    // initial CONSECUTIVE_NONE_THRESHOLD all prevent this
+                    // path in normal operation.
+                    const MAX_PROBE_JUMP: i64 = 4096;
+                    tracing::warn!(
+                        alias,
+                        stuck_chunk,
+                        consecutive_none,
+                        "Warmup stuck on missing chunk; probing forward for live edge"
+                    );
+                    let mut jump: i64 = 1;
+                    let mut new_probe = probe_id + jump;
+                    let mut found_live_edge = false;
+                    loop {
+                        match fetcher.chunk_duration_ms(new_probe).await {
+                            Ok(Some(_)) => {
+                                tracing::info!(
+                                    alias,
+                                    stuck_chunk,
+                                    new_probe,
+                                    jump,
+                                    "Warmup found live edge; resuming"
+                                );
+                                probe_id = new_probe;
+                                found_live_edge = true;
+                                break;
+                            }
+                            Ok(None) => {
+                                if jump >= MAX_PROBE_JUMP {
+                                    break;
+                                }
+                                jump *= 2;
+                                new_probe = probe_id + jump;
+                            }
+                            Err(e) => {
+                                tracing::warn!(alias, new_probe, "Probe-forward fetch error: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    if !found_live_edge {
+                        // Exponential probe gave up; fall back to +1 so we
+                        // still make progress (caller's existing recovery).
+                        probe_id += 1;
+                    }
+                    consecutive_none = 0;
+                    stuck_chunk = probe_id;
+                    continue;
+                }
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
                     _ = stop_rx.changed() => {

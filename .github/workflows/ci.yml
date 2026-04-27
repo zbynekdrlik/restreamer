@@ -3046,6 +3046,74 @@ jobs:
           }
           throw "FAILED: Delivery server not ready after $maxRetries attempts (~10 min)"
 
+      - name: "GATE: delivery_init_sent within 180s of vps_ready"
+        shell: powershell
+        run: |
+          # Hardens against the chunk_records.duration_ms=0 regression (#146).
+          # The orchestrator's buffer-fill wait loop in delivery.rs:463-491 has
+          # a 900s timeout. If duration_ms data is corrupt, sent_duration_ms
+          # stays at 0 forever and the wait times out at 15 minutes -- which
+          # is exactly the production failure observed on stream.lan 2026-04-27.
+          # In healthy operation the wait completes in ~120s (the configured
+          # cache delay). 180s gives generous headroom for CI scheduling.
+          $ErrorActionPreference = "Stop"
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $e2eEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME } | Select-Object -First 1
+          if (-not $e2eEvent) { throw "FAILED: no event matching $($env:EVENT_NAME)" }
+          $audit = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?event_id=$($e2eEvent.id)&limit=500" -TimeoutSec 10
+          $vpsReady = $audit.rows | Where-Object { $_.action -eq "vps_ready" } | Sort-Object ts -Descending | Select-Object -First 1
+          $initSent = $audit.rows | Where-Object { $_.action -eq "delivery_init_sent" } | Sort-Object ts -Descending | Select-Object -First 1
+          if (-not $vpsReady) { throw "FAILED: no vps_ready audit row for event $($e2eEvent.id)" }
+          if (-not $initSent) { throw "FAILED: no delivery_init_sent audit row for event $($e2eEvent.id)" }
+          $vpsReadyTs = [DateTime]::Parse($vpsReady.ts).ToUniversalTime()
+          $initSentTs = [DateTime]::Parse($initSent.ts).ToUniversalTime()
+          $delaySecs = ($initSentTs - $vpsReadyTs).TotalSeconds
+          Write-Host "vps_ready=$($vpsReady.ts) delivery_init_sent=$($initSent.ts) delaySecs=$delaySecs"
+          if ($delaySecs -gt 180) {
+            throw "FAILED: delivery_init_sent took $delaySecs s after vps_ready (max 180s). Likely chunk_records.duration_ms regression -- see issue #146."
+          }
+          Write-Host "=== Init latency GATE PASSED: $delaySecs s ==="
+
+      - name: "GATE: chunks_processed > 0 within 90s of init"
+        shell: powershell
+        run: |
+          # Catches the silent VPS warmup spin (#146). After init returns ok,
+          # the VPS must start delivering chunks. If it does not, the dashboard
+          # shows "0 delivered" indefinitely -- exactly the production failure
+          # operator hit. Polls every 3s up to 90s.
+          $ErrorActionPreference = "Stop"
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $e2eEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME } | Select-Object -First 1
+          if (-not $e2eEvent) { throw "FAILED: no event matching $($env:EVENT_NAME)" }
+          $deadline = (Get-Date).AddSeconds(90)
+          $progressed = $false
+          $lastChunks = -1
+          while ((Get-Date) -lt $deadline) {
+            try {
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($e2eEvent.id)" -TimeoutSec 10
+              if ($status.endpoint_details -and $status.endpoint_details.Count -gt 0) {
+                $maxChunks = ($status.endpoint_details | Measure-Object -Property chunks_processed -Maximum).Maximum
+                if ($maxChunks -ne $lastChunks) {
+                  Write-Host "chunks_processed max across endpoints: $maxChunks"
+                  $lastChunks = $maxChunks
+                }
+                if ($maxChunks -gt 0) {
+                  $progressed = $true
+                  break
+                }
+              }
+            } catch {
+              Write-Host "delivery/status poll error (will retry): $_"
+            }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $progressed) {
+            $finalStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($e2eEvent.id)" -TimeoutSec 10
+            Write-Host "FINAL endpoint_details: $($finalStatus.endpoint_details | ConvertTo-Json -Depth 3)"
+            throw "FAILED: chunks_processed stayed 0 for 90s after init. VPS warmup is stuck (likely start_chunk_id below S3 live-edge -- see issue #146)."
+          }
+          Write-Host "=== chunks_processed GATE PASSED ==="
+
       - name: Verify delivery progression
         shell: powershell
         timeout-minutes: 10

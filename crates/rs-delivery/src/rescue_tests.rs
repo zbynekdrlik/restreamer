@@ -204,20 +204,51 @@ fn output_format_all_services_is_flv() {
 use crate::api::EndpointConfig;
 use crate::endpoint_task::{ChunkFetcher, EndpointStats, Stats};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use tokio::sync::{Mutex, watch};
 
+/// Mock fetcher for warmup tests. `chunk_duration_ms(id)` returns
+/// `Ok(Some(chunk_duration_ms))` if `id` is in the inclusive range
+/// `[available_start, available_end]`, else `Ok(None)`.
+///
+/// `probe_count` records every call to `chunk_duration_ms` so tests can
+/// assert on algorithmic complexity (e.g. "exponential probe finishes in
+/// O(log n) calls, not O(n)").
+///
+/// Two construction patterns:
+/// - `new(N, dur)` — chunks `..=N` available (the common "S3 has up to chunk N" pattern)
+/// - `with_range(s, e, dur)` — chunks pruned outside `[s, e]` (the "start_chunk_id below live edge" pattern from #146)
 struct WarmupMockFetcher {
-    available_up_to: AtomicI64,
+    available_start: AtomicI64,
+    available_end: AtomicI64,
     chunk_duration_ms: i64,
+    probe_count: AtomicU64,
 }
 
 impl WarmupMockFetcher {
     fn new(available_up_to: i64, chunk_duration_ms: i64) -> Self {
         Self {
-            available_up_to: AtomicI64::new(available_up_to),
+            available_start: AtomicI64::new(i64::MIN),
+            available_end: AtomicI64::new(available_up_to),
             chunk_duration_ms,
+            probe_count: AtomicU64::new(0),
         }
+    }
+
+    /// Chunks outside `[start, end]` (inclusive) return `Ok(None)`. Models
+    /// the production scenario where `start_chunk_id` points at a pruned
+    /// chunk but newer chunks exist (#146).
+    fn with_range(start: i64, end: i64, chunk_duration_ms: i64) -> Self {
+        Self {
+            available_start: AtomicI64::new(start),
+            available_end: AtomicI64::new(end),
+            chunk_duration_ms,
+            probe_count: AtomicU64::new(0),
+        }
+    }
+
+    fn probe_count(&self) -> u64 {
+        self.probe_count.load(Ordering::Relaxed)
     }
 }
 
@@ -230,8 +261,10 @@ impl ChunkFetcher for WarmupMockFetcher {
     }
 
     async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
-        let up_to = self.available_up_to.load(Ordering::Relaxed);
-        if chunk_id <= up_to {
+        self.probe_count.fetch_add(1, Ordering::Relaxed);
+        let start = self.available_start.load(Ordering::Relaxed);
+        let end = self.available_end.load(Ordering::Relaxed);
+        if chunk_id >= start && chunk_id <= end {
             Ok(Some(self.chunk_duration_ms))
         } else {
             Ok(None)
@@ -510,4 +543,95 @@ async fn warmup_stop_signal_cleans_up_and_returns_true() {
         !std::path::Path::new(&countdown_file_path(&alias)).exists(),
         "countdown file should be cleaned up on stop"
     );
+}
+
+/// Hardens warmup against the "start_chunk_id points at a pruned chunk"
+/// failure mode (#146). Pre-fix the Ok(None) branch slept 2s without
+/// incrementing probe_id, so a missing chunk hung the warmup loop
+/// forever and silently. Post-fix: after CONSECUTIVE_NONE_THRESHOLD
+/// consecutive Ok(None)s on the same chunk, log one WARN and probe
+/// forward exponentially to find the live edge.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn warmup_skips_forward_when_chunk_missing_for_n_seconds() {
+    // chunks 1..=4 missing (pruned). chunks 5+ available, 50ms each.
+    // Target 1000ms — should reach within ~20 chunks past chunk 5.
+    let alias = unique_alias("skip-stuck");
+    let fetcher = WarmupMockFetcher::with_range(5, i64::MAX, 50);
+    let ep_cfg = test_endpoint_config(&alias, false);
+
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (_stop_tx, mut stop_rx) = watch::channel(false);
+
+    // Start at chunk 1 (the "pruned" range).
+    let stopped = crate::rescue::run_warmup_loop(
+        &fetcher,
+        &alias,
+        &ep_cfg,
+        1,
+        1000,
+        None, // no rescue video — keeps test simple
+        &stats,
+        &mut stop_rx,
+    )
+    .await;
+
+    assert!(
+        !stopped,
+        "warmup must complete, not get stuck or be stopped"
+    );
+    let s = stats.lock().await;
+    assert_eq!(
+        s.delivery_mode, "normal",
+        "warmup should hand off to normal"
+    );
+}
+
+/// Validates the exponential-probe path of the warmup hardening (#146 review
+/// follow-up). Pre-exponential the recovery was `+= 1` per 60s of consecutive
+/// Nones, which on a 500-chunk pruned gap would take ~8 hours. Exponential
+/// probe finds the live edge in ~10 fetches.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn warmup_exponential_probe_clears_large_pruned_gap() {
+    // 500 pruned chunks, then chunks 501+ available.
+    let alias = unique_alias("skip-large-gap");
+    let fetcher = WarmupMockFetcher::with_range(501, i64::MAX, 50);
+    let ep_cfg = test_endpoint_config(&alias, false);
+
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (_stop_tx, mut stop_rx) = watch::channel(false);
+
+    let stopped = crate::rescue::run_warmup_loop(
+        &fetcher,
+        &alias,
+        &ep_cfg,
+        1,
+        1000,
+        None,
+        &stats,
+        &mut stop_rx,
+    )
+    .await;
+
+    assert!(
+        !stopped,
+        "warmup must complete via exponential probe on a 500-chunk gap"
+    );
+
+    // Algorithmic-complexity assertion: the probe count must be O(log n),
+    // not O(n). For a 500-chunk gap starting from probe_id=1:
+    //   * 30 stuck-detection probes on chunk 1 (CONSECUTIVE_NONE_THRESHOLD)
+    //   * ~10 exponential-jump probes (jump 1, 2, 4, ..., 512 finds chunk 513)
+    //   * ~target_delay_ms / chunk_dur successful probes filling the buffer
+    //     (1000 / 50 = 20 chunks)
+    // Total upper bound ~80. Linear `+= 1` would have been 500 × 30 = 15 000.
+    // Cap at 200 leaves ample headroom for any reasonable refactor while
+    // catching a regression to linear-advance behaviour.
+    let probes = fetcher.probe_count();
+    assert!(
+        probes < 200,
+        "exponential probe must be O(log n); got {probes} probes for a 500-chunk gap"
+    );
+
+    let s = stats.lock().await;
+    assert_eq!(s.delivery_mode, "normal");
 }
