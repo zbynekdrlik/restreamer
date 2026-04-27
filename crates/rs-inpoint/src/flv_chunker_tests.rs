@@ -4,6 +4,39 @@
 use super::*;
 use std::sync::Arc;
 
+/// Find the first FLV audio tag whose body begins with `marker` and return
+/// its 32-bit timestamp (24-bit low + 8-bit high per the FLV spec). Returns
+/// None if no such tag is found in the stream.
+///
+/// Used by tests that need to verify timestamps written into the actual FLV
+/// byte stream (e.g. `audio_flv_tag_carries_xiu_timestamp`) rather than
+/// trusting in-memory accounting fields.
+fn first_flv_audio_timestamp_with_marker(bytes: &[u8], marker: &[u8]) -> Option<u32> {
+    // FLV header is 9 bytes + 4 bytes "previous tag size 0" trailer.
+    let mut offset = 9 + 4;
+    while offset + 11 <= bytes.len() {
+        let tag_type = bytes[offset];
+        let data_size = ((bytes[offset + 1] as u32) << 16)
+            | ((bytes[offset + 2] as u32) << 8)
+            | (bytes[offset + 3] as u32);
+        let ts_low = ((bytes[offset + 4] as u32) << 16)
+            | ((bytes[offset + 5] as u32) << 8)
+            | (bytes[offset + 6] as u32);
+        let ts_high = bytes[offset + 7] as u32;
+        let ts = (ts_high << 24) | ts_low;
+        let body_start = offset + 11;
+        let body_end = body_start + data_size as usize;
+        if tag_type == FLV_TAG_AUDIO
+            && body_end <= bytes.len()
+            && bytes[body_start..].starts_with(marker)
+        {
+            return Some(ts);
+        }
+        offset = body_end + 4; // skip body + 4-byte previous-tag-size trailer
+    }
+    None
+}
+
 #[tokio::test]
 async fn null_sink_discards_data() {
     let sink = FlvChunkSink::new_null();
@@ -355,39 +388,11 @@ async fn audio_flv_tag_carries_xiu_timestamp() {
 
     let bytes = std::fs::read(&chunk.path).unwrap();
 
-    // Walk the FLV byte stream looking for an audio tag (type 0x08) whose
-    // body starts with our AAC payload marker 0xAF 0x01 -- that's the tag
-    // we wrote (the audio sequence header has 0xAF 0x00). Read its
-    // 32-bit timestamp (24 bits low + 8 bits upper) and assert it's 42.
-    // FLV header is 9 bytes + 4 bytes "previous tag size 0".
-    let mut offset = 9 + 4;
-    let mut found = None;
-    while offset + 11 <= bytes.len() {
-        let tag_type = bytes[offset];
-        let data_size = ((bytes[offset + 1] as u32) << 16)
-            | ((bytes[offset + 2] as u32) << 8)
-            | (bytes[offset + 3] as u32);
-        let ts_low = ((bytes[offset + 4] as u32) << 16)
-            | ((bytes[offset + 5] as u32) << 8)
-            | (bytes[offset + 6] as u32);
-        let ts_high = bytes[offset + 7] as u32;
-        let ts = (ts_high << 24) | ts_low;
-
-        let body_start = offset + 11;
-        let body_end = body_start + data_size as usize;
-        if tag_type == FLV_TAG_AUDIO
-            && body_end <= bytes.len()
-            && bytes.get(body_start) == Some(&0xAF)
-            && bytes.get(body_start + 1) == Some(&0x01)
-        {
-            found = Some(ts);
-            break;
-        }
-        offset = body_end + 4; // skip body + 4-byte previous-tag-size trailer
-    }
-
+    // The audio sequence header has body 0xAF 0x00; the AAC payload tag we
+    // wrote has body 0xAF 0x01. Match on the latter to skip the seq header.
+    let ts = first_flv_audio_timestamp_with_marker(&bytes, &[0xAF, 0x01]);
     assert_eq!(
-        found,
+        ts,
         Some(42),
         "audio FLV tag must carry xiu timestamp 42 in the byte stream"
     );
