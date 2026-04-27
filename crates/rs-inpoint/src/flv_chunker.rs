@@ -251,10 +251,11 @@ impl FlvChunkSink {
     ///
     /// `timestamp` is the xiu-forwarded RTMP timestamp (in milliseconds).
     /// Audio uses xiu timestamps directly — unlike video, which is rewritten
-    /// to wall-clock to fix #135 cache drift. AAC frames have fixed cadence
-    /// (1024 samples / 48000 Hz = 21.333 ms), so the producer cannot drift,
-    /// and wall-clock stamping introduces RTMP delivery jitter into PTS,
-    /// causing decoder resampling artefacts (chipmunk pitch + glitches).
+    /// to wall-clock to fix #135 cache drift. AAC frames are 1024 samples;
+    /// cadence = 1024 / sample_rate seconds (e.g. 21.3 ms at 48 kHz, 23.2 ms
+    /// at 44.1 kHz), so the producer cannot drift. Wall-clock stamping would
+    /// inject RTMP delivery jitter into PTS, causing decoder resampling
+    /// artefacts (chipmunk pitch + glitches).
     pub async fn write_audio(&self, timestamp: u32, data: &BytesMut) {
         let is_sequence_header = data.len() > 1 && (data[0] >> 4) == 0x0A && data[1] == 0x00;
 
@@ -922,10 +923,11 @@ mod tests {
     }
 
     /// Audio FLV tags must carry the xiu-supplied RTMP timestamp verbatim,
-    /// not a wall-clock-derived value. AAC at 48 kHz has fixed-cadence frames
-    /// (1024 samples / 48000 Hz = 21.333 ms). Wall-clock stamping introduces
-    /// RTMP jitter into PTS, which the downstream decoder interprets as
-    /// resampling cues — producing chipmunk pitch shift and glitches.
+    /// not a wall-clock-derived value. AAC frames are 1024 samples; cadence
+    /// = 1024 / sample_rate seconds (e.g. 21.3 ms at 48 kHz, 23.2 ms at
+    /// 44.1 kHz). Wall-clock stamping introduces RTMP jitter into PTS,
+    /// which the downstream decoder interprets as resampling cues —
+    /// producing chipmunk pitch shift and glitches.
     /// Regression test for the live-event failure on 2026-04-26.
     #[tokio::test]
     async fn audio_uses_xiu_timestamp_not_wall_clock() {
