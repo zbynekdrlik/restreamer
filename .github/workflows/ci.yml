@@ -3060,7 +3060,7 @@ jobs:
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $e2eEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME } | Select-Object -First 1
           if (-not $e2eEvent) { throw "FAILED: no event matching $($env:EVENT_NAME)" }
-          $audit = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?event_id=$($e2eEvent.id)&limit=200" -TimeoutSec 10
+          $audit = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?event_id=$($e2eEvent.id)&limit=500" -TimeoutSec 10
           $vpsReady = $audit.rows | Where-Object { $_.action -eq "vps_ready" } | Sort-Object ts -Descending | Select-Object -First 1
           $initSent = $audit.rows | Where-Object { $_.action -eq "delivery_init_sent" } | Sort-Object ts -Descending | Select-Object -First 1
           if (-not $vpsReady) { throw "FAILED: no vps_ready audit row for event $($e2eEvent.id)" }
