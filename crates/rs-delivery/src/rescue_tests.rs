@@ -204,12 +204,16 @@ fn output_format_all_services_is_flv() {
 use crate::api::EndpointConfig;
 use crate::endpoint_task::{ChunkFetcher, EndpointStats, Stats};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use tokio::sync::{Mutex, watch};
 
 /// Mock fetcher for warmup tests. `chunk_duration_ms(id)` returns
 /// `Ok(Some(chunk_duration_ms))` if `id` is in the inclusive range
 /// `[available_start, available_end]`, else `Ok(None)`.
+///
+/// `probe_count` records every call to `chunk_duration_ms` so tests can
+/// assert on algorithmic complexity (e.g. "exponential probe finishes in
+/// O(log n) calls, not O(n)").
 ///
 /// Two construction patterns:
 /// - `new(N, dur)` — chunks `..=N` available (the common "S3 has up to chunk N" pattern)
@@ -218,6 +222,7 @@ struct WarmupMockFetcher {
     available_start: AtomicI64,
     available_end: AtomicI64,
     chunk_duration_ms: i64,
+    probe_count: AtomicU64,
 }
 
 impl WarmupMockFetcher {
@@ -226,6 +231,7 @@ impl WarmupMockFetcher {
             available_start: AtomicI64::new(i64::MIN),
             available_end: AtomicI64::new(available_up_to),
             chunk_duration_ms,
+            probe_count: AtomicU64::new(0),
         }
     }
 
@@ -237,7 +243,12 @@ impl WarmupMockFetcher {
             available_start: AtomicI64::new(start),
             available_end: AtomicI64::new(end),
             chunk_duration_ms,
+            probe_count: AtomicU64::new(0),
         }
+    }
+
+    fn probe_count(&self) -> u64 {
+        self.probe_count.load(Ordering::Relaxed)
     }
 }
 
@@ -250,6 +261,7 @@ impl ChunkFetcher for WarmupMockFetcher {
     }
 
     async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        self.probe_count.fetch_add(1, Ordering::Relaxed);
         let start = self.available_start.load(Ordering::Relaxed);
         let end = self.available_end.load(Ordering::Relaxed);
         if chunk_id >= start && chunk_id <= end {
@@ -604,6 +616,22 @@ async fn warmup_exponential_probe_clears_large_pruned_gap() {
         !stopped,
         "warmup must complete via exponential probe on a 500-chunk gap"
     );
+
+    // Algorithmic-complexity assertion: the probe count must be O(log n),
+    // not O(n). For a 500-chunk gap starting from probe_id=1:
+    //   * 30 stuck-detection probes on chunk 1 (CONSECUTIVE_NONE_THRESHOLD)
+    //   * ~10 exponential-jump probes (jump 1, 2, 4, ..., 512 finds chunk 513)
+    //   * ~target_delay_ms / chunk_dur successful probes filling the buffer
+    //     (1000 / 50 = 20 chunks)
+    // Total upper bound ~80. Linear `+= 1` would have been 500 × 30 = 15 000.
+    // Cap at 200 leaves ample headroom for any reasonable refactor while
+    // catching a regression to linear-advance behaviour.
+    let probes = fetcher.probe_count();
+    assert!(
+        probes < 200,
+        "exponential probe must be O(log n); got {probes} probes for a 500-chunk gap"
+    );
+
     let s = stats.lock().await;
     assert_eq!(s.delivery_mode, "normal");
 }

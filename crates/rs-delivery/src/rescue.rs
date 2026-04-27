@@ -446,6 +446,20 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
                     // increment alone would take 60s × n on a large gap
                     // (e.g. 600 pruned chunks = 10 hours); exponential is
                     // ~10 probes for the same gap, each a single S3 HEAD.
+                    //
+                    // Overshoot is intentional: for a 600-chunk gap the
+                    // probe lands at +1024 (the first power of two past
+                    // the gap), skipping ~424 chunks of available history.
+                    // Warmup only needs to find ANY live chunk to start
+                    // filling the buffer; missing old history doesn't
+                    // affect time-to-stream-start (still ~target_delay_ms
+                    // wall time of fresh content needed).
+                    //
+                    // MAX_PROBE_JUMP = 4096 ≈ 2h 16m at 2s/chunk. Beyond
+                    // that we degrade to `+= 1` (60s/chunk). 4th line of
+                    // defense — the chunker fix (#146), DB fallback, and
+                    // initial CONSECUTIVE_NONE_THRESHOLD all prevent this
+                    // path in normal operation.
                     const MAX_PROBE_JUMP: i64 = 4096;
                     tracing::warn!(
                         alias,
