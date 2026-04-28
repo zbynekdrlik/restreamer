@@ -610,13 +610,12 @@ async fn read_loop(io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>, poisoned: Arc<
                                     // Watch for mid-stream onStatus errors.
                                     if amf_string(&command_name) == "onStatus" {
                                         let is_error = others.iter().any(|v| {
-                                            if let Amf0ValueType::Object(m) = v {
-                                                m.get("level")
-                                                    .map(|lv| matches!(lv, Amf0ValueType::UTF8String(s) if s == "error"))
-                                                    .unwrap_or(false)
-                                            } else {
-                                                false
-                                            }
+                                            let Amf0ValueType::Object(m) = v else {
+                                                return false;
+                                            };
+                                            m.get("level")
+                                                .map(|lv| matches!(lv, Amf0ValueType::UTF8String(s) if s == "error"))
+                                                .unwrap_or(false)
                                         });
                                         if is_error {
                                             poisoned.store(true, Ordering::Relaxed);
