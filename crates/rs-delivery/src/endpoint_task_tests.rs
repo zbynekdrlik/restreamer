@@ -766,6 +766,8 @@ async fn test_stats_struct_serializes() {
         restart_history: std::collections::VecDeque::new(),
         delivery_mode: "normal".to_string(),
         rescue_eta_secs: None,
+        reconnect_count: 0,
+        rtmp_push_history: std::collections::VecDeque::new(),
     };
     let json = serde_json::to_string(&stats).unwrap();
     assert!(json.contains("\"stall_reason\":\"chunk_gap\""));
