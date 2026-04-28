@@ -45,7 +45,7 @@ async fn parse_pusher_kind_rust_roundtrip() {
 #[tokio::test]
 async fn parse_pusher_kind_ffmpeg_roundtrip() {
     let pool = setup().await;
-    let id = create_endpoint_config(&pool, "fb-ffmpeg", "Facebook", "key2", false)
+    let id = create_endpoint_config(&pool, "fb-ffmpeg", "FB", "key2", false)
         .await
         .unwrap();
     sqlx::query("UPDATE endpoint_configs SET pusher = 'ffmpeg' WHERE id = ?1")
@@ -104,7 +104,7 @@ async fn list_endpoint_configs_returns_all_rows_with_correct_pusher() {
     let id1 = create_endpoint_config(&pool, "ep-rust", "YT_RTMP", "r-key", false)
         .await
         .unwrap();
-    let id2 = create_endpoint_config(&pool, "ep-ffmpeg", "Facebook", "f-key", false)
+    let id2 = create_endpoint_config(&pool, "ep-ffmpeg", "FB", "f-key", false)
         .await
         .unwrap();
 
