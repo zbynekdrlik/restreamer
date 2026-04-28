@@ -699,6 +699,10 @@ app.post("/api/v1/_test/scenario", (req, res) => {
           chunk_delay_secs: 3.2,
           stall_reason: null,
           ffmpeg_restart_count: 0,
+          // reconnect_count mirrors ffmpeg_restart_count for PusherKind::Rust
+          // endpoints (#103). Always present so the dashboard can read it
+          // uniformly regardless of which pusher the endpoint uses.
+          reconnect_count: 0,
           last_error: null,
           is_fast: false,
           delivery_mode: "normal",
@@ -878,6 +882,10 @@ wss.on("connection", (ws) => {
           chunk_delay_secs: 3.2,
           stall_reason: null,
           ffmpeg_restart_count: 0,
+          // reconnect_count mirrors ffmpeg_restart_count for PusherKind::Rust
+          // endpoints (#103). Always present so the dashboard can read it
+          // uniformly regardless of which pusher the endpoint uses.
+          reconnect_count: 0,
           last_error: null,
           is_fast: false,
           delivery_mode: "normal",
