@@ -1809,7 +1809,21 @@ jobs:
       - name: Ensure OBS is running
         shell: powershell
         run: |
-          $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+          # Multiple obs64 processes can accumulate when a previous run got
+          # stuck on the crash-recovery dialog (the Force-kill leaves a
+          # zombie + the next launch creates a new one). Kill any zombies
+          # (low-memory processes are stuck on a dialog) before health check.
+          $allObs = Get-Process obs64 -ErrorAction SilentlyContinue
+          if ($allObs) {
+            $zombies = $allObs | Where-Object { ($_.WorkingSet64 / 1MB) -lt 500 }
+            if ($zombies) {
+              Write-Host "Killing $($zombies.Count) zombie obs64 process(es) (mem < 500MB)..."
+              $zombies | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+              Start-Sleep -Seconds 3
+            }
+          }
+          # Pick the single live obs64 process (highest memory) for health check.
+          $obs = Get-Process obs64 -ErrorAction SilentlyContinue | Sort-Object WorkingSet64 -Descending | Select-Object -First 1
           if (-not $obs) {
             Write-Host "OBS not running, registering scheduled task with correct WorkingDirectory..."
 
