@@ -189,8 +189,10 @@ jobs:
           fi
           # GH ubuntu-latest runners have intermittently lost communication
           # at ~8 min into mutation runs. Retry up to 3 times to ride past
-          # transient runner failures. --jobs=1 serializes builds (also
-          # helps stability). Each attempt rebuilds from scratch.
+          # transient runner failures. --jobs=2 parallelizes builds on the
+          # 4-vCPU runner so we finish under the ~8 min cancel window;
+          # --baseline=skip avoids re-proving the unmutated tree (the push
+          # run gates that already). Each attempt rebuilds from scratch.
           ATTEMPT=0
           MAX_ATTEMPTS=3
           while true; do
@@ -199,7 +201,7 @@ jobs:
             # rs-rtmp-push MUST stay in the mutation-testing matrix per spec
             # 7.6 of docs/superpowers/specs/2026-04-27-pure-rust-rtmp-push-design.md.
             # Do NOT add an --exclude-re for rs_rtmp_push:: or rs-rtmp-push.
-            if cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --jobs 1 --output mutants-out \
+            if cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --jobs 2 --baseline=skip --output mutants-out \
             --exclude-re 'impl ChunkFetcher for S3Fetcher' \
             --exclude-re 'S3Fetcher::fetch_chunk_with_meta' \
             --exclude-re 'S3Fetcher::head_chunk_duration' \
