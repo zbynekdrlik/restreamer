@@ -25,6 +25,20 @@ pub struct FfmpegRestartRecord {
     pub backoff_secs: u64,
 }
 
+/// Audit record emitted on every reconnect of an endpoint using
+/// `PusherKind::Rust`. Mirrors `FfmpegRestartRecord` so the dashboard can
+/// render either source uniformly. See spec sec 5.5.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RtmpPushAuditRecord {
+    pub timestamp_ms: i64,
+    pub chunk_id: i64,
+    pub reconnect_count: u32,
+    /// Short error code from the RTMP server (e.g. "NetStream.Publish.BadName")
+    /// or the error variant name for local failures.
+    pub error_display: String,
+    pub backoff_ms: u64,
+}
+
 /// Cap on the per-endpoint restart history ring buffer.
 pub const RESTART_HISTORY_CAP: usize = 100;
 
@@ -149,6 +163,31 @@ pub fn emit_s3_fetcher_init_failed(audit_ring: &Option<Arc<AuditRing>>, alias: &
         serde_json::json!({
             "phase": "s3_fetcher_init",
             "error": error,
+        }),
+    );
+}
+
+/// Audit row emitted when the Rust RTMP pusher disconnects. Mirrors
+/// `emit_ffmpeg_died` so operators see the same schema regardless of
+/// which backend is active. See spec sec 5.5.
+pub fn emit_rtmp_push_died(
+    audit_ring: &Option<Arc<AuditRing>>,
+    alias: &str,
+    error_display: &str,
+    backoff_ms: u64,
+    reconnect_count: u32,
+) {
+    let Some(ring) = audit_ring else { return };
+    ring.push(
+        Severity::Warn,
+        Source::Vps,
+        Some(alias.to_string()),
+        Action::EndpointFfmpegDied,
+        serde_json::json!({
+            "backend": "rust_rtmp_push",
+            "error": error_display,
+            "backoff_ms": backoff_ms,
+            "reconnect_count": reconnect_count,
         }),
     );
 }

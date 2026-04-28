@@ -1,7 +1,9 @@
 /// Per-endpoint delivery task: S3 poll -> normalize -> ffmpeg pipe.
 /// Producer -> bounded channel (~20s) -> Consumer (ffmpeg writer).
 use async_trait::async_trait;
+use rs_core::models::PusherKind;
 use rs_ffmpeg::{FfmpegProcess, ServiceType};
+use rs_rtmp_push::{PusherConfig, RtmpPusher};
 use std::sync::Arc;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use tokio::sync::{Mutex, mpsc, watch};
@@ -21,7 +23,7 @@ pub use flv_normalizer::FlvStreamNormalizer;
 const MAX_FFMPEG_RESTARTS: u32 = 10;
 const MAX_CHUNK_MISS_COUNT: u32 = 40; // ~80s at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
-const WRITE_TIMEOUT_SECS: u64 = 30;
+pub(crate) const WRITE_TIMEOUT_SECS: u64 = 30;
 const MAX_WRITE_FAILURES_PER_CHUNK: u32 = 3;
 /// Base S3 backoff (doubles on each error, max 60s, resets on success).
 const S3_BACKOFF_BASE_SECS: u64 = 2;
@@ -126,7 +128,13 @@ impl OutputProcessFactory for FfmpegProcessFactory {
     }
 }
 
-pub use crate::endpoint_audit::{EndpointRestartState, FfmpegRestartRecord, RESTART_HISTORY_CAP};
+pub use crate::endpoint_audit::{
+    EndpointRestartState, FfmpegRestartRecord, RESTART_HISTORY_CAP, RtmpPushAuditRecord,
+};
+
+#[path = "endpoint_consumer_helpers.rs"]
+mod consumer_helpers;
+use consumer_helpers::{FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, handle_rust_push};
 
 /// Stats tracked per endpoint with diagnostics.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -149,6 +157,13 @@ pub struct EndpointStats {
     pub delivery_mode: String,
     /// ETA in seconds until rescue mode ends (warmup or buffer refill).
     pub rescue_eta_secs: Option<u64>,
+    /// Reconnect counter for `PusherKind::Rust` endpoints. Mirrors
+    /// `ffmpeg_restart_count` so the dashboard can use either uniformly.
+    #[serde(default)]
+    pub reconnect_count: u32,
+    /// Per-endpoint ring buffer of recent Rust RTMP pusher reconnects.
+    #[serde(default)]
+    pub rtmp_push_history: std::collections::VecDeque<RtmpPushAuditRecord>,
 }
 
 impl Default for EndpointStats {
@@ -167,6 +182,8 @@ impl Default for EndpointStats {
             restart_history: std::collections::VecDeque::new(),
             delivery_mode: "normal".to_string(),
             rescue_eta_secs: None,
+            reconnect_count: 0,
+            rtmp_push_history: std::collections::VecDeque::new(),
         }
     }
 }
@@ -278,6 +295,30 @@ impl EndpointHandle {
     pub async fn stop(self) {
         let _ = self.stop_tx.send(true);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.task).await;
+    }
+}
+
+/// Build the plain RTMP URL for a given service type and stream key.
+/// Mirrors `rs_ffmpeg::build_ffmpeg_args` URL construction so `RtmpPusher`
+/// connects to the same upstream that ffmpeg would.
+fn build_rtmp_url(service_type: ServiceType, stream_key: &str) -> String {
+    match service_type {
+        ServiceType::YtRtmp => {
+            format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}")
+        }
+        ServiceType::Facebook => {
+            format!("rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}")
+        }
+        ServiceType::Vimeo => {
+            format!("rtmps://rtmp-global.cloud.vimeo.com:443/live/{stream_key}")
+        }
+        ServiceType::Instagram => {
+            format!("rtmps://live-upload.instagram.com:443/rtmp/{stream_key}")
+        }
+        ServiceType::TestFile => {
+            // TestFile has no upstream — use a local test address.
+            format!("rtmp://127.0.0.1:1935/live/{stream_key}")
+        }
     }
 }
 
@@ -434,15 +475,16 @@ async fn producer_task<F: ChunkFetcher>(
     tracing::info!(alias = %alias, "Producer task stopped");
 }
 
-/// Consumer task: pulls pre-fetched chunks from the channel, normalizes FLV, writes to ffmpeg.
-/// Never makes S3 calls -- zero network I/O.
+/// Consumer task: pulls pre-fetched chunks from the channel, normalizes FLV,
+/// writes to the configured output backend (ffmpeg subprocess or Rust RTMP
+/// pusher). Never makes S3 calls -- zero network I/O.
 ///
-/// Pacing is done by ffmpeg's `-re` flag alone. The `FlvStreamNormalizer`
-/// rebases every ffmpeg process's input to start at PTS=0 so `-re` paces
-/// correctly from process start, and consumer writes are naturally
-/// throttled by ffmpeg's stdin read rate. The previous Rust-side pacing
-/// layer (removed 2026-04-21) was a workaround for the normalizer not
-/// rebasing the first chunk per process — it fought `-re` and caused
+/// Pacing is done by ffmpeg's `-re` flag alone (ffmpeg path). The
+/// `FlvStreamNormalizer` rebases every process's input to start at PTS=0
+/// so `-re` paces correctly from process start, and consumer writes are
+/// naturally throttled by ffmpeg's stdin read rate. The previous Rust-side
+/// pacing layer (removed 2026-04-21) was a workaround for the normalizer not
+/// rebasing the first chunk per process -- it fought `-re` and caused
 /// cumulative drift + cascading cache growth after ffmpeg restarts.
 #[allow(clippy::too_many_arguments)]
 async fn consumer_task<P: OutputProcessFactory>(
@@ -467,7 +509,10 @@ async fn consumer_task<P: OutputProcessFactory>(
     };
 
     let mut flv_normalizer = FlvStreamNormalizer::new();
+    // `proc` is the ffmpeg-path output handle (None when using Rust pusher).
     let mut proc: Option<Box<dyn OutputProcess>> = None;
+    // `rust_pusher` is the Rust-path output handle (None when using ffmpeg).
+    let mut rust_pusher: Option<RtmpPusher> = None;
     let mut consecutive_ffmpeg_failures: u32 = 0;
     // Class-aware backoff: tracks the ReasonClass of the most recent death
     // and how many deaths in a row shared that class. See `ffmpeg_reason`.
@@ -476,15 +521,27 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut circuit_trips: u32 = 0;
     let mut consecutive_write_failures: u32 = 0;
     let mut last_heartbeat = std::time::Instant::now();
+    // Consecutive push errors for the Rust pusher exponential backoff ladder.
+    let mut consecutive_push_errors: u32 = 0;
 
-    // Rust-side pacing was removed 2026-04-21. It fought against ffmpeg
-    // `-re`: consumer tried to sleep between writes, but ffmpeg pipe
-    // backpressure from `-re` already throttled consumer writes, and the
-    // two layers together caused (a) cumulative drift as pacing errors
-    // accumulated, (b) broken catchup after ffmpeg restart. With the FLV
-    // normalizer now rebasing each ffmpeg process's input stream to
-    // PTS=0, ffmpeg `-re` alone paces correctly.
-    tracing::info!(alias = %alias, "Consumer: endpoint delivery configured (FLV-only)");
+    let use_rust_pusher = ep_cfg.pusher == PusherKind::Rust;
+
+    if use_rust_pusher {
+        // Rust pusher: lazy-connect on first write. Construct now so the
+        // handle is available for the whole consumer lifetime.
+        let url = build_rtmp_url(service_type, &ep_cfg.stream_key);
+        tracing::info!(alias = %alias, url = %url, "Consumer: endpoint delivery configured (Rust RTMP pusher)");
+        rust_pusher = Some(RtmpPusher::new(url, PusherConfig::default()));
+    } else {
+        // Rust-side pacing was removed 2026-04-21. It fought against ffmpeg
+        // `-re`: consumer tried to sleep between writes, but ffmpeg pipe
+        // backpressure from `-re` already throttled consumer writes, and the
+        // two layers together caused (a) cumulative drift as pacing errors
+        // accumulated, (b) broken catchup after ffmpeg restart. With the FLV
+        // normalizer now rebasing each ffmpeg process's input stream to
+        // PTS=0, ffmpeg `-re` alone paces correctly.
+        tracing::info!(alias = %alias, "Consumer: endpoint delivery configured (FLV-only)");
+    }
 
     loop {
         if *stop_rx.borrow() {
@@ -502,167 +559,101 @@ async fn consumer_task<P: OutputProcessFactory>(
             last_heartbeat = std::time::Instant::now();
         }
 
-        // Ensure output process is running
-        if !proc.as_mut().is_some_and(|p| p.is_alive()) {
-            if proc.is_some() {
-                // ffmpeg died. Classify from stderr, advance per-class counter,
-                // apply class-specific reconnect floor. Reset counter if
-                // process lived long enough to prove the session was real.
-                const LIFETIME_RESET_SECS: u64 = 60;
-                let lifetime_secs = proc_spawned_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-                if lifetime_secs >= LIFETIME_RESET_SECS {
-                    restart_state = EndpointRestartState::new();
-                }
-
-                let stderr_tail = proc.as_mut().and_then(|p| p.last_stderr_line());
-                let stderr_for_classify = stderr_tail.clone().unwrap_or_default();
-                let class = ffmpeg_reason::classify(&service_type_str, &stderr_for_classify);
-                restart_state = restart_state.advance(class);
-
-                let floor = ffmpeg_reason::reconnect_floor(
-                    class,
-                    restart_state.consecutive_same_class.saturating_sub(1),
-                );
-                let is_process_killed = floor.is_none();
-                // reason is the serialized ReasonClass (e.g. "youtube_rtmp_closed").
-                let reason_str = serde_json::to_string(&class)
-                    .unwrap_or_default()
-                    .trim_matches('"')
-                    .to_string();
-                let backoff_secs = floor.map(|d| d.as_secs()).unwrap_or(0);
-
-                let current_chunk_id_for_record = {
-                    let s = stats.lock().await;
-                    s.current_chunk_id
-                };
-                let timestamp_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                // The host mirror pulls these rows next tick — persisted
-                // evidence is what the 2026-04-19 post-mortem lacked.
-                endpoint_audit::emit_ffmpeg_died(
-                    &audit_ring,
-                    &alias,
-                    lifetime_secs,
-                    &reason_str,
-                    stderr_tail.as_deref(),
-                    backoff_secs,
-                    restart_state.consecutive_same_class,
-                );
-
-                let record = FfmpegRestartRecord {
-                    timestamp_ms,
-                    chunk_id: current_chunk_id_for_record,
-                    lifetime_secs,
-                    reason: reason_str.clone(),
-                    stderr_tail: stderr_tail.clone(),
-                    backoff_secs,
-                };
-                let mut s = stats.lock().await;
-                s.ffmpeg_restart_count += 1;
-                s.ffmpeg_last_stderr = stderr_tail;
-                if s.restart_history.len() >= RESTART_HISTORY_CAP {
-                    s.restart_history.pop_front();
-                }
-                s.restart_history.push_back(record);
-                drop(s);
-
-                if is_process_killed {
-                    tracing::info!(
-                        alias = %alias,
-                        reason = %reason_str,
-                        "Consumer: ffmpeg was intentionally killed; not restarting"
-                    );
-                    break;
-                }
-
-                tracing::warn!(
-                    alias = %alias,
-                    lifetime_secs,
-                    consecutive_same_class = restart_state.consecutive_same_class,
-                    reason = %reason_str,
-                    backoff_secs,
-                    "Consumer: ffmpeg died, backing off before restart"
-                );
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
-                    _ = stop_rx.changed() => {
-                        if *stop_rx.borrow() { break; }
+        if use_rust_pusher {
+            // Rust pusher path: pusher is always present (lazy-reconnects
+            // on next push_flv_bytes call after an error). No process
+            // lifecycle management needed here — errors are handled in the
+            // write section below.
+        } else {
+            // ffmpeg path: ensure output process is running.
+            if !proc.as_mut().is_some_and(|p| p.is_alive()) {
+                if proc.is_some() {
+                    // ffmpeg died -- delegate to helper to keep this
+                    // function under the 1000-line gate.
+                    match handle_ffmpeg_death(
+                        &mut proc,
+                        proc_spawned_at,
+                        &mut restart_state,
+                        &service_type_str,
+                        &alias,
+                        &stats,
+                        &audit_ring,
+                        &mut stop_rx,
+                        &mut flv_normalizer,
+                    )
+                    .await
+                    {
+                        FfmpegDeathAction::Break => break,
+                        FfmpegDeathAction::Respawn => {}
                     }
                 }
-                // The new FlvStreamNormalizer will rebase the next chunk's
-                // FLV timestamps to start at 0, so the freshly-spawned
-                // ffmpeg's `-re` pacer works natively. No Rust-side pacing
-                // state to reset — that layer was removed.
-                flv_normalizer = FlvStreamNormalizer::new();
-            }
 
-            match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {
-                Ok(new_proc) => {
-                    tracing::info!(alias = %alias, "Consumer: ffmpeg started");
-                    // Previous spawn existed iff we've ever tracked a start
-                    // time. The death handler above keeps `proc` as `Some`
-                    // with a dead child, so `proc.is_none()` alone cannot
-                    // distinguish first spawn from restart.
-                    let was_dead = proc_spawned_at.is_some();
-                    proc = Some(new_proc);
-                    proc_spawned_at = Some(tokio::time::Instant::now());
-                    consecutive_ffmpeg_failures = 0;
-                    let mut s = stats.lock().await;
-                    s.consecutive_ffmpeg_failures = 0;
-                    if s.stall_reason.as_deref() == Some("ffmpeg_crash_loop") {
-                        s.stall_reason = None;
-                    }
-                    drop(s);
-                    endpoint_audit::emit_spawn_success(
-                        &audit_ring,
-                        &alias,
-                        &ep_cfg.service_type,
-                        ep_cfg.stream_key.len(),
-                        was_dead,
-                    );
-                }
-                Err(e) => {
-                    consecutive_ffmpeg_failures += 1;
-                    let mut s = stats.lock().await;
-                    s.consecutive_ffmpeg_failures = consecutive_ffmpeg_failures;
-                    s.last_error = Some(e.clone());
-                    drop(s);
-                    endpoint_audit::emit_spawn_failed(
-                        &audit_ring,
-                        &alias,
-                        consecutive_ffmpeg_failures,
-                        &e,
-                    );
-
-                    if consecutive_ffmpeg_failures >= MAX_FFMPEG_RESTARTS {
-                        circuit_trips += 1;
-                        let cooldown = (30 * 2u64.pow(circuit_trips.min(4) - 1)).min(300);
-                        tracing::error!(
-                            alias = %alias,
-                            failures = consecutive_ffmpeg_failures,
-                            circuit_trip = circuit_trips,
-                            "Consumer: ffmpeg circuit breaker #{circuit_trips}, cooldown {cooldown}s"
-                        );
-                        let mut s = stats.lock().await;
-                        s.stall_reason = Some("ffmpeg_crash_loop".to_string());
-                        drop(s);
-                        let sleep_dur = std::time::Duration::from_secs(cooldown);
-                        tokio::select! {
-                            _ = tokio::time::sleep(sleep_dur) => {}
-                            _ = stop_rx.changed() => {
-                                if *stop_rx.borrow() { break; }
-                            }
-                        }
+                match factory.spawn(service_type, &ep_cfg.stream_key, &alias) {
+                    Ok(new_proc) => {
+                        tracing::info!(alias = %alias, "Consumer: ffmpeg started");
+                        // Previous spawn existed iff we've ever tracked a start
+                        // time. The death handler above keeps `proc` as `Some`
+                        // with a dead child, so `proc.is_none()` alone cannot
+                        // distinguish first spawn from restart.
+                        let was_dead = proc_spawned_at.is_some();
+                        proc = Some(new_proc);
+                        proc_spawned_at = Some(tokio::time::Instant::now());
                         consecutive_ffmpeg_failures = 0;
                         let mut s = stats.lock().await;
                         s.consecutive_ffmpeg_failures = 0;
-                    } else {
-                        tracing::error!(alias = %alias, "Consumer: failed to spawn ffmpeg: {e}");
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        if s.stall_reason.as_deref() == Some("ffmpeg_crash_loop") {
+                            s.stall_reason = None;
+                        }
+                        drop(s);
+                        endpoint_audit::emit_spawn_success(
+                            &audit_ring,
+                            &alias,
+                            &ep_cfg.service_type,
+                            ep_cfg.stream_key.len(),
+                            was_dead,
+                        );
                     }
-                    continue;
+                    Err(e) => {
+                        consecutive_ffmpeg_failures += 1;
+                        let mut s = stats.lock().await;
+                        s.consecutive_ffmpeg_failures = consecutive_ffmpeg_failures;
+                        s.last_error = Some(e.clone());
+                        drop(s);
+                        endpoint_audit::emit_spawn_failed(
+                            &audit_ring,
+                            &alias,
+                            consecutive_ffmpeg_failures,
+                            &e,
+                        );
+
+                        if consecutive_ffmpeg_failures >= MAX_FFMPEG_RESTARTS {
+                            circuit_trips += 1;
+                            let cooldown = (30 * 2u64.pow(circuit_trips.min(4) - 1)).min(300);
+                            tracing::error!(
+                                alias = %alias,
+                                failures = consecutive_ffmpeg_failures,
+                                circuit_trip = circuit_trips,
+                                "Consumer: ffmpeg circuit breaker #{circuit_trips}, cooldown {cooldown}s"
+                            );
+                            let mut s = stats.lock().await;
+                            s.stall_reason = Some("ffmpeg_crash_loop".to_string());
+                            drop(s);
+                            let sleep_dur = std::time::Duration::from_secs(cooldown);
+                            tokio::select! {
+                                _ = tokio::time::sleep(sleep_dur) => {}
+                                _ = stop_rx.changed() => {
+                                    if *stop_rx.borrow() { break; }
+                                }
+                            }
+                            consecutive_ffmpeg_failures = 0;
+                            let mut s = stats.lock().await;
+                            s.consecutive_ffmpeg_failures = 0;
+                        } else {
+                            tracing::error!(alias = %alias, "Consumer: failed to spawn ffmpeg: {e}");
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        }
+                        continue;
+                    }
                 }
             }
         }
@@ -744,7 +735,31 @@ async fn consumer_task<P: OutputProcessFactory>(
         // writes as fast as the pipe accepts and is naturally throttled
         // by ffmpeg's stdin read rate.
 
-        if let Some(ref mut p) = proc {
+        if use_rust_pusher {
+            // Rust RTMP pusher write path. Delegated to helper to keep
+            // consumer_task under the 1000-line gate.
+            if let Some(ref mut pusher) = rust_pusher {
+                let action = handle_rust_push(
+                    pusher,
+                    &processed,
+                    chunk_id,
+                    chunk_duration_ms,
+                    &alias,
+                    &mut consecutive_push_errors,
+                    &mut consecutive_write_failures,
+                    &stats,
+                    &audit_ring,
+                    &mut stop_rx,
+                    &mut flv_normalizer,
+                )
+                .await;
+                match action {
+                    RustPushAction::Continue => {}
+                    RustPushAction::Break => break,
+                }
+            }
+        } else if let Some(ref mut p) = proc {
+            // ffmpeg write path (unchanged from pre-Task-11 code).
             let write_result = tokio::time::timeout(
                 std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
                 p.write(&processed),
@@ -770,7 +785,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                     let mut s = stats.lock().await;
                     s.last_error = Some(e);
                     drop(s);
-                    // Kill the process IN PLACE — leave the Option as Some
+                    // Kill the process IN PLACE -- leave the Option as Some
                     // so the death handler at the top of the loop catches
                     // it and applies backoff + audit log on the next
                     // iteration. Previously this called proc.take() which
@@ -806,7 +821,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                     s.last_error = Some("write_timeout".to_string());
                     s.stall_reason = Some("write_timeout".to_string());
                     drop(s);
-                    // Same fix as above — kill in place, let the death
+                    // Same fix as above -- kill in place, let the death
                     // handler record the audit entry and apply backoff.
                     // The 10ms post-kill sleep gives the OS a chance to
                     // reap the child so is_alive() returns false on the
@@ -832,6 +847,9 @@ async fn consumer_task<P: OutputProcessFactory>(
     // Cleanup
     if let Some(mut p) = proc {
         p.kill().await;
+    }
+    if let Some(mut pusher) = rust_pusher {
+        pusher.close().await;
     }
     tracing::info!(alias = %alias, "Consumer task stopped");
 }

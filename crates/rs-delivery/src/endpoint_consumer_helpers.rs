@@ -1,0 +1,237 @@
+//! Consumer-task helpers extracted from `endpoint_task.rs` to keep that
+//! file under the 1000-line file-size gate. Included via `#[path]` as
+//! `mod consumer_helpers` inside `endpoint_task.rs`.
+
+use std::sync::Arc;
+
+use rs_rtmp_push::{RtmpPusher, backoff_floor_ms, is_exponential};
+use tokio::sync::watch;
+
+use super::{
+    EndpointRestartState, FfmpegRestartRecord, FlvStreamNormalizer, OutputProcess,
+    RESTART_HISTORY_CAP, RtmpPushAuditRecord, Stats, WRITE_TIMEOUT_SECS,
+};
+use crate::audit_ring::AuditRing;
+use crate::{endpoint_audit, ffmpeg_reason};
+
+/// Return value from `handle_rust_push` telling the consumer loop whether
+/// to continue normally or break the loop.
+pub(super) enum RustPushAction {
+    Continue,
+    Break,
+}
+
+/// Handle one Rust RTMP pusher write call (success or error path).
+/// Extracted from `consumer_task` to keep that function under 1000 lines.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn handle_rust_push(
+    pusher: &mut RtmpPusher,
+    data: &[u8],
+    chunk_id: i64,
+    chunk_duration_ms: i64,
+    alias: &str,
+    consecutive_push_errors: &mut u32,
+    consecutive_write_failures: &mut u32,
+    stats: &Stats,
+    audit_ring: &Option<Arc<AuditRing>>,
+    stop_rx: &mut watch::Receiver<bool>,
+    flv_normalizer: &mut FlvStreamNormalizer,
+) -> RustPushAction {
+    let push_result = tokio::time::timeout(
+        std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
+        pusher.push_flv_bytes(data),
+    )
+    .await;
+
+    match push_result {
+        Ok(Ok(())) => {
+            *consecutive_push_errors = 0;
+            *consecutive_write_failures = 0;
+            let mut s = stats.lock().await;
+            s.bytes_processed_total += data.len() as u64;
+            s.duration_processed_ms += chunk_duration_ms.max(0) as u64;
+            s.current_chunk_id = chunk_id;
+            s.chunks_processed += 1;
+            s.reconnect_count = pusher.reconnect_count();
+            RustPushAction::Continue
+        }
+        Ok(Err(push_err)) => {
+            *consecutive_push_errors += 1;
+            let error_display = push_err.to_string();
+            tracing::warn!(
+                alias = %alias,
+                chunk_id,
+                consecutive = *consecutive_push_errors,
+                "Consumer: Rust pusher error: {error_display}"
+            );
+            let floor = backoff_floor_ms(&push_err);
+            let Some(floor_ms) = floor else {
+                tracing::info!(alias = %alias, "Consumer: Rust pusher cancelled; stopping");
+                return RustPushAction::Break;
+            };
+            let backoff_ms = if is_exponential(&push_err) {
+                let factor = 1u64 << (consecutive_push_errors.saturating_sub(1).min(5));
+                floor_ms.saturating_mul(factor).min(300_000)
+            } else {
+                floor_ms
+            };
+            let timestamp_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let reconnect_count = pusher.reconnect_count();
+            endpoint_audit::emit_rtmp_push_died(
+                audit_ring,
+                alias,
+                &error_display,
+                backoff_ms,
+                reconnect_count,
+            );
+            let record = RtmpPushAuditRecord {
+                timestamp_ms,
+                chunk_id,
+                reconnect_count,
+                error_display: error_display.clone(),
+                backoff_ms,
+            };
+            let mut s = stats.lock().await;
+            s.reconnect_count = reconnect_count;
+            s.last_error = Some(error_display);
+            if s.rtmp_push_history.len() >= RESTART_HISTORY_CAP {
+                s.rtmp_push_history.pop_front();
+            }
+            s.rtmp_push_history.push_back(record);
+            drop(s);
+            *flv_normalizer = FlvStreamNormalizer::new();
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {}
+                _ = stop_rx.changed() => {
+                    if *stop_rx.borrow() { return RustPushAction::Break; }
+                }
+            }
+            RustPushAction::Continue
+        }
+        Err(_timeout) => {
+            *consecutive_push_errors += 1;
+            tracing::error!(
+                alias = %alias,
+                chunk_id,
+                consecutive = *consecutive_push_errors,
+                "Consumer: Rust pusher write timed out"
+            );
+            let mut s = stats.lock().await;
+            s.last_error = Some("rtmp_push_timeout".to_string());
+            s.stall_reason = Some("rtmp_push_timeout".to_string());
+            drop(s);
+            *flv_normalizer = FlvStreamNormalizer::new();
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                _ = stop_rx.changed() => {
+                    if *stop_rx.borrow() { return RustPushAction::Break; }
+                }
+            }
+            RustPushAction::Continue
+        }
+    }
+}
+
+/// Return from `handle_ffmpeg_death`: what the consumer loop should do next.
+pub(super) enum FfmpegDeathAction {
+    /// Continue to the spawn-new-process step.
+    Respawn,
+    /// ffmpeg was intentionally killed; break the consumer loop.
+    Break,
+}
+
+/// Handle ffmpeg process death inside the consumer loop:
+/// classify stderr, emit audit, update stats, compute backoff, sleep.
+/// Extracted from `consumer_task` to keep that function under 1000 lines.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn handle_ffmpeg_death(
+    proc: &mut Option<Box<dyn OutputProcess>>,
+    proc_spawned_at: Option<tokio::time::Instant>,
+    restart_state: &mut EndpointRestartState,
+    service_type_str: &str,
+    alias: &str,
+    stats: &Stats,
+    audit_ring: &Option<Arc<AuditRing>>,
+    stop_rx: &mut watch::Receiver<bool>,
+    flv_normalizer: &mut FlvStreamNormalizer,
+) -> FfmpegDeathAction {
+    const LIFETIME_RESET_SECS: u64 = 60;
+    let lifetime_secs = proc_spawned_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+    if lifetime_secs >= LIFETIME_RESET_SECS {
+        *restart_state = EndpointRestartState::new();
+    }
+    let stderr_tail = proc.as_mut().and_then(|p| p.last_stderr_line());
+    let class = ffmpeg_reason::classify(service_type_str, stderr_tail.as_deref().unwrap_or(""));
+    *restart_state = restart_state.advance(class);
+    let floor = ffmpeg_reason::reconnect_floor(
+        class,
+        restart_state.consecutive_same_class.saturating_sub(1),
+    );
+    let is_killed = floor.is_none();
+    let reason_str = serde_json::to_string(&class)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string();
+    let backoff_secs = floor.map(|d| d.as_secs()).unwrap_or(0);
+    let current_chunk_id_for_record = {
+        let s = stats.lock().await;
+        s.current_chunk_id
+    };
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    endpoint_audit::emit_ffmpeg_died(
+        audit_ring,
+        alias,
+        lifetime_secs,
+        &reason_str,
+        stderr_tail.as_deref(),
+        backoff_secs,
+        restart_state.consecutive_same_class,
+    );
+    let record = FfmpegRestartRecord {
+        timestamp_ms,
+        chunk_id: current_chunk_id_for_record,
+        lifetime_secs,
+        reason: reason_str.clone(),
+        stderr_tail: stderr_tail.clone(),
+        backoff_secs,
+    };
+    {
+        let mut s = stats.lock().await;
+        s.ffmpeg_restart_count += 1;
+        s.ffmpeg_last_stderr = stderr_tail;
+        if s.restart_history.len() >= RESTART_HISTORY_CAP {
+            s.restart_history.pop_front();
+        }
+        s.restart_history.push_back(record);
+    }
+    if is_killed {
+        tracing::info!(
+            alias = %alias,
+            reason = %reason_str,
+            "Consumer: ffmpeg was intentionally killed; not restarting"
+        );
+        return FfmpegDeathAction::Break;
+    }
+    tracing::warn!(
+        alias = %alias,
+        lifetime_secs,
+        consecutive_same_class = restart_state.consecutive_same_class,
+        reason = %reason_str,
+        backoff_secs,
+        "Consumer: ffmpeg died, backing off before restart"
+    );
+    tokio::select! {
+        _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
+        _ = stop_rx.changed() => {
+            if *stop_rx.borrow() { return FfmpegDeathAction::Break; }
+        }
+    }
+    *flv_normalizer = FlvStreamNormalizer::new();
+    FfmpegDeathAction::Respawn
+}

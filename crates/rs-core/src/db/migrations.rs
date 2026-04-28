@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 21;
+pub const MAX_SCHEMA_VERSION: i32 = 22;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -337,6 +337,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             19 => migrate_v19(&mut tx).await?,
             20 => migrate_v20(&mut tx).await?,
             21 => migrate_v21(&mut tx).await?,
+            22 => migrate_v22(&mut tx).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -689,4 +690,16 @@ async fn migrate_v21(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+async fn migrate_v22(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    // Add pusher column for PusherKind (#103). Default 'ffmpeg' preserves
+    // existing endpoint behaviour for all rows created before this migration.
+    add_column_if_missing(
+        tx,
+        "endpoint_configs",
+        "pusher",
+        "pusher TEXT NOT NULL DEFAULT 'ffmpeg'",
+    )
+    .await
 }
