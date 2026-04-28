@@ -468,3 +468,381 @@ async fn media_payload_byte_identical_to_source() {
     assert_eq!(rec_audio_sha, src_audio_sha, "audio body bytes diverged");
     assert_eq!(rec_video_sha, src_video_sha, "video body bytes diverged");
 }
+
+// ---------------------------------------------------------------------------
+// Reconnect helper: recording server bound to a SPECIFIC addr
+// ---------------------------------------------------------------------------
+
+/// Identical to `spawn_recording_xiu_server` but binds xiu to `addr` instead
+/// of discovering a fresh ephemeral port.  Used by the reconnect test to spin
+/// up a replacement server on the exact same port after the first server is
+/// killed.
+///
+/// The caller is responsible for ensuring the port is free before calling this
+/// function (e.g. by aborting the previous server task and waiting briefly so
+/// the OS releases the TCP listener).
+async fn spawn_recording_xiu_server_at(
+    addr: std::net::SocketAddr,
+) -> (
+    Arc<Mutex<Vec<RecordedTag>>>,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    let recorded: Arc<Mutex<Vec<RecordedTag>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let mut hub = StreamsHub::new(None);
+    hub.set_rtmp_push_enabled(true);
+
+    let event_sender_for_server = hub.get_hub_event_sender();
+    let event_sender_for_sub = hub.get_hub_event_sender();
+    let mut broadcast_rx = hub.get_client_event_consumer();
+
+    let (sub_ready_tx, sub_ready_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let address = addr.to_string();
+    let recorded_for_sub = Arc::clone(&recorded);
+
+    tokio::spawn(async move {
+        let identifier = loop {
+            match tokio::time::timeout(Duration::from_secs(10), broadcast_rx.recv()).await {
+                Ok(Ok(BroadcastEvent::Publish { identifier })) => {
+                    eprintln!(
+                        "[recorder-at] BroadcastEvent::Publish received for {:?}",
+                        identifier
+                    );
+                    break identifier;
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) => {
+                    eprintln!("[recorder-at] broadcast channel closed before Publish");
+                    return;
+                }
+                Err(_) => {
+                    eprintln!("[recorder-at] timed out waiting for BroadcastEvent::Publish");
+                    return;
+                }
+            }
+        };
+
+        let mut frame_rx = loop {
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            let sub_info = SubscriberInfo {
+                id: Uuid::new(RandomDigitCount::Six),
+                sub_type: SubscribeType::RtmpPull,
+                sub_data_type: SubDataType::Frame,
+                notify_info: NotifyInfo {
+                    request_url: String::new(),
+                    remote_addr: String::from("test-recorder-at"),
+                },
+            };
+
+            if event_sender_for_sub
+                .send(StreamHubEvent::Subscribe {
+                    identifier: identifier.clone(),
+                    info: sub_info,
+                    result_sender: result_tx,
+                })
+                .is_err()
+            {
+                eprintln!("[recorder-at] hub event channel closed; cannot subscribe");
+                return;
+            }
+
+            match tokio::time::timeout(Duration::from_millis(500), result_rx).await {
+                Ok(Ok(Ok((data_receiver, _stat)))) => {
+                    if let Some(rx) = data_receiver.frame_receiver {
+                        eprintln!("[recorder-at] subscribed; frame receiver ready");
+                        break rx;
+                    }
+                    eprintln!("[recorder-at] no frame_receiver; retrying...");
+                }
+                Ok(Ok(Err(e))) => {
+                    eprintln!("[recorder-at] subscribe error: {e:?}; retrying...");
+                }
+                _ => {
+                    eprintln!("[recorder-at] subscribe timeout; retrying...");
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+
+        let _ = sub_ready_tx.send(());
+
+        while let Some(frame) = frame_rx.recv().await {
+            match frame {
+                FrameData::Audio { timestamp, data } => {
+                    eprintln!("[recorder-at] audio frame ts={}", timestamp);
+                    recorded_for_sub.lock().await.push(RecordedTag {
+                        tag_type: 8,
+                        timestamp_ms: timestamp,
+                        body: data.to_vec(),
+                    });
+                }
+                FrameData::Video { timestamp, data } => {
+                    eprintln!("[recorder-at] video frame ts={}", timestamp);
+                    recorded_for_sub.lock().await.push(RecordedTag {
+                        tag_type: 9,
+                        timestamp_ms: timestamp,
+                        body: data.to_vec(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        eprintln!("[recorder-at] frame channel closed; drain complete");
+    });
+
+    let handle = tokio::spawn(async move {
+        let mut rtmp_server =
+            rtmp::rtmp::RtmpServer::new(address, event_sender_for_server, 0, None);
+
+        tokio::select! {
+            _ = hub.run() => {}
+            result = rtmp_server.run() => {
+                if let Err(e) = result {
+                    log::debug!("xiu recording-at test server stopped: {e}");
+                }
+            }
+        }
+    });
+
+    (recorded, handle, sub_ready_rx)
+}
+
+// ---------------------------------------------------------------------------
+// Build a minimal audio-only FLV with tags every 100 ms from ts_start..=ts_end
+// ---------------------------------------------------------------------------
+
+/// Build an in-memory FLV byte stream containing audio tags spaced 100 ms
+/// apart from `ts_start` to `ts_end` (inclusive).
+///
+/// The FLV header and PreviousTagSize0 are prepended so `RtmpPusher::push_flv_bytes`
+/// parses it correctly.  Each audio tag body is 4 bytes of synthetic payload.
+fn synthetic_audio_flv(ts_start_ms: u32, ts_end_ms: u32) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+
+    // FLV header: signature "FLV", version 1, flags 0x04 (audio only), header size 9
+    out.extend_from_slice(&[b'F', b'L', b'V', 1, 0x04, 0, 0, 0, 9]);
+    // PreviousTagSize0 = 0
+    out.extend_from_slice(&[0u8; 4]);
+
+    let mut ts = ts_start_ms;
+    loop {
+        // 4-byte synthetic body: two fixed bytes plus two TS-derived bytes so
+        // each tag is unique and detectable in the recording.
+        let body: [u8; 4] = [0xAB, 0xCD, (ts >> 8) as u8, ts as u8];
+        let body_size = body.len() as u32;
+
+        // Tag header (11 bytes):
+        //   [0]     tag type = 8 (audio)
+        //   [1..3]  data size (3 bytes, big-endian)
+        //   [4..6]  timestamp lower 24 bits (big-endian)
+        //   [7]     timestamp upper 8 bits (extended)
+        //   [8..10] stream id = 0 (3 bytes)
+        let ts_low = ts & 0x00FF_FFFF;
+        let ts_high = (ts >> 24) as u8;
+
+        out.push(8u8); // audio tag type
+        out.push((body_size >> 16) as u8);
+        out.push((body_size >> 8) as u8);
+        out.push(body_size as u8);
+        out.push((ts_low >> 16) as u8);
+        out.push((ts_low >> 8) as u8);
+        out.push(ts_low as u8);
+        out.push(ts_high);
+        out.extend_from_slice(&[0u8; 3]); // stream id
+
+        out.extend_from_slice(&body);
+
+        // PreviousTagSize = 11 (header) + body_size
+        let prev_size = 11u32 + body_size;
+        out.extend_from_slice(&prev_size.to_be_bytes());
+
+        if ts >= ts_end_ms {
+            break;
+        }
+        ts = ts.saturating_add(100);
+        if ts > ts_end_ms {
+            ts = ts_end_ms;
+        }
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Reconnect test: monotonic TS across reconnect + reconnect_count increments
+// ---------------------------------------------------------------------------
+
+/// Assert that output timestamps remain monotonic across a pusher reconnect
+/// AND that `reconnect_count()` increments from 0 to 1.
+///
+/// Scenario (Approach C -- sequential port-reuse):
+///   1. Discover ephemeral port P and bind server A there.
+///   2. Construct `RtmpPusher` pointed at `rtmp://127.0.0.1:P/live/rec`.
+///   3. Push `chunk1` (TS 0..=500) to server A.
+///   4. Abort server A; call `pusher.close()` to drop the stale session.
+///   5. Wait briefly so the OS finishes releasing port P.
+///   6. Bind server B at the SAME port P.
+///   7. Push `chunk2` (TS 0..=500 again) to server B.
+///      The pusher sees `session == None` and reconnects.
+///   8. Assert combined wire timestamps (server A then server B) are monotonic.
+///   9. Assert `reconnect_count() == 1` (Task 8 implements the increment; this
+///      assertion is the TDD RED for Task 7 -- it will fail until Task 8 lands).
+///
+/// Port-reuse note: after aborting server A the OS transitions the listening
+/// socket through TIME_WAIT.  We sleep 400 ms before binding server B to give
+/// the kernel time to release the port.  On Linux loopback `SO_REUSEADDR` makes
+/// immediate rebind possible, but we rely on the sleep for portability.
+#[tokio::test]
+async fn monotonic_ts_across_reconnect() {
+    // --- Step 1: discover ephemeral port ------------------------------------
+    let addr = {
+        let probe = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind probe listener");
+        let a = probe.local_addr().expect("probe local_addr");
+        drop(probe);
+        a
+    };
+
+    let url = format!("rtmp://{}/live/rec", addr);
+
+    // --- Step 2: spin up server A and the pusher ----------------------------
+    let (recorded_a, server_a, sub_ready_a) = spawn_recording_xiu_server_at(addr).await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut pusher = RtmpPusher::new(url.clone(), PusherConfig::default());
+
+    // Handshake with server A (empty push to trigger publish so the subscriber
+    // task can register its frame receiver).
+    pusher
+        .push_flv_bytes(&[])
+        .await
+        .expect("handshake with server A");
+
+    eprintln!("[reconnect-test] handshake A done; waiting for subscriber A...");
+
+    tokio::time::timeout(Duration::from_secs(5), sub_ready_a)
+        .await
+        .expect("subscriber A did not signal within 5s")
+        .expect("sub_ready_a channel dropped");
+
+    eprintln!("[reconnect-test] subscriber A ready; pushing chunk1...");
+
+    // --- Step 3: push chunk1 (TS 0..=500) to server A ----------------------
+    let chunk1 = synthetic_audio_flv(0, 500);
+    pusher
+        .push_flv_bytes(&chunk1)
+        .await
+        .expect("push chunk1 to server A");
+
+    // Allow the subscriber task on server A to drain in-flight frames.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let last_ts_a = {
+        let guard = recorded_a.lock().await;
+        eprintln!("[reconnect-test] server A recorded {} tags", guard.len());
+        guard.last().map(|t| t.timestamp_ms).unwrap_or(0)
+    };
+
+    eprintln!("[reconnect-test] last wire TS from server A: {}", last_ts_a);
+
+    // --- Step 4: kill server A and drop the pusher session ------------------
+    server_a.abort();
+    pusher.close().await;
+
+    eprintln!("[reconnect-test] server A aborted; session closed; sleeping before rebind...");
+
+    // --- Step 5: wait for OS to release the port ----------------------------
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // --- Step 6: spin up server B at the same port --------------------------
+    let (recorded_b, _server_b, sub_ready_b) = spawn_recording_xiu_server_at(addr).await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    eprintln!("[reconnect-test] server B started; pushing chunk2 (triggers reconnect)...");
+
+    // --- Step 7: push chunk2 (TS 0..=500 internally; wire TS must continue) -
+    // The pusher finds session == None (closed in step 4) and reconnects.
+    // After Task 8, this increments reconnect_count from 0 to 1.
+    let chunk2 = synthetic_audio_flv(0, 500);
+
+    // Trigger the reconnect and the subscriber registration on server B.
+    pusher
+        .push_flv_bytes(&[])
+        .await
+        .expect("handshake with server B (reconnect)");
+
+    eprintln!("[reconnect-test] handshake B done; waiting for subscriber B...");
+
+    tokio::time::timeout(Duration::from_secs(5), sub_ready_b)
+        .await
+        .expect("subscriber B did not signal within 5s")
+        .expect("sub_ready_b channel dropped");
+
+    eprintln!("[reconnect-test] subscriber B ready; pushing chunk2 media...");
+
+    pusher
+        .push_flv_bytes(&chunk2)
+        .await
+        .expect("push chunk2 to server B");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // --- Step 8: assert combined timestamps are monotonic -------------------
+    let guard_a = recorded_a.lock().await;
+    let guard_b = recorded_b.lock().await;
+
+    eprintln!(
+        "[reconnect-test] server A: {} tags, server B: {} tags",
+        guard_a.len(),
+        guard_b.len()
+    );
+
+    assert!(
+        !guard_a.is_empty(),
+        "no tags reached server A; check eprintln output"
+    );
+    assert!(
+        !guard_b.is_empty(),
+        "no tags reached server B; check eprintln output"
+    );
+
+    // Collect all wire timestamps in order: server A first, then server B.
+    let all_ts: Vec<u32> = guard_a
+        .iter()
+        .map(|t| t.timestamp_ms)
+        .chain(guard_b.iter().map(|t| t.timestamp_ms))
+        .collect();
+
+    let mut last = 0u32;
+    for ts in &all_ts {
+        assert!(
+            *ts >= last,
+            "timestamp regressed: {} < {} (combined wire TS must be monotonic across reconnect)",
+            ts,
+            last
+        );
+        last = *ts;
+    }
+
+    eprintln!(
+        "[reconnect-test] monotonic TS check passed (first={}, last={})",
+        all_ts.first().copied().unwrap_or(0),
+        all_ts.last().copied().unwrap_or(0)
+    );
+
+    // --- Step 9: assert reconnect_count incremented (TDD RED until Task 8) --
+    // Task 8 adds: if is_reconnect { self.state.reconnect_count += 1; }
+    // Until then, reconnect_count stays 0 and this assertion fails.
+    assert_eq!(
+        pusher.reconnect_count(),
+        1,
+        "expected reconnect_count == 1 after one session drop + reconnect; got {}",
+        pusher.reconnect_count()
+    );
+}
