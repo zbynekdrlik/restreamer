@@ -57,14 +57,26 @@ impl<'a> Iterator for FlvTagIter<'a> {
         }
 
         let tag_type = self.bytes[self.offset];
-        let data_size = ((self.bytes[self.offset + 1] as usize) << 16)
-            | ((self.bytes[self.offset + 2] as usize) << 8)
-            | (self.bytes[self.offset + 3] as usize);
-        let ts_low = ((self.bytes[self.offset + 4] as u32) << 16)
-            | ((self.bytes[self.offset + 5] as u32) << 8)
-            | (self.bytes[self.offset + 6] as u32);
-        let ts_high = self.bytes[self.offset + 7] as u32;
-        let timestamp_ms = (ts_high << 24) | ts_low;
+
+        // 24-bit big-endian fields stored as 3-byte sequences.  Use
+        // from_be_bytes with a leading 0 to widen to u32/usize -- equivalent
+        // semantically to the manual (b0<<16)|(b1<<8)|b2 assembly and avoids
+        // equivalent-mutant traps on non-overlapping bit positions.
+        let data_size = u32::from_be_bytes([
+            0,
+            self.bytes[self.offset + 1],
+            self.bytes[self.offset + 2],
+            self.bytes[self.offset + 3],
+        ]) as usize;
+
+        // FLV timestamp: low 24 bits in bytes 4-6, high 8 bits in byte 7.
+        // Reconstruct as a conventional 32-bit big-endian value.
+        let timestamp_ms = u32::from_be_bytes([
+            self.bytes[self.offset + 7],
+            self.bytes[self.offset + 4],
+            self.bytes[self.offset + 5],
+            self.bytes[self.offset + 6],
+        ]);
 
         let body_start = self.offset + 11;
         let body_end = body_start + data_size;

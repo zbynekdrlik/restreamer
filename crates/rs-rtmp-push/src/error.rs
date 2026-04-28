@@ -38,16 +38,13 @@ pub enum PushError {
 /// `crates/rs-delivery/src/ffmpeg_reason.rs::reconnect_floor` semantics.
 ///
 /// The endpoint task multiplies this by `2^consecutive_errors` and caps at 300_000
-/// (5 min). `PublishRejected { code: "NetStream.Publish.BadName" }` is a fixed
-/// 30s floor — fast retry is pointless and exponential escalation drowns the
-/// signal. `LocalCancel` returns `None` (no retry).
+/// (5 min). All `PublishRejected` variants share the same 30 s floor; the
+/// BadName-specific behaviour (no exponential escalation) is encoded in
+/// `is_exponential`, not here. `LocalCancel` returns `None` (no retry).
 pub fn backoff_floor_ms(err: &PushError) -> Option<u64> {
     match err {
         PushError::HandshakeFailed(_) => Some(5_000),
         PushError::ConnectRejected { .. } => Some(30_000),
-        PushError::PublishRejected { code, .. } if code == "NetStream.Publish.BadName" => {
-            Some(30_000)
-        }
         PushError::PublishRejected { .. } => Some(30_000),
         PushError::RemoteClosed(_) => Some(30_000),
         PushError::Timeout => Some(10_000),

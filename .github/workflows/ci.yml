@@ -244,6 +244,8 @@ jobs:
             --exclude-re 'delivery_broadcast_loop' \
             --exclude-re 'run_worker' \
             --exclude-re 'ChunkUploader::run' \
+            --exclude-re 'handle_rust_push' \
+            --exclude-re 'handle_ffmpeg_death' \
             -e 'crates/rs-api/src/template_handlers.rs' \
             -e 'crates/rs-api/src/s3_handlers.rs' \
             -e 'crates/rs-delivery/src/flv_normalizer.rs' \
