@@ -193,6 +193,51 @@ mod tests {
         assert_eq!(tags[2].tag_type, FLV_TAG_SCRIPT);
     }
 
+    /// Verify the exact 32-bit timestamp assembly: (ts_high << 24) | ts_low.
+    /// Uses a timestamp that has all four bytes non-zero so a << -> >> mutation
+    /// or | -> ^ mutation on any byte produces a different integer and fails.
+    #[test]
+    fn timestamp_all_four_bytes_nonzero_exact_value() {
+        // ts_low bytes (3 bytes BE): 0x34, 0x56, 0x78
+        // ts_high byte:              0x12
+        // Expected: (0x12 << 24) | (0x34 << 16) | (0x56 << 8) | 0x78 = 0x12345678
+        let ts: u32 = 0x12345678;
+        let mut data = make_flv_header();
+        data.extend_from_slice(&make_tag(FLV_TAG_AUDIO, ts, b"\xAA\xBB\xCC\xDD"));
+        let tags: Vec<_> = FlvTagIter::new(&data).unwrap().collect();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(
+            tags[0].timestamp_ms, 0x12345678,
+            "timestamp must be (ts_high << 24) | ts_low_24bits; \
+             kills << -> >> and | -> ^ mutations"
+        );
+    }
+
+    /// Verify the exact 24-bit data_size assembly: (b1 << 16) | (b2 << 8) | b3.
+    /// Uses a value that has all three bytes non-zero (0x0A0B0C = 657,164 bytes)
+    /// so a << -> >> or | -> ^ mutation on any byte position produces
+    /// a different length and fails the body.len() assertion.
+    #[test]
+    fn data_size_all_three_bytes_nonzero_exact_value() {
+        // data_size = 0x01_02_03 = 66,051 — large but fits in a test Vec.
+        // (0x01 << 16) | (0x02 << 8) | 0x03 = 66,051
+        let data_size: usize = 0x01_02_03;
+        let body: Vec<u8> = (0..data_size).map(|i| (i % 256) as u8).collect();
+        let mut data = make_flv_header();
+        data.extend_from_slice(&make_tag(FLV_TAG_AUDIO, 0, &body));
+        let tags: Vec<_> = FlvTagIter::new(&data).unwrap().collect();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(
+            tags[0].body.len(),
+            data_size,
+            "data_size must be (b1 << 16) | (b2 << 8) | b3 = 0x010203 = 66051; \
+             kills << -> >> and | -> ^ mutations on data_size assembly"
+        );
+        // Spot-check body boundaries.
+        assert_eq!(tags[0].body[0], 0x00);
+        assert_eq!(tags[0].body[data_size - 1], ((data_size - 1) % 256) as u8);
+    }
+
     #[test]
     fn stops_on_truncated_tag() {
         let mut data = make_flv_header();

@@ -321,6 +321,13 @@ fn build_rtmp_url(service_type: ServiceType, stream_key: &str) -> String {
     }
 }
 
+/// Test-accessible re-export of `build_rtmp_url` so unit tests can call it
+/// without making the function part of the public API.
+#[cfg(test)]
+pub(crate) fn build_rtmp_url_pub(service_type: ServiceType, stream_key: &str) -> String {
+    build_rtmp_url(service_type, stream_key)
+}
+
 /// Producer task: fetches chunks from S3 and sends them into the bounded channel.
 /// Blocks on channel send when buffer is full (backpressure).
 #[allow(clippy::too_many_arguments)]

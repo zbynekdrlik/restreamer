@@ -73,3 +73,162 @@ pub fn is_exponential(err: &PushError) -> bool {
             | PushError::LocalCancel
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    // --- backoff_floor_ms ---
+
+    #[test]
+    fn backoff_floor_handshake_failed_is_5000() {
+        let e = PushError::HandshakeFailed(io::Error::new(io::ErrorKind::Other, "x"));
+        assert_eq!(backoff_floor_ms(&e), Some(5_000));
+    }
+
+    #[test]
+    fn backoff_floor_connect_rejected_is_30000() {
+        let e = PushError::ConnectRejected {
+            code: "NetConnection.Connect.Rejected".into(),
+            description: "y".into(),
+        };
+        assert_eq!(backoff_floor_ms(&e), Some(30_000));
+    }
+
+    #[test]
+    fn backoff_floor_publish_rejected_bad_name_is_30000() {
+        let e = PushError::PublishRejected {
+            code: "NetStream.Publish.BadName".into(),
+            description: String::new(),
+        };
+        assert_eq!(backoff_floor_ms(&e), Some(30_000));
+    }
+
+    #[test]
+    fn backoff_floor_publish_rejected_other_code_is_30000() {
+        let e = PushError::PublishRejected {
+            code: "NetStream.Publish.OtherCode".into(),
+            description: String::new(),
+        };
+        assert_eq!(backoff_floor_ms(&e), Some(30_000));
+    }
+
+    #[test]
+    fn backoff_floor_remote_closed_is_30000() {
+        let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
+        assert_eq!(backoff_floor_ms(&e), Some(30_000));
+    }
+
+    #[test]
+    fn backoff_floor_timeout_is_10000() {
+        assert_eq!(backoff_floor_ms(&PushError::Timeout), Some(10_000));
+    }
+
+    #[test]
+    fn backoff_floor_io_error_is_15000() {
+        let e = PushError::IoError(io::Error::new(io::ErrorKind::Other, "x"));
+        assert_eq!(backoff_floor_ms(&e), Some(15_000));
+    }
+
+    #[test]
+    fn backoff_floor_malformed_input_is_15000() {
+        let e = PushError::MalformedInput {
+            offset: 0,
+            reason: "x".into(),
+        };
+        assert_eq!(backoff_floor_ms(&e), Some(15_000));
+    }
+
+    #[test]
+    fn backoff_floor_local_cancel_is_none() {
+        assert_eq!(backoff_floor_ms(&PushError::LocalCancel), None);
+    }
+
+    // --- is_exponential ---
+
+    #[test]
+    fn is_exponential_bad_name_is_false() {
+        let e = PushError::PublishRejected {
+            code: "NetStream.Publish.BadName".into(),
+            description: String::new(),
+        };
+        assert!(
+            !is_exponential(&e),
+            "BadName must NOT be exponential: operator must rotate the key"
+        );
+    }
+
+    #[test]
+    fn is_exponential_publish_rejected_other_code_is_true() {
+        let e = PushError::PublishRejected {
+            code: "NetStream.Publish.SomeOther".into(),
+            description: String::new(),
+        };
+        assert!(
+            is_exponential(&e),
+            "non-BadName PublishRejected MUST be exponential"
+        );
+    }
+
+    #[test]
+    fn is_exponential_connect_rejected_is_true() {
+        let e = PushError::ConnectRejected {
+            code: "NetConnection.Connect.Rejected".into(),
+            description: "y".into(),
+        };
+        assert!(is_exponential(&e));
+    }
+
+    #[test]
+    fn is_exponential_remote_closed_is_true() {
+        let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
+        assert!(is_exponential(&e));
+    }
+
+    #[test]
+    fn is_exponential_timeout_is_false() {
+        assert!(
+            !is_exponential(&PushError::Timeout),
+            "Timeout uses fixed floor, not exponential"
+        );
+    }
+
+    #[test]
+    fn is_exponential_io_error_is_false() {
+        let e = PushError::IoError(io::Error::new(io::ErrorKind::Other, "x"));
+        assert!(
+            !is_exponential(&e),
+            "IoError uses fixed floor, not exponential"
+        );
+    }
+
+    #[test]
+    fn is_exponential_handshake_failed_is_false() {
+        let e = PushError::HandshakeFailed(io::Error::new(io::ErrorKind::Other, "x"));
+        assert!(
+            !is_exponential(&e),
+            "HandshakeFailed uses fixed floor, not exponential"
+        );
+    }
+
+    #[test]
+    fn is_exponential_malformed_input_is_false() {
+        let e = PushError::MalformedInput {
+            offset: 0,
+            reason: "x".into(),
+        };
+        assert!(
+            !is_exponential(&e),
+            "MalformedInput uses fixed floor, not exponential"
+        );
+    }
+
+    #[test]
+    fn is_exponential_local_cancel_is_false() {
+        assert!(
+            !is_exponential(&PushError::LocalCancel),
+            "LocalCancel returns None from backoff_floor_ms, is_exponential must be false"
+        );
+    }
+}
