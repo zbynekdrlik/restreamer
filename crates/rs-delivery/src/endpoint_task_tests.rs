@@ -1,4 +1,5 @@
 use super::super::*;
+use rs_core::models::PusherKind;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -137,6 +138,7 @@ fn test_ep_cfg() -> EndpointConfig {
         is_fast: false,
         chunk_format: "flv".to_string(),
         start_chunk_id: None,
+        pusher: PusherKind::Ffmpeg,
     }
 }
 #[tokio::test]

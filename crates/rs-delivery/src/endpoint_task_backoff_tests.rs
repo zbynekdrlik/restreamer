@@ -9,6 +9,7 @@
 //! 524 restarts in a 9.5h overnight test.
 
 use super::super::*;
+use rs_core::models::PusherKind;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
@@ -111,6 +112,7 @@ fn backoff_test_ep_cfg() -> EndpointConfig {
         is_fast: false,
         chunk_format: "flv".to_string(),
         start_chunk_id: None,
+        pusher: PusherKind::Ffmpeg,
     }
 }
 
