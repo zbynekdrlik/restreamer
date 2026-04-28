@@ -46,7 +46,17 @@ impl RtmpPusher {
     pub async fn push_flv_bytes(&mut self, bytes: &[u8]) -> Result<(), PushError> {
         // Lazy connect.
         if self.session.is_none() {
-            let s = Session::connect(&self.url, self.config.timeout_ms).await?;
+            // A reconnect is any connect that happens after media has been sent
+            // (last_output_ts_ms > 0 means at least one tag was written in a
+            // previous session).  Count the attempt before the connect so the
+            // dashboard always sees an accurate reconnect count, even when the
+            // reconnect itself fails.
+            let is_reconnect = self.state.last_output_ts_ms > 0;
+            let connect_result = Session::connect(&self.url, self.config.timeout_ms).await;
+            if is_reconnect {
+                self.state.reconnect_count = self.state.reconnect_count.saturating_add(1);
+            }
+            let s = connect_result?;
             self.session = Some(s);
             self.state.connected = true;
         }
