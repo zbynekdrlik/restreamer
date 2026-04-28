@@ -6,8 +6,8 @@
 //! - `endpoint_task.rs::emit_rtmp_push_died` (via endpoint_audit): body -> ()
 //!   replacement.
 
-use super::super::audit_ring::AuditRing;
-use super::super::endpoint_audit;
+use crate::audit_ring::AuditRing;
+use crate::endpoint_audit;
 use rs_ffmpeg::ServiceType;
 use rs_rtmp_push::{PushError, backoff_floor_ms, is_exponential};
 use std::io;
@@ -214,7 +214,7 @@ fn rust_push_backoff_remote_closed_ladder_is_monotone() {
 
 #[test]
 fn build_rtmp_url_yt_rtmp_contains_key_and_rtmp_scheme() {
-    let url = super::super::endpoint_task::build_rtmp_url_pub(ServiceType::YtRtmp, "my-yt-key");
+    let url = super::super::build_rtmp_url_pub(ServiceType::YtRtmp, "my-yt-key");
     assert!(
         url.starts_with("rtmp://"),
         "YtRtmp URL must use rtmp:// scheme, got: {url}"
@@ -231,7 +231,7 @@ fn build_rtmp_url_yt_rtmp_contains_key_and_rtmp_scheme() {
 
 #[test]
 fn build_rtmp_url_facebook_contains_key_and_facebook_host() {
-    let url = super::super::endpoint_task::build_rtmp_url_pub(ServiceType::Facebook, "fb-key-123");
+    let url = super::super::build_rtmp_url_pub(ServiceType::Facebook, "fb-key-123");
     assert!(
         url.contains("fb-key-123"),
         "Facebook URL must embed the stream key, got: {url}"
@@ -245,7 +245,7 @@ fn build_rtmp_url_facebook_contains_key_and_facebook_host() {
 
 #[test]
 fn build_rtmp_url_vimeo_contains_key_and_vimeo_host() {
-    let url = super::super::endpoint_task::build_rtmp_url_pub(ServiceType::Vimeo, "vimeo-key-xyz");
+    let url = super::super::build_rtmp_url_pub(ServiceType::Vimeo, "vimeo-key-xyz");
     assert!(
         url.contains("vimeo-key-xyz"),
         "Vimeo URL must embed the stream key, got: {url}"
@@ -258,7 +258,7 @@ fn build_rtmp_url_vimeo_contains_key_and_vimeo_host() {
 
 #[test]
 fn build_rtmp_url_instagram_contains_key_and_instagram_host() {
-    let url = super::super::endpoint_task::build_rtmp_url_pub(ServiceType::Instagram, "ig-key-789");
+    let url = super::super::build_rtmp_url_pub(ServiceType::Instagram, "ig-key-789");
     assert!(
         url.contains("ig-key-789"),
         "Instagram URL must embed the stream key, got: {url}"
@@ -271,7 +271,7 @@ fn build_rtmp_url_instagram_contains_key_and_instagram_host() {
 
 #[test]
 fn build_rtmp_url_test_file_contains_key() {
-    let url = super::super::endpoint_task::build_rtmp_url_pub(ServiceType::TestFile, "test-key");
+    let url = super::super::build_rtmp_url_pub(ServiceType::TestFile, "test-key");
     assert!(
         url.contains("test-key"),
         "TestFile URL must embed the stream key, got: {url}"
