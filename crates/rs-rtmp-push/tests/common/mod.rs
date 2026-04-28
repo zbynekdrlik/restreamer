@@ -575,6 +575,7 @@ pub fn synthetic_audio_flv(ts_start_ms: u32, ts_end_ms: u32) -> Vec<u8> {
 /// point of the publish rejection, and then returns.  It is designed to run
 /// inside a `tokio::spawn` so that the test can join (or abort) it.
 pub async fn run_rejecting_server(listener: tokio::net::TcpListener) -> Result<(), String> {
+    use bytesio::bytes_writer::AsyncBytesWriter;
     use rtmp::chunk::unpacketizer::{ChunkUnpacketizer, UnpackResult};
     use rtmp::handshake::define::ServerHandshakeState;
     use rtmp::handshake::handshake_server::SimpleHandshakeServer;
@@ -582,6 +583,7 @@ pub async fn run_rejecting_server(listener: tokio::net::TcpListener) -> Result<(
     use rtmp::messages::parser::MessageParser;
     use rtmp::netconnection::writer::NetConnection;
     use rtmp::netstream::writer::NetStreamWriter;
+    use rtmp::protocol_control_messages::writer::ProtocolControlMessagesWriter;
 
     let (stream, _peer) = listener
         .accept()
@@ -609,6 +611,18 @@ pub async fn run_rejecting_server(listener: tokio::net::TcpListener) -> Result<(
             break;
         }
     }
+
+    // Mirror what xiu's real ServerSession does immediately after handshake:
+    // send SetChunkSize(4096) so the client's unpacketizer accepts larger
+    // AMF payloads in a single chunk.  Without this the default 128-byte
+    // chunk limit causes the onStatus rejection message to be fragmented,
+    // and the client-side parser returns "none return" before it reassembles
+    // the full message.
+    let mut ctrl =
+        ProtocolControlMessagesWriter::new(AsyncBytesWriter::new(std::sync::Arc::clone(&io)));
+    ctrl.write_set_chunk_size(4096)
+        .await
+        .map_err(|e| format!("write_set_chunk_size: {e:?}"))?;
 
     // --- Phase 2: parse RTMP messages and respond to connect / createStream /
     //             publish.  On "publish" we return an onStatus rejection.     -
