@@ -2524,6 +2524,64 @@ jobs:
           }
           Write-Host "Pre-flight cleanup complete"
 
+      - name: Set e2e rtmp endpoint to rust pusher
+        shell: powershell
+        run: |
+          # Wire the "e2e rtmp" endpoint to use the Rust RTMP push path for
+          # this E2E run. Writes directly to the SQLite DB because the REST
+          # PUT /api/v1/endpoints/:id does not expose the pusher field yet.
+          # The app is stopped first so SQLite is not locked, then restarted.
+          $ErrorActionPreference = "Stop"
+          $dbPath = "C:\ProgramData\Restreamer\restreamer.db"
+          $TaskName = "RestreamerGUI"
+
+          # Stop the app so SQLite WAL is flushed and the file is not locked.
+          Write-Host "Stopping Restreamer for DB update..."
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
+          Start-Sleep -Seconds 3
+
+          # Use sqlite3.exe -- download the tools zip if not cached.
+          $sqlite3 = "C:\ProgramData\Restreamer\sqlite3.exe"
+          if (-not (Test-Path $sqlite3)) {
+            Write-Host "Downloading sqlite3.exe..."
+            $toolsZip = "$env:TEMP\sqlite-tools.zip"
+            Invoke-WebRequest -Uri "https://www.sqlite.org/2024/sqlite-tools-win-x64-3470200.zip" `
+              -OutFile $toolsZip -UseBasicParsing
+            Expand-Archive -Path $toolsZip -DestinationPath "$env:TEMP\sqlite-tools" -Force
+            Copy-Item "$env:TEMP\sqlite-tools\sqlite3.exe" $sqlite3 -Force
+          }
+
+          # Update the pusher column to 'rust' for the "e2e rtmp" endpoint.
+          $sql = "UPDATE endpoint_configs SET pusher = 'rust' WHERE alias = 'e2e rtmp';"
+          $result = & $sqlite3 $dbPath $sql 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "sqlite3 update failed (exit $LASTEXITCODE): $result"
+          }
+          $count = & $sqlite3 $dbPath "SELECT COUNT(*) FROM endpoint_configs WHERE alias = 'e2e rtmp' AND pusher = 'rust';"
+          if ($count -ne "1") {
+            throw "Failed to verify pusher=rust update: endpoint_configs row count=$count"
+          }
+          Write-Host "Set 'e2e rtmp' endpoint pusher = 'rust' (row count verified: $count)"
+
+          # Restart the app so it reads the updated endpoint config.
+          schtasks.exe /run /tn $TaskName
+          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName" }
+          Start-Sleep -Seconds 10
+
+          # Verify app is back up.
+          $maxRetries = 15
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5 | Out-Null
+              Write-Host "Restreamer restarted with rust pusher for 'e2e rtmp'"
+              return
+            } catch {
+              Write-Host "Waiting for restart (attempt $i/$maxRetries)..."
+              Start-Sleep -Seconds 3
+            }
+          }
+          throw "FAILED: Restreamer did not restart after DB update"
+
       - name: Start stream (activate + delivery VPS)
         shell: powershell
         run: |
@@ -3113,6 +3171,28 @@ jobs:
             throw "FAILED: chunks_processed stayed 0 for 90s after init. VPS warmup is stuck (likely start_chunk_id below S3 live-edge -- see issue #146)."
           }
           Write-Host "=== chunks_processed GATE PASSED ==="
+
+      - name: "GATE: rust pusher reconnect_count stays at 0"
+        shell: pwsh
+        run: |
+          # The 'e2e rtmp' endpoint uses PusherKind::Rust for this run.
+          # A reconnect_count > 0 means the Rust TCP/RTMP session dropped
+          # and reconnected -- a sign of instability that must be
+          # investigated before merging.
+          $ErrorActionPreference = "Stop"
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
+          $e2eEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME } | Select-Object -First 1
+          if (-not $e2eEvent) { throw "FAILED: no event matching $($env:EVENT_NAME)" }
+          $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($e2eEvent.id)" -TimeoutSec 30
+          $rtmpEp = $resp.endpoint_details | Where-Object { $_.alias -eq "e2e rtmp" } | Select-Object -First 1
+          if (-not $rtmpEp) {
+            throw "GATE SKIPPED: 'e2e rtmp' endpoint not found in delivery status -- cannot check reconnect_count"
+          }
+          $reconnects = if ($null -ne $rtmpEp.reconnect_count) { $rtmpEp.reconnect_count } else { 0 }
+          if ($reconnects -ne 0) {
+            throw "Rust pusher reconnected $reconnects times during the E2E window -- expected 0. Investigate before PR merge."
+          }
+          Write-Host "GATE PASSED: reconnect_count = $reconnects"
 
       - name: Verify delivery progression
         shell: powershell
@@ -4591,6 +4671,27 @@ jobs:
           Write-Host "=========================================="
           Write-Host "PRODUCTION CONFIG VERIFIED"
           Write-Host "=========================================="
+
+      - name: Restore e2e rtmp endpoint to ffmpeg pusher
+        if: always()
+        shell: pwsh
+        run: |
+          # Restore the 'e2e rtmp' endpoint's pusher column to 'ffmpeg' so
+          # subsequent runs that do not set the rust flag still work.
+          # Runs with if: always() so cleanup happens even if the test fails.
+          $dbPath = "C:\ProgramData\Restreamer\restreamer.db"
+          $sqlite3 = "C:\ProgramData\Restreamer\sqlite3.exe"
+          if (-not (Test-Path $sqlite3)) {
+            Write-Host "WARNING: sqlite3.exe not found at $sqlite3 -- skipping pusher restore"
+            exit 0
+          }
+          $sql = "UPDATE endpoint_configs SET pusher = 'ffmpeg' WHERE alias = 'e2e rtmp';"
+          $result = & $sqlite3 $dbPath $sql 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "WARNING: sqlite3 restore failed (exit $LASTEXITCODE): $result"
+            exit 0
+          }
+          Write-Host "Restored 'e2e rtmp' endpoint pusher = 'ffmpeg'"
 
   e2e-gate:
     name: E2E Gate
