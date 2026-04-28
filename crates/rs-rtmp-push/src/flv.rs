@@ -277,4 +277,30 @@ mod tests {
         assert!(iter.next().is_none()); // stops
         assert!(iter.into_error().is_some()); // error recorded
     }
+
+    /// Boundary case: a zero-body tag positioned EXACTLY at the end of the
+    /// buffer (offset + 11 == bytes.len()). The current `>` check accepts
+    /// this and parses the tag. The mutation `>` -> `>=` would early-return
+    /// None at this exact offset; this test fails with that mutation.
+    #[test]
+    fn zero_body_tag_at_exact_offset_plus_11_equals_len_yields_some() {
+        // FLV header (9) + PreviousTagSize0 (4) = 13 bytes
+        // Tag header (11 bytes) with data_size=0, ts=42, type=8
+        // Total = 24 bytes. After new(), offset=13, len=24, offset+11=24.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[b'F', b'L', b'V', 1, 0x05, 0, 0, 0, 9]);
+        buf.extend_from_slice(&[0, 0, 0, 0]); // PreviousTagSize0
+        // Audio tag (type=8), data_size=0, ts_low=0x00002A (42), ts_high=0
+        buf.extend_from_slice(&[8, 0, 0, 0, 0, 0, 42, 0, 0, 0, 0]);
+        // No body, no trailing PreviousTagSize.
+        assert_eq!(buf.len(), 24);
+
+        let mut iter = FlvTagIter::new(&buf).unwrap();
+        let tag = iter
+            .next()
+            .expect("zero-body tag at exact boundary offset+11==len must parse as Some");
+        assert_eq!(tag.tag_type, 8);
+        assert_eq!(tag.timestamp_ms, 42);
+        assert_eq!(tag.body.len(), 0);
+    }
 }
