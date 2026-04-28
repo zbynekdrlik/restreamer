@@ -672,6 +672,205 @@ fn synthetic_audio_flv(ts_start_ms: u32, ts_end_ms: u32) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Hand-rolled rejecting RTMP server
+// ---------------------------------------------------------------------------
+
+/// A minimal RTMP server that completes the standard handshake / connect /
+/// createStream sequence and then REJECTS the `publish` command by sending an
+/// `onStatus` message with `code = "NetStream.Publish.BadName"`.
+///
+/// This lets us verify that `RtmpPusher` surfaces `PushError::PublishRejected`
+/// with the correct code without relying on xiu rejecting any stream name
+/// (xiu accepts everything).
+///
+/// The function accepts exactly one incoming connection, processes it to the
+/// point of the publish rejection, and then returns.  It is designed to run
+/// inside a `tokio::spawn` so that the test can join (or abort) it.
+async fn run_rejecting_server(listener: tokio::net::TcpListener) -> Result<(), String> {
+    use rtmp::chunk::unpacketizer::{ChunkUnpacketizer, UnpackResult};
+    use rtmp::handshake::define::ServerHandshakeState;
+    use rtmp::handshake::handshake_server::SimpleHandshakeServer;
+    use rtmp::messages::define::RtmpMessageData;
+    use rtmp::messages::parser::MessageParser;
+    use rtmp::netconnection::writer::NetConnection;
+    use rtmp::netstream::writer::NetStreamWriter;
+
+    let (stream, _peer) = listener
+        .accept()
+        .await
+        .map_err(|e| format!("accept: {e:?}"))?;
+
+    // Wrap the TcpStream in the bytesio TNetIO adapter that xiu APIs expect.
+    let io: std::sync::Arc<tokio::sync::Mutex<Box<dyn bytesio::bytesio::TNetIO + Send + Sync>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(
+            bytesio::bytesio::TcpIO::new(stream),
+        )));
+
+    // --- Phase 1: RTMP handshake (server side) ------------------------------
+    let mut hs = SimpleHandshakeServer::new(std::sync::Arc::clone(&io));
+    loop {
+        let data = io
+            .lock()
+            .await
+            .read()
+            .await
+            .map_err(|e| format!("read hs: {e:?}"))?;
+        hs.extend_data(&data[..]);
+        hs.handshake().await.map_err(|e| format!("hs: {e:?}"))?;
+        if matches!(hs.state, ServerHandshakeState::Finish) {
+            break;
+        }
+    }
+
+    // --- Phase 2: parse RTMP messages and respond to connect / createStream /
+    //             publish.  On "publish" we return an onStatus rejection.     -
+    let mut unpacketizer = ChunkUnpacketizer::new();
+
+    'outer: loop {
+        let data = io
+            .lock()
+            .await
+            .read()
+            .await
+            .map_err(|e| format!("read msg: {e:?}"))?;
+        unpacketizer.extend_data(&data[..]);
+
+        loop {
+            match unpacketizer.read_chunks() {
+                Ok(UnpackResult::Chunks(chunks)) => {
+                    for chunk in chunks {
+                        let msg = match MessageParser::new(chunk).parse() {
+                            Ok(Some(m)) => m,
+                            _ => continue,
+                        };
+
+                        match msg {
+                            RtmpMessageData::Amf0Command {
+                                command_name,
+                                transaction_id,
+                                ..
+                            } => {
+                                let cmd = match &command_name {
+                                    xflv::amf0::define::Amf0ValueType::UTF8String(s) => s.clone(),
+                                    _ => String::new(),
+                                };
+                                let tid = match &transaction_id {
+                                    xflv::amf0::define::Amf0ValueType::Number(n) => *n,
+                                    _ => 0.0,
+                                };
+
+                                match cmd.as_str() {
+                                    "connect" => {
+                                        // Respond with _result (NetConnection.Connect.Success).
+                                        let mut nc = NetConnection::new(std::sync::Arc::clone(&io));
+                                        nc.write_connect_response(
+                                            &tid,
+                                            "FMS/3,0,1,123",
+                                            &31.0_f64,
+                                            "NetConnection.Connect.Success",
+                                            "status",
+                                            "Connection succeeded.",
+                                            &0.0_f64,
+                                        )
+                                        .await
+                                        .map_err(|e| format!("write_connect_response: {e:?}"))?;
+                                    }
+                                    "createStream" => {
+                                        // Respond with _result, stream_id = 1.
+                                        let mut nc = NetConnection::new(std::sync::Arc::clone(&io));
+                                        nc.write_create_stream_response(&tid, &1.0_f64)
+                                            .await
+                                            .map_err(|e| {
+                                                format!("write_create_stream_response: {e:?}")
+                                            })?;
+                                    }
+                                    "publish" => {
+                                        // Reject with NetStream.Publish.BadName.
+                                        let mut ns =
+                                            NetStreamWriter::new(std::sync::Arc::clone(&io));
+                                        ns.write_on_status(
+                                            &0.0_f64,
+                                            "error",
+                                            "NetStream.Publish.BadName",
+                                            "Bad stream name.",
+                                        )
+                                        .await
+                                        .map_err(|e| format!("write_on_status: {e:?}"))?;
+                                        // Done -- the pusher will see the rejection and error.
+                                        return Ok(());
+                                    }
+                                    // FCPublish, releaseStream, etc. -- ignore silently.
+                                    _ => {}
+                                }
+                            }
+                            RtmpMessageData::SetChunkSize { chunk_size } => {
+                                unpacketizer.update_max_chunk_size(chunk_size as usize);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(_) => break 'outer,
+                Ok(_) => break,
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PublishRejected test: server rejects publish with NetStream.Publish.BadName
+// ---------------------------------------------------------------------------
+
+/// Assert that `RtmpPusher` surfaces `PushError::PublishRejected` when the
+/// server responds to `publish` with `onStatus(NetStream.Publish.BadName)`.
+///
+/// Task 10 (AMF onStatus parsing) was implemented as part of the Task 4
+/// corrective patch (commit 6455fd1) in `wait_for_publish_start`.  This test
+/// provides regression coverage: it will go red immediately if the
+/// `onStatus`-rejection path is accidentally removed or broken.
+///
+/// The hand-rolled `run_rejecting_server` helper is necessary because the real
+/// xiu `RtmpServer` accepts every stream name unconditionally and never emits a
+/// rejection `onStatus`.
+#[tokio::test]
+async fn publish_rejected_on_invalid_stream_key() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = run_rejecting_server(listener).await {
+            eprintln!("[rejecting-server] error: {e}");
+        }
+    });
+
+    // Small delay so the server task has time to reach accept().
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let url = format!("rtmp://{}/live/badkey", addr);
+    let mut pusher = RtmpPusher::new(url, PusherConfig::default());
+
+    let result = tokio::time::timeout(Duration::from_secs(5), pusher.push_flv_bytes(&[]))
+        .await
+        .expect("push_flv_bytes did not return within 5 s");
+
+    server_handle.abort();
+
+    match result {
+        Err(rs_rtmp_push::PushError::PublishRejected { code, .. }) => {
+            assert_eq!(
+                code, "NetStream.Publish.BadName",
+                "expected NetStream.Publish.BadName, got code={code}"
+            );
+        }
+        other => panic!("expected PushError::PublishRejected, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Reconnect test: monotonic TS across reconnect + reconnect_count increments
 // ---------------------------------------------------------------------------
 

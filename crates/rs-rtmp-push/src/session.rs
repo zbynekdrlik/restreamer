@@ -476,6 +476,10 @@ async fn wait_for_create_stream_result(
 
 /// Read messages from `io` until we see `onStatus` with a code that starts
 /// with `NetStream.Publish.Start`.  Returns an error on rejection.
+///
+/// Task 10 (AMF onStatus parsing for PublishRejected) is implemented inline
+/// in the loop below -- see the `Amf0Command` arm that extracts `code` and
+/// `description` from the status object and returns `PushError::PublishRejected`.
 async fn wait_for_publish_start(
     io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
     unpacketizer: &mut ChunkUnpacketizer,
