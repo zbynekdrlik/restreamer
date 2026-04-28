@@ -196,6 +196,9 @@ jobs:
           while true; do
             ATTEMPT=$((ATTEMPT + 1))
             echo "=== Mutation attempt $ATTEMPT/$MAX_ATTEMPTS ==="
+            # rs-rtmp-push MUST stay in the mutation-testing matrix per spec
+            # 7.6 of docs/superpowers/specs/2026-04-27-pure-rust-rtmp-push-design.md.
+            # Do NOT add an --exclude-re for rs_rtmp_push:: or rs-rtmp-push.
             if cargo mutants --in-diff pr.diff --timeout 300 --build-timeout 600 --jobs 1 --output mutants-out \
             --exclude-re 'impl ChunkFetcher for S3Fetcher' \
             --exclude-re 'S3Fetcher::fetch_chunk_with_meta' \
