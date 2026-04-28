@@ -104,7 +104,7 @@ async fn handshake_completes_with_local_xiu_server() {
 
 /// A single captured FLV tag as it arrived at the xiu server.
 ///
-/// `body` holds the raw FLV tag body bytes — the bytes AFTER the 11-byte tag
+/// `body` holds the raw FLV tag body bytes -- the bytes AFTER the 11-byte tag
 /// header and BEFORE the 4-byte PreviousTagSize trailer.  This is exactly the
 /// payload that `sha256_flv_bodies` reads from the source file, so the two
 /// SHA-256 digests can be compared directly.
@@ -125,24 +125,36 @@ struct RecordedTag {
 // Recording server helper
 // ---------------------------------------------------------------------------
 
-/// Spin up a real xiu RTMP server and a companion subscription task that
-/// captures every audio/video frame the publisher sends via the streamhub
-/// `FrameData` channel.
+/// Spin up a real xiu RTMP server and register a streamhub subscriber that
+/// captures every audio/video frame the publisher sends.
 ///
-/// Using the real xiu `RtmpServer` + streamhub subscribe avoids the protocol
-/// fragility of a hand-rolled minimal server and eliminates the race condition
-/// between subscriber registration and the first media frames: we wait for the
-/// `BroadcastEvent::Publish` signal before attempting to subscribe, and retry
-/// until the hub registers the stream.
+/// The function blocks until the subscriber is fully registered with the hub
+/// (i.e., the caller receives a frame receiver from the hub).  This guarantees
+/// that when the caller invokes `push_flv_bytes`, the subscriber is already in
+/// place and no media frames are lost to a subscriber-registration race.
+///
+/// Design:
+///   1. Spawn the xiu `RtmpServer` + hub in a background task.
+///   2. Obtain a `BroadcastEvent` receiver from the hub BEFORE `hub.run()`.
+///   3. Obtain a dedicated `event_sender` for the subscriber.
+///   4. In a second background task:
+///      a. Wait for `BroadcastEvent::Publish` (signals the publisher's publish
+///         command was accepted by xiu).
+///      b. Send a `StreamHubEvent::Subscribe` and receive the frame channel.
+///      c. Signal readiness back to the caller via a `oneshot`.
+///      d. Drain `FrameData` frames into `recorded` until the channel closes.
+///   5. Return to the caller only after the `oneshot` fires (subscriber ready).
 ///
 /// Returns:
-/// - `url`      — `rtmp://127.0.0.1:<port>/live/test` for the pusher
-/// - `recorded` — shared accumulator; drained by the subscriber task
-/// - `_server`  — `JoinHandle` keeping the server + hub alive
+/// - `url`          -- `rtmp://127.0.0.1:<port>/live/test` for the pusher
+/// - `recorded`     -- shared accumulator; filled by the subscriber task
+/// - `_server`      -- `JoinHandle` keeping the server + hub alive
+/// - `sub_ready_rx` -- fires when the subscriber has obtained its frame receiver
 async fn spawn_recording_xiu_server() -> (
     String,
     Arc<Mutex<Vec<RecordedTag>>>,
     tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
 ) {
     // Discover an available ephemeral port (same TOCTOU caveat as spawn_xiu_server).
     let addr = {
@@ -161,105 +173,129 @@ async fn spawn_recording_xiu_server() -> (
     let mut hub = StreamsHub::new(None);
     hub.set_rtmp_push_enabled(true);
 
-    // Two independent senders: one for the RtmpServer, one for the subscriber task.
+    // Dedicated event sender for the subscriber task (obtained before hub.run()).
     let event_sender_for_server = hub.get_hub_event_sender();
     let event_sender_for_sub = hub.get_hub_event_sender();
 
-    // Broadcast receiver fires on Publish / UnPublish events.
+    // Broadcast receiver: fires when the publisher connects (Publish event).
+    // Must be obtained before hub.run() starts consuming events.
     let mut broadcast_rx = hub.get_client_event_consumer();
+
+    // Oneshot used to signal that the subscriber has obtained its frame receiver
+    // and is ready to accept media.  The caller awaits this before pushing data.
+    let (sub_ready_tx, sub_ready_rx) = tokio::sync::oneshot::channel::<()>();
 
     let address = addr.to_string();
     let url = format!("rtmp://{}/live/test", addr);
 
     let recorded_for_sub = Arc::clone(&recorded);
 
+    // Subscriber task: waits for Publish, subscribes, signals ready, then drains.
+    tokio::spawn(async move {
+        // Step 1: wait for BroadcastEvent::Publish with a 10-second timeout.
+        let identifier = loop {
+            match tokio::time::timeout(Duration::from_secs(10), broadcast_rx.recv()).await {
+                Ok(Ok(BroadcastEvent::Publish { identifier })) => {
+                    eprintln!(
+                        "[recorder] BroadcastEvent::Publish received for {:?}",
+                        identifier
+                    );
+                    break identifier;
+                }
+                Ok(Ok(_)) => continue, // other broadcast events -- skip
+                Ok(Err(_)) => {
+                    eprintln!("[recorder] broadcast channel closed before Publish");
+                    return;
+                }
+                Err(_) => {
+                    eprintln!("[recorder] timed out waiting for BroadcastEvent::Publish");
+                    return;
+                }
+            }
+        };
+
+        // Step 2: Subscribe to the stream via the hub event channel.
+        // Retry briefly in case the hub event loop hasn't ticked yet.
+        let mut frame_rx = loop {
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            let sub_info = SubscriberInfo {
+                id: Uuid::new(RandomDigitCount::Six),
+                sub_type: SubscribeType::RtmpPull,
+                sub_data_type: SubDataType::Frame,
+                notify_info: NotifyInfo {
+                    request_url: String::new(),
+                    remote_addr: String::from("test-recorder"),
+                },
+            };
+
+            if event_sender_for_sub
+                .send(StreamHubEvent::Subscribe {
+                    identifier: identifier.clone(),
+                    info: sub_info,
+                    result_sender: result_tx,
+                })
+                .is_err()
+            {
+                eprintln!("[recorder] hub event channel closed; cannot subscribe");
+                return;
+            }
+
+            match tokio::time::timeout(Duration::from_millis(500), result_rx).await {
+                Ok(Ok(Ok((data_receiver, _stat)))) => {
+                    if let Some(rx) = data_receiver.frame_receiver {
+                        eprintln!("[recorder] subscribed successfully; frame receiver ready");
+                        break rx;
+                    }
+                    // Hub returned a packet-only receiver -- retry.
+                    eprintln!("[recorder] no frame_receiver in response; retrying...");
+                }
+                Ok(Ok(Err(e))) => {
+                    eprintln!("[recorder] subscribe error: {e:?}; retrying...");
+                }
+                _ => {
+                    eprintln!("[recorder] subscribe timeout or channel error; retrying...");
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+
+        // Step 3: Signal the caller that the subscriber is ready.  From this
+        // point onward, any media the pusher sends will be captured.  If the
+        // send fails the caller already timed out -- we still drain below.
+        let _ = sub_ready_tx.send(());
+
+        // Step 4: Drain FrameData into the recorded accumulator until the
+        // publisher disconnects and the channel closes.
+        while let Some(frame) = frame_rx.recv().await {
+            match frame {
+                FrameData::Audio { timestamp, data } => {
+                    eprintln!("[recorder] audio frame ts={}", timestamp);
+                    recorded_for_sub.lock().await.push(RecordedTag {
+                        tag_type: 8,
+                        timestamp_ms: timestamp,
+                        body: data.to_vec(),
+                    });
+                }
+                FrameData::Video { timestamp, data } => {
+                    eprintln!("[recorder] video frame ts={}", timestamp);
+                    recorded_for_sub.lock().await.push(RecordedTag {
+                        tag_type: 9,
+                        timestamp_ms: timestamp,
+                        body: data.to_vec(),
+                    });
+                }
+                _ => {} // skip MetaData, MediaInfo
+            }
+        }
+        eprintln!("[recorder] frame channel closed; drain complete");
+    });
+
+    // Server task: runs xiu RtmpServer and hub concurrently.
     let handle = tokio::spawn(async move {
         let mut rtmp_server =
             rtmp::rtmp::RtmpServer::new(address, event_sender_for_server, 0, None);
 
-        // Spawn the subscriber task inside the same Tokio task group so it
-        // shares the same runtime as hub.run() and rtmp_server.run().
-        let recorded_clone = Arc::clone(&recorded_for_sub);
-        tokio::spawn(async move {
-            // Block until the xiu server emits BroadcastEvent::Publish.
-            // This guarantees the stream is registered in the hub before we try
-            // to subscribe (no retry needed for the Publish race).
-            let identifier = loop {
-                match broadcast_rx.recv().await {
-                    Ok(BroadcastEvent::Publish { identifier }) => break identifier,
-                    Ok(_) => continue,
-                    Err(_) => return, // broadcast channel closed — server gone
-                }
-            };
-
-            // Subscribe to the stream via the hub event channel.  The hub
-            // processes Subscribe synchronously in its event loop; because we
-            // already received Publish the stream is registered so the first
-            // attempt should succeed.  Retry with a short delay in case the hub
-            // event loop hasn't ticked yet.
-            let mut frame_rx = loop {
-                let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-                let sub_info = SubscriberInfo {
-                    id: Uuid::new(RandomDigitCount::Six),
-                    sub_type: SubscribeType::RtmpPull,
-                    sub_data_type: SubDataType::Frame,
-                    notify_info: NotifyInfo {
-                        request_url: String::new(),
-                        remote_addr: String::from("test-recorder"),
-                    },
-                };
-
-                if event_sender_for_sub
-                    .send(StreamHubEvent::Subscribe {
-                        identifier: identifier.clone(),
-                        info: sub_info,
-                        result_sender: result_tx,
-                    })
-                    .is_err()
-                {
-                    // Hub event channel closed.
-                    return;
-                }
-
-                match tokio::time::timeout(Duration::from_millis(500), result_rx).await {
-                    Ok(Ok(Ok((data_receiver, _stat)))) => {
-                        if let Some(rx) = data_receiver.frame_receiver {
-                            break rx;
-                        }
-                        // No frame receiver — hub sent a packet-only receiver; retry.
-                    }
-                    _ => {
-                        // Timeout or error — retry after a brief pause.
-                    }
-                }
-
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            };
-
-            // Drain FrameData into the recorded accumulator until the publisher
-            // disconnects and the channel closes.
-            while let Some(frame) = frame_rx.recv().await {
-                match frame {
-                    FrameData::Audio { timestamp, data } => {
-                        recorded_clone.lock().await.push(RecordedTag {
-                            tag_type: 8,
-                            timestamp_ms: timestamp,
-                            body: data.to_vec(),
-                        });
-                    }
-                    FrameData::Video { timestamp, data } => {
-                        recorded_clone.lock().await.push(RecordedTag {
-                            tag_type: 9,
-                            timestamp_ms: timestamp,
-                            body: data.to_vec(),
-                        });
-                    }
-                    _ => {} // skip MetaData, MediaInfo
-                }
-            }
-        });
-
-        // Run hub and server concurrently; either finishing ends the task.
         tokio::select! {
             _ = hub.run() => {}
             result = rtmp_server.run() => {
@@ -270,7 +306,13 @@ async fn spawn_recording_xiu_server() -> (
         }
     });
 
-    (url, recorded, handle)
+    // The subscriber task and server task are now both running.  The server is
+    // ready to accept TCP connections immediately; the subscriber task will
+    // establish its frame channel once the pusher's publish command is accepted.
+    // We do NOT wait for sub_ready_rx here -- that wait is done in the test
+    // body AFTER push_flv_bytes initiates the publish handshake.
+
+    (url, recorded, handle, sub_ready_rx)
 }
 
 // ---------------------------------------------------------------------------
@@ -348,25 +390,64 @@ fn sha256_recorded_bodies(recorded: &[RecordedTag]) -> (String, String) {
 /// Assert that every audio and video tag body byte that the pusher reads from
 /// the source FLV arrives unmodified at the xiu server side.
 ///
-/// The test uses a real xiu `RtmpServer` + streamhub subscription to capture
-/// `FrameData` frames.  The subscriber task waits for `BroadcastEvent::Publish`
-/// before subscribing, eliminating the race between subscriber registration and
-/// the first media frames.
+/// Timing contract (no race conditions):
+///   1. `spawn_recording_xiu_server` starts both the xiu server task and the
+///      subscriber task.  The subscriber task blocks on `BroadcastEvent::Publish`.
+///   2. The test starts the pusher.  The pusher performs the full RTMP negotiate
+///      sequence (handshake + connect + createStream + publish).  When the
+///      server's `onStatus(NetStream.Publish.Start)` is sent, xiu internally
+///      fires `BroadcastEvent::Publish` on the hub's broadcast channel.
+///   3. The subscriber task receives `BroadcastEvent::Publish`, immediately sends
+///      a `StreamHubEvent::Subscribe`, gets the frame receiver, and signals the
+///      test via `sub_ready_rx`.
+///   4. The test awaits `sub_ready_rx` (5-second timeout) before sending any
+///      media tags.  By the time the first audio/video chunk is written, the
+///      subscriber is already registered in the hub -- no frames are dropped.
+///   5. After `push_flv_bytes` returns, we wait 2 seconds for the subscriber
+///      task to drain any in-flight frames, then compare SHA-256 digests.
 #[tokio::test]
 async fn media_payload_byte_identical_to_source() {
     let source_bytes = std::fs::read("tests/data/short.flv").expect("read short.flv");
 
-    let (url, recorded, _server) = spawn_recording_xiu_server().await;
+    let (url, recorded, _server, sub_ready_rx) = spawn_recording_xiu_server().await;
 
     // Give the server a moment to bind and start listening.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let mut pusher = RtmpPusher::new(url, PusherConfig::default());
 
+    // Step 1: perform the RTMP negotiate (handshake + connect + publish).
+    // This triggers BroadcastEvent::Publish inside xiu, which the subscriber
+    // task is waiting for.  We call push_flv_bytes with an empty slice here
+    // so the publish handshake completes but no media is sent yet.
+    //
+    // NOTE: push_flv_bytes with an empty slice parses zero tags and returns
+    // immediately after the lazy connect -- it does NOT send any media chunks.
+    pusher
+        .push_flv_bytes(&[])
+        .await
+        .expect("handshake must succeed");
+
+    eprintln!("[test] publish handshake complete; waiting for subscriber ready signal...");
+
+    // Step 2: wait for the subscriber task to confirm it has obtained the
+    // frame receiver from the hub.  This eliminates the race between xiu's
+    // BroadcastEvent::Publish and our Subscribe request.
+    tokio::time::timeout(Duration::from_secs(5), sub_ready_rx)
+        .await
+        .expect("subscriber task did not signal ready within 5s")
+        .expect("sub_ready channel dropped before signal");
+
+    eprintln!("[test] subscriber ready; sending media...");
+
+    // Step 3: now send the actual media payload.  The subscriber is registered
+    // so no frames will be dropped.
     pusher
         .push_flv_bytes(&source_bytes)
         .await
         .expect("push_flv_bytes");
+
+    eprintln!("[test] push_flv_bytes complete; waiting for drain...");
 
     // Give the subscriber task time to drain the last frames from the channel.
     // The channel closes once the pusher drops the session (TCP disconnect),
@@ -375,7 +456,11 @@ async fn media_payload_byte_identical_to_source() {
     tokio::time::sleep(Duration::from_millis(2000)).await;
 
     let recorded_guard = recorded.lock().await;
-    assert!(!recorded_guard.is_empty(), "no tags reached the server");
+    eprintln!("[test] recorded {} tags", recorded_guard.len());
+    assert!(
+        !recorded_guard.is_empty(),
+        "no tags reached the server; check eprintln output above"
+    );
 
     let (src_audio_sha, src_video_sha) = sha256_flv_bodies(&source_bytes);
     let (rec_audio_sha, rec_video_sha) = sha256_recorded_bodies(&recorded_guard);

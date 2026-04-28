@@ -503,54 +503,52 @@ async fn wait_for_publish_start(
                                 command_name,
                                 others,
                                 ..
-                            } => {
-                                if amf_string(&command_name) == "onStatus" {
-                                    // `others` contains the info object (the
-                                    // Null command object was consumed as
-                                    // `command_object`; the status object is
-                                    // the first entry in `others`).
-                                    let status_obj = others.into_iter().find_map(|v| {
-                                        if let Amf0ValueType::Object(m) = v {
-                                            Some(m)
-                                        } else {
-                                            None
-                                        }
-                                    });
-                                    if let Some(obj) = status_obj {
-                                        let code = obj
-                                            .get("code")
-                                            .and_then(|v| {
-                                                if let Amf0ValueType::UTF8String(s) = v {
-                                                    Some(s.clone())
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                            .unwrap_or_default();
-                                        let desc = obj
-                                            .get("description")
-                                            .and_then(|v| {
-                                                if let Amf0ValueType::UTF8String(s) = v {
-                                                    Some(s.clone())
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                            .unwrap_or_default();
-
-                                        if code == "NetStream.Publish.Start" {
-                                            return Ok(());
-                                        }
-                                        if code.starts_with("NetStream.Publish.")
-                                            || code.starts_with("NetConnection.Connect.")
-                                        {
-                                            return Err(PushError::PublishRejected {
-                                                code,
-                                                description: desc,
-                                            });
-                                        }
-                                        // Other onStatus codes (e.g. Reset) - keep waiting.
+                            } if amf_string(&command_name) == "onStatus" => {
+                                // `others` contains the info object (the
+                                // Null command object was consumed as
+                                // `command_object`; the status object is
+                                // the first entry in `others`).
+                                let status_obj = others.into_iter().find_map(|v| {
+                                    if let Amf0ValueType::Object(m) = v {
+                                        Some(m)
+                                    } else {
+                                        None
                                     }
+                                });
+                                if let Some(obj) = status_obj {
+                                    let code = obj
+                                        .get("code")
+                                        .and_then(|v| {
+                                            if let Amf0ValueType::UTF8String(s) = v {
+                                                Some(s.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .unwrap_or_default();
+                                    let desc = obj
+                                        .get("description")
+                                        .and_then(|v| {
+                                            if let Amf0ValueType::UTF8String(s) = v {
+                                                Some(s.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .unwrap_or_default();
+
+                                    if code == "NetStream.Publish.Start" {
+                                        return Ok(());
+                                    }
+                                    if code.starts_with("NetStream.Publish.")
+                                        || code.starts_with("NetConnection.Connect.")
+                                    {
+                                        return Err(PushError::PublishRejected {
+                                            code,
+                                            description: desc,
+                                        });
+                                    }
+                                    // Other onStatus codes (e.g. Reset) - keep waiting.
                                 }
                             }
                             RtmpMessageData::SetChunkSize { chunk_size } => {
@@ -571,19 +569,41 @@ async fn wait_for_publish_start(
 // Background read loop
 // -------------------------------------------------------------------------
 
+// Maximum time the read-loop holds the `io` mutex while waiting for the
+// server to send data.  Releasing the mutex periodically is required so that
+// concurrent `send_tag` callers can acquire it to write audio/video chunks.
+// Without this the read-loop would hold the mutex indefinitely (blocking
+// forever on `read()`) while `send_tag` starves, causing the server's
+// inactivity timer (xiu uses 2 s) to fire and RST the connection.
+const READ_LOOP_TIMEOUT_MS: u64 = 100;
+
 /// Background task: continuously reads from `io` and watches for
 /// server-initiated errors.  Sets `poisoned = true` on any I/O error or EOF.
+///
+/// The read uses a short timeout (`READ_LOOP_TIMEOUT_MS`) so that the `io`
+/// mutex is released regularly.  This allows `send_tag` to acquire the mutex
+/// and write media chunks concurrently with this task watching for errors.
 async fn read_loop(io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>, poisoned: Arc<AtomicBool>) {
     let mut unpacketizer = ChunkUnpacketizer::new();
     loop {
-        let data = {
+        // Acquire the mutex and attempt a bounded read.  The timeout ensures
+        // the mutex is released every READ_LOOP_TIMEOUT_MS milliseconds even
+        // when the server is quiet, so `send_tag` is never starved.
+        let result = {
             let mut guard = io.lock().await;
-            match guard.read().await {
-                Ok(d) => d,
-                Err(_) => {
-                    poisoned.store(true, Ordering::Relaxed);
-                    return;
-                }
+            tokio::time::timeout(Duration::from_millis(READ_LOOP_TIMEOUT_MS), guard.read()).await
+            // guard (and the mutex) is dropped here regardless of outcome.
+        };
+
+        let data = match result {
+            Err(_timeout) => {
+                // No data from server within the window; release mutex and retry.
+                continue;
+            }
+            Ok(Ok(d)) => d,
+            Ok(Err(_)) => {
+                poisoned.store(true, Ordering::Relaxed);
+                return;
             }
         };
 
@@ -606,21 +626,19 @@ async fn read_loop(io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>, poisoned: Arc<
                                     command_name,
                                     others,
                                     ..
-                                } => {
+                                } if amf_string(&command_name) == "onStatus" => {
                                     // Watch for mid-stream onStatus errors.
-                                    if amf_string(&command_name) == "onStatus" {
-                                        let is_error = others.iter().any(|v| {
-                                            let Amf0ValueType::Object(m) = v else {
-                                                return false;
-                                            };
-                                            m.get("level")
-                                                .map(|lv| matches!(lv, Amf0ValueType::UTF8String(s) if s == "error"))
-                                                .unwrap_or(false)
-                                        });
-                                        if is_error {
-                                            poisoned.store(true, Ordering::Relaxed);
-                                            return;
-                                        }
+                                    let is_error = others.iter().any(|v| {
+                                        let Amf0ValueType::Object(m) = v else {
+                                            return false;
+                                        };
+                                        m.get("level")
+                                            .map(|lv| matches!(lv, Amf0ValueType::UTF8String(s) if s == "error"))
+                                            .unwrap_or(false)
+                                    });
+                                    if is_error {
+                                        poisoned.store(true, Ordering::Relaxed);
+                                        return;
                                     }
                                 }
                                 _ => {}
