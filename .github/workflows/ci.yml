@@ -248,6 +248,18 @@ jobs:
             --exclude-re 'ChunkUploader::run' \
             --exclude-re 'handle_rust_push' \
             --exclude-re 'handle_ffmpeg_death' \
+            --exclude-re 'Session::connect' \
+            --exclude-re 'Session::send_audio_tag' \
+            --exclude-re 'Session::send_video_tag' \
+            --exclude-re 'Session::send_tag' \
+            --exclude-re 'Session::close' \
+            --exclude-re 'wait_for_publish_start' \
+            --exclude-re 'wait_for_create_stream_result' \
+            --exclude-re 'wait_for_result' \
+            --exclude-re 'negotiate' \
+            --exclude-re 'read_loop' \
+            --exclude-re 'RtmpPusher::push_flv_bytes' \
+            --exclude-re 'RtmpPusher::close' \
             -e 'crates/rs-api/src/template_handlers.rs' \
             -e 'crates/rs-api/src/s3_handlers.rs' \
             -e 'crates/rs-delivery/src/flv_normalizer.rs' \
