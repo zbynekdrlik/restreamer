@@ -1,5 +1,9 @@
 //! `RtmpPusher` - public API.
 
+use std::time::Duration;
+
+use tokio::time::Instant;
+
 use crate::session::Session;
 use crate::{PushError, PusherConfig, PusherState};
 
@@ -70,6 +74,9 @@ impl RtmpPusher {
         let iter = crate::flv::FlvTagIter::new(bytes)?;
         let mut chunk_first_ts: Option<u32> = None;
         let monotonic_offset = self.state.last_output_ts_ms;
+        // Anchor wall-clock once per pusher lifetime so per-chunk pacing
+        // tracks the cumulative output timestamp, not just intra-chunk time.
+        let anchor = *self.state.pacing_anchor.get_or_insert_with(Instant::now);
 
         // Collect tag metadata (type, output timestamp) and body slices.
         // We hold the body references into `bytes` (lifetime tied to the `iter`
@@ -99,6 +106,19 @@ impl RtmpPusher {
                 self.session = None;
                 return Err(e);
             }
+        }
+
+        // -re-style pacing: ONCE per chunk, sleep until wall-clock has
+        // caught up to the cumulative output timestamp. When we're behind
+        // (cache > target after warmup), the sleep is skipped and the
+        // pusher drains the buffer at TCP-write speed; once up-to-date it
+        // settles at ~1 x media-time. Per-chunk granularity (vs per-tag)
+        // collapses 80 sleeps/sec into ONE — eliminating the scheduler
+        // jitter that previously dropped output to 0.3 x (#103).
+        let target_ms = self.state.last_output_ts_ms;
+        let actual_ms = anchor.elapsed().as_millis() as u64;
+        if actual_ms < target_ms {
+            tokio::time::sleep(Duration::from_millis(target_ms - actual_ms)).await;
         }
 
         Ok(())
@@ -148,5 +168,54 @@ mod tests {
             PusherConfig::default(),
         );
         assert_eq!(p.url(), "rtmp://example.com/live/key");
+    }
+
+    /// Per-chunk pacing math (issue #103, run 25119429314): when wall-clock
+    /// is BEHIND the cumulative output timestamp, the chunk-end sleep
+    /// equals `last_output_ts_ms - wall_elapsed`. Uses `tokio::time::pause`
+    /// so the test is deterministic.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn per_chunk_pacing_sleeps_when_ahead_of_wall_clock() {
+        let anchor = Instant::now();
+        // Pretend we just sent a chunk worth 2000 ms of media…
+        let target_ms: u64 = 2_000;
+        // …in 500 ms of wall time (very fast TCP writes).
+        tokio::time::advance(Duration::from_millis(500)).await;
+        let actual_ms = anchor.elapsed().as_millis() as u64;
+        assert_eq!(actual_ms, 500, "wall elapsed must be 500 ms");
+        assert!(actual_ms < target_ms);
+        let sleep_ms = target_ms - actual_ms;
+        assert_eq!(
+            sleep_ms, 1_500,
+            "per-chunk pacing must sleep target - wall = 1500 ms"
+        );
+    }
+
+    /// When wall-clock has already overrun the cumulative output timestamp
+    /// (cache overshoot during init, or a slow first chunk), pacing must
+    /// NOT sleep — the pusher needs to drain at TCP-write speed.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn per_chunk_pacing_no_sleep_when_behind() {
+        let anchor = Instant::now();
+        let target_ms: u64 = 1_000;
+        tokio::time::advance(Duration::from_millis(5_000)).await;
+        let actual_ms = anchor.elapsed().as_millis() as u64;
+        assert!(
+            actual_ms >= target_ms,
+            "wall elapsed (5000) >= target (1000) must skip sleep"
+        );
+    }
+
+    #[test]
+    fn pacing_anchor_starts_none_and_persists_after_first_set() {
+        let mut state = PusherState::default();
+        assert!(state.pacing_anchor.is_none());
+        let anchor = *state.pacing_anchor.get_or_insert_with(Instant::now);
+        assert!(state.pacing_anchor.is_some());
+        // get_or_insert_with on an Option<Instant> is idempotent: a second
+        // call must NOT overwrite the anchor (otherwise pacing math drifts
+        // back to per-chunk wall-clock instead of cumulative).
+        let anchor2 = *state.pacing_anchor.get_or_insert_with(Instant::now);
+        assert_eq!(anchor, anchor2, "anchor must be stable after first set");
     }
 }

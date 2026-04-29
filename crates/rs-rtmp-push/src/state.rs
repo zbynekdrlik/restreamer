@@ -1,5 +1,7 @@
 //! Pusher transport state. See spec §5.1.
 
+use tokio::time::Instant;
+
 /// Per-`RtmpPusher` runtime state. Owns connection-lifetime data (TCP session +
 /// monotonic output timestamp + reconnect counter). Retry-policy state
 /// (`consecutive_errors`, `last_error_class`) lives in the *caller*
@@ -16,6 +18,14 @@ pub struct PusherState {
     /// after `connect()` failed or after a mid-stream error dropped the
     /// session. Lazy reconnect on next `push_flv_bytes`.
     pub connected: bool,
+    /// Wall-clock anchor for `-re`-style pacing. Set on the first chunk we
+    /// successfully push and reused across the whole pusher lifetime; together
+    /// with `last_output_ts_ms` it lets `push_flv_bytes` sleep ONCE per chunk
+    /// to keep output close to 1 x media-time when up-to-date, while still
+    /// running flat-out when behind. Per-tag pacing was tried first but the
+    /// 80 sleeps/sec compounded scheduler jitter and dropped output to
+    /// ~0.3 x real-time (#103, run 25119429314).
+    pub pacing_anchor: Option<Instant>,
 }
 
 #[derive(Clone)]

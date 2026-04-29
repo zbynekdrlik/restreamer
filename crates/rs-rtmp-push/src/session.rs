@@ -20,10 +20,6 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-// Use tokio's `Instant` (alias for std's in production, but honors
-// `tokio::time::pause`/`advance` in tests) so the pacing math is unit-testable
-// with virtual time.
-use tokio::time::Instant;
 
 use bytesio::bytes_writer::AsyncBytesWriter;
 use bytesio::bytesio::{TNetIO, TcpIO};
@@ -79,13 +75,6 @@ pub struct Session {
     poisoned: Arc<AtomicBool>,
     /// Background task handle; aborted on `Drop` or `close`.
     read_loop_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Wall-clock anchor + first FLV timestamp seen on this session — used for
-    /// `-re`-style pacing so cache buffer stays stable. Without this the
-    /// pusher writes tags as fast as the producer hands them over and the
-    /// upstream's `chunk_delay` cache buffer drains over time (issue #155 /
-    /// spec §2 acceptance criterion: "cache delay holds at target ±5s for
-    /// the entire duration of a multi-hour stream").
-    pacing: Option<(Instant, u32)>,
 }
 
 impl Session {
@@ -141,7 +130,6 @@ impl Session {
             msg_stream_id,
             poisoned,
             read_loop_handle: Some(read_loop_handle),
-            pacing: None,
         })
     }
 
@@ -167,11 +155,12 @@ impl Session {
 
     /// Packetize and write a single RTMP chunk for the given tag body.
     ///
-    /// Pacing: the first tag anchors `wall_clock` to `timestamp_ms`. Each
-    /// subsequent tag sleeps until the wall clock has advanced by the same
-    /// amount as the FLV timestamp delta. This is the equivalent of ffmpeg's
-    /// `-re` rate limiter; without it, cache_delay drains at ~1s/min and
-    /// hits zero in under 2 hours, which violates spec §2.
+    /// Pure write — no pacing here. `RtmpPusher::push_flv_bytes` paces ONCE
+    /// per chunk (rather than per tag) so the wall-clock sleep happens
+    /// exactly once per ~80 tags instead of 80 times per second of media.
+    /// Per-tag pacing produced ~12.5 ms of scheduler jitter per sleep ×
+    /// 80 tags/sec = >1 second of compounded overhead per second of media,
+    /// dropping effective output to ~0.3 x real-time (#103, run 25119429314).
     async fn send_tag(
         &mut self,
         csid: u32,
@@ -183,23 +172,6 @@ impl Session {
             return Err(PushError::RemoteClosed(io::Error::from(
                 io::ErrorKind::ConnectionReset,
             )));
-        }
-
-        // -re-style pacing: the first tag anchors wall-clock; subsequent tags
-        // sleep until wall_elapsed >= ts_delta so we push in real-time and the
-        // upstream's cache_delay buffer stays stable.
-        let (anchor, first_ts) = match self.pacing {
-            Some(p) => p,
-            None => {
-                let p = (Instant::now(), timestamp_ms);
-                self.pacing = Some(p);
-                p
-            }
-        };
-        let target_ms = timestamp_ms.saturating_sub(first_ts) as u64;
-        let actual_ms = anchor.elapsed().as_millis() as u64;
-        if actual_ms < target_ms {
-            tokio::time::sleep(Duration::from_millis(target_ms - actual_ms)).await;
         }
 
         let mut chunk_info = ChunkInfo::new(
@@ -905,21 +877,6 @@ mod tests {
             actual_ms >= target_ms,
             "wall elapsed (5000) >= target (1000)"
         );
-    }
-
-    /// First tag anchors the pacing — the field starts None and the first
-    /// `send_tag` call sets it.  Subsequent tags reuse that anchor so wall-
-    /// clock drift across many tags is bounded by the FLV-ts span, not
-    /// per-tag.
-    #[test]
-    fn pacing_field_starts_none() {
-        // Build a struct-like value that mimics the pacing field.  Without
-        // a live Session we test the Option-roundtrip semantics directly.
-        let pacing: Option<(Instant, u32)> = None;
-        assert!(pacing.is_none());
-        let p = (Instant::now(), 12_345_u32);
-        let pacing = Some(p);
-        assert_eq!(pacing.expect("anchor set").1, 12_345);
     }
 
     #[test]
