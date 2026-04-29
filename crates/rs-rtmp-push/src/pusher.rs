@@ -158,6 +158,22 @@ impl RtmpPusher {
                 _ => false,
             };
 
+            // Per-tag pacing: sleep BEFORE sending so the wall-clock
+            // emission cadence matches the FLV timestamp cadence (~33 ms
+            // for 30 fps video, ~21 ms for AAC audio). Without this the
+            // pusher sends a whole chunk's tags in ~1 ms and then sleeps
+            // ~2 s — YouTube's bitrate sensor averages over a short
+            // window and reports `bitrateLow` because the per-window
+            // average is half the encoded rate (#103).
+            let pre_tag_target_ms = monotonic_offset + delta as u64;
+            let pre_tag_actual_ms = anchor.elapsed().as_millis() as u64;
+            if pre_tag_actual_ms < pre_tag_target_ms {
+                tokio::time::sleep(Duration::from_millis(
+                    pre_tag_target_ms - pre_tag_actual_ms,
+                ))
+                .await;
+            }
+
             let session = self.session.as_mut().expect("session was just set");
             let send_result = if skip {
                 tags_skipped += 1;
@@ -197,13 +213,12 @@ impl RtmpPusher {
         self.state.last_output_ts_ms = monotonic_offset + chunk_duration_ms as u64;
         let send_elapsed_ms = chunk_started_at.elapsed().as_millis() as u64;
 
-        // -re-style pacing: ONCE per chunk, sleep until wall-clock has
-        // caught up to the cumulative output timestamp. When we're behind
-        // (cache > target after warmup), the sleep is skipped and the
-        // pusher drains the buffer at TCP-write speed; once up-to-date it
-        // settles at ~1 x media-time. Per-chunk granularity (vs per-tag)
-        // collapses 80 sleeps/sec into ONE — eliminating the scheduler
-        // jitter that previously dropped output to 0.3 x (#103).
+        // Per-chunk tail pacing: small mop-up sleep if all per-tag sleeps
+        // together still left us slightly behind the cumulative target
+        // (e.g. zero-duration tags or rounding). With per-tag pacing
+        // active above this is normally 0–10 ms; the line is kept so a
+        // CHUNKER chunk_duration_ms larger than the sum of FLV deltas
+        // still produces correct cumulative pacing.
         let target_ms = self.state.last_output_ts_ms;
         let actual_ms = anchor.elapsed().as_millis() as u64;
         let pacing_sleep_ms = target_ms.saturating_sub(actual_ms);
