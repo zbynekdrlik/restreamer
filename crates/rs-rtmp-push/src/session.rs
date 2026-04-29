@@ -609,35 +609,49 @@ async fn wait_for_publish_start(
 // Background read loop
 // -------------------------------------------------------------------------
 
-// Maximum time the read-loop holds the `io` mutex while waiting for the
-// server to send data.  Releasing the mutex periodically is required so that
-// concurrent `send_tag` callers can acquire it to write audio/video chunks.
-// Without this the read-loop would hold the mutex indefinitely (blocking
-// forever on `read()`) while `send_tag` starves, causing the server's
-// inactivity timer (xiu uses 2 s) to fire and RST the connection.
-const READ_LOOP_TIMEOUT_MS: u64 = 100;
+// Maximum time the read-loop holds the `io` mutex on each poll. Real-time
+// media push needs ~50 tags/sec each acquiring the same mutex to write,
+// so the read side must yield FAST when contended; otherwise contention
+// caps output rate to a fraction of real-time and `cache_delay` grows
+// without bound. Empirically, a 100 ms hold caused ~0.2 x real-time
+// output (cache grew 0.8 s/s during E2E #103).
+const READ_LOOP_HOLD_MS: u64 = 5;
+// Idle gap between read attempts so the read-loop is mutex-busy ~10 % of
+// the time, leaving the rest for `send_tag`. Combined with `try_lock`
+// below this means `send_tag` essentially never blocks on the read-loop.
+const READ_LOOP_IDLE_MS: u64 = 50;
 
 /// Background task: continuously reads from `io` and watches for
 /// server-initiated errors.  Sets `poisoned = true` on any I/O error or EOF.
 ///
-/// The read uses a short timeout (`READ_LOOP_TIMEOUT_MS`) so that the `io`
-/// mutex is released regularly.  This allows `send_tag` to acquire the mutex
-/// and write media chunks concurrently with this task watching for errors.
+/// Mutex discipline: the `io` mutex is shared with `send_tag`; on the push
+/// path that mutex is on the hot path (every audio/video tag write). The
+/// read-loop therefore uses `try_lock` and a short hold/idle cycle so it
+/// yields to writers immediately and is mutex-busy only ~10 % of the time.
+/// Detection latency for server-initiated errors is bounded by
+/// `READ_LOOP_HOLD_MS + READ_LOOP_IDLE_MS` (~55 ms), which is far below
+/// xiu's 2 s inactivity timer and well under the consumer-task `WRITE_TIMEOUT`.
 async fn read_loop(io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>, poisoned: Arc<AtomicBool>) {
     let mut unpacketizer = ChunkUnpacketizer::new();
     loop {
-        // Acquire the mutex and attempt a bounded read.  The timeout ensures
-        // the mutex is released every READ_LOOP_TIMEOUT_MS milliseconds even
-        // when the server is quiet, so `send_tag` is never starved.
-        let result = {
-            let mut guard = io.lock().await;
-            tokio::time::timeout(Duration::from_millis(READ_LOOP_TIMEOUT_MS), guard.read()).await
-            // guard (and the mutex) is dropped here regardless of outcome.
+        // Don't *await* the mutex — `send_tag` is on the hot path and
+        // must win immediately. If contended, sleep briefly and retry.
+        let result = match io.try_lock() {
+            Ok(mut guard) => {
+                tokio::time::timeout(Duration::from_millis(READ_LOOP_HOLD_MS), guard.read()).await
+                // guard (and the mutex) is dropped here regardless of outcome.
+            }
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(READ_LOOP_IDLE_MS)).await;
+                continue;
+            }
         };
 
         let data = match result {
             Err(_timeout) => {
-                // No data from server within the window; release mutex and retry.
+                // No data from server within the window; release mutex and
+                // back off so writers get the bulk of the lock.
+                tokio::time::sleep(Duration::from_millis(READ_LOOP_IDLE_MS)).await;
                 continue;
             }
             Ok(Ok(d)) => d,
@@ -895,5 +909,32 @@ mod tests {
         let p = (Instant::now(), 12_345_u32);
         let pacing = Some(p);
         assert_eq!(pacing.expect("anchor set").1, 12_345);
+    }
+
+    #[test]
+    fn read_loop_constants_keep_writers_off_the_hot_path() {
+        // Regression for the cache-growth bug found in #103 E2E run on
+        // 2026-04-29: the read-loop held the io mutex for 100ms per cycle.
+        // Each `send_tag` write needs the same mutex; with ~50 tags/sec on
+        // a typical OBS stream (30fps video + audio), output rate dropped
+        // to ~0.2 x real-time and `cache_delay` grew at ~1 s/s during init.
+        //
+        // The fix bounds total mutex-busy fraction (HOLD / (HOLD + IDLE))
+        // to ~10 %. A regression that pushes HOLD back up to 100ms or
+        // shrinks IDLE to a few ms would re-create the contention.
+        assert!(
+            READ_LOOP_HOLD_MS <= 10,
+            "HOLD must stay tiny so writers win the mutex"
+        );
+        assert!(
+            READ_LOOP_IDLE_MS >= 4 * READ_LOOP_HOLD_MS,
+            "IDLE must be much larger than HOLD so the mutex is mostly free for writers"
+        );
+        // Detection latency for server errors (~HOLD + IDLE) must stay
+        // below xiu's 2 s inactivity timer with a healthy margin.
+        assert!(
+            READ_LOOP_HOLD_MS + READ_LOOP_IDLE_MS < 1_000,
+            "detection-latency budget exceeded"
+        );
     }
 }
