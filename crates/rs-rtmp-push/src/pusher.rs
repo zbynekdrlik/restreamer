@@ -38,6 +38,14 @@ impl RtmpPusher {
 
     /// Lazy-connect + write FLV bytes.
     ///
+    /// `chunk_duration_ms` is the chunker's authoritative media duration of
+    /// this chunk (from `chunk_records.duration_ms`); it advances the
+    /// cumulative `last_output_ts_ms` by EXACTLY that amount, decoupling the
+    /// pacing target from FLV tag timestamps that may live in different
+    /// time domains for audio vs video (issue #103: audio is xiu-ts,
+    /// video is wall-clock — see `feedback_chunker_time_domains`).
+    /// Pass `0` only for handshake-only calls with empty `bytes`.
+    ///
     /// On the first call (or after a reconnect) the pusher dials the server,
     /// performs the full RTMP handshake + connect + publish sequence, and
     /// stores the resulting `Session`.
@@ -47,7 +55,11 @@ impl RtmpPusher {
     ///
     /// For non-empty `bytes`, each audio/video tag body is written via
     /// `ChunkPacketizer` with monotonically rewritten timestamps.
-    pub async fn push_flv_bytes(&mut self, bytes: &[u8]) -> Result<(), PushError> {
+    pub async fn push_flv_bytes(
+        &mut self,
+        bytes: &[u8],
+        chunk_duration_ms: u32,
+    ) -> Result<(), PushError> {
         // Lazy connect.
         if self.session.is_none() {
             // A reconnect is any connect that happens after media has been sent
@@ -175,10 +187,14 @@ impl RtmpPusher {
                 return Err(e);
             }
         }
-        // Advance the cumulative monotonic timestamp by ONE chunk's worth
-        // of media (max of audio/video intra-chunk deltas) so pacing target
-        // grows at real media-rate, not by the cross-domain offset.
-        self.state.last_output_ts_ms = monotonic_offset + max_intra_chunk_delta as u64;
+        // Advance the cumulative monotonic timestamp by the chunker's
+        // authoritative media duration. Using FLV tag deltas would risk
+        // measuring from the wrong time domain (audio xiu vs video
+        // wall-clock) or from in-chunk frame-arrival jitter; the chunker's
+        // `chunk_duration_ms` is computed from video keyframe-to-keyframe
+        // wall-clock and is the only honest source of "how much real
+        // media is in this chunk".
+        self.state.last_output_ts_ms = monotonic_offset + chunk_duration_ms as u64;
         let send_elapsed_ms = chunk_started_at.elapsed().as_millis() as u64;
 
         // -re-style pacing: ONCE per chunk, sleep until wall-clock has
@@ -195,7 +211,7 @@ impl RtmpPusher {
             tokio::time::sleep(Duration::from_millis(pacing_sleep_ms)).await;
         }
         tracing::info!(
-            "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} send_elapsed_ms={send_elapsed_ms} pacing_sleep_ms={pacing_sleep_ms} target_ms={target_ms} actual_ms={actual_ms}"
+            "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} chunk_duration_ms={chunk_duration_ms} max_intra_chunk_delta={max_intra_chunk_delta} send_elapsed_ms={send_elapsed_ms} pacing_sleep_ms={pacing_sleep_ms} target_ms={target_ms} actual_ms={actual_ms}"
         );
 
         Ok(())

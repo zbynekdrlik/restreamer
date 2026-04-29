@@ -26,13 +26,13 @@ async fn handshake_completes_with_local_xiu_server() {
     // Empty bytes -> no media tags to send.  `push_flv_bytes` should still
     // do the lazy connect (handshake + NetConnection.connect + createStream
     // + publish) and return Ok if the server accepts the publish.
-    let result = tokio::time::timeout(Duration::from_secs(5), pusher.push_flv_bytes(&[]))
+    let result = tokio::time::timeout(Duration::from_secs(5), pusher.push_flv_bytes(&[], 0))
         .await
         .expect("push_flv_bytes did not return within 5s");
 
     assert!(
         result.is_ok(),
-        "expected push_flv_bytes(&[]) to complete handshake+publish; got {:?}",
+        "expected push_flv_bytes(&[], 0) to complete handshake+publish; got {:?}",
         result
     );
 
@@ -79,7 +79,7 @@ async fn media_payload_byte_identical_to_source() {
     // NOTE: push_flv_bytes with an empty slice parses zero tags and returns
     // immediately after the lazy connect -- it does NOT send any media chunks.
     pusher
-        .push_flv_bytes(&[])
+        .push_flv_bytes(&[], 0)
         .await
         .expect("handshake must succeed");
 
@@ -98,7 +98,7 @@ async fn media_payload_byte_identical_to_source() {
     // Step 3: now send the actual media payload.  The subscriber is registered
     // so no frames will be dropped.
     pusher
-        .push_flv_bytes(&source_bytes)
+        .push_flv_bytes(&source_bytes, 2000)
         .await
         .expect("push_flv_bytes");
 
@@ -176,7 +176,7 @@ async fn monotonic_ts_across_reconnect() {
     // Handshake with server A (empty push to trigger publish so the subscriber
     // task can register its frame receiver).
     pusher
-        .push_flv_bytes(&[])
+        .push_flv_bytes(&[], 0)
         .await
         .expect("handshake with server A");
 
@@ -192,7 +192,7 @@ async fn monotonic_ts_across_reconnect() {
     // --- Step 3: push chunk1 (TS 0..=500) to server A ----------------------
     let chunk1 = synthetic_audio_flv(0, 500);
     pusher
-        .push_flv_bytes(&chunk1)
+        .push_flv_bytes(&chunk1, 2000)
         .await
         .expect("push chunk1 to server A");
 
@@ -230,7 +230,7 @@ async fn monotonic_ts_across_reconnect() {
 
     // Trigger the reconnect and the subscriber registration on server B.
     pusher
-        .push_flv_bytes(&[])
+        .push_flv_bytes(&[], 0)
         .await
         .expect("handshake with server B (reconnect)");
 
@@ -244,7 +244,7 @@ async fn monotonic_ts_across_reconnect() {
     eprintln!("[reconnect-test] subscriber B ready; pushing chunk2 media...");
 
     pusher
-        .push_flv_bytes(&chunk2)
+        .push_flv_bytes(&chunk2, 2000)
         .await
         .expect("push chunk2 to server B");
 
