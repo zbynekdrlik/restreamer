@@ -143,7 +143,10 @@ mod tests {
 
     #[test]
     fn url_returns_constructor_value() {
-        let p = RtmpPusher::new("rtmp://example.com/live/key".into(), PusherConfig::default());
+        let p = RtmpPusher::new(
+            "rtmp://example.com/live/key".into(),
+            PusherConfig::default(),
+        );
         assert_eq!(p.url(), "rtmp://example.com/live/key");
     }
 }
