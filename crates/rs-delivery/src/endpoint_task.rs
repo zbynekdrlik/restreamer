@@ -734,20 +734,21 @@ async fn consumer_task<P: OutputProcessFactory>(
 
         let chunk_id = chunk.chunk_id;
         let chunk_duration_ms = chunk.duration_ms;
-        let processed = flv_normalizer.normalize(&chunk.data);
-        // Pacing is handled by ffmpeg's `-re` flag alone. The FLV
-        // normalizer rebases each ffmpeg process's input to start at
-        // PTS=0 so `-re` paces correctly from process start; consumer
-        // writes as fast as the pipe accepts and is naturally throttled
-        // by ffmpeg's stdin read rate.
 
         if use_rust_pusher {
-            // Rust RTMP pusher write path. Delegated to helper to keep
-            // consumer_task under the 1000-line gate.
+            // Rust RTMP pusher write path. Bypasses flv_normalizer because
+            // each S3 chunk is already a self-contained FLV with its own
+            // 9-byte header; the rust pusher's push_flv_bytes parses it as
+            // a complete FLV and applies its own monotonic-timestamp logic
+            // via state.last_output_ts_ms. The normalizer would strip the
+            // header on subsequent chunks (correct for ffmpeg's `-re -f flv
+            // -i pipe:` which only needs the header on the first write),
+            // leaving the pusher with raw tag bytes that fail the FLV
+            // signature check at offset 0.
             if let Some(ref mut pusher) = rust_pusher {
                 let action = handle_rust_push(
                     pusher,
-                    &processed,
+                    &chunk.data,
                     chunk_id,
                     chunk_duration_ms,
                     &alias,
@@ -765,7 +766,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
             }
         } else if let Some(ref mut p) = proc {
-            // ffmpeg write path (unchanged from pre-Task-11 code).
+            // ffmpeg write path: normalize FLV (PTS rebase, header strip
+            // on subsequent chunks) so ffmpeg's `-re` paces correctly and
+            // duplicate codec config packets don't break the muxer.
+            let processed = flv_normalizer.normalize(&chunk.data);
             let write_result = tokio::time::timeout(
                 std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
                 p.write(&processed),
