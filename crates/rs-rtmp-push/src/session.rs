@@ -107,6 +107,19 @@ impl Session {
             tracing::warn!(error = %e, "failed to set TCP_NODELAY on push socket");
         }
 
+        // Bump the TCP send buffer to 4 MB. With per-tag pacing
+        // ChunkPacketizer issues ~150 TCP writes per chunk (one per FLV
+        // tag), each ~17 KB. The default Linux send buffer (~256 KB on
+        // most kernels) blocks each write until the kernel has receive-
+        // ACKed the prior bytes — Hetzner→YouTube RTT is ~30 ms, so the
+        // pusher caps at roughly 33 writes/s = 4 s to drain a 2 s chunk
+        // (#103, run 25138323858). A 4 MB buffer holds ~30 chunks of
+        // in-flight bytes and decouples the per-tag write rate from RTT.
+        const PUSH_SEND_BUF_BYTES: u32 = 4 * 1024 * 1024;
+        if let Err(e) = tcp_stream.set_send_buffer_size(PUSH_SEND_BUF_BYTES as usize) {
+            tracing::warn!(error = %e, "failed to set TCP send buffer size on push socket");
+        }
+
         // Wrap in TcpIO and share via Arc<Mutex<>>.
         let net_io: Box<dyn TNetIO + Send + Sync> = Box::new(TcpIO::new(tcp_stream));
         let io = Arc::new(Mutex::new(net_io));
