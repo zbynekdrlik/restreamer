@@ -76,8 +76,20 @@ impl RtmpPusher {
 
         // Parse FLV tags with monotonic timestamp rewriting.
         let iter = crate::flv::FlvTagIter::new(bytes)?;
-        let mut chunk_first_ts: Option<u32> = None;
+        // Track first ts SEPARATELY per track. The chunker stamps audio
+        // tags with xiu's RTMP session ts (e.g. 60_000 ms after one
+        // minute) but stamps video tags with wall-clock since the chunker
+        // started (e.g. 0 ms). Mixing those two domains into a single
+        // `chunk_first_ts` produces deltas inflated by the cross-domain
+        // offset (~5–60 s) and was the root cause of the cache-growth
+        // bug observed in #103 — `last_output_ts_ms` ballooned by tens
+        // of seconds per chunk, pacing slept many seconds, and effective
+        // output rate fell to 0.2 x real-time even though TCP send took
+        // ~1 ms per chunk. See `feedback_chunker_time_domains`.
+        let mut chunk_first_audio_ts: Option<u32> = None;
+        let mut chunk_first_video_ts: Option<u32> = None;
         let monotonic_offset = self.state.last_output_ts_ms;
+        let mut max_intra_chunk_delta: u32 = 0;
         // Anchor wall-clock once per pusher lifetime so per-chunk pacing
         // tracks the cumulative output timestamp, not just intra-chunk time.
         let anchor = *self.state.pacing_anchor.get_or_insert_with(Instant::now);
@@ -94,12 +106,24 @@ impl RtmpPusher {
         // We hold the body references into `bytes` (lifetime tied to the `iter`
         // borrow of `bytes`), so we send each tag immediately inside the loop.
         for tag in iter {
-            // Compute the per-chunk delta and add to the monotonic output base.
-            let first = *chunk_first_ts.get_or_insert(tag.timestamp_ms);
-            let delta = tag.timestamp_ms.saturating_sub(first);
-            let output_ts_u64 = monotonic_offset + delta as u64;
-            let output_ts = output_ts_u64 as u32;
-            self.state.last_output_ts_ms = output_ts_u64;
+            // Compute the per-chunk delta IN THE TAG'S OWN TRACK so audio
+            // (xiu domain) and video (wall-clock domain) don't pollute
+            // each other's pacing math.
+            let delta = match tag.tag_type {
+                crate::flv::FLV_TAG_AUDIO => {
+                    let first = *chunk_first_audio_ts.get_or_insert(tag.timestamp_ms);
+                    tag.timestamp_ms.saturating_sub(first)
+                }
+                crate::flv::FLV_TAG_VIDEO => {
+                    let first = *chunk_first_video_ts.get_or_insert(tag.timestamp_ms);
+                    tag.timestamp_ms.saturating_sub(first)
+                }
+                _ => 0, // SCRIPT/unknown — no contribution to output_ts
+            };
+            if delta > max_intra_chunk_delta {
+                max_intra_chunk_delta = delta;
+            }
+            let output_ts = (monotonic_offset + delta as u64) as u32;
 
             // Identify and de-duplicate codec sequence headers. The chunker
             // re-emits AVC SPS/PPS and AAC AudioSpecificConfig in EVERY S3
@@ -151,6 +175,10 @@ impl RtmpPusher {
                 return Err(e);
             }
         }
+        // Advance the cumulative monotonic timestamp by ONE chunk's worth
+        // of media (max of audio/video intra-chunk deltas) so pacing target
+        // grows at real media-rate, not by the cross-domain offset.
+        self.state.last_output_ts_ms = monotonic_offset + max_intra_chunk_delta as u64;
         let send_elapsed_ms = chunk_started_at.elapsed().as_millis() as u64;
 
         // -re-style pacing: ONCE per chunk, sleep until wall-clock has
@@ -279,5 +307,49 @@ mod tests {
         let state = PusherState::default();
         assert!(!state.avc_seq_header_sent);
         assert!(!state.aac_seq_header_sent);
+    }
+
+    /// Per-track delta math (regression for #103, run 25131115779):
+    /// the chunker stamps audio with xiu's RTMP session timestamp and
+    /// video with wall-clock since the chunker session start. Mixing
+    /// the two domains into a single `chunk_first_ts` produces deltas
+    /// inflated by the cross-domain offset (~5–60 s); per-chunk
+    /// `last_output_ts_ms` then balloons by tens of seconds and pacing
+    /// over-sleeps. Compute the delta against the FIRST tag of THE SAME
+    /// TRACK and use the max of audio/video intra-chunk deltas as the
+    /// chunk's media duration.
+    #[test]
+    fn per_track_delta_handles_offset_audio_xiu_vs_wallclock_video() {
+        // Simulate one chunk where audio lives in xiu domain and video
+        // in wall-clock domain. Within the chunk, both tracks span 2 s.
+        let video_ts = [0_u32, 33, 66, 1_000, 1_999];
+        let audio_ts = [60_000_u32, 60_023, 60_046, 61_000, 61_999];
+
+        // Track first ts per track.
+        let mut chunk_first_audio_ts: Option<u32> = None;
+        let mut chunk_first_video_ts: Option<u32> = None;
+        let mut max_intra_chunk_delta: u32 = 0;
+
+        for &ts in video_ts.iter() {
+            let first = *chunk_first_video_ts.get_or_insert(ts);
+            let delta = ts.saturating_sub(first);
+            if delta > max_intra_chunk_delta {
+                max_intra_chunk_delta = delta;
+            }
+        }
+        for &ts in audio_ts.iter() {
+            let first = *chunk_first_audio_ts.get_or_insert(ts);
+            let delta = ts.saturating_sub(first);
+            if delta > max_intra_chunk_delta {
+                max_intra_chunk_delta = delta;
+            }
+        }
+
+        // Chunk media duration must be ~2 s, NOT 60+ s. The OLD
+        // single-domain code would have produced 61_999 here.
+        assert!(
+            max_intra_chunk_delta >= 1_999 && max_intra_chunk_delta <= 2_100,
+            "expected ~2000 ms chunk duration, got {max_intra_chunk_delta} ms"
+        );
     }
 }
