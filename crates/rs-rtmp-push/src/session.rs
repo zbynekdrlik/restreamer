@@ -617,26 +617,29 @@ const READ_LOOP_IDLE_MS: u64 = 50;
 async fn read_loop(io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>, poisoned: Arc<AtomicBool>) {
     let mut unpacketizer = ChunkUnpacketizer::new();
     loop {
+        // Sleep FIRST every iteration so the read-loop is mutex-busy for
+        // at most HOLD/(HOLD+IDLE) = 5/55 ≈ 9 % of the time, regardless
+        // of whether the previous iteration read data or timed out. RTMP
+        // servers send Window-Ack frames frequently during a healthy
+        // push; without an unconditional sleep the loop stays hot when
+        // reads succeed and the mutex stays held ~50 % of the time —
+        // which throttles `send_tag` writers and observed in the #103
+        // E2E run as ~0.4 x output even after every other pacing fix.
+        tokio::time::sleep(Duration::from_millis(READ_LOOP_IDLE_MS)).await;
+
         // Don't *await* the mutex — `send_tag` is on the hot path and
-        // must win immediately. If contended, sleep briefly and retry.
+        // must win immediately. If contended, skip this round entirely
+        // (the next iteration's sleep already gives writers headroom).
         let result = match io.try_lock() {
             Ok(mut guard) => {
                 tokio::time::timeout(Duration::from_millis(READ_LOOP_HOLD_MS), guard.read()).await
                 // guard (and the mutex) is dropped here regardless of outcome.
             }
-            Err(_) => {
-                tokio::time::sleep(Duration::from_millis(READ_LOOP_IDLE_MS)).await;
-                continue;
-            }
+            Err(_) => continue,
         };
 
         let data = match result {
-            Err(_timeout) => {
-                // No data from server within the window; release mutex and
-                // back off so writers get the bulk of the lock.
-                tokio::time::sleep(Duration::from_millis(READ_LOOP_IDLE_MS)).await;
-                continue;
-            }
+            Err(_timeout) => continue,
             Ok(Ok(d)) => d,
             Ok(Err(_)) => {
                 poisoned.store(true, Ordering::Relaxed);
