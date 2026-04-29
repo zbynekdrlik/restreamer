@@ -107,6 +107,17 @@ impl Session {
                 .map_err(|_| PushError::Timeout)?
                 .map_err(PushError::HandshakeFailed)?;
 
+        // Disable Nagle's algorithm (TCP_NODELAY=true). RTMP packetizes a
+        // single FLV tag into many small chunks (default 4 KB each) and
+        // ChunkPacketizer issues one TCP write per chunk; Nagle would
+        // coalesce those writes for up to ~40 ms each, dropping the
+        // effective output rate well below real-time. Without NODELAY the
+        // E2E push pipeline ran at ~0.22 x real-time and `cache_delay`
+        // grew at ~0.8 s/s during init (#103, run 25116396931).
+        if let Err(e) = tcp_stream.set_nodelay(true) {
+            tracing::warn!(error = %e, "failed to set TCP_NODELAY on push socket");
+        }
+
         // Wrap in TcpIO and share via Arc<Mutex<>>.
         let net_io: Box<dyn TNetIO + Send + Sync> = Box::new(TcpIO::new(tcp_stream));
         let io = Arc::new(Mutex::new(net_io));
