@@ -19,7 +19,11 @@
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// Use tokio's `Instant` (alias for std's in production, but honors
+// `tokio::time::pause`/`advance` in tests) so the pacing math is unit-testable
+// with virtual time.
+use tokio::time::Instant;
 
 use bytesio::bytes_writer::AsyncBytesWriter;
 use bytesio::bytesio::{TNetIO, TcpIO};
@@ -771,7 +775,8 @@ mod tests {
     use super::parse_rtmp_url;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use tokio::time::Instant;
 
     // --- URL parser tests ---------------------------------------------------
 
