@@ -63,6 +63,10 @@ impl RtmpPusher {
             let s = connect_result?;
             self.session = Some(s);
             self.state.connected = true;
+            // Codec config must be re-sent on every fresh RTMP session so
+            // the receiver can decode subsequent NALU/raw-AAC tags.
+            self.state.avc_seq_header_sent = false;
+            self.state.aac_seq_header_sent = false;
         }
 
         // Empty slice -> handshake verified, nothing to send.
@@ -89,14 +93,39 @@ impl RtmpPusher {
             let output_ts = output_ts_u64 as u32;
             self.state.last_output_ts_ms = output_ts_u64;
 
+            // Identify and de-duplicate codec sequence headers. The chunker
+            // re-emits AVC SPS/PPS and AAC AudioSpecificConfig in EVERY S3
+            // chunk so each chunk is a self-contained FLV; but a real RTMP
+            // server expects each codec config exactly ONCE per session.
+            // Re-sending was observed to throttle YouTube ingestion and
+            // drop output to ~0.2 x real-time (#103).
+            let is_seq_header = tag.body.len() >= 2 && tag.body[1] == 0x00;
+            let skip = match tag.tag_type {
+                crate::flv::FLV_TAG_VIDEO if is_seq_header => {
+                    let already = self.state.avc_seq_header_sent;
+                    self.state.avc_seq_header_sent = true;
+                    already
+                }
+                crate::flv::FLV_TAG_AUDIO if is_seq_header => {
+                    let already = self.state.aac_seq_header_sent;
+                    self.state.aac_seq_header_sent = true;
+                    already
+                }
+                _ => false,
+            };
+
             let session = self.session.as_mut().expect("session was just set");
-            let send_result = match tag.tag_type {
-                crate::flv::FLV_TAG_AUDIO => session.send_audio_tag(output_ts, tag.body).await,
-                crate::flv::FLV_TAG_VIDEO => session.send_video_tag(output_ts, tag.body).await,
-                crate::flv::FLV_TAG_SCRIPT => Ok(()), // skip metadata
-                other => {
-                    tracing::warn!(tag_type = other, "unknown FLV tag type, skipping");
-                    Ok(())
+            let send_result = if skip {
+                Ok(())
+            } else {
+                match tag.tag_type {
+                    crate::flv::FLV_TAG_AUDIO => session.send_audio_tag(output_ts, tag.body).await,
+                    crate::flv::FLV_TAG_VIDEO => session.send_video_tag(output_ts, tag.body).await,
+                    crate::flv::FLV_TAG_SCRIPT => Ok(()), // skip metadata
+                    other => {
+                        tracing::warn!(tag_type = other, "unknown FLV tag type, skipping");
+                        Ok(())
+                    }
                 }
             };
 
@@ -217,5 +246,18 @@ mod tests {
         // back to per-chunk wall-clock instead of cumulative).
         let anchor2 = *state.pacing_anchor.get_or_insert_with(Instant::now);
         assert_eq!(anchor, anchor2, "anchor must be stable after first set");
+    }
+
+    #[test]
+    fn seq_header_dedup_flags_default_false_and_independent() {
+        // Regression for #103 cache-growth investigation: AVC and AAC
+        // sequence-header flags must start FALSE so the FIRST seq header
+        // of each codec is forwarded to the RTMP server (without it the
+        // receiver can't decode subsequent tags). Once flipped, the SECOND
+        // identical seq header is suppressed; the chunker re-emits it in
+        // every S3 chunk and re-sending throttled YouTube ingestion.
+        let state = PusherState::default();
+        assert!(!state.avc_seq_header_sent);
+        assert!(!state.aac_seq_header_sent);
     }
 }

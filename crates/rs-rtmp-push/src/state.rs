@@ -26,6 +26,16 @@ pub struct PusherState {
     /// 80 sleeps/sec compounded scheduler jitter and dropped output to
     /// ~0.3 x real-time (#103, run 25119429314).
     pub pacing_anchor: Option<Instant>,
+    /// `true` once an AVC sequence header has been forwarded on this RTMP
+    /// session. The chunker re-emits the sequence header in EVERY S3 chunk
+    /// (it must, so each chunk is a self-contained FLV file for ffmpeg's
+    /// `-re -f flv -i pipe:`), but a real RTMP server expects it exactly
+    /// once per session — re-sending it can cause the receiver to reset
+    /// its decoder or pause ingestion, and was observed to drop the rust
+    /// pusher's effective output to ~0.2 x real-time (#103).
+    pub avc_seq_header_sent: bool,
+    /// Same as `avc_seq_header_sent` but for AAC.
+    pub aac_seq_header_sent: bool,
 }
 
 #[derive(Clone)]
