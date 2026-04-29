@@ -167,14 +167,7 @@ impl RtmpPusher {
             tokio::time::sleep(Duration::from_millis(pacing_sleep_ms)).await;
         }
         tracing::info!(
-            tags_sent,
-            tags_skipped,
-            bytes_sent,
-            send_elapsed_ms,
-            pacing_sleep_ms,
-            target_ms,
-            actual_ms,
-            "rtmp_push: chunk done"
+            "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} send_elapsed_ms={send_elapsed_ms} pacing_sleep_ms={pacing_sleep_ms} target_ms={target_ms} actual_ms={actual_ms}"
         );
 
         Ok(())
