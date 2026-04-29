@@ -168,10 +168,8 @@ impl RtmpPusher {
             let pre_tag_target_ms = monotonic_offset + delta as u64;
             let pre_tag_actual_ms = anchor.elapsed().as_millis() as u64;
             if pre_tag_actual_ms < pre_tag_target_ms {
-                tokio::time::sleep(Duration::from_millis(
-                    pre_tag_target_ms - pre_tag_actual_ms,
-                ))
-                .await;
+                tokio::time::sleep(Duration::from_millis(pre_tag_target_ms - pre_tag_actual_ms))
+                    .await;
             }
 
             let session = self.session.as_mut().expect("session was just set");
