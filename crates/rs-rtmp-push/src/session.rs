@@ -786,7 +786,7 @@ fn bad_url(reason: &str, url: &str) -> PushError {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_rtmp_url;
+    use super::{READ_LOOP_HOLD_MS, READ_LOOP_IDLE_MS, parse_rtmp_url};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
