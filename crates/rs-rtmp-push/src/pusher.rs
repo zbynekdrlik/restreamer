@@ -82,6 +82,14 @@ impl RtmpPusher {
         // tracks the cumulative output timestamp, not just intra-chunk time.
         let anchor = *self.state.pacing_anchor.get_or_insert_with(Instant::now);
 
+        // Per-chunk diagnostics — `tracing::info!` lands in journalctl on
+        // the VPS so cache-growth post-mortems can attribute time to send
+        // vs sleep without redeploying with extra logs.
+        let chunk_started_at = Instant::now();
+        let mut tags_sent: u32 = 0;
+        let mut tags_skipped: u32 = 0;
+        let mut bytes_sent: u64 = 0;
+
         // Collect tag metadata (type, output timestamp) and body slices.
         // We hold the body references into `bytes` (lifetime tied to the `iter`
         // borrow of `bytes`), so we send each tag immediately inside the loop.
@@ -116,9 +124,11 @@ impl RtmpPusher {
 
             let session = self.session.as_mut().expect("session was just set");
             let send_result = if skip {
+                tags_skipped += 1;
                 Ok(())
             } else {
-                match tag.tag_type {
+                let body_len = tag.body.len();
+                let res = match tag.tag_type {
                     crate::flv::FLV_TAG_AUDIO => session.send_audio_tag(output_ts, tag.body).await,
                     crate::flv::FLV_TAG_VIDEO => session.send_video_tag(output_ts, tag.body).await,
                     crate::flv::FLV_TAG_SCRIPT => Ok(()), // skip metadata
@@ -126,7 +136,12 @@ impl RtmpPusher {
                         tracing::warn!(tag_type = other, "unknown FLV tag type, skipping");
                         Ok(())
                     }
+                };
+                if res.is_ok() {
+                    tags_sent += 1;
+                    bytes_sent += body_len as u64;
                 }
+                res
             };
 
             if let Err(e) = send_result {
@@ -136,6 +151,7 @@ impl RtmpPusher {
                 return Err(e);
             }
         }
+        let send_elapsed_ms = chunk_started_at.elapsed().as_millis() as u64;
 
         // -re-style pacing: ONCE per chunk, sleep until wall-clock has
         // caught up to the cumulative output timestamp. When we're behind
@@ -146,9 +162,20 @@ impl RtmpPusher {
         // jitter that previously dropped output to 0.3 x (#103).
         let target_ms = self.state.last_output_ts_ms;
         let actual_ms = anchor.elapsed().as_millis() as u64;
-        if actual_ms < target_ms {
-            tokio::time::sleep(Duration::from_millis(target_ms - actual_ms)).await;
+        let pacing_sleep_ms = target_ms.saturating_sub(actual_ms);
+        if pacing_sleep_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(pacing_sleep_ms)).await;
         }
+        tracing::info!(
+            tags_sent,
+            tags_skipped,
+            bytes_sent,
+            send_elapsed_ms,
+            pacing_sleep_ms,
+            target_ms,
+            actual_ms,
+            "rtmp_push: chunk done"
+        );
 
         Ok(())
     }
