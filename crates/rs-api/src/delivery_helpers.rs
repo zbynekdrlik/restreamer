@@ -4,6 +4,40 @@
 
 use std::path::PathBuf;
 
+use rs_core::models::{EndpointConfig, PusherKind};
+
+/// Build the per-endpoint JSON object embedded in the `/api/init` payload sent
+/// to the rs-delivery VPS. The `pusher` field MUST be included so the VPS
+/// honors the per-endpoint backend selection (#103) — without it, the VPS-side
+/// `EndpointConfig` deserializer falls back to `PusherKind::Ffmpeg` via
+/// `#[serde(default)]` and silently runs ffmpeg even when the operator
+/// requested the rust pusher.
+pub(crate) fn build_endpoint_init_entry(
+    ep: &EndpointConfig,
+    chunk_format: &str,
+    start_chunk_id: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "alias": ep.alias,
+        "service_type": ep.service_type,
+        "stream_key": ep.stream_key,
+        "is_fast": ep.is_fast,
+        "chunk_format": chunk_format,
+        "start_chunk_id": start_chunk_id,
+        "pusher": ep.pusher,
+    })
+}
+
+/// Returns the wire string a `PusherKind` serializes to. Used by audit and
+/// dashboard payloads that want a stable lowercase tag.
+#[allow(dead_code)]
+pub(crate) fn pusher_wire_tag(p: PusherKind) -> &'static str {
+    match p {
+        PusherKind::Ffmpeg => "ffmpeg",
+        PusherKind::Rust => "rust",
+    }
+}
+
 /// Returns true if the DB-side status represents a live delivery instance
 /// that we can talk to over HTTP.
 pub(crate) fn is_delivery_active(status: &str) -> bool {
@@ -123,5 +157,70 @@ mod tests {
         assert_eq!(read_back, "hello\nworld");
 
         std::fs::remove_dir_all(tmp.parent().unwrap()).ok();
+    }
+
+    fn make_endpoint(alias: &str, pusher: PusherKind) -> EndpointConfig {
+        EndpointConfig {
+            id: 1,
+            alias: alias.to_string(),
+            service_type: "youtube_hls".to_string(),
+            stream_key: "key-xyz".to_string(),
+            enabled: true,
+            position_last: 0,
+            delivered_bytes: 0,
+            is_fast: false,
+            pusher,
+            created_at: "2026-04-27T00:00:00Z".to_string(),
+            updated_at: "2026-04-27T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn init_entry_includes_pusher_rust() {
+        // Regression for #103: VPS init payload MUST include the per-endpoint
+        // pusher field. Without it, the VPS-side EndpointConfig deserializer
+        // falls back to PusherKind::Ffmpeg via #[serde(default)] and the
+        // operator's "pusher='rust'" choice is silently lost.
+        let ep = make_endpoint("e2e rtmp", PusherKind::Rust);
+        let v = build_endpoint_init_entry(&ep, "flv", 42);
+        assert_eq!(
+            v["pusher"], "rust",
+            "pusher field must be present and 'rust'"
+        );
+        assert_eq!(v["alias"], "e2e rtmp");
+        assert_eq!(v["start_chunk_id"], 42);
+        assert_eq!(v["chunk_format"], "flv");
+    }
+
+    #[test]
+    fn init_entry_includes_pusher_ffmpeg() {
+        let ep = make_endpoint("FB-Zbynek", PusherKind::Ffmpeg);
+        let v = build_endpoint_init_entry(&ep, "flv", 7);
+        assert_eq!(
+            v["pusher"], "ffmpeg",
+            "pusher field must be present and 'ffmpeg'"
+        );
+    }
+
+    #[test]
+    fn init_entry_pusher_field_is_never_missing() {
+        // Belt-and-braces: assert the JSON key exists for both variants. A
+        // missing key (rather than wrong value) is the exact failure mode the
+        // VPS silently absorbs via #[serde(default)].
+        for p in [PusherKind::Ffmpeg, PusherKind::Rust] {
+            let ep = make_endpoint("any", p);
+            let v = build_endpoint_init_entry(&ep, "flv", 0);
+            let obj = v.as_object().expect("init entry must be a JSON object");
+            assert!(
+                obj.contains_key("pusher"),
+                "init entry missing 'pusher' field for {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pusher_wire_tag_matches_serde_rename() {
+        assert_eq!(pusher_wire_tag(PusherKind::Ffmpeg), "ffmpeg");
+        assert_eq!(pusher_wire_tag(PusherKind::Rust), "rust");
     }
 }
