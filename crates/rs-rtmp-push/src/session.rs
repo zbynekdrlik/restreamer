@@ -771,6 +771,7 @@ mod tests {
     use super::parse_rtmp_url;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
 
     // --- URL parser tests ---------------------------------------------------
 
