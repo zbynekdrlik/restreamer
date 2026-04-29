@@ -111,3 +111,39 @@ impl RtmpPusher {
         self.state.connected = false;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test-only setter so unit tests can prove the getter reads from state.
+    /// Without this, the `RtmpPusher::last_output_ts_ms -> 0` mutation would
+    /// only be killed by integration tests (which mutation testing skips).
+    impl RtmpPusher {
+        pub(crate) fn set_last_output_ts_ms_for_test(&mut self, v: u64) {
+            self.state.last_output_ts_ms = v;
+        }
+    }
+
+    #[test]
+    fn last_output_ts_ms_reads_state_field() {
+        let mut p = RtmpPusher::new("rtmp://x:1935/a/b".into(), PusherConfig::default());
+        assert_eq!(p.last_output_ts_ms(), 0);
+        p.set_last_output_ts_ms_for_test(12_345);
+        assert_eq!(p.last_output_ts_ms(), 12_345);
+        p.set_last_output_ts_ms_for_test(u64::MAX);
+        assert_eq!(p.last_output_ts_ms(), u64::MAX);
+    }
+
+    #[test]
+    fn reconnect_count_starts_zero() {
+        let p = RtmpPusher::new("rtmp://x:1935/a/b".into(), PusherConfig::default());
+        assert_eq!(p.reconnect_count(), 0);
+    }
+
+    #[test]
+    fn url_returns_constructor_value() {
+        let p = RtmpPusher::new("rtmp://example.com/live/key".into(), PusherConfig::default());
+        assert_eq!(p.url(), "rtmp://example.com/live/key");
+    }
+}

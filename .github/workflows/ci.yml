@@ -188,16 +188,19 @@ jobs:
             exit 0
           fi
           # GH ubuntu-latest runners have intermittently lost communication
-          # at ~11 min into mutation runs. Investigation showed the first
-          # mutant's build takes ~10 min from scratch because cargo-mutants
-          # creates a separate target/ per mutant by default and doesn't
-          # reuse Swatinem/rust-cache.
+          # at ~11 min into mutation runs. Investigation: the first mutant's
+          # build was taking ~8-10 min from scratch because cargo-mutants
+          # by default creates a separate copy of the source tree per mutant
+          # and cargo's incremental cache doesn't survive a directory move
+          # (paths are baked into rmeta files), so even --copy-target=true
+          # didn't help.
           #
-          # Fix: --copy-target=true lets cargo-mutants copy the workspace's
-          # cached target/ into each mutant build dir, so individual mutant
-          # builds are incremental (seconds, not minutes). Combined with
-          # --jobs=2 and --baseline=skip we fit the runner's reliability
-          # window. Retry up to 3 times for residual transient failures.
+          # Fix: --in-place mutates the workspace directly, so individual
+          # mutant builds reuse the Swatinem/rust-cache incrementally
+          # (seconds, not minutes). --in-place forces --jobs=1 (it has to
+          # serialize mutations of the same source tree). Combined with
+          # --baseline=skip we fit comfortably under the runner window.
+          # Retry up to 3 times for residual transient failures.
           ATTEMPT=0
           MAX_ATTEMPTS=3
           while true; do
@@ -206,7 +209,7 @@ jobs:
             # rs-rtmp-push MUST stay in the mutation-testing matrix per spec
             # 7.6 of docs/superpowers/specs/2026-04-27-pure-rust-rtmp-push-design.md.
             # Do NOT add an --exclude-re for rs_rtmp_push:: or rs-rtmp-push.
-            if cargo mutants --in-diff pr.diff --copy-target=true --timeout 300 --build-timeout 600 --jobs 2 --baseline=skip --output mutants-out \
+            if cargo mutants --in-diff pr.diff --in-place --timeout 300 --build-timeout 600 --jobs 1 --baseline=skip --output mutants-out \
             --exclude-re 'impl ChunkFetcher for S3Fetcher' \
             --exclude-re 'S3Fetcher::fetch_chunk_with_meta' \
             --exclude-re 'S3Fetcher::head_chunk_duration' \
