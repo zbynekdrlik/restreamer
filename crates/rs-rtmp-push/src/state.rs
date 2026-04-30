@@ -36,17 +36,6 @@ pub struct PusherState {
     pub avc_seq_header_sent: bool,
     /// Same as `avc_seq_header_sent` but for AAC.
     pub aac_seq_header_sent: bool,
-    /// Chunker's last-seen video FLV timestamp across the pusher lifetime.
-    /// Video is stamped by the chunker with wall-clock since session start
-    /// (`crates/rs-inpoint/src/flv_chunker.rs::current_session_ts`), so the
-    /// delta between two successive chunks' last video tag IS the real
-    /// wall-clock advance from chunker's frame of reference — including
-    /// the inter-chunk keyframe gap that `chunk_duration_ms` misses.
-    /// Using this for pacing-target advance eliminates the ~1.7 % drain
-    /// caused by `chunk_duration_ms` reporting only intra-chunk span
-    /// (#103 4-h soak observed cache drop from 106s → 92s in 13 min).
-    /// `None` until the first chunk with a video tag has been pushed.
-    pub last_video_ts_ms: Option<u32>,
 }
 
 #[derive(Clone)]
