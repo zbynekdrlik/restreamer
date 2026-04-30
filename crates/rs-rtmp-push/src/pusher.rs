@@ -81,8 +81,25 @@ impl RtmpPusher {
             // reconnect even if xiu's RTMP session resets to ts=0.
             self.state.audio_origin_xiu_ts = None;
             self.state.video_origin_xiu_ts = None;
-            self.state.audio_base_ms = self.state.last_audio_output_ts_ms.saturating_add(1);
-            self.state.video_base_ms = self.state.last_video_output_ts_ms.saturating_add(1);
+            // Roll the per-track BASE forward to the LATER of:
+            //   1. one ms past the highest output_ts already sent
+            //      (preserves wire monotonicity)
+            //   2. wall-clock since pusher session start
+            //      (keeps pacing from over-shooting after a long gap;
+            //      the consumer's per-tag pacing math compares each
+            //      tag's `output_ts` directly to `anchor.elapsed()`,
+            //      and freezes the pusher if `output_ts` ever runs
+            //      far ahead of wall — see the #103 resilience-test
+            //      regression).
+            let elapsed_ms = self
+                .state
+                .pacing_anchor
+                .map(|a| a.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            self.state.audio_base_ms =
+                elapsed_ms.max(self.state.last_audio_output_ts_ms.saturating_add(1));
+            self.state.video_base_ms =
+                elapsed_ms.max(self.state.last_video_output_ts_ms.saturating_add(1));
             // last_*_xiu_ts is "what we just saw upstream"; the new
             // session starts fresh, so any xiu_ts value is valid (the
             // origin will anchor on the first tag we see).
@@ -140,15 +157,26 @@ impl RtmpPusher {
                         // xiu_ts resets to ~0 even though our RTMP-to-
                         // -YouTube session is still alive). When the new
                         // tag's xiu_ts is strictly less than the previous
-                        // tag's, treat it as an upstream reset: bump the
-                        // per-track base past the highest output_ts we
-                        // already sent, and re-anchor the origin on this
-                        // tag. PTS stays strictly monotonic on the wire.
+                        // tag's, treat it as an upstream reset and re-
+                        // anchor: bump the per-track base to match wall
+                        // clock (so subsequent pacing doesn't overshoot
+                        // and freeze the pusher) while staying strictly
+                        // greater than the highest output_ts already
+                        // sent (so the wire timeline never goes
+                        // backwards). The previous "+ 1" formulation
+                        // froze the pusher in #103 resilience-test (the
+                        // pusher's catch-up burst would advance output_ts
+                        // by chunk_duration_ms × N chunks while
+                        // anchor.elapsed only advanced by N × ~200 ms,
+                        // and pacing then slept for the difference,
+                        // exceeding the 30 s consumer-task write
+                        // timeout).
                         if let Some(prev) = self.state.last_audio_xiu_ts
                             && tag.timestamp_ms < prev
                         {
-                            self.state.audio_base_ms =
-                                self.state.last_audio_output_ts_ms.saturating_add(1);
+                            let elapsed_ms = anchor.elapsed().as_millis() as u64;
+                            self.state.audio_base_ms = elapsed_ms
+                                .max(self.state.last_audio_output_ts_ms.saturating_add(1));
                             self.state.audio_origin_xiu_ts = None;
                         }
                         self.state.last_audio_xiu_ts = Some(tag.timestamp_ms);
@@ -174,8 +202,9 @@ impl RtmpPusher {
                         if let Some(prev) = self.state.last_video_xiu_ts
                             && tag.timestamp_ms < prev
                         {
-                            self.state.video_base_ms =
-                                self.state.last_video_output_ts_ms.saturating_add(1);
+                            let elapsed_ms = anchor.elapsed().as_millis() as u64;
+                            self.state.video_base_ms = elapsed_ms
+                                .max(self.state.last_video_output_ts_ms.saturating_add(1));
                             self.state.video_origin_xiu_ts = None;
                         }
                         self.state.last_video_xiu_ts = Some(tag.timestamp_ms);
@@ -440,73 +469,76 @@ mod tests {
     /// Chunker-side timestamp regression mid-session (e.g. stream.lan
     /// crashed and resumed but VPS pusher's RTMP session to YouTube
     /// stayed alive): incoming tag.xiu_ts is strictly less than the
-    /// previous tag's. Without re-anchoring, the wire `output_ts` would
-    /// go BACKWARDS (audio_base + new_xiu - old_origin = negative,
-    /// saturating to 0, which is way less than the last tag we sent).
-    /// Detection bumps base past last_output_ts and clears origin.
+    /// previous tag's. Re-anchor `audio_base_ms` to the LATER of:
+    /// `last_output_ts + 1` (monotonic on the wire) and `elapsed_ms`
+    /// (no pacing overshoot — the previous +1 caused the pusher to
+    /// freeze in #103 resilience-test because the catch-up burst made
+    /// `output_ts` exceed `anchor.elapsed()` by tens of seconds).
     #[test]
-    fn audio_xiu_regression_advances_base_and_re_anchors() {
+    fn audio_xiu_regression_re_anchors_to_wall_clock() {
+        // Scenario: pusher ran 600 s before crash; 12 s gap; chunker
+        // resets to xiu=0. Wall-clock-aligned base means PTS continues
+        // at 612_000 (= 600_000 + 12_000 gap) instead of 600_001 (which
+        // would freeze the pusher for ~12 s of pacing sleep on the very
+        // next tag, breaking the catch-up).
         let mut state = PusherState::default();
-        // Simulate first session at xiu=0..600_000.
         state.audio_origin_xiu_ts = Some(0);
         state.last_audio_xiu_ts = Some(600_000);
         state.last_audio_output_ts_ms = 600_000;
+        let elapsed_ms = 612_000_u64; // 12-s crash gap on top of 600 s pre-crash run
 
-        // Now upstream chunker resets, new tag arrives at xiu=21
-        // (much less than the last seen 600_000).
         let new_tag_xiu_ts = 21_u32;
         let prev = state.last_audio_xiu_ts.unwrap();
         if new_tag_xiu_ts < prev {
-            state.audio_base_ms = state.last_audio_output_ts_ms.saturating_add(1);
+            state.audio_base_ms = elapsed_ms.max(state.last_audio_output_ts_ms.saturating_add(1));
             state.audio_origin_xiu_ts = None;
         }
-        // Anchor on this tag.
-        let origin = *state.audio_origin_xiu_ts.get_or_insert(new_tag_xiu_ts);
-        let delta = new_tag_xiu_ts.saturating_sub(origin) as u64;
-        let output_ts = state.audio_base_ms + delta;
 
-        assert_eq!(state.audio_base_ms, 600_001);
-        assert_eq!(origin, 21);
-        assert_eq!(delta, 0);
         assert_eq!(
-            output_ts, 600_001,
-            "post-regression first tag MUST be > prior session's last output_ts"
+            state.audio_base_ms, 612_000,
+            "base must equal wall-clock, NOT last_output_ts + 1, so pacing doesn't overshoot"
         );
-        assert!(
-            output_ts > state.last_audio_output_ts_ms,
-            "wire timeline must stay strictly monotonic"
+
+        // Wire monotonicity: even with elapsed_ms < last_output_ts the
+        // base would still be > last_output_ts (the .max() guard).
+        let mut state2 = PusherState::default();
+        state2.last_audio_xiu_ts = Some(600_000);
+        state2.last_audio_output_ts_ms = 600_000;
+        let elapsed_ms_short = 100_000_u64; // hypothetical fast-forward
+        state2.audio_base_ms =
+            elapsed_ms_short.max(state2.last_audio_output_ts_ms.saturating_add(1));
+        assert_eq!(
+            state2.audio_base_ms, 600_001,
+            "wire monotonicity guard: base never < last_output_ts + 1"
         );
     }
 
-    /// On reconnect, per-track BASE rolls forward to one past the highest
-    /// output_ts sent in the prior session. This keeps the wire timeline
-    /// strictly monotonic across reconnects even when xiu's RTMP session
-    /// resets to ts=0 on the upstream side.
+    /// On reconnect, per-track BASE rolls forward to the LATER of:
+    /// `last_output_ts + 1` (monotonic on the wire) and `elapsed_ms`
+    /// (no pacing overshoot). Same anti-freeze logic as the in-session
+    /// regression detection.
     #[test]
-    fn reconnect_advances_per_track_base() {
+    fn reconnect_advances_per_track_base_to_wall_clock() {
         let mut state = PusherState::default();
         state.last_audio_output_ts_ms = 60_000;
         state.last_video_output_ts_ms = 60_033;
         state.audio_origin_xiu_ts = Some(40_000);
         state.video_origin_xiu_ts = Some(0);
 
-        // Simulate the reconnect logic in push_flv_bytes lazy-connect block.
+        // Reconnect logic with wall-clock alignment.
+        let elapsed_ms = 75_000_u64; // session has been alive 75s wall
         state.audio_origin_xiu_ts = None;
         state.video_origin_xiu_ts = None;
-        state.audio_base_ms = state.last_audio_output_ts_ms.saturating_add(1);
-        state.video_base_ms = state.last_video_output_ts_ms.saturating_add(1);
+        state.audio_base_ms = elapsed_ms.max(state.last_audio_output_ts_ms.saturating_add(1));
+        state.video_base_ms = elapsed_ms.max(state.last_video_output_ts_ms.saturating_add(1));
 
-        assert_eq!(state.audio_base_ms, 60_001);
-        assert_eq!(state.video_base_ms, 60_034);
-        assert!(state.audio_origin_xiu_ts.is_none());
-        assert!(state.video_origin_xiu_ts.is_none());
+        assert_eq!(state.audio_base_ms, 75_000);
+        assert_eq!(state.video_base_ms, 75_000);
 
-        // First audio tag of the new session at xiu_ts=0 (xiu reset)
-        // gets output_ts = 60_001 (strictly greater than the prior
-        // session's last 60_000 → wire timeline stays monotonic).
+        // First audio tag of the new session at xiu_ts=0 → output_ts = 75_000.
         let first_xiu = 0_u32;
         let origin = *state.audio_origin_xiu_ts.get_or_insert(first_xiu);
         let output_ts = state.audio_base_ms + first_xiu.saturating_sub(origin) as u64;
-        assert_eq!(output_ts, 60_001);
+        assert_eq!(output_ts, 75_000);
     }
 }
