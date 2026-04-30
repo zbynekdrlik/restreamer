@@ -83,6 +83,11 @@ impl RtmpPusher {
             self.state.video_origin_xiu_ts = None;
             self.state.audio_base_ms = self.state.last_audio_output_ts_ms.saturating_add(1);
             self.state.video_base_ms = self.state.last_video_output_ts_ms.saturating_add(1);
+            // last_*_xiu_ts is "what we just saw upstream"; the new
+            // session starts fresh, so any xiu_ts value is valid (the
+            // origin will anchor on the first tag we see).
+            self.state.last_audio_xiu_ts = None;
+            self.state.last_video_xiu_ts = None;
         }
 
         // Empty slice -> handshake verified, nothing to send.
@@ -129,6 +134,25 @@ impl RtmpPusher {
 
             let (output_ts_u64, track_max) = match tag.tag_type {
                 crate::flv::FLV_TAG_AUDIO => {
+                    if !is_seq_header {
+                        // Detect chunker-side timestamp regression (e.g.
+                        // stream.lan crash → fresh chunker session →
+                        // xiu_ts resets to ~0 even though our RTMP-to-
+                        // -YouTube session is still alive). When the new
+                        // tag's xiu_ts is strictly less than the previous
+                        // tag's, treat it as an upstream reset: bump the
+                        // per-track base past the highest output_ts we
+                        // already sent, and re-anchor the origin on this
+                        // tag. PTS stays strictly monotonic on the wire.
+                        if let Some(prev) = self.state.last_audio_xiu_ts
+                            && tag.timestamp_ms < prev
+                        {
+                            self.state.audio_base_ms =
+                                self.state.last_audio_output_ts_ms.saturating_add(1);
+                            self.state.audio_origin_xiu_ts = None;
+                        }
+                        self.state.last_audio_xiu_ts = Some(tag.timestamp_ms);
+                    }
                     let origin = if is_seq_header {
                         // Don't anchor on the seq header (its ts=0 would
                         // pollute the audio origin with the chunk preamble
@@ -146,6 +170,16 @@ impl RtmpPusher {
                     (ts, &mut max_audio_output_ts)
                 }
                 crate::flv::FLV_TAG_VIDEO => {
+                    if !is_seq_header {
+                        if let Some(prev) = self.state.last_video_xiu_ts
+                            && tag.timestamp_ms < prev
+                        {
+                            self.state.video_base_ms =
+                                self.state.last_video_output_ts_ms.saturating_add(1);
+                            self.state.video_origin_xiu_ts = None;
+                        }
+                        self.state.last_video_xiu_ts = Some(tag.timestamp_ms);
+                    }
                     let origin = if is_seq_header {
                         self.state.video_origin_xiu_ts.unwrap_or(tag.timestamp_ms)
                     } else {
@@ -400,6 +434,47 @@ mod tests {
             np1_outputs[0] - n_outputs.last().unwrap(),
             21,
             "inter-chunk gap must equal xiu inter-frame interval"
+        );
+    }
+
+    /// Chunker-side timestamp regression mid-session (e.g. stream.lan
+    /// crashed and resumed but VPS pusher's RTMP session to YouTube
+    /// stayed alive): incoming tag.xiu_ts is strictly less than the
+    /// previous tag's. Without re-anchoring, the wire `output_ts` would
+    /// go BACKWARDS (audio_base + new_xiu - old_origin = negative,
+    /// saturating to 0, which is way less than the last tag we sent).
+    /// Detection bumps base past last_output_ts and clears origin.
+    #[test]
+    fn audio_xiu_regression_advances_base_and_re_anchors() {
+        let mut state = PusherState::default();
+        // Simulate first session at xiu=0..600_000.
+        state.audio_origin_xiu_ts = Some(0);
+        state.last_audio_xiu_ts = Some(600_000);
+        state.last_audio_output_ts_ms = 600_000;
+
+        // Now upstream chunker resets, new tag arrives at xiu=21
+        // (much less than the last seen 600_000).
+        let new_tag_xiu_ts = 21_u32;
+        let prev = state.last_audio_xiu_ts.unwrap();
+        if new_tag_xiu_ts < prev {
+            state.audio_base_ms = state.last_audio_output_ts_ms.saturating_add(1);
+            state.audio_origin_xiu_ts = None;
+        }
+        // Anchor on this tag.
+        let origin = *state.audio_origin_xiu_ts.get_or_insert(new_tag_xiu_ts);
+        let delta = new_tag_xiu_ts.saturating_sub(origin) as u64;
+        let output_ts = state.audio_base_ms + delta;
+
+        assert_eq!(state.audio_base_ms, 600_001);
+        assert_eq!(origin, 21);
+        assert_eq!(delta, 0);
+        assert_eq!(
+            output_ts, 600_001,
+            "post-regression first tag MUST be > prior session's last output_ts"
+        );
+        assert!(
+            output_ts > state.last_audio_output_ts_ms,
+            "wire timeline must stay strictly monotonic"
         );
     }
 

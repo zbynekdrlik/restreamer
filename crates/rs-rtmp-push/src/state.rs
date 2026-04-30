@@ -61,6 +61,22 @@ pub struct PusherState {
     pub video_base_ms: u64,
     /// Highest video `output_ts` actually sent.
     pub last_video_output_ts_ms: u64,
+    /// xiu FLV ts of the previous non-seq-header AUDIO tag we processed.
+    /// Used to detect chunker-side timestamp regression — when stream.lan
+    /// crashes/restarts but our RTMP session to YouTube stays alive, the
+    /// chunker resumes with xiu_ts ~0 even though we'd previously been
+    /// pushing tags at xiu_ts ~600_000. Without re-anchoring, the next
+    /// `output_ts` would be `audio_base_ms + 0` — strictly less than the
+    /// last `output_ts` we sent, breaking PTS monotonicity on the wire
+    /// and causing YouTube to drop the stream (#103 production test
+    /// 2026-04-30: stream went `active/good` → `inactive/noData` after
+    /// the crash-recovery resilience test). Detection roll forward
+    /// `audio_base_ms`, clears `audio_origin_xiu_ts`, and re-anchors on
+    /// the regressed tag — strictly monotonic on the wire, RTMP session
+    /// preserved.
+    pub last_audio_xiu_ts: Option<u32>,
+    /// Same as `last_audio_xiu_ts` but for video.
+    pub last_video_xiu_ts: Option<u32>,
 }
 
 #[derive(Clone)]
