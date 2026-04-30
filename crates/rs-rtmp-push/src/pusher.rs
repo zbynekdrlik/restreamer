@@ -58,15 +58,10 @@ impl RtmpPusher {
     pub async fn push_flv_bytes(
         &mut self,
         bytes: &[u8],
-        chunk_duration_ms: u32,
+        _chunk_duration_ms: u32,
     ) -> Result<(), PushError> {
         // Lazy connect.
         if self.session.is_none() {
-            // A reconnect is any connect that happens after media has been sent
-            // (last_output_ts_ms > 0 means at least one tag was written in a
-            // previous session).  Count the attempt before the connect so the
-            // dashboard always sees an accurate reconnect count, even when the
-            // reconnect itself fails.
             let is_reconnect = self.state.last_output_ts_ms > 0;
             let connect_result = Session::connect(&self.url, self.config.timeout_ms).await;
             if is_reconnect {
@@ -79,12 +74,15 @@ impl RtmpPusher {
             // the receiver can decode subsequent NALU/raw-AAC tags.
             self.state.avc_seq_header_sent = false;
             self.state.aac_seq_header_sent = false;
-            // Forget the chunker's video-ts anchor across reconnects: the
-            // next chunk after this point is the FIRST chunk of the new
-            // session and should advance pacing by chunk_duration_ms
-            // (one chunk's worth) instead of an enormous wall-clock
-            // delta from the prior session.
-            self.state.last_video_ts_ms = None;
+            // Reset per-track origins so the new session anchors on its
+            // first tag. Roll the per-track BASE forward to one past the
+            // highest output_ts we sent in the previous session — that
+            // keeps the wire timeline strictly monotonic across the
+            // reconnect even if xiu's RTMP session resets to ts=0.
+            self.state.audio_origin_xiu_ts = None;
+            self.state.video_origin_xiu_ts = None;
+            self.state.audio_base_ms = self.state.last_audio_output_ts_ms.saturating_add(1);
+            self.state.video_base_ms = self.state.last_video_output_ts_ms.saturating_add(1);
         }
 
         // Empty slice -> handshake verified, nothing to send.
@@ -92,88 +90,82 @@ impl RtmpPusher {
             return Ok(());
         }
 
-        // Parse FLV tags with monotonic timestamp rewriting.
+        // Parse FLV tags. Each non-seq-header media tag's `output_ts` is
+        // computed PER TRACK as `track_base + (tag.ts - track_origin)`.
+        // The two tracks evolve on independent monotonic timelines, both
+        // measured in the same units (ms) so the receiver sees them as
+        // a coherent A/V pair.
+        //
+        // Why per-track: the chunker stamps audio with xiu's RTMP session
+        // ts and video with wall-clock since chunker session start. Within
+        // a single chunk those two clocks are aligned, but the SPAN of
+        // audio in a chunk often differs from the SPAN of video in the
+        // same chunk (chunks flush at video keyframes — audio frames
+        // straddling that boundary go to whichever chunk happens to be
+        // open at the moment). Mixing the two into one shared cumulative
+        // counter caused audio frames at chunk boundaries to land on the
+        // SAME `output_ts` as the previous chunk's last audio frame, and
+        // YouTube/the decoder rendered that as an audible click every
+        // ~2 s (#103 production test on 2026-04-30).
         let iter = crate::flv::FlvTagIter::new(bytes)?;
-        // Track first ts SEPARATELY per track. The chunker stamps audio
-        // tags with xiu's RTMP session ts (e.g. 60_000 ms after one
-        // minute) but stamps video tags with wall-clock since the chunker
-        // started (e.g. 0 ms). Mixing those two domains into a single
-        // `chunk_first_ts` produces deltas inflated by the cross-domain
-        // offset (~5–60 s) and was the root cause of the cache-growth
-        // bug observed in #103 — `last_output_ts_ms` ballooned by tens
-        // of seconds per chunk, pacing slept many seconds, and effective
-        // output rate fell to 0.2 x real-time even though TCP send took
-        // ~1 ms per chunk. See `feedback_chunker_time_domains`.
-        let mut chunk_first_audio_ts: Option<u32> = None;
-        let mut chunk_first_video_ts: Option<u32> = None;
-        let monotonic_offset = self.state.last_output_ts_ms;
-        let mut max_intra_chunk_delta: u32 = 0;
-        // Anchor wall-clock once per pusher lifetime so per-chunk pacing
-        // tracks the cumulative output timestamp, not just intra-chunk time.
         let anchor = *self.state.pacing_anchor.get_or_insert_with(Instant::now);
 
-        // Per-chunk diagnostics — `tracing::info!` lands in journalctl on
-        // the VPS so cache-growth post-mortems can attribute time to send
-        // vs sleep without redeploying with extra logs.
         let chunk_started_at = Instant::now();
         let mut tags_sent: u32 = 0;
         let mut tags_skipped: u32 = 0;
         let mut bytes_sent: u64 = 0;
-        // Track the LAST non-seq-header video tag's chunker FLV ts so we
-        // can advance the cumulative pacing target by inter-chunk delta
-        // (= true wall-clock advance from chunker's frame of reference).
-        let mut last_video_ts_in_chunk: Option<u32> = None;
+        let mut max_audio_output_ts: u64 = 0;
+        let mut max_video_output_ts: u64 = 0;
 
-        // Collect tag metadata (type, output timestamp) and body slices.
-        // We hold the body references into `bytes` (lifetime tied to the `iter`
-        // borrow of `bytes`), so we send each tag immediately inside the loop.
         for tag in iter {
-            // Identify codec sequence headers up front so we can EXCLUDE them
-            // from the per-track delta anchor. The chunker writes AVC/AAC
-            // sequence headers with timestamp=0 at the START of every chunk
-            // (so each chunk is a self-contained FLV file), but the actual
-            // media tags that follow carry xiu's session timestamp (often
-            // tens of seconds after stream start). If the seq header set
-            // `chunk_first_audio_ts=0`, the next real audio tag's delta
-            // would be the cross-chunk session offset (38_000+ ms in the
-            // observed E2E run), corrupting the pacing math (#103).
+            // Sequence headers (codec config: AVC SPS/PPS, AAC config) are
+            // identified by body[1] == 0x00 (`AVCPacketType::SequenceHeader`
+            // / `AACPacketType::SequenceHeader`). The chunker writes them
+            // at the START of every chunk with ts=0 so each S3 chunk is a
+            // self-contained FLV file for the ffmpeg path. We forward
+            // exactly ONE per codec per RTMP session (subsequent ones
+            // would force the receiver to reset its decoder).
             let is_seq_header = tag.body.len() >= 2 && tag.body[1] == 0x00;
 
-            // Compute the per-chunk delta IN THE TAG'S OWN TRACK so audio
-            // (xiu domain) and video (wall-clock domain) don't pollute
-            // each other's pacing math. Sequence headers (ts=0, written
-            // by the chunker as a per-chunk preamble) are EXCLUDED from
-            // the anchor — they don't reflect the chunk's media start.
-            let delta = if is_seq_header {
-                0
-            } else {
-                match tag.tag_type {
-                    crate::flv::FLV_TAG_AUDIO => {
-                        let first = *chunk_first_audio_ts.get_or_insert(tag.timestamp_ms);
-                        tag.timestamp_ms.saturating_sub(first)
-                    }
-                    crate::flv::FLV_TAG_VIDEO => {
-                        let first = *chunk_first_video_ts.get_or_insert(tag.timestamp_ms);
-                        // Track the most recent non-seq-header video tag's
-                        // chunker FLV ts so we can advance pacing target by
-                        // its inter-chunk delta after the loop.
-                        last_video_ts_in_chunk = Some(tag.timestamp_ms);
-                        tag.timestamp_ms.saturating_sub(first)
-                    }
-                    _ => 0, // SCRIPT/unknown — no contribution to output_ts
+            let (output_ts_u64, track_max) = match tag.tag_type {
+                crate::flv::FLV_TAG_AUDIO => {
+                    let origin = if is_seq_header {
+                        // Don't anchor on the seq header (its ts=0 would
+                        // pollute the audio origin with the chunk preamble
+                        // value); use the existing or future first real
+                        // audio tag instead.
+                        self.state.audio_origin_xiu_ts.unwrap_or(tag.timestamp_ms)
+                    } else {
+                        *self
+                            .state
+                            .audio_origin_xiu_ts
+                            .get_or_insert(tag.timestamp_ms)
+                    };
+                    let delta = tag.timestamp_ms.saturating_sub(origin) as u64;
+                    let ts = self.state.audio_base_ms + delta;
+                    (ts, &mut max_audio_output_ts)
                 }
+                crate::flv::FLV_TAG_VIDEO => {
+                    let origin = if is_seq_header {
+                        self.state.video_origin_xiu_ts.unwrap_or(tag.timestamp_ms)
+                    } else {
+                        *self
+                            .state
+                            .video_origin_xiu_ts
+                            .get_or_insert(tag.timestamp_ms)
+                    };
+                    let delta = tag.timestamp_ms.saturating_sub(origin) as u64;
+                    let ts = self.state.video_base_ms + delta;
+                    (ts, &mut max_video_output_ts)
+                }
+                _ => continue, // SCRIPT/unknown — drop, no PTS to assign
             };
-            if delta > max_intra_chunk_delta {
-                max_intra_chunk_delta = delta;
+            let output_ts = output_ts_u64 as u32;
+            if output_ts_u64 > *track_max {
+                *track_max = output_ts_u64;
             }
-            let output_ts = (monotonic_offset + delta as u64) as u32;
 
-            // De-duplicate codec sequence headers across the RTMP session.
-            // The chunker re-emits AVC SPS/PPS and AAC AudioSpecificConfig
-            // in EVERY S3 chunk so each chunk is a self-contained FLV; but
-            // a real RTMP server expects each codec config exactly ONCE per
-            // session. Re-sending throttled YouTube ingestion to ~0.2 x
-            // real-time (#103).
+            // De-duplicate codec sequence headers across the session.
             let skip = match tag.tag_type {
                 crate::flv::FLV_TAG_VIDEO if is_seq_header => {
                     let already = self.state.avc_seq_header_sent;
@@ -188,18 +180,12 @@ impl RtmpPusher {
                 _ => false,
             };
 
-            // Per-tag pacing: sleep BEFORE sending so the wall-clock
-            // emission cadence matches the FLV timestamp cadence (~33 ms
-            // for 30 fps video, ~21 ms for AAC audio). Without this the
-            // pusher sends a whole chunk's tags in ~1 ms and then sleeps
-            // ~2 s — YouTube's bitrate sensor averages over a short
-            // window and reports `bitrateLow` because the per-window
-            // average is half the encoded rate (#103).
-            let pre_tag_target_ms = monotonic_offset + delta as u64;
-            let pre_tag_actual_ms = anchor.elapsed().as_millis() as u64;
-            if pre_tag_actual_ms < pre_tag_target_ms {
-                tokio::time::sleep(Duration::from_millis(pre_tag_target_ms - pre_tag_actual_ms))
-                    .await;
+            // Per-tag pacing: sleep until wall-clock catches up to this
+            // tag's PTS. Both `output_ts_u64` and `anchor.elapsed()` live
+            // in the same ms domain, so the math is direct.
+            let actual_ms = anchor.elapsed().as_millis() as u64;
+            if actual_ms < output_ts_u64 {
+                tokio::time::sleep(Duration::from_millis(output_ts_u64 - actual_ms)).await;
             }
 
             let session = self.session.as_mut().expect("session was just set");
@@ -211,11 +197,7 @@ impl RtmpPusher {
                 let res = match tag.tag_type {
                     crate::flv::FLV_TAG_AUDIO => session.send_audio_tag(output_ts, tag.body).await,
                     crate::flv::FLV_TAG_VIDEO => session.send_video_tag(output_ts, tag.body).await,
-                    crate::flv::FLV_TAG_SCRIPT => Ok(()), // skip metadata
-                    other => {
-                        tracing::warn!(tag_type = other, "unknown FLV tag type, skipping");
-                        Ok(())
-                    }
+                    _ => Ok(()),
                 };
                 if res.is_ok() {
                     tags_sent += 1;
@@ -225,59 +207,36 @@ impl RtmpPusher {
             };
 
             if let Err(e) = send_result {
-                // Drop session so next call lazy-reconnects.
                 self.state.connected = false;
                 self.session = None;
                 return Err(e);
             }
         }
-        // Advance the cumulative monotonic timestamp by the INTER-CHUNK
-        // delta of the chunker's last video FLV ts (wall-clock-based).
-        // `chunk_duration_ms` only covers intra-chunk span (first → last
-        // tag in THIS chunk) and misses the keyframe-interval gap to the
-        // next chunk's first frame (~33 ms at 30 fps). Across thousands
-        // of chunks that gap accumulates to a measurable drain
-        // (#103 4-h soak: 1.7 %, ~1 s/min — exact same rate as the
-        // ffmpeg path this PR replaces). Using the inter-chunk video-ts
-        // delta tracks the chunker's wall-clock advance exactly.
-        let advance_ms = match (last_video_ts_in_chunk, self.state.last_video_ts_ms) {
-            (Some(this_last), Some(prev_last)) => {
-                // Steady state: advance by chunker's inter-chunk wall delta.
-                this_last.saturating_sub(prev_last) as u64
-            }
-            (Some(_this_last), None) => {
-                // First chunk of this session (no prior anchor): use the
-                // chunker's intra-chunk content span as a one-time
-                // approximation. The next chunk picks up exact wall delta.
-                chunk_duration_ms as u64
-            }
-            _ => {
-                // Audio-only chunk (no video tags). Fall back to the
-                // chunker's reported duration; preserves the previous
-                // last_video_ts_ms anchor for the next video-bearing chunk.
-                chunk_duration_ms as u64
-            }
-        };
-        self.state.last_output_ts_ms = monotonic_offset + advance_ms;
-        if let Some(t) = last_video_ts_in_chunk {
-            self.state.last_video_ts_ms = Some(t);
+
+        // Advance per-track bookkeeping with the highest output_ts we
+        // actually sent on each track in this chunk. `last_output_ts_ms`
+        // is the max of both — used as a single "is this a true reconnect"
+        // signal at the top of the next call and reported on the dashboard.
+        if max_audio_output_ts > self.state.last_audio_output_ts_ms {
+            self.state.last_audio_output_ts_ms = max_audio_output_ts;
+        }
+        if max_video_output_ts > self.state.last_video_output_ts_ms {
+            self.state.last_video_output_ts_ms = max_video_output_ts;
+        }
+        let cumulative_max = self
+            .state
+            .last_audio_output_ts_ms
+            .max(self.state.last_video_output_ts_ms);
+        if cumulative_max > self.state.last_output_ts_ms {
+            self.state.last_output_ts_ms = cumulative_max;
         }
         let send_elapsed_ms = chunk_started_at.elapsed().as_millis() as u64;
-
-        // Per-chunk tail pacing: small mop-up sleep if all per-tag sleeps
-        // together still left us slightly behind the cumulative target
-        // (e.g. zero-duration tags or rounding). With per-tag pacing
-        // active above this is normally 0–10 ms; the line is kept so a
-        // CHUNKER chunk_duration_ms larger than the sum of FLV deltas
-        // still produces correct cumulative pacing.
-        let target_ms = self.state.last_output_ts_ms;
         let actual_ms = anchor.elapsed().as_millis() as u64;
+        let target_ms = self.state.last_output_ts_ms;
         let pacing_sleep_ms = target_ms.saturating_sub(actual_ms);
-        if pacing_sleep_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(pacing_sleep_ms)).await;
-        }
+
         tracing::info!(
-            "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} chunk_duration_ms={chunk_duration_ms} advance_ms={advance_ms} max_intra_chunk_delta={max_intra_chunk_delta} send_elapsed_ms={send_elapsed_ms} pacing_sleep_ms={pacing_sleep_ms} target_ms={target_ms} actual_ms={actual_ms}"
+            "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} a_out={max_audio_output_ts} v_out={max_video_output_ts} send_elapsed_ms={send_elapsed_ms} pacing_sleep_ms={pacing_sleep_ms} target_ms={target_ms} actual_ms={actual_ms}"
         );
 
         Ok(())
@@ -391,47 +350,88 @@ mod tests {
         assert!(!state.aac_seq_header_sent);
     }
 
-    /// Per-track delta math (regression for #103, run 25131115779):
-    /// the chunker stamps audio with xiu's RTMP session timestamp and
-    /// video with wall-clock since the chunker session start. Mixing
-    /// the two domains into a single `chunk_first_ts` produces deltas
-    /// inflated by the cross-domain offset (~5–60 s); per-chunk
-    /// `last_output_ts_ms` then balloons by tens of seconds and pacing
-    /// over-sleeps. Compute the delta against the FIRST tag of THE SAME
-    /// TRACK and use the max of audio/video intra-chunk deltas as the
-    /// chunk's media duration.
+    /// Audio output_ts continuity across chunk boundaries (regression
+    /// for #103 production test on 2026-04-30: audible click every ~2 s
+    /// when the rust pusher delivered to YouTube).
+    ///
+    /// Audio frames continue at xiu's monotonic ts across chunks (e.g.
+    /// 40000, 40021, ..., 41979 in chunk N; 42000, 42021, ..., 43979 in
+    /// chunk N+1). The pusher's `output_ts` for those frames is
+    /// `audio_base + (xiu_ts - audio_origin)`. With per-track origin
+    /// pinned at the FIRST audio tag of the session, audio's `output_ts`
+    /// timeline matches xiu's timeline exactly: continuous, monotonic,
+    /// no jumps at chunk boundaries.
     #[test]
-    fn per_track_delta_handles_offset_audio_xiu_vs_wallclock_video() {
-        // Simulate one chunk where audio lives in xiu domain and video
-        // in wall-clock domain. Within the chunk, both tracks span 2 s.
-        let video_ts = [0_u32, 33, 66, 1_000, 1_999];
-        let audio_ts = [60_000_u32, 60_023, 60_046, 61_000, 61_999];
+    fn per_track_audio_output_ts_is_continuous_across_chunks() {
+        let mut state = PusherState::default();
+        // Simulate first audio tag of the session arriving at xiu_ts=40000.
+        let origin = *state.audio_origin_xiu_ts.get_or_insert(40_000);
+        assert_eq!(origin, 40_000);
 
-        // Track first ts per track.
-        let mut chunk_first_audio_ts: Option<u32> = None;
-        let mut chunk_first_video_ts: Option<u32> = None;
-        let mut max_intra_chunk_delta: u32 = 0;
+        // Compute output_ts for chunk N's audio frames.
+        let chunk_n = [40_000_u32, 40_021, 40_042, 41_958, 41_979];
+        let n_outputs: Vec<u64> = chunk_n
+            .iter()
+            .map(|&ts| {
+                state.audio_base_ms + (ts.saturating_sub(state.audio_origin_xiu_ts.unwrap())) as u64
+            })
+            .collect();
+        assert_eq!(n_outputs, vec![0, 21, 42, 1_958, 1_979]);
 
-        for &ts in video_ts.iter() {
-            let first = *chunk_first_video_ts.get_or_insert(ts);
-            let delta = ts.saturating_sub(first);
-            if delta > max_intra_chunk_delta {
-                max_intra_chunk_delta = delta;
-            }
-        }
-        for &ts in audio_ts.iter() {
-            let first = *chunk_first_audio_ts.get_or_insert(ts);
-            let delta = ts.saturating_sub(first);
-            if delta > max_intra_chunk_delta {
-                max_intra_chunk_delta = delta;
-            }
-        }
-
-        // Chunk media duration must be ~2 s, NOT 60+ s. The OLD
-        // single-domain code would have produced 61_999 here.
+        // Now chunk N+1 — audio continues at xiu_ts=42000, 42021, ...
+        // The origin is sticky (set once at session start), NOT per-chunk.
+        let chunk_n_plus_1 = [42_000_u32, 42_021, 43_958, 43_979];
+        let np1_outputs: Vec<u64> = chunk_n_plus_1
+            .iter()
+            .map(|&ts| {
+                state.audio_base_ms + (ts.saturating_sub(state.audio_origin_xiu_ts.unwrap())) as u64
+            })
+            .collect();
+        // CRITICAL: chunk N+1's first audio output_ts (2_000) must be
+        // STRICTLY GREATER than chunk N's last (1_979) by exactly the
+        // xiu inter-chunk delta (21 ms). Old code rebased per chunk and
+        // collided at 1_979 → audible click every chunk boundary.
+        assert_eq!(np1_outputs, vec![2_000, 2_021, 3_958, 3_979]);
         assert!(
-            max_intra_chunk_delta >= 1_999 && max_intra_chunk_delta <= 2_100,
-            "expected ~2000 ms chunk duration, got {max_intra_chunk_delta} ms"
+            np1_outputs[0] > *n_outputs.last().unwrap(),
+            "audio output_ts must be strictly monotonic across chunk boundary"
         );
+        assert_eq!(
+            np1_outputs[0] - n_outputs.last().unwrap(),
+            21,
+            "inter-chunk gap must equal xiu inter-frame interval"
+        );
+    }
+
+    /// On reconnect, per-track BASE rolls forward to one past the highest
+    /// output_ts sent in the prior session. This keeps the wire timeline
+    /// strictly monotonic across reconnects even when xiu's RTMP session
+    /// resets to ts=0 on the upstream side.
+    #[test]
+    fn reconnect_advances_per_track_base() {
+        let mut state = PusherState::default();
+        state.last_audio_output_ts_ms = 60_000;
+        state.last_video_output_ts_ms = 60_033;
+        state.audio_origin_xiu_ts = Some(40_000);
+        state.video_origin_xiu_ts = Some(0);
+
+        // Simulate the reconnect logic in push_flv_bytes lazy-connect block.
+        state.audio_origin_xiu_ts = None;
+        state.video_origin_xiu_ts = None;
+        state.audio_base_ms = state.last_audio_output_ts_ms.saturating_add(1);
+        state.video_base_ms = state.last_video_output_ts_ms.saturating_add(1);
+
+        assert_eq!(state.audio_base_ms, 60_001);
+        assert_eq!(state.video_base_ms, 60_034);
+        assert!(state.audio_origin_xiu_ts.is_none());
+        assert!(state.video_origin_xiu_ts.is_none());
+
+        // First audio tag of the new session at xiu_ts=0 (xiu reset)
+        // gets output_ts = 60_001 (strictly greater than the prior
+        // session's last 60_000 → wire timeline stays monotonic).
+        let first_xiu = 0_u32;
+        let origin = *state.audio_origin_xiu_ts.get_or_insert(first_xiu);
+        let output_ts = state.audio_base_ms + first_xiu.saturating_sub(origin) as u64;
+        assert_eq!(output_ts, 60_001);
     }
 }

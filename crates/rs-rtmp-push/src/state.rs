@@ -9,7 +9,9 @@ use tokio::time::Instant;
 /// and `EndpointRestartState`.
 #[derive(Default)]
 pub struct PusherState {
-    /// Output timestamp in ms, monotonic across reconnects. Never resets.
+    /// Highest output timestamp seen across all tracks. Used by the consumer
+    /// task as the "reconnect-count" companion metric and to decide whether
+    /// a fresh connect is a true reconnect (any media has been sent before).
     pub last_output_ts_ms: u64,
     /// Total reconnects since the pusher was created. Surfaced as the
     /// dashboard `reconnect_count` metric (replaces `ffmpeg_restart_count`).
@@ -19,12 +21,10 @@ pub struct PusherState {
     /// session. Lazy reconnect on next `push_flv_bytes`.
     pub connected: bool,
     /// Wall-clock anchor for `-re`-style pacing. Set on the first chunk we
-    /// successfully push and reused across the whole pusher lifetime; together
-    /// with `last_output_ts_ms` it lets `push_flv_bytes` sleep ONCE per chunk
-    /// to keep output close to 1 x media-time when up-to-date, while still
-    /// running flat-out when behind. Per-tag pacing was tried first but the
-    /// 80 sleeps/sec compounded scheduler jitter and dropped output to
-    /// ~0.3 x real-time (#103, run 25119429314).
+    /// successfully push and reused across the whole pusher lifetime.
+    /// Each tag's pacing target is its `output_ts` directly — same domain
+    /// as `anchor.elapsed()`, so when up-to-date the pusher sleeps just
+    /// long enough for wall-clock to catch up to the tag's PTS.
     pub pacing_anchor: Option<Instant>,
     /// `true` once an AVC sequence header has been forwarded on this RTMP
     /// session. The chunker re-emits the sequence header in EVERY S3 chunk
@@ -36,18 +36,31 @@ pub struct PusherState {
     pub avc_seq_header_sent: bool,
     /// Same as `avc_seq_header_sent` but for AAC.
     pub aac_seq_header_sent: bool,
-    /// Chunker's last-seen non-seq-header video FLV timestamp across the
-    /// pusher lifetime. The chunker stamps video with wall-clock since
-    /// session start, so the inter-chunk delta of the LAST video tag IS
-    /// the chunker's true wall-clock production rate — including the
-    /// keyframe-interval gap that `chunk_duration_ms` (intra-chunk span
-    /// only) misses. Used by `push_flv_bytes` to advance pacing target.
-    /// Without this, the pusher drained ~1.7 % of cache per second
-    /// during the #103 4-h soak (106 s → 92 s in 13 min). `None` until
-    /// the first chunk with a video tag has been pushed; reset on
-    /// reconnect so the post-reconnect chunk doesn't compute a delta
-    /// against the prior session's timeline.
-    pub last_video_ts_ms: Option<u32>,
+    /// FLV ts of the FIRST audio tag seen on the current RTMP session.
+    /// Each subsequent audio tag's wire `output_ts` is computed as
+    /// `audio_base + (tag.ts - audio_origin)`, keeping audio on its OWN
+    /// continuous timeline that exactly preserves xiu's audio cadence
+    /// (~21 ms between AAC frames). Resets to `None` on reconnect so the
+    /// new session anchors fresh; `audio_base` carries the cumulative
+    /// offset so the wire timeline stays monotonic across reconnects.
+    /// Without per-track timelines, audio frames at chunk boundaries
+    /// landed on the same `output_ts` as the last frame of the previous
+    /// chunk → audible click at every chunk boundary (#103).
+    pub audio_origin_xiu_ts: Option<u32>,
+    /// Per-track output_ts base for AUDIO. Carried across reconnects so
+    /// the wire timeline never goes backwards even when xiu's RTMP
+    /// session resets to 0 on the upstream reconnect.
+    pub audio_base_ms: u64,
+    /// Highest audio `output_ts` actually sent. Used to advance
+    /// `audio_base_ms` on reconnect (`audio_base_ms = max + 1`).
+    pub last_audio_output_ts_ms: u64,
+    /// FLV ts of the FIRST video tag seen on the current RTMP session.
+    /// See `audio_origin_xiu_ts`.
+    pub video_origin_xiu_ts: Option<u32>,
+    /// Per-track output_ts base for VIDEO.
+    pub video_base_ms: u64,
+    /// Highest video `output_ts` actually sent.
+    pub last_video_output_ts_ms: u64,
 }
 
 #[derive(Clone)]
