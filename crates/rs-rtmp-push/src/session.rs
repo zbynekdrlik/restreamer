@@ -35,7 +35,7 @@ use rtmp::netconnection::writer::{ConnectProperties, NetConnection};
 use rtmp::netstream::writer::NetStreamWriter;
 use rtmp::protocol_control_messages::writer::ProtocolControlMessagesWriter;
 use rtmp::session::define::{TRANSACTION_ID_CONNECT, TRANSACTION_ID_CREATE_STREAM};
-use tokio::net::TcpStream;
+use tokio::net::TcpSocket;
 use tokio::sync::Mutex;
 use xflv::amf0::define::Amf0ValueType;
 
@@ -89,12 +89,53 @@ impl Session {
         let (host, port, app, stream_name) = parse_rtmp_url(url)?;
 
         // --- 2. TCP connect -------------------------------------------------
+        // Pre-resolve via tokio::net::lookup_host so we can build a
+        // tokio::net::TcpSocket and configure socket options BEFORE the
+        // connect (TCP_NODELAY can be set after connect on TcpStream, but
+        // SO_SNDBUF is only exposed on TcpSocket).
         let addr = format!("{host}:{port}");
-        let tcp_stream =
-            tokio::time::timeout(Duration::from_millis(timeout_ms), TcpStream::connect(&addr))
-                .await
-                .map_err(|_| PushError::Timeout)?
-                .map_err(PushError::HandshakeFailed)?;
+        let socket_addr = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            tokio::net::lookup_host(&addr),
+        )
+        .await
+        .map_err(|_| PushError::Timeout)?
+        .map_err(PushError::HandshakeFailed)?
+        .next()
+        .ok_or_else(|| {
+            PushError::HandshakeFailed(io::Error::other(format!("no addresses for {addr}")))
+        })?;
+
+        let socket = if socket_addr.is_ipv4() {
+            TcpSocket::new_v4()
+        } else {
+            TcpSocket::new_v6()
+        }
+        .map_err(PushError::HandshakeFailed)?;
+
+        // Bump the TCP send buffer to 4 MB. With per-tag pacing
+        // ChunkPacketizer issues ~150 TCP writes per chunk (one per FLV
+        // tag), each ~17 KB. The default Linux send buffer (~256 KB on
+        // most kernels) blocks each write until the kernel has receive-
+        // ACKed the prior bytes — Hetzner→YouTube RTT is ~30 ms, so the
+        // pusher caps at roughly 33 writes/s = 4 s to drain a 2 s chunk
+        // (#103, run 25138323858). A 4 MB buffer holds ~30 chunks of
+        // in-flight bytes and decouples the per-tag write rate from RTT.
+        // Failure to set the option logs a warning but does not fail the
+        // connection — kernels with rmem/wmem caps will simply get the
+        // largest value they allow.
+        const PUSH_SEND_BUF_BYTES: u32 = 4 * 1024 * 1024;
+        if let Err(e) = socket.set_send_buffer_size(PUSH_SEND_BUF_BYTES) {
+            tracing::warn!(error = %e, "failed to set TCP send buffer size on push socket");
+        }
+
+        let tcp_stream = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            socket.connect(socket_addr),
+        )
+        .await
+        .map_err(|_| PushError::Timeout)?
+        .map_err(PushError::HandshakeFailed)?;
 
         // Disable Nagle's algorithm (TCP_NODELAY=true). RTMP packetizes a
         // single FLV tag into many small chunks (default 4 KB each) and
@@ -105,19 +146,6 @@ impl Session {
         // grew at ~0.8 s/s during init (#103, run 25116396931).
         if let Err(e) = tcp_stream.set_nodelay(true) {
             tracing::warn!(error = %e, "failed to set TCP_NODELAY on push socket");
-        }
-
-        // Bump the TCP send buffer to 4 MB. With per-tag pacing
-        // ChunkPacketizer issues ~150 TCP writes per chunk (one per FLV
-        // tag), each ~17 KB. The default Linux send buffer (~256 KB on
-        // most kernels) blocks each write until the kernel has receive-
-        // ACKed the prior bytes — Hetzner→YouTube RTT is ~30 ms, so the
-        // pusher caps at roughly 33 writes/s = 4 s to drain a 2 s chunk
-        // (#103, run 25138323858). A 4 MB buffer holds ~30 chunks of
-        // in-flight bytes and decouples the per-tag write rate from RTT.
-        const PUSH_SEND_BUF_BYTES: u32 = 4 * 1024 * 1024;
-        if let Err(e) = tcp_stream.set_send_buffer_size(PUSH_SEND_BUF_BYTES as usize) {
-            tracing::warn!(error = %e, "failed to set TCP send buffer size on push socket");
         }
 
         // Wrap in TcpIO and share via Arc<Mutex<>>.
