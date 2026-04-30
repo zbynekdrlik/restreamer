@@ -118,32 +118,48 @@ impl RtmpPusher {
         // We hold the body references into `bytes` (lifetime tied to the `iter`
         // borrow of `bytes`), so we send each tag immediately inside the loop.
         for tag in iter {
+            // Identify codec sequence headers up front so we can EXCLUDE them
+            // from the per-track delta anchor. The chunker writes AVC/AAC
+            // sequence headers with timestamp=0 at the START of every chunk
+            // (so each chunk is a self-contained FLV file), but the actual
+            // media tags that follow carry xiu's session timestamp (often
+            // tens of seconds after stream start). If the seq header set
+            // `chunk_first_audio_ts=0`, the next real audio tag's delta
+            // would be the cross-chunk session offset (38_000+ ms in the
+            // observed E2E run), corrupting the pacing math (#103).
+            let is_seq_header = tag.body.len() >= 2 && tag.body[1] == 0x00;
+
             // Compute the per-chunk delta IN THE TAG'S OWN TRACK so audio
             // (xiu domain) and video (wall-clock domain) don't pollute
-            // each other's pacing math.
-            let delta = match tag.tag_type {
-                crate::flv::FLV_TAG_AUDIO => {
-                    let first = *chunk_first_audio_ts.get_or_insert(tag.timestamp_ms);
-                    tag.timestamp_ms.saturating_sub(first)
+            // each other's pacing math. Sequence headers (ts=0, written
+            // by the chunker as a per-chunk preamble) are EXCLUDED from
+            // the anchor — they don't reflect the chunk's media start.
+            let delta = if is_seq_header {
+                0
+            } else {
+                match tag.tag_type {
+                    crate::flv::FLV_TAG_AUDIO => {
+                        let first = *chunk_first_audio_ts.get_or_insert(tag.timestamp_ms);
+                        tag.timestamp_ms.saturating_sub(first)
+                    }
+                    crate::flv::FLV_TAG_VIDEO => {
+                        let first = *chunk_first_video_ts.get_or_insert(tag.timestamp_ms);
+                        tag.timestamp_ms.saturating_sub(first)
+                    }
+                    _ => 0, // SCRIPT/unknown — no contribution to output_ts
                 }
-                crate::flv::FLV_TAG_VIDEO => {
-                    let first = *chunk_first_video_ts.get_or_insert(tag.timestamp_ms);
-                    tag.timestamp_ms.saturating_sub(first)
-                }
-                _ => 0, // SCRIPT/unknown — no contribution to output_ts
             };
             if delta > max_intra_chunk_delta {
                 max_intra_chunk_delta = delta;
             }
             let output_ts = (monotonic_offset + delta as u64) as u32;
 
-            // Identify and de-duplicate codec sequence headers. The chunker
-            // re-emits AVC SPS/PPS and AAC AudioSpecificConfig in EVERY S3
-            // chunk so each chunk is a self-contained FLV; but a real RTMP
-            // server expects each codec config exactly ONCE per session.
-            // Re-sending was observed to throttle YouTube ingestion and
-            // drop output to ~0.2 x real-time (#103).
-            let is_seq_header = tag.body.len() >= 2 && tag.body[1] == 0x00;
+            // De-duplicate codec sequence headers across the RTMP session.
+            // The chunker re-emits AVC SPS/PPS and AAC AudioSpecificConfig
+            // in EVERY S3 chunk so each chunk is a self-contained FLV; but
+            // a real RTMP server expects each codec config exactly ONCE per
+            // session. Re-sending throttled YouTube ingestion to ~0.2 x
+            // real-time (#103).
             let skip = match tag.tag_type {
                 crate::flv::FLV_TAG_VIDEO if is_seq_header => {
                     let already = self.state.avc_seq_header_sent;
