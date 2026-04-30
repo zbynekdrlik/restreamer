@@ -1,0 +1,564 @@
+[     785ms] [WARNING] The `integrity` attribute is currently ignored for preload destinations that do not support subresource integrity. See https://crbug.com/981419 for more information @ http://stream.lan:8910/:29
+[ 5350933ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5350935ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 5350936ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5351372ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5351374ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 5351380ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5351386ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 5351390ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 5351392ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 5351395ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 5352380ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5352381ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 5352383ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5352393ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 5352396ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 5352405ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 5352407ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 5352927ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5352928ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 5352929ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5353387ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5353388ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 5353390ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5353392ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 5353396ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 5353398ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 5353401ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 5354394ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5354396ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 5354405ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5354410ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 5354413ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 5354417ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 5354421ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 5354930ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5354935ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 5354939ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5355401ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 5355402ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5355405ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5355407ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 5355413ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 5355415ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 5355418ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 5356406ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5356409ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 5356410ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5356414ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 5356417ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 5356420ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 5356424ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 5356926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5356928ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 5356929ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5357415ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5357418ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5357420ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 5357423ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 5357430ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 5357433ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 5357435ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 5996933ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5996937ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 5996941ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5997570ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 5997572ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5997577ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5997583ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 5997589ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 5997601ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 5997612ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 5998573ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 5998574ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5998577ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5998582ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 5998589ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 5998593ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 5998597ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 5998924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5998928ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 5998928ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5999584ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 5999586ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 5999590ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 5999595ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 5999600ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 5999604ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 5999611ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 6866932ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 6866932ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 6866935ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 6867427ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 6867428ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 6867430ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 6867434ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 6867437ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 6867440ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 6867443ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 6868430ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 6868431ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 6868435ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 6868438ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 6868440ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 6868442ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 6868444ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 6868925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 6868925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 6868927ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 6869431ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 6869433ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 6869436ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 6869439ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 6869442ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 6869445ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 6869447ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 8228953ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8228956ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 8228957ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8229879ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8229882ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8229890ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 8229891ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 8229895ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 8229898ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 8229900ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 8230898ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 8230901ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8230903ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8230905ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 8230907ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 8230908ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 8230910ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 8230923ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8230924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 8230925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8231901ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8231902ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 8231904ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8231906ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 8231908ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 8231910ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 8231913ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 8232906ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8232908ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8232910ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 8232913ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 8232917ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 8232920ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 8232926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 8232926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8232928ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 8232929ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8233914ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8233914ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 8233916ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8233919ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 8233921ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 8233923ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 8233925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 8234918ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8234919ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 8234921ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8234923ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 8234924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8234925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 8234925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 8234927ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8234927ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 8234930ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 8235922ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8235925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8235925ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 8235927ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 8235930ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 8235932ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 8235934ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 8876930ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8876931ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 8876933ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8876980ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8876982ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 8876982ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8876987ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 8876993ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 8876995ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 8876996ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 8877985ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8877986ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 8877988ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8877990ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 8877992ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 8877994ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 8878000ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 8878924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8878925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 8878926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8878989ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 8878990ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 8878992ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 8878993ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 8878995ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 8878997ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 8878999ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 9770931ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 9770932ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 9770933ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 9771096ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 9771096ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 9771098ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 9771103ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 9771106ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 9771108ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 9771110ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 9772098ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 9772099ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 9772101ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 9772103ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 9772105ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 9772107ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 9772109ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[ 9772924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 9772924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[ 9772925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 9773101ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[ 9773102ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[ 9773104ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[ 9773106ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[ 9773109ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[ 9773112ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[ 9773114ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[37128953ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37128959ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[37128961ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37129005ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37129007ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37129013ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[37129030ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[37129037ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[37129037ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[37129042ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[37130043ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[37130044ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37130047ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37130050ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[37130052ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[37130054ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[37130058ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[37130928ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37130930ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[37130931ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37131048ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[37131048ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37131051ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37131054ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[37131057ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[37131060ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[37131061ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[37132053ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37132054ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[37132057ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37132060ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[37132063ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[37132066ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[37132070ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[37132924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37132925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[37132926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37133059ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37133061ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[37133065ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37133068ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[37133070ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[37133074ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[37133076ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[37134065ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37134067ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[37134068ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37134071ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[37134074ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[37134076ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[37134078ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[37134929ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37134930ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[37134937ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37135071ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37135073ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37135075ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[37135076ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[37135078ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[37135078ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[37135080ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[37776275ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[37776276ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37776278ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37776281ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[37776283ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[37776285ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[37776287ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[37776924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37776925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[37776926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37777278ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37777279ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[37777281ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37777283ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[37777285ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[37777287ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[37777289ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[37778282ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[37778283ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[37778284ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[37778286ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[37778288ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[37778290ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[37778292ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[38648657ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[38648657ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[38648659ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[38648661ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[38648664ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[38648667ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[38648670ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[38648924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[38648925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[38648926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[38649659ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[38649660ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[38649663ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[38649665ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[38649667ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[38649669ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[38649672ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[38650661ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[38650664ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[38650667ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[38650668ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[38650670ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[38650672ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[38650675ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[38650923ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[38650924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[38650926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[39120931ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[39120933ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[39120933ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[39121476ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[39121477ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[39121481ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[39121483ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[39121486ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[39121488ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[39121489ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[39122480ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[39122481ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[39122483ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[39122485ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[39122487ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[39122489ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[39122491ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[39122925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[39122925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[39122927ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[39123483ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[39123484ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[39123485ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[39123487ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[39123489ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[39123491ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[39123494ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[39990863ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[39990864ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[39990866ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[39990869ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[39990871ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[39990873ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[39990877ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[39990926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[39990927ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[39990927ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/youtube/status:0
+[39990929ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[39991867ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[39991867ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[39991869ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[39991871ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[39991873ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[39991876ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[39991878ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[39992869ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[39992870ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[39992871ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[39992873ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[39992876ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[39992879ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[39992881ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[39992924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[39992926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[39992928ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42016586ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42016595ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[42016595ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42016604ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[42016623ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[42016630ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[42016632ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[42016924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42016925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[42016926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42017601ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42017602ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[42017604ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42017606ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[42017608ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[42017609ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[42017613ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[42018607ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42018609ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[42018613ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42018619ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[42018623ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[42018630ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[42018634ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[42018924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42018925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[42018926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42019613ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[42019613ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42019615ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42019618ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[42019619ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[42019622ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[42019626ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[42020616ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42020617ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[42020619ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42020621ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[42020623ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[42020625ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[42020638ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[42020924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42020926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[42020926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42021624ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[42021625ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42021629ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42021633ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[42021637ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[42021640ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[42021643ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[42022628ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42022633ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42022634ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[42022638ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[42022640ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[42022642ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[42022645ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[42022924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42022925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[42022926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42664765ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[42664765ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42664769ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42664772ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[42664775ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[42664777ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[42664779ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[42664924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42664926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[42664926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42665770ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42665771ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[42665772ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42665774ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[42665776ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[42665778ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[42665780ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[42666776ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42666776ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[42666778ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[42666781ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[42666784ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[42666786ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[42666790ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[42666926ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[42666928ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[42666931ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[43538216ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[43538219ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[43538219ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[43538222ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[43538224ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[43538226ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[43538228ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[43538924ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[43538925ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[43538927ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[43539222ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[43539223ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[43539225ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[43539227ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[43539229ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[43539235ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[43539237ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[43540224ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[43540225ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[43540228ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[43540244ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[43540256ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[43540263ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[43540271ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[45616939ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[45616941ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[45616954ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[45616954ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[45616958ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[45616962ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[45616976ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[45616987ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[45616994ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[45617003ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[45617973ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[45617978ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[45617984ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[45617995ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[45618004ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[45618011ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[45618018ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[45618930ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[45618933ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[45618939ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[45618988ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[45618990ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[45618994ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[45619000ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[45619007ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[45619013ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[45619019ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[46476937ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[46476940ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[46476943ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[46477073ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[46477075ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[46477078ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[46477090ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[46477096ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[46477104ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[46477108ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[46478081ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[46478089ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[46478094ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[46478103ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[46478109ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[46478113ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[46478121ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0
+[46478927ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[46478929ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/uploads/stats:0
+[46478937ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[46479094ms] [ERROR] WebSocket connection to 'ws://stream.lan:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/leptos-ui-b5fcc4bcb75650a.js:688
+[46479094ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/status:0
+[46479104ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/chunks/stats:0
+[46479108ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/delivery/status/cached:0
+[46479114ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/events:0
+[46479120ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/endpoints:0
+[46479126ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://stream.lan:8910/api/v1/obs/status:0

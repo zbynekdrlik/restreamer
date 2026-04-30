@@ -79,6 +79,12 @@ impl RtmpPusher {
             // the receiver can decode subsequent NALU/raw-AAC tags.
             self.state.avc_seq_header_sent = false;
             self.state.aac_seq_header_sent = false;
+            // Forget the chunker's video-ts anchor across reconnects: the
+            // next chunk after this point is the FIRST chunk of the new
+            // session and should advance pacing by chunk_duration_ms (one
+            // chunk's worth) instead of an enormous wall-clock delta from
+            // the prior session.
+            self.state.last_video_ts_ms = None;
         }
 
         // Empty slice -> handshake verified, nothing to send.
@@ -113,6 +119,10 @@ impl RtmpPusher {
         let mut tags_sent: u32 = 0;
         let mut tags_skipped: u32 = 0;
         let mut bytes_sent: u64 = 0;
+        // Track the LAST non-seq-header video tag's chunker FLV ts to
+        // compute the inter-chunk wall-clock advance (see PusherState
+        // `last_video_ts_ms`). Updated below as we walk the FLV tags.
+        let mut last_video_ts_in_chunk: Option<u32> = None;
 
         // Collect tag metadata (type, output timestamp) and body slices.
         // We hold the body references into `bytes` (lifetime tied to the `iter`
@@ -144,6 +154,10 @@ impl RtmpPusher {
                     }
                     crate::flv::FLV_TAG_VIDEO => {
                         let first = *chunk_first_video_ts.get_or_insert(tag.timestamp_ms);
+                        // Track the most recent non-seq-header video tag's
+                        // chunker ts so we can advance the pacing target by
+                        // its inter-chunk delta below.
+                        last_video_ts_in_chunk = Some(tag.timestamp_ms);
                         tag.timestamp_ms.saturating_sub(first)
                     }
                     _ => 0, // SCRIPT/unknown — no contribution to output_ts
@@ -217,14 +231,35 @@ impl RtmpPusher {
                 return Err(e);
             }
         }
-        // Advance the cumulative monotonic timestamp by the chunker's
-        // authoritative media duration. Using FLV tag deltas would risk
-        // measuring from the wrong time domain (audio xiu vs video
-        // wall-clock) or from in-chunk frame-arrival jitter; the chunker's
-        // `chunk_duration_ms` is computed from video keyframe-to-keyframe
-        // wall-clock and is the only honest source of "how much real
-        // media is in this chunk".
-        self.state.last_output_ts_ms = monotonic_offset + chunk_duration_ms as u64;
+        // Advance the cumulative monotonic timestamp by the INTER-CHUNK
+        // delta of the chunker's last video FLV ts (wall-clock-based).
+        // `chunk_duration_ms` only covers intra-chunk span (first → last
+        // tag in THIS chunk) and misses the keyframe-interval gap to the
+        // next chunk's first frame (~33 ms at 30 fps). Across thousands
+        // of chunks that gap accumulates to a measurable drain
+        // (#103 4-h soak: 1.7 %, ~1 s/min — exact same rate as the
+        // ffmpeg path this PR replaces). Using the inter-chunk video-ts
+        // delta tracks the chunker's wall-clock advance exactly.
+        let advance_ms = match (last_video_ts_in_chunk, self.state.last_video_ts_ms) {
+            (Some(this_last), Some(prev_last)) => {
+                // Normal steady-state path: advance by wall delta.
+                this_last.saturating_sub(prev_last) as u64
+            }
+            (Some(_this_last), None) => {
+                // First chunk: no prev anchor yet; use chunker's
+                // intra-chunk content span as a one-time approximation.
+                chunk_duration_ms as u64
+            }
+            _ => {
+                // No video tags in this chunk (unusual, e.g. audio-only
+                // segment). Fall back to chunker's reported duration.
+                chunk_duration_ms as u64
+            }
+        };
+        self.state.last_output_ts_ms = monotonic_offset + advance_ms;
+        if let Some(t) = last_video_ts_in_chunk {
+            self.state.last_video_ts_ms = Some(t);
+        }
         let send_elapsed_ms = chunk_started_at.elapsed().as_millis() as u64;
 
         // Per-chunk tail pacing: small mop-up sleep if all per-tag sleeps
@@ -240,7 +275,7 @@ impl RtmpPusher {
             tokio::time::sleep(Duration::from_millis(pacing_sleep_ms)).await;
         }
         tracing::info!(
-            "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} chunk_duration_ms={chunk_duration_ms} max_intra_chunk_delta={max_intra_chunk_delta} send_elapsed_ms={send_elapsed_ms} pacing_sleep_ms={pacing_sleep_ms} target_ms={target_ms} actual_ms={actual_ms}"
+            "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} chunk_duration_ms={chunk_duration_ms} advance_ms={advance_ms} max_intra_chunk_delta={max_intra_chunk_delta} send_elapsed_ms={send_elapsed_ms} pacing_sleep_ms={pacing_sleep_ms} target_ms={target_ms} actual_ms={actual_ms}"
         );
 
         Ok(())
