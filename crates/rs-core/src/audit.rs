@@ -58,6 +58,12 @@ pub enum Action {
     EndpointAliveTransition,
     EndpointFfmpegDied,
     EndpointFfmpegRestartFailed,
+    /// Rust RTMP pusher (`PusherKind::Rust`) lost its session and is
+    /// reconnecting. Distinct from `EndpointFfmpegDied` so the dashboard
+    /// can render the correct icon/label for the rust path — operators
+    /// looking at the activity feed should immediately see "rust pusher
+    /// reconnected" rather than the misleading "ffmpeg died" (#103).
+    EndpointRtmpPushDied,
     S3UploadFailed,
     S3FetchFailed,
     RestreamerStarted,

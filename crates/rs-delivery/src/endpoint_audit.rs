@@ -167,9 +167,12 @@ pub fn emit_s3_fetcher_init_failed(audit_ring: &Option<Arc<AuditRing>>, alias: &
     );
 }
 
-/// Audit row emitted when the Rust RTMP pusher disconnects. Mirrors
-/// `emit_ffmpeg_died` so operators see the same schema regardless of
-/// which backend is active. See spec sec 5.5.
+/// Audit row emitted when the Rust RTMP pusher disconnects. Uses its OWN
+/// `Action::EndpointRtmpPushDied` variant so the dashboard activity feed
+/// can render the correct icon/label — operators watching the rust path
+/// should see "rust pusher reconnected" immediately, not the misleading
+/// "ffmpeg died" that would appear if both backends shared
+/// `EndpointFfmpegDied` (#103 4-h soak feedback).
 pub fn emit_rtmp_push_died(
     audit_ring: &Option<Arc<AuditRing>>,
     alias: &str,
@@ -182,7 +185,7 @@ pub fn emit_rtmp_push_died(
         Severity::Warn,
         Source::Vps,
         Some(alias.to_string()),
-        Action::EndpointFfmpegDied,
+        Action::EndpointRtmpPushDied,
         serde_json::json!({
             "backend": "rust_rtmp_push",
             "error": error_display,
