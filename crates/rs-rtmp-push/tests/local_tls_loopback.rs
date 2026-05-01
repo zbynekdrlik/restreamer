@@ -45,21 +45,32 @@ async fn rtmps_handshake_completes_and_media_payload_byte_identical() {
     let cert_der: CertificateDer<'static> = certified.cert.der().clone();
     set_tls_client_config_for_tests(test_client_config(cert_der));
 
-    // Wait for the recording subscriber to be ready before pushing.
-    sub_ready.await.expect("subscriber ready");
+    let mut pusher = RtmpPusher::new(rtmps_url.clone(), PusherConfig::default());
 
-    // Build a tiny canned FLV: AAC sequence header + 1 audio media tag +
-    // AVC sequence header + 1 video media tag.
+    // Step 1: empty push to drive handshake + publish. Mirrors the plaintext
+    // `media_payload_byte_identical_to_source` test ordering. Without this,
+    // the subscriber never sees `BroadcastEvent::Publish` and `sub_ready` is
+    // never signalled (deadlock).
+    tokio::time::timeout(Duration::from_secs(10), pusher.push_flv_bytes(&[]))
+        .await
+        .expect("rtmps handshake did not return within 10s")
+        .expect("rtmps handshake must succeed");
+
+    // Step 2: now the publish has reached the hub; wait for the recording
+    // subscriber to register before pushing media.
+    tokio::time::timeout(Duration::from_secs(5), sub_ready)
+        .await
+        .expect("subscriber task did not signal ready within 5s")
+        .expect("sub_ready channel dropped before signal");
+
+    // Step 3: push the real canned FLV.
     let canned = build_canned_flv();
     let canned_bodies_sha = sha256_flv_bodies(&canned);
 
-    // Push via rtmps://. RtmpPusher::push_flv_bytes drives Session::connect
-    // which (after Task 4) detects the rtmps:// scheme and uses TlsIO.
-    let mut pusher = RtmpPusher::new(rtmps_url.clone(), PusherConfig::default());
-    let result = tokio::time::timeout(Duration::from_secs(10), pusher.push_flv_bytes(&canned))
+    tokio::time::timeout(Duration::from_secs(10), pusher.push_flv_bytes(&canned))
         .await
-        .expect("push_flv_bytes did not return within 10s");
-    result.expect("rtmps push must succeed");
+        .expect("rtmps push did not return within 10s")
+        .expect("rtmps push must succeed");
 
     // Drain a moment so the recording subscriber finishes accumulating.
     tokio::time::sleep(Duration::from_millis(500)).await;
