@@ -588,6 +588,10 @@ pub async fn spawn_recording_xiu_server_tls() -> (
     use tokio_rustls::rustls::ServerConfig;
     use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
+    // rustls 0.23 panics on `ServerConfig::builder()` unless a process-level
+    // CryptoProvider is installed. Install ring idempotently before the build.
+    rs_rtmp_push::tls::testing::ensure_default_crypto_provider();
+
     // 1. Spawn the plain xiu server we already have.
     let (plain_url, recorded, server_handle, sub_ready_rx) = spawn_recording_xiu_server().await;
     // plain_url = "rtmp://127.0.0.1:<plain_port>/live/test"

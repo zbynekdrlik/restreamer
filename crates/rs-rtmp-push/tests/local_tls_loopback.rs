@@ -21,7 +21,10 @@ use tokio_rustls::rustls::RootCertStore;
 use tokio_rustls::rustls::pki_types::CertificateDer;
 
 /// Build a `ClientConfig` whose trust anchor is exactly the test CA.
+/// Installs rustls's `ring` crypto provider idempotently so `ClientConfig::builder()`
+/// does not panic on a missing process-level provider.
 fn test_client_config(ca_der: CertificateDer<'static>) -> Arc<ClientConfig> {
+    rs_rtmp_push::tls::testing::ensure_default_crypto_provider();
     let mut roots = RootCertStore::empty();
     roots.add(ca_der).expect("add test CA");
     Arc::new(

@@ -93,7 +93,21 @@ pub fn tls_client_config() -> Arc<ClientConfig> {
     TLS_CONFIG_DEFAULT.get_or_init(build_default_config).clone()
 }
 
+/// Install rustls's `ring` crypto provider as the process-default. Idempotent:
+/// subsequent calls (or calls from other code paths) silently no-op. rustls
+/// 0.23 panics on `ClientConfig::builder()` when no provider is installed.
+pub(crate) fn ensure_default_crypto_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // `install_default` returns Err if a provider is already installed
+        // (e.g., another test already called us). Either outcome is fine.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 fn build_default_config() -> Arc<ClientConfig> {
+    ensure_default_crypto_provider();
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let cfg = ClientConfig::builder()
@@ -135,6 +149,15 @@ pub mod testing {
     /// any rtmps:// connect attempt. Subsequent calls in the same process are
     /// silently ignored.
     pub fn set_tls_client_config_for_tests(cfg: Arc<ClientConfig>) {
+        super::ensure_default_crypto_provider();
         let _ = TLS_CONFIG_OVERRIDE.set(cfg);
+    }
+
+    /// Idempotently install rustls's `ring` crypto provider. Tests that build
+    /// their own `ServerConfig` / `ClientConfig` (e.g. the TLS bridge harness)
+    /// call this before touching any rustls Builder so they don't panic on a
+    /// missing process-level provider.
+    pub fn ensure_default_crypto_provider() {
+        super::ensure_default_crypto_provider();
     }
 }
