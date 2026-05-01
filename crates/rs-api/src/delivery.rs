@@ -12,7 +12,9 @@ use rs_core::audit::{Action, AuditRow, RateLimiter, Severity, Source};
 use rs_core::config::Config;
 use rs_core::db;
 
-pub(crate) use crate::delivery_helpers::{is_delivery_active, persist_delivery_log_to_disk};
+pub(crate) use crate::delivery_helpers::{
+    build_endpoint_init_entry, is_delivery_active, persist_delivery_log_to_disk,
+};
 
 // Re-exports so existing call sites (`crate::delivery::Foo`, test modules,
 // external uses of `rs_api::delivery::Foo`) keep working after the split.
@@ -507,14 +509,7 @@ impl DeliveryOrchestrator {
                 let ep_start = resume_pos.as_ref()
                     .and_then(|rp| rp.get(&ep.alias).copied())
                     .unwrap_or(start_chunk_id);
-                serde_json::json!({
-                    "alias": ep.alias,
-                    "service_type": ep.service_type,
-                    "stream_key": ep.stream_key,
-                    "is_fast": ep.is_fast,
-                    "chunk_format": chunk_format,
-                    "start_chunk_id": ep_start,
-                })
+                build_endpoint_init_entry(ep, chunk_format, ep_start)
             }).collect::<Vec<_>>(),
             "s3_config": {
                 "bucket": self.config.s3.bucket,
@@ -544,6 +539,12 @@ impl DeliveryOrchestrator {
                         "event_id": event_id,
                         "endpoints_count": endpoints.len(),
                         "start_chunk_id": start_chunk_id,
+                        "pushers": endpoints.iter()
+                            .map(|ep| serde_json::json!({
+                                "alias": ep.alias,
+                                "pusher": ep.pusher,
+                            }))
+                            .collect::<Vec<_>>(),
                     }),
                     ts_override: None,
                 },

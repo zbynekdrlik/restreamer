@@ -25,6 +25,7 @@ parking_lot = "0.12"
 async-trait = "0.1"
 rs-core = { path = "../rs-core" }
 rs-ffmpeg = { path = "../rs-ffmpeg" }
+rs-rtmp-push = { path = "../rs-rtmp-push" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -203,6 +203,7 @@ fn output_format_all_services_is_flv() {
 
 use crate::api::EndpointConfig;
 use crate::endpoint_task::{ChunkFetcher, EndpointStats, Stats};
+use rs_core::models::PusherKind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use tokio::sync::{Mutex, watch};
@@ -280,6 +281,7 @@ fn test_endpoint_config(alias: &str, is_fast: bool) -> EndpointConfig {
         is_fast,
         chunk_format: "flv".to_string(),
         start_chunk_id: None,
+        pusher: PusherKind::Ffmpeg,
     }
 }
 

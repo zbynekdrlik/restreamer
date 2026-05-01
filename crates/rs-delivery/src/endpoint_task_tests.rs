@@ -1,4 +1,5 @@
 use super::super::*;
+use rs_core::models::PusherKind;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -137,6 +138,7 @@ fn test_ep_cfg() -> EndpointConfig {
         is_fast: false,
         chunk_format: "flv".to_string(),
         start_chunk_id: None,
+        pusher: PusherKind::Ffmpeg,
     }
 }
 #[tokio::test]
@@ -756,14 +758,12 @@ async fn test_stats_struct_serializes() {
         current_chunk_id: 42,
         chunks_processed: 10,
         ffmpeg_restart_count: 2,
-        consecutive_ffmpeg_failures: 0,
         consecutive_chunk_misses: 5,
         last_error: Some("test error".to_string()),
         stall_reason: Some("chunk_gap".to_string()),
         ffmpeg_last_stderr: Some("connection refused".to_string()),
-        restart_history: std::collections::VecDeque::new(),
         delivery_mode: "normal".to_string(),
-        rescue_eta_secs: None,
+        ..EndpointStats::default()
     };
     let json = serde_json::to_string(&stats).unwrap();
     assert!(json.contains("\"stall_reason\":\"chunk_gap\""));

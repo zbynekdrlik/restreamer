@@ -1,5 +1,6 @@
 //! Tests for FlvStreamNormalizer and write-failure chunk-skip behavior.
 use super::super::*;
+use rs_core::models::PusherKind;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -108,6 +109,7 @@ fn flv_test_ep_cfg() -> crate::api::EndpointConfig {
         is_fast: false,
         chunk_format: "flv".to_string(),
         start_chunk_id: None,
+        pusher: PusherKind::Ffmpeg,
     }
 }
 

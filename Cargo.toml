@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/rs-core",
     "crates/rs-inpoint",
+    "crates/rs-rtmp-push",
     "crates/rs-endpoint",
     "crates/rs-api",
     "crates/rs-runtime",
@@ -21,7 +22,7 @@ members = [
 exclude = ["src-tauri", "leptos-ui"]
 
 [workspace.package]
-version = "0.3.73"
+version = "0.3.74"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/restreamer"

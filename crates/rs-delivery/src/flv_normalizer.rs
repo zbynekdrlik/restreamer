@@ -541,4 +541,42 @@ mod tests {
         assert_eq!(apply_offset(12_345, 0), 12_345);
         assert_eq!(apply_offset(0, 12_345), 12_345);
     }
+
+    #[test]
+    fn subsequent_chunks_strip_flv_header_so_rust_pusher_must_bypass() {
+        // Regression for #103: the consumer task originally sent
+        // `flv_normalizer.normalize(&chunk.data)` to BOTH the ffmpeg path and
+        // the rust pusher path. That works for ffmpeg's `-re -f flv -i pipe:`
+        // (which only needs the 9-byte FLV header on the first write) but
+        // breaks rs_rtmp_push::push_flv_bytes, which parses each chunk as a
+        // standalone FLV and rejects header-less input with
+        //   "malformed FLV input at offset 0: expected 'FLV' signature".
+        // This test locks in the normalizer contract so the consumer task
+        // keeps bypassing the normalizer for the rust pusher path.
+        let mut norm = FlvStreamNormalizer::new();
+        let chunk1 = build_flv(&[(9, 0, NALU_VIDEO.to_vec())]);
+        let chunk2 = build_flv(&[(9, 100, NALU_VIDEO.to_vec())]);
+
+        let out1 = norm.normalize(&chunk1);
+        let out2 = norm.normalize(&chunk2);
+
+        assert_eq!(
+            &out1[..3],
+            b"FLV",
+            "first normalized chunk MUST keep the FLV header for ffmpeg pipe init"
+        );
+        assert!(
+            out2.len() < 3 || &out2[..3] != b"FLV",
+            "subsequent normalized chunks MUST NOT start with the FLV header; \
+             the rust pusher therefore must bypass the normalizer and use raw \
+             chunk.data (which is a self-contained FLV from S3)"
+        );
+        // And the raw chunk must still be a valid FLV — that's the contract
+        // the rust pusher relies on.
+        assert_eq!(
+            &chunk2[..3],
+            b"FLV",
+            "raw S3 chunks are self-contained FLVs with their own header"
+        );
+    }
 }

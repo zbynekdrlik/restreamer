@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post},
 };
 use rs_core::log_buffer::LogEntry;
+use rs_core::models::PusherKind;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -100,6 +101,10 @@ pub struct EndpointConfig {
     /// Per-endpoint start chunk ID. Overrides the top-level `start_chunk_id` if set.
     #[serde(default)]
     pub start_chunk_id: Option<i64>,
+    /// Which RTMP-push backend to use. `#[serde(default)]` keeps existing
+    /// config.json files parsing unchanged (missing field -> `Ffmpeg`).
+    #[serde(default)]
+    pub pusher: PusherKind,
 }
 
 fn default_chunk_format() -> String {

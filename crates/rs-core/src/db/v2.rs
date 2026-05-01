@@ -4,15 +4,25 @@ use sqlx::sqlite::SqlitePool;
 
 use crate::error::{CoreError, Result};
 use crate::models::{
-    DeliveryEndpointStatus, DeliveryInstance, EndpointConfig, StreamingEvent, YouTubeOAuth,
+    DeliveryEndpointStatus, DeliveryInstance, EndpointConfig, PusherKind, StreamingEvent,
+    YouTubeOAuth,
 };
+
+/// Parse a `pusher` TEXT column value from the database into `PusherKind`.
+/// Unknown values default to `Ffmpeg` so existing rows are never broken.
+fn parse_pusher_kind(s: String) -> PusherKind {
+    match s.as_str() {
+        "rust" => PusherKind::Rust,
+        _ => PusherKind::Ffmpeg,
+    }
+}
 
 // --- Endpoint Configs ---
 
 pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConfig>> {
     let rows = sqlx::query(
         "SELECT id, alias, service_type, stream_key, enabled, position_last,
-         delivered_bytes, is_fast, created_at, updated_at
+         delivered_bytes, is_fast, pusher, created_at, updated_at
          FROM endpoint_configs ORDER BY id",
     )
     .fetch_all(pool)
@@ -29,6 +39,7 @@ pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConf
             position_last: r.get("position_last"),
             delivered_bytes: r.get("delivered_bytes"),
             is_fast: r.get::<i32, _>("is_fast") != 0,
+            pusher: parse_pusher_kind(r.get("pusher")),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         })
@@ -38,7 +49,7 @@ pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConf
 pub async fn get_endpoint_config(pool: &SqlitePool, id: i64) -> Result<Option<EndpointConfig>> {
     let row = sqlx::query(
         "SELECT id, alias, service_type, stream_key, enabled, position_last,
-         delivered_bytes, is_fast, created_at, updated_at
+         delivered_bytes, is_fast, pusher, created_at, updated_at
          FROM endpoint_configs WHERE id = ?1",
     )
     .bind(id)
@@ -54,6 +65,7 @@ pub async fn get_endpoint_config(pool: &SqlitePool, id: i64) -> Result<Option<En
         position_last: r.get("position_last"),
         delivered_bytes: r.get("delivered_bytes"),
         is_fast: r.get::<i32, _>("is_fast") != 0,
+        pusher: parse_pusher_kind(r.get("pusher")),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     }))
@@ -143,7 +155,7 @@ pub async fn detach_endpoint_from_event(
 pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec<EndpointConfig>> {
     let rows = sqlx::query(
         "SELECT e.id, e.alias, e.service_type, e.stream_key, e.enabled, e.position_last,
-         e.delivered_bytes, e.is_fast, e.created_at, e.updated_at
+         e.delivered_bytes, e.is_fast, e.pusher, e.created_at, e.updated_at
          FROM endpoint_configs e
          INNER JOIN event_endpoints ee ON ee.endpoint_id = e.id
          WHERE ee.event_id = ?1 AND e.enabled = 1
@@ -164,6 +176,7 @@ pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec
             position_last: r.get("position_last"),
             delivered_bytes: r.get("delivered_bytes"),
             is_fast: r.get::<i32, _>("is_fast") != 0,
+            pusher: parse_pusher_kind(r.get("pusher")),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         })

@@ -61,6 +61,17 @@ pub struct ChunkRecord {
     pub upload_failed_permanently: bool,
 }
 
+/// Which RTMP-push backend an endpoint uses. Default `Ffmpeg` keeps existing
+/// `config.json` files behaving exactly as today; `Rust` selects the new
+/// in-process pusher introduced for #103.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PusherKind {
+    #[default]
+    Ffmpeg,
+    Rust,
+}
+
 /// Endpoint configuration (e.g., YouTube HLS, Facebook RTMP).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointConfig {
@@ -72,6 +83,10 @@ pub struct EndpointConfig {
     pub position_last: i64,
     pub delivered_bytes: i64,
     pub is_fast: bool,
+    /// Which push backend to use. `#[serde(default)]` keeps existing
+    /// config.json files parsing unchanged (missing field -> `Ffmpeg`).
+    #[serde(default)]
+    pub pusher: PusherKind,
     pub created_at: String,
     pub updated_at: String,
 }

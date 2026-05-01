@@ -2477,7 +2477,7 @@ dependencies = [
 
 [[package]]
 name = "rs-api"
-version = "0.3.73"
+version = "0.3.74"
 dependencies = [
  "anyhow",
  "axum",
@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "rs-cloud"
-version = "0.3.73"
+version = "0.3.74"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2519,7 +2519,7 @@ dependencies = [
 
 [[package]]
 name = "rs-core"
-version = "0.3.73"
+version = "0.3.74"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2537,7 +2537,7 @@ dependencies = [
 
 [[package]]
 name = "rs-delivery"
-version = "0.3.73"
+version = "0.3.74"
 dependencies = [
  "async-trait",
  "axum",
@@ -2560,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "rs-endpoint"
-version = "0.3.73"
+version = "0.3.74"
 dependencies = [
  "anyhow",
  "axum",
@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "rs-ffmpeg"
-version = "0.3.73"
+version = "0.3.74"
 dependencies = [
  "serde",
  "serde_json",
@@ -2596,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "rs-inpoint"
-version = "0.3.73"
+version = "0.3.74"
 dependencies = [
  "bytes",
  "env_logger 0.11.10",
@@ -2614,8 +2614,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rs-rtmp-push"
+version = "0.3.74"
+dependencies = [
+ "bytes",
+ "bytesio",
+ "log",
+ "rtmp",
+ "sha2 0.10.9",
+ "streamhub",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "xflv",
+]
+
+[[package]]
 name = "rs-runtime"
-version = "0.3.73"
+version = "0.3.74"
 dependencies = [
  "anyhow",
  "axum",
@@ -2635,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "rs-service"
-version = "0.3.73"
+version = "0.3.74"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -2654,7 +2671,7 @@ dependencies = [
 
 [[package]]
 name = "rs-youtube"
-version = "0.3.73"
+version = "0.3.74"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",
