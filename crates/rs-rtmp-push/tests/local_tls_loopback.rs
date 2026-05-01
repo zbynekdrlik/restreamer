@@ -10,7 +10,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{RecordedTag, spawn_recording_xiu_server_tls};
+use common::{sha256_flv_bodies, sha256_recorded_bodies, spawn_recording_xiu_server_tls};
 
 use rs_rtmp_push::tls::testing::set_tls_client_config_for_tests;
 use rs_rtmp_push::{PusherConfig, RtmpPusher};
@@ -89,8 +89,7 @@ async fn rtmps_handshake_completes_and_media_payload_byte_identical() {
 }
 
 // ---------------------------------------------------------------------------
-// FLV helpers (kept local to this test file -- if more rtmps tests grow they
-// can move to tests/common/mod.rs)
+// FLV helpers (canned FLV builder is local; SHA helpers live in tests/common)
 // ---------------------------------------------------------------------------
 
 /// Build a small canned FLV stream with: header + AAC seq hdr + 1 audio tag +
@@ -141,36 +140,4 @@ fn push_flv_tag(buf: &mut Vec<u8>, tag_type: u8, ts_ms: u32, body: &[u8]) {
     // PreviousTagSize (4 bytes) = 11 + body_len
     let prev = 11u32 + body_len;
     buf.extend_from_slice(&prev.to_be_bytes());
-}
-
-fn sha256_flv_bodies(flv: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    let mut i: usize = 9 + 4; // skip FLV header + PreviousTagSize0
-    while i + 11 <= flv.len() {
-        let tag_type = flv[i];
-        let body_len =
-            ((flv[i + 1] as usize) << 16) | ((flv[i + 2] as usize) << 8) | (flv[i + 3] as usize);
-        let body_start = i + 11;
-        let body_end = body_start + body_len;
-        if body_end + 4 > flv.len() {
-            break;
-        }
-        if tag_type == 8 || tag_type == 9 {
-            hasher.update(&flv[body_start..body_end]);
-        }
-        i = body_end + 4;
-    }
-    hasher.finalize().into()
-}
-
-fn sha256_recorded_bodies(recorded: &[RecordedTag]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    for t in recorded {
-        if t.tag_type == 8 || t.tag_type == 9 {
-            hasher.update(&t.body);
-        }
-    }
-    hasher.finalize().into()
 }
