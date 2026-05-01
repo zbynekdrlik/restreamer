@@ -37,14 +37,13 @@ pub(super) async fn handle_rust_push(
     stop_rx: &mut watch::Receiver<bool>,
     flv_normalizer: &mut FlvStreamNormalizer,
 ) -> RustPushAction {
-    // Pass the chunker's authoritative chunk_duration_ms so the rust pusher
-    // advances `last_output_ts_ms` by exactly the chunk's media length and
-    // doesn't have to reverse-engineer it from FLV tag timestamps that may
-    // span different time domains for audio vs video (#103).
-    let push_duration_ms = chunk_duration_ms.max(0).min(u32::MAX as i64) as u32;
+    // chunk_duration_ms is no longer needed by push_flv_bytes (per-track
+    // output_ts math is fully timestamp-driven from inside the FLV
+    // payload — see PusherState::audio_origin_xiu_ts). Kept on the
+    // consumer-helper signature for stats reporting (`s.duration_processed_ms`).
     let push_result = tokio::time::timeout(
         std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
-        pusher.push_flv_bytes(data, push_duration_ms),
+        pusher.push_flv_bytes(data),
     )
     .await;
 

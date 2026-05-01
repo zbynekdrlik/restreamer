@@ -38,14 +38,6 @@ impl RtmpPusher {
 
     /// Lazy-connect + write FLV bytes.
     ///
-    /// `chunk_duration_ms` is the chunker's authoritative media duration of
-    /// this chunk (from `chunk_records.duration_ms`); it advances the
-    /// cumulative `last_output_ts_ms` by EXACTLY that amount, decoupling the
-    /// pacing target from FLV tag timestamps that may live in different
-    /// time domains for audio vs video (issue #103: audio is xiu-ts,
-    /// video is wall-clock — see `feedback_chunker_time_domains`).
-    /// Pass `0` only for handshake-only calls with empty `bytes`.
-    ///
     /// On the first call (or after a reconnect) the pusher dials the server,
     /// performs the full RTMP handshake + connect + publish sequence, and
     /// stores the resulting `Session`.
@@ -54,12 +46,12 @@ impl RtmpPusher {
     /// this is the Task 3 test contract: "handshake completes, no tags sent".
     ///
     /// For non-empty `bytes`, each audio/video tag body is written via
-    /// `ChunkPacketizer` with monotonically rewritten timestamps.
-    pub async fn push_flv_bytes(
-        &mut self,
-        bytes: &[u8],
-        _chunk_duration_ms: u32,
-    ) -> Result<(), PushError> {
+    /// `ChunkPacketizer` with per-track monotonically rewritten timestamps.
+    /// Each track (audio xiu-ts vs video wall-clock — see
+    /// `feedback_chunker_time_domains`) carries its own cumulative
+    /// `output_ts` so chunk boundaries don't introduce cross-track
+    /// collisions or audible clicks (#103).
+    pub async fn push_flv_bytes(&mut self, bytes: &[u8]) -> Result<(), PushError> {
         // Lazy connect.
         if self.session.is_none() {
             let is_reconnect = self.state.last_output_ts_ms > 0;
@@ -178,6 +170,8 @@ impl RtmpPusher {
                             self.state.audio_base_ms = elapsed_ms
                                 .max(self.state.last_audio_output_ts_ms.saturating_add(1));
                             self.state.audio_origin_xiu_ts = None;
+                            self.state.regression_reanchor_count =
+                                self.state.regression_reanchor_count.saturating_add(1);
                         }
                         self.state.last_audio_xiu_ts = Some(tag.timestamp_ms);
                     }
@@ -206,6 +200,8 @@ impl RtmpPusher {
                             self.state.video_base_ms = elapsed_ms
                                 .max(self.state.last_video_output_ts_ms.saturating_add(1));
                             self.state.video_origin_xiu_ts = None;
+                            self.state.regression_reanchor_count =
+                                self.state.regression_reanchor_count.saturating_add(1);
                         }
                         self.state.last_video_xiu_ts = Some(tag.timestamp_ms);
                     }
@@ -296,13 +292,28 @@ impl RtmpPusher {
         let send_elapsed_ms = chunk_started_at.elapsed().as_millis() as u64;
         let actual_ms = anchor.elapsed().as_millis() as u64;
         let target_ms = self.state.last_output_ts_ms;
-        let pacing_sleep_ms = target_ms.saturating_sub(actual_ms);
+        // Per-tag pacing already drained inside the loop — by chunk end the
+        // residual is normally 0–10 ms. Renamed from `pacing_sleep_ms` to
+        // make clear that the pusher does NOT sleep this long here; the
+        // value just shows how far ahead/behind wall-clock the chunk
+        // ended up.
+        let pacing_residual_ms = target_ms.saturating_sub(actual_ms);
+        let regression_reanchor_count = self.state.regression_reanchor_count;
 
         tracing::info!(
-            "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} a_out={max_audio_output_ts} v_out={max_video_output_ts} send_elapsed_ms={send_elapsed_ms} pacing_sleep_ms={pacing_sleep_ms} target_ms={target_ms} actual_ms={actual_ms}"
+            "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} a_out={max_audio_output_ts} v_out={max_video_output_ts} send_elapsed_ms={send_elapsed_ms} pacing_residual_ms={pacing_residual_ms} target_ms={target_ms} actual_ms={actual_ms} reanchor={regression_reanchor_count}"
         );
 
         Ok(())
+    }
+
+    /// Number of times this pusher has detected an upstream chunker
+    /// timestamp regression and re-anchored its per-track base. Mirrors
+    /// `reconnect_count()` for visibility — alerts can fire on a non-zero
+    /// value to investigate stream.lan crashes / chunker resets that
+    /// the operator might otherwise miss.
+    pub fn regression_reanchor_count(&self) -> u32 {
+        self.state.regression_reanchor_count
     }
 
     pub async fn close(&mut self) {

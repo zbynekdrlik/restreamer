@@ -61,6 +61,13 @@ pub struct PusherState {
     pub video_base_ms: u64,
     /// Highest video `output_ts` actually sent.
     pub last_video_output_ts_ms: u64,
+    /// Times this pusher has detected upstream-chunker timestamp regression
+    /// (`tag.xiu_ts < last_*_xiu_ts`) and re-anchored. Mirrors
+    /// `reconnect_count` for visibility — useful for alerting on
+    /// stream.lan crashes / chunker resets that the operator might
+    /// otherwise miss (the RTMP-to-YouTube session stays alive through
+    /// these events, so reconnect_count alone wouldn't move).
+    pub regression_reanchor_count: u32,
     /// xiu FLV ts of the previous non-seq-header AUDIO tag we processed.
     /// Used to detect chunker-side timestamp regression — when stream.lan
     /// crashes/restarts but our RTMP session to YouTube stays alive, the
