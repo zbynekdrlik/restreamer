@@ -86,7 +86,7 @@ impl Session {
     /// negotiate sequence has its own 30-second deadline.
     pub async fn connect(url: &str, timeout_ms: u64) -> Result<Self, PushError> {
         // --- 1. Parse URL ---------------------------------------------------
-        let (host, port, app, stream_name) = parse_rtmp_url(url)?;
+        let (scheme, host, port, app, stream_name) = parse_rtmp_url(url)?;
 
         // --- 2. TCP connect -------------------------------------------------
         // Pre-resolve via tokio::net::lookup_host so we can build a
@@ -148,8 +148,13 @@ impl Session {
             tracing::warn!(error = %e, "failed to set TCP_NODELAY on push socket");
         }
 
-        // Wrap in TcpIO and share via Arc<Mutex<>>.
-        let net_io: Box<dyn TNetIO + Send + Sync> = Box::new(TcpIO::new(tcp_stream));
+        // Wrap the connected stream in either TcpIO (rtmp://) or TlsIO (rtmps://).
+        // The negotiate / read-loop machinery below operates on Box<dyn TNetIO>
+        // and is therefore transparent to wire encryption.
+        let net_io: Box<dyn TNetIO + Send + Sync> = match scheme {
+            Scheme::Rtmp => Box::new(TcpIO::new(tcp_stream)),
+            Scheme::Rtmps => Box::new(crate::tls::connect_tls(tcp_stream, &host).await?),
+        };
         let io = Arc::new(Mutex::new(net_io));
 
         // --- 3-5. Negotiate (handshake + connect + publish) ------------------
@@ -756,14 +761,21 @@ fn amf_u8(v: &Amf0ValueType) -> u8 {
 // URL parsing
 // -------------------------------------------------------------------------
 
-/// Parse `rtmp://host[:port]/app/stream` into `(host, port, app, stream)`.
-///
-/// - Default port is 1935.
-/// - Both `app` and `stream` must be non-empty.
-fn parse_rtmp_url(url: &str) -> Result<(String, u16, String, String), PushError> {
-    let rest = url
-        .strip_prefix("rtmp://")
-        .ok_or_else(|| bad_url("must start with rtmp://", url))?;
+/// URL scheme of the upstream RTMP endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scheme {
+    Rtmp,
+    Rtmps,
+}
+
+fn parse_rtmp_url(url: &str) -> Result<(Scheme, String, u16, String, String), PushError> {
+    let (scheme, rest, default_port) = if let Some(r) = url.strip_prefix("rtmps://") {
+        (Scheme::Rtmps, r, 443u16)
+    } else if let Some(r) = url.strip_prefix("rtmp://") {
+        (Scheme::Rtmp, r, 1935u16)
+    } else {
+        return Err(bad_url("must start with rtmp:// or rtmps://", url));
+    };
 
     let slash = rest
         .find('/')
@@ -779,7 +791,7 @@ fn parse_rtmp_url(url: &str) -> Result<(String, u16, String, String), PushError>
             .map_err(|_| bad_url("invalid port number", url))?;
         (h.to_string(), p)
     } else {
-        (authority.to_string(), 1935u16)
+        (authority.to_string(), default_port)
     };
 
     if host.is_empty() {
@@ -800,7 +812,7 @@ fn parse_rtmp_url(url: &str) -> Result<(String, u16, String, String), PushError>
         return Err(bad_url("stream name is empty", url));
     }
 
-    Ok((host, port, app, stream))
+    Ok((scheme, host, port, app, stream))
 }
 
 fn bad_url(reason: &str, url: &str) -> PushError {
@@ -813,7 +825,7 @@ fn bad_url(reason: &str, url: &str) -> PushError {
 
 #[cfg(test)]
 mod tests {
-    use super::{READ_LOOP_HOLD_MS, READ_LOOP_IDLE_MS, parse_rtmp_url};
+    use super::{READ_LOOP_HOLD_MS, READ_LOOP_IDLE_MS, Scheme, parse_rtmp_url};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -822,8 +834,10 @@ mod tests {
     // --- URL parser tests ---------------------------------------------------
 
     #[test]
-    fn parse_standard_url() {
-        let (host, port, app, stream) = parse_rtmp_url("rtmp://a.example.com/live/test").unwrap();
+    fn parse_standard_rtmp_url() {
+        let (scheme, host, port, app, stream) =
+            parse_rtmp_url("rtmp://a.example.com/live/test").unwrap();
+        assert_eq!(scheme, Scheme::Rtmp);
         assert_eq!(host, "a.example.com");
         assert_eq!(port, 1935);
         assert_eq!(app, "live");
@@ -831,13 +845,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_url_with_port() {
-        let (host, port, app, stream) =
+    fn parse_rtmp_url_with_port() {
+        let (scheme, host, port, app, stream) =
             parse_rtmp_url("rtmp://127.0.0.1:19350/live/mykey").unwrap();
+        assert_eq!(scheme, Scheme::Rtmp);
         assert_eq!(host, "127.0.0.1");
         assert_eq!(port, 19350);
         assert_eq!(app, "live");
         assert_eq!(stream, "mykey");
+    }
+
+    #[test]
+    fn parse_standard_rtmps_url() {
+        let (scheme, host, port, app, stream) =
+            parse_rtmp_url("rtmps://live-api-s.facebook.com/rtmp/abc123").unwrap();
+        assert_eq!(scheme, Scheme::Rtmps);
+        assert_eq!(host, "live-api-s.facebook.com");
+        assert_eq!(port, 443);
+        assert_eq!(app, "rtmp");
+        assert_eq!(stream, "abc123");
+    }
+
+    #[test]
+    fn parse_rtmps_url_with_explicit_port() {
+        let (scheme, host, port, app, stream) =
+            parse_rtmp_url("rtmps://127.0.0.1:19443/live/test").unwrap();
+        assert_eq!(scheme, Scheme::Rtmps);
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 19443);
+        assert_eq!(app, "live");
+        assert_eq!(stream, "test");
     }
 
     #[test]
@@ -848,6 +885,7 @@ mod tests {
     #[test]
     fn rejects_missing_stream() {
         assert!(parse_rtmp_url("rtmp://host/live").is_err());
+        assert!(parse_rtmp_url("rtmps://host/live").is_err());
     }
 
     #[test]
