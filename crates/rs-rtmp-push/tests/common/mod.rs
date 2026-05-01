@@ -558,3 +558,100 @@ pub fn synthetic_audio_flv(ts_start_ms: u32, ts_end_ms: u32) -> Vec<u8> {
 
     out
 }
+
+// ---------------------------------------------------------------------------
+// TLS bridge harness (spec §11.2)
+// ---------------------------------------------------------------------------
+
+/// Spawn the existing recording xiu RTMP server on plain TCP, then bind a TLS
+/// listener that bridges decrypted bytes through to it via
+/// `tokio::io::copy_bidirectional`. xiu's `ServerSession::new` accepts
+/// `TcpStream` concretely (cannot consume `TlsStream`), so the bridge is the
+/// simplest way to validate rtmps:// without forking xiu.
+///
+/// Returns:
+/// - `rtmps_url`     -- `rtmps://127.0.0.1:<tls_port>/live/test`
+/// - `recorded`      -- shared accumulator filled by the underlying recording subscriber
+/// - `ca_cert_der`   -- the self-signed CA cert; the test client must trust it
+/// - `_server`       -- `JoinHandle` keeping the plain xiu server + hub alive
+/// - `sub_ready_rx`  -- fires when the recording subscriber has its frame receiver
+pub async fn spawn_recording_xiu_server_tls() -> (
+    String,
+    std::sync::Arc<tokio::sync::Mutex<Vec<RecordedTag>>>,
+    rcgen::CertifiedKey,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    // 1. Spawn the plain xiu server we already have.
+    let (plain_url, recorded, server_handle, sub_ready_rx) = spawn_recording_xiu_server().await;
+    // plain_url = "rtmp://127.0.0.1:<plain_port>/live/test"
+    let plain_authority = plain_url
+        .strip_prefix("rtmp://")
+        .and_then(|s| s.split('/').next())
+        .expect("plain URL has authority");
+    let plain_addr: std::net::SocketAddr = plain_authority
+        .parse()
+        .expect("plain authority parses as SocketAddr");
+
+    // 2. Generate a self-signed cert valid for 127.0.0.1.
+    let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("rcgen self-signed cert");
+    let cert_der: CertificateDer<'static> = certified.cert.der().clone();
+    let key_pem: Vec<u8> = certified.key_pair.serialize_der();
+    let key_der: PrivateKeyDer<'static> = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pem));
+
+    // 3. Build the TLS acceptor.
+    let server_cfg = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der.clone()], key_der)
+        .expect("rustls server config");
+    let acceptor = TlsAcceptor::from(Arc::new(server_cfg));
+
+    // 4. Bind the TLS listener on an ephemeral port.
+    let tls_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind TLS listener");
+    let tls_addr = tls_listener.local_addr().expect("tls local_addr");
+    let rtmps_url = format!("rtmps://127.0.0.1:{}/live/test", tls_addr.port());
+
+    // 5. Bridge task: TLS in, plain TCP out. One spawned task per connection.
+    tokio::spawn(async move {
+        loop {
+            let (tcp, _) = match tls_listener.accept().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let tls = match acceptor.accept(tcp).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("[bridge] tls accept error: {e}");
+                        return;
+                    }
+                };
+                let plain = match tokio::net::TcpStream::connect(plain_addr).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("[bridge] plain connect error: {e}");
+                        return;
+                    }
+                };
+                let (mut tls_r, mut tls_w) = tokio::io::split(tls);
+                let (mut plain_r, mut plain_w) = tokio::io::split(plain);
+                let _ = tokio::join!(
+                    tokio::io::copy(&mut tls_r, &mut plain_w),
+                    tokio::io::copy(&mut plain_r, &mut tls_w),
+                );
+            });
+        }
+    });
+
+    (rtmps_url, recorded, certified, server_handle, sub_ready_rx)
+}
