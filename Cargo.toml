@@ -36,6 +36,10 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "multipart"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
+# TLS for rtmps:// pusher (#156)
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
+rcgen = "0.13"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 

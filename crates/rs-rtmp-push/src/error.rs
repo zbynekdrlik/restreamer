@@ -30,6 +30,9 @@ pub enum PushError {
     #[error("local cancel")]
     LocalCancel,
 
+    #[error("TLS handshake failed: {0}")]
+    TlsHandshakeFailed(String),
+
     #[error("malformed FLV input at offset {offset}: {reason}")]
     MalformedInput { offset: usize, reason: String },
 }
@@ -44,6 +47,7 @@ pub enum PushError {
 pub fn backoff_floor_ms(err: &PushError) -> Option<u64> {
     match err {
         PushError::HandshakeFailed(_) => Some(5_000),
+        PushError::TlsHandshakeFailed(_) => Some(5_000),
         PushError::ConnectRejected { .. } => Some(30_000),
         PushError::PublishRejected { .. } => Some(30_000),
         PushError::RemoteClosed(_) => Some(30_000),
@@ -66,6 +70,7 @@ pub fn is_exponential(err: &PushError) -> bool {
         PushError::Timeout
             | PushError::IoError(_)
             | PushError::HandshakeFailed(_)
+            | PushError::TlsHandshakeFailed(_)
             | PushError::MalformedInput { .. }
             | PushError::LocalCancel
     )
@@ -226,6 +231,21 @@ mod tests {
         assert!(
             !is_exponential(&PushError::LocalCancel),
             "LocalCancel returns None from backoff_floor_ms, is_exponential must be false"
+        );
+    }
+
+    #[test]
+    fn backoff_floor_tls_handshake_failed_is_5000() {
+        let e = PushError::TlsHandshakeFailed("rustls: handshake error".into());
+        assert_eq!(backoff_floor_ms(&e), Some(5_000));
+    }
+
+    #[test]
+    fn is_exponential_tls_handshake_failed_is_false() {
+        let e = PushError::TlsHandshakeFailed("rustls: handshake error".into());
+        assert!(
+            !is_exponential(&e),
+            "TlsHandshakeFailed uses fixed floor, not exponential"
         );
     }
 }
