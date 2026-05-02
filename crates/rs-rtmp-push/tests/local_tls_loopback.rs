@@ -87,15 +87,25 @@ async fn rtmps_handshake_completes_and_media_payload_byte_identical() {
     let recorded_lock = recorded.lock().await;
     let audio_count = recorded_lock.iter().filter(|t| t.tag_type == 8).count();
     let video_count = recorded_lock.iter().filter(|t| t.tag_type == 9).count();
+    // Canned FLV has 2 audio bodies (AAC seq hdr + 1 audio media tag) and
+    // 2 video bodies (AVC seq hdr + 1 video media tag). Pusher's per-session
+    // sequence-header de-dup (`avc_seq_header_sent` / `aac_seq_header_sent`
+    // in state.rs) does NOT suppress on first-send — both audio bodies must
+    // arrive. Video, however, has the seq hdr at ts=0 and the media tag at
+    // ts=40 — the pusher's pacing waits for wall-clock to catch up, so the
+    // 40 ms-delayed second video tag may not flush before the session is
+    // dropped at end-of-scope. Hence the asymmetric `>= 2` audio vs `>= 1`
+    // video. A regression that drops one transport direction (e.g.
+    // TlsIO::write loses every other packet) would fail this gate.
     assert!(
-        audio_count >= 1,
-        "expected at least one audio tag over rtmps://; got {} audio + {} video",
+        audio_count >= 2,
+        "expected at least 2 audio tags over rtmps:// (seq hdr + media); got {} audio + {} video",
         audio_count,
         video_count
     );
     assert!(
         video_count >= 1,
-        "expected at least one video tag over rtmps://; got {} audio + {} video",
+        "expected at least 1 video tag over rtmps://; got {} audio + {} video",
         audio_count,
         video_count
     );

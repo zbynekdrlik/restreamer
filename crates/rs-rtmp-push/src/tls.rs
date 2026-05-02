@@ -47,6 +47,9 @@ impl TlsIO {
 #[async_trait]
 impl TNetIO for TlsIO {
     fn get_net_type(&self) -> NetType {
+        // bytesio has no TLS variant; TCP is the closest semantic peer
+        // (the underlying transport is still a TCP stream — the TLS layer
+        // is purely cryptographic and transparent to RTMP framing).
         NetType::TCP
     }
 
