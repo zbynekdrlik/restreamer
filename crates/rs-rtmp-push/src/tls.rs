@@ -150,7 +150,19 @@ pub mod testing {
     /// silently ignored.
     pub fn set_tls_client_config_for_tests(cfg: Arc<ClientConfig>) {
         super::ensure_default_crypto_provider();
-        let _ = TLS_CONFIG_OVERRIDE.set(cfg);
+        // First-call-wins enforced by panic, not silent ignore: if a test binary
+        // grows multiple `#[tokio::test]` functions that each call this with
+        // different configs (e.g. different self-signed certs), the second
+        // caller's cert will NOT be in the trust store and the connect would
+        // silently fail with `UnknownIssuer`. Panic loudly so the test author
+        // sees the problem instead of debugging a phantom handshake error.
+        if TLS_CONFIG_OVERRIDE.set(cfg).is_err() {
+            panic!(
+                "set_tls_client_config_for_tests called twice in the same test \
+                 binary; integration tests are not isolated. Either factor the \
+                 conflicting tests into separate test files, or share one config."
+            );
+        }
     }
 
     /// Idempotently install rustls's `ring` crypto provider. Tests that build

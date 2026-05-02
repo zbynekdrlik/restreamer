@@ -160,7 +160,7 @@ impl Session {
         // --- 3-5. Negotiate (handshake + connect + publish) ------------------
         let msg_stream_id = tokio::time::timeout(
             Duration::from_secs(NEGOTIATE_TIMEOUT_SECS),
-            negotiate(Arc::clone(&io), &addr, &app, &stream_name),
+            negotiate(Arc::clone(&io), scheme, &addr, &app, &stream_name),
         )
         .await
         .map_err(|_| PushError::Timeout)??;
@@ -265,6 +265,7 @@ impl Drop for Session {
 /// `NetStream.Publish.Start`, or errors on any rejection or unexpected close.
 async fn negotiate(
     io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
+    scheme: Scheme,
     raw_domain: &str,
     app: &str,
     stream_name: &str,
@@ -316,7 +317,11 @@ async fn negotiate(
         props.pub_type = Some("nonprivate".to_string());
         props.flash_ver = Some("FMLE/3.0 (compatible; xiu)".to_string());
         props.fpad = Some(false);
-        props.tc_url = Some(format!("rtmp://{raw_domain}/{app}"));
+        let scheme_str = match scheme {
+            Scheme::Rtmp => "rtmp",
+            Scheme::Rtmps => "rtmps",
+        };
+        props.tc_url = Some(format!("{scheme_str}://{raw_domain}/{app}"));
         nc.write_connect(&(TRANSACTION_ID_CONNECT as f64), &props)
             .await
             .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;

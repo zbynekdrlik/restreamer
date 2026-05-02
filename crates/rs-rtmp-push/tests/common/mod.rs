@@ -640,19 +640,19 @@ pub async fn spawn_recording_xiu_server_tls() -> (
                         return;
                     }
                 };
-                let plain = match tokio::net::TcpStream::connect(plain_addr).await {
+                let mut plain = match tokio::net::TcpStream::connect(plain_addr).await {
                     Ok(p) => p,
                     Err(e) => {
                         eprintln!("[bridge] plain connect error: {e}");
                         return;
                     }
                 };
-                let (mut tls_r, mut tls_w) = tokio::io::split(tls);
-                let (mut plain_r, mut plain_w) = tokio::io::split(plain);
-                let _ = tokio::join!(
-                    tokio::io::copy(&mut tls_r, &mut plain_w),
-                    tokio::io::copy(&mut plain_r, &mut tls_w),
-                );
+                // `copy_bidirectional` propagates half-close: when one side
+                // shuts down, the other side's copy task gets EOF and the
+                // join completes. Two independent `copy` calls in `join!`
+                // would leak per-connection tasks until both halves see EOF.
+                let mut tls = tls;
+                let _ = tokio::io::copy_bidirectional(&mut tls, &mut plain).await;
             });
         }
     });
