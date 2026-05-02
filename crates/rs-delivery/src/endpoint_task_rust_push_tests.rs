@@ -52,66 +52,34 @@ fn rust_push_backoff_handshake_failed_fixed_always_5000() {
 
 // ---------------------------------------------------------------------------
 // Backoff math: RemoteClosed (exponential, floor = 30_000)
-// Ladder: 30_000, 60_000, 120_000, 240_000, 300_000 (cap), 300_000, ...
+// RemoteClosed = upstream-initiated rotation (YT/FB load balancer churn).
+// 3 s flat, NEVER exponential — escalating wastes cache time we just got.
+// (Changed from 30 s exponential ladder in #160 follow-up after live soak
+// showed 60 s cache overshoot per 2-rotation cycle.)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rust_push_backoff_remote_closed_first_error_is_floor() {
+fn rust_push_backoff_remote_closed_first_error_is_3000() {
     let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
     assert_eq!(
         compute_rust_push_backoff(&e, 1),
-        30_000,
-        "first error: factor = 1 << (1-1).min(5) = 1 -> 30000 * 1 = 30000"
+        3_000,
+        "first RemoteClosed: 3 s floor, not exponential"
     );
 }
 
 #[test]
-fn rust_push_backoff_remote_closed_second_error_doubles() {
+fn rust_push_backoff_remote_closed_is_never_exponential() {
     let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
-    assert_eq!(
-        compute_rust_push_backoff(&e, 2),
-        60_000,
-        "second error: factor = 1 << 1 = 2 -> 30000 * 2 = 60000"
-    );
-}
-
-#[test]
-fn rust_push_backoff_remote_closed_third_error_is_120000() {
-    let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
-    assert_eq!(
-        compute_rust_push_backoff(&e, 3),
-        120_000,
-        "third error: factor = 1 << 2 = 4 -> 30000 * 4 = 120000"
-    );
-}
-
-#[test]
-fn rust_push_backoff_remote_closed_fourth_error_is_240000() {
-    let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
-    assert_eq!(
-        compute_rust_push_backoff(&e, 4),
-        240_000,
-        "fourth error: factor = 1 << 3 = 8 -> 30000 * 8 = 240000"
-    );
-}
-
-#[test]
-fn rust_push_backoff_remote_closed_fifth_and_beyond_caps_at_300000() {
-    let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
-    // 5th: factor = 1 << 4 = 16 -> 30000 * 16 = 480000, capped to 300000
-    assert_eq!(
-        compute_rust_push_backoff(&e, 5),
-        300_000,
-        "fifth error: 30000 * 16 = 480000, must cap at 300000"
-    );
-    // 6th: factor = 1 << 5 = 32 -> still capped
-    assert_eq!(
-        compute_rust_push_backoff(&e, 6),
-        300_000,
-        "sixth error: exponent clamped at .min(5), still 300000"
-    );
-    // Any larger consecutive stays capped
-    assert_eq!(compute_rust_push_backoff(&e, 99), 300_000);
+    for consecutive in 1..=10 {
+        assert_eq!(
+            compute_rust_push_backoff(&e, consecutive),
+            3_000,
+            "RemoteClosed must stay at 3 s for consecutive={consecutive}; \
+             upstream-initiated rotations are not our fault, escalating \
+             wastes cache time"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,25 +153,19 @@ fn rust_push_backoff_local_cancel_is_zero() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rust_push_backoff_remote_closed_ladder_is_monotone() {
+fn rust_push_backoff_remote_closed_is_constant() {
+    // RemoteClosed is no longer exponential (changed from 30 s ladder to
+    // 3 s flat). Verify the value is constant across consecutive errors —
+    // kills the ×= 2 / << mutants in compute_rust_push_backoff.
     let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
     let values: Vec<u64> = (1..=6).map(|n| compute_rust_push_backoff(&e, n)).collect();
-    // Each step must be >= the previous step.
-    for window in values.windows(2) {
-        assert!(
-            window[1] >= window[0],
-            "backoff ladder must be monotone non-decreasing; got {:?}",
-            values
-        );
-    }
-    // First four steps must be strictly increasing (before the cap).
-    for window in values[..4].windows(2) {
-        assert!(
-            window[1] > window[0],
-            "backoff ladder must be strictly increasing before the cap; got {:?}",
-            &values[..4]
-        );
-    }
+    let first = values[0];
+    assert!(
+        values.iter().all(|&v| v == first),
+        "RemoteClosed backoff must be constant; got {:?}",
+        values
+    );
+    assert_eq!(first, 3_000);
 }
 
 // ---------------------------------------------------------------------------
