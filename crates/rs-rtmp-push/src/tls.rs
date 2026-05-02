@@ -149,8 +149,8 @@ pub mod testing {
 
     /// Install a custom rustls `ClientConfig` (e.g. a `RootCertStore` containing
     /// only a self-signed test CA). Must be called once per test binary BEFORE
-    /// any rtmps:// connect attempt. Subsequent calls in the same process are
-    /// silently ignored.
+    /// any rtmps:// connect attempt. PANICS if called more than once in the
+    /// same process — see the inline comment for rationale.
     pub fn set_tls_client_config_for_tests(cfg: Arc<ClientConfig>) {
         super::ensure_default_crypto_provider();
         // First-call-wins enforced by panic, not silent ignore: if a test binary

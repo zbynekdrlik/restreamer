@@ -633,7 +633,7 @@ pub async fn spawn_recording_xiu_server_tls() -> (
             };
             let acceptor = acceptor.clone();
             tokio::spawn(async move {
-                let tls = match acceptor.accept(tcp).await {
+                let mut tls = match acceptor.accept(tcp).await {
                     Ok(t) => t,
                     Err(e) => {
                         eprintln!("[bridge] tls accept error: {e}");
@@ -651,7 +651,6 @@ pub async fn spawn_recording_xiu_server_tls() -> (
                 // shuts down, the other side's copy task gets EOF and the
                 // join completes. Two independent `copy` calls in `join!`
                 // would leak per-connection tasks until both halves see EOF.
-                let mut tls = tls;
                 let _ = tokio::io::copy_bidirectional(&mut tls, &mut plain).await;
             });
         }
