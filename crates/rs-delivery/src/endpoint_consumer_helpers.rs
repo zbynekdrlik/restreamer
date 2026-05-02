@@ -121,15 +121,54 @@ pub(super) async fn handle_rust_push(
                 alias = %alias,
                 chunk_id,
                 consecutive = *consecutive_push_errors,
-                "Consumer: Rust pusher write timed out"
+                "Consumer: Rust pusher write timed out -- force-closing session"
             );
+
+            // CRITICAL: Force-close the wedged pusher session. Without this,
+            // pusher.session stays alive but unresponsive — every subsequent
+            // push_flv_bytes call hits the same blocked write and times out
+            // again. Closing drops the TCP/TLS connection and clears
+            // self.session, so the next push_flv_bytes triggers lazy
+            // reconnect (issue #157).
+            pusher.close().await;
+            let reconnect_count = pusher.reconnect_count();
+
+            // Audit: emit endpoint_rtmp_push_died on EVERY timeout so the
+            // operator sees the silent stall instead of guessing from
+            // stall_reason on the dashboard. Backoff matches the fixed
+            // 30 s sleep below.
+            let backoff_ms: u64 = 30_000;
+            endpoint_audit::emit_rtmp_push_died(
+                audit_ring,
+                alias,
+                "rtmp_push_timeout",
+                backoff_ms,
+                reconnect_count,
+            );
+            let timestamp_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let record = RtmpPushAuditRecord {
+                timestamp_ms,
+                chunk_id,
+                reconnect_count,
+                error_display: "rtmp_push_timeout".to_string(),
+                backoff_ms,
+            };
+
             let mut s = stats.lock().await;
+            s.reconnect_count = reconnect_count;
             s.last_error = Some("rtmp_push_timeout".to_string());
             s.stall_reason = Some("rtmp_push_timeout".to_string());
+            if s.rtmp_push_history.len() >= RESTART_HISTORY_CAP {
+                s.rtmp_push_history.pop_front();
+            }
+            s.rtmp_push_history.push_back(record);
             drop(s);
             *flv_normalizer = FlvStreamNormalizer::new();
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {}
                 _ = stop_rx.changed() => {
                     if *stop_rx.borrow() { return RustPushAction::Break; }
                 }
