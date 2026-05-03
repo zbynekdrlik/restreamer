@@ -158,16 +158,9 @@ impl DeliveryOrchestrator {
     /// Creates a Hetzner VPS, records it in the DB, polls until running,
     /// then POSTs /api/init to the rs-delivery binary on the VPS.
     pub async fn start_delivery(&self, event_id: i64) -> anyhow::Result<StartDeliveryResult> {
-        // Check for existing instance that's actually serving traffic.
-        // Pre-fix: any non-`deleted` row short-circuited (returning empty
-        // auth_token), so a leftover `failed` / `stopped` / `stopping` row
-        // from a prior run blocked every future spawn -- silently. Issue
-        // #165, also surfaced as the CI E2E "Wait for delivery server
-        // ready" 15-min timeout on 2026-05-03.
-        //
-        // `is_delivery_or_spawning` covers the reuse-existing states
-        // (booting / initializing / delivering / running / creating).
-        // Anything else is stale and gets cleaned up below.
+        // Reuse existing instance only when it's serving traffic or mid-spawn
+        // (`is_delivery_or_spawning`). Stale rows (`failed` / `stopped` /
+        // `stopping` / unknown) are cleaned up below — see #165.
         if let Some(existing) = db::get_delivery_instance_by_event(&self.pool, event_id).await? {
             if is_delivery_or_spawning(&existing.status) {
                 return Ok(StartDeliveryResult {
@@ -670,6 +663,16 @@ impl DeliveryOrchestrator {
     }
 
     /// Stop delivery for an event: POST /api/stop, then delete Hetzner server.
+    ///
+    /// Race note: between the `"stopping"` status write below and the
+    /// final `"deleted"` status write at the end of this function, a
+    /// concurrent `start_delivery` may run. That call sees status =
+    /// `"stopping"` (not in `is_delivery_or_spawning`), classifies the
+    /// row as stale, and rewrites it to `"deleted"`. Harmless: this
+    /// function captures `instance.hetzner_id` BEFORE either write, so
+    /// the OLD VPS still gets deleted on Hetzner regardless of how many
+    /// times the row is rewritten. No orphan VPS billing leak. Symmetric
+    /// to the comment in `start_delivery`.
     pub async fn stop_delivery(&self, event_id: i64) -> anyhow::Result<()> {
         let instance = db::get_delivery_instance_by_event(&self.pool, event_id).await?;
         let instance = match instance {

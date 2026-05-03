@@ -343,10 +343,14 @@ mod close_on_error {
         (stats, rx, FlvStreamNormalizer::new(), 0u32, 0u32)
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn err_arm_calls_close_so_next_push_reconnects() {
         // Sequence: IoError -> Ok. Without the close-on-Err fix the Err arm
         // would skip close() and reconnect_count would stay 0.
+        //
+        // `start_paused = true` virtualizes the 15 s exponential backoff
+        // sleep so the test runs in milliseconds. Real-time waits would
+        // add ~15 s per `cargo test` invocation.
         let mut pusher = MockPusher::with_results(vec![
             Err(PushError::IoError(io::Error::other("none return"))),
             Ok(()),
@@ -354,8 +358,8 @@ mod close_on_error {
 
         let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write) = fresh_state();
 
-        // First call: Err. Should record push -> close, sleep 15 s.
-        // Override the long sleep by tripping stop_rx mid-select.
+        // Spawn the handle_rust_push call so we can advance virtual time
+        // past the backoff sleep.
         let stats_clone = Arc::clone(&stats);
         let task = tokio::spawn(async move {
             handle_rust_push(
@@ -375,11 +379,11 @@ mod close_on_error {
             pusher
         });
 
-        // Wait briefly so handle_rust_push enters its sleep, then any
-        // select on stop_rx would unblock if signalled. To keep the test
-        // fast we just yield once and then await the join handle, which
-        // returns once the 15 s sleep runs (we accept the wait in CI; this
-        // is the cost of testing the real backoff path).
+        // Yield to let the task reach the backoff sleep, then advance
+        // virtual time past 15 s + a margin so the sleep returns.
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(20)).await;
+
         let pusher = task.await.expect("task panicked");
 
         assert_eq!(
@@ -475,6 +479,15 @@ mod close_on_error {
             pusher.events,
             vec!["push"],
             "LocalCancel must NOT call close() in handle_rust_push (Drop handles it)"
+        );
+        assert_ne!(
+            pusher.events.last().copied(),
+            Some("close"),
+            "Last event must NOT be 'close' on the LocalCancel path"
+        );
+        assert_eq!(
+            pusher.reconnects, 0,
+            "LocalCancel must NOT trigger any reconnect bookkeeping"
         );
     }
 }

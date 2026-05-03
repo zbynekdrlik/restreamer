@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 22;
+pub const MAX_SCHEMA_VERSION: i32 = 23;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -338,6 +338,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             20 => migrate_v20(&mut tx).await?,
             21 => migrate_v21(&mut tx).await?,
             22 => migrate_v22(&mut tx).await?,
+            23 => execute_sql_statements(&mut tx, MIGRATION_V23_SQL).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -703,3 +704,14 @@ async fn migrate_v22(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
     )
     .await
 }
+
+// V23: covering index on delivery_instances(event_id, id DESC) so
+// `get_delivery_instance_by_event` (which now ORDER BYs id DESC LIMIT 1
+// after the #165 stale-row fix) avoids a partition full scan as the
+// instance row count grows over long-lived deployments. Partial index on
+// `status != 'deleted'` matches the WHERE clause exactly.
+const MIGRATION_V23_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_delivery_instances_event_id_active
+    ON delivery_instances(event_id, id DESC)
+    WHERE status != 'deleted';
+"#;

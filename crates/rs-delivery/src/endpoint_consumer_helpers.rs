@@ -25,6 +25,11 @@ pub(super) enum RustPushAction {
 /// as a trait so unit tests can substitute a mock that records calls
 /// (e.g. asserts that `close()` is invoked on the Err arm). The real
 /// `rs_rtmp_push::RtmpPusher` impl is below.
+///
+/// **Module path:** `endpoint_task::consumer_helpers::Pushable`. Tests
+/// reach it via `super::super::super::consumer_helpers::Pushable` from
+/// inside `endpoint_task_rust_push_tests::close_on_error`. If you ever
+/// move this trait, update the test imports.
 pub(super) trait Pushable {
     fn push_flv_bytes(
         &mut self,
