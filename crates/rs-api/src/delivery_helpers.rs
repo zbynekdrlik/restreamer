@@ -47,6 +47,19 @@ pub(crate) fn is_delivery_active(status: &str) -> bool {
     )
 }
 
+/// Wider predicate than `is_delivery_active`: returns true when the row
+/// represents a VPS that is either currently serving traffic OR being
+/// spawned. `start_delivery` uses this to decide whether to short-circuit
+/// (reuse existing row) vs. mark the row deleted and spawn fresh.
+///
+/// `creating` is included because an in-flight spawn shouldn't be raced
+/// by a second `start_delivery` call. Anything else (`stopping`,
+/// `failed`, `stopped`, `deleted`, unknown future statuses) is stale and
+/// safe to clean up.
+pub(crate) fn is_delivery_or_spawning(status: &str) -> bool {
+    status == "creating" || is_delivery_active(status)
+}
+
 /// Build the filename for a disk-persisted VPS log capture. Uses a
 /// timestamp prefix so files sort chronologically in a directory listing.
 pub(crate) fn delivery_log_filename(
@@ -126,6 +139,43 @@ mod tests {
         assert!(!is_delivery_active("deleted"));
         assert!(!is_delivery_active("failed"));
         assert!(!is_delivery_active(""));
+    }
+
+    #[test]
+    fn is_delivery_or_spawning_includes_creating_plus_active() {
+        // Reuse-existing-row states: must short-circuit start_delivery.
+        for s in [
+            "creating",
+            "booting",
+            "initializing",
+            "delivering",
+            "running",
+        ] {
+            assert!(
+                is_delivery_or_spawning(s),
+                "{s} must short-circuit start_delivery"
+            );
+        }
+    }
+
+    #[test]
+    fn is_delivery_or_spawning_excludes_stale_states() {
+        // Stale states: must fall through to spawn fresh. Includes the
+        // bug states from #165 (`failed`, `stopped`, `stopping`) plus
+        // `deleted` and any unknown future status.
+        for s in [
+            "stopping",
+            "failed",
+            "stopped",
+            "deleted",
+            "unknown_future_status",
+            "",
+        ] {
+            assert!(
+                !is_delivery_or_spawning(s),
+                "{s} must NOT short-circuit start_delivery (would block fresh spawn)"
+            );
+        }
     }
 
     #[test]

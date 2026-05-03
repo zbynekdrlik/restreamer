@@ -33,12 +33,15 @@ pub enum StartPosition {
 ///   with a buffer matching the existing endpoints instead of zero cache.
 /// - `Beginning` → first sequence number (replay from event start)
 /// - `Resume`    → passes through the chunk_id directly
+///
+/// `target_delay_ms` is only consulted on the `Live` arm; callers should
+/// compute it once via `compute_delivery_delay_ms(config, event_row.cache_delay_secs)`
+/// to keep this helper independent of `Config` shape.
 pub async fn resolve_start_chunk_id(
     pool: &SqlitePool,
     event_id: i64,
     position: &StartPosition,
-    config: &Config,
-    event_cache_delay_secs: Option<i64>,
+    target_delay_ms: u64,
 ) -> anyhow::Result<i64> {
     match position {
         StartPosition::Resume { chunk_id } => Ok(*chunk_id),
@@ -49,8 +52,8 @@ pub async fn resolve_start_chunk_id(
             Ok(first)
         }
         StartPosition::Live => {
-            let target_delay_ms = compute_delivery_delay_ms(config, event_cache_delay_secs) as i64;
-            let start = db::compute_target_start_chunk(pool, event_id, target_delay_ms).await?;
+            let start =
+                db::compute_target_start_chunk(pool, event_id, target_delay_ms as i64).await?;
             Ok(start)
         }
     }
@@ -101,14 +104,9 @@ pub async fn add_endpoint_to_delivery(
     let event = db::get_streaming_event_by_id(pool, event_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Streaming event {event_id} not found"))?;
-    let start_chunk_id = resolve_start_chunk_id(
-        pool,
-        event_id,
-        &start_position,
-        config,
-        event.cache_delay_secs,
-    )
-    .await?;
+    let target_delay_ms = compute_delivery_delay_ms(config, event.cache_delay_secs);
+    let start_chunk_id =
+        resolve_start_chunk_id(pool, event_id, &start_position, target_delay_ms).await?;
 
     let chunk_format = &config.inpoint.chunk_format;
 

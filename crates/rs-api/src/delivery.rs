@@ -13,7 +13,8 @@ use rs_core::config::Config;
 use rs_core::db;
 
 pub(crate) use crate::delivery_helpers::{
-    build_endpoint_init_entry, is_delivery_active, persist_delivery_log_to_disk,
+    build_endpoint_init_entry, is_delivery_active, is_delivery_or_spawning,
+    persist_delivery_log_to_disk,
 };
 
 // Re-exports so existing call sites (`crate::delivery::Foo`, test modules,
@@ -164,11 +165,11 @@ impl DeliveryOrchestrator {
         // #165, also surfaced as the CI E2E "Wait for delivery server
         // ready" 15-min timeout on 2026-05-03.
         //
-        // Reuse the same liveness predicate the rest of the orchestrator
-        // uses (`is_delivery_active`) plus `creating` (mid-spawn). Anything
-        // else is a stale row and gets cleaned up below.
+        // `is_delivery_or_spawning` covers the reuse-existing states
+        // (booting / initializing / delivering / running / creating).
+        // Anything else is stale and gets cleaned up below.
         if let Some(existing) = db::get_delivery_instance_by_event(&self.pool, event_id).await? {
-            if existing.status == "creating" || is_delivery_active(&existing.status) {
+            if is_delivery_or_spawning(&existing.status) {
                 return Ok(StartDeliveryResult {
                     instance_id: existing.id,
                     hetzner_id: existing.hetzner_id,
@@ -178,9 +179,18 @@ impl DeliveryOrchestrator {
                     auth_token: existing.auth_token,
                 });
             }
-            // Stale row (failed / stopped / stopping). Mark it deleted so
-            // get_delivery_instance_by_event stops returning it on subsequent
-            // polls, then fall through to spawn a fresh VPS.
+            // Stale row (failed / stopped / stopping, or any unknown
+            // future status). Mark it deleted so subsequent
+            // get_delivery_instance_by_event calls stop returning it,
+            // then fall through to spawn a fresh VPS.
+            //
+            // Stop-vs-start race: a concurrent `stop_delivery` may be
+            // between its own update_delivery_instance_status("stopping")
+            // and update_delivery_instance_status("deleted"). That's
+            // harmless -- the stop task acts on its own captured
+            // `hetzner_id`, so the OLD VPS still gets deleted on Hetzner
+            // regardless of how many times this row is rewritten to
+            // "deleted". No orphan VPS billing leak.
             tracing::warn!(
                 event_id,
                 instance_id = existing.id,
@@ -190,6 +200,11 @@ impl DeliveryOrchestrator {
             if let Err(e) =
                 db::update_delivery_instance_status(&self.pool, existing.id, "deleted").await
             {
+                // Continue anyway: worst case is two non-deleted rows
+                // for this event. `get_delivery_instance_by_event` ORDER
+                // BYs id DESC LIMIT 1, so the next call will
+                // deterministically prefer the freshly-spawned row over
+                // the stale one.
                 tracing::error!(
                     instance_id = existing.id,
                     "Failed to mark stale instance as deleted: {e} -- spawning new anyway"

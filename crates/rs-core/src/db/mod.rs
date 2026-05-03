@@ -352,11 +352,14 @@ pub async fn get_chunks_paginated(
 }
 
 pub async fn get_chunk_stats(pool: &SqlitePool, chunk_duration_ms: u64) -> Result<ChunkStats> {
-    // `pending_chunks` matches the uploader's pick criteria (see
-    // `pick_next_uploadable_chunk`): sent=0 AND in_process=0 AND
-    // upload_failed_permanently=0. Without the failed-permanent filter,
-    // dead chunks from prior runs would show up as "pending" forever and
-    // cause the E2E gate (`pending_chunks > 0`) to fail on every run.
+    // `pending_chunks` matches the uploader's permanent-eligibility
+    // criteria: sent=0 AND in_process=0 AND upload_failed_permanently=0.
+    // (`pick_next_uploadable_chunk` ALSO honors `upload_next_retry_at`,
+    // but a chunk in retry-backoff is genuinely "still pending -- will
+    // be picked up soon", whereas a `failed_permanently` chunk will
+    // never be picked up.) Without the failed-permanent filter, dead
+    // chunks from prior runs showed up as "pending" forever and caused
+    // the E2E gate (`pending_chunks > 0`) to fail on every run.
     let row = sqlx::query(
         r#"SELECT
             COUNT(*) as total_chunks,

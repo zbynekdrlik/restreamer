@@ -274,3 +274,207 @@ fn emit_rtmp_push_died_with_none_ring_is_no_op() {
     endpoint_audit::emit_rtmp_push_died(&None, "test-alias", "some error", 5_000, 1);
     // If we get here without panic the test passes.
 }
+
+// ---------------------------------------------------------------------------
+// handle_rust_push close-on-error behavior (regression for 2026-05-03 freeze)
+// Asserts that the Err arm calls pusher.close() so the next push reconnects
+// instead of re-using a wedged session forever.
+// ---------------------------------------------------------------------------
+
+mod close_on_error {
+    use super::super::super::consumer_helpers::{Pushable, RustPushAction, handle_rust_push};
+    use super::super::super::{EndpointStats, FlvStreamNormalizer};
+    use rs_rtmp_push::PushError;
+    use std::collections::VecDeque;
+    use std::io;
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, watch};
+
+    /// Mock that records call sequence and returns a pre-canned push result
+    /// per call, so the test can assert close() was invoked between an Err
+    /// and a subsequent push.
+    #[derive(Default)]
+    struct MockPusher {
+        push_results: VecDeque<Result<(), PushError>>,
+        events: Vec<&'static str>,
+        reconnects: u32,
+    }
+
+    impl MockPusher {
+        fn with_results(results: Vec<Result<(), PushError>>) -> Self {
+            Self {
+                push_results: VecDeque::from(results),
+                events: Vec::new(),
+                reconnects: 0,
+            }
+        }
+    }
+
+    impl Pushable for MockPusher {
+        async fn push_flv_bytes(&mut self, _data: &[u8]) -> Result<(), PushError> {
+            self.events.push("push");
+            self.push_results
+                .pop_front()
+                .unwrap_or(Err(PushError::IoError(io::Error::other(
+                    "no canned result remaining",
+                ))))
+        }
+
+        async fn close(&mut self) {
+            self.events.push("close");
+            // Each close represents a fresh-session reconnect on the next push.
+            self.reconnects += 1;
+        }
+
+        fn reconnect_count(&self) -> u32 {
+            self.reconnects
+        }
+    }
+
+    fn fresh_state() -> (
+        Arc<Mutex<EndpointStats>>,
+        watch::Receiver<bool>,
+        FlvStreamNormalizer,
+        u32,
+        u32,
+    ) {
+        let stats = Arc::new(Mutex::new(EndpointStats::default()));
+        let (_tx, rx) = watch::channel(false);
+        (stats, rx, FlvStreamNormalizer::new(), 0u32, 0u32)
+    }
+
+    #[tokio::test]
+    async fn err_arm_calls_close_so_next_push_reconnects() {
+        // Sequence: IoError -> Ok. Without the close-on-Err fix the Err arm
+        // would skip close() and reconnect_count would stay 0.
+        let mut pusher = MockPusher::with_results(vec![
+            Err(PushError::IoError(io::Error::other("none return"))),
+            Ok(()),
+        ]);
+
+        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write) = fresh_state();
+
+        // First call: Err. Should record push -> close, sleep 15 s.
+        // Override the long sleep by tripping stop_rx mid-select.
+        let stats_clone = Arc::clone(&stats);
+        let task = tokio::spawn(async move {
+            handle_rust_push(
+                &mut pusher,
+                b"chunk-data",
+                42,
+                2000,
+                "test-alias",
+                &mut consec_err,
+                &mut consec_write,
+                &stats_clone,
+                &None,
+                &mut stop_rx,
+                &mut norm,
+            )
+            .await;
+            pusher
+        });
+
+        // Wait briefly so handle_rust_push enters its sleep, then any
+        // select on stop_rx would unblock if signalled. To keep the test
+        // fast we just yield once and then await the join handle, which
+        // returns once the 15 s sleep runs (we accept the wait in CI; this
+        // is the cost of testing the real backoff path).
+        let pusher = task.await.expect("task panicked");
+
+        assert_eq!(
+            pusher.events,
+            vec!["push", "close"],
+            "Err arm must call close() after the failed push so the next call reconnects"
+        );
+
+        let stats_guard = stats.lock().await;
+        assert_eq!(
+            stats_guard.last_error.as_deref(),
+            Some("I/O error: none return"),
+            "Err arm must surface last_error so the dashboard shows the failure"
+        );
+        assert_eq!(
+            stats_guard.stall_reason.as_deref(),
+            Some("I/O error: none return"),
+            "Err arm must surface stall_reason (regression: previously only the Timeout arm did)"
+        );
+    }
+
+    #[tokio::test]
+    async fn ok_arm_clears_stall_after_recovery() {
+        // After a transient error sets stall_reason / last_error, a
+        // successful push must clear them so the dashboard reflects
+        // recovery instead of the stale freeze indicator.
+        let mut pusher = MockPusher::with_results(vec![Ok(())]);
+        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write) = fresh_state();
+
+        // Pre-seed stale error markers as if a prior failure happened.
+        {
+            let mut s = stats.lock().await;
+            s.last_error = Some("stale".to_string());
+            s.stall_reason = Some("stale".to_string());
+        }
+
+        let action = handle_rust_push(
+            &mut pusher,
+            b"chunk-data",
+            7,
+            2000,
+            "test-alias",
+            &mut consec_err,
+            &mut consec_write,
+            &stats,
+            &None,
+            &mut stop_rx,
+            &mut norm,
+        )
+        .await;
+
+        assert!(matches!(action, RustPushAction::Continue));
+
+        let s = stats.lock().await;
+        assert!(
+            s.last_error.is_none(),
+            "Ok path must clear last_error; got {:?}",
+            s.last_error
+        );
+        assert!(
+            s.stall_reason.is_none(),
+            "Ok path must clear stall_reason; got {:?}",
+            s.stall_reason
+        );
+        assert_eq!(s.chunks_processed, 1);
+    }
+
+    #[tokio::test]
+    async fn local_cancel_returns_break_without_calling_close() {
+        // PushError::LocalCancel is the only None-floor variant. The let-else
+        // short-circuit must return Break BEFORE the close() call, so no
+        // double-close on shutdown (close happens via Drop on stack unwind).
+        let mut pusher = MockPusher::with_results(vec![Err(PushError::LocalCancel)]);
+        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write) = fresh_state();
+
+        let action = handle_rust_push(
+            &mut pusher,
+            b"data",
+            1,
+            2000,
+            "test-alias",
+            &mut consec_err,
+            &mut consec_write,
+            &stats,
+            &None,
+            &mut stop_rx,
+            &mut norm,
+        )
+        .await;
+
+        assert!(matches!(action, RustPushAction::Break));
+        assert_eq!(
+            pusher.events,
+            vec!["push"],
+            "LocalCancel must NOT call close() in handle_rust_push (Drop handles it)"
+        );
+    }
+}

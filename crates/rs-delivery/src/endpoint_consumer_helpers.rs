@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use rs_rtmp_push::{RtmpPusher, backoff_floor_ms, is_exponential};
+use rs_rtmp_push::{PushError, RtmpPusher, backoff_floor_ms, is_exponential};
 use tokio::sync::watch;
 
 use super::{
@@ -21,11 +21,38 @@ pub(super) enum RustPushAction {
     Break,
 }
 
+/// Minimal interface `handle_rust_push` needs from a pusher. Extracted
+/// as a trait so unit tests can substitute a mock that records calls
+/// (e.g. asserts that `close()` is invoked on the Err arm). The real
+/// `rs_rtmp_push::RtmpPusher` impl is below.
+pub(super) trait Pushable {
+    fn push_flv_bytes(
+        &mut self,
+        data: &[u8],
+    ) -> impl std::future::Future<Output = Result<(), PushError>> + Send;
+    fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
+    fn reconnect_count(&self) -> u32;
+}
+
+impl Pushable for RtmpPusher {
+    async fn push_flv_bytes(&mut self, data: &[u8]) -> Result<(), PushError> {
+        RtmpPusher::push_flv_bytes(self, data).await
+    }
+
+    async fn close(&mut self) {
+        RtmpPusher::close(self).await
+    }
+
+    fn reconnect_count(&self) -> u32 {
+        RtmpPusher::reconnect_count(self)
+    }
+}
+
 /// Handle one Rust RTMP pusher write call (success or error path).
 /// Extracted from `consumer_task` to keep that function under 1000 lines.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_rust_push(
-    pusher: &mut RtmpPusher,
+    pusher: &mut impl Pushable,
     data: &[u8],
     chunk_id: i64,
     chunk_duration_ms: i64,
@@ -74,6 +101,12 @@ pub(super) async fn handle_rust_push(
             );
             let floor = backoff_floor_ms(&push_err);
             let Some(floor_ms) = floor else {
+                // LocalCancel is the only None-floor variant. Returning
+                // Break lets the consumer task exit; we do NOT call
+                // pusher.close() here because close happens via Drop on
+                // the consumer's stack unwind. Keeping this short-circuit
+                // ABOVE the close() below ensures we don't double-close
+                // on shutdown.
                 tracing::info!(alias = %alias, "Consumer: Rust pusher cancelled; stopping");
                 return RustPushAction::Break;
             };

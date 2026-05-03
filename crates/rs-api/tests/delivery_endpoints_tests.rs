@@ -159,7 +159,6 @@ async fn start_position_live_walks_back_target_delay_buffer_for_midstream_add() 
     // new endpoint joins with zero cache and never builds the buffer the
     // other endpoints already have.
     use rs_api::delivery_endpoints::{StartPosition, resolve_start_chunk_id};
-    use rs_core::config::Config;
 
     let pool = db::create_memory_pool().await.unwrap();
     db::run_migrations(&pool).await.unwrap();
@@ -186,10 +185,7 @@ async fn start_position_live_walks_back_target_delay_buffer_for_midstream_add() 
         .unwrap();
     }
 
-    let mut config = Config::default();
-    config.delivery.delivery_delay_secs = 120;
-
-    let live = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, &config, None)
+    let live = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 120_000)
         .await
         .unwrap();
     assert_eq!(
@@ -197,18 +193,17 @@ async fn start_position_live_walks_back_target_delay_buffer_for_midstream_add() 
         "Live must walk back ~120 s of buffer from latest (100), expected seq 41 got {live}"
     );
 
-    let beg = resolve_start_chunk_id(&pool, event_id, &StartPosition::Beginning, &config, None)
+    let beg = resolve_start_chunk_id(&pool, event_id, &StartPosition::Beginning, 120_000)
         .await
         .unwrap();
     assert_eq!(beg, 1, "Beginning must resolve to first sequence (1)");
 
-    // Per-event override beats the global config default.
-    let live_override =
-        resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, &config, Some(60))
-            .await
-            .unwrap();
+    // Smaller delay walks back fewer chunks (60 s = 30 chunks at 2 s each).
+    let live_short = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 60_000)
+        .await
+        .unwrap();
     assert_eq!(
-        live_override, 71,
-        "Per-event 60 s override must walk back 30 chunks from latest (100), got {live_override}"
+        live_short, 71,
+        "60 s target must walk back 30 chunks from latest (100), got {live_short}"
     );
 }
