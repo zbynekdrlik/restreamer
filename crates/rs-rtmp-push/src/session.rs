@@ -315,8 +315,18 @@ async fn negotiate(
         let mut props = ConnectProperties::new_none();
         props.app = Some(app.to_string());
         props.pub_type = Some("nonprivate".to_string());
-        props.flash_ver = Some("FMLE/3.0 (compatible; xiu)".to_string());
+        // OBS advertises these on every RTMP connect. Without them, Facebook
+        // Live silently accepts the publish and then discards the media (no
+        // RTMP error returned, no preview shown in Live Producer). Operator
+        // confirmed 2026-05-03 that FB shows zero data ingestion despite
+        // pusher reporting healthy chunk-done logs. Mirror libobs values.
+        props.flash_ver = Some("FMLE/3.0 (compatible; FMSc/1.0)".to_string());
         props.fpad = Some(false);
+        props.capabilities = Some(239.0);
+        props.audio_codecs = Some(3575.0); // OBS bitmask: AAC + MP3 + ...
+        props.video_codecs = Some(252.0); // OBS bitmask: H.264 + ...
+        props.video_function = Some(1.0); // CLIENT_SEEK
+        props.object_encoding = Some(0.0); // AMF0
         let scheme_str = match scheme {
             Scheme::Rtmp => "rtmp",
             Scheme::Rtmps => "rtmps",
