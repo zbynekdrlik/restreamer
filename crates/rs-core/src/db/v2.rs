@@ -293,7 +293,8 @@ pub async fn get_delivery_instance_by_event(
 ) -> Result<Option<DeliveryInstance>> {
     let row = sqlx::query(
         "SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token
-         FROM delivery_instances WHERE event_id = ?1 AND status != 'deleted' LIMIT 1",
+         FROM delivery_instances WHERE event_id = ?1 AND status != 'deleted'
+         ORDER BY id DESC LIMIT 1",
     )
     .bind(event_id)
     .fetch_optional(pool)

@@ -11,6 +11,7 @@ mod flv;
 mod pusher;
 mod session;
 mod state;
+pub mod tls;
 
 pub use error::{PushError, backoff_floor_ms, is_exponential};
 pub use pusher::RtmpPusher;

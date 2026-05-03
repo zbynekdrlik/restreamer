@@ -17,14 +17,21 @@ impl LogCaptureLayer {
 
 impl<S: Subscriber> Layer<S> for LogCaptureLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        // Skip DEBUG/TRACE from noisy HTTP crates to prevent buffer overflow
+        // Skip DEBUG/TRACE from noisy HTTP / xiu crates to prevent buffer
+        // overflow. xiu (rtmp / streamhub / bytesio / xflv) all emit via the
+        // `log` crate which bridges to target=="log" — without filtering that,
+        // a few minutes of streaming fills the 200-entry capture buffer with
+        // 99% xiu chunk-level TRACE noise and operator-relevant app logs are
+        // never visible (issue #158).
         let level = *event.metadata().level();
         let target = event.metadata().target();
         if level > tracing::Level::INFO
-            && (target.starts_with("hyper")
+            && (target == "log"
+                || target.starts_with("hyper")
                 || target.starts_with("h2")
                 || target.starts_with("rustls")
-                || target.starts_with("reqwest"))
+                || target.starts_with("reqwest")
+                || target.starts_with("axum"))
         {
             return;
         }

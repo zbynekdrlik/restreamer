@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use rs_rtmp_push::{RtmpPusher, backoff_floor_ms, is_exponential};
+use rs_rtmp_push::{PushError, RtmpPusher, backoff_floor_ms, is_exponential};
 use tokio::sync::watch;
 
 use super::{
@@ -21,11 +21,43 @@ pub(super) enum RustPushAction {
     Break,
 }
 
+/// Minimal interface `handle_rust_push` needs from a pusher. Extracted
+/// as a trait so unit tests can substitute a mock that records calls
+/// (e.g. asserts that `close()` is invoked on the Err arm). The real
+/// `rs_rtmp_push::RtmpPusher` impl is below.
+///
+/// **Module path:** `endpoint_task::consumer_helpers::Pushable`. Tests
+/// reach it via `super::super::super::consumer_helpers::Pushable` from
+/// inside `endpoint_task_rust_push_tests::close_on_error`. If you ever
+/// move this trait, update the test imports.
+pub(super) trait Pushable {
+    fn push_flv_bytes(
+        &mut self,
+        data: &[u8],
+    ) -> impl std::future::Future<Output = Result<(), PushError>> + Send;
+    fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
+    fn reconnect_count(&self) -> u32;
+}
+
+impl Pushable for RtmpPusher {
+    async fn push_flv_bytes(&mut self, data: &[u8]) -> Result<(), PushError> {
+        RtmpPusher::push_flv_bytes(self, data).await
+    }
+
+    async fn close(&mut self) {
+        RtmpPusher::close(self).await
+    }
+
+    fn reconnect_count(&self) -> u32 {
+        RtmpPusher::reconnect_count(self)
+    }
+}
+
 /// Handle one Rust RTMP pusher write call (success or error path).
 /// Extracted from `consumer_task` to keep that function under 1000 lines.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_rust_push(
-    pusher: &mut RtmpPusher,
+    pusher: &mut impl Pushable,
     data: &[u8],
     chunk_id: i64,
     chunk_duration_ms: i64,
@@ -57,6 +89,10 @@ pub(super) async fn handle_rust_push(
             s.current_chunk_id = chunk_id;
             s.chunks_processed += 1;
             s.reconnect_count = pusher.reconnect_count();
+            // Clear sticky error markers: prior timeout / push-error states
+            // shouldn't keep showing on the dashboard once writes resume.
+            s.stall_reason = None;
+            s.last_error = None;
             RustPushAction::Continue
         }
         Ok(Err(push_err)) => {
@@ -66,13 +102,28 @@ pub(super) async fn handle_rust_push(
                 alias = %alias,
                 chunk_id,
                 consecutive = *consecutive_push_errors,
-                "Consumer: Rust pusher error: {error_display}"
+                "Consumer: Rust pusher error: {error_display} -- force-closing session"
             );
             let floor = backoff_floor_ms(&push_err);
             let Some(floor_ms) = floor else {
+                // LocalCancel is the only None-floor variant. Returning
+                // Break lets the consumer task exit; we do NOT call
+                // pusher.close() here because close happens via Drop on
+                // the consumer's stack unwind. Keeping this short-circuit
+                // ABOVE the close() below ensures we don't double-close
+                // on shutdown.
                 tracing::info!(alias = %alias, "Consumer: Rust pusher cancelled; stopping");
                 return RustPushAction::Break;
             };
+            // CRITICAL: any push error means the session is in an unknown
+            // state (broken socket, half-closed peer, poisoned by read loop).
+            // Without close() the next push_flv_bytes would re-use the same
+            // wedged session and fail identically forever -- exactly the
+            // 2026-05-03 FB-NewLevel/FB-Zbynek freeze where last_error =
+            // "I/O error: none return" but ffmpeg_restart_count stayed 0
+            // and chunks_processed froze. Close drops the connection so the
+            // next call lazily reconnects.
+            pusher.close().await;
             let backoff_ms = if is_exponential(&push_err) {
                 let factor = 1u64 << (consecutive_push_errors.saturating_sub(1).min(5));
                 floor_ms.saturating_mul(factor).min(300_000)
@@ -100,7 +151,10 @@ pub(super) async fn handle_rust_push(
             };
             let mut s = stats.lock().await;
             s.reconnect_count = reconnect_count;
-            s.last_error = Some(error_display);
+            s.last_error = Some(error_display.clone());
+            // Match the Timeout arm: surface the freeze on the dashboard.
+            // The success path clears stall_reason once writes resume.
+            s.stall_reason = Some(error_display);
             if s.rtmp_push_history.len() >= RESTART_HISTORY_CAP {
                 s.rtmp_push_history.pop_front();
             }
@@ -121,15 +175,54 @@ pub(super) async fn handle_rust_push(
                 alias = %alias,
                 chunk_id,
                 consecutive = *consecutive_push_errors,
-                "Consumer: Rust pusher write timed out"
+                "Consumer: Rust pusher write timed out -- force-closing session"
             );
+
+            // CRITICAL: Force-close the wedged pusher session. Without this,
+            // pusher.session stays alive but unresponsive — every subsequent
+            // push_flv_bytes call hits the same blocked write and times out
+            // again. Closing drops the TCP/TLS connection and clears
+            // self.session, so the next push_flv_bytes triggers lazy
+            // reconnect (issue #157).
+            pusher.close().await;
+            let reconnect_count = pusher.reconnect_count();
+
+            // Audit: emit endpoint_rtmp_push_died on EVERY timeout so the
+            // operator sees the silent stall instead of guessing from
+            // stall_reason on the dashboard. Backoff matches the fixed
+            // 30 s sleep below.
+            let backoff_ms: u64 = 30_000;
+            endpoint_audit::emit_rtmp_push_died(
+                audit_ring,
+                alias,
+                "rtmp_push_timeout",
+                backoff_ms,
+                reconnect_count,
+            );
+            let timestamp_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let record = RtmpPushAuditRecord {
+                timestamp_ms,
+                chunk_id,
+                reconnect_count,
+                error_display: "rtmp_push_timeout".to_string(),
+                backoff_ms,
+            };
+
             let mut s = stats.lock().await;
+            s.reconnect_count = reconnect_count;
             s.last_error = Some("rtmp_push_timeout".to_string());
             s.stall_reason = Some("rtmp_push_timeout".to_string());
+            if s.rtmp_push_history.len() >= RESTART_HISTORY_CAP {
+                s.rtmp_push_history.pop_front();
+            }
+            s.rtmp_push_history.push_back(record);
             drop(s);
             *flv_normalizer = FlvStreamNormalizer::new();
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {}
                 _ = stop_rx.changed() => {
                     if *stop_rx.borrow() { return RustPushAction::Break; }
                 }

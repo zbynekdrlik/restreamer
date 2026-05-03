@@ -145,7 +145,7 @@ dependencies = [
  "serde",
  "serde_json",
  "url",
- "webpki-roots",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -1318,7 +1318,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -2024,6 +2024,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2325,6 +2335,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
+]
+
+[[package]]
 name = "rdrand"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2458,7 +2481,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -2477,7 +2500,7 @@ dependencies = [
 
 [[package]]
 name = "rs-api"
-version = "0.3.74"
+version = "0.3.75"
 dependencies = [
  "anyhow",
  "axum",
@@ -2507,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "rs-cloud"
-version = "0.3.74"
+version = "0.3.75"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2519,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "rs-core"
-version = "0.3.74"
+version = "0.3.75"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2537,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "rs-delivery"
-version = "0.3.74"
+version = "0.3.75"
 dependencies = [
  "async-trait",
  "axum",
@@ -2546,6 +2569,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rs-core",
  "rs-ffmpeg",
+ "rs-rtmp-push",
  "rust-s3",
  "serde",
  "serde_json",
@@ -2560,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "rs-endpoint"
-version = "0.3.74"
+version = "0.3.75"
 dependencies = [
  "anyhow",
  "axum",
@@ -2584,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "rs-ffmpeg"
-version = "0.3.74"
+version = "0.3.75"
 dependencies = [
  "serde",
  "serde_json",
@@ -2596,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "rs-inpoint"
-version = "0.3.74"
+version = "0.3.75"
 dependencies = [
  "bytes",
  "env_logger 0.11.10",
@@ -2615,24 +2639,31 @@ dependencies = [
 
 [[package]]
 name = "rs-rtmp-push"
-version = "0.3.74"
+version = "0.3.75"
 dependencies = [
+ "async-trait",
  "bytes",
  "bytesio",
+ "futures",
  "log",
+ "rcgen",
  "rtmp",
+ "rustls",
  "sha2 0.10.9",
  "streamhub",
  "thiserror",
  "tokio",
+ "tokio-rustls",
+ "tokio-util 0.7.18",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots 0.26.11",
  "xflv",
 ]
 
 [[package]]
 name = "rs-runtime"
-version = "0.3.74"
+version = "0.3.75"
 dependencies = [
  "anyhow",
  "axum",
@@ -2652,7 +2683,7 @@ dependencies = [
 
 [[package]]
 name = "rs-service"
-version = "0.3.74"
+version = "0.3.75"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -2671,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "rs-youtube"
-version = "0.3.74"
+version = "0.3.75"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",
@@ -4168,6 +4199,15 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.6",
+]
+
+[[package]]
+name = "webpki-roots"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
@@ -4730,6 +4770,15 @@ dependencies = [
  "indexmap 1.9.3",
  "log",
  "serde",
+]
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
 ]
 
 [[package]]

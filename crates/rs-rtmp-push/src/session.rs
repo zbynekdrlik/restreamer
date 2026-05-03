@@ -86,7 +86,7 @@ impl Session {
     /// negotiate sequence has its own 30-second deadline.
     pub async fn connect(url: &str, timeout_ms: u64) -> Result<Self, PushError> {
         // --- 1. Parse URL ---------------------------------------------------
-        let (host, port, app, stream_name) = parse_rtmp_url(url)?;
+        let (scheme, host, port, app, stream_name) = parse_rtmp_url(url)?;
 
         // --- 2. TCP connect -------------------------------------------------
         // Pre-resolve via tokio::net::lookup_host so we can build a
@@ -148,14 +148,19 @@ impl Session {
             tracing::warn!(error = %e, "failed to set TCP_NODELAY on push socket");
         }
 
-        // Wrap in TcpIO and share via Arc<Mutex<>>.
-        let net_io: Box<dyn TNetIO + Send + Sync> = Box::new(TcpIO::new(tcp_stream));
+        // Wrap the connected stream in either TcpIO (rtmp://) or TlsIO (rtmps://).
+        // The negotiate / read-loop machinery below operates on Box<dyn TNetIO>
+        // and is therefore transparent to wire encryption.
+        let net_io: Box<dyn TNetIO + Send + Sync> = match scheme {
+            Scheme::Rtmp => Box::new(TcpIO::new(tcp_stream)),
+            Scheme::Rtmps => Box::new(crate::tls::connect_tls(tcp_stream, &host).await?),
+        };
         let io = Arc::new(Mutex::new(net_io));
 
         // --- 3-5. Negotiate (handshake + connect + publish) ------------------
         let msg_stream_id = tokio::time::timeout(
             Duration::from_secs(NEGOTIATE_TIMEOUT_SECS),
-            negotiate(Arc::clone(&io), &addr, &app, &stream_name),
+            negotiate(Arc::clone(&io), scheme, &addr, &app, &stream_name),
         )
         .await
         .map_err(|_| PushError::Timeout)??;
@@ -260,6 +265,7 @@ impl Drop for Session {
 /// `NetStream.Publish.Start`, or errors on any rejection or unexpected close.
 async fn negotiate(
     io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
+    scheme: Scheme,
     raw_domain: &str,
     app: &str,
     stream_name: &str,
@@ -309,9 +315,23 @@ async fn negotiate(
         let mut props = ConnectProperties::new_none();
         props.app = Some(app.to_string());
         props.pub_type = Some("nonprivate".to_string());
-        props.flash_ver = Some("FMLE/3.0 (compatible; xiu)".to_string());
+        // OBS advertises these on every RTMP connect. Without them, Facebook
+        // Live silently accepts the publish and then discards the media (no
+        // RTMP error returned, no preview shown in Live Producer). Operator
+        // confirmed 2026-05-03 that FB shows zero data ingestion despite
+        // pusher reporting healthy chunk-done logs. Mirror libobs values.
+        props.flash_ver = Some("FMLE/3.0 (compatible; FMSc/1.0)".to_string());
         props.fpad = Some(false);
-        props.tc_url = Some(format!("rtmp://{raw_domain}/{app}"));
+        props.capabilities = Some(239.0);
+        props.audio_codecs = Some(3575.0); // OBS bitmask: AAC + MP3 + ...
+        props.video_codecs = Some(252.0); // OBS bitmask: H.264 + ...
+        props.video_function = Some(1.0); // CLIENT_SEEK
+        props.object_encoding = Some(0.0); // AMF0
+        let scheme_str = match scheme {
+            Scheme::Rtmp => "rtmp",
+            Scheme::Rtmps => "rtmps",
+        };
+        props.tc_url = Some(format!("{scheme_str}://{raw_domain}/{app}"));
         nc.write_connect(&(TRANSACTION_ID_CONNECT as f64), &props)
             .await
             .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
@@ -655,84 +675,11 @@ const READ_LOOP_IDLE_MS: u64 = 50;
 /// Detection latency for server-initiated errors is bounded by
 /// `READ_LOOP_HOLD_MS + READ_LOOP_IDLE_MS` (~55 ms), which is far below
 /// xiu's 2 s inactivity timer and well under the consumer-task `WRITE_TIMEOUT`.
-async fn read_loop(io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>, poisoned: Arc<AtomicBool>) {
-    let mut unpacketizer = ChunkUnpacketizer::new();
-    loop {
-        // Sleep FIRST every iteration so the read-loop is mutex-busy for
-        // at most HOLD/(HOLD+IDLE) = 5/55 ≈ 9 % of the time, regardless
-        // of whether the previous iteration read data or timed out. RTMP
-        // servers send Window-Ack frames frequently during a healthy
-        // push; without an unconditional sleep the loop stays hot when
-        // reads succeed and the mutex stays held ~50 % of the time —
-        // which throttles `send_tag` writers and observed in the #103
-        // E2E run as ~0.4 x output even after every other pacing fix.
-        tokio::time::sleep(Duration::from_millis(READ_LOOP_IDLE_MS)).await;
-
-        // Don't *await* the mutex — `send_tag` is on the hot path and
-        // must win immediately. If contended, skip this round entirely
-        // (the next iteration's sleep already gives writers headroom).
-        let result = match io.try_lock() {
-            Ok(mut guard) => {
-                tokio::time::timeout(Duration::from_millis(READ_LOOP_HOLD_MS), guard.read()).await
-                // guard (and the mutex) is dropped here regardless of outcome.
-            }
-            Err(_) => continue,
-        };
-
-        let data = match result {
-            Err(_timeout) => continue,
-            Ok(Ok(d)) => d,
-            Ok(Err(_)) => {
-                poisoned.store(true, Ordering::Relaxed);
-                return;
-            }
-        };
-
-        if data.is_empty() {
-            poisoned.store(true, Ordering::Relaxed);
-            return;
-        }
-
-        unpacketizer.extend_data(&data[..]);
-        loop {
-            match unpacketizer.read_chunks() {
-                Ok(UnpackResult::Chunks(chunks)) => {
-                    for chunk in chunks {
-                        if let Ok(Some(msg)) = MessageParser::new(chunk).parse() {
-                            match msg {
-                                RtmpMessageData::SetChunkSize { chunk_size } => {
-                                    unpacketizer.update_max_chunk_size(chunk_size as usize);
-                                }
-                                RtmpMessageData::Amf0Command {
-                                    command_name,
-                                    others,
-                                    ..
-                                } if amf_string(&command_name) == "onStatus" => {
-                                    // Watch for mid-stream onStatus errors.
-                                    let is_error = others.iter().any(|v| {
-                                        let Amf0ValueType::Object(m) = v else {
-                                            return false;
-                                        };
-                                        m.get("level")
-                                            .map(|lv| matches!(lv, Amf0ValueType::UTF8String(s) if s == "error"))
-                                            .unwrap_or(false)
-                                    });
-                                    if is_error {
-                                        poisoned.store(true, Ordering::Relaxed);
-                                        return;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                Err(_) => break,
-                Ok(_) => {}
-            }
-        }
-    }
-}
+// Read loop is large (RTMP message dispatch + Acknowledgement state).
+// Extracted to a sibling file to keep this file under the 1000-line cap.
+#[path = "session_read_loop.rs"]
+mod read_loop_mod;
+use read_loop_mod::read_loop;
 
 // -------------------------------------------------------------------------
 // AMF value helpers
@@ -756,14 +703,21 @@ fn amf_u8(v: &Amf0ValueType) -> u8 {
 // URL parsing
 // -------------------------------------------------------------------------
 
-/// Parse `rtmp://host[:port]/app/stream` into `(host, port, app, stream)`.
-///
-/// - Default port is 1935.
-/// - Both `app` and `stream` must be non-empty.
-fn parse_rtmp_url(url: &str) -> Result<(String, u16, String, String), PushError> {
-    let rest = url
-        .strip_prefix("rtmp://")
-        .ok_or_else(|| bad_url("must start with rtmp://", url))?;
+/// URL scheme of the upstream RTMP endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scheme {
+    Rtmp,
+    Rtmps,
+}
+
+fn parse_rtmp_url(url: &str) -> Result<(Scheme, String, u16, String, String), PushError> {
+    let (scheme, rest, default_port) = if let Some(r) = url.strip_prefix("rtmps://") {
+        (Scheme::Rtmps, r, 443u16)
+    } else if let Some(r) = url.strip_prefix("rtmp://") {
+        (Scheme::Rtmp, r, 1935u16)
+    } else {
+        return Err(bad_url("must start with rtmp:// or rtmps://", url));
+    };
 
     let slash = rest
         .find('/')
@@ -779,7 +733,7 @@ fn parse_rtmp_url(url: &str) -> Result<(String, u16, String, String), PushError>
             .map_err(|_| bad_url("invalid port number", url))?;
         (h.to_string(), p)
     } else {
-        (authority.to_string(), 1935u16)
+        (authority.to_string(), default_port)
     };
 
     if host.is_empty() {
@@ -800,7 +754,7 @@ fn parse_rtmp_url(url: &str) -> Result<(String, u16, String, String), PushError>
         return Err(bad_url("stream name is empty", url));
     }
 
-    Ok((host, port, app, stream))
+    Ok((scheme, host, port, app, stream))
 }
 
 fn bad_url(reason: &str, url: &str) -> PushError {
@@ -813,7 +767,7 @@ fn bad_url(reason: &str, url: &str) -> PushError {
 
 #[cfg(test)]
 mod tests {
-    use super::{READ_LOOP_HOLD_MS, READ_LOOP_IDLE_MS, parse_rtmp_url};
+    use super::{READ_LOOP_HOLD_MS, READ_LOOP_IDLE_MS, Scheme, parse_rtmp_url};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -822,8 +776,10 @@ mod tests {
     // --- URL parser tests ---------------------------------------------------
 
     #[test]
-    fn parse_standard_url() {
-        let (host, port, app, stream) = parse_rtmp_url("rtmp://a.example.com/live/test").unwrap();
+    fn parse_standard_rtmp_url() {
+        let (scheme, host, port, app, stream) =
+            parse_rtmp_url("rtmp://a.example.com/live/test").unwrap();
+        assert_eq!(scheme, Scheme::Rtmp);
         assert_eq!(host, "a.example.com");
         assert_eq!(port, 1935);
         assert_eq!(app, "live");
@@ -831,13 +787,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_url_with_port() {
-        let (host, port, app, stream) =
+    fn parse_rtmp_url_with_port() {
+        let (scheme, host, port, app, stream) =
             parse_rtmp_url("rtmp://127.0.0.1:19350/live/mykey").unwrap();
+        assert_eq!(scheme, Scheme::Rtmp);
         assert_eq!(host, "127.0.0.1");
         assert_eq!(port, 19350);
         assert_eq!(app, "live");
         assert_eq!(stream, "mykey");
+    }
+
+    #[test]
+    fn parse_standard_rtmps_url() {
+        let (scheme, host, port, app, stream) =
+            parse_rtmp_url("rtmps://live-api-s.facebook.com/rtmp/abc123").unwrap();
+        assert_eq!(scheme, Scheme::Rtmps);
+        assert_eq!(host, "live-api-s.facebook.com");
+        assert_eq!(port, 443);
+        assert_eq!(app, "rtmp");
+        assert_eq!(stream, "abc123");
+    }
+
+    #[test]
+    fn parse_rtmps_url_with_explicit_port() {
+        let (scheme, host, port, app, stream) =
+            parse_rtmp_url("rtmps://127.0.0.1:19443/live/test").unwrap();
+        assert_eq!(scheme, Scheme::Rtmps);
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 19443);
+        assert_eq!(app, "live");
+        assert_eq!(stream, "test");
     }
 
     #[test]
@@ -848,6 +827,7 @@ mod tests {
     #[test]
     fn rejects_missing_stream() {
         assert!(parse_rtmp_url("rtmp://host/live").is_err());
+        assert!(parse_rtmp_url("rtmps://host/live").is_err());
     }
 
     #[test]

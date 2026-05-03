@@ -52,66 +52,34 @@ fn rust_push_backoff_handshake_failed_fixed_always_5000() {
 
 // ---------------------------------------------------------------------------
 // Backoff math: RemoteClosed (exponential, floor = 30_000)
-// Ladder: 30_000, 60_000, 120_000, 240_000, 300_000 (cap), 300_000, ...
+// RemoteClosed = upstream-initiated rotation (YT/FB load balancer churn).
+// 3 s flat, NEVER exponential — escalating wastes cache time we just got.
+// (Changed from 30 s exponential ladder in #160 follow-up after live soak
+// showed 60 s cache overshoot per 2-rotation cycle.)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rust_push_backoff_remote_closed_first_error_is_floor() {
+fn rust_push_backoff_remote_closed_first_error_is_3000() {
     let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
     assert_eq!(
         compute_rust_push_backoff(&e, 1),
-        30_000,
-        "first error: factor = 1 << (1-1).min(5) = 1 -> 30000 * 1 = 30000"
+        3_000,
+        "first RemoteClosed: 3 s floor, not exponential"
     );
 }
 
 #[test]
-fn rust_push_backoff_remote_closed_second_error_doubles() {
+fn rust_push_backoff_remote_closed_is_never_exponential() {
     let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
-    assert_eq!(
-        compute_rust_push_backoff(&e, 2),
-        60_000,
-        "second error: factor = 1 << 1 = 2 -> 30000 * 2 = 60000"
-    );
-}
-
-#[test]
-fn rust_push_backoff_remote_closed_third_error_is_120000() {
-    let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
-    assert_eq!(
-        compute_rust_push_backoff(&e, 3),
-        120_000,
-        "third error: factor = 1 << 2 = 4 -> 30000 * 4 = 120000"
-    );
-}
-
-#[test]
-fn rust_push_backoff_remote_closed_fourth_error_is_240000() {
-    let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
-    assert_eq!(
-        compute_rust_push_backoff(&e, 4),
-        240_000,
-        "fourth error: factor = 1 << 3 = 8 -> 30000 * 8 = 240000"
-    );
-}
-
-#[test]
-fn rust_push_backoff_remote_closed_fifth_and_beyond_caps_at_300000() {
-    let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
-    // 5th: factor = 1 << 4 = 16 -> 30000 * 16 = 480000, capped to 300000
-    assert_eq!(
-        compute_rust_push_backoff(&e, 5),
-        300_000,
-        "fifth error: 30000 * 16 = 480000, must cap at 300000"
-    );
-    // 6th: factor = 1 << 5 = 32 -> still capped
-    assert_eq!(
-        compute_rust_push_backoff(&e, 6),
-        300_000,
-        "sixth error: exponent clamped at .min(5), still 300000"
-    );
-    // Any larger consecutive stays capped
-    assert_eq!(compute_rust_push_backoff(&e, 99), 300_000);
+    for consecutive in 1..=10 {
+        assert_eq!(
+            compute_rust_push_backoff(&e, consecutive),
+            3_000,
+            "RemoteClosed must stay at 3 s for consecutive={consecutive}; \
+             upstream-initiated rotations are not our fault, escalating \
+             wastes cache time"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,25 +153,19 @@ fn rust_push_backoff_local_cancel_is_zero() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rust_push_backoff_remote_closed_ladder_is_monotone() {
+fn rust_push_backoff_remote_closed_is_constant() {
+    // RemoteClosed is no longer exponential (changed from 30 s ladder to
+    // 3 s flat). Verify the value is constant across consecutive errors —
+    // kills the ×= 2 / << mutants in compute_rust_push_backoff.
     let e = PushError::RemoteClosed(io::Error::new(io::ErrorKind::ConnectionReset, "x"));
     let values: Vec<u64> = (1..=6).map(|n| compute_rust_push_backoff(&e, n)).collect();
-    // Each step must be >= the previous step.
-    for window in values.windows(2) {
-        assert!(
-            window[1] >= window[0],
-            "backoff ladder must be monotone non-decreasing; got {:?}",
-            values
-        );
-    }
-    // First four steps must be strictly increasing (before the cap).
-    for window in values[..4].windows(2) {
-        assert!(
-            window[1] > window[0],
-            "backoff ladder must be strictly increasing before the cap; got {:?}",
-            &values[..4]
-        );
-    }
+    let first = values[0];
+    assert!(
+        values.iter().all(|&v| v == first),
+        "RemoteClosed backoff must be constant; got {:?}",
+        values
+    );
+    assert_eq!(first, 3_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -311,4 +273,221 @@ fn emit_rtmp_push_died_with_none_ring_is_no_op() {
     // When audit_ring is None the function must be a no-op (no panic).
     endpoint_audit::emit_rtmp_push_died(&None, "test-alias", "some error", 5_000, 1);
     // If we get here without panic the test passes.
+}
+
+// ---------------------------------------------------------------------------
+// handle_rust_push close-on-error behavior (regression for 2026-05-03 freeze)
+// Asserts that the Err arm calls pusher.close() so the next push reconnects
+// instead of re-using a wedged session forever.
+// ---------------------------------------------------------------------------
+
+mod close_on_error {
+    use super::super::super::consumer_helpers::{Pushable, RustPushAction, handle_rust_push};
+    use super::super::super::{EndpointStats, FlvStreamNormalizer};
+    use rs_rtmp_push::PushError;
+    use std::collections::VecDeque;
+    use std::io;
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, watch};
+
+    /// Mock that records call sequence and returns a pre-canned push result
+    /// per call, so the test can assert close() was invoked between an Err
+    /// and a subsequent push.
+    #[derive(Default)]
+    struct MockPusher {
+        push_results: VecDeque<Result<(), PushError>>,
+        events: Vec<&'static str>,
+        reconnects: u32,
+    }
+
+    impl MockPusher {
+        fn with_results(results: Vec<Result<(), PushError>>) -> Self {
+            Self {
+                push_results: VecDeque::from(results),
+                events: Vec::new(),
+                reconnects: 0,
+            }
+        }
+    }
+
+    impl Pushable for MockPusher {
+        async fn push_flv_bytes(&mut self, _data: &[u8]) -> Result<(), PushError> {
+            self.events.push("push");
+            self.push_results
+                .pop_front()
+                .unwrap_or(Err(PushError::IoError(io::Error::other(
+                    "no canned result remaining",
+                ))))
+        }
+
+        async fn close(&mut self) {
+            self.events.push("close");
+            // Each close represents a fresh-session reconnect on the next push.
+            self.reconnects += 1;
+        }
+
+        fn reconnect_count(&self) -> u32 {
+            self.reconnects
+        }
+    }
+
+    fn fresh_state() -> (
+        Arc<Mutex<EndpointStats>>,
+        watch::Receiver<bool>,
+        FlvStreamNormalizer,
+        u32,
+        u32,
+    ) {
+        let stats = Arc::new(Mutex::new(EndpointStats::default()));
+        let (_tx, rx) = watch::channel(false);
+        (stats, rx, FlvStreamNormalizer::new(), 0u32, 0u32)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn err_arm_calls_close_so_next_push_reconnects() {
+        // Sequence: IoError -> Ok. Without the close-on-Err fix the Err arm
+        // would skip close() and reconnect_count would stay 0.
+        //
+        // `start_paused = true` virtualizes the 15 s exponential backoff
+        // sleep so the test runs in milliseconds. Real-time waits would
+        // add ~15 s per `cargo test` invocation.
+        let mut pusher = MockPusher::with_results(vec![
+            Err(PushError::IoError(io::Error::other("none return"))),
+            Ok(()),
+        ]);
+
+        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write) = fresh_state();
+
+        // Spawn the handle_rust_push call so we can advance virtual time
+        // past the backoff sleep.
+        let stats_clone = Arc::clone(&stats);
+        let task = tokio::spawn(async move {
+            handle_rust_push(
+                &mut pusher,
+                b"chunk-data",
+                42,
+                2000,
+                "test-alias",
+                &mut consec_err,
+                &mut consec_write,
+                &stats_clone,
+                &None,
+                &mut stop_rx,
+                &mut norm,
+            )
+            .await;
+            pusher
+        });
+
+        // Yield to let the task reach the backoff sleep, then advance
+        // virtual time past 15 s + a margin so the sleep returns.
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(20)).await;
+
+        let pusher = task.await.expect("task panicked");
+
+        assert_eq!(
+            pusher.events,
+            vec!["push", "close"],
+            "Err arm must call close() after the failed push so the next call reconnects"
+        );
+
+        let stats_guard = stats.lock().await;
+        assert_eq!(
+            stats_guard.last_error.as_deref(),
+            Some("I/O error: none return"),
+            "Err arm must surface last_error so the dashboard shows the failure"
+        );
+        assert_eq!(
+            stats_guard.stall_reason.as_deref(),
+            Some("I/O error: none return"),
+            "Err arm must surface stall_reason (regression: previously only the Timeout arm did)"
+        );
+    }
+
+    #[tokio::test]
+    async fn ok_arm_clears_stall_after_recovery() {
+        // After a transient error sets stall_reason / last_error, a
+        // successful push must clear them so the dashboard reflects
+        // recovery instead of the stale freeze indicator.
+        let mut pusher = MockPusher::with_results(vec![Ok(())]);
+        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write) = fresh_state();
+
+        // Pre-seed stale error markers as if a prior failure happened.
+        {
+            let mut s = stats.lock().await;
+            s.last_error = Some("stale".to_string());
+            s.stall_reason = Some("stale".to_string());
+        }
+
+        let action = handle_rust_push(
+            &mut pusher,
+            b"chunk-data",
+            7,
+            2000,
+            "test-alias",
+            &mut consec_err,
+            &mut consec_write,
+            &stats,
+            &None,
+            &mut stop_rx,
+            &mut norm,
+        )
+        .await;
+
+        assert!(matches!(action, RustPushAction::Continue));
+
+        let s = stats.lock().await;
+        assert!(
+            s.last_error.is_none(),
+            "Ok path must clear last_error; got {:?}",
+            s.last_error
+        );
+        assert!(
+            s.stall_reason.is_none(),
+            "Ok path must clear stall_reason; got {:?}",
+            s.stall_reason
+        );
+        assert_eq!(s.chunks_processed, 1);
+    }
+
+    #[tokio::test]
+    async fn local_cancel_returns_break_without_calling_close() {
+        // PushError::LocalCancel is the only None-floor variant. The let-else
+        // short-circuit must return Break BEFORE the close() call, so no
+        // double-close on shutdown (close happens via Drop on stack unwind).
+        let mut pusher = MockPusher::with_results(vec![Err(PushError::LocalCancel)]);
+        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write) = fresh_state();
+
+        let action = handle_rust_push(
+            &mut pusher,
+            b"data",
+            1,
+            2000,
+            "test-alias",
+            &mut consec_err,
+            &mut consec_write,
+            &stats,
+            &None,
+            &mut stop_rx,
+            &mut norm,
+        )
+        .await;
+
+        assert!(matches!(action, RustPushAction::Break));
+        assert_eq!(
+            pusher.events,
+            vec!["push"],
+            "LocalCancel must NOT call close() in handle_rust_push (Drop handles it)"
+        );
+        assert_ne!(
+            pusher.events.last().copied(),
+            Some("close"),
+            "Last event must NOT be 'close' on the LocalCancel path"
+        );
+        assert_eq!(
+            pusher.reconnects, 0,
+            "LocalCancel must NOT trigger any reconnect bookkeeping"
+        );
+    }
 }

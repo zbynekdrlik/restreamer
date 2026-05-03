@@ -153,7 +153,11 @@ async fn remove_endpoint_rejects_when_would_leave_zero_and_delivery_active() {
 }
 
 #[tokio::test]
-async fn start_position_live_returns_latest_sequence_not_first() {
+async fn start_position_live_walks_back_target_delay_buffer_for_midstream_add() {
+    // #163: mid-stream endpoint add with StartPosition::Live must resolve to
+    // (latest_seq - target_delay), not the bare live edge — otherwise the
+    // new endpoint joins with zero cache and never builds the buffer the
+    // other endpoints already have.
     use rs_api::delivery_endpoints::{StartPosition, resolve_start_chunk_id};
 
     let pool = db::create_memory_pool().await.unwrap();
@@ -162,33 +166,44 @@ async fn start_position_live_returns_latest_sequence_not_first() {
         .await
         .unwrap();
 
-    // Insert 10 chunks with sequence_number 1..=10 manually.
-    for seq in 1i64..=10 {
-        let _id: i64 = sqlx::query_scalar(
-            "INSERT INTO chunk_records (streaming_event_id, chunk_file_path, data_size, md5, sequence_number)
-             VALUES (?1, ?2, ?3, '', ?4) RETURNING id",
+    // Insert 100 chunks of 2000 ms each, all sent=1. Total content = 200 s.
+    // With default target_delay = 120 s, the walk should land on
+    // seq=100 - (120000/2000) + 1 = 41 (so the buffer summed from 41..=100
+    // is exactly 60 chunks * 2000 ms = 120 s).
+    for seq in 1i64..=100 {
+        sqlx::query(
+            "INSERT INTO chunk_records
+             (streaming_event_id, chunk_file_path, data_size, md5, sequence_number, duration_ms, sent)
+             VALUES (?1, ?2, ?3, '', ?4, 2000, 1)",
         )
         .bind(event_id)
         .bind(format!("c{seq}.bin"))
         .bind(1024_i64)
         .bind(seq)
-        .fetch_one(&pool)
+        .execute(&pool)
         .await
         .unwrap();
     }
 
-    let live = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live)
+    let live = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 120_000)
         .await
         .unwrap();
     assert_eq!(
-        live, 10,
-        "Live must resolve to latest sequence (10), got {live}"
+        live, 41,
+        "Live must walk back ~120 s of buffer from latest (100), expected seq 41 got {live}"
     );
 
-    let beg = resolve_start_chunk_id(&pool, event_id, &StartPosition::Beginning)
+    let beg = resolve_start_chunk_id(&pool, event_id, &StartPosition::Beginning, 120_000)
         .await
         .unwrap();
     assert_eq!(beg, 1, "Beginning must resolve to first sequence (1)");
 
-    assert_ne!(live, beg, "Live and Beginning must differ");
+    // Smaller delay walks back fewer chunks (60 s = 30 chunks at 2 s each).
+    let live_short = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 60_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        live_short, 71,
+        "60 s target must walk back 30 chunks from latest (100), got {live_short}"
+    );
 }

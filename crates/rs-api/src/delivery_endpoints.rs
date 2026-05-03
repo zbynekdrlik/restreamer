@@ -11,6 +11,7 @@ use rs_core::config::Config;
 use rs_core::db;
 
 use crate::delivery::{DeliveryOrchestrator, is_delivery_active};
+use crate::delivery_helpers::build_endpoint_init_entry;
 
 /// Start position strategy for an endpoint joining a delivery session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -27,13 +28,20 @@ pub enum StartPosition {
 
 /// Resolve a StartPosition into a concrete start_chunk_id for an event.
 ///
-/// - `Live`      → latest sequence number (track the current live edge)
+/// - `Live`      → walks back from the latest sequence by `target_delay_ms`
+///   (same backward-walk used by `delivery_init`). The new endpoint joins
+///   with a buffer matching the existing endpoints instead of zero cache.
 /// - `Beginning` → first sequence number (replay from event start)
 /// - `Resume`    → passes through the chunk_id directly
+///
+/// `target_delay_ms` is only consulted on the `Live` arm; callers should
+/// compute it once via `compute_delivery_delay_ms(config, event_row.cache_delay_secs)`
+/// to keep this helper independent of `Config` shape.
 pub async fn resolve_start_chunk_id(
     pool: &SqlitePool,
     event_id: i64,
     position: &StartPosition,
+    target_delay_ms: u64,
 ) -> anyhow::Result<i64> {
     match position {
         StartPosition::Resume { chunk_id } => Ok(*chunk_id),
@@ -44,13 +52,9 @@ pub async fn resolve_start_chunk_id(
             Ok(first)
         }
         StartPosition::Live => {
-            // "Live" means the current live edge — latest chunk. Starting from
-            // here makes the endpoint track real-time ingest. (Historically
-            // this was identical to Beginning; see 2026-04-19 post-mortem.)
-            let last_seq = db::get_latest_sequence_number_for_event(pool, event_id)
-                .await?
-                .unwrap_or(1);
-            Ok(last_seq)
+            let start =
+                db::compute_target_start_chunk(pool, event_id, target_delay_ms as i64).await?;
+            Ok(start)
         }
     }
 }
@@ -97,19 +101,20 @@ pub async fn add_endpoint_to_delivery(
         ));
     }
 
-    let start_chunk_id = resolve_start_chunk_id(pool, event_id, &start_position).await?;
+    let event = db::get_streaming_event_by_id(pool, event_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Streaming event {event_id} not found"))?;
+    let target_delay_ms = compute_delivery_delay_ms(config, event.cache_delay_secs);
+    let start_chunk_id =
+        resolve_start_chunk_id(pool, event_id, &start_position, target_delay_ms).await?;
 
     let chunk_format = &config.inpoint.chunk_format;
 
+    // Reuse the same helper as delivery_init so the VPS receives the same
+    // shape — including `pusher`. Without this, mid-stream adds silently
+    // fell back to ffmpeg even when the DB row was pusher='rust' (#160 follow-up).
     let body = serde_json::json!({
-        "endpoint": {
-            "alias": ep.alias,
-            "service_type": ep.service_type,
-            "stream_key": ep.stream_key,
-            "is_fast": ep.is_fast,
-            "chunk_format": chunk_format,
-            "start_chunk_id": start_chunk_id,
-        }
+        "endpoint": build_endpoint_init_entry(&ep, chunk_format, start_chunk_id),
     });
 
     let delivery_url = format!("http://{}:8000", instance.ipv4);

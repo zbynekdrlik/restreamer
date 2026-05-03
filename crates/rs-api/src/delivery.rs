@@ -13,7 +13,8 @@ use rs_core::config::Config;
 use rs_core::db;
 
 pub(crate) use crate::delivery_helpers::{
-    build_endpoint_init_entry, is_delivery_active, persist_delivery_log_to_disk,
+    build_endpoint_init_entry, is_delivery_active, is_delivery_or_spawning,
+    persist_delivery_log_to_disk,
 };
 
 // Re-exports so existing call sites (`crate::delivery::Foo`, test modules,
@@ -157,17 +158,50 @@ impl DeliveryOrchestrator {
     /// Creates a Hetzner VPS, records it in the DB, polls until running,
     /// then POSTs /api/init to the rs-delivery binary on the VPS.
     pub async fn start_delivery(&self, event_id: i64) -> anyhow::Result<StartDeliveryResult> {
-        // Check for existing active instance
+        // Reuse existing instance only when it's serving traffic or mid-spawn
+        // (`is_delivery_or_spawning`). Stale rows (`failed` / `stopped` /
+        // `stopping` / unknown) are cleaned up below — see #165.
         if let Some(existing) = db::get_delivery_instance_by_event(&self.pool, event_id).await? {
-            if existing.status != "deleted" {
+            if is_delivery_or_spawning(&existing.status) {
                 return Ok(StartDeliveryResult {
                     instance_id: existing.id,
                     hetzner_id: existing.hetzner_id,
                     name: existing.name,
                     server_type: existing.server_type,
                     status: existing.status,
-                    auth_token: String::new(),
+                    auth_token: existing.auth_token,
                 });
+            }
+            // Stale row (failed / stopped / stopping, or any unknown
+            // future status). Mark it deleted so subsequent
+            // get_delivery_instance_by_event calls stop returning it,
+            // then fall through to spawn a fresh VPS.
+            //
+            // Stop-vs-start race: a concurrent `stop_delivery` may be
+            // between its own update_delivery_instance_status("stopping")
+            // and update_delivery_instance_status("deleted"). That's
+            // harmless -- the stop task acts on its own captured
+            // `hetzner_id`, so the OLD VPS still gets deleted on Hetzner
+            // regardless of how many times this row is rewritten to
+            // "deleted". No orphan VPS billing leak.
+            tracing::warn!(
+                event_id,
+                instance_id = existing.id,
+                status = %existing.status,
+                "Marking stale delivery_instance row as deleted before spawning new VPS"
+            );
+            if let Err(e) =
+                db::update_delivery_instance_status(&self.pool, existing.id, "deleted").await
+            {
+                // Continue anyway: worst case is two non-deleted rows
+                // for this event. `get_delivery_instance_by_event` ORDER
+                // BYs id DESC LIMIT 1, so the next call will
+                // deterministically prefer the freshly-spawned row over
+                // the stale one.
+                tracing::error!(
+                    instance_id = existing.id,
+                    "Failed to mark stale instance as deleted: {e} -- spawning new anyway"
+                );
             }
         }
 
@@ -629,6 +663,16 @@ impl DeliveryOrchestrator {
     }
 
     /// Stop delivery for an event: POST /api/stop, then delete Hetzner server.
+    ///
+    /// Race note: between the `"stopping"` status write below and the
+    /// final `"deleted"` status write at the end of this function, a
+    /// concurrent `start_delivery` may run. That call sees status =
+    /// `"stopping"` (not in `is_delivery_or_spawning`), classifies the
+    /// row as stale, and rewrites it to `"deleted"`. Harmless: this
+    /// function captures `instance.hetzner_id` BEFORE either write, so
+    /// the OLD VPS still gets deleted on Hetzner regardless of how many
+    /// times the row is rewritten. No orphan VPS billing leak. Symmetric
+    /// to the comment in `start_delivery`.
     pub async fn stop_delivery(&self, event_id: i64) -> anyhow::Result<()> {
         let instance = db::get_delivery_instance_by_event(&self.pool, event_id).await?;
         let instance = match instance {
