@@ -73,8 +73,16 @@ fn should_spawn_worker(live: usize, target: usize) -> bool {
 
 const MAX_ATTEMPTS: i64 = 10;
 const MAX_WALL_CLOCK_MS: i64 = 600_000; // 10 min total retry budget
-const MIN_CONCURRENCY: usize = 4;
-pub(crate) const MAX_CONCURRENCY: usize = 32;
+// Concurrency bounds tuned for Hetzner Object Storage NBG1 per-bucket
+// rate limits. 32-worker sustained load triggered 503/504 cascades
+// during 2026-05-02 4-h soak. boto3 burst test: 30 parallel PUTs from
+// the SAME source IP succeeded 30/30 in 14 s — but a burst is not
+// sustained load. Hetzner enforces per-bucket request rate limits on
+// NBG1 ("we will be reducing the available write limitations for some
+// existing buckets on NBG1" per official status page); 32 sustained
+// requests/sec exceeds it. 8 sustained workers stays within budget.
+const MIN_CONCURRENCY: usize = 2;
+pub(crate) const MAX_CONCURRENCY: usize = 8;
 
 pub(crate) fn backoff_ms(attempt: i64) -> u64 {
     // 1s, 2s, 4s, 8s, 16s, 30s (cap)
@@ -547,28 +555,24 @@ mod tests {
 
     #[test]
     fn adaptive_scales_up_on_zero_errors_fast_median() {
-        let mut target = 4usize;
+        let mut target = 2usize;
+        target = adjust_target(target, 0.0, 200);
+        assert_eq!(target, 4);
         target = adjust_target(target, 0.0, 200);
         assert_eq!(target, 8);
         target = adjust_target(target, 0.0, 200);
-        assert_eq!(target, 16);
-        target = adjust_target(target, 0.0, 200);
-        assert_eq!(target, 32);
-        target = adjust_target(target, 0.0, 200);
-        assert_eq!(target, 32, "capped at MAX_CONCURRENCY");
+        assert_eq!(target, 8, "capped at MAX_CONCURRENCY");
     }
 
     #[test]
     fn adaptive_scales_down_on_errors() {
-        let mut target = 32usize;
-        target = adjust_target(target, 0.3, 200);
-        assert_eq!(target, 16);
-        target = adjust_target(target, 0.3, 200);
-        assert_eq!(target, 8);
+        let mut target = 8usize;
         target = adjust_target(target, 0.3, 200);
         assert_eq!(target, 4);
         target = adjust_target(target, 0.3, 200);
-        assert_eq!(target, 4, "capped at MIN_CONCURRENCY");
+        assert_eq!(target, 2);
+        target = adjust_target(target, 0.3, 200);
+        assert_eq!(target, 2, "capped at MIN_CONCURRENCY");
     }
 
     #[test]
@@ -633,10 +637,10 @@ mod tests {
 
     #[test]
     fn spawn_gate_reopens_after_drain_below_target() {
-        // After scale-down 32→4, live drains from 32 toward 4.
-        // Mid-drain (live=20) with target=4: no spawn.
-        assert!(!should_spawn_worker(20, 4));
-        // After drain (live=4) with target now raised to 8: spawn.
-        assert!(should_spawn_worker(4, 8));
+        // After scale-down 8→2, live drains from 8 toward 2.
+        // Mid-drain (live=5) with target=2: no spawn.
+        assert!(!should_spawn_worker(5, 2));
+        // After drain (live=2) with target now raised to 4: spawn.
+        assert!(should_spawn_worker(2, 4));
     }
 }
