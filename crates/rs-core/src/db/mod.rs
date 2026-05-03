@@ -547,13 +547,19 @@ pub async fn get_sent_chunk_count_for_event(
     Ok(row.get::<i32, _>("cnt") as i64)
 }
 
-/// Count chunks on local disk (not yet uploaded to S3) for a specific streaming event.
+/// Count chunks on local disk that the uploader will still pick up for a
+/// specific streaming event. Mirrors `get_chunk_stats`'s pending criteria:
+/// excludes `upload_failed_permanently=1` so dead chunks from prior runs
+/// don't inflate the dashboard's `local_buffer_chunks` indicator forever.
 pub async fn get_pending_chunk_count_for_event(
     pool: &SqlitePool,
     streaming_event_id: i64,
 ) -> Result<i64> {
     let row = sqlx::query(
-        "SELECT COUNT(*) as cnt FROM chunk_records WHERE streaming_event_id = ?1 AND sent = 0",
+        "SELECT COUNT(*) as cnt FROM chunk_records
+         WHERE streaming_event_id = ?1
+           AND sent = 0
+           AND upload_failed_permanently = 0",
     )
     .bind(streaming_event_id)
     .fetch_one(pool)
