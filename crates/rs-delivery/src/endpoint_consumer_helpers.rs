@@ -70,13 +70,22 @@ pub(super) async fn handle_rust_push(
                 alias = %alias,
                 chunk_id,
                 consecutive = *consecutive_push_errors,
-                "Consumer: Rust pusher error: {error_display}"
+                "Consumer: Rust pusher error: {error_display} -- force-closing session"
             );
             let floor = backoff_floor_ms(&push_err);
             let Some(floor_ms) = floor else {
                 tracing::info!(alias = %alias, "Consumer: Rust pusher cancelled; stopping");
                 return RustPushAction::Break;
             };
+            // CRITICAL: any push error means the session is in an unknown
+            // state (broken socket, half-closed peer, poisoned by read loop).
+            // Without close() the next push_flv_bytes would re-use the same
+            // wedged session and fail identically forever -- exactly the
+            // 2026-05-03 FB-NewLevel/FB-Zbynek freeze where last_error =
+            // "I/O error: none return" but ffmpeg_restart_count stayed 0
+            // and chunks_processed froze. Close drops the connection so the
+            // next call lazily reconnects.
+            pusher.close().await;
             let backoff_ms = if is_exponential(&push_err) {
                 let factor = 1u64 << (consecutive_push_errors.saturating_sub(1).min(5));
                 floor_ms.saturating_mul(factor).min(300_000)
@@ -104,7 +113,10 @@ pub(super) async fn handle_rust_push(
             };
             let mut s = stats.lock().await;
             s.reconnect_count = reconnect_count;
-            s.last_error = Some(error_display);
+            s.last_error = Some(error_display.clone());
+            // Match the Timeout arm: surface the freeze on the dashboard.
+            // The success path clears stall_reason once writes resume.
+            s.stall_reason = Some(error_display);
             if s.rtmp_push_history.len() >= RESTART_HISTORY_CAP {
                 s.rtmp_push_history.pop_front();
             }
