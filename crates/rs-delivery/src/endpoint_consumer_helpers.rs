@@ -57,6 +57,10 @@ pub(super) async fn handle_rust_push(
             s.current_chunk_id = chunk_id;
             s.chunks_processed += 1;
             s.reconnect_count = pusher.reconnect_count();
+            // Clear sticky error markers: prior timeout / push-error states
+            // shouldn't keep showing on the dashboard once writes resume.
+            s.stall_reason = None;
+            s.last_error = None;
             RustPushAction::Continue
         }
         Ok(Err(push_err)) => {

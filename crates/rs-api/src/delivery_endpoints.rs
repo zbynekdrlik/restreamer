@@ -28,13 +28,17 @@ pub enum StartPosition {
 
 /// Resolve a StartPosition into a concrete start_chunk_id for an event.
 ///
-/// - `Live`      → latest sequence number (track the current live edge)
+/// - `Live`      → walks back from the latest sequence by `target_delay_ms`
+///   (same backward-walk used by `delivery_init`). The new endpoint joins
+///   with a buffer matching the existing endpoints instead of zero cache.
 /// - `Beginning` → first sequence number (replay from event start)
 /// - `Resume`    → passes through the chunk_id directly
 pub async fn resolve_start_chunk_id(
     pool: &SqlitePool,
     event_id: i64,
     position: &StartPosition,
+    config: &Config,
+    event_cache_delay_secs: Option<i64>,
 ) -> anyhow::Result<i64> {
     match position {
         StartPosition::Resume { chunk_id } => Ok(*chunk_id),
@@ -45,13 +49,9 @@ pub async fn resolve_start_chunk_id(
             Ok(first)
         }
         StartPosition::Live => {
-            // "Live" means the current live edge — latest chunk. Starting from
-            // here makes the endpoint track real-time ingest. (Historically
-            // this was identical to Beginning; see 2026-04-19 post-mortem.)
-            let last_seq = db::get_latest_sequence_number_for_event(pool, event_id)
-                .await?
-                .unwrap_or(1);
-            Ok(last_seq)
+            let target_delay_ms = compute_delivery_delay_ms(config, event_cache_delay_secs) as i64;
+            let start = db::compute_target_start_chunk(pool, event_id, target_delay_ms).await?;
+            Ok(start)
         }
     }
 }
@@ -98,7 +98,17 @@ pub async fn add_endpoint_to_delivery(
         ));
     }
 
-    let start_chunk_id = resolve_start_chunk_id(pool, event_id, &start_position).await?;
+    let event = db::get_streaming_event_by_id(pool, event_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Streaming event {event_id} not found"))?;
+    let start_chunk_id = resolve_start_chunk_id(
+        pool,
+        event_id,
+        &start_position,
+        config,
+        event.cache_delay_secs,
+    )
+    .await?;
 
     let chunk_format = &config.inpoint.chunk_format;
 
