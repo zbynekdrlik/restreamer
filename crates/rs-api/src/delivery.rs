@@ -157,17 +157,43 @@ impl DeliveryOrchestrator {
     /// Creates a Hetzner VPS, records it in the DB, polls until running,
     /// then POSTs /api/init to the rs-delivery binary on the VPS.
     pub async fn start_delivery(&self, event_id: i64) -> anyhow::Result<StartDeliveryResult> {
-        // Check for existing active instance
+        // Check for existing instance that's actually serving traffic.
+        // Pre-fix: any non-`deleted` row short-circuited (returning empty
+        // auth_token), so a leftover `failed` / `stopped` / `stopping` row
+        // from a prior run blocked every future spawn -- silently. Issue
+        // #165, also surfaced as the CI E2E "Wait for delivery server
+        // ready" 15-min timeout on 2026-05-03.
+        //
+        // Reuse the same liveness predicate the rest of the orchestrator
+        // uses (`is_delivery_active`) plus `creating` (mid-spawn). Anything
+        // else is a stale row and gets cleaned up below.
         if let Some(existing) = db::get_delivery_instance_by_event(&self.pool, event_id).await? {
-            if existing.status != "deleted" {
+            if existing.status == "creating" || is_delivery_active(&existing.status) {
                 return Ok(StartDeliveryResult {
                     instance_id: existing.id,
                     hetzner_id: existing.hetzner_id,
                     name: existing.name,
                     server_type: existing.server_type,
                     status: existing.status,
-                    auth_token: String::new(),
+                    auth_token: existing.auth_token,
                 });
+            }
+            // Stale row (failed / stopped / stopping). Mark it deleted so
+            // get_delivery_instance_by_event stops returning it on subsequent
+            // polls, then fall through to spawn a fresh VPS.
+            tracing::warn!(
+                event_id,
+                instance_id = existing.id,
+                status = %existing.status,
+                "Marking stale delivery_instance row as deleted before spawning new VPS"
+            );
+            if let Err(e) =
+                db::update_delivery_instance_status(&self.pool, existing.id, "deleted").await
+            {
+                tracing::error!(
+                    instance_id = existing.id,
+                    "Failed to mark stale instance as deleted: {e} -- spawning new anyway"
+                );
             }
         }
 
