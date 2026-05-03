@@ -1,6 +1,6 @@
 [package]
 name = "leptos-ui"
-version = "0.3.84"
+version = "0.3.85"
 edition = "2024"
 license = "MIT"
 
