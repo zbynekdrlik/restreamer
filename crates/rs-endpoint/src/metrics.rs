@@ -183,4 +183,102 @@ mod tests {
         assert_eq!(s.in_flight, 7);
         assert_eq!(s.adaptive_target, 16);
     }
+
+    // Issue #168: dashboard "errors X%" indistinguishable between transient
+    // retry burst (cache init, all recover) and persistent S3 outage.
+    // classify_upload_state collapses (succ, fail, permanent, in_flight) into
+    // a 5-state semantic the operator can read at a glance.
+
+    #[test]
+    fn classify_healthy_when_no_events() {
+        let s = classify_upload_state(0, 0, 0, 0);
+        assert_eq!(s, StripState::Healthy);
+    }
+
+    #[test]
+    fn classify_healthy_when_all_succeed_no_failures() {
+        let s = classify_upload_state(30, 0, 0, 2);
+        assert_eq!(s, StripState::Healthy);
+    }
+
+    #[test]
+    fn classify_transient_burst_when_some_fail_none_permanent() {
+        // 7 of 30 retried during cache init, all eventually recovered, no
+        // permanent. Yellow "transient retries (recovered)", NOT red.
+        let s = classify_upload_state(23, 7, 0, 2);
+        assert_eq!(s, StripState::TransientBurst { retried: 7 });
+    }
+
+    #[test]
+    fn classify_degraded_transient_when_in_flight_retrying() {
+        // 5 in-flight while error_rate creeps up but no permanent yet.
+        // Yellow "elevated retries in flight".
+        let s = classify_upload_state(10, 5, 0, 5);
+        assert_eq!(
+            s,
+            StripState::DegradedTransient {
+                retrying_in_flight: 5
+            }
+        );
+    }
+
+    #[test]
+    fn classify_permanent_failures_promotes_to_red() {
+        // Even 1 permanent failure = data loss = red, not yellow.
+        let s = classify_upload_state(28, 2, 1, 2);
+        assert_eq!(s, StripState::PermanentFailures { count: 1 });
+    }
+
+    #[test]
+    fn classify_cascading_when_many_permanent() {
+        // Sustained outage: lots of failures AND multiple permanent.
+        // Loudest red state, separate from PermanentFailures so UI can alarm.
+        let s = classify_upload_state(15, 15, 5, 8);
+        assert_eq!(
+            s,
+            StripState::Cascading {
+                permanent: 5,
+                failures: 15,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_permanent_threshold_is_one_not_two() {
+        // Killer: any single permanent must escalate from TransientBurst.
+        // Mutant that uses `permanent > 1` would survive without this.
+        let burst = classify_upload_state(23, 7, 0, 0);
+        let one_perm = classify_upload_state(23, 7, 1, 0);
+        assert!(matches!(burst, StripState::TransientBurst { .. }));
+        assert!(matches!(one_perm, StripState::PermanentFailures { .. }));
+    }
+
+    #[test]
+    fn classify_cascading_threshold_is_strict() {
+        // Boundary: exactly 5 permanent + 15 failures = Cascading;
+        // 4 permanent + 15 failures = PermanentFailures (not yet cascading).
+        // Encodes the spec line in the public docstring of the function.
+        let cascading = classify_upload_state(15, 15, 5, 0);
+        let just_permanent = classify_upload_state(15, 15, 4, 0);
+        assert!(matches!(cascading, StripState::Cascading { .. }));
+        assert!(matches!(
+            just_permanent,
+            StripState::PermanentFailures { .. }
+        ));
+    }
+
+    #[test]
+    fn snapshot_carries_state_field() {
+        let m = UploadMetrics::default();
+        let now = Instant::now();
+        for _ in 0..4 {
+            m.record(UploadEvent {
+                at: now,
+                duration_ms: 100,
+                success: true,
+            });
+        }
+        let s = m.snapshot(Duration::from_secs(60));
+        assert_eq!(s.state, StripState::Healthy);
+    }
 }
