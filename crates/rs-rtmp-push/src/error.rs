@@ -1,5 +1,6 @@
 //! Error types surfaced by `RtmpPusher`. See spec §4.1 + §5.3.
 
+use bytesio::bytesio_errors::{BytesIOError, BytesIOErrorValue};
 use std::io;
 use thiserror::Error;
 
@@ -61,6 +62,32 @@ pub fn backoff_floor_ms(err: &PushError) -> Option<u64> {
         PushError::IoError(_) => Some(15_000),
         PushError::MalformedInput { .. } => Some(15_000),
         PushError::LocalCancel => None,
+    }
+}
+
+/// Map a `BytesIOError` produced by xiu's `TNetIO::read()` (or `read_timeout`)
+/// onto the right `PushError` variant.
+///
+/// Issue #168: `BytesIOErrorValue::NoneReturn` is the bytesio crate's signal
+/// that the peer cleanly closed the TCP/TLS connection (the underlying
+/// framed-codec stream ran dry). For RTMP that is **upstream-initiated
+/// disconnect** — exactly what `PushError::RemoteClosed` already encodes (3 s
+/// backoff floor, non-exponential). Wrapping it in `IoError` was wrong:
+/// 15 s backoff per reset bloated the cache overshoot on FB endpoints.
+///
+/// Apply at every READ site in session.rs that does `.read().await` and was
+/// previously `.map_err(|e| PushError::IoError(io::Error::other(e.to_string())))`.
+pub fn map_read_err(err: BytesIOError) -> PushError {
+    match err.value {
+        BytesIOErrorValue::NoneReturn => {
+            PushError::RemoteClosed(io::Error::from(io::ErrorKind::UnexpectedEof))
+        }
+        BytesIOErrorValue::IOError(io_err) => PushError::IoError(io_err),
+        BytesIOErrorValue::TimeoutError(_) => PushError::Timeout,
+        // ClientClosed / NotEnoughBytes / fall-through: treat as ordinary
+        // I/O error (15 s backoff). These are diagnostic-quality variants
+        // that should not occur on a healthy session.
+        other => PushError::IoError(io::Error::other(format!("{other:?}"))),
     }
 }
 
@@ -271,8 +298,6 @@ mod tests {
     // (15 s backoff) instead of PushError::RemoteClosed (3 s backoff).
     // map_read_err is the centralizing helper applied at every READ site
     // in session.rs so the variant carries through.
-
-    use bytesio::bytesio_errors::{BytesIOError, BytesIOErrorValue};
 
     #[test]
     fn map_read_err_none_return_is_remote_closed() {

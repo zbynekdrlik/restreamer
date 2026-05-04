@@ -39,7 +39,7 @@ use tokio::net::TcpSocket;
 use tokio::sync::Mutex;
 use xflv::amf0::define::Amf0ValueType;
 
-use crate::PushError;
+use crate::{PushError, map_read_err};
 
 // -------------------------------------------------------------------------
 // Connection timeout for the full handshake+connect+publish sequence.
@@ -409,12 +409,7 @@ async fn wait_for_result(
     label: &str,
 ) -> Result<(), PushError> {
     loop {
-        let data = io
-            .lock()
-            .await
-            .read()
-            .await
-            .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
+        let data = io.lock().await.read().await.map_err(map_read_err)?;
         unpacketizer.extend_data(&data[..]);
 
         loop {
@@ -480,12 +475,7 @@ async fn wait_for_create_stream_result(
     unpacketizer: &mut ChunkUnpacketizer,
 ) -> Result<u32, PushError> {
     loop {
-        let data = io
-            .lock()
-            .await
-            .read()
-            .await
-            .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
+        let data = io.lock().await.read().await.map_err(map_read_err)?;
         unpacketizer.extend_data(&data[..]);
 
         loop {
@@ -565,12 +555,7 @@ async fn wait_for_publish_start(
     unpacketizer: &mut ChunkUnpacketizer,
 ) -> Result<(), PushError> {
     loop {
-        let data = io
-            .lock()
-            .await
-            .read()
-            .await
-            .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
+        let data = io.lock().await.read().await.map_err(map_read_err)?;
         unpacketizer.extend_data(&data[..]);
 
         loop {

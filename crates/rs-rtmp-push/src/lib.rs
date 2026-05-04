@@ -13,6 +13,6 @@ mod session;
 mod state;
 pub mod tls;
 
-pub use error::{PushError, backoff_floor_ms, is_exponential};
+pub use error::{PushError, backoff_floor_ms, is_exponential, map_read_err};
 pub use pusher::RtmpPusher;
 pub use state::{PusherConfig, PusherState};
