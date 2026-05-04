@@ -146,6 +146,19 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 .upload-strip__errors { color: var(--text-secondary); }
 .upload-strip__errors--alert { color: var(--status-error); font-weight: 500; }
 
+/* Issue #168: state-driven strip badge.
+   Five classes; 'ok' green, 'burst'/'degraded' yellow, 'permanent'/'cascading' red. */
+.upload-strip__state { font-weight: 500; }
+.upload-strip__state--ok { color: var(--status-ok, #34c759); }
+.upload-strip__state--burst { color: var(--status-warn, #f5a623); }
+.upload-strip__state--degraded { color: var(--status-warn, #f5a623); font-weight: 600; }
+.upload-strip__state--permanent { color: var(--status-error, #ff3b30); font-weight: 600; }
+.upload-strip__state--cascading {
+    color: var(--status-error, #ff3b30);
+    font-weight: 700;
+    text-decoration: underline wavy;
+}
+
 /* Uploads drill-down page */
 .uploads-page {
     padding: 1.5rem;

@@ -450,6 +450,21 @@ pub struct UploadStats {
     pub error_rate: f64,
     pub in_flight: usize,
     pub adaptive_target: usize,
+    #[serde(default)]
+    pub permanent_recent: u32,
+    #[serde(default)]
+    pub render: StateRender,
+}
+
+/// Server-rendered visual contract for the upload-strip badge. Mirrors
+/// `rs_endpoint::metrics::StateRender` field-for-field. The component
+/// consumes (`class`, `label`, `tooltip`) directly so the visual logic
+/// stays centrally tested in `render_strip_state` (issue #168).
+#[derive(Clone, Debug, Deserialize, PartialEq, Default)]
+pub struct StateRender {
+    pub class: String,
+    pub label: String,
+    pub tooltip: String,
 }
 
 /// Get current upload telemetry snapshot (1-minute window) from backend.
