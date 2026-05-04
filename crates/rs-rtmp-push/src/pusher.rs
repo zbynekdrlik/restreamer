@@ -552,4 +552,61 @@ mod tests {
         let output_ts = state.audio_base_ms + first_xiu.saturating_sub(origin) as u64;
         assert_eq!(output_ts, 75_000);
     }
+
+    /// Issue #171: after RemoteClosed (e.g. YT load-balancer rotation), the
+    /// pusher must catch up the buffered media instead of resuming at
+    /// real-time pacing. With base = max(wall, last+1), output_ts starts
+    /// at wall and per-tag pacing keeps push at real-time → cache delay
+    /// stair-steps up by the gap duration on every reset and never
+    /// recovers. With base = last+1 (no wall floor), output_ts stays in
+    /// the old timeline → per-tag pacing detects output < wall → push
+    /// without sleep until output catches wall (catch-up burst).
+    ///
+    /// This test captures the FIX. Currently fails because the live code
+    /// at pusher.rs:91-94 still uses `elapsed_ms.max(...)`.
+    #[test]
+    fn reconnect_base_is_last_output_plus_one_to_enable_catchup() {
+        // Scenario: 60 s of media pushed, then RemoteClosed at wall=70 s,
+        // 5 s reconnect gap, resume at wall=75 s.
+        let last_audio_out = 60_000_u64;
+        let last_video_out = 60_033_u64;
+        let elapsed_ms = 75_000_u64;
+
+        // Apply the FIXED reconnect base computation: anchor on the wire
+        // timeline, NOT wall clock.
+        let audio_base = anchor_base_ms_post_reconnect(elapsed_ms, last_audio_out);
+        let video_base = anchor_base_ms_post_reconnect(elapsed_ms, last_video_out);
+
+        assert_eq!(
+            audio_base, 60_001,
+            "audio base must continue from last+1 so per-tag pacing can burst-push the gap"
+        );
+        assert_eq!(video_base, 60_034);
+
+        // First tag at xiu=0 → output_ts = 60_001. Wall = 75_000.
+        // Per-tag pacing sees actual_ms (75_000) >= output_ts (60_001) →
+        // NO sleep → push immediately. Burst continues until output_ts
+        // catches wall (~14 s of media).
+        let first_output_ts = audio_base; // origin xiu = 0, first xiu = 0
+        assert!(
+            first_output_ts < elapsed_ms,
+            "first tag's output_ts must be BEHIND wall so pacing skips sleep"
+        );
+    }
+
+    /// Boundary: when `last_output > elapsed_ms` (chunker drift made the
+    /// output timeline run ahead of wall during the previous session),
+    /// the helper still must enforce wire monotonicity by returning
+    /// `last_output + 1`, not `elapsed_ms`.
+    #[test]
+    fn anchor_base_preserves_monotonicity_when_last_output_ahead_of_wall() {
+        // Pre-reset bug: last_output ran 5 s ahead of wall.
+        let last_out = 100_000_u64;
+        let elapsed_ms = 95_000_u64;
+        let base = anchor_base_ms_post_reconnect(elapsed_ms, last_out);
+        assert_eq!(
+            base, 100_001,
+            "wire monotonicity guard: base must always be > last_output_ts"
+        );
+    }
 }
