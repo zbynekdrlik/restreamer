@@ -25,6 +25,11 @@ struct Inner {
     filled: bool,
     in_flight: usize,
     adaptive_target: usize,
+    /// Count of chunks that have hit `mark_upload_permanently_failed` in
+    /// the last permanent-failure window (set externally by the API layer
+    /// from `db::list_recent_uploads` so the dashboard strip can show a
+    /// loud-red state distinct from transient retry bursts).
+    permanent_recent: u32,
 }
 
 impl Default for UploadMetrics {
@@ -36,6 +41,7 @@ impl Default for UploadMetrics {
                 filled: false,
                 in_flight: 0,
                 adaptive_target: 4,
+                permanent_recent: 0,
             }),
         }
     }
@@ -60,6 +66,14 @@ impl UploadMetrics {
 
     pub fn set_adaptive_target(&self, n: usize) {
         self.inner.lock().unwrap().adaptive_target = n;
+    }
+
+    /// Update the count of permanent upload failures observed in the last
+    /// 5-minute window. The classifier uses this to escalate the strip
+    /// state from yellow ("transient burst, recovered") to red ("data
+    /// loss in progress").
+    pub fn set_permanent_recent(&self, n: u32) {
+        self.inner.lock().unwrap().permanent_recent = n;
     }
 
     pub fn snapshot(&self, window: Duration) -> Snapshot {
@@ -95,6 +109,13 @@ impl UploadMetrics {
             failures as f64 / total as f64
         };
 
+        let state = classify_upload_state(
+            successes as u32,
+            failures as u32,
+            g.permanent_recent,
+            g.in_flight,
+        );
+
         Snapshot {
             chunks_per_sec,
             median_ms,
@@ -102,6 +123,8 @@ impl UploadMetrics {
             error_rate,
             in_flight: g.in_flight,
             adaptive_target: g.adaptive_target,
+            permanent_recent: g.permanent_recent,
+            state,
         }
     }
 }
@@ -122,6 +145,76 @@ pub struct Snapshot {
     pub error_rate: f64,
     pub in_flight: usize,
     pub adaptive_target: usize,
+    pub permanent_recent: u32,
+    pub state: StripState,
+}
+
+/// Five-state semantic classification for the dashboard upload strip.
+///
+/// Replaces the ambiguous "errors X%" badge that conflated cache-init
+/// retry bursts (transient, all recover) with real S3 outages
+/// (permanent, data loss). See issue #168.
+///
+/// Invariants:
+/// - `permanent >= 1` always escalates to red (PermanentFailures or
+///   Cascading), never yellow — even one lost chunk is data loss.
+/// - `Cascading` requires BOTH `permanent >= 5` AND `failures >= 15` so
+///   the loudest red state only fires on a genuine outage, not a
+///   single bad bucket period.
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StripState {
+    /// No events or zero failures: green.
+    Healthy,
+    /// Some retries, none permanent: yellow "transient retries
+    /// (recovered)". This is the cache-init phase look — operator
+    /// should be reassured, not alarmed.
+    TransientBurst { retried: u32 },
+    /// In-flight retries elevated, no permanent yet: yellow "elevated
+    /// retries in flight". Distinguished from TransientBurst by
+    /// active backpressure.
+    DegradedTransient { retrying_in_flight: u32 },
+    /// At least one permanent failure: red "data loss".
+    PermanentFailures { count: u32 },
+    /// Cascading outage: permanent >= 5 AND failures >= 15: loudest red.
+    Cascading { permanent: u32, failures: u32 },
+}
+
+/// Pure classifier — see `StripState` invariants. Inputs are window
+/// counts (`successes` + `failures` over the snapshot window),
+/// `permanent` count from DB over the permanent-failure window, and
+/// the live `in_flight` worker count.
+pub fn classify_upload_state(
+    successes: u32,
+    failures: u32,
+    permanent: u32,
+    in_flight: usize,
+) -> StripState {
+    if permanent >= 5 && failures >= 15 {
+        return StripState::Cascading {
+            permanent,
+            failures,
+        };
+    }
+    if permanent >= 1 {
+        return StripState::PermanentFailures { count: permanent };
+    }
+    if failures == 0 {
+        // Empty window (successes==0) or pure-success window.
+        let _ = successes;
+        return StripState::Healthy;
+    }
+    // failures > 0, permanent == 0 → transient.
+    // Distinguish two transient flavors: in-flight retrying ≥ 4 means
+    // the queue is actively under strain (DegradedTransient), otherwise
+    // it is a recovered burst (TransientBurst).
+    if in_flight >= 4 {
+        StripState::DegradedTransient {
+            retrying_in_flight: in_flight as u32,
+        }
+    } else {
+        StripState::TransientBurst { retried: failures }
+    }
 }
 
 #[cfg(test)]
