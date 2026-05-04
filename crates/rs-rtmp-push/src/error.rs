@@ -262,4 +262,67 @@ mod tests {
             "TlsHandshakeFailed uses fixed floor, not exponential"
         );
     }
+
+    // --- map_read_err ---
+    //
+    // Issue #168: "I/O error: none return" on FB endpoints was traced to
+    // wait_for_publish_start / wait_for_create_stream_response wrapping
+    // `BytesIOErrorValue::NoneReturn` (= peer EOF) into PushError::IoError
+    // (15 s backoff) instead of PushError::RemoteClosed (3 s backoff).
+    // map_read_err is the centralizing helper applied at every READ site
+    // in session.rs so the variant carries through.
+
+    use bytesio::bytesio_errors::{BytesIOError, BytesIOErrorValue};
+
+    #[test]
+    fn map_read_err_none_return_is_remote_closed() {
+        let e = BytesIOError {
+            value: BytesIOErrorValue::NoneReturn,
+        };
+        let mapped = map_read_err(e);
+        match mapped {
+            PushError::RemoteClosed(_) => {}
+            other => panic!("expected RemoteClosed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_read_err_io_error_stays_io_error() {
+        let e = BytesIOError {
+            value: BytesIOErrorValue::IOError(io::Error::new(io::ErrorKind::Other, "x")),
+        };
+        let mapped = map_read_err(e);
+        match mapped {
+            PushError::IoError(_) => {}
+            other => panic!("expected IoError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_read_err_remote_closed_has_unexpected_eof_kind() {
+        // Killer: catches a mutant that produces RemoteClosed(io::Error)
+        // with the wrong ErrorKind. The 15s-vs-3s decision lives in
+        // backoff_floor_ms and works on the variant, but downstream
+        // operator tooling reads ErrorKind for triage.
+        let e = BytesIOError {
+            value: BytesIOErrorValue::NoneReturn,
+        };
+        if let PushError::RemoteClosed(inner) = map_read_err(e) {
+            assert_eq!(inner.kind(), io::ErrorKind::UnexpectedEof);
+        } else {
+            panic!("expected RemoteClosed");
+        }
+    }
+
+    #[test]
+    fn backoff_floor_for_mapped_none_return_is_3000_not_15000() {
+        // Round-trip: NoneReturn -> RemoteClosed -> 3s floor (not 15s).
+        // This is the production-impact assertion: 12s saved per reset
+        // event, which historically inflated cache overshoot on FB.
+        let e = BytesIOError {
+            value: BytesIOErrorValue::NoneReturn,
+        };
+        let mapped = map_read_err(e);
+        assert_eq!(backoff_floor_ms(&mapped), Some(3_000));
+    }
 }
