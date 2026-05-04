@@ -69,6 +69,28 @@ pub async fn record_upload_failure(
     Ok(())
 }
 
+/// Count chunks that were marked `upload_failed_permanently = 1` whose
+/// first upload attempt is at or after `since_ms` (a unix-epoch millisecond
+/// timestamp). The dashboard upload-strip uses this to escalate from
+/// `TransientBurst` (yellow) to `PermanentFailures` (red) only when the
+/// data loss is recent (typically last 5 min).
+///
+/// Anchor is `upload_first_attempt_at` rather than the row insertion time
+/// because the chunk's failure window starts when retries began, not when
+/// the chunk was created (which may be hours earlier on stale rows).
+pub async fn count_permanently_failed_since(pool: &SqlitePool, since_ms: i64) -> Result<i64> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM chunk_records
+         WHERE upload_failed_permanently = 1
+           AND upload_first_attempt_at IS NOT NULL
+           AND upload_first_attempt_at >= ?1",
+    )
+    .bind(since_ms)
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
 /// Mark a chunk as permanently failed after the retry budget is exhausted.
 pub async fn mark_upload_permanently_failed(pool: &SqlitePool, chunk_id: i64) -> Result<()> {
     sqlx::query(
