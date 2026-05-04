@@ -214,7 +214,7 @@ pub fn render_strip_state(state: &StripState) -> StateRender {
             class: "burst",
             label: format!("{retried} transient retries (recovered)"),
             tooltip: format!(
-                "{retried} chunk(s) needed retry but all eventually uploaded — \
+                "{retried} chunk(s) needed retry but all eventually recovered — \
                  typical during cache initialisation. No data lost."
             ),
         },

@@ -2179,7 +2179,18 @@ test.describe("Upload telemetry UI", () => {
     await expect(strip.locator(".upload-strip__rate")).toContainText("c/s");
     await expect(strip.locator(".upload-strip__median")).toContainText("ms");
     await expect(strip.locator(".upload-strip__inflight")).toContainText("in-flight");
-    await expect(strip.locator(".upload-strip__errors")).toContainText("errors");
+    // Issue #168: state badge replaces the old "errors X%" label. The
+    // server renders a class+label+tooltip via render_strip_state; here
+    // we just assert the element exists with one of the five state
+    // modifier classes and a non-empty label so the strip is never blank.
+    const stateBadge = strip.locator(".upload-strip__state");
+    await expect(stateBadge).toBeVisible();
+    const stateClass = (await stateBadge.getAttribute("class")) || "";
+    expect(stateClass).toMatch(
+      /upload-strip__state--(ok|burst|degraded|permanent|cascading)/,
+    );
+    const label = (await stateBadge.textContent()) || "";
+    expect(label.length).toBeGreaterThan(0);
   });
 
   test("clicking strip navigates to /uploads page", async ({ page }) => {
