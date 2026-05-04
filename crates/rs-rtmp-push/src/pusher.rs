@@ -27,14 +27,18 @@ pub const MIN_TAG_INTERVAL_MS: u64 = 5;
 
 /// Pure pacing helper. Returns ms to sleep before pushing the next tag.
 ///
-/// Three cases:
-/// 1. `wall_elapsed < output_ts` — output is AHEAD of wall; sleep until
-///    wall catches up (real-time pacing).
-/// 2. `wall_elapsed >= output_ts` AND a previous tag wrote less than
-///    `min_tag_interval_ms` ago — catch-up territory, but burst is
-///    capped: sleep the residual.
-/// 3. Otherwise — push immediately (catch-up at full rate, or first tag
-///    with no prior write).
+/// Three regimes:
+/// 1. `wall_elapsed < output_ts` — output AHEAD of wall: real-time pacing,
+///    sleep until wall aligns.
+/// 2. `wall_elapsed - output_ts > CATCHUP_THRESHOLD_MS` — actively in
+///    catch-up territory after a gap: enforce `min_tag_interval_ms`
+///    between writes so the burst doesn't drown TCP.
+/// 3. Otherwise (output near wall) — push immediately. Normal real-time
+///    pushes don't pay the per-tag spacing tax (kept the steady-state
+///    behavior identical to v0.3.91 to keep TLS / xiu loopback tests
+///    happy on Windows runners).
+pub const CATCHUP_THRESHOLD_MS: u64 = 100;
+
 pub fn next_tag_sleep_ms(
     output_ts_ms: u64,
     wall_elapsed_ms: u64,
@@ -44,10 +48,15 @@ pub fn next_tag_sleep_ms(
     if wall_elapsed_ms < output_ts_ms {
         return output_ts_ms - wall_elapsed_ms;
     }
-    match last_tag_write_elapsed_ms {
-        Some(elapsed) if elapsed < min_tag_interval_ms => min_tag_interval_ms - elapsed,
-        _ => 0,
+    let lag = wall_elapsed_ms - output_ts_ms;
+    if lag > CATCHUP_THRESHOLD_MS {
+        if let Some(elapsed) = last_tag_write_elapsed_ms
+            && elapsed < min_tag_interval_ms
+        {
+            return min_tag_interval_ms - elapsed;
+        }
     }
+    0
 }
 
 impl RtmpPusher {
@@ -604,5 +613,37 @@ mod tests {
         // is ahead of wall (don't fall behind real-time just because
         // we wrote recently).
         assert_eq!(next_tag_sleep_ms(2000, 1000, Some(1), 5), 1000);
+    }
+
+    #[test]
+    fn next_tag_sleep_zero_in_steady_state_within_catchup_threshold() {
+        // Steady-state: output near wall (lag < CATCHUP_THRESHOLD_MS).
+        // The min-interval tax is NOT applied here — normal real-time
+        // pushes proceed without the catch-up spacing. Kills any
+        // mutant that drops the threshold check and applies the tax
+        // unconditionally (which broke the TLS loopback test on
+        // Windows runners with the original v0.3.94 attempt).
+        assert_eq!(
+            next_tag_sleep_ms(99, 100, Some(1), 5),
+            0,
+            "lag of 1 ms is below CATCHUP_THRESHOLD_MS — no min-interval"
+        );
+        assert_eq!(
+            next_tag_sleep_ms(0, 100, Some(1), 5),
+            0,
+            "lag of 100 ms exactly is at threshold — still no min-interval"
+        );
+    }
+
+    #[test]
+    fn next_tag_sleep_min_interval_kicks_in_just_past_threshold() {
+        // Boundary: lag of 101 > threshold 100 → catch-up active →
+        // min-interval enforced. Recent write (1 ms ago, < 5 min) →
+        // sleep 4 ms.
+        assert_eq!(
+            next_tag_sleep_ms(0, 101, Some(1), 5),
+            4,
+            "lag of 101 ms is just past threshold — min-interval applies"
+        );
     }
 }
