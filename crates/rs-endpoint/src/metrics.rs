@@ -180,6 +180,67 @@ pub enum StripState {
     Cascading { permanent: u32, failures: u32 },
 }
 
+/// Server-rendered strip visuals. The leptos-ui component renders
+/// `class` as a CSS modifier (e.g. `upload-strip__state--ok`) and
+/// `label` as the visible text. `tooltip` is shown on hover and
+/// explains what the state means so the operator does not have to
+/// guess. See `render_strip_state` for the mapping.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct StateRender {
+    pub class: &'static str,
+    pub label: String,
+    pub tooltip: String,
+}
+
+/// Map a `StripState` to its dashboard rendering. Pure function — no
+/// IO, no allocation beyond the returned strings — so the test suite
+/// can pin the visual contract per state. Adding a new state here
+/// requires updating the leptos-ui CSS and a corresponding test.
+pub fn render_strip_state(state: &StripState) -> StateRender {
+    match state {
+        StripState::Healthy => StateRender {
+            class: "ok",
+            label: "Uploads OK".to_string(),
+            tooltip: "S3 uploads steady, no failures in the last minute.".to_string(),
+        },
+        StripState::TransientBurst { retried } => StateRender {
+            class: "burst",
+            label: format!("{retried} transient retries (recovered)"),
+            tooltip: format!(
+                "{retried} chunk(s) needed retry but all eventually uploaded — \
+                 typical during cache initialisation. No data lost."
+            ),
+        },
+        StripState::DegradedTransient { retrying_in_flight } => StateRender {
+            class: "degraded",
+            label: format!("Elevated retries: {retrying_in_flight} in flight"),
+            tooltip: format!(
+                "{retrying_in_flight} retry attempts active. No permanent \
+                 failures yet — watch for escalation."
+            ),
+        },
+        StripState::PermanentFailures { count } => StateRender {
+            class: "permanent",
+            label: format!("{count} chunk(s) lost"),
+            tooltip: format!(
+                "{count} chunk(s) hit retry budget and were marked permanently \
+                 failed in the last 5 min. Investigate S3 / network."
+            ),
+        },
+        StripState::Cascading {
+            permanent,
+            failures,
+        } => StateRender {
+            class: "cascading",
+            label: format!("Cascading: {permanent} lost, {failures} failures"),
+            tooltip: format!(
+                "{permanent} permanent + {failures} failures in window — \
+                 active S3 outage or sustained cascade. Page on-call."
+            ),
+        },
+    }
+}
+
 /// Pure classifier — see `StripState` invariants. Inputs are window
 /// counts (`successes` + `failures` over the snapshot window),
 /// `permanent` count from DB over the permanent-failure window, and
