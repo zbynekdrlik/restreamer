@@ -91,6 +91,16 @@ mod tests {
         assert!(v.get("error_rate").is_some());
         assert!(v.get("in_flight").is_some());
         assert!(v.get("adaptive_target").is_some());
+        // Issue #168: state classifier + server-rendered visuals must
+        // be present in every snapshot so the leptos-ui can render
+        // without re-implementing match arms client-side.
+        assert!(v.get("permanent_recent").is_some());
+        let state = v.get("state").expect("state field");
+        assert!(state.get("kind").is_some(), "state must be a tagged enum");
+        let render = v.get("render").expect("render field");
+        assert!(render.get("class").is_some());
+        assert!(render.get("label").is_some());
+        assert!(render.get("tooltip").is_some());
     }
 
     #[tokio::test]
