@@ -115,6 +115,7 @@ impl UploadMetrics {
             g.permanent_recent,
             g.in_flight,
         );
+        let render = render_strip_state(&state);
 
         Snapshot {
             chunks_per_sec,
@@ -125,6 +126,7 @@ impl UploadMetrics {
             adaptive_target: g.adaptive_target,
             permanent_recent: g.permanent_recent,
             state,
+            render,
         }
     }
 }
@@ -137,7 +139,7 @@ fn percentile(sorted: &[u32], p: u32) -> u32 {
     sorted[idx]
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
 pub struct Snapshot {
     pub chunks_per_sec: f64,
     pub median_ms: u32,
@@ -147,6 +149,11 @@ pub struct Snapshot {
     pub adaptive_target: usize,
     pub permanent_recent: u32,
     pub state: StripState,
+    /// Server-rendered (class, label, tooltip) for the dashboard upload
+    /// strip. The leptos-ui consumes these directly instead of mapping
+    /// `state` itself so the visual contract is centrally tested in
+    /// `render_strip_state`.
+    pub render: StateRender,
 }
 
 /// Five-state semantic classification for the dashboard upload strip.
