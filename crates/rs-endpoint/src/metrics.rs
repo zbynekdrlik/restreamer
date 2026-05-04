@@ -374,4 +374,86 @@ mod tests {
         let s = m.snapshot(Duration::from_secs(60));
         assert_eq!(s.state, StripState::Healthy);
     }
+
+    // --- render_strip_state ---
+    //
+    // Pure visual-mapping fn so the leptos-ui component can render the
+    // strip via server-supplied (class, label, tooltip) instead of
+    // re-implementing the same match arms client-side. Native tests
+    // here cover the mapping; UI just consumes `Snapshot::render`.
+
+    #[test]
+    fn render_healthy_is_ok_class() {
+        let r = render_strip_state(&StripState::Healthy);
+        assert_eq!(r.class, "ok");
+        assert_eq!(r.label, "Uploads OK");
+        assert!(r.tooltip.contains("no failures"));
+    }
+
+    #[test]
+    fn render_transient_burst_is_burst_class_yellow() {
+        let r = render_strip_state(&StripState::TransientBurst { retried: 7 });
+        assert_eq!(r.class, "burst");
+        assert_eq!(r.label, "7 transient retries (recovered)");
+        assert!(r.tooltip.contains("recovered"), "{}", r.tooltip);
+    }
+
+    #[test]
+    fn render_degraded_transient_is_degraded_class() {
+        let r = render_strip_state(&StripState::DegradedTransient {
+            retrying_in_flight: 5,
+        });
+        assert_eq!(r.class, "degraded");
+        assert!(r.label.contains("5"), "{}", r.label);
+        assert!(r.label.contains("in flight"), "{}", r.label);
+    }
+
+    #[test]
+    fn render_permanent_failures_is_permanent_class_red() {
+        let r = render_strip_state(&StripState::PermanentFailures { count: 2 });
+        assert_eq!(r.class, "permanent");
+        assert!(r.label.contains("2"), "{}", r.label);
+        assert!(r.label.contains("lost"), "{}", r.label);
+    }
+
+    #[test]
+    fn render_cascading_is_cascading_class_alarm() {
+        let r = render_strip_state(&StripState::Cascading {
+            permanent: 5,
+            failures: 15,
+        });
+        assert_eq!(r.class, "cascading");
+        assert!(r.label.contains("5"), "{}", r.label);
+        assert!(r.label.contains("15"), "{}", r.label);
+        assert!(
+            r.tooltip.contains("outage") || r.tooltip.contains("cascade"),
+            "{}",
+            r.tooltip
+        );
+    }
+
+    #[test]
+    fn render_classes_are_distinct_for_each_state() {
+        // Mutant killer: ensures no two states produce the same class
+        // (a "return Healthy always" mutant collapses the strip and
+        // would survive without this assertion).
+        let classes = [
+            render_strip_state(&StripState::Healthy).class,
+            render_strip_state(&StripState::TransientBurst { retried: 1 }).class,
+            render_strip_state(&StripState::DegradedTransient {
+                retrying_in_flight: 1,
+            })
+            .class,
+            render_strip_state(&StripState::PermanentFailures { count: 1 }).class,
+            render_strip_state(&StripState::Cascading {
+                permanent: 5,
+                failures: 15,
+            })
+            .class,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for c in classes {
+            assert!(seen.insert(c), "duplicate class {c}");
+        }
+    }
 }
