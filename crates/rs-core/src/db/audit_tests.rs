@@ -272,3 +272,193 @@ async fn get_by_id_roundtrip() {
     let missing = audit::get_by_id(&pool, 999999).await.unwrap();
     assert!(missing.is_none());
 }
+
+// ---------------------------------------------------------------------
+// group_audit_rows — issue #169 (activity-log burst dedup)
+// ---------------------------------------------------------------------
+
+fn fake_row(id: i64, ts: &str, source: &str, action: &str, endpoint: Option<&str>) -> AuditLogRow {
+    AuditLogRow {
+        id,
+        ts: ts.to_string(),
+        severity: "warn".to_string(),
+        source: source.to_string(),
+        event_id: None,
+        instance_id: None,
+        endpoint: endpoint.map(|s| s.to_string()),
+        action: action.to_string(),
+        detail: serde_json::json!({"id": id}),
+    }
+}
+
+#[test]
+fn group_audit_rows_empty_returns_empty() {
+    let groups = audit::group_audit_rows(Vec::new(), 60);
+    assert!(groups.is_empty());
+}
+
+#[test]
+fn group_audit_rows_window_zero_keeps_singletons() {
+    // window=0 disables grouping. Each row → its own group.
+    let rows = vec![
+        fake_row(
+            3,
+            "2026-05-04T18:00:30Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("FB-Zbynek"),
+        ),
+        fake_row(
+            2,
+            "2026-05-04T18:00:15Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("FB-Zbynek"),
+        ),
+        fake_row(
+            1,
+            "2026-05-04T18:00:00Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("FB-Zbynek"),
+        ),
+    ];
+    let groups = audit::group_audit_rows(rows, 0);
+    assert_eq!(groups.len(), 3);
+    assert!(groups.iter().all(|g| g.count == 1));
+}
+
+#[test]
+fn group_audit_rows_collapses_repeats_within_window() {
+    // 3 identical events 15 s apart, window=60 s → collapse to 1 group.
+    let rows = vec![
+        fake_row(
+            3,
+            "2026-05-04T18:00:30Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("FB-Zbynek"),
+        ),
+        fake_row(
+            2,
+            "2026-05-04T18:00:15Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("FB-Zbynek"),
+        ),
+        fake_row(
+            1,
+            "2026-05-04T18:00:00Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("FB-Zbynek"),
+        ),
+    ];
+    let groups = audit::group_audit_rows(rows, 60);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].count, 3);
+    assert_eq!(groups[0].last_ts, "2026-05-04T18:00:30Z");
+    assert_eq!(groups[0].first_ts, "2026-05-04T18:00:00Z");
+    // Sample id = newest row in the group (the first one in the input,
+    // since input is sorted newest-first).
+    assert_eq!(groups[0].sample_id, 3);
+}
+
+#[test]
+fn group_audit_rows_keeps_distinct_keys_separate() {
+    // Same time, different endpoints → 2 groups.
+    let rows = vec![
+        fake_row(
+            2,
+            "2026-05-04T18:00:00Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("FB-Zbynek"),
+        ),
+        fake_row(
+            1,
+            "2026-05-04T18:00:00Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("FB-NewLevel"),
+        ),
+    ];
+    let groups = audit::group_audit_rows(rows, 60);
+    assert_eq!(groups.len(), 2);
+    assert!(groups.iter().all(|g| g.count == 1));
+}
+
+#[test]
+fn group_audit_rows_breaks_group_when_window_exceeded() {
+    // Two rows far apart with one matching key but ts span > window.
+    // → 2 groups, NOT 1.
+    let rows = vec![
+        fake_row(
+            2,
+            "2026-05-04T18:30:00Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("YT NLW 4k"),
+        ),
+        fake_row(
+            1,
+            "2026-05-04T18:00:00Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("YT NLW 4k"),
+        ),
+    ];
+    let groups = audit::group_audit_rows(rows, 60);
+    assert_eq!(groups.len(), 2);
+}
+
+#[test]
+fn group_audit_rows_window_boundary_inclusive() {
+    // Boundary: rows EXACTLY window_secs apart should be grouped
+    // (kills mutant that flips < to <=).
+    let rows = vec![
+        fake_row(
+            2,
+            "2026-05-04T18:01:00Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("YT NLW 4k"),
+        ),
+        fake_row(
+            1,
+            "2026-05-04T18:00:00Z",
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("YT NLW 4k"),
+        ),
+    ];
+    let groups = audit::group_audit_rows(rows, 60);
+    assert_eq!(
+        groups.len(),
+        1,
+        "exactly 60 s gap is at boundary, must group"
+    );
+    assert_eq!(groups[0].count, 2);
+}
+
+#[test]
+fn group_audit_rows_25_in_5min_collapses_to_one() {
+    // The user-visible motivation case from #169: 25 endpoint_rtmp_push_died
+    // rows within 5 min for one alias must collapse to a single grouped row
+    // showing count=25.
+    let mut rows = Vec::new();
+    let base = chrono::DateTime::parse_from_rfc3339("2026-05-04T18:05:00Z").unwrap();
+    for i in 0..25 {
+        let t = base - chrono::Duration::seconds(i * 12); // 12 s apart
+        rows.push(fake_row(
+            (25 - i) as i64,
+            &t.to_rfc3339(),
+            "vps",
+            "endpoint_rtmp_push_died",
+            Some("FB-Zbynek"),
+        ));
+    }
+    let groups = audit::group_audit_rows(rows, 300);
+    assert_eq!(groups.len(), 1, "all 25 must collapse to one");
+    assert_eq!(groups[0].count, 25);
+}

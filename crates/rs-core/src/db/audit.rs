@@ -228,3 +228,110 @@ pub async fn rotate(pool: &SqlitePool, keep_days: i64) -> Result<i64> {
         .await?;
     Ok(res.rows_affected() as i64)
 }
+
+/// One grouped audit-log entry (issue #169). Collapses consecutive
+/// rows that share `(source, action, endpoint)` and fall within
+/// `window_secs` of each other. Dashboard activity feed uses this to
+/// hide repeat-burst noise (e.g. 25 `endpoint_rtmp_push_died` rows in
+/// 5 min becomes one row showing `count=25`, span first_ts → last_ts,
+/// with one representative `sample_detail` for drill-down).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct GroupedAuditRow {
+    pub source: String,
+    pub action: String,
+    pub endpoint: Option<String>,
+    pub severity: String,
+    pub count: u32,
+    pub first_ts: String,
+    pub last_ts: String,
+    /// Representative detail JSON (the LAST row in the group). Operator
+    /// drills into this for forensic detail; the older rows in the
+    /// group are reachable via the ungrouped `/api/v1/audit` endpoint.
+    pub sample_detail: serde_json::Value,
+    pub sample_id: i64,
+}
+
+/// Pure fn — group consecutive same-key audit rows within `window_secs`.
+///
+/// Input rows must be sorted DESCENDING by ts (newest first), the same
+/// order returned by [`query`]. Output preserves that order: newest
+/// group first.
+///
+/// Two rows belong to the same group iff:
+/// - `(source, action, endpoint)` match exactly, AND
+/// - the more-recent row's ts is at most `window_secs` after the
+///   currently-open group's earliest row.
+///
+/// `window_secs == 0` disables grouping entirely (every row becomes a
+/// singleton group). The dashboard typically uses 60.
+pub fn group_audit_rows(rows: Vec<AuditLogRow>, window_secs: i64) -> Vec<GroupedAuditRow> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    if window_secs == 0 {
+        return rows
+            .into_iter()
+            .map(|r| GroupedAuditRow {
+                source: r.source.clone(),
+                action: r.action.clone(),
+                endpoint: r.endpoint.clone(),
+                severity: r.severity.clone(),
+                count: 1,
+                first_ts: r.ts.clone(),
+                last_ts: r.ts.clone(),
+                sample_detail: r.detail,
+                sample_id: r.id,
+            })
+            .collect();
+    }
+    let parse = |s: &str| -> Option<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| d.with_timezone(&chrono::Utc))
+            .or_else(|| {
+                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                    .ok()
+                    .map(|n| n.and_utc())
+                    .or_else(|| {
+                        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.fZ")
+                            .ok()
+                            .map(|n| n.and_utc())
+                    })
+            })
+    };
+
+    let mut out: Vec<GroupedAuditRow> = Vec::new();
+    for row in rows {
+        // Match against the LAST open group of the same key, which (for
+        // newest-first input) is the most recently appended group.
+        let key_match = out.iter_mut().rev().find(|g| {
+            g.source == row.source && g.action == row.action && g.endpoint == row.endpoint
+        });
+        if let Some(g) = key_match {
+            // Compare row.ts against g.first_ts (the EARLIEST = oldest
+            // ts in the group when input is newest-first).
+            let group_oldest_ts = parse(&g.first_ts);
+            let row_ts = parse(&row.ts);
+            if let (Some(go), Some(rt)) = (group_oldest_ts, row_ts) {
+                let delta = (go - rt).num_seconds().abs();
+                if delta <= window_secs {
+                    g.count = g.count.saturating_add(1);
+                    g.first_ts = row.ts.clone();
+                    continue;
+                }
+            }
+        }
+        out.push(GroupedAuditRow {
+            source: row.source.clone(),
+            action: row.action.clone(),
+            endpoint: row.endpoint.clone(),
+            severity: row.severity.clone(),
+            count: 1,
+            first_ts: row.ts.clone(),
+            last_ts: row.ts.clone(),
+            sample_detail: row.detail,
+            sample_id: row.id,
+        });
+    }
+    out
+}
