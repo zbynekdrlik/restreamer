@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::audit::{Action, AuditRow, Severity, Source};
+use crate::db::audit::AuditLogRow;
 use tokio::sync::broadcast;
 
 #[tokio::test]
