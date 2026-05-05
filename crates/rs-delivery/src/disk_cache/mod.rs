@@ -63,7 +63,7 @@ pub struct DiskCache {
     pub registry: Arc<ChunkRegistry>,
     pub download_service: Arc<DownloadService>,
     pub position_registry: Arc<EndpointPositionRegistry>,
-    pub eviction_handle: tokio::task::JoinHandle<()>,
+    eviction_handle: tokio::task::JoinHandle<()>,
     pub cache_dir: PathBuf,
 }
 
@@ -80,6 +80,9 @@ impl DiskCache {
         unimplemented!("scaffold; implemented in Task 12")
     }
 
+    /// Abort the eviction task and release cache handles. Call when the
+    /// event ends. Does not delete cached files (the next DiskCache::new
+    /// for the same event will reuse them).
     pub async fn shutdown(self) {
         self.eviction_handle.abort();
     }
