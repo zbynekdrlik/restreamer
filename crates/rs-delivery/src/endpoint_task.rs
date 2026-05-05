@@ -4,8 +4,7 @@ use async_trait::async_trait;
 use rs_core::models::PusherKind;
 use rs_ffmpeg::{FfmpegProcess, ServiceType};
 use rs_rtmp_push::{PusherConfig, RtmpPusher};
-use std::sync::Arc;
-use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::{Arc, atomic::Ordering as AtomicOrdering};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 
