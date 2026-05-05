@@ -254,6 +254,10 @@ pub struct DeliveryEndpointMetrics {
     pub stall_reason: Option<String>,
     #[serde(default)]
     pub ffmpeg_restart_count: u32,
+    /// Rust-pusher reconnect counter (issue #172). Defaults to 0 for
+    /// older payloads / ffmpeg-path endpoints.
+    #[serde(default)]
+    pub reconnect_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -471,6 +475,8 @@ mod tests {
                     chunk_delay_secs: 3.2,
                     stall_reason: None,
                     ffmpeg_restart_count: 0,
+
+                    reconnect_count: 0,
                     last_error: None,
                     is_fast: false,
                     delivery_mode: None,
@@ -594,6 +600,8 @@ mod tests {
             chunk_delay_secs: 3.2,
             stall_reason: Some("chunk_gap".to_string()),
             ffmpeg_restart_count: 5,
+
+            reconnect_count: 0,
             last_error: Some("S3 timeout".to_string()),
             is_fast: true,
             delivery_mode: None,
@@ -639,6 +647,8 @@ mod tests {
                 chunk_delay_secs: 211.0,
                 stall_reason: Some("ffmpeg_crash_loop".to_string()),
                 ffmpeg_restart_count: 10,
+
+                reconnect_count: 0,
                 last_error: Some("Connection refused".to_string()),
                 is_fast: false,
                 delivery_mode: None,
@@ -663,6 +673,8 @@ mod tests {
                 chunk_delay_secs: 25.0,
                 stall_reason: None,
                 ffmpeg_restart_count: 0,
+
+                reconnect_count: 0,
                 last_error: None,
                 is_fast: true,
                 delivery_mode: None,
@@ -677,6 +689,8 @@ mod tests {
                 chunk_delay_secs: 120.0,
                 stall_reason: None,
                 ffmpeg_restart_count: 0,
+
+                reconnect_count: 0,
                 last_error: None,
                 is_fast: false,
                 delivery_mode: None,
@@ -703,6 +717,8 @@ mod tests {
             chunk_delay_secs: 25.0,
             stall_reason: None,
             ffmpeg_restart_count: 0,
+
+            reconnect_count: 0,
             last_error: None,
             is_fast: true,
             delivery_mode: None,

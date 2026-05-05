@@ -1,0 +1,439 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - link "⚙ Settings" [ref=e4] [cursor=pointer]:
+      - /url: /settings
+    - heading "Restreamer" [level=1] [ref=e5]
+    - generic [ref=e6]: Connected
+    - generic [ref=e7]: 0.3.75-dev
+  - main [ref=e8]:
+    - generic [ref=e10]:
+      - generic [ref=e11]:
+        - generic [ref=e12]:
+          - generic [ref=e13]:
+            - generic [ref=e14]: "Event:"
+            - combobox [disabled] [ref=e15]:
+              - option "-- Select Event --" [selected]
+            - button "Start Delivering" [disabled] [ref=e16]
+            - button "Stop Delivering" [ref=e17] [cursor=pointer]
+          - generic [ref=e18]:
+            - generic [ref=e19]: Streaming
+            - generic [ref=e20]: 00:03:14
+        - generic [ref=e21]:
+          - generic [ref=e22]:
+            - generic [ref=e25]: OBS
+            - generic [ref=e26]: Disconnected
+          - generic [ref=e27]: │
+          - generic [ref=e28]:
+            - generic [ref=e31]: RTMP
+            - generic [ref=e32]: Idle
+          - generic [ref=e33]: │
+          - generic [ref=e34]:
+            - generic [ref=e37]: Local Buffer
+            - generic [ref=e38]: 50 chunks
+          - generic [ref=e39]: │
+          - generic [ref=e40]:
+            - generic [ref=e43]: S3 → VPS
+            - generic [ref=e44]: 51 queued → 28 delivered
+          - generic "S3 upload telemetry — click for detail" [ref=e45] [cursor=pointer]:
+            - generic [ref=e46]: "Upload: 0.0 c/s"
+            - generic [ref=e47]: median 0ms
+            - generic [ref=e48]: in-flight 1/4
+            - generic [ref=e49]: errors 100%
+          - generic [ref=e50]:
+            - generic [ref=e51]:
+              - generic [ref=e52]: ├──
+              - generic [ref=e53]:
+                - generic [ref=e55]: YT NLCH 4K
+                - generic [ref=e56]: —
+                - generic [ref=e57]: 0 chunks
+                - button "×" [ref=e58] [cursor=pointer]
+                - generic [ref=e59]:
+                  - generic: 99s / 120s cache
+                - button "History" [ref=e62] [cursor=pointer]
+            - generic [ref=e63]:
+              - generic [ref=e64]: ├──
+              - generic [ref=e65]:
+                - generic [ref=e67]: FB-Zbynek
+                - generic [ref=e68]: 0 chunks
+                - button "×" [ref=e69] [cursor=pointer]
+                - generic [ref=e70]:
+                  - generic: 99s / 120s cache
+                - button "History" [ref=e73] [cursor=pointer]
+            - generic [ref=e74]:
+              - generic [ref=e75]: ├──
+              - generic [ref=e76]:
+                - generic [ref=e78]: Control stream Kiko
+                - generic [ref=e79]: 28 chunks
+                - generic [ref=e80]: "S3 fetch error: status 503"
+                - button "×" [ref=e81] [cursor=pointer]
+                - generic [ref=e82]:
+                  - generic: 99s / 120s cache
+                - button "History" [ref=e85] [cursor=pointer]
+            - generic [ref=e86]:
+              - generic [ref=e87]: ├──
+              - generic [ref=e88]:
+                - generic [ref=e90]: FB-NewLevel
+                - generic [ref=e91]: 0 chunks
+                - button "×" [ref=e92] [cursor=pointer]
+                - generic [ref=e93]:
+                  - generic: 99s / 120s cache
+                - button "History" [ref=e96] [cursor=pointer]
+            - generic [ref=e97]:
+              - generic [ref=e98]: ├──
+              - generic [ref=e99]:
+                - generic [ref=e101]: YT NLW 4k
+                - generic [ref=e102]: —
+                - generic [ref=e103]: 0 chunks
+                - button "×" [ref=e104] [cursor=pointer]
+                - generic [ref=e105]:
+                  - generic: 99s / 120s cache
+                - button "History" [ref=e108] [cursor=pointer]
+            - generic [ref=e109]:
+              - generic [ref=e110]: └──
+              - button "+ Add" [ref=e111] [cursor=pointer]
+      - complementary [ref=e112]:
+        - generic [ref=e113]:
+          - generic [ref=e114]:
+            - heading "Activity" [level=3] [ref=e115]
+            - combobox [ref=e116]:
+              - option "all sources" [selected]
+              - option "operator"
+              - option "inpoint"
+              - option "uploader"
+              - option "delivery"
+              - option "vps"
+              - option "ffmpeg"
+              - option "s3"
+              - option "system"
+          - list [ref=e117]:
+            - listitem [ref=e118]:
+              - generic [ref=e119]: 16:17:28
+              - generic [ref=e120]: uploader
+              - generic [ref=e121]: s3_upload_failed
+              - group [ref=e122]:
+                - generic "detail" [ref=e123] [cursor=pointer]
+            - listitem [ref=e124]:
+              - generic [ref=e125]: 16:16:27
+              - generic [ref=e126]: uploader
+              - generic [ref=e127]: s3_upload_failed
+              - group [ref=e128]:
+                - generic "detail" [ref=e129] [cursor=pointer]
+            - listitem [ref=e130]:
+              - generic [ref=e131]: 16:15:59
+              - generic [ref=e132]: delivery
+              - generic [ref=e133]: delivery_init_response
+              - group [ref=e134]:
+                - generic "detail" [ref=e135] [cursor=pointer]
+            - listitem [ref=e136]:
+              - generic [ref=e137]: 16:15:59
+              - generic [ref=e138]: delivery
+              - generic [ref=e139]: delivery_init_sent
+              - group [ref=e140]:
+                - generic "detail" [ref=e141] [cursor=pointer]
+            - listitem [ref=e142]:
+              - generic [ref=e143]: 16:15:59
+              - generic [ref=e144]: delivery
+              - generic [ref=e145]: vps_ready
+              - group [ref=e146]:
+                - generic "detail" [ref=e147] [cursor=pointer]
+            - listitem [ref=e148]:
+              - generic [ref=e149]: 16:15:54
+              - generic [ref=e150]: system
+              - generic [ref=e151]: vps_unreachable
+              - group [ref=e152]:
+                - generic "detail" [ref=e153] [cursor=pointer]
+            - listitem [ref=e154]:
+              - generic [ref=e155]: 16:15:48
+              - generic [ref=e156]: system
+              - generic [ref=e157]: vps_unreachable
+              - group [ref=e158]:
+                - generic "detail" [ref=e159] [cursor=pointer]
+            - listitem [ref=e160]:
+              - generic [ref=e161]: 16:15:42
+              - generic [ref=e162]: system
+              - generic [ref=e163]: vps_unreachable
+              - group [ref=e164]:
+                - generic "detail" [ref=e165] [cursor=pointer]
+            - listitem [ref=e166]:
+              - generic [ref=e167]: 16:15:36
+              - generic [ref=e168]: system
+              - generic [ref=e169]: vps_unreachable
+              - group [ref=e170]:
+                - generic "detail" [ref=e171] [cursor=pointer]
+            - listitem [ref=e172]:
+              - generic [ref=e173]: 16:15:29
+              - generic [ref=e174]: system
+              - generic [ref=e175]: vps_unreachable
+              - group [ref=e176]:
+                - generic "detail" [ref=e177] [cursor=pointer]
+            - listitem [ref=e178]:
+              - generic [ref=e179]: 16:15:21
+              - generic [ref=e180]: system
+              - generic [ref=e181]: vps_unreachable
+              - group [ref=e182]:
+                - generic "detail" [ref=e183] [cursor=pointer]
+            - listitem [ref=e184]:
+              - generic [ref=e185]: 16:15:09
+              - generic [ref=e186]: system
+              - generic [ref=e187]: vps_unreachable
+              - group [ref=e188]:
+                - generic "detail" [ref=e189] [cursor=pointer]
+            - listitem [ref=e190]:
+              - generic [ref=e191]: 16:15:02
+              - generic [ref=e192]: system
+              - generic [ref=e193]: vps_unreachable
+              - group [ref=e194]:
+                - generic "detail" [ref=e195] [cursor=pointer]
+            - listitem [ref=e196]:
+              - generic [ref=e197]: 16:14:55
+              - generic [ref=e198]: operator
+              - generic [ref=e199]: delivery_started
+              - group [ref=e200]:
+                - generic "detail" [ref=e201] [cursor=pointer]
+            - listitem [ref=e202]:
+              - generic [ref=e203]: 16:14:55
+              - generic [ref=e204]: delivery
+              - generic [ref=e205]: vps_creating
+              - group [ref=e206]:
+                - generic "detail" [ref=e207] [cursor=pointer]
+            - listitem [ref=e208]:
+              - generic [ref=e209]: 16:14:38
+              - generic [ref=e210]: operator
+              - generic [ref=e211]: delivery_stopped
+              - group [ref=e212]:
+                - generic "detail" [ref=e213] [cursor=pointer]
+            - listitem [ref=e214]:
+              - generic [ref=e215]: 16:14:38
+              - generic [ref=e216]: delivery
+              - generic [ref=e217]: vps_deleted
+              - group [ref=e218]:
+                - generic "detail" [ref=e219] [cursor=pointer]
+            - listitem [ref=e220]:
+              - generic [ref=e221]: 16:14:23
+              - generic [ref=e222]: ffmpeg
+              - generic [ref=e223]: endpoint_ffmpeg_died
+              - generic [ref=e224]: FB-Zbynek
+              - group [ref=e225]:
+                - generic "detail" [ref=e226] [cursor=pointer]
+            - listitem [ref=e227]:
+              - generic [ref=e228]: 16:14:19
+              - generic [ref=e229]: ffmpeg
+              - generic [ref=e230]: endpoint_ffmpeg_died
+              - generic [ref=e231]: FB-NewLevel
+              - group [ref=e232]:
+                - generic "detail" [ref=e233] [cursor=pointer]
+            - listitem [ref=e234]:
+              - generic [ref=e235]: 16:13:52
+              - generic [ref=e236]: ffmpeg
+              - generic [ref=e237]: endpoint_alive_transition
+              - generic [ref=e238]: FB-Zbynek
+              - group [ref=e239]:
+                - generic "detail" [ref=e240] [cursor=pointer]
+            - listitem [ref=e241]:
+              - generic [ref=e242]: 16:13:50
+              - generic [ref=e243]: ffmpeg
+              - generic [ref=e244]: endpoint_alive_transition
+              - generic [ref=e245]: FB-NewLevel
+              - group [ref=e246]:
+                - generic "detail" [ref=e247] [cursor=pointer]
+            - listitem [ref=e248]:
+              - generic [ref=e249]: 16:13:22
+              - generic [ref=e250]: ffmpeg
+              - generic [ref=e251]: endpoint_ffmpeg_died
+              - generic [ref=e252]: FB-Zbynek
+              - group [ref=e253]:
+                - generic "detail" [ref=e254] [cursor=pointer]
+            - listitem [ref=e255]:
+              - generic [ref=e256]: 16:13:20
+              - generic [ref=e257]: ffmpeg
+              - generic [ref=e258]: endpoint_ffmpeg_died
+              - generic [ref=e259]: FB-NewLevel
+              - group [ref=e260]:
+                - generic "detail" [ref=e261] [cursor=pointer]
+            - listitem [ref=e262]:
+              - generic [ref=e263]: 16:12:51
+              - generic [ref=e264]: ffmpeg
+              - generic [ref=e265]: endpoint_started
+              - generic [ref=e266]: FB-Zbynek
+              - group [ref=e267]:
+                - generic "detail" [ref=e268] [cursor=pointer]
+            - listitem [ref=e269]:
+              - generic [ref=e270]: 16:12:51
+              - generic [ref=e271]: ffmpeg
+              - generic [ref=e272]: endpoint_started
+              - generic [ref=e273]: FB-NewLevel
+              - group [ref=e274]:
+                - generic "detail" [ref=e275] [cursor=pointer]
+            - listitem [ref=e276]:
+              - generic [ref=e277]: 16:12:48
+              - generic [ref=e278]: operator
+              - generic [ref=e279]: endpoint_added
+              - generic [ref=e280]: FB-Zbynek
+              - group [ref=e281]:
+                - generic "detail" [ref=e282] [cursor=pointer]
+            - listitem [ref=e283]:
+              - generic [ref=e284]: 16:12:48
+              - generic [ref=e285]: operator
+              - generic [ref=e286]: endpoint_added
+              - generic [ref=e287]: FB-NewLevel
+              - group [ref=e288]:
+                - generic "detail" [ref=e289] [cursor=pointer]
+            - listitem [ref=e290]:
+              - generic [ref=e291]: 16:12:19
+              - generic [ref=e292]: operator
+              - generic [ref=e293]: endpoint_removed
+              - generic [ref=e294]: FB-Zbynek
+              - group [ref=e295]:
+                - generic "detail" [ref=e296] [cursor=pointer]
+            - listitem [ref=e297]:
+              - generic [ref=e298]: 16:12:19
+              - generic [ref=e299]: operator
+              - generic [ref=e300]: endpoint_removed
+              - generic [ref=e301]: FB-NewLevel
+              - group [ref=e302]:
+                - generic "detail" [ref=e303] [cursor=pointer]
+            - listitem [ref=e304]:
+              - generic [ref=e305]: 16:08:52
+              - generic [ref=e306]: ffmpeg
+              - generic [ref=e307]: endpoint_ffmpeg_died
+              - generic [ref=e308]: FB-NewLevel
+              - group [ref=e309]:
+                - generic "detail" [ref=e310] [cursor=pointer]
+            - listitem [ref=e311]:
+              - generic [ref=e312]: 16:08:49
+              - generic [ref=e313]: ffmpeg
+              - generic [ref=e314]: endpoint_ffmpeg_died
+              - generic [ref=e315]: FB-Zbynek
+              - group [ref=e316]:
+                - generic "detail" [ref=e317] [cursor=pointer]
+            - listitem [ref=e318]:
+              - generic [ref=e319]: 16:08:20
+              - generic [ref=e320]: ffmpeg
+              - generic [ref=e321]: endpoint_alive_transition
+              - generic [ref=e322]: FB-Zbynek
+              - group [ref=e323]:
+                - generic "detail" [ref=e324] [cursor=pointer]
+            - listitem [ref=e325]:
+              - generic [ref=e326]: 16:08:19
+              - generic [ref=e327]: ffmpeg
+              - generic [ref=e328]: endpoint_alive_transition
+              - generic [ref=e329]: FB-NewLevel
+              - group [ref=e330]:
+                - generic "detail" [ref=e331] [cursor=pointer]
+            - listitem [ref=e332]:
+              - generic [ref=e333]: 16:06:20
+              - generic [ref=e334]: ffmpeg
+              - generic [ref=e335]: endpoint_ffmpeg_died
+              - generic [ref=e336]: FB-Zbynek
+              - group [ref=e337]:
+                - generic "detail" [ref=e338] [cursor=pointer]
+            - listitem [ref=e339]:
+              - generic [ref=e340]: 16:06:19
+              - generic [ref=e341]: ffmpeg
+              - generic [ref=e342]: endpoint_ffmpeg_died
+              - generic [ref=e343]: FB-NewLevel
+              - group [ref=e344]:
+                - generic "detail" [ref=e345] [cursor=pointer]
+            - listitem [ref=e346]:
+              - generic [ref=e347]: 16:05:49
+              - generic [ref=e348]: ffmpeg
+              - generic [ref=e349]: endpoint_alive_transition
+              - generic [ref=e350]: FB-Zbynek
+              - group [ref=e351]:
+                - generic "detail" [ref=e352] [cursor=pointer]
+            - listitem [ref=e353]:
+              - generic [ref=e354]: 16:05:48
+              - generic [ref=e355]: ffmpeg
+              - generic [ref=e356]: endpoint_alive_transition
+              - generic [ref=e357]: FB-NewLevel
+              - group [ref=e358]:
+                - generic "detail" [ref=e359] [cursor=pointer]
+            - listitem [ref=e360]:
+              - generic [ref=e361]: 16:04:49
+              - generic [ref=e362]: ffmpeg
+              - generic [ref=e363]: endpoint_ffmpeg_died
+              - generic [ref=e364]: FB-Zbynek
+              - group [ref=e365]:
+                - generic "detail" [ref=e366] [cursor=pointer]
+            - listitem [ref=e367]:
+              - generic [ref=e368]: 16:04:48
+              - generic [ref=e369]: ffmpeg
+              - generic [ref=e370]: endpoint_ffmpeg_died
+              - generic [ref=e371]: FB-NewLevel
+              - group [ref=e372]:
+                - generic "detail" [ref=e373] [cursor=pointer]
+            - listitem [ref=e374]:
+              - generic [ref=e375]: 16:04:17
+              - generic [ref=e376]: ffmpeg
+              - generic [ref=e377]: endpoint_alive_transition
+              - generic [ref=e378]: FB-Zbynek
+              - group [ref=e379]:
+                - generic "detail" [ref=e380] [cursor=pointer]
+            - listitem [ref=e381]:
+              - generic [ref=e382]: 16:04:16
+              - generic [ref=e383]: ffmpeg
+              - generic [ref=e384]: endpoint_alive_transition
+              - generic [ref=e385]: FB-NewLevel
+              - group [ref=e386]:
+                - generic "detail" [ref=e387] [cursor=pointer]
+            - listitem [ref=e388]:
+              - generic [ref=e389]: 16:03:47
+              - generic [ref=e390]: ffmpeg
+              - generic [ref=e391]: endpoint_ffmpeg_died
+              - generic [ref=e392]: FB-Zbynek
+              - group [ref=e393]:
+                - generic "detail" [ref=e394] [cursor=pointer]
+            - listitem [ref=e395]:
+              - generic [ref=e396]: 16:03:46
+              - generic [ref=e397]: ffmpeg
+              - generic [ref=e398]: endpoint_ffmpeg_died
+              - generic [ref=e399]: FB-NewLevel
+              - group [ref=e400]:
+                - generic "detail" [ref=e401] [cursor=pointer]
+            - listitem [ref=e402]:
+              - generic [ref=e403]: 16:03:17
+              - generic [ref=e404]: ffmpeg
+              - generic [ref=e405]: endpoint_started
+              - generic [ref=e406]: FB-NewLevel
+              - group [ref=e407]:
+                - generic "detail" [ref=e408] [cursor=pointer]
+            - listitem [ref=e409]:
+              - generic [ref=e410]: 16:03:17
+              - generic [ref=e411]: ffmpeg
+              - generic [ref=e412]: endpoint_started
+              - generic [ref=e413]: FB-Zbynek
+              - group [ref=e414]:
+                - generic "detail" [ref=e415] [cursor=pointer]
+            - listitem [ref=e416]:
+              - generic [ref=e417]: 16:03:13
+              - generic [ref=e418]: delivery
+              - generic [ref=e419]: delivery_init_response
+              - group [ref=e420]:
+                - generic "detail" [ref=e421] [cursor=pointer]
+            - listitem [ref=e422]:
+              - generic [ref=e423]: 16:03:13
+              - generic [ref=e424]: delivery
+              - generic [ref=e425]: delivery_init_sent
+              - group [ref=e426]:
+                - generic "detail" [ref=e427] [cursor=pointer]
+            - listitem [ref=e428]:
+              - generic [ref=e429]: 16:02:13
+              - generic [ref=e430]: delivery
+              - generic [ref=e431]: vps_ready
+              - group [ref=e432]:
+                - generic "detail" [ref=e433] [cursor=pointer]
+            - listitem [ref=e434]:
+              - generic [ref=e435]: 16:02:09
+              - generic [ref=e436]: system
+              - generic [ref=e437]: vps_unreachable
+              - group [ref=e438]:
+                - generic "detail" [ref=e439] [cursor=pointer]
+            - listitem [ref=e440]:
+              - generic [ref=e441]: 16:02:03
+              - generic [ref=e442]: system
+              - generic [ref=e443]: vps_unreachable
+              - group [ref=e444]:
+                - generic "detail" [ref=e445] [cursor=pointer]
+        - generic [ref=e446]:
+          - heading "Pacing diagnostics" [level=3] [ref=e447]
+          - paragraph [ref=e448]: No event selected

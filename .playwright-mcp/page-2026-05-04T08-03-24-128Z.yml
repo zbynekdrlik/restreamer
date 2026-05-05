@@ -1,0 +1,456 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - link "⚙ Settings" [ref=e4] [cursor=pointer]:
+      - /url: /settings
+    - heading "Restreamer" [level=1] [ref=e5]
+    - generic [ref=e6]: Connected
+    - generic [ref=e7]: 0.3.90
+  - main [ref=e8]:
+    - generic [ref=e11]:
+      - generic [ref=e12]:
+        - generic [ref=e13]:
+          - generic [ref=e14]:
+            - generic [ref=e15]: "Event:"
+            - combobox [disabled] [ref=e16]:
+              - option "-- Select Event --"
+              - option "SNV-stream-2026-05-03" [selected]
+              - option "E2E-Test"
+            - button "Start Delivering" [disabled] [ref=e17]
+            - button "Stop Delivering" [ref=e18] [cursor=pointer]
+          - generic [ref=e19]:
+            - generic [ref=e20]: Streaming
+            - generic [ref=e21]: 00:05:45
+        - generic [ref=e22]:
+          - generic [ref=e23]:
+            - generic [ref=e26]: OBS
+            - generic [ref=e27]: Streaming
+            - button "Stop" [ref=e386] [cursor=pointer]
+          - generic [ref=e28]: │
+          - generic [ref=e29]:
+            - generic [ref=e32]: RTMP
+            - generic [ref=e33]: 11.9 Mbps | 21.80 GB
+          - generic [ref=e34]: │
+          - generic [ref=e35]:
+            - generic [ref=e38]: Local Buffer
+            - generic [ref=e39]: 17 chunks
+          - generic [ref=e40]: │
+          - generic [ref=e41]:
+            - generic [ref=e44]: S3 → VPS
+            - generic [ref=e45]: 46 queued → 112 delivered
+          - generic "S3 upload telemetry — click for detail" [ref=e46] [cursor=pointer]:
+            - generic [ref=e47]: "Upload: 0.4 c/s"
+            - generic [ref=e48]: median 5016ms
+            - generic [ref=e49]: in-flight 2/2
+            - generic [ref=e50]: errors 0%
+          - generic [ref=e387]:
+            - generic [ref=e388]:
+              - generic [ref=e389]: ├──
+              - generic [ref=e390]:
+                - generic [ref=e392]: YT NLW 4k
+                - generic [ref=e393]: noData
+                - generic [ref=e394]: 112 chunks
+                - button "×" [ref=e395] [cursor=pointer]
+                - generic [ref=e396]:
+                  - generic: 90s / 120s cache
+                - button "History" [ref=e399] [cursor=pointer]
+            - generic [ref=e400]:
+              - generic [ref=e401]: ├──
+              - generic [ref=e402]:
+                - generic [ref=e404]: YT NLCH 4K
+                - generic [ref=e405]: noData
+                - generic [ref=e406]: 112 chunks
+                - button "×" [ref=e407] [cursor=pointer]
+                - generic [ref=e408]:
+                  - generic: 90s / 120s cache
+                - button "History" [ref=e411] [cursor=pointer]
+            - generic [ref=e412]:
+              - generic [ref=e413]: ├──
+              - generic [ref=e414]:
+                - generic [ref=e416]: Control stream Kiko
+                - generic [ref=e417]: 112 chunks
+                - button "×" [ref=e418] [cursor=pointer]
+                - generic [ref=e419]:
+                  - generic: 90s / 120s cache
+                - button "History" [ref=e422] [cursor=pointer]
+            - generic [ref=e423]:
+              - generic [ref=e424]: ├──
+              - generic [ref=e425]:
+                - generic [ref=e427]: FB-Zbynek
+                - generic [ref=e428]: 0 chunks
+                - generic [ref=e429]: "stall: I/O error: none return"
+                - generic [ref=e430]: "I/O error: none return"
+                - button "×" [ref=e431] [cursor=pointer]
+                - generic [ref=e432]:
+                  - generic: 90s / 120s cache
+                - button "History" [ref=e435] [cursor=pointer]
+            - generic [ref=e436]:
+              - generic [ref=e437]: ├──
+              - generic [ref=e438]:
+                - generic [ref=e440]: FB-NewLevel
+                - generic [ref=e441]: 0 chunks
+                - generic [ref=e442]: "stall: I/O error: none return"
+                - generic [ref=e443]: "I/O error: none return"
+                - button "×" [ref=e444] [cursor=pointer]
+                - generic [ref=e445]:
+                  - generic: 90s / 120s cache
+                - button "History" [ref=e448] [cursor=pointer]
+            - generic [ref=e449]:
+              - generic [ref=e450]: └──
+              - button "+ Add" [ref=e451] [cursor=pointer]
+      - complementary [ref=e51]:
+        - generic [ref=e52]:
+          - generic [ref=e53]:
+            - heading "Activity" [level=3] [ref=e54]
+            - combobox [ref=e55]:
+              - option "all sources" [selected]
+              - option "operator"
+              - option "inpoint"
+              - option "uploader"
+              - option "delivery"
+              - option "vps"
+              - option "ffmpeg"
+              - option "s3"
+              - option "system"
+          - list [ref=e56]:
+            - listitem [ref=e452]:
+              - generic [ref=e453]: 08:03:10
+              - generic [ref=e454]: vps
+              - generic [ref=e455]: endpoint_rtmp_push_died
+              - generic [ref=e456]: FB-Zbynek
+              - group [ref=e457]:
+                - generic "detail" [ref=e458] [cursor=pointer]
+            - listitem [ref=e459]:
+              - generic [ref=e460]: 08:03:10
+              - generic [ref=e461]: vps
+              - generic [ref=e462]: endpoint_rtmp_push_died
+              - generic [ref=e463]: FB-NewLevel
+              - group [ref=e464]:
+                - generic "detail" [ref=e465] [cursor=pointer]
+            - listitem [ref=e466]:
+              - generic [ref=e467]: 08:02:54
+              - generic [ref=e468]: vps
+              - generic [ref=e469]: endpoint_rtmp_push_died
+              - generic [ref=e470]: FB-Zbynek
+              - group [ref=e471]:
+                - generic "detail" [ref=e472] [cursor=pointer]
+            - listitem [ref=e473]:
+              - generic [ref=e474]: 08:02:54
+              - generic [ref=e475]: vps
+              - generic [ref=e476]: endpoint_rtmp_push_died
+              - generic [ref=e477]: FB-NewLevel
+              - group [ref=e478]:
+                - generic "detail" [ref=e479] [cursor=pointer]
+            - listitem [ref=e57]:
+              - generic [ref=e58]: 08:02:39
+              - generic [ref=e59]: vps
+              - generic [ref=e60]: endpoint_rtmp_push_died
+              - generic [ref=e61]: FB-Zbynek
+              - group [ref=e62]:
+                - generic "detail" [active] [ref=e63] [cursor=pointer]
+                - generic [ref=e480]: "{ \"backend\": \"rust_rtmp_push\", \"backoff_ms\": 15000, \"error\": \"I/O error: none return\", \"reconnect_count\": 0 }"
+            - listitem [ref=e64]:
+              - generic [ref=e65]: 08:02:39
+              - generic [ref=e66]: vps
+              - generic [ref=e67]: endpoint_rtmp_push_died
+              - generic [ref=e68]: FB-NewLevel
+              - group [ref=e69]:
+                - generic "detail" [ref=e70] [cursor=pointer]
+            - listitem [ref=e71]:
+              - generic [ref=e72]: 08:02:24
+              - generic [ref=e73]: vps
+              - generic [ref=e74]: endpoint_rtmp_push_died
+              - generic [ref=e75]: FB-Zbynek
+              - group [ref=e76]:
+                - generic "detail" [ref=e77] [cursor=pointer]
+            - listitem [ref=e78]:
+              - generic [ref=e79]: 08:02:24
+              - generic [ref=e80]: vps
+              - generic [ref=e81]: endpoint_rtmp_push_died
+              - generic [ref=e82]: FB-NewLevel
+              - group [ref=e83]:
+                - generic "detail" [ref=e84] [cursor=pointer]
+            - listitem [ref=e85]:
+              - generic [ref=e86]: 08:02:09
+              - generic [ref=e87]: vps
+              - generic [ref=e88]: endpoint_rtmp_push_died
+              - generic [ref=e89]: FB-Zbynek
+              - group [ref=e90]:
+                - generic "detail" [ref=e91] [cursor=pointer]
+            - listitem [ref=e92]:
+              - generic [ref=e93]: 08:02:09
+              - generic [ref=e94]: vps
+              - generic [ref=e95]: endpoint_rtmp_push_died
+              - generic [ref=e96]: FB-NewLevel
+              - group [ref=e97]:
+                - generic "detail" [ref=e98] [cursor=pointer]
+            - listitem [ref=e99]:
+              - generic [ref=e100]: 08:01:54
+              - generic [ref=e101]: vps
+              - generic [ref=e102]: endpoint_rtmp_push_died
+              - generic [ref=e103]: FB-Zbynek
+              - group [ref=e104]:
+                - generic "detail" [ref=e105] [cursor=pointer]
+            - listitem [ref=e106]:
+              - generic [ref=e107]: 08:01:54
+              - generic [ref=e108]: vps
+              - generic [ref=e109]: endpoint_rtmp_push_died
+              - generic [ref=e110]: FB-NewLevel
+              - group [ref=e111]:
+                - generic "detail" [ref=e112] [cursor=pointer]
+            - listitem [ref=e113]:
+              - generic [ref=e114]: 08:01:39
+              - generic [ref=e115]: vps
+              - generic [ref=e116]: endpoint_rtmp_push_died
+              - generic [ref=e117]: FB-Zbynek
+              - group [ref=e118]:
+                - generic "detail" [ref=e119] [cursor=pointer]
+            - listitem [ref=e120]:
+              - generic [ref=e121]: 08:01:39
+              - generic [ref=e122]: vps
+              - generic [ref=e123]: endpoint_rtmp_push_died
+              - generic [ref=e124]: FB-NewLevel
+              - group [ref=e125]:
+                - generic "detail" [ref=e126] [cursor=pointer]
+            - listitem [ref=e127]:
+              - generic [ref=e128]: 08:01:23
+              - generic [ref=e129]: vps
+              - generic [ref=e130]: endpoint_rtmp_push_died
+              - generic [ref=e131]: FB-Zbynek
+              - group [ref=e132]:
+                - generic "detail" [ref=e133] [cursor=pointer]
+            - listitem [ref=e134]:
+              - generic [ref=e135]: 08:01:23
+              - generic [ref=e136]: vps
+              - generic [ref=e137]: endpoint_rtmp_push_died
+              - generic [ref=e138]: FB-NewLevel
+              - group [ref=e139]:
+                - generic "detail" [ref=e140] [cursor=pointer]
+            - listitem [ref=e141]:
+              - generic [ref=e142]: 08:01:08
+              - generic [ref=e143]: vps
+              - generic [ref=e144]: endpoint_rtmp_push_died
+              - generic [ref=e145]: FB-Zbynek
+              - group [ref=e146]:
+                - generic "detail" [ref=e147] [cursor=pointer]
+            - listitem [ref=e148]:
+              - generic [ref=e149]: 08:01:08
+              - generic [ref=e150]: vps
+              - generic [ref=e151]: endpoint_rtmp_push_died
+              - generic [ref=e152]: FB-NewLevel
+              - group [ref=e153]:
+                - generic "detail" [ref=e154] [cursor=pointer]
+            - listitem [ref=e155]:
+              - generic [ref=e156]: 08:00:53
+              - generic [ref=e157]: vps
+              - generic [ref=e158]: endpoint_rtmp_push_died
+              - generic [ref=e159]: FB-Zbynek
+              - group [ref=e160]:
+                - generic "detail" [ref=e161] [cursor=pointer]
+            - listitem [ref=e162]:
+              - generic [ref=e163]: 08:00:53
+              - generic [ref=e164]: vps
+              - generic [ref=e165]: endpoint_rtmp_push_died
+              - generic [ref=e166]: FB-NewLevel
+              - group [ref=e167]:
+                - generic "detail" [ref=e168] [cursor=pointer]
+            - listitem [ref=e169]:
+              - generic [ref=e170]: 08:00:38
+              - generic [ref=e171]: vps
+              - generic [ref=e172]: endpoint_rtmp_push_died
+              - generic [ref=e173]: FB-Zbynek
+              - group [ref=e174]:
+                - generic "detail" [ref=e175] [cursor=pointer]
+            - listitem [ref=e176]:
+              - generic [ref=e177]: 08:00:38
+              - generic [ref=e178]: vps
+              - generic [ref=e179]: endpoint_rtmp_push_died
+              - generic [ref=e180]: FB-NewLevel
+              - group [ref=e181]:
+                - generic "detail" [ref=e182] [cursor=pointer]
+            - listitem [ref=e183]:
+              - generic [ref=e184]: 08:00:23
+              - generic [ref=e185]: vps
+              - generic [ref=e186]: endpoint_rtmp_push_died
+              - generic [ref=e187]: FB-Zbynek
+              - group [ref=e188]:
+                - generic "detail" [ref=e189] [cursor=pointer]
+            - listitem [ref=e190]:
+              - generic [ref=e191]: 08:00:23
+              - generic [ref=e192]: vps
+              - generic [ref=e193]: endpoint_rtmp_push_died
+              - generic [ref=e194]: FB-NewLevel
+              - group [ref=e195]:
+                - generic "detail" [ref=e196] [cursor=pointer]
+            - listitem [ref=e197]:
+              - generic [ref=e198]: 08:00:08
+              - generic [ref=e199]: vps
+              - generic [ref=e200]: endpoint_rtmp_push_died
+              - generic [ref=e201]: FB-Zbynek
+              - group [ref=e202]:
+                - generic "detail" [ref=e203] [cursor=pointer]
+            - listitem [ref=e204]:
+              - generic [ref=e205]: 08:00:08
+              - generic [ref=e206]: vps
+              - generic [ref=e207]: endpoint_rtmp_push_died
+              - generic [ref=e208]: FB-NewLevel
+              - group [ref=e209]:
+                - generic "detail" [ref=e210] [cursor=pointer]
+            - listitem [ref=e211]:
+              - generic [ref=e212]: 07:59:53
+              - generic [ref=e213]: vps
+              - generic [ref=e214]: endpoint_rtmp_push_died
+              - generic [ref=e215]: FB-Zbynek
+              - group [ref=e216]:
+                - generic "detail" [ref=e217] [cursor=pointer]
+            - listitem [ref=e218]:
+              - generic [ref=e219]: 07:59:53
+              - generic [ref=e220]: vps
+              - generic [ref=e221]: endpoint_rtmp_push_died
+              - generic [ref=e222]: FB-NewLevel
+              - group [ref=e223]:
+                - generic "detail" [ref=e224] [cursor=pointer]
+            - listitem [ref=e225]:
+              - generic [ref=e226]: 07:59:38
+              - generic [ref=e227]: vps
+              - generic [ref=e228]: endpoint_rtmp_push_died
+              - generic [ref=e229]: FB-Zbynek
+              - group [ref=e230]:
+                - generic "detail" [ref=e231] [cursor=pointer]
+            - listitem [ref=e232]:
+              - generic [ref=e233]: 07:59:37
+              - generic [ref=e234]: vps
+              - generic [ref=e235]: endpoint_rtmp_push_died
+              - generic [ref=e236]: FB-NewLevel
+              - group [ref=e237]:
+                - generic "detail" [ref=e238] [cursor=pointer]
+            - listitem [ref=e239]:
+              - generic [ref=e240]: 07:59:40
+              - generic [ref=e241]: delivery
+              - generic [ref=e242]: delivery_init_response
+              - group [ref=e243]:
+                - generic "detail" [ref=e244] [cursor=pointer]
+            - listitem [ref=e245]:
+              - generic [ref=e246]: 07:59:40
+              - generic [ref=e247]: delivery
+              - generic [ref=e248]: delivery_init_sent
+              - group [ref=e249]:
+                - generic "detail" [ref=e250] [cursor=pointer]
+            - listitem [ref=e251]:
+              - generic [ref=e252]: 07:58:37
+              - generic [ref=e253]: delivery
+              - generic [ref=e254]: vps_ready
+              - group [ref=e255]:
+                - generic "detail" [ref=e256] [cursor=pointer]
+            - listitem [ref=e257]:
+              - generic [ref=e258]: 07:58:30
+              - generic [ref=e259]: system
+              - generic [ref=e260]: vps_unreachable
+              - group [ref=e261]:
+                - generic "detail" [ref=e262] [cursor=pointer]
+            - listitem [ref=e263]:
+              - generic [ref=e264]: 07:58:29
+              - generic [ref=e265]: uploader
+              - generic [ref=e266]: s3_upload_failed
+              - group [ref=e267]:
+                - generic "detail" [ref=e268] [cursor=pointer]
+            - listitem [ref=e269]:
+              - generic [ref=e270]: 07:58:18
+              - generic [ref=e271]: system
+              - generic [ref=e272]: vps_unreachable
+              - group [ref=e273]:
+                - generic "detail" [ref=e274] [cursor=pointer]
+            - listitem [ref=e275]:
+              - generic [ref=e276]: 07:58:09
+              - generic [ref=e277]: system
+              - generic [ref=e278]: vps_unreachable
+              - group [ref=e279]:
+                - generic "detail" [ref=e280] [cursor=pointer]
+            - listitem [ref=e281]:
+              - generic [ref=e282]: 07:58:01
+              - generic [ref=e283]: system
+              - generic [ref=e284]: vps_unreachable
+              - group [ref=e285]:
+                - generic "detail" [ref=e286] [cursor=pointer]
+            - listitem [ref=e287]:
+              - generic [ref=e288]: 07:57:49
+              - generic [ref=e289]: system
+              - generic [ref=e290]: vps_unreachable
+              - group [ref=e291]:
+                - generic "detail" [ref=e292] [cursor=pointer]
+            - listitem [ref=e293]:
+              - generic [ref=e294]: 07:57:42
+              - generic [ref=e295]: system
+              - generic [ref=e296]: vps_unreachable
+              - group [ref=e297]:
+                - generic "detail" [ref=e298] [cursor=pointer]
+            - listitem [ref=e299]:
+              - generic [ref=e300]: 07:57:37
+              - generic [ref=e301]: delivery
+              - generic [ref=e302]: vps_creating
+              - group [ref=e303]:
+                - generic "detail" [ref=e304] [cursor=pointer]
+            - listitem [ref=e305]:
+              - generic [ref=e306]: 07:57:37
+              - generic [ref=e307]: operator
+              - generic [ref=e308]: event_started
+              - group [ref=e309]:
+                - generic "detail" [ref=e310] [cursor=pointer]
+            - listitem [ref=e311]:
+              - generic [ref=e312]: 07:57:19
+              - generic [ref=e313]: inpoint
+              - generic [ref=e314]: rtmp_connected
+              - group [ref=e315]:
+                - generic "detail" [ref=e316] [cursor=pointer]
+            - listitem [ref=e317]:
+              - generic [ref=e318]: 00:06:18
+              - generic [ref=e319]: operator
+              - generic [ref=e320]: delivery_stopped
+              - group [ref=e321]:
+                - generic "detail" [ref=e322] [cursor=pointer]
+            - listitem [ref=e323]:
+              - generic [ref=e324]: 00:06:18
+              - generic [ref=e325]: delivery
+              - generic [ref=e326]: vps_deleted
+              - group [ref=e327]:
+                - generic "detail" [ref=e328] [cursor=pointer]
+            - listitem [ref=e329]:
+              - generic [ref=e330]: 00:06:15
+              - generic [ref=e331]: inpoint
+              - generic [ref=e332]: rtmp_disconnected
+              - group [ref=e333]:
+                - generic "detail" [ref=e334] [cursor=pointer]
+            - listitem [ref=e335]:
+              - generic [ref=e336]: 00:05:34
+              - generic [ref=e337]: inpoint
+              - generic [ref=e338]: rtmp_connected
+              - group [ref=e339]:
+                - generic "detail" [ref=e340] [cursor=pointer]
+            - listitem [ref=e341]:
+              - generic [ref=e342]: 00:05:31
+              - generic [ref=e343]: system
+              - generic [ref=e344]: restreamer_started
+              - group [ref=e345]:
+                - generic "detail" [ref=e346] [cursor=pointer]
+            - listitem [ref=e347]:
+              - generic [ref=e348]: 23:57:27
+              - generic [ref=e349]: delivery
+              - generic [ref=e350]: delivery_init_response
+              - group [ref=e351]:
+                - generic "detail" [ref=e352] [cursor=pointer]
+            - listitem [ref=e353]:
+              - generic [ref=e354]: 23:57:27
+              - generic [ref=e355]: delivery
+              - generic [ref=e356]: delivery_init_sent
+              - group [ref=e357]:
+                - generic "detail" [ref=e358] [cursor=pointer]
+        - generic [ref=e383]:
+          - heading "Pacing diagnostics" [level=3] [ref=e384]
+          - generic [ref=e481]:
+            - heading "Producer rate (ts/wall)" [level=4] [ref=e482]
+            - paragraph [ref=e483]: 157 samples
+          - generic [ref=e484]:
+            - heading "Consumer rate (ffmpeg_time/wall)" [level=4] [ref=e485]
+            - paragraph [ref=e486]: Select an endpoint to see per-endpoint drain rate
+          - generic [ref=e487]:
+            - heading "Clock skew (ms)" [level=4] [ref=e488]
+            - paragraph [ref=e489]: 536 samples

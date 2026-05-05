@@ -1,0 +1,55 @@
+[      41ms] [WARNING] The `integrity` attribute is currently ignored for preload destinations that do not support subresource integrity. See https://crbug.com/981419 for more information @ http://10.77.9.204:8910/:29
+[   18115ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/status:0
+[   18120ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/uploads/stats:0
+[   18126ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/chunks/stats:0
+[   18220ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/status:0
+[   18222ms] [ERROR] WebSocket connection to 'ws://10.77.9.204:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/leptos-ui-47fc18c800781b10.js:688
+[   18228ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/chunks/stats:0
+[   18236ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/delivery/status/cached:0
+[   18241ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/events:0
+[   18245ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/endpoints:0
+[   18249ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/obs/status:0
+[   19229ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/status:0
+[   19231ms] [ERROR] WebSocket connection to 'ws://10.77.9.204:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/leptos-ui-47fc18c800781b10.js:688
+[   19235ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/chunks/stats:0
+[   19242ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/delivery/status/cached:0
+[   19250ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/events:0
+[   19255ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/endpoints:0
+[   19260ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/obs/status:0
+[   20112ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/status:0
+[   20113ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/uploads/stats:0
+[   20116ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/chunks/stats:0
+[   20239ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/status:0
+[   20241ms] [ERROR] WebSocket connection to 'ws://10.77.9.204:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/leptos-ui-47fc18c800781b10.js:688
+[   20245ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/chunks/stats:0
+[   20253ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/delivery/status/cached:0
+[   20259ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/events:0
+[   20264ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/endpoints:0
+[   20269ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/obs/status:0
+[  860112ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/status:0
+[  860119ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/uploads/stats:0
+[  860120ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/chunks/stats:0
+[  860495ms] [ERROR] WebSocket connection to 'ws://10.77.9.204:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/leptos-ui-47fc18c800781b10.js:688
+[  860496ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/status:0
+[  860504ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/chunks/stats:0
+[  860509ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/delivery/status/cached:0
+[  860519ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/events:0
+[  860525ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/endpoints:0
+[  860532ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/obs/status:0
+[  861500ms] [ERROR] WebSocket connection to 'ws://10.77.9.204:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/leptos-ui-47fc18c800781b10.js:688
+[  861502ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/status:0
+[  861506ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/chunks/stats:0
+[  861510ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/delivery/status/cached:0
+[  861519ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/events:0
+[  861524ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/endpoints:0
+[  861528ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/obs/status:0
+[  862118ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/status:0
+[  862120ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/uploads/stats:0
+[  862126ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/chunks/stats:0
+[  862506ms] [ERROR] WebSocket connection to 'ws://10.77.9.204:8910/api/v1/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/leptos-ui-47fc18c800781b10.js:688
+[  862507ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/status:0
+[  862511ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/chunks/stats:0
+[  862519ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/delivery/status/cached:0
+[  862524ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/events:0
+[  862528ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/endpoints:0
+[  862533ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://10.77.9.204:8910/api/v1/obs/status:0

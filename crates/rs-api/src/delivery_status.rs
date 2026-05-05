@@ -367,6 +367,7 @@ impl DeliveryOrchestrator {
                 chunk_delay_secs: ep.chunk_delay_secs,
                 stall_reason: ep.stall_reason,
                 ffmpeg_restart_count: ep.ffmpeg_restart_count,
+                reconnect_count: ep.reconnect_count,
                 last_error: ep.last_error,
                 is_fast: ep.is_fast,
                 delivery_mode: ep.delivery_mode,
