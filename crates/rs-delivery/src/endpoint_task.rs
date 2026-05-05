@@ -339,10 +339,16 @@ async fn producer_task<F: ChunkFetcher>(
     stats: Stats,
     alias: String,
     buffer_state: Arc<BufferState>,
+    audit_ring: Option<Arc<AuditRing>>,
 ) {
     let mut chunk_id = start_chunk_id;
     let mut consecutive_chunk_misses: u32 = 0;
     let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
+    // Issue #173: track last-emitted audit per error_class so a sustained
+    // S3 outage emits ONE row per minute per class, not per fetch attempt.
+    let mut last_audit_ts: std::collections::HashMap<&'static str, std::time::Instant> =
+        std::collections::HashMap::new();
+    const AUDIT_RATE_LIMIT_SECS: u64 = 60;
 
     loop {
         if *stop_rx.borrow() {
@@ -469,6 +475,26 @@ async fn producer_task<F: ChunkFetcher>(
                     backoff_secs = s3_backoff_secs,
                     "Producer: S3 fetch error, retrying in {s3_backoff_secs}s: {e}"
                 );
+                // Issue #173: emit audit row, rate-limited per error_class
+                // so a sustained S3 outage emits 1 row/min/class, not one
+                // per fetch attempt.
+                let class = crate::endpoint_audit::classify_s3_fetch_error(&e);
+                let now = std::time::Instant::now();
+                let should_emit = match last_audit_ts.get(class) {
+                    Some(t) => t.elapsed().as_secs() >= AUDIT_RATE_LIMIT_SECS,
+                    None => true,
+                };
+                if should_emit {
+                    crate::endpoint_audit::emit_s3_fetch_failed(
+                        &audit_ring,
+                        &alias,
+                        chunk_id,
+                        class,
+                        &e,
+                        s3_backoff_secs,
+                    );
+                    last_audit_ts.insert(class, now);
+                }
                 let mut s = stats.lock().await;
                 s.last_error = Some(e);
                 drop(s);
@@ -912,6 +938,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
     let producer_stats = stats.clone();
     let producer_alias = alias.clone();
     let producer_buffer_state = buffer_state.clone();
+    let producer_audit_ring = audit_ring.clone();
     let producer = tokio::spawn(producer_task(
         fetcher,
         tx,
@@ -920,6 +947,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
         producer_stats,
         producer_alias,
         producer_buffer_state,
+        producer_audit_ring,
     ));
 
     let consumer_stop = stop_rx.clone();
