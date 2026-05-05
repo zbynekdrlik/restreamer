@@ -1,7 +1,76 @@
 //! EvictionTask -- deletes cache files outside any endpoint's window.
+//!
+//! Runs periodically. Reads `EndpointPositionRegistry` snapshot, computes
+//! the union of `[pos, pos + window]` ranges, deletes any cache file
+//! whose chunk_id is not in the union. Eventual consistency: the
+//! ChunkRegistry slot for an evicted chunk_id is NOT updated; the next
+//! reader request re-creates the slot via DownloadService::request_chunk.
 
-pub struct EvictionTask {
-    _placeholder: (),
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::position_registry::EndpointPositionRegistry;
+use super::registry::ChunkRegistry;
+
+pub struct EvictionTask;
+
+impl EvictionTask {
+    /// Spawn the eviction loop. Returns the JoinHandle the caller stores.
+    pub fn spawn(
+        cache_dir: std::path::PathBuf,
+        positions: Arc<EndpointPositionRegistry>,
+        registry: Arc<ChunkRegistry>,
+        interval: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                if let Err(e) = Self::run_once(&cache_dir, &positions, &registry).await {
+                    tracing::warn!("disk_cache eviction error: {e}");
+                }
+            }
+        })
+    }
+
+    /// Single sweep pass: list cache_dir, delete files not in any
+    /// endpoint window. Returns number of files deleted.
+    pub async fn run_once(
+        cache_dir: &Path,
+        positions: &EndpointPositionRegistry,
+        _registry: &ChunkRegistry,
+    ) -> std::io::Result<u64> {
+        if !cache_dir.exists() {
+            return Ok(0);
+        }
+        let needed = positions.needed_chunks().await;
+        let mut evicted = 0u64;
+        let mut entries = tokio::fs::read_dir(cache_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            // Skip in-flight writes.
+            if name_str.ends_with(".part") {
+                continue;
+            }
+            let stem = match name_str.strip_suffix(".bin") {
+                Some(s) => s,
+                None => continue,
+            };
+            let chunk_id: i64 = match stem.parse() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            if !needed.contains(&chunk_id) {
+                tokio::fs::remove_file(entry.path()).await?;
+                evicted += 1;
+            }
+        }
+        if evicted > 0 {
+            tracing::info!(evicted, "disk_cache: evicted unreferenced chunks");
+        }
+        Ok(evicted)
+    }
 }
 
 #[cfg(test)]
