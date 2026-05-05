@@ -32,3 +32,8 @@ test-results/
 # Git worktrees
 .worktrees/
 .superpowers/
+
+# Local MCP / Playwright debugging artifacts (should never be committed)
+.mcp.json
+.playwright-mcp/
+dashboard-*.png
