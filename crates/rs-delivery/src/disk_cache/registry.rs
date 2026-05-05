@@ -86,33 +86,59 @@ impl ChunkRegistry {
 
     pub fn exists(&self, chunk_id: i64) -> bool {
         // Synchronous best-effort check: callers use this as a fast-path
-        // skip before issuing async wait.
-        let g = self.inner.lock().unwrap();
-        matches!(
-            g.get(&chunk_id).map(|s| &s.state),
-            Some(ChunkAvailability::Available { .. })
-        )
+        // skip before issuing async wait. Uses try_lock to avoid blocking;
+        // returns false on contention rather than wait.
+        match self.inner.try_lock() {
+            Ok(g) => matches!(
+                g.get(&chunk_id).map(|s| &s.state),
+                Some(ChunkAvailability::Available { .. })
+            ),
+            Err(_) => false,
+        }
     }
 
     /// Block until the chunk reaches a terminal state. Returns the state.
+    ///
+    /// Race-safe pattern: the `Notified` future is created and `enable`d
+    /// BEFORE the state check, so concurrent `mark_*` calls cannot fire
+    /// `notify_waiters()` in the gap and lose the wake.
     pub async fn wait_for_chunk(
         self: &Arc<Self>,
         chunk_id: i64,
     ) -> Result<ChunkAvailability, RegistryError> {
         loop {
-            let notify = {
+            // 1. Get-or-create the slot's Notify Arc, drop the lock immediately.
+            let notify_arc = {
                 let mut g = self.inner.lock().unwrap();
                 let slot = g.entry(chunk_id).or_insert_with(|| Slot {
                     state: ChunkAvailability::InFlight,
                     notify: Arc::new(Notify::new()),
                 });
-                if !matches!(slot.state, ChunkAvailability::InFlight) {
-                    return Ok(slot.state.clone());
-                }
                 Arc::clone(&slot.notify)
             };
-            // Lock is dropped here before awaiting — mark_* will not deadlock.
-            notify.notified().await;
+
+            // 2. Register the waiter BEFORE checking state. `enable` polls the
+            //    future once so any subsequent `notify_waiters` reaches it.
+            let notified = notify_arc.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            // 3. Check state under the lock again. If terminal, return now;
+            //    any concurrent `notify_waiters` either already woke us
+            //    (we just don't await) or transitioned the state we now see.
+            {
+                let g = self.inner.lock().unwrap();
+                if let Some(slot) = g.get(&chunk_id) {
+                    if !matches!(slot.state, ChunkAvailability::InFlight) {
+                        return Ok(slot.state.clone());
+                    }
+                }
+            }
+
+            // 4. Still InFlight — wait for the wake. If `mark_*` fired between
+            //    steps 2 and 3, the Notified holds the wake permit and this
+            //    returns immediately, then we re-check on the next iteration.
+            notified.await;
         }
     }
 
