@@ -123,6 +123,9 @@ struct WsDeliveryEndpoint {
     stall_reason: Option<String>,
     #[serde(default)]
     ffmpeg_restart_count: u32,
+    /// Issue #172.
+    #[serde(default)]
+    reconnect_count: u32,
     #[serde(default)]
     last_error: Option<String>,
     #[serde(default)]
