@@ -14,6 +14,7 @@ mod audit_ring;
 pub mod buffer_state;
 mod clock_endpoint;
 pub mod db;
+mod disk_cache;
 pub mod endpoint_audit;
 pub mod endpoint_task;
 mod ffmpeg_reason;

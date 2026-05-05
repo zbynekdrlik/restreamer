@@ -66,6 +66,27 @@ pub enum Action {
     EndpointRtmpPushDied,
     S3UploadFailed,
     S3FetchFailed,
+    /// Disk cache started pre-filling for an event. Emitted on first
+    /// EndpointReader registration. Issue #174.
+    DiskCachePrefillStarted,
+    /// Disk cache window is fully populated for at least one endpoint;
+    /// the first push is imminent.
+    DiskCachePrefillReady,
+    /// Rate-limited summary (1/min): number of chunks evicted by
+    /// EvictionTask. Useful for spotting churn.
+    DiskCacheChunkEvicted,
+    /// DownloadService bandwidth cap reached; sustained S3 latency
+    /// expected. Operator may want to investigate Hetzner status.
+    DiskCacheDownloadThrottled,
+    /// EndpointReader.wait_for_chunk timed out (default 60 s).
+    /// Indicates a real S3 outage longer than the cache window.
+    DiskCacheStallTimeout,
+    /// Disk write failed (ENOSPC / EIO). Severity::Error.
+    DiskCacheWriteFailed,
+    /// Reader pushed successfully after a stall; the cache absorbed
+    /// the transient. Pair with DiskCacheStallTimeout to bound outage
+    /// duration in the audit log.
+    DiskCacheReaderRecovered,
     RestreamerStarted,
     MigrationsApplied,
     /// DB write that drives UI state failed. Emitted when e.g.
