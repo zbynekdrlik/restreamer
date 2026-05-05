@@ -29,17 +29,20 @@ const S3_BACKOFF_BASE_SECS: u64 = 2;
 const S3_BACKOFF_MAX_SECS: u64 = 60;
 /// Heartbeat interval for endpoint delivery loop.
 const ENDPOINT_HEARTBEAT_SECS: u64 = 60;
-/// Pre-fetch buffer size: ~120 s of chunks (60 x ~2 s each). Sized to
-/// match the production cache_delay_secs target so the consumer has a
-/// full session-window of media buffered locally on the VPS before
-/// pushing. Absorbs Hetzner S3 transient outages (observed up to ~70 s
-/// on 2026-05-05 event 9289 soak — see issue #173 audit) without
-/// draining to zero, which previously caused upstream RTMP idle
-/// timeouts → all-endpoints simultaneous reconnect → cache stair-step.
+/// Pre-fetch buffer size: 10 chunks (~20 s of media at 2 s/chunk).
 ///
-/// Memory cost: 60 chunks × ~3 MB avg × N endpoints. cpx32 has 8 GB
-/// RAM; ~1 GB used at 6 endpoints is well within budget.
-const PREFETCH_BUFFER_SIZE: usize = 60;
+/// Tried 60 in v0.3.98 to absorb Hetzner S3 outages but it triggered a
+/// regression: 6 endpoints × 60 chunks × ~3 MB pre-fill = ~1 GB
+/// download burst at startup, saturating cpx32's shared 1 Gbit NIC for
+/// long enough that outbound RTMP writes blocked → 30 s
+/// `rtmp_push_timeout` cascaded across all endpoints (worse than the
+/// stair-step it was meant to fix). Reverted to 10 in v0.3.99.
+///
+/// Real fix for the S3-outage class belongs in the producer: rate-limit
+/// pre-fill bandwidth, or move the cache to local SSD with a separate
+/// fill task that doesn't compete with outbound RTMP for NIC. Tracked
+/// in issue #174.
+const PREFETCH_BUFFER_SIZE: usize = 10;
 
 /// A chunk that has been fetched from S3 and is ready for the consumer.
 struct PrefetchedChunk {
