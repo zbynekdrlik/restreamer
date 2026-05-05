@@ -222,6 +222,9 @@ pub struct DeliveryEndpointEntry {
     pub chunk_delay_secs: f64,
     pub stall_reason: Option<String>,
     pub ffmpeg_restart_count: u32,
+    /// Rust-pusher reconnect counter (issue #172). Companion to
+    /// `ffmpeg_restart_count` for endpoints on the rust pusher path.
+    pub reconnect_count: u32,
     pub ffmpeg_last_stderr: Option<String>,
     pub last_error: Option<String>,
     pub is_fast: bool,
@@ -262,6 +265,7 @@ pub async fn delivery_status(
             chunk_delay_secs: ep.chunk_delay_secs,
             stall_reason: ep.stall_reason,
             ffmpeg_restart_count: ep.ffmpeg_restart_count,
+            reconnect_count: ep.reconnect_count,
             ffmpeg_last_stderr: ep.ffmpeg_last_stderr,
             last_error: ep.last_error,
             is_fast: ep.is_fast,

@@ -120,6 +120,12 @@ pub struct EndpointDeliveryStatus {
     pub chunk_delay_secs: f64,
     pub stall_reason: Option<String>,
     pub ffmpeg_restart_count: u32,
+    /// Rust-pusher reconnect counter. Companion to `ffmpeg_restart_count`
+    /// for the rust pusher path. Read from VPS `/api/status` JSON
+    /// (defaults to 0 if VPS rs-delivery is older than this field).
+    /// Issue #172.
+    #[serde(default)]
+    pub reconnect_count: u32,
     pub last_error: Option<String>,
     pub ffmpeg_last_stderr: Option<String>,
     pub is_fast: bool,
@@ -193,6 +199,8 @@ impl DeliveryOrchestrator {
                                 entry["stall_reason"].as_str().map(|s| s.to_string());
                             let ffmpeg_restart_count =
                                 entry["ffmpeg_restart_count"].as_u64().unwrap_or(0) as u32;
+                            let reconnect_count =
+                                entry["reconnect_count"].as_u64().unwrap_or(0) as u32;
                             let last_error = entry["last_error"].as_str().map(|s| s.to_string());
                             let ffmpeg_last_stderr =
                                 entry["ffmpeg_last_stderr"].as_str().map(|s| s.to_string());
@@ -278,6 +286,7 @@ impl DeliveryOrchestrator {
                                 chunk_delay_secs,
                                 stall_reason,
                                 ffmpeg_restart_count,
+                                reconnect_count,
                                 last_error,
                                 ffmpeg_last_stderr,
                                 is_fast: fast_map.get(&alias).copied().unwrap_or(false),

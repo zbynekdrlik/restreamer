@@ -726,6 +726,11 @@ pub struct DeliveryEndpointDetail {
     pub stall_reason: Option<String>,
     #[serde(default)]
     pub ffmpeg_restart_count: u32,
+    /// Rust-pusher reconnect counter (issue #172). Companion to
+    /// `ffmpeg_restart_count` for endpoints on the rust pusher path.
+    /// Defaults to 0 if VPS rs-delivery is older than this field.
+    #[serde(default)]
+    pub reconnect_count: u32,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]

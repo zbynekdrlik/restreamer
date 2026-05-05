@@ -237,6 +237,11 @@ struct EndpointStatusEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     stall_reason: Option<String>,
     ffmpeg_restart_count: u32,
+    /// Rust-pusher reconnect counter. Companion to `ffmpeg_restart_count`
+    /// for endpoints using the rust pusher path. Surfaced on the host
+    /// dashboard so operators can correlate audit `endpoint_rtmp_push_died`
+    /// events with this counter (issue #172).
+    reconnect_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -272,6 +277,7 @@ async fn endpoint_status(
             chunks_processed: stats.chunks_processed,
             stall_reason: stats.stall_reason,
             ffmpeg_restart_count: stats.ffmpeg_restart_count,
+            reconnect_count: stats.reconnect_count,
             last_error: stats.last_error,
             ffmpeg_last_stderr: stats.ffmpeg_last_stderr,
             consecutive_chunk_misses: stats.consecutive_chunk_misses,

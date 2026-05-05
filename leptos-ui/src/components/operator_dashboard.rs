@@ -784,6 +784,21 @@ fn EndpointTree() -> impl IntoView {
                                     }
                                 }}
                                 {move || {
+                                    // Issue #172: rust-pusher reconnect counter.
+                                    // Surfaces YT/FB upstream-rotation events the
+                                    // operator otherwise had to dig out of the
+                                    // audit log (every endpoint_rtmp_push_died
+                                    // bumps this).
+                                    let count = ep_data.get().reconnect_count;
+                                    if count > 0 {
+                                        Some(view! {
+                                            <span class="endpoint-anomaly">{format!("reconn x{count}")}</span>
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                }}
+                                {move || {
                                     let remove_alias = remove_alias.clone();
                                     is_running_memo.get().then(move || {
                                         let remove_alias = remove_alias.clone();
