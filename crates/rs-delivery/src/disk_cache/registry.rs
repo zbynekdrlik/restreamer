@@ -1,10 +1,13 @@
-//! ChunkRegistry -- in-memory chunk-availability tracker with async wake.
+//! ChunkRegistry — in-memory chunk-availability tracker with async wake.
 //!
 //! Owns the source of truth for "is chunk N on disk and ready to read?".
 //! `DownloadService` calls `mark_available` after the file rename;
 //! `EndpointReader` calls `wait_for_chunk` to block until ready.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChunkAvailability {
@@ -14,15 +17,122 @@ pub enum ChunkAvailability {
     Evicted,
 }
 
+/// Per-chunk slot. The Notify wakes any pending `wait_for_chunk` once
+/// `state` transitions to a terminal value (Available / NotFound / Evicted).
+struct Slot {
+    state: ChunkAvailability,
+    notify: Arc<Notify>,
+}
+
 pub struct ChunkRegistry {
-    // implemented in Task 4
-    _placeholder: (),
+    inner: Mutex<BTreeMap<i64, Slot>>,
 }
 
 impl ChunkRegistry {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { _placeholder: () })
+        Arc::new(Self {
+            inner: Mutex::new(BTreeMap::new()),
+        })
     }
+
+    /// Mark a chunk as available on disk with the given byte size.
+    /// Wakes all pending waiters. Safe to call from both sync and async contexts.
+    pub fn mark_available(self: &Arc<Self>, chunk_id: i64, size_bytes: u64) {
+        let notify = {
+            let mut g = self.inner.lock().unwrap();
+            let slot = g.entry(chunk_id).or_insert_with(|| Slot {
+                state: ChunkAvailability::InFlight,
+                notify: Arc::new(Notify::new()),
+            });
+            slot.state = ChunkAvailability::Available { size_bytes };
+            Arc::clone(&slot.notify)
+        };
+        notify.notify_waiters();
+    }
+
+    pub fn mark_not_found(self: &Arc<Self>, chunk_id: i64) {
+        let notify = {
+            let mut g = self.inner.lock().unwrap();
+            let slot = g.entry(chunk_id).or_insert_with(|| Slot {
+                state: ChunkAvailability::InFlight,
+                notify: Arc::new(Notify::new()),
+            });
+            slot.state = ChunkAvailability::NotFound;
+            Arc::clone(&slot.notify)
+        };
+        notify.notify_waiters();
+    }
+
+    pub fn mark_evicted(self: &Arc<Self>, chunk_id: i64) {
+        let notify = {
+            let mut g = self.inner.lock().unwrap();
+            let slot = g.entry(chunk_id).or_insert_with(|| Slot {
+                state: ChunkAvailability::InFlight,
+                notify: Arc::new(Notify::new()),
+            });
+            slot.state = ChunkAvailability::Evicted;
+            Arc::clone(&slot.notify)
+        };
+        notify.notify_waiters();
+    }
+
+    pub fn mark_in_flight(self: &Arc<Self>, chunk_id: i64) {
+        let mut g = self.inner.lock().unwrap();
+        g.entry(chunk_id).or_insert_with(|| Slot {
+            state: ChunkAvailability::InFlight,
+            notify: Arc::new(Notify::new()),
+        });
+    }
+
+    pub fn exists(&self, chunk_id: i64) -> bool {
+        // Synchronous best-effort check: callers use this as a fast-path
+        // skip before issuing async wait.
+        let g = self.inner.lock().unwrap();
+        matches!(
+            g.get(&chunk_id).map(|s| &s.state),
+            Some(ChunkAvailability::Available { .. })
+        )
+    }
+
+    /// Block until the chunk reaches a terminal state. Returns the state.
+    pub async fn wait_for_chunk(
+        self: &Arc<Self>,
+        chunk_id: i64,
+    ) -> Result<ChunkAvailability, RegistryError> {
+        loop {
+            let notify = {
+                let mut g = self.inner.lock().unwrap();
+                let slot = g.entry(chunk_id).or_insert_with(|| Slot {
+                    state: ChunkAvailability::InFlight,
+                    notify: Arc::new(Notify::new()),
+                });
+                if !matches!(slot.state, ChunkAvailability::InFlight) {
+                    return Ok(slot.state.clone());
+                }
+                Arc::clone(&slot.notify)
+            };
+            // Lock is dropped here before awaiting — mark_* will not deadlock.
+            notify.notified().await;
+        }
+    }
+
+    /// Same as `wait_for_chunk` but with a timeout.
+    pub async fn wait_for_chunk_with_timeout(
+        self: &Arc<Self>,
+        chunk_id: i64,
+        timeout: Duration,
+    ) -> Result<ChunkAvailability, RegistryError> {
+        match tokio::time::timeout(timeout, self.wait_for_chunk(chunk_id)).await {
+            Ok(r) => r,
+            Err(_) => Err(RegistryError::Timeout),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RegistryError {
+    #[error("registry wait timed out")]
+    Timeout,
 }
 
 #[cfg(test)]
