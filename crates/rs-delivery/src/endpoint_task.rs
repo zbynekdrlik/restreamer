@@ -29,8 +29,17 @@ const S3_BACKOFF_BASE_SECS: u64 = 2;
 const S3_BACKOFF_MAX_SECS: u64 = 60;
 /// Heartbeat interval for endpoint delivery loop.
 const ENDPOINT_HEARTBEAT_SECS: u64 = 60;
-/// Pre-fetch buffer size: ~20s of chunks (10 x ~2s each).
-const PREFETCH_BUFFER_SIZE: usize = 10;
+/// Pre-fetch buffer size: ~120 s of chunks (60 x ~2 s each). Sized to
+/// match the production cache_delay_secs target so the consumer has a
+/// full session-window of media buffered locally on the VPS before
+/// pushing. Absorbs Hetzner S3 transient outages (observed up to ~70 s
+/// on 2026-05-05 event 9289 soak — see issue #173 audit) without
+/// draining to zero, which previously caused upstream RTMP idle
+/// timeouts → all-endpoints simultaneous reconnect → cache stair-step.
+///
+/// Memory cost: 60 chunks × ~3 MB avg × N endpoints. cpx32 has 8 GB
+/// RAM; ~1 GB used at 6 endpoints is well within budget.
+const PREFETCH_BUFFER_SIZE: usize = 60;
 
 /// A chunk that has been fetched from S3 and is ready for the consumer.
 struct PrefetchedChunk {
