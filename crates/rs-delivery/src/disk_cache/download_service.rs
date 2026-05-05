@@ -132,7 +132,10 @@ impl DownloadService {
                     self.token_bucket_consume(data.len() as u64).await;
                     if let Err(e) = self.write_atomic(chunk_id, &data, duration_ms).await {
                         tracing::error!(chunk_id, "disk_cache write failed: {e}");
-                        // Surface as failure; do not mark available.
+                        // Mark NotFound so waiters wake — better to surface a
+                        // visible failure than to leave the slot InFlight and
+                        // block the EndpointReader forever on this chunk.
+                        self.registry.mark_not_found(chunk_id);
                         return;
                     }
                     self.registry.mark_available(chunk_id, data.len() as u64);
@@ -217,7 +220,6 @@ mod tests {
         fn set_ok(&self, data: Vec<u8>, dur: i64) {
             *self.result.lock().unwrap() = Some(Ok((data, dur)));
         }
-        #[allow(dead_code)]
         fn set_err(&self, msg: &str) {
             *self.result.lock().unwrap() = Some(Err(msg.into()));
         }
@@ -373,5 +375,35 @@ mod tests {
             "bandwidth cap must throttle (got {:?})",
             elapsed
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_5xx_exhausts_retries_then_marks_not_found() {
+        // Always-failing backend triggers all 5 attempts; final state must be
+        // NotFound so EndpointReader unblocks instead of stalling forever.
+        let backend = Arc::new(MockBackend::default());
+        backend.set_err("S3 fetch error: status 503");
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = ChunkRegistry::new();
+        let svc = DownloadService::new(
+            backend.clone(),
+            registry.clone(),
+            tmp.path().to_path_buf(),
+            "evt".into(),
+            10_000,
+            8,
+        );
+        // Speed test up: don't actually wait the 500+1000+2000+4000ms. Pause
+        // tokio time and let the retry loop sleep through paused time. The
+        // backend is sync-instant; the only real waits are the backoff sleeps.
+        // Note: cannot use tokio::time::pause without start_paused — and the
+        // test runtime hasn't started paused. Simpler: tolerate ~7.5s test
+        // runtime in CI. The plan's retry interval (500ms doubling, capped
+        // at 30s) yields 0.5+1+2+4 = 7.5s for 4 backoffs after 5 failed
+        // attempts. Acceptable for one slow test.
+        svc.request_chunk(503).await;
+        let state = registry.wait_for_chunk(503).await.unwrap();
+        assert!(matches!(state, ChunkAvailability::NotFound));
+        assert_eq!(backend.count(), 5, "all 5 retries must have happened");
     }
 }
