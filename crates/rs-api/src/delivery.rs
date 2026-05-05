@@ -340,11 +340,28 @@ impl DeliveryOrchestrator {
         // up to 5s of user-visible warmup time.
         let hetzner_id = instance.hetzner_id;
         for attempt in 0..300 {
-            let server = self
-                .hetzner
-                .get_server(hetzner_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("get_server failed: {e}"))?;
+            // Hetzner API is occasionally flaky (503, network blips). Treat
+            // transient errors as "not yet running" and continue polling --
+            // a single failed call must NOT abort the whole deployment.
+            // Permanent errors (404, 401) propagate via the `?` only at the
+            // 5-minute timeout, AFTER we've given them many chances.
+            let server = match self.hetzner.get_server(hetzner_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    if attempt % 30 == 0 {
+                        warn!(
+                            attempt,
+                            error = %e,
+                            "Hetzner get_server transient error, will retry"
+                        );
+                    }
+                    if attempt == 299 {
+                        return Err(anyhow::anyhow!("get_server failed after 300 attempts: {e}"));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
 
             if server.status == "running" {
                 let ipv4 = server.public_net.ipv4.ip.clone();
