@@ -344,11 +344,8 @@ async fn producer_task<F: ChunkFetcher>(
     let mut chunk_id = start_chunk_id;
     let mut consecutive_chunk_misses: u32 = 0;
     let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
-    // Issue #173: track last-emitted audit per error_class so a sustained
-    // S3 outage emits ONE row per minute per class, not per fetch attempt.
-    let mut last_audit_ts: std::collections::HashMap<&'static str, std::time::Instant> =
-        std::collections::HashMap::new();
-    const AUDIT_RATE_LIMIT_SECS: u64 = 60;
+    // Issue #173: rate-limited audit-row emitter, owned by this task.
+    let mut s3_fetch_audit = crate::endpoint_audit::S3FetchAuditLimiter::new();
 
     loop {
         if *stop_rx.borrow() {
@@ -475,26 +472,8 @@ async fn producer_task<F: ChunkFetcher>(
                     backoff_secs = s3_backoff_secs,
                     "Producer: S3 fetch error, retrying in {s3_backoff_secs}s: {e}"
                 );
-                // Issue #173: emit audit row, rate-limited per error_class
-                // so a sustained S3 outage emits 1 row/min/class, not one
-                // per fetch attempt.
-                let class = crate::endpoint_audit::classify_s3_fetch_error(&e);
-                let now = std::time::Instant::now();
-                let should_emit = match last_audit_ts.get(class) {
-                    Some(t) => t.elapsed().as_secs() >= AUDIT_RATE_LIMIT_SECS,
-                    None => true,
-                };
-                if should_emit {
-                    crate::endpoint_audit::emit_s3_fetch_failed(
-                        &audit_ring,
-                        &alias,
-                        chunk_id,
-                        class,
-                        &e,
-                        s3_backoff_secs,
-                    );
-                    last_audit_ts.insert(class, now);
-                }
+                // Issue #173: emit audit row (rate-limited per error_class).
+                s3_fetch_audit.try_emit(&audit_ring, &alias, chunk_id, &e, s3_backoff_secs);
                 let mut s = stats.lock().await;
                 s.last_error = Some(e);
                 drop(s);

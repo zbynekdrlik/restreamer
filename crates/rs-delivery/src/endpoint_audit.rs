@@ -199,6 +199,49 @@ pub fn emit_s3_fetch_failed(
     );
 }
 
+/// One audit row per minute per error_class for VPS S3 fetch failures
+/// (issue #173). 60 s matches the host-side `crates/rs-endpoint/src/uploader.rs`
+/// rate-limiter on the upload side.
+pub const S3_FETCH_AUDIT_WINDOW_SECS: u64 = 60;
+
+/// Per-class rate-limiter for S3-fetch audit rows. Owned by the
+/// producer task; drop with the task. Keeps the producer hot path
+/// branch-free (one HashMap lookup) while ensuring a sustained outage
+/// emits one row per minute per class instead of a flood.
+#[derive(Default)]
+pub struct S3FetchAuditLimiter {
+    last: std::collections::HashMap<&'static str, std::time::Instant>,
+}
+
+impl S3FetchAuditLimiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Emit an audit row for an S3 fetch failure if the rate-limit
+    /// window for this error_class has elapsed (or this is the first
+    /// hit). Bucketing happens via [`classify_s3_fetch_error`].
+    pub fn try_emit(
+        &mut self,
+        audit_ring: &Option<Arc<AuditRing>>,
+        alias: &str,
+        chunk_id: i64,
+        error_msg: &str,
+        backoff_secs: u64,
+    ) {
+        let class = classify_s3_fetch_error(error_msg);
+        let now = std::time::Instant::now();
+        let should_emit = match self.last.get(class) {
+            Some(t) => t.elapsed().as_secs() >= S3_FETCH_AUDIT_WINDOW_SECS,
+            None => true,
+        };
+        if should_emit {
+            emit_s3_fetch_failed(audit_ring, alias, chunk_id, class, error_msg, backoff_secs);
+            self.last.insert(class, now);
+        }
+    }
+}
+
 /// Bucket a free-text S3 fetch error into a small set of stable classes
 /// for the audit row's rate-limiter key + dashboard categorization.
 /// Mirrors the pattern in `crates/rs-endpoint/src/uploader.rs::classify_upload_error`.
