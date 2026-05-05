@@ -160,25 +160,32 @@ impl DownloadService {
     }
 
     /// Reserve a `bytes / cap`-duration slot in the shared token-bucket
-    /// schedule, then sleep until the slot's start. Concurrent callers
+    /// schedule, then sleep until the slot's END. Concurrent callers
     /// serialize their slots, so total elapsed across N parallel fetches
     /// is total_bytes / cap (not max_bytes / cap).
+    ///
+    /// Sleeping to the slot END (not start) is what makes the rate cap
+    /// real: the slot represents bytes-being-consumed during the
+    /// `slot_dur` window, so the consumer must not return until that
+    /// window ends. Sleeping to start would let the last task return
+    /// `slot_dur` too early -- the bandwidth-cap test caught this
+    /// (got 324ms vs expected ~400ms for 5x1MB at 100 Mbit/s).
     async fn token_bucket_consume(&self, bytes: u64) {
         if self.bandwidth_cap_bytes_per_sec == 0 {
             return;
         }
         let slot_dur =
             Duration::from_secs_f64(bytes as f64 / self.bandwidth_cap_bytes_per_sec as f64);
-        let scheduled = {
+        let slot_end = {
             let mut g = self.next_slot_start.lock().await;
             let now = Instant::now();
             let start = (*g).max(now);
             *g = start + slot_dur;
-            start
+            *g
         };
         let now = Instant::now();
-        if scheduled > now {
-            tokio::time::sleep(scheduled - now).await;
+        if slot_end > now {
+            tokio::time::sleep(slot_end - now).await;
         }
     }
 

@@ -12,6 +12,12 @@
 //! - `EndpointPositionRegistry`: tracks per-endpoint chunk_id for eviction.
 //!
 //! `DiskCache` is the public facade. One instance per event.
+//!
+//! Tasks 13+ wire this module into `init_endpoints` and `EndpointHandle::spawn`.
+//! Until that integration lands, the components are unused outside their tests
+//! -- the allow(dead_code, unused_imports) below silences the lints across the
+//! whole module while preserving the exact API surface for the integration PR.
+#![allow(dead_code, unused_imports)]
 
 mod download_service;
 mod endpoint_reader;
