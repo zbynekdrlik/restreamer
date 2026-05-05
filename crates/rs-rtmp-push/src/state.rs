@@ -84,14 +84,6 @@ pub struct PusherState {
     pub last_audio_xiu_ts: Option<u32>,
     /// Same as `last_audio_xiu_ts` but for video.
     pub last_video_xiu_ts: Option<u32>,
-    /// Wall-clock instant of the most recent successful tag write, used
-    /// to enforce a minimum inter-tag wallclock spacing during catch-up
-    /// (issue #171 follow-up). Without this cap, a post-RemoteClosed
-    /// catch-up burst pushes hundreds of tags within milliseconds and
-    /// overwhelms the upstream's TCP receive buffer → BytesWriteError →
-    /// 15 s IoError backoff → cascade. With the cap, the burst is
-    /// bounded at ~MAX_PUSH_RATE_TAGS_PER_SEC, smooth recovery.
-    pub last_tag_write_at: Option<Instant>,
 }
 
 #[derive(Clone)]
