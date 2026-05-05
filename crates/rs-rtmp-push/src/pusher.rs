@@ -49,11 +49,12 @@ pub fn next_tag_sleep_ms(
         return output_ts_ms - wall_elapsed_ms;
     }
     let lag = wall_elapsed_ms - output_ts_ms;
-    if lag > CATCHUP_THRESHOLD_MS
-        && let Some(elapsed) = last_tag_write_elapsed_ms
-        && elapsed < min_tag_interval_ms
-    {
-        return min_tag_interval_ms - elapsed;
+    if lag > CATCHUP_THRESHOLD_MS {
+        if let Some(elapsed) = last_tag_write_elapsed_ms
+            && elapsed < min_tag_interval_ms
+        {
+            return min_tag_interval_ms - elapsed;
+        }
     }
     0
 }
