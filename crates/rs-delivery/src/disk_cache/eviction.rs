@@ -62,8 +62,12 @@ impl EvictionTask {
                 Err(_) => continue,
             };
             if !needed.contains(&chunk_id) {
-                tokio::fs::remove_file(entry.path()).await?;
-                evicted += 1;
+                match tokio::fs::remove_file(entry.path()).await {
+                    Ok(()) => evicted += 1,
+                    // Concurrent writer/sweeper may have removed it; benign.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
             }
         }
         if evicted > 0 {
