@@ -14,6 +14,42 @@ pub struct RtmpPusher {
     session: Option<Session>,
 }
 
+/// Catch-up factor expressed as percent of real-time. 120 = at most 1.2×
+/// real-time. Conservative enough that a 5 s rotation gap drains in ~25 s
+/// wallclock without bursting upstream's TCP receive buffer (the failure
+/// mode of v0.3.92's unbounded burst on YT and v0.3.94's 5 ms-per-tag
+/// cap that still pushed 7× on YT and killed FB at chunk 3 — see
+/// issue #171). 100 disables catch-up entirely (real-time only).
+pub const CATCHUP_FACTOR_PCT: u64 = 120;
+
+/// Pure pacing helper. Returns the wallclock ms to sleep at the END of a
+/// push_flv_bytes call so the chunk's push rate is capped at
+/// `catchup_factor_pct/100` × real-time.
+///
+/// Math: `target_wall = chunk_media_ms × 100 / catchup_factor_pct`. If
+/// `actual_wall_ms < target_wall_ms`, sleep the residual; otherwise no
+/// sleep.
+///
+/// Steady-state (per-tag pacing already paced at real-time, so
+/// actual_wall ≈ chunk_media): the residual collapses to 0 and no
+/// extra sleep happens. Only catch-up bursts (actual_wall ≪ chunk_media
+/// because per-tag pacing skipped) trigger the rate cap.
+///
+/// `catchup_factor_pct == 0` disables the cap entirely (returns 0). 100
+/// = exact real-time. >100 = allowed to push faster than real-time
+/// (catch up).
+pub fn chunk_pacing_sleep_ms(
+    chunk_media_ms: u64,
+    actual_wall_ms: u64,
+    catchup_factor_pct: u64,
+) -> u64 {
+    if catchup_factor_pct == 0 {
+        return 0;
+    }
+    let target_wall_ms = chunk_media_ms.saturating_mul(100) / catchup_factor_pct;
+    target_wall_ms.saturating_sub(actual_wall_ms)
+}
+
 impl RtmpPusher {
     pub fn new(url: String, config: PusherConfig) -> Self {
         Self {
@@ -83,15 +119,15 @@ impl RtmpPusher {
             //      and freezes the pusher if `output_ts` ever runs
             //      far ahead of wall — see the #103 resilience-test
             //      regression).
-            let elapsed_ms = self
-                .state
-                .pacing_anchor
-                .map(|a| a.elapsed().as_millis() as u64)
-                .unwrap_or(0);
-            self.state.audio_base_ms =
-                elapsed_ms.max(self.state.last_audio_output_ts_ms.saturating_add(1));
-            self.state.video_base_ms =
-                elapsed_ms.max(self.state.last_video_output_ts_ms.saturating_add(1));
+            // Issue #171: drop the wall-clock floor on reconnect base.
+            // After a RemoteClosed gap, `last_output+1` lets per-tag
+            // pacing skip sleep (output < wall), bursting buffered
+            // chunks until output catches wall. The unbounded burst
+            // problem (v0.3.92 cascaded YT TCP, v0.3.94 5ms-cap-killed
+            // FB) is now mitigated by the chunk-end rate cap (see
+            // `chunk_pacing_sleep_ms` and CATCHUP_FACTOR_PCT below).
+            self.state.audio_base_ms = self.state.last_audio_output_ts_ms.saturating_add(1);
+            self.state.video_base_ms = self.state.last_video_output_ts_ms.saturating_add(1);
             // last_*_xiu_ts is "what we just saw upstream"; the new
             // session starts fresh, so any xiu_ts value is valid (the
             // origin will anchor on the first tag we see).
@@ -125,6 +161,13 @@ impl RtmpPusher {
         let anchor = *self.state.pacing_anchor.get_or_insert_with(Instant::now);
 
         let chunk_started_at = Instant::now();
+        // Capture the per-track output_ts at chunk start so the chunk-end
+        // rate cap (issue #171) knows how much MEDIA was sent, vs how
+        // much wallclock elapsed during the push. Burst delivery during
+        // catch-up advances chunk_media_ms much faster than wallclock,
+        // which is the case the cap brakes.
+        let chunk_start_audio_out = self.state.last_audio_output_ts_ms;
+        let chunk_start_video_out = self.state.last_video_output_ts_ms;
         let mut tags_sent: u32 = 0;
         let mut tags_skipped: u32 = 0;
         let mut bytes_sent: u64 = 0;
@@ -166,9 +209,12 @@ impl RtmpPusher {
                         if let Some(prev) = self.state.last_audio_xiu_ts
                             && tag.timestamp_ms < prev
                         {
-                            let elapsed_ms = anchor.elapsed().as_millis() as u64;
-                            self.state.audio_base_ms = elapsed_ms
-                                .max(self.state.last_audio_output_ts_ms.saturating_add(1));
+                            // Issue #171: anchor on wire timeline (last+1)
+                            // not wall, so the chunker-restart gap is
+                            // burst-pushed and bounded by the chunk-end
+                            // rate cap.
+                            self.state.audio_base_ms =
+                                self.state.last_audio_output_ts_ms.saturating_add(1);
                             self.state.audio_origin_xiu_ts = None;
                             self.state.regression_reanchor_count =
                                 self.state.regression_reanchor_count.saturating_add(1);
@@ -196,9 +242,9 @@ impl RtmpPusher {
                         if let Some(prev) = self.state.last_video_xiu_ts
                             && tag.timestamp_ms < prev
                         {
-                            let elapsed_ms = anchor.elapsed().as_millis() as u64;
-                            self.state.video_base_ms = elapsed_ms
-                                .max(self.state.last_video_output_ts_ms.saturating_add(1));
+                            // Issue #171: anchor on wire timeline.
+                            self.state.video_base_ms =
+                                self.state.last_video_output_ts_ms.saturating_add(1);
                             self.state.video_origin_xiu_ts = None;
                             self.state.regression_reanchor_count =
                                 self.state.regression_reanchor_count.saturating_add(1);
@@ -299,6 +345,21 @@ impl RtmpPusher {
         // ended up.
         let pacing_residual_ms = target_ms.saturating_sub(actual_ms);
         let regression_reanchor_count = self.state.regression_reanchor_count;
+
+        // Issue #171 — chunk-end rate cap. Caps push rate at
+        // CATCHUP_FACTOR_PCT/100 × real-time so a post-RemoteClosed
+        // burst drains buffered chunks GENTLY without overrunning
+        // upstream's TCP receive buffer. Steady-state pushes (where
+        // per-tag pacing already paced at real-time) see a 0 ms
+        // residual and no extra sleep.
+        let chunk_start_max = chunk_start_audio_out.max(chunk_start_video_out);
+        let chunk_end_max = max_audio_output_ts.max(max_video_output_ts);
+        let chunk_media_ms = chunk_end_max.saturating_sub(chunk_start_max);
+        let chunk_cap_sleep_ms =
+            chunk_pacing_sleep_ms(chunk_media_ms, send_elapsed_ms, CATCHUP_FACTOR_PCT);
+        if chunk_cap_sleep_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(chunk_cap_sleep_ms)).await;
+        }
 
         tracing::info!(
             "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} a_out={max_audio_output_ts} v_out={max_video_output_ts} send_elapsed_ms={send_elapsed_ms} pacing_residual_ms={pacing_residual_ms} target_ms={target_ms} actual_ms={actual_ms} reanchor={regression_reanchor_count}"
@@ -477,79 +538,108 @@ mod tests {
         );
     }
 
-    /// Chunker-side timestamp regression mid-session (e.g. stream.lan
-    /// crashed and resumed but VPS pusher's RTMP session to YouTube
-    /// stayed alive): incoming tag.xiu_ts is strictly less than the
-    /// previous tag's. Re-anchor `audio_base_ms` to the LATER of:
-    /// `last_output_ts + 1` (monotonic on the wire) and `elapsed_ms`
-    /// (no pacing overshoot — the previous +1 caused the pusher to
-    /// freeze in #103 resilience-test because the catch-up burst made
-    /// `output_ts` exceed `anchor.elapsed()` by tens of seconds).
+    /// Chunker-side timestamp regression mid-session: re-anchor
+    /// `audio_base_ms` to `last_output_ts + 1`. Wire-monotonic, sets
+    /// output BEHIND wall so per-tag pacing burst-pushes the gap; the
+    /// burst is capped by the chunk-end rate cap (issue #171).
     #[test]
-    fn audio_xiu_regression_re_anchors_to_wall_clock() {
-        // Scenario: pusher ran 600 s before crash; 12 s gap; chunker
-        // resets to xiu=0. Wall-clock-aligned base means PTS continues
-        // at 612_000 (= 600_000 + 12_000 gap) instead of 600_001 (which
-        // would freeze the pusher for ~12 s of pacing sleep on the very
-        // next tag, breaking the catch-up).
+    fn audio_xiu_regression_re_anchors_to_last_output_plus_one() {
         let mut state = PusherState::default();
         state.audio_origin_xiu_ts = Some(0);
         state.last_audio_xiu_ts = Some(600_000);
         state.last_audio_output_ts_ms = 600_000;
-        let elapsed_ms = 612_000_u64; // 12-s crash gap on top of 600 s pre-crash run
 
         let new_tag_xiu_ts = 21_u32;
         let prev = state.last_audio_xiu_ts.unwrap();
         if new_tag_xiu_ts < prev {
-            state.audio_base_ms = elapsed_ms.max(state.last_audio_output_ts_ms.saturating_add(1));
+            state.audio_base_ms = state.last_audio_output_ts_ms.saturating_add(1);
             state.audio_origin_xiu_ts = None;
         }
 
         assert_eq!(
-            state.audio_base_ms, 612_000,
-            "base must equal wall-clock, NOT last_output_ts + 1, so pacing doesn't overshoot"
-        );
-
-        // Wire monotonicity: even with elapsed_ms < last_output_ts the
-        // base would still be > last_output_ts (the .max() guard).
-        let mut state2 = PusherState::default();
-        state2.last_audio_xiu_ts = Some(600_000);
-        state2.last_audio_output_ts_ms = 600_000;
-        let elapsed_ms_short = 100_000_u64; // hypothetical fast-forward
-        state2.audio_base_ms =
-            elapsed_ms_short.max(state2.last_audio_output_ts_ms.saturating_add(1));
-        assert_eq!(
-            state2.audio_base_ms, 600_001,
-            "wire monotonicity guard: base never < last_output_ts + 1"
+            state.audio_base_ms, 600_001,
+            "base anchors on wire timeline; chunk-end rate cap bounds the catch-up burst"
         );
     }
 
-    /// On reconnect, per-track BASE rolls forward to the LATER of:
-    /// `last_output_ts + 1` (monotonic on the wire) and `elapsed_ms`
-    /// (no pacing overshoot). Same anti-freeze logic as the in-session
-    /// regression detection.
+    /// On reconnect, per-track BASE = `last_output_ts + 1`. Output
+    /// starts behind wall after a gap → per-tag pacing skips sleep →
+    /// burst push, then chunk-end rate cap caps overall rate at
+    /// CATCHUP_FACTOR_PCT/100 × real-time.
     #[test]
-    fn reconnect_advances_per_track_base_to_wall_clock() {
+    fn reconnect_advances_per_track_base_to_last_output_plus_one() {
         let mut state = PusherState::default();
         state.last_audio_output_ts_ms = 60_000;
         state.last_video_output_ts_ms = 60_033;
         state.audio_origin_xiu_ts = Some(40_000);
         state.video_origin_xiu_ts = Some(0);
 
-        // Reconnect logic with wall-clock alignment.
-        let elapsed_ms = 75_000_u64; // session has been alive 75s wall
         state.audio_origin_xiu_ts = None;
         state.video_origin_xiu_ts = None;
-        state.audio_base_ms = elapsed_ms.max(state.last_audio_output_ts_ms.saturating_add(1));
-        state.video_base_ms = elapsed_ms.max(state.last_video_output_ts_ms.saturating_add(1));
+        state.audio_base_ms = state.last_audio_output_ts_ms.saturating_add(1);
+        state.video_base_ms = state.last_video_output_ts_ms.saturating_add(1);
 
-        assert_eq!(state.audio_base_ms, 75_000);
-        assert_eq!(state.video_base_ms, 75_000);
+        assert_eq!(state.audio_base_ms, 60_001);
+        assert_eq!(state.video_base_ms, 60_034);
 
-        // First audio tag of the new session at xiu_ts=0 → output_ts = 75_000.
         let first_xiu = 0_u32;
         let origin = *state.audio_origin_xiu_ts.get_or_insert(first_xiu);
         let output_ts = state.audio_base_ms + first_xiu.saturating_sub(origin) as u64;
-        assert_eq!(output_ts, 75_000);
+        assert_eq!(output_ts, 60_001);
+    }
+
+    // --- chunk_pacing_sleep_ms (issue #171 chunk-end rate cap) ---
+
+    #[test]
+    fn chunk_pacing_steady_state_no_extra_sleep() {
+        // Per-tag pacing already paced at real-time → actual_wall ≈
+        // chunk_media. target_wall = 2000*100/120 = 1666 < actual 2000
+        // → 0 sleep. Steady-state path unaffected.
+        assert_eq!(chunk_pacing_sleep_ms(2000, 2000, 120), 0);
+    }
+
+    #[test]
+    fn chunk_pacing_catchup_burst_is_bounded() {
+        // Catch-up: per-tag pacing skipped, all 2000 ms media pushed in
+        // 50 ms wallclock. Cap at 1.2× real-time → target_wall = 1666 ms,
+        // sleep 1616 ms. Net: chunk push takes 1666 ms wallclock, push
+        // rate = 2000/1666 = 1.2× real-time exactly.
+        assert_eq!(chunk_pacing_sleep_ms(2000, 50, 120), 1616);
+    }
+
+    #[test]
+    fn chunk_pacing_disabled_at_zero() {
+        // Zero factor disables the cap entirely (regression escape
+        // hatch). Returns 0 regardless of inputs.
+        assert_eq!(chunk_pacing_sleep_ms(2000, 50, 0), 0);
+    }
+
+    #[test]
+    fn chunk_pacing_factor_100_is_strict_real_time() {
+        // 100% = exactly real-time. burst 50ms wallclock for 2000ms
+        // media → sleep 1950 to bring total to 2000ms.
+        assert_eq!(chunk_pacing_sleep_ms(2000, 50, 100), 1950);
+    }
+
+    #[test]
+    fn chunk_pacing_factor_500_aggressive_burst() {
+        // 5x burst allowed: target_wall = 2000/5 = 400, sleep 350 from
+        // actual 50. Used to verify factor scales correctly.
+        assert_eq!(chunk_pacing_sleep_ms(2000, 50, 500), 350);
+    }
+
+    #[test]
+    fn chunk_pacing_actual_at_target_no_sleep() {
+        // Boundary: actual_wall == target_wall → sleep 0 (kills off-by-one
+        // mutant flipping <= to <).
+        assert_eq!(chunk_pacing_sleep_ms(2400, 2000, 120), 0);
+    }
+
+    #[test]
+    fn chunk_pacing_empty_chunk_no_sleep() {
+        // Edge case: chunk with no media (e.g. just seq headers).
+        // chunk_media_ms = 0 → target_wall = 0 → sleep 0.
+        assert_eq!(chunk_pacing_sleep_ms(0, 0, 120), 0);
+        assert_eq!(chunk_pacing_sleep_ms(0, 100, 120), 0);
     }
 }
