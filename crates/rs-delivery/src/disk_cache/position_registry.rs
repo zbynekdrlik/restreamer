@@ -1,6 +1,12 @@
 //! EndpointPositionRegistry -- tracks per-endpoint chunk_id for eviction.
+//!
+//! `EvictionTask` reads `needed_chunks()` each sweep tick to decide which
+//! cache files to keep. Each endpoint's needed-set is `[current, current
+//! + window]`; the global needed-set is the union across endpoints.
 
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct EndpointWindow {
@@ -10,12 +16,59 @@ pub struct EndpointWindow {
 }
 
 pub struct EndpointPositionRegistry {
-    _placeholder: (),
+    inner: RwLock<HashMap<String, EndpointWindow>>,
 }
 
 impl EndpointPositionRegistry {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { _placeholder: () })
+        Arc::new(Self {
+            inner: RwLock::new(HashMap::new()),
+        })
+    }
+
+    /// Register or re-register an endpoint with the given window size.
+    /// On re-register, preserves the existing `current_chunk_id` so an
+    /// operator changing `cache_delay_secs` mid-event does not rewind
+    /// the read position.
+    pub async fn register(&self, alias: String, window_chunks: i64) {
+        let mut g = self.inner.write().await;
+        let existing = g.get(&alias).map(|w| w.current_chunk_id).unwrap_or(0);
+        g.insert(
+            alias.clone(),
+            EndpointWindow {
+                alias,
+                current_chunk_id: existing,
+                cache_window_chunks: window_chunks,
+            },
+        );
+    }
+
+    pub async fn advance(&self, alias: &str, chunk_id: i64) {
+        let mut g = self.inner.write().await;
+        if let Some(w) = g.get_mut(alias) {
+            w.current_chunk_id = chunk_id;
+        }
+    }
+
+    pub async fn deregister(&self, alias: &str) {
+        let mut g = self.inner.write().await;
+        g.remove(alias);
+    }
+
+    pub async fn snapshot(&self) -> Vec<EndpointWindow> {
+        self.inner.read().await.values().cloned().collect()
+    }
+
+    /// Union of `[current, current + window]` across all endpoints.
+    pub async fn needed_chunks(&self) -> BTreeSet<i64> {
+        let g = self.inner.read().await;
+        let mut needed = BTreeSet::new();
+        for w in g.values() {
+            for id in w.current_chunk_id..=(w.current_chunk_id + w.cache_window_chunks) {
+                needed.insert(id);
+            }
+        }
+        needed
     }
 }
 
