@@ -23,8 +23,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run soak-mini
+        shell: pwsh
         env:
           EVENT_ID: ${{ github.event.inputs.event_id || '9289' }}
         run: |
-          chmod +x scripts/soak-mini.sh
-          bash scripts/soak-mini.sh
+          .\scripts\soak-mini.ps1
