@@ -272,4 +272,14 @@ mod tests {
         }
         assert_eq!(count, 1, "second Info row should have been dropped");
     }
+
+    #[test]
+    fn rate_limiter_keys_disk_cache_push_sample_per_endpoint() {
+        let rl = RateLimiter::new();
+        assert!(rl.allow(Action::DiskCachePushSample, "FB-NewLevel"));
+        assert!(!rl.allow(Action::DiskCachePushSample, "FB-NewLevel"));
+        // Different endpoint key -> separate slot, must allow.
+        assert!(rl.allow(Action::DiskCachePushSample, "YT NLCH 4K"));
+        assert!(!rl.allow(Action::DiskCachePushSample, "YT NLCH 4K"));
+    }
 }
