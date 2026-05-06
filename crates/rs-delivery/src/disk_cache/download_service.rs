@@ -73,6 +73,9 @@ pub struct DownloadService {
     /// file stores only the bytes; pacing-aware consumers query this map
     /// to recover the metadata that S3 originally returned.
     durations: Mutex<HashMap<i64, i64>>,
+    /// S3 fetch latency + byte + failure profiler. Surfaced via
+    /// `profile_snapshot()` for the `/api/v1/delivery/status` endpoint.
+    profile: Arc<crate::s3_fetch_profile::S3FetchProfile>,
 }
 
 impl DownloadService {
@@ -94,6 +97,7 @@ impl DownloadService {
             semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
             next_slot_start: Mutex::new(Instant::now()),
             durations: Mutex::new(HashMap::new()),
+            profile: Arc::new(crate::s3_fetch_profile::S3FetchProfile::new()),
         })
     }
 
@@ -102,6 +106,13 @@ impl DownloadService {
     /// metadata predates this DownloadService instance).
     pub async fn get_duration(&self, chunk_id: i64) -> Option<i64> {
         self.durations.lock().await.get(&chunk_id).copied()
+    }
+
+    /// Returns a point-in-time snapshot of S3 fetch latency, byte, and
+    /// failure statistics accumulated since this `DownloadService` was
+    /// created. Consumed by `/api/v1/delivery/status` (Task 12).
+    pub fn profile_snapshot(&self) -> crate::s3_fetch_profile::S3FetchProfileSnapshot {
+        self.profile.snapshot()
     }
 
     /// HEAD-only duration probe. Returns `Ok(Some(ms))` if the chunk
@@ -183,8 +194,12 @@ impl DownloadService {
                 .acquire_owned()
                 .await
                 .expect("semaphore closed");
-            match self.backend.fetch(chunk_id).await {
+            let fetch_start = Instant::now();
+            let result = self.backend.fetch(chunk_id).await;
+            let elapsed_ms = fetch_start.elapsed().as_millis() as u64;
+            match result {
                 Ok(Some((data, duration_ms))) => {
+                    self.profile.record_success(elapsed_ms, data.len() as u64);
                     self.token_bucket_consume(data.len() as u64).await;
                     if let Err(e) = self.write_atomic(chunk_id, &data, duration_ms).await {
                         tracing::error!(chunk_id, "disk_cache write failed: {e}");
@@ -199,11 +214,14 @@ impl DownloadService {
                     return;
                 }
                 Ok(None) => {
+                    self.profile.record_failure("404");
                     self.registry.mark_not_found(chunk_id);
                     return;
                 }
                 Err(e) => {
                     tracing::warn!(chunk_id, attempt, "disk_cache S3 fetch failed: {e}");
+                    let class = crate::endpoint_audit::classify_s3_fetch_error(&e.to_string());
+                    self.profile.record_failure(class);
                     if attempt >= max_attempts {
                         self.registry.mark_not_found(chunk_id);
                         return;
