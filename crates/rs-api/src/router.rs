@@ -181,6 +181,7 @@ pub fn build_router(state: AppState) -> Router {
             "/diagnostics/pacing",
             get(crate::diagnostics_pacing::get_pacing),
         )
+        .route("/diag/dump", post(crate::diag::diag_dump_handler))
         // Test hooks for CI E2E testing
         .route("/_test/s3-block", post(handlers::test_s3_block))
         .route("/_test/s3-unblock", post(handlers::test_s3_unblock));
