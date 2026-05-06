@@ -105,10 +105,14 @@ async fn per_worker_picker_under_wal_no_busy_errors() {
          pragma-only mitigation isn't holding"
     );
     // Throughput sanity: workers should have drained a meaningful chunk
-    // of the 500 rows even with contention. Exact count depends on
-    // machine but 50+ is a reasonable lower bound.
+    // of the 500 rows even with contention. The 3s budget is tight on
+    // shared CI runners under load; lower the bound to 20 since we are
+    // primarily testing that workers ARE making progress (proving the
+    // pragma stack holds), not that the runner is fast. Same-SHA flake
+    // observed where one Windows runner got 50+ and a parallel one got
+    // <50 (#174).
     assert!(
-        took >= 50,
+        took >= 20,
         "uploader throughput regressed: only {took} claims in 3s"
     );
 }
