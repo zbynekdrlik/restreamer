@@ -6,9 +6,12 @@
 //! registry available.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use futures::FutureExt;
 
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -137,7 +140,17 @@ impl DownloadService {
                 let svc = Arc::clone(self);
                 let n_clone = Arc::clone(&n);
                 tokio::spawn(async move {
-                    svc.fetch_with_retry(chunk_id).await;
+                    // Catch panics so the in_flight slot + Notify are
+                    // always released. A panic with no recovery would
+                    // leave waiters blocked on an orphan Notify until
+                    // their stall timeout (#174 review finding 7).
+                    let result = AssertUnwindSafe(svc.fetch_with_retry(chunk_id))
+                        .catch_unwind()
+                        .await;
+                    if result.is_err() {
+                        tracing::error!(chunk_id, "disk_cache fetch panicked");
+                        svc.registry.mark_not_found(chunk_id);
+                    }
                     let mut g = svc.in_flight.lock().await;
                     g.remove(&chunk_id);
                     n_clone.notify_waiters();
@@ -424,6 +437,36 @@ mod tests {
             "bandwidth cap must throttle (got {:?})",
             elapsed
         );
+    }
+
+    #[tokio::test]
+    async fn panicking_backend_releases_waiters_via_catch_unwind() {
+        struct PanicBackend;
+        #[async_trait::async_trait]
+        impl S3Backend for PanicBackend {
+            async fn fetch(&self, _id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+                panic!("simulated backend panic");
+            }
+        }
+        let backend = Arc::new(PanicBackend);
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = ChunkRegistry::new();
+        let svc = DownloadService::new(
+            backend,
+            registry.clone(),
+            tmp.path().to_path_buf(),
+            "evt".into(),
+            10_000,
+            8,
+        );
+        // Should resolve to NotFound, NOT hang.
+        let result = tokio::time::timeout(Duration::from_secs(2), svc.request_chunk(7)).await;
+        assert!(
+            result.is_ok(),
+            "request_chunk hung after backend panic; catch_unwind missing"
+        );
+        let state = registry.wait_for_chunk(7).await.unwrap();
+        assert!(matches!(state, ChunkAvailability::NotFound));
     }
 
     #[tokio::test]
