@@ -14,6 +14,7 @@ use super::upload_strip::UploadStrip;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
 use crate::store::DashboardStore;
+use crate::utils::cache_threshold_for_service;
 
 /// Minimum seconds the RTMP publisher must be connected before the
 /// operator can start delivery. Mirrors
@@ -856,20 +857,15 @@ fn EndpointTree() -> impl IntoView {
                                     } else {
                                         ps.cache_duration_secs
                                     };
-                                    // Per-service threshold: YT and tight ingestors
-                                    // get 1.1x (sensitive to drift); Facebook gets
-                                    // 1.3x because FB ingest legitimately runs ~10-15s
-                                    // above target due to TLS+RTT variance and a
-                                    // tighter band would alert in steady-state.
-                                    // Real divergence (e.g. 905s / 60s) still trips
-                                    // critical for both (#174 review #10).
+                                    // Per-service threshold lives in utils.rs so
+                                    // a service-type rename touches one site.
                                     let alias_lookup = ep.alias.clone();
                                     let service_type = store.endpoints_list.get()
                                         .iter()
                                         .find(|e| e.alias == alias_lookup)
                                         .map(|e| e.service_type.clone())
                                         .unwrap_or_default();
-                                    let threshold_mult = if service_type == "Facebook" { 1.3 } else { 1.1 };
+                                    let threshold_mult = cache_threshold_for_service(&service_type);
                                     let progress = (cache_secs / target as f64).min(1.0);
                                     let bar_class = if cache_secs > target as f64 * threshold_mult {
                                         "buffer-bar-fill critical"
