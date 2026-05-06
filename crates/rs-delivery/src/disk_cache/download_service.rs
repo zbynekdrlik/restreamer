@@ -21,6 +21,13 @@ use super::registry::ChunkRegistry;
 #[async_trait::async_trait]
 pub trait S3Backend: Send + Sync + 'static {
     async fn fetch(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String>;
+    /// HEAD-only duration probe. Default delegates to `fetch` (full GET)
+    /// for backends that don't implement HEAD; production `S3Fetcher`
+    /// overrides with a real HEAD request to keep skip-ahead probes
+    /// from downloading full chunk bodies (#174 review finding 2).
+    async fn head_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        self.fetch(chunk_id).await.map(|o| o.map(|(_, d)| d))
+    }
 }
 
 #[async_trait::async_trait]
@@ -31,6 +38,11 @@ impl S3Backend for crate::s3_fetch::S3Fetcher {
             Ok(None) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
+    }
+    async fn head_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        crate::s3_fetch::S3Fetcher::head_chunk_duration(self, chunk_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -85,6 +97,23 @@ impl DownloadService {
     /// metadata predates this DownloadService instance).
     pub async fn get_duration(&self, chunk_id: i64) -> Option<i64> {
         self.durations.lock().await.get(&chunk_id).copied()
+    }
+
+    /// HEAD-only duration probe. Returns `Ok(Some(ms))` if the chunk
+    /// exists on S3, `Ok(None)` for 404, `Err(_)` for transient errors.
+    /// Caches the result in `durations` so a follow-up `request_chunk`
+    /// + `get_duration` can reuse the metadata without a second HEAD.
+    /// Used by the producer's skip-ahead probe to avoid the full-GET
+    /// regression (#174 review finding 2: a 50 MB skip-ahead waste).
+    pub async fn head_duration(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        if let Some(ms) = self.durations.lock().await.get(&chunk_id).copied() {
+            return Ok(Some(ms));
+        }
+        let res = self.backend.head_duration_ms(chunk_id).await?;
+        if let Some(ms) = res {
+            self.durations.lock().await.insert(chunk_id, ms);
+        }
+        Ok(res)
     }
 
     /// Fetch a chunk if not already cached / in flight. Returns when
@@ -395,6 +424,39 @@ mod tests {
             "bandwidth cap must throttle (got {:?})",
             elapsed
         );
+    }
+
+    #[tokio::test]
+    async fn head_duration_does_not_download_body_or_write_disk() {
+        struct HeadOnlyBackend(AtomicU32);
+        #[async_trait::async_trait]
+        impl S3Backend for HeadOnlyBackend {
+            async fn fetch(&self, _id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+                panic!("fetch must not be called for HEAD probe");
+            }
+            async fn head_duration_ms(&self, _id: i64) -> Result<Option<i64>, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(2000))
+            }
+        }
+        let backend = Arc::new(HeadOnlyBackend(AtomicU32::new(0)));
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = ChunkRegistry::new();
+        let svc = DownloadService::new(
+            backend.clone(),
+            registry.clone(),
+            tmp.path().to_path_buf(),
+            "evt".into(),
+            10_000,
+            8,
+        );
+        let result = svc.head_duration(7).await.unwrap();
+        assert_eq!(result, Some(2000));
+        // No file written.
+        assert!(!tmp.path().join("evt").join("7.bin").exists());
+        // Cached: second probe is a hit, no second backend call.
+        assert_eq!(svc.head_duration(7).await.unwrap(), Some(2000));
+        assert_eq!(backend.0.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -113,29 +113,16 @@ impl ChunkFetcher for DiskCacheFetcher {
     }
 
     async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
-        // Producer's skip-ahead probe: fire a fetch and report whether
-        // the chunk lands within a short window. The producer is
-        // looking for the next available chunk, so a short timeout
-        // (5s) keeps the probe loop responsive without waiting for a
-        // full S3 retry cycle.
-        let svc = Arc::clone(&self.cache.download_service);
-        let cid = chunk_id;
-        tokio::spawn(async move { svc.request_chunk(cid).await });
-        match self
-            .cache
-            .registry
-            .wait_for_chunk_with_timeout(chunk_id, Duration::from_secs(5))
-            .await
-        {
-            Ok(ChunkAvailability::Available { .. }) => Ok(Some(
-                self.cache
-                    .download_service
-                    .get_duration(chunk_id)
-                    .await
-                    .unwrap_or(0),
-            )),
-            Ok(ChunkAvailability::NotFound) | Ok(ChunkAvailability::Evicted) => Ok(None),
-            Ok(ChunkAvailability::InFlight) | Err(_) => Ok(None),
+        // Producer's skip-ahead probe: HEAD-only, no body download.
+        // The earlier impl called request_chunk which performed a full
+        // S3 GET + disk write for every probed chunk; with
+        // SKIP_AHEAD_PROBE=10 this could waste up to 50 MB per skip
+        // cycle, polluting the bandwidth budget the disk_cache exists
+        // to protect (#174 review finding 2).
+        match self.cache.download_service.head_duration(chunk_id).await {
+            Ok(Some(ms)) => Ok(Some(ms)),
+            Ok(None) => Ok(None),
+            Err(_) => Ok(None),
         }
     }
 }

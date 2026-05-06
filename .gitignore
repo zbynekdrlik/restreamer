@@ -37,3 +37,4 @@ test-results/
 .mcp.json
 .playwright-mcp/
 dashboard-*.png
+soak-*.png
