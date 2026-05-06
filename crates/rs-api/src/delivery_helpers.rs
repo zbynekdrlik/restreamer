@@ -123,17 +123,62 @@ pub(crate) fn persist_delivery_log_to_disk(
 /// Permanent (non-retryable) Hetzner API errors. 401/403 = bad token,
 /// 404 = server doesn't exist. Burning the 5-minute retry window for
 /// these is wasted time + masks the real misconfig (#174 review
-/// finding 4). Substring match on the error string until rs-cloud
-/// exposes a typed error variant.
+/// finding 4).
+///
+/// Patterns are anchored on word boundaries to avoid false positives
+/// from log lines that happen to contain the digit triple, e.g.
+/// "fetch chunk 4012 failed" or "x-ratelimit-remaining: 401" (#174
+/// review-of-review finding 1).
 pub fn is_permanent_hetzner_error(msg: &str) -> bool {
-    msg.contains("401")
-        || msg.contains("403")
-        || msg.contains("404")
-        || msg.contains("unauthorized")
-        || msg.contains("forbidden")
-        || msg.contains("not_found")
-        || msg.contains("not found")
-        || msg.contains("invalid_token")
+    let lower = msg.to_ascii_lowercase();
+    has_status_code(&lower, "401")
+        || has_status_code(&lower, "403")
+        || has_status_code(&lower, "404")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("not_found")
+        || lower.contains("not found")
+        || lower.contains("invalid_token")
+        || lower.contains("invalid api token")
+        || lower.contains("token_invalid")
+}
+
+/// True if `code` (e.g. "401") appears as an HTTP status code in `msg`,
+/// not as a substring of a longer number or identifier. The code must
+/// be bordered on BOTH sides by either: end-of-string, a non-ASCII-digit
+/// non-ASCII-alphabetic character (whitespace, punctuation), OR specific
+/// HTTP-context tokens. Anchoring prevents false positives like the
+/// "401" inside chunk-id "4012", req-id "abc40134", or rate-limit
+/// header "401-burst-window".
+fn has_status_code(msg: &str, code: &str) -> bool {
+    let bytes = msg.as_bytes();
+    let code_bytes = code.as_bytes();
+    let mut start = 0usize;
+    while let Some(off) = msg[start..].find(code) {
+        let i = start + off;
+        let prev = if i == 0 { None } else { Some(bytes[i - 1]) };
+        let next_idx = i + code_bytes.len();
+        let next = if next_idx >= bytes.len() {
+            None
+        } else {
+            Some(bytes[next_idx])
+        };
+        if !is_token_continuation(prev) && !is_token_continuation(next) {
+            return true;
+        }
+        start = i + 1;
+    }
+    false
+}
+
+/// True if `b` is a byte that would extend the digit triple into a
+/// longer token (digit, letter, or `-`). End-of-string and punctuation
+/// like `:`, `_`, ` ` do NOT continue the token.
+fn is_token_continuation(b: Option<u8>) -> bool {
+    match b {
+        None => false,
+        Some(c) => c.is_ascii_digit() || c.is_ascii_alphabetic() || c == b'-',
+    }
 }
 
 #[cfg(test)]
@@ -296,6 +341,9 @@ mod tests {
         assert!(is_permanent_hetzner_error("403 Forbidden"));
         assert!(is_permanent_hetzner_error("404 not found"));
         assert!(is_permanent_hetzner_error("invalid_token"));
+        assert!(is_permanent_hetzner_error("status code: 404"));
+        assert!(is_permanent_hetzner_error("HTTP 403 Forbidden"));
+        assert!(is_permanent_hetzner_error("status_code=401"));
     }
 
     #[test]
@@ -306,5 +354,19 @@ mod tests {
             "connection timed out after 30s"
         ));
         assert!(!is_permanent_hetzner_error("dns lookup failure"));
+    }
+
+    #[test]
+    fn permanent_classifier_does_not_match_unrelated_digit_triples() {
+        // Substring "401" inside a chunk-id or rate-limit header is NOT a
+        // permanent classification (#174 review-of-review #1).
+        assert!(!is_permanent_hetzner_error(
+            "fetch chunk 4012 failed: connection reset"
+        ));
+        assert!(!is_permanent_hetzner_error(
+            "rate limit header: x-ratelimit-remaining=401-burst-window"
+        ));
+        assert!(!is_permanent_hetzner_error("req-id: abc40134"));
+        assert!(!is_permanent_hetzner_error("retry: 1404 attempts left"));
     }
 }
