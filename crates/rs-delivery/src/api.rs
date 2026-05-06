@@ -250,6 +250,11 @@ struct StatusResponse {
     recent_audit: Vec<crate::audit_ring::RingRow>,
     #[serde(default)]
     next_audit_cursor: i64,
+    /// Cumulative S3 fetch profile for the current event (count, bytes,
+    /// p50/p99 latency, fail counts by class). `None` when no DiskCache
+    /// is active. Issue #176.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    s3_fetch_profile: Option<crate::s3_fetch_profile::S3FetchProfileSnapshot>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -321,12 +326,20 @@ async fn endpoint_status(
 
     let (recent_audit, next_audit_cursor) = state.audit_ring.since(q.since.unwrap_or(0));
 
+    let s3_fetch_profile = state
+        .disk_cache
+        .read()
+        .await
+        .as_ref()
+        .map(|dc| dc.s3_fetch_profile_snapshot());
+
     Json(StatusResponse {
         status: "ok".to_string(),
         endpoint_count: entries.len(),
         endpoints: entries,
         recent_audit,
         next_audit_cursor,
+        s3_fetch_profile,
     })
 }
 

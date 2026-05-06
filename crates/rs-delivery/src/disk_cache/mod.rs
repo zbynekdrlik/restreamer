@@ -119,6 +119,11 @@ impl DiskCache {
         self.cache_dir.join(&self.event_id)
     }
 
+    /// Snapshot of the cumulative S3 fetch profile for diag dumps.
+    pub fn s3_fetch_profile_snapshot(&self) -> crate::s3_fetch_profile::S3FetchProfileSnapshot {
+        self.download_service.profile_snapshot()
+    }
+
     /// Abort the eviction task and release cache handles. Call when the
     /// event ends. Does not delete cached files (the next DiskCache::new
     /// for the same event will reuse them).
