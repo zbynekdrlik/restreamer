@@ -62,43 +62,11 @@ const testName = EXPECT_NO_STREAM
   ? "YouTube Studio shows stream is NOT being received (baseline)"
   : "YouTube Studio shows stream is being received (testing state)";
 
-/**
- * Asserts that the live YT health is "good" with no configuration_issues.
- * Throws on first failure with a message that matches the regex
- * `/YT health must be 'good'/`. Used by both the live youtube-studio-check
- * E2E and the fixture tests in `frontend.spec.ts`.
- *
- * Issue #176.
- */
-export async function assertYtHealthGood(
-  page: import("@playwright/test").Page,
-) {
-  const ytStatus = await page.evaluate(async () => {
-    const res = await fetch("http://10.77.9.204:8910/api/v1/youtube/status");
-    return res.json();
-  });
-  const activeStreams = ((ytStatus as { streams?: unknown[] })?.streams || []).filter(
-    (s: any) => s.stream_status === "active",
-  );
-  if (activeStreams.length === 0) {
-    throw new Error("no active YT stream observed");
-  }
-  for (const s of activeStreams as any[]) {
-    if (s.health_status !== "good") {
-      throw new Error(
-        `YT health must be 'good' (got '${s.health_status}' on stream '${s.title}')`,
-      );
-    }
-    if (
-      Array.isArray(s.configuration_issues) &&
-      s.configuration_issues.length > 0
-    ) {
-      throw new Error(
-        `YT configuration_issues must be empty (got ${JSON.stringify(s.configuration_issues)} on '${s.title}')`,
-      );
-    }
-  }
-}
+// Phase 1 (#176): YT health helper lives in its own module so both this
+// live spec and the fixture tests in frontend.spec.ts can import it
+// statically (Playwright's TS loader rejects dynamic ESM `import()` at
+// runtime).
+import { assertYtHealthGood } from "./yt-health";
 
 test(testName, async () => {
   const headed = !!process.env.HEADED;

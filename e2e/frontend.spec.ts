@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import * as fs from "fs";
 import * as path from "path";
+import { assertYtHealthGood } from "./yt-health";
 
 // Inject Tauri mock before each page navigation
 const tauriMockScript = fs.readFileSync(
@@ -2259,7 +2260,6 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
       });
     });
     await page.goto("/");
-    const { assertYtHealthGood } = await import("./youtube-studio-check.spec");
     await expect(assertYtHealthGood(page)).rejects.toThrow(
       /YT health must be 'good'/,
     );
@@ -2287,7 +2287,6 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
       });
     });
     await page.goto("/");
-    const { assertYtHealthGood } = await import("./youtube-studio-check.spec");
     await expect(assertYtHealthGood(page)).resolves.toBeUndefined();
   });
 });
