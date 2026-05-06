@@ -14,7 +14,7 @@ use rs_core::db;
 
 pub(crate) use crate::delivery_helpers::{
     build_endpoint_init_entry, is_delivery_active, is_delivery_or_spawning,
-    persist_delivery_log_to_disk,
+    is_permanent_hetzner_error, persist_delivery_log_to_disk,
 };
 
 // Re-exports so existing call sites (`crate::delivery::Foo`, test modules,
@@ -321,9 +321,12 @@ impl DeliveryOrchestrator {
         // up to 5s of user-visible warmup time.
         let hetzner_id = instance.hetzner_id;
         for attempt in 0..300 {
-            // Hetzner API 503/network blip: log + continue, do not abort.
+            // 401/403/404 = permanent: fail fast (#174 review finding 4).
             let server = match self.hetzner.get_server(hetzner_id).await {
                 Ok(s) => s,
+                Err(e) if is_permanent_hetzner_error(&e.to_string()) => {
+                    return Err(anyhow::anyhow!("get_server permanent error: {e}"));
+                }
                 Err(e) if attempt < 299 => {
                     if attempt % 30 == 0 {
                         warn!(attempt, error = %e, "get_server transient, retrying");
@@ -994,7 +997,3 @@ impl DeliveryOrchestrator {
         Ok(latest.id.to_string())
     }
 }
-
-// Helpers moved to delivery_helpers.rs; status assembly + restart-history
-// helpers live in delivery_status.rs; mirror_vps_audit lives in
-// delivery_audit_mirror.rs. Tests remain in delivery_tests.rs.

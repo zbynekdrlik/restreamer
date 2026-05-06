@@ -120,6 +120,22 @@ pub(crate) fn persist_delivery_log_to_disk(
     }
 }
 
+/// Permanent (non-retryable) Hetzner API errors. 401/403 = bad token,
+/// 404 = server doesn't exist. Burning the 5-minute retry window for
+/// these is wasted time + masks the real misconfig (#174 review
+/// finding 4). Substring match on the error string until rs-cloud
+/// exposes a typed error variant.
+pub fn is_permanent_hetzner_error(msg: &str) -> bool {
+    msg.contains("401")
+        || msg.contains("403")
+        || msg.contains("404")
+        || msg.contains("unauthorized")
+        || msg.contains("forbidden")
+        || msg.contains("not_found")
+        || msg.contains("not found")
+        || msg.contains("invalid_token")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +288,23 @@ mod tests {
     fn pusher_wire_tag_matches_serde_rename() {
         assert_eq!(pusher_wire_tag(PusherKind::Ffmpeg), "ffmpeg");
         assert_eq!(pusher_wire_tag(PusherKind::Rust), "rust");
+    }
+
+    #[test]
+    fn permanent_hetzner_error_classifies_4xx() {
+        assert!(is_permanent_hetzner_error("API returned 401 Unauthorized"));
+        assert!(is_permanent_hetzner_error("403 Forbidden"));
+        assert!(is_permanent_hetzner_error("404 not found"));
+        assert!(is_permanent_hetzner_error("invalid_token"));
+    }
+
+    #[test]
+    fn transient_hetzner_error_does_not_match_permanent() {
+        assert!(!is_permanent_hetzner_error("503 Service Unavailable"));
+        assert!(!is_permanent_hetzner_error("500 Internal Server Error"));
+        assert!(!is_permanent_hetzner_error(
+            "connection timed out after 30s"
+        ));
+        assert!(!is_permanent_hetzner_error("dns lookup failure"));
     }
 }
