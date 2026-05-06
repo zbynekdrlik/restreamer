@@ -2,7 +2,9 @@
 // See docs/superpowers/specs/2026-05-06-soak-gate-and-telemetry-design.md §5.3.
 // Issue #176.
 
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 /// Per-session telemetry counters for one RTMP push connection.
 /// Reset on each connect by constructing a fresh value.
@@ -133,14 +135,14 @@ mod tests {
 
     #[test]
     fn snapshot_hex_encodes_close_buffer() {
-        let mut t = RtmpPushTelemetry::new_for_test_at(0);
+        let t = RtmpPushTelemetry::new_for_test_at(0);
         let v = t.snapshot(&[0xDE, 0xAD, 0xBE, 0xEF]);
         assert_eq!(v["upstream_close_first_bytes_hex"], "deadbeef");
     }
 
     #[test]
     fn snapshot_truncates_close_buffer_to_64_bytes() {
-        let mut t = RtmpPushTelemetry::new_for_test_at(0);
+        let t = RtmpPushTelemetry::new_for_test_at(0);
         let buf = vec![0xAA; 200];
         let v = t.snapshot(&buf);
         let hex = v["upstream_close_first_bytes_hex"].as_str().unwrap();

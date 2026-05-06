@@ -155,6 +155,7 @@ impl EndpointReader {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_push_sample_payload(
     endpoint: &str,
     chunk_id: u64,

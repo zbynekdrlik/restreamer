@@ -290,7 +290,8 @@ pub fn emit_rtmp_push_died(
 
 /// Detailed variant of `emit_rtmp_push_died` that merges
 /// `RtmpPushTelemetry` + close-buffer + pipeline depth into the audit
-/// detail JSON. Phase 1 telemetry -- see spec §5.3 and issue #176.
+/// detail JSON. Phase 1 telemetry -- see spec section 5.3 and issue #176.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_rtmp_push_died_detailed(
     audit_ring: &Option<Arc<AuditRing>>,
     alias: &str,
@@ -387,7 +388,7 @@ mod tests {
         let close_buf = [0x00, 0xC0, 0x00, 0x03];
 
         emit_rtmp_push_died_detailed(
-            &Some(Arc::new(ring.clone())),
+            &Some(Arc::clone(&ring)),
             "FB-NewLevel",
             "upstream closed connection mid-stream: unexpected end of file",
             3000,

@@ -68,8 +68,10 @@ impl DumpSources for ProductionSources {
     }
 }
 
+type AuditRow = (i64, String, String, String, String);
+
 async fn fetch_audit_60min(pool: &SqlitePool) -> Vec<Value> {
-    let rows: Result<Vec<(i64, String, String, String, String)>, _> = sqlx::query_as(
+    let rows: Result<Vec<AuditRow>, _> = sqlx::query_as(
         "SELECT id, ts, severity, action, detail FROM audit_log \
          WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-60 minutes') \
          ORDER BY id DESC LIMIT 5000",
@@ -79,12 +81,14 @@ async fn fetch_audit_60min(pool: &SqlitePool) -> Vec<Value> {
     rows.map(|rs| {
         rs.into_iter()
             .map(|(id, ts, sev, action, detail)| {
+                let parsed_detail =
+                    serde_json::from_str::<Value>(&detail).unwrap_or(Value::String(detail));
                 json!({
                     "id": id,
                     "ts": ts,
                     "severity": sev,
                     "action": action,
-                    "detail": serde_json::from_str::<Value>(&detail).unwrap_or_else(|_| Value::String(detail))
+                    "detail": parsed_detail
                 })
             })
             .collect()
@@ -99,7 +103,8 @@ async fn fetch_endpoint_timeline(pool: &SqlitePool, event_id: Option<i64>) -> Va
     let cutoff_ms = chrono::Utc::now()
         .timestamp_millis()
         .saturating_sub(60 * 60 * 1000);
-    let rows: Result<Vec<(String, i64, i64, i64, f64, i64)>, _> = sqlx::query_as(
+    type TimelineRow = (String, i64, i64, i64, f64, i64);
+    let rows: Result<Vec<TimelineRow>, _> = sqlx::query_as(
         "SELECT alias, ts_ms, current_chunk_id, chunks_processed, chunk_delay_secs, bytes_processed_total \
          FROM delivery_endpoint_metrics \
          WHERE event_id = ? AND ts_ms >= ? \
