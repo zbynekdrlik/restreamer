@@ -43,13 +43,12 @@ impl DiskCacheFetcher {
         // Register synchronously: a same-tick `advance` from the producer
         // would otherwise silently no-op on an unknown alias and the
         // EvictionTask could delete chunks this endpoint still needs
-        // (#174 review finding 1).
-        cache
-            .position_registry
-            .register(alias.clone(), window_chunks);
-        // Seed initial position so the first eviction sweep already
-        // protects this endpoint's window.
-        cache.position_registry.advance(&alias, start_chunk_id);
+        // (#174 review finding 1). Single alias clone for register;
+        // advance takes a borrow.
+        let alias_for_register = alias.clone();
+        let positions = &cache.position_registry;
+        positions.register(alias_for_register, window_chunks);
+        positions.advance(&alias, start_chunk_id);
         Self {
             cache,
             alias,
@@ -62,14 +61,18 @@ impl DiskCacheFetcher {
 
 impl ChunkFetcher for DiskCacheFetcher {
     async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
-        // Prefetch upcoming chunks. Fire-and-forget so the producer is
-        // not blocked. Each request_chunk is deduplicated by the
-        // DownloadService -- six endpoints requesting the same chunk
-        // result in one S3 GET.
-        for ahead in 1..=self.window_chunks {
-            let svc = Arc::clone(&self.cache.download_service);
-            tokio::spawn(async move { svc.request_chunk(chunk_id + ahead).await });
-        }
+        // Prefetch the upcoming window in ONE spawned task that loops
+        // (instead of N spawns per fetch). The DownloadService's own
+        // semaphore + dedup keeps the actual S3 concurrency bounded;
+        // collapsing the spawn ladder cuts ~window-1 spawn calls per
+        // chunk per endpoint (#174 review-of-review #3).
+        let prefetch_window = self.window_chunks;
+        let prefetch_svc = Arc::clone(&self.cache.download_service);
+        tokio::spawn(async move {
+            for ahead in 1..=prefetch_window {
+                prefetch_svc.request_chunk(chunk_id + ahead).await;
+            }
+        });
 
         // Update position registry so eviction protects this endpoint's window.
         self.cache.position_registry.advance(&self.alias, chunk_id);
