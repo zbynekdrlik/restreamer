@@ -230,8 +230,10 @@ async fn build_disk_cache(
         S3Fetcher::new(s3_config, &req.event_identifier)
             .map_err(|e| std::io::Error::other(format!("S3Fetcher init: {e}")))?,
     );
-    let mut cfg = DiskCacheConfig::default();
-    cfg.window_chunks = ((req.delivery_delay_ms as i64) / 2000).max(10);
+    let cfg = DiskCacheConfig {
+        window_chunks: ((req.delivery_delay_ms as i64) / 2000).max(10),
+        ..Default::default()
+    };
     let cache = DiskCache::new(cfg, backend, req.event_identifier.clone()).await?;
     Ok(Arc::new(cache))
 }
