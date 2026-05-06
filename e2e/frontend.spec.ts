@@ -2223,3 +2223,71 @@ test.describe("Upload telemetry UI", () => {
     await expect(page.locator(".uploads-row--sent").first()).toBeVisible();
   });
 });
+
+test.describe("YT health gate (assertYtHealthGood)", () => {
+  test("YT studio gate fails when /api/v1/youtube/status reports health=bad", async ({
+    page,
+  }) => {
+    // This test runs against a STUBBED /api/v1/youtube/status response, not
+    // live YT. It exists to lock in the gate logic. The live youtube-studio-check
+    // E2E uses the same assertion; this is its unit-style guard.
+    await page.route("**/api/v1/youtube/status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          authenticated: true,
+          stream_receiving: true,
+          broadcast_testing: true,
+          broadcast_statuses: [],
+          stream_count: 1,
+          streams: [
+            {
+              title: "e2e rtmp",
+              stream_status: "active",
+              health_status: "bad",
+              configuration_issues: [
+                "videoIngestionFasterThanRealtime: Check video settings (error)",
+              ],
+              cdn_resolution: "2160p",
+              cdn_frame_rate: "30fps",
+              cdn_ingestion_type: "rtmp",
+            },
+          ],
+          error: null,
+        }),
+      });
+    });
+    await page.goto("/");
+    const { assertYtHealthGood } = await import("./youtube-studio-check.spec");
+    await expect(assertYtHealthGood(page)).rejects.toThrow(
+      /YT health must be 'good'/,
+    );
+  });
+
+  test("YT studio gate passes when health=good and configuration_issues empty", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/youtube/status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          authenticated: true,
+          stream_receiving: true,
+          streams: [
+            {
+              title: "e2e rtmp",
+              stream_status: "active",
+              health_status: "good",
+              configuration_issues: [],
+            },
+          ],
+        }),
+      });
+    });
+    await page.goto("/");
+    const { assertYtHealthGood } = await import("./youtube-studio-check.spec");
+    await expect(assertYtHealthGood(page)).resolves.toBeUndefined();
+  });
+});
