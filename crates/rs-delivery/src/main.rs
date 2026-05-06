@@ -20,6 +20,7 @@ pub mod endpoint_audit;
 pub mod endpoint_task;
 mod ffmpeg_reason;
 pub mod rescue;
+pub mod rtmp_push_telemetry;
 mod s3_fetch;
 
 pub use audit_ring::AuditRing;
