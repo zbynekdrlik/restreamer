@@ -200,4 +200,35 @@ mod tests {
         let result = EndpointReader::run_once(cfg, registry, positions, pusher).await;
         assert!(matches!(result, Err(ReaderError::StallTimeout { .. })));
     }
+
+    #[test]
+    fn push_sample_payload_math() {
+        let payload = build_push_sample_payload(
+            "FB-NewLevel",
+            100,
+            /* chunk_supply_lag_ms = */ 320,
+            /* inter_chunk_gap_ms = */ 850,
+            /* chunk_duration_ms = */ 1000,
+            /* delivery_delay_secs = */ 120,
+            /* current_chunk_delay_secs = */ 151.3,
+        );
+        assert_eq!(payload["endpoint"], "FB-NewLevel");
+        assert_eq!(payload["chunk_id"], 100);
+        assert_eq!(payload["chunk_supply_lag_ms"], 320);
+        assert_eq!(payload["inter_chunk_gap_ms"], 850);
+        let burst = payload["burst_factor"].as_f64().unwrap();
+        assert!((burst - (1000.0 / 850.0)).abs() < 1e-6);
+        assert_eq!(payload["delivery_delay_secs"], 120);
+        let cd = payload["current_chunk_delay_secs"].as_f64().unwrap();
+        assert!((cd - 151.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn push_sample_burst_factor_is_zero_when_gap_is_zero() {
+        // Edge case: first push, no previous chunk -> inter_chunk_gap_ms = 0.
+        // Avoid div-by-zero; report burst_factor = 0.0 and let the consumer
+        // treat it as "no signal yet".
+        let payload = build_push_sample_payload("YT NLCH 4K", 1, 0, 0, 1000, 120, 0.0);
+        assert_eq!(payload["burst_factor"].as_f64().unwrap(), 0.0);
+    }
 }
