@@ -341,4 +341,37 @@ mod tests {
             "504"
         );
     }
+
+    #[test]
+    fn emit_rtmp_push_died_detailed_includes_telemetry_fields() {
+        use crate::rtmp_push_telemetry::RtmpPushTelemetry;
+
+        let ring = AuditRing::new(64);
+        let mut tel = RtmpPushTelemetry::new();
+        tel.note_send("Audio", 100);
+        tel.note_chunk_pushed();
+        let close_buf = [0x00, 0xC0, 0x00, 0x03];
+
+        emit_rtmp_push_died_detailed(
+            &Some(Arc::new(ring.clone())),
+            "FB-NewLevel",
+            "upstream closed connection mid-stream: unexpected end of file",
+            3000,
+            2840,
+            &tel,
+            &close_buf,
+            0, // chunks_buffered_in_pipeline
+        );
+
+        let (rows, _) = ring.since(0i64);
+        assert_eq!(rows.len(), 1);
+        let detail = &rows[0].detail;
+        assert_eq!(detail["backend"], "rust_rtmp_push");
+        assert_eq!(detail["reconnect_count"], 2840);
+        assert_eq!(detail["bytes_sent_since_connect"], 100);
+        assert_eq!(detail["chunks_pushed"], 1);
+        assert_eq!(detail["last_rtmp_message_type_sent"], "Audio");
+        assert_eq!(detail["upstream_close_first_bytes_hex"], "00c00003");
+        assert_eq!(detail["chunks_buffered_in_pipeline"], 0);
+    }
 }
