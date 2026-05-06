@@ -107,7 +107,7 @@ impl DownloadService {
     /// HEAD-only duration probe. Returns `Ok(Some(ms))` if the chunk
     /// exists on S3, `Ok(None)` for 404, `Err(_)` for transient errors.
     /// Caches the result in `durations` so a follow-up `request_chunk`
-    /// + `get_duration` can reuse the metadata without a second HEAD.
+    /// then `get_duration` can reuse the metadata without a second HEAD.
     /// Used by the producer's skip-ahead probe to avoid the full-GET
     /// regression (#174 review finding 2: a 50 MB skip-ahead waste).
     pub async fn head_duration(&self, chunk_id: i64) -> Result<Option<i64>, String> {

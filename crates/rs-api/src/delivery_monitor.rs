@@ -42,7 +42,7 @@ impl DeliveryOrchestrator {
             interval.tick().await;
 
             // Check if event is still delivering (operator may have stopped)
-            match db::get_streaming_event_by_id(&self.pool(), event_id).await {
+            match db::get_streaming_event_by_id(self.pool(), event_id).await {
                 Ok(Some(evt)) if !evt.delivering_activated => {
                     info!(
                         event_id,
@@ -61,7 +61,7 @@ impl DeliveryOrchestrator {
             }
 
             // Check if instance still exists and is running
-            let instance = match db::get_delivery_instance(&self.pool(), instance_id).await {
+            let instance = match db::get_delivery_instance(self.pool(), instance_id).await {
                 Ok(Some(inst)) if is_delivery_active(&inst.status) => inst,
                 Ok(Some(inst)) => {
                     info!(
@@ -118,7 +118,7 @@ impl DeliveryOrchestrator {
                     );
                 }
                 consecutive_failures = 0;
-                db::update_delivery_instance_health(&self.pool(), instance_id)
+                db::update_delivery_instance_health(self.pool(), instance_id)
                     .await
                     .ok();
             } else {
