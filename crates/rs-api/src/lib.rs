@@ -5,6 +5,7 @@ pub(crate) mod delivery_audit_mirror;
 pub mod delivery_endpoints;
 pub mod delivery_handlers;
 pub(crate) mod delivery_helpers;
+pub(crate) mod delivery_monitor;
 pub(crate) mod delivery_status;
 #[cfg(test)]
 mod delivery_tests;
