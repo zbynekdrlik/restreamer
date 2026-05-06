@@ -66,6 +66,7 @@ pub(super) async fn handle_rust_push(
     consecutive_write_failures: &mut u32,
     stats: &Stats,
     audit_ring: &Option<Arc<AuditRing>>,
+    telemetry: &mut crate::rtmp_push_telemetry::RtmpPushTelemetry,
     stop_rx: &mut watch::Receiver<bool>,
     flv_normalizer: &mut FlvStreamNormalizer,
 ) -> RustPushAction {
@@ -83,6 +84,8 @@ pub(super) async fn handle_rust_push(
         Ok(Ok(())) => {
             *consecutive_push_errors = 0;
             *consecutive_write_failures = 0;
+            telemetry.note_send("flv_bytes", data.len() as u64);
+            telemetry.note_chunk_pushed();
             let mut s = stats.lock().await;
             s.bytes_processed_total += data.len() as u64;
             s.duration_processed_ms += chunk_duration_ms.max(0) as u64;
@@ -135,13 +138,17 @@ pub(super) async fn handle_rust_push(
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             let reconnect_count = pusher.reconnect_count();
-            endpoint_audit::emit_rtmp_push_died(
+            endpoint_audit::emit_rtmp_push_died_detailed(
                 audit_ring,
                 alias,
                 &error_display,
                 backoff_ms,
                 reconnect_count,
+                telemetry,
+                &[],
+                0,
             );
+            *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
             let record = RtmpPushAuditRecord {
                 timestamp_ms,
                 chunk_id,
@@ -192,13 +199,17 @@ pub(super) async fn handle_rust_push(
             // stall_reason on the dashboard. Backoff matches the fixed
             // 30 s sleep below.
             let backoff_ms: u64 = 30_000;
-            endpoint_audit::emit_rtmp_push_died(
+            endpoint_audit::emit_rtmp_push_died_detailed(
                 audit_ring,
                 alias,
                 "rtmp_push_timeout",
                 backoff_ms,
                 reconnect_count,
+                telemetry,
+                &[],
+                0,
             );
+            *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
             let timestamp_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)

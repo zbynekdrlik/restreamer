@@ -288,6 +288,40 @@ pub fn emit_rtmp_push_died(
     );
 }
 
+/// Detailed variant of `emit_rtmp_push_died` that merges
+/// `RtmpPushTelemetry` + close-buffer + pipeline depth into the audit
+/// detail JSON. Phase 1 telemetry -- see spec §5.3 and issue #176.
+pub fn emit_rtmp_push_died_detailed(
+    audit_ring: &Option<Arc<AuditRing>>,
+    alias: &str,
+    error_display: &str,
+    backoff_ms: u64,
+    reconnect_count: u32,
+    telemetry: &crate::rtmp_push_telemetry::RtmpPushTelemetry,
+    close_first_bytes: &[u8],
+    chunks_buffered_in_pipeline: u32,
+) {
+    let Some(ring) = audit_ring else { return };
+    let mut detail = telemetry.snapshot(close_first_bytes);
+    if let Some(obj) = detail.as_object_mut() {
+        obj.insert("backend".into(), serde_json::json!("rust_rtmp_push"));
+        obj.insert("error".into(), serde_json::json!(error_display));
+        obj.insert("backoff_ms".into(), serde_json::json!(backoff_ms));
+        obj.insert("reconnect_count".into(), serde_json::json!(reconnect_count));
+        obj.insert(
+            "chunks_buffered_in_pipeline".into(),
+            serde_json::json!(chunks_buffered_in_pipeline),
+        );
+    }
+    ring.push(
+        Severity::Warn,
+        Source::Vps,
+        Some(alias.to_string()),
+        Action::EndpointRtmpPushDied,
+        detail,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

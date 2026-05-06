@@ -515,6 +515,8 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut last_heartbeat = std::time::Instant::now();
     // Consecutive push errors for the Rust pusher exponential backoff ladder.
     let mut consecutive_push_errors: u32 = 0;
+    // Phase 1 telemetry for the Rust RTMP pusher -- reset on each connect.
+    let mut rust_telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 
     let use_rust_pusher = ep_cfg.pusher == PusherKind::Rust;
 
@@ -742,6 +744,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                     &mut consecutive_write_failures,
                     &stats,
                     &audit_ring,
+                    &mut rust_telemetry,
                     &mut stop_rx,
                     &mut flv_normalizer,
                 )
