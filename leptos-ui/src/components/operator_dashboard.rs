@@ -856,14 +856,22 @@ fn EndpointTree() -> impl IntoView {
                                     } else {
                                         ps.cache_duration_secs
                                     };
-                                    // Bar fill caps at 100% visually; numeric label shows TRUE seconds.
-                                    // critical only when cache truly diverges (>= 1.3*target). The
-                                    // 1.1*target band was too tight for normal RTMP-ingest variance:
-                                    // FB endpoints settle ~10-15s above target (TLS handshake + ingest
-                                    // RTT differences) without any actual cache buildup. Real divergence
-                                    // (e.g. 905s / 60s) still triggers critical at 1.3x.
+                                    // Per-service threshold: YT and tight ingestors
+                                    // get 1.1x (sensitive to drift); Facebook gets
+                                    // 1.3x because FB ingest legitimately runs ~10-15s
+                                    // above target due to TLS+RTT variance and a
+                                    // tighter band would alert in steady-state.
+                                    // Real divergence (e.g. 905s / 60s) still trips
+                                    // critical for both (#174 review #10).
+                                    let alias_lookup = ep.alias.clone();
+                                    let service_type = store.endpoints_list.get()
+                                        .iter()
+                                        .find(|e| e.alias == alias_lookup)
+                                        .map(|e| e.service_type.clone())
+                                        .unwrap_or_default();
+                                    let threshold_mult = if service_type == "Facebook" { 1.3 } else { 1.1 };
                                     let progress = (cache_secs / target as f64).min(1.0);
-                                    let bar_class = if cache_secs > target as f64 * 1.3 {
+                                    let bar_class = if cache_secs > target as f64 * threshold_mult {
                                         "buffer-bar-fill critical"
                                     } else if progress >= 0.75 {
                                         "buffer-bar-fill healthy"
