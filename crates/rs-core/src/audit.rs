@@ -87,6 +87,12 @@ pub enum Action {
     /// the transient. Pair with DiskCacheStallTimeout to bound outage
     /// duration in the audit log.
     DiskCacheReaderRecovered,
+    /// Per-endpoint push sample emitted by EndpointReader on chunk push.
+    /// Rate-limited 1/min/endpoint via RateLimiter keyed by
+    /// (DiskCachePushSample, endpoint_alias). Carries chunk_supply_lag_ms,
+    /// inter_chunk_gap_ms, burst_factor, current_chunk_delay_secs, and
+    /// delivery_delay_secs target. Issue #176.
+    DiskCachePushSample,
     RestreamerStarted,
     MigrationsApplied,
     /// DB write that drives UI state failed. Emitted when e.g.
