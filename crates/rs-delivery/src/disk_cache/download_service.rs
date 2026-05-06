@@ -52,8 +52,10 @@ impl S3Backend for crate::s3_fetch::S3Fetcher {
 pub struct DownloadService {
     backend: Arc<dyn S3Backend>,
     registry: Arc<ChunkRegistry>,
-    cache_dir: PathBuf,
-    event_id: String,
+    /// `{cache_root}/{event_id}/`. Constructed once at `new`; reused
+    /// by `write_atomic` so the join is not duplicated per write
+    /// (#174 review finding 12).
+    event_dir: PathBuf,
     /// Concurrent in-flight requests. Used for dedup — same chunk_id
     /// requested twice yields one S3 GET; the second waiter blocks on
     /// the same Notify.
@@ -82,11 +84,11 @@ impl DownloadService {
         bandwidth_cap_mbit: u64,
         max_concurrent: usize,
     ) -> Arc<Self> {
+        let event_dir = cache_dir.join(&event_id);
         Arc::new(Self {
             backend,
             registry,
-            cache_dir,
-            event_id,
+            event_dir,
             in_flight: Mutex::new(HashMap::new()),
             bandwidth_cap_bytes_per_sec: (bandwidth_cap_mbit * 1_000_000) / 8,
             semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
@@ -250,10 +252,9 @@ impl DownloadService {
         data: &[u8],
         _duration_ms: i64,
     ) -> std::io::Result<()> {
-        let event_dir = self.cache_dir.join(&self.event_id);
-        fs::create_dir_all(&event_dir).await?;
-        let final_path = event_dir.join(format!("{chunk_id}.bin"));
-        let part_path = event_dir.join(format!("{chunk_id}.bin.part"));
+        fs::create_dir_all(&self.event_dir).await?;
+        let final_path = self.event_dir.join(format!("{chunk_id}.bin"));
+        let part_path = self.event_dir.join(format!("{chunk_id}.bin.part"));
         let mut f = fs::File::create(&part_path).await?;
         f.write_all(data).await?;
         f.flush().await?;
