@@ -19,13 +19,13 @@
 //! whole module while preserving the exact API surface for the integration PR.
 #![allow(dead_code, unused_imports)]
 
-mod download_service;
+pub mod download_service;
 mod endpoint_reader;
 mod eviction;
 mod position_registry;
 mod registry;
 
-pub use download_service::DownloadService;
+pub use download_service::{DownloadService, S3Backend};
 pub use endpoint_reader::EndpointReader;
 pub use eviction::EvictionTask;
 pub use position_registry::{EndpointPositionRegistry, EndpointWindow};

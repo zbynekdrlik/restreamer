@@ -226,7 +226,7 @@ async fn build_disk_cache(
     s3_config: &S3Config,
     req: &InitRequest,
 ) -> std::io::Result<Arc<DiskCache>> {
-    let backend: Arc<dyn crate::disk_cache::download_service::S3Backend> = Arc::new(
+    let backend: Arc<dyn crate::disk_cache::S3Backend> = Arc::new(
         S3Fetcher::new(s3_config, &req.event_identifier)
             .map_err(|e| std::io::Error::other(format!("S3Fetcher init: {e}")))?,
     );

@@ -14,8 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::disk_cache::DiskCache;
-use crate::disk_cache::registry::ChunkAvailability;
+use crate::disk_cache::{ChunkAvailability, DiskCache};
 use crate::endpoint_task::ChunkFetcher;
 
 pub struct DiskCacheFetcher {
