@@ -44,10 +44,7 @@ pub struct DeliveryOrchestrator {
     /// Resume positions for auto-restart after VPS crash.
     /// Key: event_id, Value: HashMap<alias, last_known_chunk_id>
     resume_positions: Arc<Mutex<HashMap<i64, HashMap<String, i64>>>>,
-    /// Audit channel. `None` in tests and any call site that has not yet been
-    /// plumbed to `AppState.audit_tx` (Task 27 will wire the real channel
-    /// from runtime startup). Every emit is `if let Some(tx) = ...` so this
-    /// is a no-op when absent.
+    /// Audit channel. `None` in tests; emit sites are guarded by `if let Some`.
     audit_tx: Option<mpsc::Sender<AuditRow>>,
 }
 
@@ -172,18 +169,9 @@ impl DeliveryOrchestrator {
                     auth_token: existing.auth_token,
                 });
             }
-            // Stale row (failed / stopped / stopping, or any unknown
-            // future status). Mark it deleted so subsequent
-            // get_delivery_instance_by_event calls stop returning it,
-            // then fall through to spawn a fresh VPS.
-            //
-            // Stop-vs-start race: a concurrent `stop_delivery` may be
-            // between its own update_delivery_instance_status("stopping")
-            // and update_delivery_instance_status("deleted"). That's
-            // harmless -- the stop task acts on its own captured
-            // `hetzner_id`, so the OLD VPS still gets deleted on Hetzner
-            // regardless of how many times this row is rewritten to
-            // "deleted". No orphan VPS billing leak.
+            // Stale row: mark deleted, fall through to spawn fresh.
+            // Stop-race-safe: stop_delivery owns its captured hetzner_id
+            // so the old VPS is always deleted regardless of rewrites.
             tracing::warn!(
                 event_id,
                 instance_id = existing.id,
@@ -193,15 +181,8 @@ impl DeliveryOrchestrator {
             if let Err(e) =
                 db::update_delivery_instance_status(&self.pool, existing.id, "deleted").await
             {
-                // Continue anyway: worst case is two non-deleted rows
-                // for this event. `get_delivery_instance_by_event` ORDER
-                // BYs id DESC LIMIT 1, so the next call will
-                // deterministically prefer the freshly-spawned row over
-                // the stale one.
-                tracing::error!(
-                    instance_id = existing.id,
-                    "Failed to mark stale instance as deleted: {e} -- spawning new anyway"
-                );
+                // Worst case: two non-deleted rows; ORDER BY id DESC picks the new one.
+                tracing::error!(instance_id = existing.id, "stale-row delete failed: {e}");
             }
         }
 
@@ -537,6 +518,25 @@ impl DeliveryOrchestrator {
             // exactly the target instead of overshooting.
             start_chunk_id =
                 db::compute_target_start_chunk(&self.pool, event_id, target_delay_ms).await?;
+            // Orphan DB rows from prior s3_cleared can point at chunks
+            // that no longer exist on S3; advance to the first chunk_id
+            // that actually exists or the producer hangs (#174).
+            if let Ok(s3) = rs_endpoint::s3::S3Client::new(&self.config.s3) {
+                let p = self.config.event_s3_prefix(event_name);
+                match s3.find_first_chunk_id_at_or_after(&p, start_chunk_id).await {
+                    Ok(Some(actual)) if actual != start_chunk_id => {
+                        info!(
+                            event_id,
+                            was = start_chunk_id,
+                            actual,
+                            "advanced to first S3 chunk"
+                        );
+                        start_chunk_id = actual;
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(event_id, "S3 LIST validation failed: {e}"),
+                }
+            }
             info!(
                 event_id,
                 start_chunk_id, "Starting delivery (live-edge computed)"
