@@ -856,13 +856,14 @@ fn EndpointTree() -> impl IntoView {
                                     } else {
                                         ps.cache_duration_secs
                                     };
-                                    // Bar fill caps at 100% visually (can't render past full),
-                                    // but the numeric label shows the TRUE cache seconds.
-                                    // If cache exceeds target the operator MUST see "905s / 60s"
-                                    // because that means delivery VPS has fallen behind — a real
-                                    // bug, not a cosmetic issue to be hidden with fancy labels.
+                                    // Bar fill caps at 100% visually; numeric label shows TRUE seconds.
+                                    // critical only when cache truly diverges (>= 1.3*target). The
+                                    // 1.1*target band was too tight for normal RTMP-ingest variance:
+                                    // FB endpoints settle ~10-15s above target (TLS handshake + ingest
+                                    // RTT differences) without any actual cache buildup. Real divergence
+                                    // (e.g. 905s / 60s) still triggers critical at 1.3x.
                                     let progress = (cache_secs / target as f64).min(1.0);
-                                    let bar_class = if cache_secs > target as f64 * 1.1 {
+                                    let bar_class = if cache_secs > target as f64 * 1.3 {
                                         "buffer-bar-fill critical"
                                     } else if progress >= 0.75 {
                                         "buffer-bar-fill healthy"
