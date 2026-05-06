@@ -9,7 +9,9 @@
 //! lost to a same-tick advance silently dropped the endpoint's window).
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct EndpointWindow {
@@ -34,7 +36,7 @@ impl EndpointPositionRegistry {
     /// operator changing `cache_delay_secs` mid-event does not rewind
     /// the read position.
     pub fn register(&self, alias: String, window_chunks: i64) {
-        let mut g = self.inner.write().unwrap();
+        let mut g = self.inner.write();
         let existing = g.get(&alias).map(|w| w.current_chunk_id).unwrap_or(0);
         g.insert(
             alias.clone(),
@@ -47,24 +49,24 @@ impl EndpointPositionRegistry {
     }
 
     pub fn advance(&self, alias: &str, chunk_id: i64) {
-        let mut g = self.inner.write().unwrap();
+        let mut g = self.inner.write();
         if let Some(w) = g.get_mut(alias) {
             w.current_chunk_id = chunk_id;
         }
     }
 
     pub fn deregister(&self, alias: &str) {
-        let mut g = self.inner.write().unwrap();
+        let mut g = self.inner.write();
         g.remove(alias);
     }
 
     pub fn snapshot(&self) -> Vec<EndpointWindow> {
-        self.inner.read().unwrap().values().cloned().collect()
+        self.inner.read().values().cloned().collect()
     }
 
     /// Union of `[current, current + window]` across all endpoints.
     pub fn needed_chunks(&self) -> BTreeSet<i64> {
-        let g = self.inner.read().unwrap();
+        let g = self.inner.read();
         let mut needed = BTreeSet::new();
         for w in g.values() {
             for id in w.current_chunk_id..=(w.current_chunk_id + w.cache_window_chunks) {
