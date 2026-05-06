@@ -1,0 +1,30 @@
+name: Soak mini (30 min)
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_id:
+        description: "Streaming event ID (must be already created on stream.snv)"
+        required: true
+        default: "9289"
+  schedule:
+    # Nightly 03:00 Slovak (= 02:00 UTC during DST)
+    - cron: "0 2 * * *"
+
+concurrency:
+  group: soak-mini
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    runs-on: [self-hosted, windows, stream-lan]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run soak-mini
+        env:
+          EVENT_ID: ${{ github.event.inputs.event_id || '9289' }}
+        run: |
+          chmod +x scripts/soak-mini.sh
+          bash scripts/soak-mini.sh
