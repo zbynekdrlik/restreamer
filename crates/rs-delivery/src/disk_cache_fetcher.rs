@@ -86,9 +86,30 @@ impl ChunkFetcher for DiskCacheFetcher {
         match state {
             ChunkAvailability::Available { .. } => {
                 let path = self.event_dir.join(format!("{chunk_id}.bin"));
-                let data = tokio::fs::read(&path)
-                    .await
-                    .map_err(|e| format!("disk read {}: {e}", path.display()))?;
+                // Single ENOENT retry: an EvictionTask sweep can race
+                // a reader between the registry mark_available and the
+                // tokio::fs::read (#174 review finding 3). One retry
+                // covers the race; if the chunk truly vanished, fall
+                // through to the producer's outer retry/backoff.
+                let data = match tokio::fs::read(&path).await {
+                    Ok(d) => d,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        self.cache.download_service.request_chunk(chunk_id).await;
+                        let _ = self
+                            .cache
+                            .registry
+                            .wait_for_chunk_with_timeout(
+                                chunk_id,
+                                Duration::from_secs(self.stall_timeout_secs),
+                            )
+                            .await
+                            .map_err(|e| format!("disk_cache enoent retry stall: {e}"))?;
+                        tokio::fs::read(&path)
+                            .await
+                            .map_err(|e| format!("disk read {} (retry): {e}", path.display()))?
+                    }
+                    Err(e) => return Err(format!("disk read {}: {e}", path.display())),
+                };
                 let duration_ms = self
                     .cache
                     .download_service

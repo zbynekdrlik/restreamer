@@ -34,11 +34,13 @@ impl EvictionTask {
     }
 
     /// Single sweep pass: list cache_dir, delete files not in any
-    /// endpoint window. Returns number of files deleted.
+    /// endpoint window, mark the registry slot as Evicted so a stale
+    /// reader can react instead of hitting ENOENT (#174 review
+    /// finding 3). Returns number of files deleted.
     pub async fn run_once(
         cache_dir: &Path,
         positions: &EndpointPositionRegistry,
-        _registry: &ChunkRegistry,
+        registry: &Arc<ChunkRegistry>,
     ) -> std::io::Result<u64> {
         if !cache_dir.exists() {
             return Ok(0);
@@ -63,9 +65,14 @@ impl EvictionTask {
             };
             if !needed.contains(&chunk_id) {
                 match tokio::fs::remove_file(entry.path()).await {
-                    Ok(()) => evicted += 1,
+                    Ok(()) => {
+                        registry.mark_evicted(chunk_id);
+                        evicted += 1;
+                    }
                     // Concurrent writer/sweeper may have removed it; benign.
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        registry.mark_evicted(chunk_id);
+                    }
                     Err(e) => return Err(e),
                 }
             }
@@ -168,6 +175,35 @@ mod tests {
         // 50..=80 is the new desired window but 61..80 don't exist on disk.
         // 50..=60 remain.
         assert_eq!(list_ids(&dir).len(), 11);
+    }
+
+    #[tokio::test]
+    async fn evicted_chunk_id_is_marked_in_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("evt");
+        std::fs::create_dir_all(&dir).unwrap();
+        touch(&dir, 1);
+        touch(&dir, 2);
+        let positions = EndpointPositionRegistry::new();
+        // No registered endpoints: every file is unreferenced.
+        let registry = ChunkRegistry::new();
+        // Pretend chunks 1 and 2 had previously been marked available.
+        registry.mark_available(1, 1);
+        registry.mark_available(2, 1);
+        EvictionTask::run_once(&dir, &positions, &registry)
+            .await
+            .unwrap();
+        // After eviction, registry must report Evicted (not stale Available).
+        let s1 = registry.wait_for_chunk(1).await.unwrap();
+        let s2 = registry.wait_for_chunk(2).await.unwrap();
+        assert!(matches!(
+            s1,
+            crate::disk_cache::registry::ChunkAvailability::Evicted
+        ));
+        assert!(matches!(
+            s2,
+            crate::disk_cache::registry::ChunkAvailability::Evicted
+        ));
     }
 
     #[tokio::test]
