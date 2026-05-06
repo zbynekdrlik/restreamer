@@ -465,7 +465,7 @@ impl DeliveryOrchestrator {
         let resume_pos = self.resume_positions.lock().await.remove(&event_id);
         let is_resume = resume_pos.is_some();
 
-        let start_chunk_id;
+        let mut start_chunk_id;
         if is_resume {
             // For resume: skip chunk-wait phase, chunks already exist from prior session
             let first_seq = db::get_first_sequence_number_for_event(&self.pool, event_id)
