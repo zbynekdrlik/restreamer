@@ -52,6 +52,10 @@ pub struct DownloadService {
     /// `max(now, next_slot_start)`. Subsequent allocations are serialized
     /// even when fetches run in parallel — total elapsed = total bytes / cap.
     next_slot_start: Mutex<Instant>,
+    /// Per-chunk duration_ms metadata captured at fetch time. The disk
+    /// file stores only the bytes; pacing-aware consumers query this map
+    /// to recover the metadata that S3 originally returned.
+    durations: Mutex<HashMap<i64, i64>>,
 }
 
 impl DownloadService {
@@ -72,7 +76,15 @@ impl DownloadService {
             bandwidth_cap_bytes_per_sec: (bandwidth_cap_mbit * 1_000_000) / 8,
             semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
             next_slot_start: Mutex::new(Instant::now()),
+            durations: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Look up the duration_ms metadata captured at fetch time. Returns
+    /// `None` for chunks that have not been requested yet (or whose
+    /// metadata predates this DownloadService instance).
+    pub async fn get_duration(&self, chunk_id: i64) -> Option<i64> {
+        self.durations.lock().await.get(&chunk_id).copied()
     }
 
     /// Fetch a chunk if not already cached / in flight. Returns when
@@ -138,6 +150,7 @@ impl DownloadService {
                         self.registry.mark_not_found(chunk_id);
                         return;
                     }
+                    self.durations.lock().await.insert(chunk_id, duration_ms);
                     self.registry.mark_available(chunk_id, data.len() as u64);
                     return;
                 }

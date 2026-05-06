@@ -8,7 +8,7 @@ use std::sync::{Arc, atomic::Ordering as AtomicOrdering};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::api::{EndpointConfig, S3Config};
+use crate::api::EndpointConfig;
 use crate::audit_ring::AuditRing;
 pub use crate::buffer_state::{BufferState, initial_delivery_mode};
 use crate::endpoint_audit;
@@ -28,19 +28,9 @@ const S3_BACKOFF_BASE_SECS: u64 = 2;
 const S3_BACKOFF_MAX_SECS: u64 = 60;
 /// Heartbeat interval for endpoint delivery loop.
 const ENDPOINT_HEARTBEAT_SECS: u64 = 60;
-/// Pre-fetch buffer size: 10 chunks (~20 s of media at 2 s/chunk).
-///
-/// Tried 60 in v0.3.98 to absorb Hetzner S3 outages but it triggered a
-/// regression: 6 endpoints × 60 chunks × ~3 MB pre-fill = ~1 GB
-/// download burst at startup, saturating cpx32's shared 1 Gbit NIC for
-/// long enough that outbound RTMP writes blocked → 30 s
-/// `rtmp_push_timeout` cascaded across all endpoints (worse than the
-/// stair-step it was meant to fix). Reverted to 10 in v0.3.99.
-///
-/// Real fix for the S3-outage class belongs in the producer: rate-limit
-/// pre-fill bandwidth, or move the cache to local SSD with a separate
-/// fill task that doesn't compete with outbound RTMP for NIC. Tracked
-/// in issue #174.
+/// Pre-fetch buffer size: 10 chunks (~20 s of media at 2 s/chunk). With
+/// the disk_cache integration in v0.4.x, the heavy cache is on local
+/// SSD; this mpsc just smooths producer/consumer pacing. See #174.
 const PREFETCH_BUFFER_SIZE: usize = 10;
 
 /// A chunk that has been fetched from S3 and is ready for the consumer.
@@ -83,16 +73,13 @@ pub trait OutputProcessFactory: Send + Sync {
     ) -> Result<Box<dyn OutputProcess>, String>;
 }
 
-/// Real S3 chunk fetcher implementing ChunkFetcher.
 impl ChunkFetcher for S3Fetcher {
     async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
-        match S3Fetcher::fetch_chunk_with_meta(self, chunk_id).await {
-            Ok(Some(cd)) => Ok(Some((cd.data, cd.duration_ms))),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e.to_string()),
-        }
+        S3Fetcher::fetch_chunk_with_meta(self, chunk_id)
+            .await
+            .map(|opt| opt.map(|cd| (cd.data, cd.duration_ms)))
+            .map_err(|e| e.to_string())
     }
-
     async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
         S3Fetcher::head_chunk_duration(self, chunk_id)
             .await
@@ -224,56 +211,40 @@ pub struct EndpointHandle {
 }
 
 impl EndpointHandle {
+    /// Spawn an endpoint task backed by the shared per-event `DiskCache`.
+    /// `disk_cache` is required: if construction failed at /api/init, the
+    /// orchestrator already received a 500 and never reaches here.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         ep_cfg: EndpointConfig,
-        s3_cfg: S3Config,
-        event_identifier: String,
         start_chunk_id: i64,
         delivery_delay_ms: u64,
         rescue_video_url: Option<String>,
         audit_ring: Option<Arc<AuditRing>>,
+        disk_cache: Arc<crate::disk_cache::DiskCache>,
     ) -> Self {
         let (stop_tx, stop_rx) = watch::channel(false);
-
         let initial_mode = initial_delivery_mode(
             rescue_video_url.is_some(),
             ep_cfg.is_fast,
             delivery_delay_ms,
         );
-
         let stats: Stats = Arc::new(Mutex::new(initial_endpoint_stats(
             start_chunk_id,
             initial_mode,
         )));
-
         let buffer_state = Arc::new(BufferState::new());
-
-        let fetcher = match S3Fetcher::new(&s3_cfg, &event_identifier) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::error!(alias = %ep_cfg.alias, "Failed to create S3 fetcher: {e}");
-                endpoint_audit::emit_s3_fetcher_init_failed(
-                    &audit_ring,
-                    &ep_cfg.alias,
-                    &e.to_string(),
-                );
-                let stats_clone = stats.clone();
-                let task = tokio::spawn(async move {
-                    let mut s = stats_clone.lock().await;
-                    s.last_error = Some(format!("S3 fetcher init failed: {e}"));
-                });
-                return Self {
-                    task,
-                    stop_tx,
-                    stats,
-                };
-            }
-        };
-
-        // Fast endpoints skip the delay entirely
+        // Fast endpoints skip the delay entirely.
         let effective_delay = if ep_cfg.is_fast { 0 } else { delivery_delay_ms };
-
+        let window = disk_cache.window_chunks;
+        let fetcher = crate::disk_cache_fetcher::DiskCacheFetcher::new(
+            disk_cache,
+            ep_cfg.alias.clone(),
+            start_chunk_id,
+            window,
+            60,
+        );
+        tracing::info!(alias = %ep_cfg.alias, window, "DiskCacheFetcher wired");
         let task = tokio::spawn(endpoint_loop(
             fetcher,
             FfmpegProcessFactory,
@@ -286,7 +257,6 @@ impl EndpointHandle {
             buffer_state,
             audit_ring,
         ));
-
         Self {
             task,
             stop_tx,

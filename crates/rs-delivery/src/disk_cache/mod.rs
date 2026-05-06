@@ -71,19 +71,52 @@ pub struct DiskCache {
     pub position_registry: Arc<EndpointPositionRegistry>,
     eviction_handle: tokio::task::JoinHandle<()>,
     pub cache_dir: PathBuf,
+    pub event_id: String,
+    pub window_chunks: i64,
 }
 
 impl DiskCache {
-    /// Construct a new DiskCache for one event. Spawns EvictionTask.
-    /// Returns `Err` if cache_dir cannot be created.
-    pub async fn new(_cfg: DiskCacheConfig) -> std::io::Result<Self> {
-        unimplemented!("scaffold; implemented in Task 13")
+    /// Construct a new DiskCache for one event. Creates the per-event
+    /// cache directory, builds the chunk registry, the position
+    /// registry, the bandwidth-managed download service, and spawns
+    /// the eviction sweep task.
+    pub async fn new(
+        cfg: DiskCacheConfig,
+        backend: Arc<dyn download_service::S3Backend>,
+        event_id: String,
+    ) -> std::io::Result<Self> {
+        let event_dir = cfg.cache_dir.join(&event_id);
+        tokio::fs::create_dir_all(&event_dir).await?;
+        let registry = ChunkRegistry::new();
+        let position_registry = EndpointPositionRegistry::new();
+        let download_service = DownloadService::new(
+            backend,
+            Arc::clone(&registry),
+            cfg.cache_dir.clone(),
+            event_id.clone(),
+            cfg.s3_ingress_cap_mbit,
+            8,
+        );
+        let eviction_handle = EvictionTask::spawn(
+            event_dir.clone(),
+            Arc::clone(&position_registry),
+            Arc::clone(&registry),
+            std::time::Duration::from_secs(cfg.eviction_interval_secs),
+        );
+        Ok(Self {
+            registry,
+            download_service,
+            position_registry,
+            eviction_handle,
+            cache_dir: cfg.cache_dir,
+            event_id,
+            window_chunks: cfg.window_chunks,
+        })
     }
 
-    /// Create an `EndpointReader` for one endpoint, registered with this cache.
-    /// Caller must spawn the returned reader on a tokio task.
-    pub fn endpoint_reader(&self, _alias: &str, _start_chunk_id: i64) -> EndpointReader {
-        unimplemented!("scaffold; implemented in Task 12")
+    /// Per-event cache directory: `{cache_dir}/{event_id}/`.
+    pub fn event_dir(&self) -> PathBuf {
+        self.cache_dir.join(&self.event_id)
     }
 
     /// Abort the eviction task and release cache handles. Call when the
