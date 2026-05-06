@@ -408,9 +408,12 @@ mod tests {
 
     #[tokio::test]
     async fn bandwidth_cap_throttles_combined_throughput() {
-        // 5 concurrent fetches x 1 MB each at 100 Mbit/s combined cap
-        //   = 5 MB total / 12.5 MB/s ~= 400 ms minimum.
-        // Use 1 MB body to keep math obvious.
+        // 10 concurrent fetches x 1 MB each at 100 Mbit/s combined cap
+        //   = 10 MB total / 12.5 MB/s ~= 800 ms minimum.
+        // Larger N puts the runtime jitter (~10-30ms typical, ~50ms
+        // worst-case on loaded CI) at <10% of the expected duration so
+        // a one-sided lower-bound assertion stays robust without an
+        // upper bound that would flake on slow runners (#174 review #11).
         let backend = Arc::new(MockBackend::default());
         backend.set_ok(vec![0u8; 1_000_000], 2000);
         let tmp = tempfile::tempdir().unwrap();
@@ -421,11 +424,11 @@ mod tests {
             tmp.path().to_path_buf(),
             "evt".into(),
             100, // 100 Mbit/s cap
-            5,
+            10,
         );
         let started = Instant::now();
         let mut handles = Vec::new();
-        for id in 0..5 {
+        for id in 0..10 {
             let s = svc.clone();
             handles.push(tokio::spawn(async move { s.request_chunk(id).await }));
         }
@@ -434,7 +437,7 @@ mod tests {
         }
         let elapsed = started.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(350),
+            elapsed >= Duration::from_millis(750),
             "bandwidth cap must throttle (got {:?})",
             elapsed
         );
