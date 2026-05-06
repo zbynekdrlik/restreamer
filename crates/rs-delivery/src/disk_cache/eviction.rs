@@ -43,7 +43,7 @@ impl EvictionTask {
         if !cache_dir.exists() {
             return Ok(0);
         }
-        let needed = positions.needed_chunks().await;
+        let needed = positions.needed_chunks();
         let mut evicted = 0u64;
         let mut entries = tokio::fs::read_dir(cache_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
@@ -128,10 +128,10 @@ mod tests {
             touch(&dir, i);
         }
         let positions = EndpointPositionRegistry::new();
-        positions.register("a".into(), 30).await;
-        positions.advance("a", 10).await; // window 10..=40
-        positions.register("b".into(), 30).await;
-        positions.advance("b", 100).await; // window 100..=130
+        positions.register("a".into(), 30);
+        positions.advance("a", 10); // window 10..=40
+        positions.register("b".into(), 30);
+        positions.advance("b", 100); // window 100..=130
         let registry = ChunkRegistry::new();
         EvictionTask::run_once(&dir, &positions, &registry)
             .await
@@ -150,15 +150,15 @@ mod tests {
             touch(&dir, i);
         }
         let positions = EndpointPositionRegistry::new();
-        positions.register("a".into(), 10).await;
-        positions.advance("a", 50).await; // window 50..=60
+        positions.register("a".into(), 10);
+        positions.advance("a", 50); // window 50..=60
         let registry = ChunkRegistry::new();
         EvictionTask::run_once(&dir, &positions, &registry)
             .await
             .unwrap();
         assert_eq!(list_ids(&dir).len(), 11); // 50..=60
         // Expand window
-        positions.register("a".into(), 30).await;
+        positions.register("a".into(), 30);
         // No new files written; existing ones outside expanded window stay
         // gone (eviction can't recover deleted files). Only files inside
         // current window survive subsequent ticks.
@@ -179,14 +179,14 @@ mod tests {
             touch(&dir, i);
         }
         let positions = EndpointPositionRegistry::new();
-        positions.register("a".into(), 10).await;
-        positions.advance("a", 0).await; // window 0..=10
+        positions.register("a".into(), 10);
+        positions.advance("a", 0); // window 0..=10
         let registry = ChunkRegistry::new();
         EvictionTask::run_once(&dir, &positions, &registry)
             .await
             .unwrap();
         assert_eq!(list_ids(&dir).len(), 11);
-        positions.deregister("a").await;
+        positions.deregister("a");
         EvictionTask::run_once(&dir, &positions, &registry)
             .await
             .unwrap();

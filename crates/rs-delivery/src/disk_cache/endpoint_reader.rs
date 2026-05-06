@@ -69,7 +69,7 @@ impl EndpointReader {
                         .push_chunk(bytes)
                         .await
                         .map_err(ReaderError::PushFailed)?;
-                    positions.advance(&cfg.alias, chunk_id).await;
+                    positions.advance(&cfg.alias, chunk_id);
                     chunk_id += 1;
                     pushed += 1;
                 }
@@ -133,7 +133,7 @@ mod tests {
         registry.mark_available(0, 4);
         registry.mark_available(1, 4);
         let positions = EndpointPositionRegistry::new();
-        positions.register("a".into(), 10).await;
+        positions.register("a".into(), 10);
         let pushed = Arc::new(AtomicU32::new(0));
         let pusher = Box::new(MockPusher {
             pushed: pushed.clone(),
@@ -160,7 +160,7 @@ mod tests {
         let registry = ChunkRegistry::new();
         registry.mark_available(0, 1);
         let positions = EndpointPositionRegistry::new();
-        positions.register("a".into(), 10).await;
+        positions.register("a".into(), 10);
         let pushed = Arc::new(AtomicU32::new(0));
         let pusher = Box::new(MockPusher {
             pushed: pushed.clone(),
@@ -175,7 +175,7 @@ mod tests {
         EndpointReader::run_once(cfg, registry, positions.clone(), pusher)
             .await
             .unwrap();
-        let snap = positions.snapshot().await;
+        let snap = positions.snapshot();
         assert_eq!(snap[0].current_chunk_id, 0);
     }
 
@@ -186,7 +186,7 @@ mod tests {
         std::fs::create_dir_all(&event_dir).unwrap();
         let registry = ChunkRegistry::new();
         let positions = EndpointPositionRegistry::new();
-        positions.register("a".into(), 10).await;
+        positions.register("a".into(), 10);
         let pusher = Box::new(MockPusher {
             pushed: Arc::new(AtomicU32::new(0)),
         });

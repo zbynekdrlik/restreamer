@@ -40,14 +40,16 @@ impl DiskCacheFetcher {
         stall_timeout_secs: u64,
     ) -> Self {
         let event_dir = cache.event_dir();
-        let positions = Arc::clone(&cache.position_registry);
-        let alias_for_register = alias.clone();
-        // Register endpoint with the eviction window. Sync-spawn so the
-        // sync `new()` returns immediately; eviction is best-effort.
-        tokio::spawn(async move {
-            positions.register(alias_for_register, window_chunks).await;
-            let _ = start_chunk_id; // start position is updated on first fetch
-        });
+        // Register synchronously: a same-tick `advance` from the producer
+        // would otherwise silently no-op on an unknown alias and the
+        // EvictionTask could delete chunks this endpoint still needs
+        // (#174 review finding 1).
+        cache
+            .position_registry
+            .register(alias.clone(), window_chunks);
+        // Seed initial position so the first eviction sweep already
+        // protects this endpoint's window.
+        cache.position_registry.advance(&alias, start_chunk_id);
         Self {
             cache,
             alias,
@@ -70,10 +72,7 @@ impl ChunkFetcher for DiskCacheFetcher {
         }
 
         // Update position registry so eviction protects this endpoint's window.
-        self.cache
-            .position_registry
-            .advance(&self.alias, chunk_id)
-            .await;
+        self.cache.position_registry.advance(&self.alias, chunk_id);
 
         // Trigger the targeted fetch and wait for terminal state.
         self.cache.download_service.request_chunk(chunk_id).await;
