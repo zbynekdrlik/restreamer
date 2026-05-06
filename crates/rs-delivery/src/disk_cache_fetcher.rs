@@ -135,15 +135,17 @@ impl ChunkFetcher for DiskCacheFetcher {
 
     async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
         // Producer's skip-ahead probe: HEAD-only, no body download.
-        // The earlier impl called request_chunk which performed a full
-        // S3 GET + disk write for every probed chunk; with
-        // SKIP_AHEAD_PROBE=10 this could waste up to 50 MB per skip
-        // cycle, polluting the bandwidth budget the disk_cache exists
-        // to protect (#174 review finding 2).
-        match self.cache.download_service.head_duration(chunk_id).await {
-            Ok(Some(ms)) => Ok(Some(ms)),
-            Ok(None) => Ok(None),
-            Err(_) => Ok(None),
+        // 5s client-side timeout in case the S3 HEAD wedges the
+        // connection (#174 review-of-review #2). Transient errors are
+        // surfaced as Err so the producer's outer backoff handles them
+        // instead of silently advancing past chunks (#174 review-of-
+        // review #4).
+        let probe = self.cache.download_service.head_duration(chunk_id);
+        match tokio::time::timeout(Duration::from_secs(5), probe).await {
+            Ok(Ok(Some(ms))) => Ok(Some(ms)),
+            Ok(Ok(None)) => Ok(None),
+            Ok(Err(e)) => Err(format!("disk_cache HEAD probe error: {e}")),
+            Err(_) => Err(format!("disk_cache HEAD probe timeout on chunk {chunk_id}")),
         }
     }
 }
