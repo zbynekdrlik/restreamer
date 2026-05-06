@@ -22,6 +22,7 @@ mod ffmpeg_reason;
 pub mod rescue;
 pub mod rtmp_push_telemetry;
 mod s3_fetch;
+pub mod s3_fetch_profile;
 
 pub use audit_ring::AuditRing;
 pub use disk_cache::DiskCache;
