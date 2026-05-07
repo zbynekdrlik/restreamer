@@ -2,12 +2,15 @@
 //! See docs/superpowers/specs/2026-05-06-soak-gate-and-telemetry-design.md §5.5.
 //! Issue #176.
 
+use std::sync::Arc;
+
 use axum::Json;
 use axum::extract::State;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
+use crate::delivery::DeliveryOrchestrator;
 use crate::state::AppState;
 
 /// Source-of-truth abstraction for `build_dump`. Production uses
@@ -15,13 +18,25 @@ use crate::state::AppState;
 pub trait DumpSources: Send + Sync {
     fn pool(&self) -> &SqlitePool;
     fn current_event_id(&self) -> Option<i64>;
+    /// Returns `(endpoint_summary, s3_fetch_profile)`.
+    ///
+    /// `endpoint_summary` is a per-alias JSON object keyed by alias, each
+    /// entry containing `alive`, `chunk_delay_secs`, `reconnect_count`,
+    /// `ffmpeg_restart_count`, and `current_chunk_id`. Sourced from the
+    /// in-process `DeliveryOrchestrator::get_delivery_status` -- no outbound
+    /// HTTP needed, auth is handled internally by the orchestrator.
+    ///
+    /// `s3_fetch_profile` is `Value::Null` (reserved for Phase 2/3 plumbing
+    /// once the orchestrator exposes the VPS-side S3 fetch stats in-process).
     fn vps_state(&self) -> BoxFuture<'_, (Value, Value)>;
 }
 
 pub struct ProductionSources {
     pub pool: SqlitePool,
     pub event_id: Option<i64>,
-    pub vps_url: Option<String>,
+    /// In-process delivery orchestrator. `None` when Hetzner is not configured
+    /// (no token), in which case `vps_state` returns a "not configured" sentinel.
+    pub orchestrator: Option<Arc<DeliveryOrchestrator>>,
 }
 
 impl DumpSources for ProductionSources {
@@ -33,35 +48,43 @@ impl DumpSources for ProductionSources {
     }
     fn vps_state(&self) -> BoxFuture<'_, (Value, Value)> {
         Box::pin(async move {
-            let Some(url) = &self.vps_url else {
+            let Some(orch) = &self.orchestrator else {
                 return (
-                    json!({ "error": "no VPS configured" }),
-                    json!({ "error": "no VPS configured" }),
+                    json!({ "error": "no delivery orchestrator configured" }),
+                    Value::Null,
                 );
             };
-            let client = reqwest::Client::new();
-            match client
-                .get(format!("{url}/api/v1/delivery/status"))
-                .send()
-                .await
-            {
-                Ok(r) => match r.json::<Value>().await {
-                    Ok(v) => (
-                        v.get("disk_cache_stats")
-                            .cloned()
-                            .unwrap_or_else(|| json!({ "error": "missing in vps response" })),
-                        v.get("s3_fetch_profile")
-                            .cloned()
-                            .unwrap_or_else(|| json!({ "error": "missing in vps response" })),
-                    ),
-                    Err(e) => (
-                        json!({ "error": format!("decode: {e}") }),
-                        json!({ "error": format!("decode: {e}") }),
-                    ),
-                },
+            let Some(event_id) = self.event_id else {
+                return (json!({ "error": "no active event" }), Value::Null);
+            };
+            match orch.get_delivery_status(event_id).await {
+                Ok(status) => {
+                    // Build a per-alias summary from the in-process status.
+                    let summary: serde_json::Map<String, Value> = status
+                        .endpoints
+                        .iter()
+                        .map(|ep| {
+                            let entry = json!({
+                                "alive": ep.alive,
+                                "chunk_delay_secs": ep.chunk_delay_secs,
+                                "reconnect_count": ep.reconnect_count,
+                                "ffmpeg_restart_count": ep.ffmpeg_restart_count,
+                                "current_chunk_id": ep.current_chunk_id,
+                            });
+                            (ep.alias.clone(), entry)
+                        })
+                        .collect();
+                    (
+                        Value::Object(summary),
+                        // s3_fetch_profile is a VPS-internal metric not yet
+                        // surfaced by get_delivery_status. Reserved for
+                        // Phase 2/3 plumbing.
+                        Value::Null,
+                    )
+                }
                 Err(e) => (
-                    json!({ "error": format!("vps unreachable: {e}") }),
-                    json!({ "error": format!("vps unreachable: {e}") }),
+                    json!({ "error": format!("orchestrator error: {e}") }),
+                    Value::Null,
                 ),
             }
         })
@@ -134,29 +157,24 @@ pub async fn build_dump<S: DumpSources>(sources: &S) -> Value {
     let pool = sources.pool();
     let audit_60min = fetch_audit_60min(pool).await;
     let timeline = fetch_endpoint_timeline(pool, event_id).await;
-    let (disk_cache_stats, s3_fetch_profile) = sources.vps_state().await;
+    let (endpoint_summary, s3_fetch_profile) = sources.vps_state().await;
     json!({
         "generated_at": chrono::Utc::now().to_rfc3339(),
         "version": env!("CARGO_PKG_VERSION"),
         "event_id": event_id,
         "audit_60min": audit_60min,
         "endpoint_timeline": timeline,
-        "disk_cache_stats": disk_cache_stats,
+        "endpoint_summary": endpoint_summary,
         "s3_fetch_profile": s3_fetch_profile,
     })
 }
 
 pub async fn diag_dump_handler(State(state): State<AppState>) -> Json<Value> {
-    // Resolve current event + VPS URL from AppState. The exact accessors
-    // depend on AppState's API; if `current_event_id()` and
-    // `current_vps_url()` aren't present, fall back to None and the dump
-    // still works (audit + timeline still populate).
     let event_id = current_event_id_from_state(&state).await;
-    let vps_url = current_vps_url_from_state(&state).await;
     let sources = ProductionSources {
         pool: state.pool.clone(),
         event_id,
-        vps_url,
+        orchestrator: state.delivery_orchestrator.clone(),
     };
     Json(build_dump(&sources).await)
 }
@@ -173,19 +191,6 @@ async fn current_event_id_from_state(state: &AppState) -> Option<i64> {
     .await
     .ok()
     .flatten()
-}
-
-/// Best-effort accessor: returns the URL of the most-recent active
-/// delivery instance (`http://<ipv4>:8920`), or `None`.
-async fn current_vps_url_from_state(state: &AppState) -> Option<String> {
-    let row: Result<Option<(String,)>, _> = sqlx::query_as(
-        "SELECT ipv4 FROM delivery_instances \
-         WHERE status IN ('delivering','running','ready') \
-         ORDER BY id DESC LIMIT 1",
-    )
-    .fetch_optional(&state.pool)
-    .await;
-    row.ok().flatten().map(|(ip,)| format!("http://{ip}:8920"))
 }
 
 #[cfg(test)]
@@ -266,20 +271,26 @@ impl DumpSources for MockSources {
         let unreachable = self.vps_unreachable;
         Box::pin(async move {
             if unreachable {
+                // Mirrors ProductionSources: orchestrator error fills slot 1;
+                // s3_fetch_profile is always Null (Phase 2/3).
                 (
-                    json!({ "error": "vps unreachable: simulated" }),
-                    json!({ "error": "vps unreachable: simulated" }),
+                    json!({ "error": "orchestrator error: simulated" }),
+                    Value::Null,
                 )
             } else {
+                // Mirrors the per-alias endpoint_summary shape returned by
+                // ProductionSources when get_delivery_status succeeds.
                 (
-                    json!({ "in_flight": 0, "cached_chunks": 120 }),
                     json!({
-                        "count": 1234,
-                        "bytes_total": 1_000_000_000u64,
-                        "p50_latency_ms": 45,
-                        "p99_latency_ms": 320,
-                        "fail_count_by_class": {}
+                        "YT": {
+                            "alive": true,
+                            "chunk_delay_secs": 2.5,
+                            "reconnect_count": 0,
+                            "ffmpeg_restart_count": 0,
+                            "current_chunk_id": 42
+                        }
                     }),
+                    Value::Null,
                 )
             }
         })
@@ -297,8 +308,11 @@ mod tests {
         assert!(dump["generated_at"].is_string());
         assert!(dump["audit_60min"].is_array());
         assert!(dump["endpoint_timeline"].is_object());
-        assert!(dump["disk_cache_stats"].is_object());
-        assert!(dump["s3_fetch_profile"].is_object());
+        // endpoint_summary is a per-alias object when the orchestrator succeeds.
+        assert!(dump["endpoint_summary"].is_object());
+        assert!(dump["endpoint_summary"]["YT"]["alive"].as_bool().unwrap());
+        // s3_fetch_profile is Null (Phase 2/3, not yet surfaced in-process).
+        assert!(dump["s3_fetch_profile"].is_null());
         assert_eq!(dump["event_id"], 9289);
     }
 
@@ -307,8 +321,9 @@ mod tests {
         let sources = MockSources::vps_unreachable().await;
         let dump = build_dump(&sources).await;
         // Failed sub-section replaced with { "error": "..." } per spec §7.
-        assert!(dump["disk_cache_stats"]["error"].is_string());
-        assert!(dump["s3_fetch_profile"]["error"].is_string());
+        assert!(dump["endpoint_summary"]["error"].is_string());
+        // s3_fetch_profile is always Null (Phase 2/3).
+        assert!(dump["s3_fetch_profile"].is_null());
         // Other sections still populated.
         assert!(dump["audit_60min"].is_array());
     }
