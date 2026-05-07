@@ -3748,7 +3748,10 @@ jobs:
             # fail message attributes correctly so operators don't waste time
             # debugging code regressions when the host's ISP blipped.
             try {
-              $infra = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?event_id=$eventId&action=host_internet_unreachable&since=$startTs&limit=100" -TimeoutSec 10
+              # NOTE: probe emits with event_id=NULL (host-side, not tied to a specific
+              # event), so the query MUST omit event_id filter -- WHERE event_id = X
+              # excludes NULL rows and the gate would never see the row.
+              $infra = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=host_internet_unreachable&since=$startTs&limit=100" -TimeoutSec 10
               $infraRows = if ($infra.rows) { $infra.rows } elseif ($infra.items) { $infra.items } else { @() }
               if ($infraRows.Count -gt 0) {
                 throw "FAILED: sample $i/$samples - host_internet_unreachable audit row(s) detected ($($infraRows.Count) total in window). Stream.snv lost internet egress at $($infraRows[0].ts). This is INFRA FLAKINESS, not a code regression. Re-run when ISP recovers; investigate stream.snv network reliability if recurring."
