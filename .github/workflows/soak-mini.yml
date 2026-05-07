@@ -7,9 +7,6 @@ on:
         description: "Streaming event ID (must be already created on stream.snv)"
         required: true
         default: "9289"
-  schedule:
-    # Nightly 03:00 Slovak (= 02:00 UTC during DST)
-    - cron: "0 2 * * *"
 
 concurrency:
   group: soak-mini
