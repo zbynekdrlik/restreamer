@@ -1755,7 +1755,7 @@ jobs:
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 35
+    timeout-minutes: 60
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -3710,6 +3710,112 @@ jobs:
           } else {
             throw "FAILED: YouTube is not receiving stream data after $maxRetries attempts."
           }
+
+      - name: "GATE: Sustained YT health + endpoint chunk_delay (15 min observation)"
+        if: success()
+        shell: powershell
+        timeout-minutes: 18
+        run: |
+          # Phase 1 (#176) sustained gate. The existing one-shot 'good' check
+          # passes on the first 'good' reading. Drift-class regressions
+          # (videoIngestionFasterThanRealtime, +30s chunk_delay accumulation,
+          # FB rust_rtmp_push death cascade) only manifest after the stream
+          # has been running ~15-20 minutes. This step polls /api/v1/youtube/status
+          # AND /api/v1/delivery/status every 30 seconds for 15 minutes; if at
+          # any sample the YT health degrades, configuration_issues populates,
+          # an active endpoint exceeds chunk_delay threshold, or FB endpoints
+          # accumulate >50 rtmp_push_died audit rows, FAIL.
+          $samples = 30
+          $intervalSecs = 30
+          $deliveryDelaySecs = 120
+          $maxFbDeaths = 50
+
+          # Capture starting audit timestamp for the death-rate window.
+          $startTs = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.000Z")
+          Write-Host "Starting sustained gate: $samples samples * $intervalSecs s = 15 min, start_ts=$startTs"
+
+          # Resolve current event id once.
+          $appStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
+          $eventId = $appStatus.streaming_event.id
+          if (-not $eventId) { throw "FAILED: no active streaming_event.id; cannot run sustained gate" }
+          Write-Host "Sustained gate observing event_id=$eventId"
+
+          for ($i = 1; $i -le $samples; $i++) {
+            Start-Sleep -Seconds $intervalSecs
+
+            # YT health sample.
+            $yt = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 10
+            $activeStreams = @($yt.streams | Where-Object { $_.stream_status -eq "active" })
+            if ($activeStreams.Count -eq 0) {
+              throw "FAILED: sample $i/$samples - no active YT stream observed mid-window (was active earlier; means upstream broke)"
+            }
+            foreach ($s in $activeStreams) {
+              if ($s.health_status -ne "good") {
+                throw "FAILED: sample $i/$samples - YT stream '$($s.title)' health='$($s.health_status)' (must stay 'good' across full window). Detected drift-class regression."
+              }
+              if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
+                $issueList = $s.configuration_issues -join ', '
+                throw "FAILED: sample $i/$samples - YT stream '$($s.title)' has configuration_issues: $issueList. videoIngestionFasterThanRealtime / bitrateLow / videoIngestionStarved are drift-class regressions per Phase 1 spec."
+              }
+            }
+
+            # Endpoint chunk_delay sample.
+            try {
+              $delivery = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 10
+              if ($delivery.endpoint_details) {
+                foreach ($ep in $delivery.endpoint_details) {
+                  $alias = [string]$ep.alias
+                  $delay = [double]$ep.chunk_delay_secs
+                  $threshold = if ($alias -like "FB-*") { 1.3 } else { 1.1 }
+                  $limit = $deliveryDelaySecs * $threshold
+                  if ($delay -gt $limit) {
+                    throw "FAILED: sample $i/$samples - endpoint '$alias' chunk_delay=$($delay)s exceeds threshold $($limit)s (target=$($deliveryDelaySecs)s, mult=$threshold)"
+                  }
+                }
+              }
+            } catch {
+              if ($_.Exception.Message -match "^FAILED:") { throw }
+              # delivery/status might 404 briefly; warn but continue.
+              Write-Host "  sample ${i}: delivery/status query failed: $($_.Exception.Message)"
+            }
+
+            Write-Host "  sample $i/$samples ok (YT good, endpoints under threshold)"
+          }
+
+          # End-of-window: cumulative endpoint_rtmp_push_died death-rate per endpoint.
+          try {
+            $audit = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?event_id=$eventId&action=endpoint_rtmp_push_died&since=$startTs&limit=10000" -TimeoutSec 30
+            $rows = if ($audit.rows) { $audit.rows } elseif ($audit.items) { $audit.items } else { @() }
+            $deathsByEp = @{}
+            foreach ($r in $rows) {
+              $ep = if ($r.endpoint) { [string]$r.endpoint } else { "<unknown>" }
+              if (-not $deathsByEp.ContainsKey($ep)) { $deathsByEp[$ep] = 0 }
+              $deathsByEp[$ep] += 1
+            }
+            $failed = $false
+            foreach ($k in $deathsByEp.Keys) {
+              $cnt = $deathsByEp[$k]
+              Write-Host "  deaths: $k -> $cnt"
+              if ($cnt -gt $maxFbDeaths) {
+                Write-Host "FAILED: endpoint='$k' had $cnt rtmp_push_died audit rows in 15min window (limit $maxFbDeaths)"
+                $failed = $true
+              }
+            }
+            if ($failed) {
+              throw "FAILED: rtmp_push_died death-rate exceeded over 15min window (see deaths log above)"
+            }
+          } catch {
+            if ($_.Exception.Message -match "^FAILED:") { throw }
+            Write-Host "  audit death-rate query failed: $($_.Exception.Message)"
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "  SUSTAINED 15-MIN GATE: PASS"
+          Write-Host "  YT health stayed 'good' across all $samples samples"
+          Write-Host "  No endpoint exceeded chunk_delay threshold"
+          Write-Host "  No endpoint accumulated >$maxFbDeaths rtmp_push_died rows"
+          Write-Host "=========================================="
 
       - name: OBS disconnect/reconnect resilience test
         if: success()
