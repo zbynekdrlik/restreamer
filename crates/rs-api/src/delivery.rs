@@ -187,6 +187,35 @@ impl DeliveryOrchestrator {
             }
         }
 
+        // Wipe S3 chunks for this event before spawning VPS (operator policy
+        // 2026-05-07): every "Start Delivering" must begin from a clean S3
+        // state so the VPS cannot replay any chunks produced before delivery
+        // start. Combined with `compute_target_start_chunk` returning live-
+        // edge (latest+1), this guarantees pushed chunks are produced AFTER
+        // delivery start.
+        if let Some(event) = db::get_streaming_event_by_id(&self.pool, event_id).await? {
+            let event_prefix = self.config.event_s3_prefix(&event.name);
+            match rs_endpoint::s3::S3Client::new(&self.config.s3) {
+                Ok(s3_client) => {
+                    let fut = s3_client.delete_event_chunks(&event_prefix);
+                    match tokio::time::timeout(Duration::from_secs(60), fut).await {
+                        Ok(Ok(n)) => info!(
+                            event_id,
+                            deleted = n,
+                            prefix = %event_prefix,
+                            "Wiped S3 chunks before starting delivery"
+                        ),
+                        Ok(Err(e)) => warn!(event_id, "S3 wipe-on-start failed (continuing): {e}"),
+                        Err(_) => warn!(
+                            event_id,
+                            "S3 wipe-on-start timed out after 60s (continuing)"
+                        ),
+                    }
+                }
+                Err(e) => warn!(event_id, "S3 client init for wipe-on-start failed: {e}"),
+            }
+        }
+
         // Get event endpoints to determine server size
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
         let server_type = rs_cloud::select_server_type(endpoints.len());

@@ -390,48 +390,31 @@ async fn setup_db_for_start_chunk() -> db::SqlitePool {
     pool
 }
 
+// `compute_target_start_chunk` returns `latest_sent_seq + 1` (strict
+// live-edge). Callers must never see a historical chunk_id, regardless
+// of duration_ms, target_ms, or chunk count. Tests below pin that
+// invariant across the regression scenarios that motivated the rewrite.
+
 #[tokio::test]
-async fn compute_target_start_chunk_returns_first_when_content_below_target() {
+async fn compute_target_start_chunk_returns_one_on_empty_event() {
     let pool = setup_db_for_start_chunk().await;
-    let event_id = upsert_streaming_event(&pool, "start-chunk-below")
+    let event_id = upsert_streaming_event(&pool, "start-chunk-empty")
         .await
         .unwrap();
 
-    // No chunks → default 1
     let start = db::compute_target_start_chunk(&pool, event_id, 120_000)
         .await
         .unwrap();
-    assert_eq!(start, 1);
-
-    // 3 chunks × 4000ms = 12s total, target 120s → returns first_seq (not enough content)
-    for i in 1..=3 {
-        let id = insert_chunk(
-            &pool,
-            event_id,
-            &format!("/tmp/b{i}.ts"),
-            1000,
-            &format!("b{i}"),
-            4000,
-        )
-        .await
-        .unwrap();
-        set_chunk_sent(&pool, id).await.unwrap();
-    }
-    let start = db::compute_target_start_chunk(&pool, event_id, 120_000)
-        .await
-        .unwrap();
-    assert_eq!(start, 1, "content < target: should return first seq");
+    assert_eq!(start, 1, "no sent chunks: must return 1 (next OBS chunk)");
 }
 
 #[tokio::test]
-async fn compute_target_start_chunk_skips_old_when_content_exceeds_target() {
+async fn compute_target_start_chunk_returns_latest_plus_one_with_chunks() {
     let pool = setup_db_for_start_chunk().await;
-    let event_id = upsert_streaming_event(&pool, "start-chunk-above")
+    let event_id = upsert_streaming_event(&pool, "start-chunk-latest-plus-one")
         .await
         .unwrap();
 
-    // 10 chunks × 4000ms = 40s total, target = 12s → should start at chunk 8
-    // (chunks 8,9,10 = 12s)
     for i in 1..=10 {
         let id = insert_chunk(
             &pool,
@@ -449,20 +432,17 @@ async fn compute_target_start_chunk_skips_old_when_content_exceeds_target() {
     let start = db::compute_target_start_chunk(&pool, event_id, 12_000)
         .await
         .unwrap();
-    assert_eq!(
-        start, 8,
-        "40s content, 12s target: should start at seq 8 (chunks 8,9,10 = 12s)"
-    );
+    assert_eq!(start, 11, "latest sent seq is 10: must return 11");
 }
 
 #[tokio::test]
-async fn compute_target_start_chunk_exact_match() {
+async fn compute_target_start_chunk_ignores_target_ms() {
+    // Target_ms is a legacy parameter; live-edge result must not depend on it.
     let pool = setup_db_for_start_chunk().await;
-    let event_id = upsert_streaming_event(&pool, "start-chunk-exact")
+    let event_id = upsert_streaming_event(&pool, "start-chunk-target-ignored")
         .await
         .unwrap();
 
-    // 5 chunks × 4000ms = 20s, target = 20s → returns first seq (exact match)
     for i in 1..=5 {
         let id = insert_chunk(
             &pool,
@@ -477,57 +457,18 @@ async fn compute_target_start_chunk_exact_match() {
         set_chunk_sent(&pool, id).await.unwrap();
     }
 
-    let start = db::compute_target_start_chunk(&pool, event_id, 20_000)
-        .await
-        .unwrap();
-    assert_eq!(start, 1, "exact match: should return first seq");
-}
-
-/// 100 chunks x 1000 ms each, target 30 s -> start at seq 71 (chunks 71..100 = 30 s).
-/// Exercises the live-edge walk at a row count deep enough that the arithmetic
-/// can't accidentally pass: any off-by-one would land on 70 or 72 instead of 71.
-#[tokio::test]
-async fn compute_target_start_chunk_picks_exact_boundary_in_large_event() {
-    let pool = setup_db_for_start_chunk().await;
-    let event_id = upsert_streaming_event(&pool, "start-chunk-100")
-        .await
-        .unwrap();
-
-    for i in 1..=100 {
-        let id = insert_chunk(
-            &pool,
-            event_id,
-            &format!("/tmp/big{i}.ts"),
-            1000,
-            &format!("big{i}"),
-            1000,
-        )
-        .await
-        .unwrap();
-        set_chunk_sent(&pool, id).await.unwrap();
+    for &target in &[1_i64, 1_000, 60_000, 600_000] {
+        let start = db::compute_target_start_chunk(&pool, event_id, target)
+            .await
+            .unwrap();
+        assert_eq!(start, 6, "target_ms={target}: still latest+1");
     }
-
-    let start = db::compute_target_start_chunk(&pool, event_id, 30_000)
-        .await
-        .unwrap();
-    assert_eq!(
-        start, 71,
-        "100 chunks x 1s, 30s target: should start at seq 71 (chunks 71..100 = 30s)"
-    );
 }
 
-/// Defense-in-depth (#146): if every sent chunk has duration_ms = 0
-/// (data corruption from the PR #144 regression), the function previously
-/// walked all rows accumulating 0 and returned the OLDEST sequence_number.
-/// The orchestrator then sent that as start_chunk_id to the VPS, which
-/// pointed at a pruned chunk and hung warmup forever.
-///
-/// Post-fix: when the accumulator stays at 0 (every walked row has
-/// duration_ms = 0), return the LATEST sequence_number so the VPS starts
-/// at live-edge with an empty buffer. Degraded UX, but stream actually
-/// starts instead of hanging.
 #[tokio::test]
-async fn compute_target_start_chunk_returns_latest_when_all_durations_zero() {
+async fn compute_target_start_chunk_returns_latest_plus_one_when_all_durations_zero() {
+    // #146 corruption: duration_ms=0 across all chunks. New live-edge
+    // policy returns latest+1 unconditionally — duration_ms irrelevant.
     let pool = db::create_memory_pool().await.unwrap();
     db::run_migrations(&pool).await.unwrap();
 
@@ -535,7 +476,6 @@ async fn compute_target_start_chunk_returns_latest_when_all_durations_zero() {
         .await
         .unwrap();
 
-    // 100 chunks all with duration_ms = 0 (the corruption pattern).
     for i in 1..=100 {
         let id = insert_chunk(
             &pool,
@@ -543,7 +483,7 @@ async fn compute_target_start_chunk_returns_latest_when_all_durations_zero() {
             &format!("/tmp/z{i}.ts"),
             1000,
             &format!("z{i}"),
-            0, // <-- the corruption
+            0,
         )
         .await
         .unwrap();
@@ -553,8 +493,36 @@ async fn compute_target_start_chunk_returns_latest_when_all_durations_zero() {
     let start = db::compute_target_start_chunk(&pool, event_id, 12_000)
         .await
         .unwrap();
-    assert_eq!(
-        start, 100,
-        "all-zero-duration data: must return latest seq (live-edge fallback), got {start}"
-    );
+    assert_eq!(start, 101, "100 chunks (any duration): must return 101");
+}
+
+#[tokio::test]
+async fn compute_target_start_chunk_skips_unsent_chunks() {
+    // Only sent=1 chunks count. If chunks 1..5 are sent but 6..10 are
+    // unsent, latest_sent=5, result=6.
+    let pool = setup_db_for_start_chunk().await;
+    let event_id = upsert_streaming_event(&pool, "start-chunk-mixed-sent")
+        .await
+        .unwrap();
+
+    for i in 1..=10 {
+        let id = insert_chunk(
+            &pool,
+            event_id,
+            &format!("/tmp/m{i}.ts"),
+            1000,
+            &format!("m{i}"),
+            2000,
+        )
+        .await
+        .unwrap();
+        if i <= 5 {
+            set_chunk_sent(&pool, id).await.unwrap();
+        }
+    }
+
+    let start = db::compute_target_start_chunk(&pool, event_id, 12_000)
+        .await
+        .unwrap();
+    assert_eq!(start, 6, "latest sent=5 (unsent ignored): must return 6");
 }

@@ -74,11 +74,31 @@ pub(super) async fn handle_rust_push(
     // output_ts math is fully timestamp-driven from inside the FLV
     // payload — see PusherState::audio_origin_xiu_ts). Kept on the
     // consumer-helper signature for stats reporting (`s.duration_processed_ms`).
+    //
+    // Phase 2 probe (#177/#178): log push_flv_bytes start so we can
+    // correlate stalls across endpoints (shared-supply hypothesis) and
+    // detect whether multiple endpoints enter push at the SAME instant.
+    let push_start = std::time::Instant::now();
+    tracing::info!(
+        alias = %alias,
+        chunk_id,
+        bytes = data.len(),
+        "rtmp_push: ENTER push_flv_bytes"
+    );
     let push_result = tokio::time::timeout(
         std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
         pusher.push_flv_bytes(data),
     )
     .await;
+    let push_elapsed_ms = push_start.elapsed().as_millis() as u64;
+    if push_elapsed_ms >= 2500 {
+        tracing::warn!(
+            alias = %alias,
+            chunk_id,
+            push_elapsed_ms,
+            "rtmp_push: SLOW push_flv_bytes (>=2.5s) -- chunk supply or TCP backpressure"
+        );
+    }
 
     match push_result {
         Ok(Ok(())) => {

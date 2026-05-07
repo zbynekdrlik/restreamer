@@ -206,18 +206,33 @@ impl RtmpPusher {
                         // and pacing then slept for the difference,
                         // exceeding the 30 s consumer-task write
                         // timeout).
-                        if let Some(prev) = self.state.last_audio_xiu_ts
-                            && tag.timestamp_ms < prev
-                        {
-                            // Issue #171: anchor on wire timeline (last+1)
-                            // not wall, so the chunker-restart gap is
-                            // burst-pushed and bounded by the chunk-end
-                            // rate cap.
-                            self.state.audio_base_ms =
-                                self.state.last_audio_output_ts_ms.saturating_add(1);
-                            self.state.audio_origin_xiu_ts = None;
-                            self.state.regression_reanchor_count =
-                                self.state.regression_reanchor_count.saturating_add(1);
+                        // Detect both BACKWARD (regression) and large
+                        // FORWARD jumps in tag.timestamp_ms. A forward
+                        // jump of more than MAX_TAG_TS_JUMP_MS is treated
+                        // as a chunker-side timestamp glitch (#176/#178:
+                        // observed 720s forward jump in a single video
+                        // tag → pacing slept 12min → 30s write timeout
+                        // → upstream connection reset). Re-anchor on the
+                        // wire timeline so output_ts steps by 1ms instead
+                        // of the bad delta, while preserving monotonicity.
+                        const MAX_TAG_TS_JUMP_MS: u32 = 30_000;
+                        if let Some(prev) = self.state.last_audio_xiu_ts {
+                            let backward = tag.timestamp_ms < prev;
+                            let forward_jump =
+                                tag.timestamp_ms.saturating_sub(prev) > MAX_TAG_TS_JUMP_MS;
+                            if backward || forward_jump {
+                                self.state.audio_base_ms =
+                                    self.state.last_audio_output_ts_ms.saturating_add(1);
+                                self.state.audio_origin_xiu_ts = None;
+                                self.state.regression_reanchor_count =
+                                    self.state.regression_reanchor_count.saturating_add(1);
+                                tracing::warn!(
+                                    prev_xiu_ts = prev,
+                                    new_xiu_ts = tag.timestamp_ms,
+                                    direction = if backward { "backward" } else { "forward" },
+                                    "rtmp_push: AUDIO tag.timestamp_ms anomaly -- re-anchoring origin to last_audio_output+1"
+                                );
+                            }
                         }
                         self.state.last_audio_xiu_ts = Some(tag.timestamp_ms);
                     }
@@ -239,15 +254,26 @@ impl RtmpPusher {
                 }
                 crate::flv::FLV_TAG_VIDEO => {
                     if !is_seq_header {
-                        if let Some(prev) = self.state.last_video_xiu_ts
-                            && tag.timestamp_ms < prev
-                        {
-                            // Issue #171: anchor on wire timeline.
-                            self.state.video_base_ms =
-                                self.state.last_video_output_ts_ms.saturating_add(1);
-                            self.state.video_origin_xiu_ts = None;
-                            self.state.regression_reanchor_count =
-                                self.state.regression_reanchor_count.saturating_add(1);
+                        // Detect BACKWARD + large FORWARD jumps. See
+                        // matching audio block above for rationale.
+                        const MAX_TAG_TS_JUMP_MS: u32 = 30_000;
+                        if let Some(prev) = self.state.last_video_xiu_ts {
+                            let backward = tag.timestamp_ms < prev;
+                            let forward_jump =
+                                tag.timestamp_ms.saturating_sub(prev) > MAX_TAG_TS_JUMP_MS;
+                            if backward || forward_jump {
+                                self.state.video_base_ms =
+                                    self.state.last_video_output_ts_ms.saturating_add(1);
+                                self.state.video_origin_xiu_ts = None;
+                                self.state.regression_reanchor_count =
+                                    self.state.regression_reanchor_count.saturating_add(1);
+                                tracing::warn!(
+                                    prev_xiu_ts = prev,
+                                    new_xiu_ts = tag.timestamp_ms,
+                                    direction = if backward { "backward" } else { "forward" },
+                                    "rtmp_push: VIDEO tag.timestamp_ms anomaly -- re-anchoring origin to last_video_output+1"
+                                );
+                            }
                         }
                         self.state.last_video_xiu_ts = Some(tag.timestamp_ms);
                     }
@@ -288,9 +314,34 @@ impl RtmpPusher {
             // Per-tag pacing: sleep until wall-clock catches up to this
             // tag's PTS. Both `output_ts_u64` and `anchor.elapsed()` live
             // in the same ms domain, so the math is direct.
+            //
+            // Defensive cap (issue #176/#178): if a tag carries a corrupt
+            // timestamp far in the future (observed 14m output_ts at 2m
+            // wall-clock = 12-minute pacing sleep), clamp the sleep to
+            // PACING_SLEEP_CAP_MS so a single bad tag does not stall the
+            // entire push (which then trips the consumer-side 30s write
+            // timeout and force-closes 5+ endpoint sessions simultaneously
+            // when the bad tag arrives via shared chunk supply).
+            const PACING_SLEEP_CAP_MS: u64 = 5_000;
             let actual_ms = anchor.elapsed().as_millis() as u64;
             if actual_ms < output_ts_u64 {
-                tokio::time::sleep(Duration::from_millis(output_ts_u64 - actual_ms)).await;
+                let raw_sleep_ms = output_ts_u64 - actual_ms;
+                let clamped = raw_sleep_ms.min(PACING_SLEEP_CAP_MS);
+                if raw_sleep_ms >= 2_000 {
+                    tracing::warn!(
+                        tag_type = tag.tag_type,
+                        output_ts = output_ts_u64,
+                        actual_ms,
+                        raw_sleep_ms,
+                        clamped_to_ms = clamped,
+                        last_audio_output_ts_ms = self.state.last_audio_output_ts_ms,
+                        last_video_output_ts_ms = self.state.last_video_output_ts_ms,
+                        audio_base_ms = self.state.audio_base_ms,
+                        video_base_ms = self.state.video_base_ms,
+                        "rtmp_push: LONG per-tag pacing sleep (>=2s) -- output_ts ahead of wall by {raw_sleep_ms}ms; clamped to {clamped}ms"
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(clamped)).await;
             }
 
             let session = self.session.as_mut().expect("session was just set");

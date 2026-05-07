@@ -229,10 +229,27 @@ impl Session {
             self.msg_stream_id,
             bytes::BytesMut::from(body),
         );
-        self.packetizer
+        // Phase 2 probe (#176/#177/#178): time the actual TCP-level write
+        // so we can prove whether stalls are at write_chunk (TCP-level) or
+        // between chunks (runtime starvation / channel wait).
+        let write_start = std::time::Instant::now();
+        let result = self
+            .packetizer
             .write_chunk(&mut chunk_info)
             .await
-            .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))
+            .map_err(|e| PushError::IoError(io::Error::other(e.to_string())));
+        let elapsed_ms = write_start.elapsed().as_millis() as u64;
+        if elapsed_ms >= 250 {
+            tracing::warn!(
+                csid,
+                msg_type_id,
+                body_len = body.len(),
+                timestamp_ms,
+                elapsed_ms,
+                "rtmp_push: SLOW write_chunk (>=250ms)"
+            );
+        }
+        result
     }
 
     /// Gracefully shut down the session.

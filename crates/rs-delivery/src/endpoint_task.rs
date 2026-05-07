@@ -21,6 +21,17 @@ pub use flv_normalizer::FlvStreamNormalizer;
 const MAX_FFMPEG_RESTARTS: u32 = 10;
 const MAX_CHUNK_MISS_COUNT: u32 = 40; // ~80s at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
+/// Live-edge lag detection: every N successful fetches, probe far ahead
+/// to detect cumulative lag and jump back to delivery_delay distance from
+/// live edge. Without this, any one-time slowdown (slow start, transient
+/// stall) accumulates forever — producer reads chunks at 1x speed and
+/// never catches up. Observed in prod (event 9289): VPS read pointer 70+
+/// min behind live edge, OBS-stop didn't drain cache because fresh chunks
+/// kept arriving faster than reader consumed.
+const LAG_PROBE_INTERVAL_ITERS: u32 = 30;
+/// Max exponential-probe ladder steps: 12 = up to 4096× delivery_delay
+/// search window. Each probe is a HEAD only (no body download).
+const LAG_PROBE_LADDER_MAX: u32 = 12;
 pub(crate) const WRITE_TIMEOUT_SECS: u64 = 30;
 const MAX_WRITE_FAILURES_PER_CHUNK: u32 = 3;
 /// Base S3 backoff (doubles on each error, max 60s, resets on success).
@@ -313,10 +324,43 @@ pub(crate) fn build_rtmp_url_pub(service_type: ServiceType, stream_key: &str) ->
 /// Producer task: fetches chunks from S3 and sends them into the bounded channel.
 /// Blocks on channel send when buffer is full (backpressure).
 #[allow(clippy::too_many_arguments)]
+/// Live-edge lag detection: exponential-probe ladder to find the highest
+/// known-existing chunk_id ahead of `current`. If the ladder finds chunks
+/// far ahead (more than `delivery_delay_chunks` × 2 ahead), returns the
+/// new chunk_id to jump to: `(highest_known - delivery_delay_chunks)`.
+///
+/// Each ladder rung is a HEAD-only probe (no body download). Cost is
+/// O(log lag) probes when lag is large, 1 probe when no lag exists.
+async fn detect_lag_and_jump<F: ChunkFetcher>(
+    fetcher: &F,
+    current: i64,
+    delivery_delay_chunks: i64,
+) -> Option<i64> {
+    if delivery_delay_chunks <= 0 {
+        return None;
+    }
+    // Start probe at 2× delivery_delay ahead. If chunk doesn't exist there,
+    // we are already at (or near) live edge — no skip needed.
+    let mut probe_offset: i64 = delivery_delay_chunks.saturating_mul(2);
+    let mut last_existing: Option<i64> = None;
+    for _ in 0..LAG_PROBE_LADDER_MAX {
+        let probe_id = current + probe_offset;
+        match fetcher.chunk_duration_ms(probe_id).await {
+            Ok(Some(_)) => {
+                last_existing = Some(probe_id);
+                probe_offset = probe_offset.saturating_mul(2);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    last_existing.map(|max_id| (max_id - delivery_delay_chunks).max(current + 1))
+}
+
 async fn producer_task<F: ChunkFetcher>(
     fetcher: F,
     tx: mpsc::Sender<PrefetchedChunk>,
     start_chunk_id: i64,
+    delivery_delay_ms: u64,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
     alias: String,
@@ -328,6 +372,9 @@ async fn producer_task<F: ChunkFetcher>(
     let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
     // Issue #173: rate-limited audit-row emitter, owned by this task.
     let mut s3_fetch_audit = crate::endpoint_audit::S3FetchAuditLimiter::new();
+    // Live-edge lag detection state.
+    let delivery_delay_chunks: i64 = ((delivery_delay_ms / 2000) as i64).max(1);
+    let mut iters_since_lag_probe: u32 = 0;
 
     loop {
         if *stop_rx.borrow() {
@@ -374,6 +421,22 @@ async fn producer_task<F: ChunkFetcher>(
                 }
 
                 chunk_id += 1;
+                iters_since_lag_probe += 1;
+                if iters_since_lag_probe >= LAG_PROBE_INTERVAL_ITERS && delivery_delay_ms > 0 {
+                    iters_since_lag_probe = 0;
+                    if let Some(new_id) =
+                        detect_lag_and_jump(&fetcher, chunk_id, delivery_delay_chunks).await
+                    {
+                        tracing::warn!(
+                            alias = %alias,
+                            from = chunk_id,
+                            to = new_id,
+                            jump = new_id - chunk_id,
+                            "Producer: live-edge lag detected, skipping ahead"
+                        );
+                        chunk_id = new_id;
+                    }
+                }
                 tokio::task::yield_now().await;
             }
             Ok(None) => {
@@ -918,6 +981,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
         fetcher,
         tx,
         start_chunk_id,
+        delivery_delay_ms,
         producer_stop,
         producer_stats,
         producer_alias,
