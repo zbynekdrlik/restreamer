@@ -3,32 +3,61 @@
 //! Extracted from endpoint_task to keep that file under the 1000-line gate.
 //! Issue #176 -- Phase 1: wire push samples to the real production hot path.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use crate::audit_ring::AuditRing;
 
+/// Static-per-task context for `emit_push_sample`. Built once at the top of
+/// `consumer_task` and reused on every push. Holds the previous-push
+/// timestamp internally via `Cell` so the call site is a single line.
+pub(crate) struct PushSampleCtx<'a> {
+    pub audit_ring: &'a Option<Arc<AuditRing>>,
+    pub push_audit_rl: &'a rs_core::audit::RateLimiter,
+    pub alias: &'a str,
+    pub delivery_delay_ms: u64,
+    pub event_start_at: std::time::Instant,
+    last_push_at: Cell<Option<std::time::Instant>>,
+}
+
+impl<'a> PushSampleCtx<'a> {
+    pub fn new(
+        audit_ring: &'a Option<Arc<AuditRing>>,
+        push_audit_rl: &'a rs_core::audit::RateLimiter,
+        alias: &'a str,
+        delivery_delay_ms: u64,
+    ) -> Self {
+        Self {
+            audit_ring,
+            push_audit_rl,
+            alias,
+            delivery_delay_ms,
+            event_start_at: std::time::Instant::now(),
+            last_push_at: Cell::new(None),
+        }
+    }
+}
+
 /// Emit a DiskCachePushSample audit row for one successful chunk push.
 /// Rate-limited via push_audit_rl keyed by (DiskCachePushSample, alias) so
 /// the audit log gets ~1 row/min/endpoint instead of ~1/2s.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_disk_cache_push_sample(
-    audit_ring: &Option<Arc<AuditRing>>,
-    push_audit_rl: &rs_core::audit::RateLimiter,
-    alias: &str,
+pub(crate) fn emit_push_sample(
+    ctx: &PushSampleCtx<'_>,
     chunk_id: i64,
     chunk_duration_ms: i64,
-    delivery_delay_ms: u64,
-    event_start_at: std::time::Instant,
-    last_push_at: &Option<std::time::Instant>,
     current_chunk_delay_secs: f64,
 ) {
-    if !push_audit_rl.allow(rs_core::audit::Action::DiskCachePushSample, alias) {
+    let now = std::time::Instant::now();
+    let prev = ctx.last_push_at.replace(Some(now));
+    if !ctx
+        .push_audit_rl
+        .allow(rs_core::audit::Action::DiskCachePushSample, ctx.alias)
+    {
         return;
     }
-    let Some(ring) = audit_ring else { return };
-    let now = std::time::Instant::now();
-    let inter_chunk_gap_ms = match last_push_at {
-        Some(t) => now.saturating_duration_since(*t).as_millis() as u64,
+    let Some(ring) = ctx.audit_ring else { return };
+    let inter_chunk_gap_ms = match prev {
+        Some(t) => now.saturating_duration_since(t).as_millis() as u64,
         None => 0,
     };
     let chunk_dur = chunk_duration_ms.max(0) as u64;
@@ -38,21 +67,23 @@ pub(crate) fn emit_disk_cache_push_sample(
         chunk_dur as f64 / inter_chunk_gap_ms as f64
     };
     let expected_wallclock_ms = (chunk_id.max(0) as u64).saturating_mul(chunk_dur);
-    let actual_wallclock_ms = now.saturating_duration_since(event_start_at).as_millis() as i64;
+    let actual_wallclock_ms = now
+        .saturating_duration_since(ctx.event_start_at)
+        .as_millis() as i64;
     let chunk_supply_lag_ms = actual_wallclock_ms.saturating_sub(expected_wallclock_ms as i64);
     let payload = serde_json::json!({
-        "endpoint": alias,
+        "endpoint": ctx.alias,
         "chunk_id": chunk_id,
         "chunk_supply_lag_ms": chunk_supply_lag_ms,
         "inter_chunk_gap_ms": inter_chunk_gap_ms,
         "burst_factor": burst_factor,
-        "delivery_delay_secs": delivery_delay_ms / 1000,
+        "delivery_delay_secs": ctx.delivery_delay_ms / 1000,
         "current_chunk_delay_secs": current_chunk_delay_secs,
     });
     ring.push(
         rs_core::audit::Severity::Warn,
         rs_core::audit::Source::Vps,
-        Some(alias.to_string()),
+        Some(ctx.alias.to_string()),
         rs_core::audit::Action::DiskCachePushSample,
         payload,
     );
