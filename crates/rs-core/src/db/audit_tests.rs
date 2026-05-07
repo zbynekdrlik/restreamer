@@ -100,6 +100,63 @@ async fn query_filters_event_and_severity() {
     assert_eq!(filtered[0].event_id, Some(1));
 }
 
+/// `Filter::action` narrows the SQL query to rows with a matching action string.
+/// Regression for #176: the `action` field was silently dropped before this fix.
+#[tokio::test]
+async fn query_filters_by_action() {
+    let pool = create_memory_pool().await.unwrap();
+    run_migrations(&pool).await.unwrap();
+    let (ws_tx, _rx) = broadcast::channel(16);
+
+    let rows = vec![
+        AuditRow {
+            severity: Severity::Info,
+            source: Source::Operator,
+            event_id: Some(1),
+            instance_id: None,
+            endpoint: None,
+            action: Action::EndpointStarted,
+            detail: serde_json::json!({}),
+            ts_override: None,
+        },
+        AuditRow {
+            severity: Severity::Warn,
+            source: Source::Vps,
+            event_id: Some(1),
+            instance_id: None,
+            endpoint: Some("YT NLW 4k".to_string()),
+            action: Action::EndpointRtmpPushDied,
+            detail: serde_json::json!({"lifetime_secs": 30}),
+            ts_override: None,
+        },
+        AuditRow {
+            severity: Severity::Error,
+            source: Source::S3,
+            event_id: Some(1),
+            instance_id: None,
+            endpoint: None,
+            action: Action::S3FetchFailed,
+            detail: serde_json::json!({}),
+            ts_override: None,
+        },
+    ];
+    audit::insert_batch(&pool, &rows, &ws_tx).await.unwrap();
+
+    let filtered = audit::query(
+        &pool,
+        audit::Filter {
+            action: Some("endpoint_rtmp_push_died".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(filtered.len(), 1, "action filter must return exactly 1 row");
+    assert_eq!(filtered[0].action, "endpoint_rtmp_push_died");
+    assert_eq!(filtered[0].endpoint.as_deref(), Some("YT NLW 4k"));
+}
+
 /// End-to-end audit flow: `record()` → `audit_writer_task` → `audit_log` row
 /// persisted AND `WsEvent::AuditAppended` broadcast. This is the pipeline
 /// that PR #129 wired up but left partially connected; we assert the full

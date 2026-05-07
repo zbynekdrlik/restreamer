@@ -565,6 +565,43 @@ mod audit_tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
+
+    /// `?action=` query parameter must be wired end-to-end through the HTTP
+    /// handler into the SQL WHERE clause. Regression test for #176: before the
+    /// fix the parameter was accepted by serde but silently dropped, causing
+    /// all actions in the window to be counted instead of just the target one.
+    #[tokio::test]
+    async fn audit_list_action_filter_returns_only_matching_rows() {
+        let state = test_state().await;
+        // Insert 3 rows with distinct action strings.
+        sqlx::query(
+            "INSERT INTO audit_log (severity, source, action, detail)
+             VALUES
+               ('info',  'operator', 'endpoint_started',        '{}'),
+               ('warn',  'vps',      'endpoint_rtmp_push_died', '{\"lifetime_secs\":30}'),
+               ('error', 's3',       's3_fetch_failed',         '{}')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit?action=endpoint_rtmp_push_died")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = json["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "action filter must return exactly 1 row");
+        assert_eq!(rows[0]["action"], "endpoint_rtmp_push_died");
+    }
 }
 
 #[cfg(test)]

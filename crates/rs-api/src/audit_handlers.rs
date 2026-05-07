@@ -26,6 +26,8 @@ pub struct ListQuery {
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
     pub since: Option<String>,
     #[serde(default)]
     pub until: Option<String>,
@@ -57,6 +59,7 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
         event_id: q.event_id,
         instance_id: q.instance_id,
         endpoint: q.endpoint,
+        action: q.action,
         severities,
         sources,
         since: q.since,

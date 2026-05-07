@@ -27,6 +27,7 @@ pub struct Filter {
     pub event_id: Option<i64>,
     pub instance_id: Option<i64>,
     pub endpoint: Option<String>,
+    pub action: Option<String>,
     pub severities: Vec<String>,
     pub sources: Vec<String>,
     pub since: Option<String>,
@@ -141,6 +142,10 @@ pub async fn query(pool: &SqlitePool, f: Filter) -> Result<Vec<AuditLogRow>> {
     if let Some(ep) = &f.endpoint {
         sql.push_str(&format!(" AND endpoint = ?{}", binds.len() + 1));
         binds.push(BindValue::Str(ep.clone()));
+    }
+    if let Some(act) = &f.action {
+        sql.push_str(&format!(" AND action = ?{}", binds.len() + 1));
+        binds.push(BindValue::Str(act.clone()));
     }
     if !f.severities.is_empty() {
         let placeholders: Vec<String> = f
