@@ -131,6 +131,7 @@ pub use crate::endpoint_audit::{
 
 #[path = "endpoint_consumer_helpers.rs"]
 mod consumer_helpers;
+use crate::disk_cache_push_sample::emit_disk_cache_push_sample;
 use consumer_helpers::{FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, handle_rust_push};
 
 /// Stats tracked per endpoint with diagnostics.
@@ -483,6 +484,7 @@ async fn consumer_task<P: OutputProcessFactory>(
     mut rx: mpsc::Receiver<PrefetchedChunk>,
     factory: P,
     ep_cfg: EndpointConfig,
+    delivery_delay_ms: u64,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
     rescue_video_url: Option<String>,
@@ -517,6 +519,10 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut consecutive_push_errors: u32 = 0;
     // Phase 1 telemetry for the Rust RTMP pusher -- reset on each connect.
     let mut rust_telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
+    // Phase 1 (#176): per-consumer rate limiter + clocks for DiskCachePushSample.
+    let event_start_at = std::time::Instant::now();
+    let mut last_push_at: Option<std::time::Instant> = None;
+    let push_audit_rl = rs_core::audit::RateLimiter::new();
 
     let use_rust_pusher = ep_cfg.pusher == PusherKind::Rust;
 
@@ -753,6 +759,21 @@ async fn consumer_task<P: OutputProcessFactory>(
                     RustPushAction::Continue => {}
                     RustPushAction::Break => break,
                 }
+                if matches!(action, RustPushAction::Continue) {
+                    let cur_chunk_delay = stats.lock().await.duration_processed_ms as f64 / 1000.0;
+                    emit_disk_cache_push_sample(
+                        &audit_ring,
+                        &push_audit_rl,
+                        &alias,
+                        chunk_id,
+                        chunk_duration_ms,
+                        delivery_delay_ms,
+                        event_start_at,
+                        &last_push_at,
+                        cur_chunk_delay,
+                    );
+                    last_push_at = Some(std::time::Instant::now());
+                }
             }
         } else if let Some(ref mut p) = proc {
             // ffmpeg write path: normalize FLV (PTS rebase, header strip
@@ -777,6 +798,20 @@ async fn consumer_task<P: OutputProcessFactory>(
                     s.duration_processed_ms += chunk_duration_ms.max(0) as u64;
                     s.current_chunk_id = chunk_id;
                     s.chunks_processed += 1;
+                    drop(s);
+                    let cur_chunk_delay = chunk_duration_ms.max(0) as f64 / 1000.0;
+                    emit_disk_cache_push_sample(
+                        &audit_ring,
+                        &push_audit_rl,
+                        &alias,
+                        chunk_id,
+                        chunk_duration_ms,
+                        delivery_delay_ms,
+                        event_start_at,
+                        &last_push_at,
+                        cur_chunk_delay,
+                    );
+                    last_push_at = Some(std::time::Instant::now());
                 }
                 Ok(Err(e)) => {
                     consecutive_write_failures += 1;
@@ -919,6 +954,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
         rx,
         factory,
         ep_cfg,
+        delivery_delay_ms,
         consumer_stop,
         consumer_stats,
         rescue_video_url,

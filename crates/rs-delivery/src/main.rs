@@ -16,6 +16,7 @@ mod clock_endpoint;
 pub mod db;
 mod disk_cache;
 mod disk_cache_fetcher;
+mod disk_cache_push_sample;
 pub mod endpoint_audit;
 pub mod endpoint_task;
 mod ffmpeg_reason;

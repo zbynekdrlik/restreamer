@@ -24,22 +24,6 @@ pub trait ReaderPusher: Send {
     async fn push_chunk(&mut self, bytes: Vec<u8>) -> Result<(), String>;
 }
 
-/// Phase 1 telemetry hookup for `EndpointReader`. When `None` (tests),
-/// no audit rows are emitted. Issue #176.
-pub struct ReaderTelemetry {
-    pub audit_ring: std::sync::Arc<crate::audit_ring::AuditRing>,
-    pub audit_rl: std::sync::Arc<rs_core::audit::RateLimiter>,
-    pub chunk_duration_ms: u64,
-    pub delivery_delay_secs: u64,
-    pub event_start_at: std::time::Instant,
-}
-
-impl std::fmt::Debug for ReaderTelemetry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReaderTelemetry").finish_non_exhaustive()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ReaderConfig {
     pub cache_dir: PathBuf,
@@ -48,7 +32,6 @@ pub struct ReaderConfig {
     pub stall_timeout_secs: u64,
     /// Test-only: stop after pushing this many chunks. `None` = unlimited.
     pub max_chunks: Option<u64>,
-    pub telemetry: Option<std::sync::Arc<ReaderTelemetry>>,
 }
 
 pub struct EndpointReader;
@@ -65,7 +48,6 @@ impl EndpointReader {
     ) -> Result<(), ReaderError> {
         let mut chunk_id = cfg.start_chunk_id;
         let mut pushed = 0u64;
-        let mut last_push_at: Option<std::time::Instant> = None;
         loop {
             if let Some(cap) = cfg.max_chunks {
                 if pushed >= cap {
@@ -88,42 +70,6 @@ impl EndpointReader {
                         .await
                         .map_err(ReaderError::PushFailed)?;
                     positions.advance(&cfg.alias, chunk_id);
-                    if let Some(tel) = &cfg.telemetry {
-                        let now = std::time::Instant::now();
-                        let inter_chunk_gap_ms = match last_push_at {
-                            Some(t) => now.saturating_duration_since(t).as_millis() as u64,
-                            None => 0,
-                        };
-                        let expected_wallclock_ms =
-                            (chunk_id as u64).saturating_mul(tel.chunk_duration_ms);
-                        let actual_wallclock_ms = now
-                            .saturating_duration_since(tel.event_start_at)
-                            .as_millis() as i64;
-                        let chunk_supply_lag_ms =
-                            actual_wallclock_ms.saturating_sub(expected_wallclock_ms as i64);
-                        if tel
-                            .audit_rl
-                            .allow(rs_core::audit::Action::DiskCachePushSample, &cfg.alias)
-                        {
-                            let payload = build_push_sample_payload(
-                                &cfg.alias,
-                                chunk_id as u64,
-                                chunk_supply_lag_ms,
-                                inter_chunk_gap_ms,
-                                tel.chunk_duration_ms,
-                                tel.delivery_delay_secs,
-                                0.0,
-                            );
-                            tel.audit_ring.push(
-                                rs_core::audit::Severity::Info,
-                                rs_core::audit::Source::Vps,
-                                Some(cfg.alias.clone()),
-                                rs_core::audit::Action::DiskCachePushSample,
-                                payload,
-                            );
-                        }
-                        last_push_at = Some(now);
-                    }
                     chunk_id += 1;
                     pushed += 1;
                 }
@@ -155,6 +101,8 @@ impl EndpointReader {
     }
 }
 
+/// Used by the unit tests below; the production emission lives in
+/// endpoint_task::emit_disk_cache_push_sample (via disk_cache_push_sample.rs).
 #[allow(clippy::too_many_arguments)]
 fn build_push_sample_payload(
     endpoint: &str,
@@ -224,7 +172,6 @@ mod tests {
             start_chunk_id: 0,
             stall_timeout_secs: 5,
             max_chunks: Some(2),
-            telemetry: None,
         };
         EndpointReader::run_once(cfg, registry, positions, pusher)
             .await
@@ -252,7 +199,6 @@ mod tests {
             start_chunk_id: 0,
             stall_timeout_secs: 5,
             max_chunks: Some(1),
-            telemetry: None,
         };
         EndpointReader::run_once(cfg, registry, positions.clone(), pusher)
             .await
@@ -278,7 +224,6 @@ mod tests {
             start_chunk_id: 0,
             stall_timeout_secs: 1,
             max_chunks: Some(1),
-            telemetry: None,
         };
         let result = EndpointReader::run_once(cfg, registry, positions, pusher).await;
         assert!(matches!(result, Err(ReaderError::StallTimeout { .. })));
