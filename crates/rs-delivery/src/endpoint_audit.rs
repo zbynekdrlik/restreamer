@@ -266,6 +266,10 @@ pub fn classify_s3_fetch_error(msg: &str) -> &'static str {
 /// should see "rust pusher reconnected" immediately, not the misleading
 /// "ffmpeg died" that would appear if both backends shared
 /// `EndpointFfmpegDied` (#103 4-h soak feedback).
+///
+/// No production callers remain -- superseded by `emit_rtmp_push_died_detailed`.
+/// Retained under `#[cfg(test)]` for mutation-killing tests.
+#[cfg(test)]
 pub fn emit_rtmp_push_died(
     audit_ring: &Option<Arc<AuditRing>>,
     alias: &str,

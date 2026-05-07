@@ -58,6 +58,9 @@ impl RtmpPushTelemetry {
         self.bytes_sent = self.bytes_sent.saturating_add(n_bytes);
     }
 
+    /// Wired by the rs-rtmp-push read loop on incoming RTMP Acknowledgement
+    /// messages. Phase 2 (#177) will plumb the call site into the ClientSession
+    /// receive path; today this method is unreachable from production.
     pub fn note_upstream_ack(&mut self) {
         self.last_upstream_ack_at = Some(self.now());
     }
@@ -74,24 +77,51 @@ impl RtmpPushTelemetry {
             .last_upstream_ack_at
             .map(|t| now.saturating_duration_since(t).as_millis() as u64);
 
-        let truncated = if close_buf.len() > 64 {
-            &close_buf[..64]
-        } else {
-            close_buf
-        };
-        let mut hex = String::with_capacity(truncated.len() * 2);
-        for b in truncated {
-            hex.push_str(&format!("{:02x}", b));
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "bytes_sent_since_connect".into(),
+            serde_json::json!(self.bytes_sent),
+        );
+        map.insert(
+            "time_since_connect_ms".into(),
+            serde_json::json!(time_since_connect_ms),
+        );
+        map.insert(
+            "time_since_last_upstream_ack_ms".into(),
+            serde_json::json!(time_since_last_upstream_ack_ms),
+        );
+        // Omit last_rtmp_message_type_sent when None -- field is not yet wired
+        // from production (Phase 2, #177); emitting null would mislead operators
+        // into thinking "no message sent" when in fact we just don't know.
+        if let Some(msg_type) = self.last_message_type_sent {
+            map.insert(
+                "last_rtmp_message_type_sent".into(),
+                serde_json::json!(msg_type),
+            );
         }
-
-        serde_json::json!({
-            "bytes_sent_since_connect": self.bytes_sent,
-            "time_since_connect_ms": time_since_connect_ms,
-            "time_since_last_upstream_ack_ms": time_since_last_upstream_ack_ms,
-            "last_rtmp_message_type_sent": self.last_message_type_sent,
-            "chunks_pushed": self.chunks_pushed,
-            "upstream_close_first_bytes_hex": hex,
-        })
+        map.insert(
+            "chunks_pushed".into(),
+            serde_json::json!(self.chunks_pushed),
+        );
+        // Omit upstream_close_first_bytes_hex when the close buffer is empty --
+        // an empty string would look like "no bytes received" which is ambiguous
+        // (the buffer may simply not have been plumbed yet, Phase 2, #177).
+        if !close_buf.is_empty() {
+            let truncated = if close_buf.len() > 64 {
+                &close_buf[..64]
+            } else {
+                close_buf
+            };
+            let mut hex = String::with_capacity(truncated.len() * 2);
+            for b in truncated {
+                hex.push_str(&format!("{:02x}", b));
+            }
+            map.insert(
+                "upstream_close_first_bytes_hex".into(),
+                serde_json::json!(hex),
+            );
+        }
+        serde_json::Value::Object(map)
     }
 }
 

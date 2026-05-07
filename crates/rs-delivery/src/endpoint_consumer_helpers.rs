@@ -138,6 +138,7 @@ pub(super) async fn handle_rust_push(
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             let reconnect_count = pusher.reconnect_count();
+            // Phase 2 (#177): plumb actual chunks_buffered_in_pipeline + close-buffer bytes from rs-rtmp-push.
             endpoint_audit::emit_rtmp_push_died_detailed(
                 audit_ring,
                 alias,
@@ -199,6 +200,7 @@ pub(super) async fn handle_rust_push(
             // stall_reason on the dashboard. Backoff matches the fixed
             // 30 s sleep below.
             let backoff_ms: u64 = 30_000;
+            // Phase 2 (#177): plumb actual chunks_buffered_in_pipeline + close-buffer bytes from rs-rtmp-push.
             endpoint_audit::emit_rtmp_push_died_detailed(
                 audit_ring,
                 alias,

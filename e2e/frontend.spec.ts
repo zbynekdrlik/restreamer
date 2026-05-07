@@ -2289,4 +2289,16 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
     await page.goto("/");
     await expect(assertYtHealthGood(page)).resolves.toBeUndefined();
   });
+
+  test("YT studio gate fails when no active YT stream is observed", async ({ page }) => {
+    await page.route("**/api/v1/youtube/status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ authenticated: true, streams: [] }),
+      });
+    });
+    await page.goto("/");
+    await expect(assertYtHealthGood(page)).rejects.toThrow(/no active YT stream/);
+  });
 });

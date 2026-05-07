@@ -214,7 +214,9 @@ impl DownloadService {
                     return;
                 }
                 Ok(None) => {
-                    self.profile.record_failure("404");
+                    // 404 is "chunk not yet uploaded" -- normal in-stream signal, not a fetch
+                    // failure for the profile (which dashboards as outage). Counted only via
+                    // existing producer-side audit.
                     self.registry.mark_not_found(chunk_id);
                     return;
                 }

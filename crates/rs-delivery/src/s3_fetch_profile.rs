@@ -3,7 +3,8 @@
 // Issue #176.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 pub struct S3FetchProfile {
     inner: Mutex<Inner>,
@@ -38,7 +39,7 @@ impl S3FetchProfile {
     }
 
     pub fn record_success(&self, latency_ms: u64, bytes: u64) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock();
         g.count += 1;
         g.bytes_total += bytes;
         let bucket = bucket_index(latency_ms);
@@ -46,12 +47,12 @@ impl S3FetchProfile {
     }
 
     pub fn record_failure(&self, class: &str) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock();
         *g.fail_count_by_class.entry(class.to_string()).or_insert(0) += 1;
     }
 
     pub fn snapshot(&self) -> S3FetchProfileSnapshot {
-        let g = self.inner.lock().unwrap();
+        let g = self.inner.lock();
         let p50 = quantile_from_buckets(&g.latency_buckets, 0.50);
         let p99 = quantile_from_buckets(&g.latency_buckets, 0.99);
         S3FetchProfileSnapshot {

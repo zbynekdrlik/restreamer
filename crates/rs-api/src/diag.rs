@@ -97,7 +97,7 @@ async fn fetch_audit_60min(pool: &SqlitePool) -> Vec<Value> {
     let rows: Result<Vec<AuditRow>, _> = sqlx::query_as(
         "SELECT id, ts, severity, action, detail FROM audit_log \
          WHERE ts > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-60 minutes') \
-         ORDER BY id DESC LIMIT 5000",
+         ORDER BY id DESC LIMIT 50000",
     )
     .fetch_all(pool)
     .await;
@@ -169,6 +169,12 @@ pub async fn build_dump<S: DumpSources>(sources: &S) -> Value {
     })
 }
 
+// TODO #176-followup: enforce loopback-only access on /diag/dump
+// ConnectInfo<SocketAddr> requires into_make_service_with_connect_info at the
+// server bind site (crates/rs-api/src/lib.rs::serve). The current server uses
+// axum::serve(listener, app) without connect-info plumbing, so the extractor
+// is unavailable. See GitHub issue "Enforce loopback-only on /api/v1/diag/dump
+// (#176 follow-up)" for the tracking item.
 pub async fn diag_dump_handler(State(state): State<AppState>) -> Json<Value> {
     let event_id = current_event_id_from_state(&state).await;
     let sources = ProductionSources {
