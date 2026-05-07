@@ -166,10 +166,10 @@ async fn start_position_live_walks_back_target_delay_buffer_for_midstream_add() 
         .await
         .unwrap();
 
-    // Insert 100 chunks of 2000 ms each, all sent=1. Total content = 200 s.
-    // With default target_delay = 120 s, the walk should land on
-    // seq=100 - (120000/2000) + 1 = 41 (so the buffer summed from 41..=100
-    // is exactly 60 chunks * 2000 ms = 120 s).
+    // Insert 100 chunks of 2000 ms each, all sent=1.
+    // Strict live-edge policy (#174): Live always returns latest_seq + 1
+    // regardless of target_delay_ms. The warmup loop, not compute_target,
+    // is what produces the delay buffer (from NEW chunks only).
     for seq in 1i64..=100 {
         sqlx::query(
             "INSERT INTO chunk_records
@@ -189,8 +189,8 @@ async fn start_position_live_walks_back_target_delay_buffer_for_midstream_add() 
         .await
         .unwrap();
     assert_eq!(
-        live, 41,
-        "Live must walk back ~120 s of buffer from latest (100), expected seq 41 got {live}"
+        live, 101,
+        "Live (strict): latest+1, expected 101 got {live}"
     );
 
     let beg = resolve_start_chunk_id(&pool, event_id, &StartPosition::Beginning, 120_000)
@@ -198,12 +198,12 @@ async fn start_position_live_walks_back_target_delay_buffer_for_midstream_add() 
         .unwrap();
     assert_eq!(beg, 1, "Beginning must resolve to first sequence (1)");
 
-    // Smaller delay walks back fewer chunks (60 s = 30 chunks at 2 s each).
+    // target_delay_ms is now legacy and ignored by Live.
     let live_short = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 60_000)
         .await
         .unwrap();
     assert_eq!(
-        live_short, 71,
-        "60 s target must walk back 30 chunks from latest (100), got {live_short}"
+        live_short, 101,
+        "Live ignores target_delay_ms: latest+1=101, got {live_short}"
     );
 }

@@ -20,6 +20,7 @@ mod disk_cache_push_sample;
 pub mod endpoint_audit;
 pub mod endpoint_task;
 mod ffmpeg_reason;
+mod producer_lag;
 pub mod rescue;
 pub mod rtmp_push_telemetry;
 mod s3_fetch;
