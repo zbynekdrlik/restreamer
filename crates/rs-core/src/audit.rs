@@ -101,6 +101,15 @@ pub enum Action {
     /// successful poll. Operators watching the audit feed can tell
     /// "dashboard is wrong, backend is right" without paging anyone.
     DbUiFlagStale,
+    /// Host (stream.snv) lost internet egress. Emitted by `internet_probe`
+    /// when N consecutive HEAD probes to a known stable URL fail.
+    /// Operators should distinguish "host LAN/ISP flake" from
+    /// "VPS code regression" -- this row is the former. Issue #176.
+    HostInternetUnreachable,
+    /// Host (stream.snv) recovered internet egress after a previous
+    /// `HostInternetUnreachable`. Emitted on first successful probe
+    /// after a stretch of failures. Issue #176.
+    HostInternetRecovered,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

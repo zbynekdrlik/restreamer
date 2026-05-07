@@ -13,6 +13,7 @@ mod delivery_youtube;
 pub(crate) mod diag;
 pub mod diagnostics_pacing;
 pub mod handlers;
+pub(crate) mod internet_probe;
 pub mod metrics_handlers;
 pub mod obs;
 pub mod rescue_video_handlers;
