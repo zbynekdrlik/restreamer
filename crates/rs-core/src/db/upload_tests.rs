@@ -402,7 +402,7 @@ async fn compute_target_start_chunk_returns_one_on_empty_event() {
         .await
         .unwrap();
 
-    let start = db::compute_target_start_chunk(&pool, event_id, 120_000)
+    let start = db::compute_target_start_chunk(&pool, event_id)
         .await
         .unwrap();
     assert_eq!(start, 1, "no sent chunks: must return 1 (next OBS chunk)");
@@ -429,40 +429,10 @@ async fn compute_target_start_chunk_returns_latest_plus_one_with_chunks() {
         set_chunk_sent(&pool, id).await.unwrap();
     }
 
-    let start = db::compute_target_start_chunk(&pool, event_id, 12_000)
+    let start = db::compute_target_start_chunk(&pool, event_id)
         .await
         .unwrap();
     assert_eq!(start, 11, "latest sent seq is 10: must return 11");
-}
-
-#[tokio::test]
-async fn compute_target_start_chunk_ignores_target_ms() {
-    // Target_ms is a legacy parameter; live-edge result must not depend on it.
-    let pool = setup_db_for_start_chunk().await;
-    let event_id = upsert_streaming_event(&pool, "start-chunk-target-ignored")
-        .await
-        .unwrap();
-
-    for i in 1..=5 {
-        let id = insert_chunk(
-            &pool,
-            event_id,
-            &format!("/tmp/e{i}.ts"),
-            1000,
-            &format!("e{i}"),
-            4000,
-        )
-        .await
-        .unwrap();
-        set_chunk_sent(&pool, id).await.unwrap();
-    }
-
-    for &target in &[1_i64, 1_000, 60_000, 600_000] {
-        let start = db::compute_target_start_chunk(&pool, event_id, target)
-            .await
-            .unwrap();
-        assert_eq!(start, 6, "target_ms={target}: still latest+1");
-    }
 }
 
 #[tokio::test]
@@ -490,7 +460,7 @@ async fn compute_target_start_chunk_returns_latest_plus_one_when_all_durations_z
         set_chunk_sent(&pool, id).await.unwrap();
     }
 
-    let start = db::compute_target_start_chunk(&pool, event_id, 12_000)
+    let start = db::compute_target_start_chunk(&pool, event_id)
         .await
         .unwrap();
     assert_eq!(start, 101, "100 chunks (any duration): must return 101");
@@ -521,7 +491,7 @@ async fn compute_target_start_chunk_skips_unsent_chunks() {
         }
     }
 
-    let start = db::compute_target_start_chunk(&pool, event_id, 12_000)
+    let start = db::compute_target_start_chunk(&pool, event_id)
         .await
         .unwrap();
     assert_eq!(start, 6, "latest sent=5 (unsent ignored): must return 6");

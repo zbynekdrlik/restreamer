@@ -3122,7 +3122,11 @@ jobs:
           # the VPS must start delivering chunks. If it does not, the dashboard
           # shows "0 delivered" indefinitely -- exactly the production failure
           # operator hit. Polls every 3s up to 200s.
-          # Threshold = 200s = delivery_delay_secs (120) + boot/init slack (80).
+          # Threshold = 200s = delivery_delay_secs (120 — see
+          # default_delivery_delay_secs() in crates/rs-core/src/config.rs)
+          # + boot/init slack (80). If operator config bumps
+          # delivery_delay_secs, bump this too or replace with a
+          # dynamic read of /api/v1/config.
           # Under strict-live-edge (#174) the warmup loop legitimately fills
           # 120s of NEW chunks before push begins, so the previous 90s gate
           # is too tight.

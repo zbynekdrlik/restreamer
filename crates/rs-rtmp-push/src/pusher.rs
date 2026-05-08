@@ -22,6 +22,11 @@ pub struct RtmpPusher {
 /// issue #171). 100 disables catch-up entirely (real-time only).
 pub const CATCHUP_FACTOR_PCT: u64 = 120;
 
+/// Forward-jump threshold for FLV tag timestamps. Anything past this
+/// is treated as chunker-side glitch and triggers a re-anchor on the
+/// wire timeline. Single source of truth for both audio + video tracks.
+const MAX_TAG_TS_JUMP_MS: u32 = 30_000;
+
 /// Pure pacing helper. Returns the wallclock ms to sleep at the END of a
 /// push_flv_bytes call so the chunk's push rate is capped at
 /// `catchup_factor_pct/100` × real-time.
@@ -215,7 +220,6 @@ impl RtmpPusher {
                         // → upstream connection reset). Re-anchor on the
                         // wire timeline so output_ts steps by 1ms instead
                         // of the bad delta, while preserving monotonicity.
-                        const MAX_TAG_TS_JUMP_MS: u32 = 30_000;
                         if let Some(prev) = self.state.last_audio_xiu_ts {
                             let backward = tag.timestamp_ms < prev;
                             let forward_jump =
@@ -256,7 +260,6 @@ impl RtmpPusher {
                     if !is_seq_header {
                         // Detect BACKWARD + large FORWARD jumps. See
                         // matching audio block above for rationale.
-                        const MAX_TAG_TS_JUMP_MS: u32 = 30_000;
                         if let Some(prev) = self.state.last_video_xiu_ts {
                             let backward = tag.timestamp_ms < prev;
                             let forward_jump =

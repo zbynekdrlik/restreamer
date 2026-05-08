@@ -66,10 +66,14 @@ pub struct StartDeliveryResult {
     pub auth_token: String,
 }
 
-/// Trait abstracting the "delete all chunks under a prefix" operation.
-/// Production implementation is `rs_endpoint::s3::S3Client`; tests use a
-/// mock. Decoupling the wipe from the concrete client lets us write
-/// positive unit tests without network I/O (#174 review v2).
+/// Trait abstracting "delete all chunks under a prefix".
+///
+/// Contract: `event_prefix` is the **bare** event prefix without trailing
+/// slash, e.g. `"<client_uuid>/<event_name>"`. Implementations are
+/// responsible for whatever path-building they need internally
+/// (`S3Client::delete_event_chunks` appends the trailing slash).
+/// This decouples mock fidelity from the concrete client and is
+/// asserted in `delivery_tests::wipe_calls_delete_with_correct_prefix`.
 #[async_trait::async_trait]
 pub trait EventChunkWiper: Send + Sync {
     async fn delete_event_chunks(&self, event_prefix: &str) -> Result<u64, String>;
@@ -558,8 +562,7 @@ impl DeliveryOrchestrator {
             // the previous 0-900s wait loop snaps "Start Delivering" from
             // multi-second to instant. The warmup loop on the VPS still
             // accumulates target_delay_ms of NEW chunks before push begins.
-            start_chunk_id =
-                db::compute_target_start_chunk(&self.pool, event_id, target_delay_ms).await?;
+            start_chunk_id = db::compute_target_start_chunk(&self.pool, event_id).await?;
             // Orphan DB rows from prior s3_cleared can point at chunks
             // that no longer exist on S3; advance to the first chunk_id
             // that actually exists or the producer hangs (#174).

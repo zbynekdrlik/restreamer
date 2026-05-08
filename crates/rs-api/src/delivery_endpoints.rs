@@ -51,8 +51,7 @@ pub async fn resolve_start_chunk_id(
             Ok(first)
         }
         StartPosition::Live => {
-            let start =
-                db::compute_target_start_chunk(pool, event_id, target_delay_ms as i64).await?;
+            let start = db::compute_target_start_chunk(pool, event_id).await?;
             Ok(start)
         }
     }

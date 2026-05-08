@@ -450,14 +450,7 @@ pub async fn get_latest_sequence_number_for_event(
 /// event's sent chunks, or `1` if no chunks sent yet. Never returns a
 /// historical chunk_id. The VPS warmup loop accumulates `delivery_delay_ms`
 /// of NEW chunks before pushing.
-///
-/// `_target_ms` is currently unused; kept in the signature for future
-/// buffering policies and other StartPosition arms.
-pub async fn compute_target_start_chunk(
-    pool: &SqlitePool,
-    event_id: i64,
-    _target_ms: i64,
-) -> Result<i64> {
+pub async fn compute_target_start_chunk(pool: &SqlitePool, event_id: i64) -> Result<i64> {
     // STRICT live-edge: never replay historical chunks. Operator policy
     // (2026-05-07): when "Start Delivering" is pressed, the VPS must only
     // push chunks produced AFTER that moment. Returning latest+1 means
