@@ -4800,7 +4800,10 @@ jobs:
             # E2E Gate result to prevent a green PR when push E2E tests fail.
             echo "PR event: checking push-triggered E2E Gate for commit ${{ github.event.pull_request.head.sha }}..."
             SHA="${{ github.event.pull_request.head.sha }}"
-            MAX_WAIT=100
+            # 150 * 30s = 75 min. Push run includes Tauri build (~14m) +
+            # full E2E (~30m + 200s warmup gate per #174). Older 100*30s
+            # (50m) ceiling timed out before push E2E completed.
+            MAX_WAIT=150
             WAIT_INTERVAL=30
             for i in $(seq 1 $MAX_WAIT); do
               # Find E2E Gate check run from the push-triggered workflow on this commit.
