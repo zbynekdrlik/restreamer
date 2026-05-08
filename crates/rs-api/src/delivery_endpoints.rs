@@ -40,7 +40,7 @@ pub async fn resolve_start_chunk_id(
     pool: &SqlitePool,
     event_id: i64,
     position: &StartPosition,
-    target_delay_ms: u64,
+    _target_delay_ms: u64,
 ) -> anyhow::Result<i64> {
     match position {
         StartPosition::Resume { chunk_id } => Ok(*chunk_id),
