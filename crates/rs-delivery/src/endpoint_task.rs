@@ -371,8 +371,10 @@ async fn producer_task<F: ChunkFetcher>(
                 }
 
                 chunk_id += 1;
+                // EWMA + [500,5000]ms clamp guards against outlier duration_ms.
                 if duration_ms > 0 {
-                    typical_chunk_dur_ms = duration_ms as u64;
+                    let c = (duration_ms as u64).clamp(500, 5000);
+                    typical_chunk_dur_ms = (3 * typical_chunk_dur_ms + c) / 4;
                 }
                 let delivery_delay_chunks: i64 =
                     ((delivery_delay_ms / typical_chunk_dur_ms.max(1)) as i64).max(1);

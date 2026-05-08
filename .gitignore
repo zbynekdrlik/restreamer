@@ -38,7 +38,7 @@ test-results/
 .playwright-mcp/
 dashboard-*.png
 soak-*.png
-# Local screenshots from debugging sessions (not for repo)
-*.png
-*.jpeg
-.playwright-mcp/
+# Repo-root debugging screenshots (must not catch leptos-ui/ assets,
+# src-tauri/icons/, etc.). Scoped to repo root only.
+/*.png
+/*.jpeg

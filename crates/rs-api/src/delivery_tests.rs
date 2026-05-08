@@ -172,29 +172,76 @@ fn pick_last_error_line_inline_returns_none_when_only_progress() {
     assert!(pick_last_error_line_inline(stderr).is_none());
 }
 
-#[tokio::test]
-async fn wipe_event_s3_chunks_no_op_when_event_missing() {
-    use crate::delivery::wipe_event_s3_chunks;
-    use rs_core::config::Config;
-    let pool = rs_core::db::create_memory_pool().await.unwrap();
-    rs_core::db::run_migrations(&pool).await.unwrap();
-    // No event with id=999 — function must return without panic.
-    wipe_event_s3_chunks(&pool, &Config::default(), 999).await;
+// --- wipe_event_s3_chunks tests (#174 review v2) ---
+//
+// Use EventChunkWiper trait + wipe_event_s3_chunks_with seam to mock the
+// S3 backend. Tests verify actual call semantics with no network I/O.
+
+struct MockWiper {
+    captured_prefix: std::sync::Mutex<Option<String>>,
+    result: Result<u64, String>,
+}
+
+impl MockWiper {
+    fn ok(count: u64) -> Self {
+        Self {
+            captured_prefix: std::sync::Mutex::new(None),
+            result: Ok(count),
+        }
+    }
+    fn err(msg: &str) -> Self {
+        Self {
+            captured_prefix: std::sync::Mutex::new(None),
+            result: Err(msg.to_string()),
+        }
+    }
+    fn last_prefix(&self) -> Option<String> {
+        self.captured_prefix.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::delivery::EventChunkWiper for MockWiper {
+    async fn delete_event_chunks(&self, event_prefix: &str) -> Result<u64, String> {
+        *self.captured_prefix.lock().unwrap() = Some(event_prefix.to_string());
+        self.result.clone()
+    }
 }
 
 #[tokio::test]
-async fn wipe_event_s3_chunks_warns_and_returns_on_invalid_s3_config() {
-    // Empty S3 credentials → S3Client::new errors → wipe must warn and
-    // return, never panic. This protects the wipe path against config
-    // misconfiguration so start_delivery can still proceed (the strict
-    // live-edge compute_target_start_chunk is the primary barrier).
-    use crate::delivery::wipe_event_s3_chunks;
-    use rs_core::config::Config;
-    let pool = rs_core::db::create_memory_pool().await.unwrap();
-    rs_core::db::run_migrations(&pool).await.unwrap();
-    let event_id = rs_core::db::upsert_streaming_event(&pool, "wipe-test")
+async fn wipe_calls_delete_with_correct_prefix_and_returns_count() {
+    use crate::delivery::wipe_event_s3_chunks_with;
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+    let event_id = db::upsert_streaming_event(&pool, "evt-positive")
         .await
         .unwrap();
-    let cfg = Config::default(); // S3 credentials empty by default
-    wipe_event_s3_chunks(&pool, &cfg, event_id).await;
+    let mut cfg = Config::default();
+    cfg.client_uuid = "uuid-abc".into();
+    let mock = MockWiper::ok(42);
+    let res = wipe_event_s3_chunks_with(&pool, &cfg, event_id, &mock).await;
+    assert_eq!(res, Ok(42));
+    assert_eq!(mock.last_prefix().as_deref(), Some("uuid-abc/evt-positive"));
+}
+
+#[tokio::test]
+async fn wipe_returns_err_when_event_missing() {
+    use crate::delivery::wipe_event_s3_chunks_with;
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+    let mock = MockWiper::ok(0);
+    let res = wipe_event_s3_chunks_with(&pool, &Config::default(), 999, &mock).await;
+    assert!(matches!(res, Err(ref s) if s.contains("no streaming event")));
+    assert!(mock.last_prefix().is_none());
+}
+
+#[tokio::test]
+async fn wipe_propagates_backend_error() {
+    use crate::delivery::wipe_event_s3_chunks_with;
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+    let event_id = db::upsert_streaming_event(&pool, "evt-err").await.unwrap();
+    let mock = MockWiper::err("boom");
+    let res = wipe_event_s3_chunks_with(&pool, &Config::default(), event_id, &mock).await;
+    assert!(matches!(res, Err(ref s) if s.contains("boom")));
 }

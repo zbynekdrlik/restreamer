@@ -66,41 +66,66 @@ pub struct StartDeliveryResult {
     pub auth_token: String,
 }
 
+/// Trait abstracting the "delete all chunks under a prefix" operation.
+/// Production implementation is `rs_endpoint::s3::S3Client`; tests use a
+/// mock. Decoupling the wipe from the concrete client lets us write
+/// positive unit tests without network I/O (#174 review v2).
+#[async_trait::async_trait]
+pub trait EventChunkWiper: Send + Sync {
+    async fn delete_event_chunks(&self, event_prefix: &str) -> Result<u64, String>;
+}
+
+#[async_trait::async_trait]
+impl EventChunkWiper for rs_endpoint::s3::S3Client {
+    async fn delete_event_chunks(&self, event_prefix: &str) -> Result<u64, String> {
+        rs_endpoint::s3::S3Client::delete_event_chunks(self, event_prefix)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Delete all S3 chunks under this event's prefix. Bounded by a 60s
-/// timeout. Failures `warn!` and return — the strict-live-edge
-/// `compute_target_start_chunk` is the primary correctness barrier; the
-/// wipe is belt-and-suspenders. Public so callers and tests can exercise
-/// the operator policy without touching private orchestrator state.
-pub async fn wipe_event_s3_chunks(pool: &SqlitePool, config: &Config, event_id: i64) {
-    let event = match db::get_streaming_event_by_id(pool, event_id).await {
-        Ok(Some(e)) => e,
-        Ok(None) => return,
-        Err(e) => {
-            warn!(event_id, "S3 wipe-on-start: db lookup failed: {e}");
-            return;
-        }
-    };
+/// timeout. Returns `Ok(deleted_count)` on success, `Err(reason)` on
+/// failure. Caller is `start_delivery`, which logs the result and
+/// proceeds even on failure (the strict-live-edge `compute_target_start_chunk`
+/// is the primary correctness barrier; the wipe is belt-and-suspenders).
+///
+/// Returning `Result` (instead of swallowing errors) gives observability
+/// for orphaned-chunk billing tracking (#174 review v2 finding 7).
+pub async fn wipe_event_s3_chunks(
+    pool: &SqlitePool,
+    config: &Config,
+    event_id: i64,
+) -> Result<u64, String> {
+    let s3 = rs_endpoint::s3::S3Client::new(&config.s3).map_err(|e| format!("init: {e}"))?;
+    wipe_event_s3_chunks_with(pool, config, event_id, &s3).await
+}
+
+/// Test seam: same as `wipe_event_s3_chunks` but takes any `EventChunkWiper`.
+pub async fn wipe_event_s3_chunks_with(
+    pool: &SqlitePool,
+    config: &Config,
+    event_id: i64,
+    wiper: &dyn EventChunkWiper,
+) -> Result<u64, String> {
+    let event = db::get_streaming_event_by_id(pool, event_id)
+        .await
+        .map_err(|e| format!("db lookup: {e}"))?
+        .ok_or_else(|| format!("no streaming event with id {event_id}"))?;
     let event_prefix = config.event_s3_prefix(&event.name);
-    let s3_client = match rs_endpoint::s3::S3Client::new(&config.s3) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(event_id, "S3 client init for wipe-on-start failed: {e}");
-            return;
-        }
-    };
-    let fut = s3_client.delete_event_chunks(&event_prefix);
+    let fut = wiper.delete_event_chunks(&event_prefix);
     match tokio::time::timeout(Duration::from_secs(60), fut).await {
-        Ok(Ok(n)) => info!(
-            event_id,
-            deleted = n,
-            prefix = %event_prefix,
-            "Wiped S3 chunks before starting delivery"
-        ),
-        Ok(Err(e)) => warn!(event_id, "S3 wipe-on-start failed (continuing): {e}"),
-        Err(_) => warn!(
-            event_id,
-            "S3 wipe-on-start timed out after 60s (continuing)"
-        ),
+        Ok(Ok(n)) => {
+            info!(
+                event_id,
+                deleted = n,
+                prefix = %event_prefix,
+                "Wiped S3 chunks before starting delivery"
+            );
+            Ok(n)
+        }
+        Ok(Err(e)) => Err(format!("delete failed: {e}")),
+        Err(_) => Err("timed out after 60s".into()),
     }
 }
 
@@ -226,8 +251,12 @@ impl DeliveryOrchestrator {
         }
 
         // Wipe S3 chunks for this event before spawning VPS (#174 operator
-        // policy 2026-05-07). See `wipe_event_s3_chunks` doc.
-        wipe_event_s3_chunks(&self.pool, &self.config, event_id).await;
+        // policy 2026-05-07). See `wipe_event_s3_chunks` doc. We surface
+        // failure as a warn so orphaned chunks become visible without
+        // aborting Start Delivering.
+        if let Err(e) = wipe_event_s3_chunks(&self.pool, &self.config, event_id).await {
+            warn!(event_id, "S3 wipe-on-start: {e}");
+        }
 
         // Get event endpoints to determine server size
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
@@ -523,46 +552,12 @@ impl DeliveryOrchestrator {
                 start_chunk_id, "Resuming delivery after crash recovery"
             );
         } else {
-            // Wait for the full target duration of content on S3 before
-            // creating the VPS. The previous "rescue video bridges the
-            // gap, so wait for 1 chunk" shortcut produced non-deterministic
-            // cache at delivery start because VPS-side warmup can exit
-            // with fewer real seconds of content than the duration sum
-            // suggests (zero-duration chunks on session reset). Waiting
-            // orchestrator-side guarantees target content exists before
-            // the VPS boots.
-            let wait_target_ms = target_delay_ms;
-
-            let max_wait_secs = 900;
-            for attempt in 0..max_wait_secs {
-                let sent_ms = db::get_sent_duration_ms(&self.pool, event_id)
-                    .await
-                    .unwrap_or(0);
-                if sent_ms >= wait_target_ms {
-                    info!(
-                        event_id,
-                        sent_ms, wait_target_ms, "Sent content duration meets target (init VPS)"
-                    );
-                    break;
-                }
-                if attempt % 10 == 0 {
-                    info!(
-                        event_id,
-                        sent_ms,
-                        wait_target_ms,
-                        attempt,
-                        "Waiting for sent duration ({sent_ms}ms / {wait_target_ms}ms)"
-                    );
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-            // Strict live-edge (#174): returns latest_sent+1 so the VPS reads
-            // only chunks produced AFTER Start Delivering was pressed. Buffer
-            // accumulation is delegated to the warmup loop, which collects
-            // `target_delay_ms` worth of NEW chunks before push begins. The
-            // wait loop above guarantees enough sent content exists to support
-            // warmup. `target_delay_ms` is currently unused by the function
-            // but kept in the signature for future buffering policies.
+            // Strict live-edge (#174): start at latest_sent+1. The producer
+            // simply waits for the next chunk OBS will upload — no need to
+            // pre-block the orchestrator on duration accumulation. Removing
+            // the previous 0-900s wait loop snaps "Start Delivering" from
+            // multi-second to instant. The warmup loop on the VPS still
+            // accumulates target_delay_ms of NEW chunks before push begins.
             start_chunk_id =
                 db::compute_target_start_chunk(&self.pool, event_id, target_delay_ms).await?;
             // Orphan DB rows from prior s3_cleared can point at chunks
