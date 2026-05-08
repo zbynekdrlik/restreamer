@@ -123,6 +123,9 @@ struct WsDeliveryEndpoint {
     stall_reason: Option<String>,
     #[serde(default)]
     ffmpeg_restart_count: u32,
+    /// Issue #172.
+    #[serde(default)]
+    reconnect_count: u32,
     #[serde(default)]
     last_error: Option<String>,
     #[serde(default)]
@@ -175,6 +178,7 @@ async fn load_initial_state(store: DashboardStore) {
                     stall_count: 0,
                     stall_reason: ep.stall_reason,
                     ffmpeg_restart_count: ep.ffmpeg_restart_count,
+                    reconnect_count: 0,
                     last_error: ep.last_error,
                     is_fast: ep.is_fast,
                     delivery_mode: ep.delivery_mode.clone(),
@@ -317,6 +321,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                             stall_count,
                             stall_reason: ep.stall_reason.clone(),
                             ffmpeg_restart_count: ep.ffmpeg_restart_count,
+                            reconnect_count: ep.reconnect_count,
                             last_error: ep.last_error.clone(),
                             is_fast: ep.is_fast,
                             delivery_mode: ep.delivery_mode.clone(),

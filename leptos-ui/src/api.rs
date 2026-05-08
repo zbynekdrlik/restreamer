@@ -450,6 +450,21 @@ pub struct UploadStats {
     pub error_rate: f64,
     pub in_flight: usize,
     pub adaptive_target: usize,
+    #[serde(default)]
+    pub permanent_recent: u32,
+    #[serde(default)]
+    pub render: StateRender,
+}
+
+/// Server-rendered visual contract for the upload-strip badge. Mirrors
+/// `rs_endpoint::metrics::StateRender` field-for-field. The component
+/// consumes (`class`, `label`, `tooltip`) directly so the visual logic
+/// stays centrally tested in `render_strip_state` (issue #168).
+#[derive(Clone, Debug, Deserialize, PartialEq, Default)]
+pub struct StateRender {
+    pub class: String,
+    pub label: String,
+    pub tooltip: String,
 }
 
 /// Get current upload telemetry snapshot (1-minute window) from backend.
@@ -711,6 +726,11 @@ pub struct DeliveryEndpointDetail {
     pub stall_reason: Option<String>,
     #[serde(default)]
     pub ffmpeg_restart_count: u32,
+    /// Rust-pusher reconnect counter (issue #172). Companion to
+    /// `ffmpeg_restart_count` for endpoints on the rust pusher path.
+    /// Defaults to 0 if VPS rs-delivery is older than this field.
+    #[serde(default)]
+    pub reconnect_count: u32,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]

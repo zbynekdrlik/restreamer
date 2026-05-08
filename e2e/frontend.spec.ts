@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import * as fs from "fs";
 import * as path from "path";
+import { assertYtHealthGood } from "./yt-health";
 
 // Inject Tauri mock before each page navigation
 const tauriMockScript = fs.readFileSync(
@@ -2179,7 +2180,18 @@ test.describe("Upload telemetry UI", () => {
     await expect(strip.locator(".upload-strip__rate")).toContainText("c/s");
     await expect(strip.locator(".upload-strip__median")).toContainText("ms");
     await expect(strip.locator(".upload-strip__inflight")).toContainText("in-flight");
-    await expect(strip.locator(".upload-strip__errors")).toContainText("errors");
+    // Issue #168: state badge replaces the old "errors X%" label. The
+    // server renders a class+label+tooltip via render_strip_state; here
+    // we just assert the element exists with one of the five state
+    // modifier classes and a non-empty label so the strip is never blank.
+    const stateBadge = strip.locator(".upload-strip__state");
+    await expect(stateBadge).toBeVisible();
+    const stateClass = (await stateBadge.getAttribute("class")) || "";
+    expect(stateClass).toMatch(
+      /upload-strip__state--(ok|burst|degraded|permanent|cascading)/,
+    );
+    const label = (await stateBadge.textContent()) || "";
+    expect(label.length).toBeGreaterThan(0);
   });
 
   test("clicking strip navigates to /uploads page", async ({ page }) => {
@@ -2210,5 +2222,83 @@ test.describe("Upload telemetry UI", () => {
     await checkbox.uncheck();
     // Sent rows come back
     await expect(page.locator(".uploads-row--sent").first()).toBeVisible();
+  });
+});
+
+test.describe("YT health gate (assertYtHealthGood)", () => {
+  test("YT studio gate fails when /api/v1/youtube/status reports health=bad", async ({
+    page,
+  }) => {
+    // This test runs against a STUBBED /api/v1/youtube/status response, not
+    // live YT. It exists to lock in the gate logic. The live youtube-studio-check
+    // E2E uses the same assertion; this is its unit-style guard.
+    await page.route("**/api/v1/youtube/status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          authenticated: true,
+          stream_receiving: true,
+          broadcast_testing: true,
+          broadcast_statuses: [],
+          stream_count: 1,
+          streams: [
+            {
+              title: "e2e rtmp",
+              stream_status: "active",
+              health_status: "bad",
+              configuration_issues: [
+                "videoIngestionFasterThanRealtime: Check video settings (error)",
+              ],
+              cdn_resolution: "2160p",
+              cdn_frame_rate: "30fps",
+              cdn_ingestion_type: "rtmp",
+            },
+          ],
+          error: null,
+        }),
+      });
+    });
+    await page.goto("/");
+    await expect(assertYtHealthGood(page)).rejects.toThrow(
+      /YT health must be 'good'/,
+    );
+  });
+
+  test("YT studio gate passes when health=good and configuration_issues empty", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/youtube/status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          authenticated: true,
+          stream_receiving: true,
+          streams: [
+            {
+              title: "e2e rtmp",
+              stream_status: "active",
+              health_status: "good",
+              configuration_issues: [],
+            },
+          ],
+        }),
+      });
+    });
+    await page.goto("/");
+    await expect(assertYtHealthGood(page)).resolves.toBeUndefined();
+  });
+
+  test("YT studio gate fails when no active YT stream is observed", async ({ page }) => {
+    await page.route("**/api/v1/youtube/status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ authenticated: true, streams: [] }),
+      });
+    });
+    await page.goto("/");
+    await expect(assertYtHealthGood(page)).rejects.toThrow(/no active YT stream/);
   });
 });

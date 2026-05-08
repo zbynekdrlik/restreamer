@@ -90,6 +90,11 @@ pub struct DeliveryEndpointState {
     pub stall_count: u32,
     pub stall_reason: Option<String>,
     pub ffmpeg_restart_count: u32,
+    /// Rust-pusher reconnect counter (issue #172). Mirrors
+    /// `ffmpeg_restart_count` for endpoints on the rust pusher path so
+    /// the dashboard can show "reconn xN" badges on YT/FB upstream
+    /// rotation events.
+    pub reconnect_count: u32,
     pub last_error: Option<String>,
     pub is_fast: bool,
     pub delivery_mode: Option<String>,

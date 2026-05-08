@@ -38,6 +38,80 @@ async fn get_pending_chunk_count_for_event_excludes_permanently_failed() {
 }
 
 #[tokio::test]
+async fn count_permanently_failed_since_only_counts_recent() {
+    // Issue #168: dashboard upload-strip needs a "permanent failures in
+    // the last 5 min" count to escalate from yellow (transient burst)
+    // to red. The counter must use upload_first_attempt_at as its
+    // timestamp anchor (the chunk's failure window starts when the
+    // first attempt fired) and must EXCLUDE chunks marked permanent
+    // before the cutoff so old failures don't keep the strip red
+    // forever.
+    let pool = setup_db().await;
+    let event_id = upsert_streaming_event(&pool, "evt-permcount")
+        .await
+        .unwrap();
+
+    // Chunk A: marked permanent 1 hour ago — should NOT count.
+    let old = insert_chunk(&pool, event_id, "/tmp/old.bin", 100, "old", 0)
+        .await
+        .unwrap();
+    upload::record_upload_attempt(&pool, old, 0).await.unwrap();
+    sqlx::query("UPDATE chunk_records SET upload_first_attempt_at = ?1 WHERE id = ?2")
+        .bind(1_000_000_000_000_i64) // way in the past
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    upload::mark_upload_permanently_failed(&pool, old)
+        .await
+        .unwrap();
+
+    // Chunk B: marked permanent 2 min ago (recent) — SHOULD count.
+    let recent = insert_chunk(&pool, event_id, "/tmp/recent.bin", 100, "recent", 0)
+        .await
+        .unwrap();
+    let now_ms = 2_000_000_000_000_i64;
+    let two_min_ago = now_ms - 2 * 60 * 1000;
+    upload::record_upload_attempt(&pool, recent, two_min_ago)
+        .await
+        .unwrap();
+    upload::mark_upload_permanently_failed(&pool, recent)
+        .await
+        .unwrap();
+
+    // Chunk C: live (NOT permanent) — should NEVER count.
+    let _live = insert_chunk(&pool, event_id, "/tmp/live.bin", 100, "live", 0)
+        .await
+        .unwrap();
+
+    // Cutoff = now - 5 min. Recent chunk B (2 min old) is in window;
+    // old chunk A (1 hour) is excluded; live chunk C is excluded.
+    let since = now_ms - 5 * 60 * 1000;
+    let n = upload::count_permanently_failed_since(&pool, since)
+        .await
+        .unwrap();
+    assert_eq!(
+        n, 1,
+        "only the chunk marked permanent within the 5-min window should count"
+    );
+
+    // Sanity: a wide-open since should count both permanent chunks.
+    let n_all = upload::count_permanently_failed_since(&pool, 0)
+        .await
+        .unwrap();
+    assert_eq!(n_all, 2);
+}
+
+#[tokio::test]
+async fn count_permanently_failed_since_zero_when_none() {
+    let pool = setup_db().await;
+    let n = upload::count_permanently_failed_since(&pool, 0)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
 async fn pending_chunks_excludes_permanently_failed() {
     // E2E-gate regression: chunks with upload_failed_permanently=1 used to
     // count as `pending_chunks`. Two dead chunks from a prior CI run made

@@ -213,6 +213,48 @@ impl S3Client {
         Ok(total_deleted)
     }
 
+    /// List the event prefix and return the smallest `{seq}.bin` whose
+    /// sequence number is >= `lower_bound`. Used by `poll_and_init` to
+    /// validate the orchestrator-computed `start_chunk_id` when the DB
+    /// has orphan rows referring to chunks that were already cleared
+    /// from S3 (so the producer doesn't get stuck on a 404 below the
+    /// real live edge). Returns `Ok(None)` if no chunk at or after
+    /// `lower_bound` exists.
+    pub async fn find_first_chunk_id_at_or_after(
+        &self,
+        event_prefix: &str,
+        lower_bound: i64,
+    ) -> Result<Option<i64>, EndpointError> {
+        let prefix = format!("{event_prefix}/");
+        let list = self
+            .bucket
+            .list(prefix.clone(), None)
+            .await
+            .map_err(|e| EndpointError::S3(format!("list failed: {e}")))?;
+        let mut best: Option<i64> = None;
+        for page in &list {
+            for obj in &page.contents {
+                let key = &obj.key;
+                let stem = match key.strip_prefix(&prefix) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let num_str = match stem.strip_suffix(".bin") {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let n: i64 = match num_str.parse() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                if n >= lower_bound && best.is_none_or(|b| n < b) {
+                    best = Some(n);
+                }
+            }
+        }
+        Ok(best)
+    }
+
     /// Compute total bytes and object count under a given prefix without
     /// downloading anything. Used by the S3 usage endpoint.
     pub async fn measure_prefix(&self, prefix: &str) -> Result<(u64, u64), EndpointError> {

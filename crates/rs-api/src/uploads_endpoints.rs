@@ -18,6 +18,16 @@ pub struct RecentQuery {
 }
 
 pub async fn get_uploads_stats(State(state): State<AppState>) -> Json<Snapshot> {
+    // Permanent failure escalation window: count chunks marked permanent
+    // whose first attempt fired in the last 5 minutes. Anything older is
+    // historical and should not keep the dashboard strip red.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let since_ms = now_ms - 5 * 60 * 1000;
+    let permanent_recent = db::count_permanently_failed_since(&state.pool, since_ms)
+        .await
+        .unwrap_or(0)
+        .max(0) as u32;
+    state.upload_metrics.set_permanent_recent(permanent_recent);
     let snap = state.upload_metrics.snapshot(Duration::from_secs(60));
     Json(snap)
 }
@@ -81,6 +91,16 @@ mod tests {
         assert!(v.get("error_rate").is_some());
         assert!(v.get("in_flight").is_some());
         assert!(v.get("adaptive_target").is_some());
+        // Issue #168: state classifier + server-rendered visuals must
+        // be present in every snapshot so the leptos-ui can render
+        // without re-implementing match arms client-side.
+        assert!(v.get("permanent_recent").is_some());
+        let state = v.get("state").expect("state field");
+        assert!(state.get("kind").is_some(), "state must be a tagged enum");
+        let render = v.get("render").expect("render field");
+        assert!(render.get("class").is_some());
+        assert!(render.get("label").is_some());
+        assert!(render.get("tooltip").is_some());
     }
 
     #[tokio::test]

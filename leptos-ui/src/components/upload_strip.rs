@@ -48,15 +48,13 @@ pub fn UploadStrip() -> impl IntoView {
             <span class="upload-strip__inflight">
                 {move || format!("in-flight {}/{}", stats.get().in_flight, stats.get().adaptive_target)}
             </span>
-            <span class=move || {
-                let s = stats.get();
-                if s.error_rate > 0.0 {
-                    "upload-strip__errors upload-strip__errors--alert"
-                } else {
-                    "upload-strip__errors"
+            <span
+                class=move || {
+                    format!("upload-strip__state upload-strip__state--{}", stats.get().render.class)
                 }
-            }>
-                {move || format!("errors {:.0}%", stats.get().error_rate * 100.0)}
+                title=move || stats.get().render.tooltip.clone()
+            >
+                {move || stats.get().render.label.clone()}
             </span>
         </div>
     }

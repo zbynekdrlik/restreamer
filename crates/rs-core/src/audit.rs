@@ -66,6 +66,33 @@ pub enum Action {
     EndpointRtmpPushDied,
     S3UploadFailed,
     S3FetchFailed,
+    /// Disk cache started pre-filling for an event. Emitted on first
+    /// EndpointReader registration. Issue #174.
+    DiskCachePrefillStarted,
+    /// Disk cache window is fully populated for at least one endpoint;
+    /// the first push is imminent.
+    DiskCachePrefillReady,
+    /// Rate-limited summary (1/min): number of chunks evicted by
+    /// EvictionTask. Useful for spotting churn.
+    DiskCacheChunkEvicted,
+    /// DownloadService bandwidth cap reached; sustained S3 latency
+    /// expected. Operator may want to investigate Hetzner status.
+    DiskCacheDownloadThrottled,
+    /// EndpointReader.wait_for_chunk timed out (default 60 s).
+    /// Indicates a real S3 outage longer than the cache window.
+    DiskCacheStallTimeout,
+    /// Disk write failed (ENOSPC / EIO). Severity::Error.
+    DiskCacheWriteFailed,
+    /// Reader pushed successfully after a stall; the cache absorbed
+    /// the transient. Pair with DiskCacheStallTimeout to bound outage
+    /// duration in the audit log.
+    DiskCacheReaderRecovered,
+    /// Per-endpoint push sample emitted by EndpointReader on chunk push.
+    /// Rate-limited 1/min/endpoint via RateLimiter keyed by
+    /// (DiskCachePushSample, endpoint_alias). Carries chunk_supply_lag_ms,
+    /// inter_chunk_gap_ms, burst_factor, current_chunk_delay_secs, and
+    /// delivery_delay_secs target. Issue #176.
+    DiskCachePushSample,
     RestreamerStarted,
     MigrationsApplied,
     /// DB write that drives UI state failed. Emitted when e.g.
@@ -74,6 +101,15 @@ pub enum Action {
     /// successful poll. Operators watching the audit feed can tell
     /// "dashboard is wrong, backend is right" without paging anyone.
     DbUiFlagStale,
+    /// Host (stream.snv) lost internet egress. Emitted by `internet_probe`
+    /// when N consecutive HEAD probes to a known stable URL fail.
+    /// Operators should distinguish "host LAN/ISP flake" from
+    /// "VPS code regression" -- this row is the former. Issue #176.
+    HostInternetUnreachable,
+    /// Host (stream.snv) recovered internet egress after a previous
+    /// `HostInternetUnreachable`. Emitted on first successful probe
+    /// after a stretch of failures. Issue #176.
+    HostInternetRecovered,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,5 +286,15 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 1, "second Info row should have been dropped");
+    }
+
+    #[test]
+    fn rate_limiter_keys_disk_cache_push_sample_per_endpoint() {
+        let rl = RateLimiter::new();
+        assert!(rl.allow(Action::DiskCachePushSample, "FB-NewLevel"));
+        assert!(!rl.allow(Action::DiskCachePushSample, "FB-NewLevel"));
+        // Different endpoint key -> separate slot, must allow.
+        assert!(rl.allow(Action::DiskCachePushSample, "YT NLCH 4K"));
+        assert!(!rl.allow(Action::DiskCachePushSample, "YT NLCH 4K"));
     }
 }

@@ -5,12 +5,15 @@ pub(crate) mod delivery_audit_mirror;
 pub mod delivery_endpoints;
 pub mod delivery_handlers;
 pub(crate) mod delivery_helpers;
+pub(crate) mod delivery_monitor;
 pub(crate) mod delivery_status;
 #[cfg(test)]
 mod delivery_tests;
 mod delivery_youtube;
+pub(crate) mod diag;
 pub mod diagnostics_pacing;
 pub mod handlers;
+pub mod internet_probe;
 pub mod metrics_handlers;
 pub mod obs;
 pub mod rescue_video_handlers;
@@ -261,6 +264,8 @@ async fn delivery_broadcast_loop(
                             chunk_delay_secs: 0.0,
                             stall_reason: None,
                             ffmpeg_restart_count: 0,
+
+                            reconnect_count: 0,
                             last_error: None,
                             is_fast: ep.is_fast,
                             delivery_mode: None,

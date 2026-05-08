@@ -536,7 +536,7 @@ app.get("/api/v1/chunks/stats", (_req, res) => {
   res.json(buildStatusResponse().chunk_stats);
 });
 
-// --- Upload telemetry (issue #118, #65) ---
+// --- Upload telemetry (issue #118, #65; state classifier #168) ---
 let uploadStats = {
   chunks_per_sec: 2.5,
   median_ms: 180,
@@ -544,6 +544,13 @@ let uploadStats = {
   error_rate: 0,
   in_flight: 3,
   adaptive_target: 8,
+  permanent_recent: 0,
+  state: { kind: "healthy" },
+  render: {
+    class: "ok",
+    label: "Uploads OK",
+    tooltip: "S3 uploads steady, no failures in the last minute.",
+  },
 };
 app.get("/api/v1/uploads/stats", (_req, res) => {
   res.json(uploadStats);

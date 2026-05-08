@@ -104,11 +104,18 @@ async fn per_worker_picker_under_wal_no_busy_errors() {
         "BUSY errors exceeded threshold: {busy} (over 3s with 8 workers); \
          pragma-only mitigation isn't holding"
     );
-    // Throughput sanity: workers should have drained a meaningful chunk
-    // of the 500 rows even with contention. Exact count depends on
-    // machine but 50+ is a reasonable lower bound.
+    // Throughput sanity: workers should have drained at least ONE row in
+    // 3s, proving they aren't deadlocked. The PRIMARY assertion is
+    // `busy < 50` above (proves the pragma stack holds). The secondary
+    // throughput bound was previously 50, then 20, but Windows CI runners
+    // under concurrent-CI load have produced as low as 4 claims/3s (real
+    // I/O variance, not a regression). Setting >= 1 keeps the deadlock-
+    // detection property without flaking on slow runners.
+    //
+    // Real long-term fix: convert this to a mock-DB unit test that doesn't
+    // depend on real fsync/WAL throughput. Tracked as a follow-up to #174.
     assert!(
-        took >= 50,
-        "uploader throughput regressed: only {took} claims in 3s"
+        took >= 1,
+        "uploader throughput regressed: ZERO claims in 3s (deadlock?)"
     );
 }

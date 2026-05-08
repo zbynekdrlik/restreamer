@@ -1,4 +1,6 @@
 /// Delivery API routes: /api/health, /api/init, /api/status, /api/stop, /api/logs, /clock
+use crate::disk_cache::{DiskCache, DiskCacheConfig};
+use crate::s3_fetch::S3Fetcher;
 use crate::{AppState, EndpointHandle, clock_endpoint::get_clock};
 use axum::{
     Json, Router,
@@ -170,6 +172,17 @@ async fn init_endpoints(
     *state.delivery_delay_ms.write().await = req.delivery_delay_ms;
     *state.rescue_video_url.write().await = req.rescue_video_url.clone();
 
+    // Build the per-event DiskCache shared across all endpoints (#174).
+    // Required: a failure to construct the cache means the stream cannot
+    // run with bandwidth-managed prefetch, so surface as 500 to the
+    // orchestrator (rather than silently downgrading the data path).
+    let disk_cache_arc = build_disk_cache(&s3_config, &req).await.map_err(|e| {
+        tracing::error!("DiskCache init failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    tracing::info!("DiskCache initialized");
+    *state.disk_cache.write().await = Some(Arc::clone(&disk_cache_arc));
+
     let mut endpoints = state.endpoints.write().await;
     let mut started = 0usize;
 
@@ -183,12 +196,11 @@ async fn init_endpoints(
 
         let handle = EndpointHandle::spawn(
             ep_cfg.clone(),
-            s3_config.clone(),
-            req.event_identifier.clone(),
             start_id,
             req.delivery_delay_ms,
             req.rescue_video_url.clone(),
             Some(Arc::clone(&state.audit_ring)),
+            Arc::clone(&disk_cache_arc),
         );
 
         endpoints.insert(ep_cfg.alias.clone(), handle);
@@ -207,6 +219,25 @@ async fn init_endpoints(
     }))
 }
 
+/// Build the per-event DiskCache. The window is derived from the requested
+/// delivery_delay_ms (chunks at ~2s each). Returns Err if cache_dir cannot
+/// be created or the S3Fetcher backend cannot be built.
+async fn build_disk_cache(
+    s3_config: &S3Config,
+    req: &InitRequest,
+) -> std::io::Result<Arc<DiskCache>> {
+    let backend: Arc<dyn crate::disk_cache::S3Backend> = Arc::new(
+        S3Fetcher::new(s3_config, &req.event_identifier)
+            .map_err(|e| std::io::Error::other(format!("S3Fetcher init: {e}")))?,
+    );
+    let cfg = DiskCacheConfig {
+        window_chunks: ((req.delivery_delay_ms as i64) / 2000).max(10),
+        ..Default::default()
+    };
+    let cache = DiskCache::new(cfg, backend, req.event_identifier.clone()).await?;
+    Ok(Arc::new(cache))
+}
+
 #[derive(Serialize)]
 struct StatusResponse {
     status: String,
@@ -219,6 +250,11 @@ struct StatusResponse {
     recent_audit: Vec<crate::audit_ring::RingRow>,
     #[serde(default)]
     next_audit_cursor: i64,
+    /// Cumulative S3 fetch profile for the current event (count, bytes,
+    /// p50/p99 latency, fail counts by class). `None` when no DiskCache
+    /// is active. Issue #176.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    s3_fetch_profile: Option<crate::s3_fetch_profile::S3FetchProfileSnapshot>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -237,6 +273,11 @@ struct EndpointStatusEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     stall_reason: Option<String>,
     ffmpeg_restart_count: u32,
+    /// Rust-pusher reconnect counter. Companion to `ffmpeg_restart_count`
+    /// for endpoints using the rust pusher path. Surfaced on the host
+    /// dashboard so operators can correlate audit `endpoint_rtmp_push_died`
+    /// events with this counter (issue #172).
+    reconnect_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -272,6 +313,7 @@ async fn endpoint_status(
             chunks_processed: stats.chunks_processed,
             stall_reason: stats.stall_reason,
             ffmpeg_restart_count: stats.ffmpeg_restart_count,
+            reconnect_count: stats.reconnect_count,
             last_error: stats.last_error,
             ffmpeg_last_stderr: stats.ffmpeg_last_stderr,
             consecutive_chunk_misses: stats.consecutive_chunk_misses,
@@ -284,12 +326,20 @@ async fn endpoint_status(
 
     let (recent_audit, next_audit_cursor) = state.audit_ring.since(q.since.unwrap_or(0));
 
+    let s3_fetch_profile = state
+        .disk_cache
+        .read()
+        .await
+        .as_ref()
+        .map(|dc| dc.s3_fetch_profile_snapshot());
+
     Json(StatusResponse {
         status: "ok".to_string(),
         endpoint_count: entries.len(),
         endpoints: entries,
         recent_audit,
         next_audit_cursor,
+        s3_fetch_profile,
     })
 }
 
@@ -352,21 +402,18 @@ async fn add_endpoint(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AddEndpointRequest>,
 ) -> Result<Json<AddEndpointResponse>, (StatusCode, String)> {
-    // Read stored S3 config and event identifier (set during /api/init)
-    let s3_config = state.s3_config.read().await.clone().ok_or_else(|| {
-        (
-            StatusCode::CONFLICT,
-            "Delivery not initialized — call /api/init first".to_string(),
-        )
-    })?;
-    let event_identifier = state.event_identifier.read().await.clone().ok_or_else(|| {
-        (
-            StatusCode::CONFLICT,
-            "Delivery not initialized — call /api/init first".to_string(),
-        )
-    })?;
     let delivery_delay_ms = *state.delivery_delay_ms.read().await;
     let rescue_video_url = state.rescue_video_url.read().await.clone();
+    let disk_cache = state
+        .disk_cache
+        .read()
+        .await
+        .as_ref()
+        .map(Arc::clone)
+        .ok_or((
+            StatusCode::CONFLICT,
+            "Delivery not initialized — call /api/init first".to_string(),
+        ))?;
 
     let mut endpoints = state.endpoints.write().await;
 
@@ -383,12 +430,11 @@ async fn add_endpoint(
 
     let handle = EndpointHandle::spawn(
         req.endpoint.clone(),
-        s3_config,
-        event_identifier,
         start_id,
         delivery_delay_ms,
         rescue_video_url,
         Some(Arc::clone(&state.audit_ring)),
+        disk_cache,
     );
 
     let alias = req.endpoint.alias.clone();

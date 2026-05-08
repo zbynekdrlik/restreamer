@@ -62,6 +62,12 @@ const testName = EXPECT_NO_STREAM
   ? "YouTube Studio shows stream is NOT being received (baseline)"
   : "YouTube Studio shows stream is being received (testing state)";
 
+// Phase 1 (#176): YT health helper lives in its own module so both this
+// live spec and the fixture tests in frontend.spec.ts can import it
+// statically (Playwright's TS loader rejects dynamic ESM `import()` at
+// runtime).
+import { assertYtHealthGood } from "./yt-health";
+
 test(testName, async () => {
   const headed = !!process.env.HEADED;
 
@@ -400,7 +406,7 @@ test(testName, async () => {
         const receivingPatterns = [
           /\d+\s*kbps/i, // Bitrate (e.g., "4500 kbps")
           /\d+p\s+\d+\s*fps/i, // "1080p 30 fps"
-          /stream\s*health.*(?:excellent|good|ok|bad)/i, // English health
+          /stream\s*health.*(?:excellent|good|ok)/i, // English health (excludes "bad" per #176)
           /Výborn/i, // Slovak: "Excellent" stream health
           /Stav\s*streamu/i, // Slovak: "Stream status"
           /Kvalita\s*streamu/i, // Slovak: "Stream quality"
@@ -610,6 +616,10 @@ test(testName, async () => {
         console.log("Saved stream preview screenshot to stream-preview.png");
       }
 
+      // Phase 1 (#176): assert structured YT health is good with no
+      // configuration issues. Catches videoIngestionFasterThanRealtime
+      // and other CDN-side problems that the regex check misses.
+      await assertYtHealthGood(page);
       console.log("==========================================");
       console.log("  YOUTUBE STREAM VERIFICATION PASSED");
       console.log("  Stream receiving + no 'Preparing' state detected");

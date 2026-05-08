@@ -199,6 +199,13 @@ impl ServiceCore {
             });
         }
 
+        // Spawn host internet-reachability probe. Runs independently of delivery;
+        // emits HostInternetUnreachable / HostInternetRecovered audit rows so
+        // operators can distinguish a host-ISP flake from a VPS code regression
+        // when both s3_upload_failed and vps_unreachable fire simultaneously.
+        // Issue #176.
+        rs_api::internet_probe::spawn_internet_probe(audit_tx.clone());
+
         // Share the AppState's audit_tx with downstream components so they
         // feed into the same audit pipeline. The sender now flows to the
         // real writer task spawned above.

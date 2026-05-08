@@ -14,7 +14,7 @@ use rs_core::db;
 
 pub(crate) use crate::delivery_helpers::{
     build_endpoint_init_entry, is_delivery_active, is_delivery_or_spawning,
-    persist_delivery_log_to_disk,
+    is_permanent_hetzner_error, persist_delivery_log_to_disk,
 };
 
 // Re-exports so existing call sites (`crate::delivery::Foo`, test modules,
@@ -44,16 +44,14 @@ pub struct DeliveryOrchestrator {
     /// Resume positions for auto-restart after VPS crash.
     /// Key: event_id, Value: HashMap<alias, last_known_chunk_id>
     resume_positions: Arc<Mutex<HashMap<i64, HashMap<String, i64>>>>,
-    /// Audit channel. `None` in tests and any call site that has not yet been
-    /// plumbed to `AppState.audit_tx` (Task 27 will wire the real channel
-    /// from runtime startup). Every emit is `if let Some(tx) = ...` so this
-    /// is a no-op when absent.
+    /// Audit channel. `None` in tests; emit sites are guarded by `if let Some`.
     audit_tx: Option<mpsc::Sender<AuditRow>>,
 }
 
 /// Rate limiter for noisy delivery audit rows (VpsUnreachable). Emits at
 /// most 1 row per minute per (action, key) pair — see `RateLimiter`.
-static DELIVERY_RL: std::sync::LazyLock<RateLimiter> = std::sync::LazyLock::new(RateLimiter::new);
+pub(crate) static DELIVERY_RL: std::sync::LazyLock<RateLimiter> =
+    std::sync::LazyLock::new(RateLimiter::new);
 
 /// Result of starting a delivery instance.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -66,6 +64,73 @@ pub struct StartDeliveryResult {
     /// Auth token generated for this delivery instance (used for API auth).
     #[serde(skip)]
     pub auth_token: String,
+}
+
+/// Trait abstracting "delete all chunks under a prefix".
+///
+/// Contract: `event_prefix` is the **bare** event prefix without trailing
+/// slash, e.g. `"<client_uuid>/<event_name>"`. Implementations are
+/// responsible for whatever path-building they need internally
+/// (`S3Client::delete_event_chunks` appends the trailing slash).
+/// This decouples mock fidelity from the concrete client and is
+/// asserted in `delivery_tests::wipe_calls_delete_with_correct_prefix`.
+#[async_trait::async_trait]
+pub trait EventChunkWiper: Send + Sync {
+    async fn delete_event_chunks(&self, event_prefix: &str) -> Result<u64, String>;
+}
+
+#[async_trait::async_trait]
+impl EventChunkWiper for rs_endpoint::s3::S3Client {
+    async fn delete_event_chunks(&self, event_prefix: &str) -> Result<u64, String> {
+        rs_endpoint::s3::S3Client::delete_event_chunks(self, event_prefix)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Delete all S3 chunks under this event's prefix. Bounded by a 60s
+/// timeout. Returns `Ok(deleted_count)` on success, `Err(reason)` on
+/// failure. Caller is `start_delivery`, which logs the result and
+/// proceeds even on failure (the strict-live-edge `compute_target_start_chunk`
+/// is the primary correctness barrier; the wipe is belt-and-suspenders).
+///
+/// Returning `Result` (instead of swallowing errors) gives observability
+/// for orphaned-chunk billing tracking (#174 review v2 finding 7).
+pub async fn wipe_event_s3_chunks(
+    pool: &SqlitePool,
+    config: &Config,
+    event_id: i64,
+) -> Result<u64, String> {
+    let s3 = rs_endpoint::s3::S3Client::new(&config.s3).map_err(|e| format!("init: {e}"))?;
+    wipe_event_s3_chunks_with(pool, config, event_id, &s3).await
+}
+
+/// Test seam: same as `wipe_event_s3_chunks` but takes any `EventChunkWiper`.
+pub async fn wipe_event_s3_chunks_with(
+    pool: &SqlitePool,
+    config: &Config,
+    event_id: i64,
+    wiper: &dyn EventChunkWiper,
+) -> Result<u64, String> {
+    let event = db::get_streaming_event_by_id(pool, event_id)
+        .await
+        .map_err(|e| format!("db lookup: {e}"))?
+        .ok_or_else(|| format!("no streaming event with id {event_id}"))?;
+    let event_prefix = config.event_s3_prefix(&event.name);
+    let fut = wiper.delete_event_chunks(&event_prefix);
+    match tokio::time::timeout(Duration::from_secs(60), fut).await {
+        Ok(Ok(n)) => {
+            info!(
+                event_id,
+                deleted = n,
+                prefix = %event_prefix,
+                "Wiped S3 chunks before starting delivery"
+            );
+            Ok(n)
+        }
+        Ok(Err(e)) => Err(format!("delete failed: {e}")),
+        Err(_) => Err("timed out after 60s".into()),
+    }
 }
 
 impl DeliveryOrchestrator {
@@ -172,18 +237,9 @@ impl DeliveryOrchestrator {
                     auth_token: existing.auth_token,
                 });
             }
-            // Stale row (failed / stopped / stopping, or any unknown
-            // future status). Mark it deleted so subsequent
-            // get_delivery_instance_by_event calls stop returning it,
-            // then fall through to spawn a fresh VPS.
-            //
-            // Stop-vs-start race: a concurrent `stop_delivery` may be
-            // between its own update_delivery_instance_status("stopping")
-            // and update_delivery_instance_status("deleted"). That's
-            // harmless -- the stop task acts on its own captured
-            // `hetzner_id`, so the OLD VPS still gets deleted on Hetzner
-            // regardless of how many times this row is rewritten to
-            // "deleted". No orphan VPS billing leak.
+            // Stale row: mark deleted, fall through to spawn fresh.
+            // Stop-race-safe: stop_delivery owns its captured hetzner_id
+            // so the old VPS is always deleted regardless of rewrites.
             tracing::warn!(
                 event_id,
                 instance_id = existing.id,
@@ -193,16 +249,17 @@ impl DeliveryOrchestrator {
             if let Err(e) =
                 db::update_delivery_instance_status(&self.pool, existing.id, "deleted").await
             {
-                // Continue anyway: worst case is two non-deleted rows
-                // for this event. `get_delivery_instance_by_event` ORDER
-                // BYs id DESC LIMIT 1, so the next call will
-                // deterministically prefer the freshly-spawned row over
-                // the stale one.
-                tracing::error!(
-                    instance_id = existing.id,
-                    "Failed to mark stale instance as deleted: {e} -- spawning new anyway"
-                );
+                // Worst case: two non-deleted rows; ORDER BY id DESC picks the new one.
+                tracing::error!(instance_id = existing.id, "stale-row delete failed: {e}");
             }
+        }
+
+        // Wipe S3 chunks for this event before spawning VPS (#174 operator
+        // policy 2026-05-07). See `wipe_event_s3_chunks` doc. We surface
+        // failure as a warn so orphaned chunks become visible without
+        // aborting Start Delivering.
+        if let Err(e) = wipe_event_s3_chunks(&self.pool, &self.config, event_id).await {
+            warn!(event_id, "S3 wipe-on-start: {e}");
         }
 
         // Get event endpoints to determine server size
@@ -340,11 +397,21 @@ impl DeliveryOrchestrator {
         // up to 5s of user-visible warmup time.
         let hetzner_id = instance.hetzner_id;
         for attempt in 0..300 {
-            let server = self
-                .hetzner
-                .get_server(hetzner_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("get_server failed: {e}"))?;
+            // 401/403/404 = permanent: fail fast (#174 review finding 4).
+            let server = match self.hetzner.get_server(hetzner_id).await {
+                Ok(s) => s,
+                Err(e) if is_permanent_hetzner_error(&e.to_string()) => {
+                    return Err(anyhow::anyhow!("get_server permanent error: {e}"));
+                }
+                Err(e) if attempt < 299 => {
+                    if attempt % 30 == 0 {
+                        warn!(attempt, error = %e, "get_server transient, retrying");
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                Err(e) => return Err(anyhow::anyhow!("get_server failed after 300 attempts: {e}")),
+            };
 
             if server.status == "running" {
                 let ipv4 = server.public_net.ipv4.ip.clone();
@@ -477,7 +544,7 @@ impl DeliveryOrchestrator {
         let resume_pos = self.resume_positions.lock().await.remove(&event_id);
         let is_resume = resume_pos.is_some();
 
-        let start_chunk_id;
+        let mut start_chunk_id;
         if is_resume {
             // For resume: skip chunk-wait phase, chunks already exist from prior session
             let first_seq = db::get_first_sequence_number_for_event(&self.pool, event_id)
@@ -489,47 +556,32 @@ impl DeliveryOrchestrator {
                 start_chunk_id, "Resuming delivery after crash recovery"
             );
         } else {
-            // Wait for the full target duration of content on S3 before
-            // creating the VPS. The previous "rescue video bridges the
-            // gap, so wait for 1 chunk" shortcut produced non-deterministic
-            // cache at delivery start because VPS-side warmup can exit
-            // with fewer real seconds of content than the duration sum
-            // suggests (zero-duration chunks on session reset). Waiting
-            // orchestrator-side guarantees target content exists before
-            // the VPS boots.
-            let wait_target_ms = target_delay_ms;
-
-            let max_wait_secs = 900;
-            for attempt in 0..max_wait_secs {
-                let sent_ms = db::get_sent_duration_ms(&self.pool, event_id)
-                    .await
-                    .unwrap_or(0);
-                if sent_ms >= wait_target_ms {
-                    info!(
-                        event_id,
-                        sent_ms, wait_target_ms, "Sent content duration meets target (init VPS)"
-                    );
-                    break;
+            // Strict live-edge (#174): start at latest_sent+1. The producer
+            // simply waits for the next chunk OBS will upload — no need to
+            // pre-block the orchestrator on duration accumulation. Removing
+            // the previous 0-900s wait loop snaps "Start Delivering" from
+            // multi-second to instant. The warmup loop on the VPS still
+            // accumulates target_delay_ms of NEW chunks before push begins.
+            start_chunk_id = db::compute_target_start_chunk(&self.pool, event_id).await?;
+            // Orphan DB rows from prior s3_cleared can point at chunks
+            // that no longer exist on S3; advance to the first chunk_id
+            // that actually exists or the producer hangs (#174).
+            if let Ok(s3) = rs_endpoint::s3::S3Client::new(&self.config.s3) {
+                let p = self.config.event_s3_prefix(event_name);
+                match s3.find_first_chunk_id_at_or_after(&p, start_chunk_id).await {
+                    Ok(Some(actual)) if actual != start_chunk_id => {
+                        info!(
+                            event_id,
+                            was = start_chunk_id,
+                            actual,
+                            "advanced to first S3 chunk"
+                        );
+                        start_chunk_id = actual;
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(event_id, "S3 LIST validation failed: {e}"),
                 }
-                if attempt % 10 == 0 {
-                    info!(
-                        event_id,
-                        sent_ms,
-                        wait_target_ms,
-                        attempt,
-                        "Waiting for sent duration ({sent_ms}ms / {wait_target_ms}ms)"
-                    );
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            // Compute the start chunk that gives exactly target_delay_ms of
-            // buffer from the latest sent chunk. If total content <= target
-            // (normal case), this returns first_seq and VPS warmup waits for
-            // more. If content > target (VPS boot exceeded target, or OBS was
-            // started early), this returns a later chunk so cache starts at
-            // exactly the target instead of overshooting.
-            start_chunk_id =
-                db::compute_target_start_chunk(&self.pool, event_id, target_delay_ms).await?;
             info!(
                 event_id,
                 start_chunk_id, "Starting delivery (live-edge computed)"
@@ -817,160 +869,6 @@ impl DeliveryOrchestrator {
         Ok(())
     }
 
-    /// Monitor delivery VPS health continuously. Auto-restart on persistent failure.
-    ///
-    /// Runs every 30s. After 3 consecutive failures (90s), stops the dead VPS and
-    /// creates a new one, resuming endpoints from their last known chunk positions.
-    /// Retries indefinitely — the 90s detection window provides natural throttling.
-    pub async fn monitor_delivery_health(
-        self: &Arc<Self>,
-        event_id: i64,
-        instance_id: i64,
-        _cached_delivery: std::sync::Arc<std::sync::RwLock<crate::state::CachedDeliveryStatus>>,
-        ws_tx: tokio::sync::broadcast::Sender<rs_core::models::WsEvent>,
-    ) {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        interval.tick().await; // skip immediate tick
-
-        let mut consecutive_failures = 0u32;
-        let client = reqwest::Client::new();
-
-        loop {
-            interval.tick().await;
-
-            // Check if event is still delivering (operator may have stopped)
-            match db::get_streaming_event_by_id(&self.pool, event_id).await {
-                Ok(Some(evt)) if !evt.delivering_activated => {
-                    info!(
-                        event_id,
-                        "Health monitor stopping: event no longer delivering"
-                    );
-                    return;
-                }
-                Ok(None) => {
-                    info!(event_id, "Health monitor stopping: event deleted");
-                    return;
-                }
-                Err(e) => {
-                    warn!(event_id, "Health monitor DB error (event): {e}");
-                }
-                _ => {}
-            }
-
-            // Check if instance still exists and is running
-            let instance = match db::get_delivery_instance(&self.pool, instance_id).await {
-                Ok(Some(inst)) if is_delivery_active(&inst.status) => inst,
-                Ok(Some(inst)) => {
-                    info!(
-                        event_id,
-                        status = %inst.status,
-                        "Health monitor stopping: instance no longer running"
-                    );
-                    return;
-                }
-                Ok(None) => {
-                    info!(event_id, "Health monitor stopping: instance deleted");
-                    return;
-                }
-                Err(e) => {
-                    warn!(event_id, "Health monitor DB error: {e}");
-                    continue;
-                }
-            };
-
-            // Check health. `last_error` is captured so audit rows carry a
-            // useful message instead of just `false`.
-            let mut last_error: Option<String> = None;
-            let healthy = match client
-                .get(format!("http://{}:8000/api/health", instance.ipv4))
-                .bearer_auth(&instance.auth_token)
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => true,
-                Ok(resp) => {
-                    let status = resp.status();
-                    warn!(
-                        event_id,
-                        status = %status,
-                        "Delivery VPS health returned non-success"
-                    );
-                    last_error = Some(format!("http_{status}"));
-                    false
-                }
-                Err(e) => {
-                    warn!(event_id, "Delivery VPS health check failed: {e}");
-                    last_error = Some(e.to_string());
-                    false
-                }
-            };
-
-            if healthy {
-                if consecutive_failures > 0 {
-                    info!(
-                        event_id,
-                        previous_failures = consecutive_failures,
-                        "Delivery VPS health recovered"
-                    );
-                }
-                consecutive_failures = 0;
-                db::update_delivery_instance_health(&self.pool, instance_id)
-                    .await
-                    .ok();
-            } else {
-                consecutive_failures += 1;
-                error!(
-                    event_id,
-                    consecutive_failures,
-                    "Delivery VPS health check failed ({consecutive_failures}/3)"
-                );
-
-                // Audit (rate-limited): one row per minute per failure class
-                // so a persistent outage doesn't flood `audit_log`.
-                if let Some(tx) = &self.audit_tx {
-                    let class = last_error.as_deref().unwrap_or("unknown");
-                    if DELIVERY_RL.allow(Action::VpsUnreachable, class) {
-                        rs_core::audit::record(
-                            tx,
-                            AuditRow {
-                                severity: Severity::Warn,
-                                source: Source::Delivery,
-                                event_id: Some(event_id),
-                                instance_id: Some(instance_id),
-                                endpoint: None,
-                                action: Action::VpsUnreachable,
-                                detail: serde_json::json!({
-                                    "consecutive_failures": consecutive_failures,
-                                    "last_error": last_error,
-                                }),
-                                ts_override: None,
-                            },
-                        );
-                    }
-                }
-
-                if consecutive_failures >= 3 {
-                    // DO NOT restart VPS — "unreachable" usually means stream.lan
-                    // lost internet, not that the VPS crashed. The VPS keeps running
-                    // and self-recovers when internet returns.
-                    error!(
-                        event_id,
-                        consecutive_failures,
-                        "Delivery VPS unreachable for 90s — monitoring continues, VPS NOT restarted"
-                    );
-                    let _ = ws_tx.send(rs_core::models::WsEvent::ActivityFeed {
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        severity: "warning".to_string(),
-                        message: "Delivery VPS unreachable — waiting for network recovery"
-                            .to_string(),
-                        source: "delivery".to_string(),
-                    });
-                }
-            }
-        }
-    }
-
     async fn find_delivery_image(&self) -> anyhow::Result<String> {
         let label = &self.config.hetzner.snapshot_label;
         let snapshots = self
@@ -987,7 +885,3 @@ impl DeliveryOrchestrator {
         Ok(latest.id.to_string())
     }
 }
-
-// Helpers moved to delivery_helpers.rs; status assembly + restart-history
-// helpers live in delivery_status.rs; mirror_vps_audit lives in
-// delivery_audit_mirror.rs. Tests remain in delivery_tests.rs.

@@ -66,6 +66,7 @@ pub(super) async fn handle_rust_push(
     consecutive_write_failures: &mut u32,
     stats: &Stats,
     audit_ring: &Option<Arc<AuditRing>>,
+    telemetry: &mut crate::rtmp_push_telemetry::RtmpPushTelemetry,
     stop_rx: &mut watch::Receiver<bool>,
     flv_normalizer: &mut FlvStreamNormalizer,
 ) -> RustPushAction {
@@ -73,16 +74,38 @@ pub(super) async fn handle_rust_push(
     // output_ts math is fully timestamp-driven from inside the FLV
     // payload — see PusherState::audio_origin_xiu_ts). Kept on the
     // consumer-helper signature for stats reporting (`s.duration_processed_ms`).
+    //
+    // Phase 2 probe (#177/#178): log push_flv_bytes start so we can
+    // correlate stalls across endpoints (shared-supply hypothesis) and
+    // detect whether multiple endpoints enter push at the SAME instant.
+    let push_start = std::time::Instant::now();
+    tracing::info!(
+        alias = %alias,
+        chunk_id,
+        bytes = data.len(),
+        "rtmp_push: ENTER push_flv_bytes"
+    );
     let push_result = tokio::time::timeout(
         std::time::Duration::from_secs(WRITE_TIMEOUT_SECS),
         pusher.push_flv_bytes(data),
     )
     .await;
+    let push_elapsed_ms = push_start.elapsed().as_millis() as u64;
+    if push_elapsed_ms >= 2500 {
+        tracing::warn!(
+            alias = %alias,
+            chunk_id,
+            push_elapsed_ms,
+            "rtmp_push: SLOW push_flv_bytes (>=2.5s) -- chunk supply or TCP backpressure"
+        );
+    }
 
     match push_result {
         Ok(Ok(())) => {
             *consecutive_push_errors = 0;
             *consecutive_write_failures = 0;
+            telemetry.note_send("flv_bytes", data.len() as u64);
+            telemetry.note_chunk_pushed();
             let mut s = stats.lock().await;
             s.bytes_processed_total += data.len() as u64;
             s.duration_processed_ms += chunk_duration_ms.max(0) as u64;
@@ -135,13 +158,18 @@ pub(super) async fn handle_rust_push(
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             let reconnect_count = pusher.reconnect_count();
-            endpoint_audit::emit_rtmp_push_died(
+            // Phase 2 (#177): plumb actual chunks_buffered_in_pipeline + close-buffer bytes from rs-rtmp-push.
+            endpoint_audit::emit_rtmp_push_died_detailed(
                 audit_ring,
                 alias,
                 &error_display,
                 backoff_ms,
                 reconnect_count,
+                telemetry,
+                &[],
+                0,
             );
+            *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
             let record = RtmpPushAuditRecord {
                 timestamp_ms,
                 chunk_id,
@@ -192,13 +220,18 @@ pub(super) async fn handle_rust_push(
             // stall_reason on the dashboard. Backoff matches the fixed
             // 30 s sleep below.
             let backoff_ms: u64 = 30_000;
-            endpoint_audit::emit_rtmp_push_died(
+            // Phase 2 (#177): plumb actual chunks_buffered_in_pipeline + close-buffer bytes from rs-rtmp-push.
+            endpoint_audit::emit_rtmp_push_died_detailed(
                 audit_ring,
                 alias,
                 "rtmp_push_timeout",
                 backoff_ms,
                 reconnect_count,
+                telemetry,
+                &[],
+                0,
             );
+            *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
             let timestamp_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)

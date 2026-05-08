@@ -362,6 +362,7 @@ mod close_on_error {
         // past the backoff sleep.
         let stats_clone = Arc::clone(&stats);
         let task = tokio::spawn(async move {
+            let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
             handle_rust_push(
                 &mut pusher,
                 b"chunk-data",
@@ -372,6 +373,7 @@ mod close_on_error {
                 &mut consec_write,
                 &stats_clone,
                 &None,
+                &mut tel,
                 &mut stop_rx,
                 &mut norm,
             )
@@ -420,6 +422,7 @@ mod close_on_error {
             s.stall_reason = Some("stale".to_string());
         }
 
+        let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
         let action = handle_rust_push(
             &mut pusher,
             b"chunk-data",
@@ -430,6 +433,7 @@ mod close_on_error {
             &mut consec_write,
             &stats,
             &None,
+            &mut tel,
             &mut stop_rx,
             &mut norm,
         )
@@ -459,6 +463,7 @@ mod close_on_error {
         let mut pusher = MockPusher::with_results(vec![Err(PushError::LocalCancel)]);
         let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write) = fresh_state();
 
+        let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
         let action = handle_rust_push(
             &mut pusher,
             b"data",
@@ -469,6 +474,7 @@ mod close_on_error {
             &mut consec_write,
             &stats,
             &None,
+            &mut tel,
             &mut stop_rx,
             &mut norm,
         )

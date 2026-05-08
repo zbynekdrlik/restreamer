@@ -14,6 +14,7 @@ use super::upload_strip::UploadStrip;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
 use crate::store::DashboardStore;
+use crate::utils::cache_threshold_for_service;
 
 /// Minimum seconds the RTMP publisher must be connected before the
 /// operator can start delivery. Mirrors
@@ -784,6 +785,21 @@ fn EndpointTree() -> impl IntoView {
                                     }
                                 }}
                                 {move || {
+                                    // Issue #172: rust-pusher reconnect counter.
+                                    // Surfaces YT/FB upstream-rotation events the
+                                    // operator otherwise had to dig out of the
+                                    // audit log (every endpoint_rtmp_push_died
+                                    // bumps this).
+                                    let count = ep_data.get().reconnect_count;
+                                    if count > 0 {
+                                        Some(view! {
+                                            <span class="endpoint-anomaly">{format!("reconn x{count}")}</span>
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                }}
+                                {move || {
                                     let remove_alias = remove_alias.clone();
                                     is_running_memo.get().then(move || {
                                         let remove_alias = remove_alias.clone();
@@ -841,13 +857,17 @@ fn EndpointTree() -> impl IntoView {
                                     } else {
                                         ps.cache_duration_secs
                                     };
-                                    // Bar fill caps at 100% visually (can't render past full),
-                                    // but the numeric label shows the TRUE cache seconds.
-                                    // If cache exceeds target the operator MUST see "905s / 60s"
-                                    // because that means delivery VPS has fallen behind — a real
-                                    // bug, not a cosmetic issue to be hidden with fancy labels.
+                                    // Per-service threshold lives in utils.rs so
+                                    // a service-type rename touches one site.
+                                    let alias_lookup = ep.alias.clone();
+                                    let service_type = store.endpoints_list.get()
+                                        .iter()
+                                        .find(|e| e.alias == alias_lookup)
+                                        .map(|e| e.service_type.clone())
+                                        .unwrap_or_default();
+                                    let threshold_mult = cache_threshold_for_service(&service_type);
                                     let progress = (cache_secs / target as f64).min(1.0);
-                                    let bar_class = if cache_secs > target as f64 * 1.1 {
+                                    let bar_class = if cache_secs > target as f64 * threshold_mult {
                                         "buffer-bar-fill critical"
                                     } else if progress >= 0.75 {
                                         "buffer-bar-fill healthy"

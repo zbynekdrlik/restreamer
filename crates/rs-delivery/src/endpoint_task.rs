@@ -4,12 +4,11 @@ use async_trait::async_trait;
 use rs_core::models::PusherKind;
 use rs_ffmpeg::{FfmpegProcess, ServiceType};
 use rs_rtmp_push::{PusherConfig, RtmpPusher};
-use std::sync::Arc;
-use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::{Arc, atomic::Ordering as AtomicOrdering};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::api::{EndpointConfig, S3Config};
+use crate::api::EndpointConfig;
 use crate::audit_ring::AuditRing;
 pub use crate::buffer_state::{BufferState, initial_delivery_mode};
 use crate::endpoint_audit;
@@ -19,17 +18,19 @@ use crate::s3_fetch::S3Fetcher;
 mod flv_normalizer;
 pub use flv_normalizer::FlvStreamNormalizer;
 
+use crate::producer_lag::maybe_jump as maybe_jump_ahead;
+
 const MAX_FFMPEG_RESTARTS: u32 = 10;
 const MAX_CHUNK_MISS_COUNT: u32 = 40; // ~80s at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
 pub(crate) const WRITE_TIMEOUT_SECS: u64 = 30;
 const MAX_WRITE_FAILURES_PER_CHUNK: u32 = 3;
-/// Base S3 backoff (doubles on each error, max 60s, resets on success).
+/// Base S3 backoff (doubles per error, max 60s, resets on success).
 const S3_BACKOFF_BASE_SECS: u64 = 2;
 const S3_BACKOFF_MAX_SECS: u64 = 60;
-/// Heartbeat interval for endpoint delivery loop.
 const ENDPOINT_HEARTBEAT_SECS: u64 = 60;
-/// Pre-fetch buffer size: ~20s of chunks (10 x ~2s each).
+/// Pre-fetch buffer size: 10 chunks (~20s of media). disk_cache lives on
+/// local SSD; this mpsc just smooths producer/consumer pacing. See #174.
 const PREFETCH_BUFFER_SIZE: usize = 10;
 
 /// A chunk that has been fetched from S3 and is ready for the consumer.
@@ -72,16 +73,13 @@ pub trait OutputProcessFactory: Send + Sync {
     ) -> Result<Box<dyn OutputProcess>, String>;
 }
 
-/// Real S3 chunk fetcher implementing ChunkFetcher.
 impl ChunkFetcher for S3Fetcher {
     async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
-        match S3Fetcher::fetch_chunk_with_meta(self, chunk_id).await {
-            Ok(Some(cd)) => Ok(Some((cd.data, cd.duration_ms))),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e.to_string()),
-        }
+        S3Fetcher::fetch_chunk_with_meta(self, chunk_id)
+            .await
+            .map(|opt| opt.map(|cd| (cd.data, cd.duration_ms)))
+            .map_err(|e| e.to_string())
     }
-
     async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
         S3Fetcher::head_chunk_duration(self, chunk_id)
             .await
@@ -133,6 +131,7 @@ pub use crate::endpoint_audit::{
 
 #[path = "endpoint_consumer_helpers.rs"]
 mod consumer_helpers;
+use crate::disk_cache_push_sample::{PushSampleCtx, emit_push_sample};
 use consumer_helpers::{FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, handle_rust_push};
 
 /// Stats tracked per endpoint with diagnostics.
@@ -189,15 +188,8 @@ impl Default for EndpointStats {
 
 pub type Stats = Arc<Mutex<EndpointStats>>;
 
-/// Build initial EndpointStats for a newly spawned endpoint. Starts from
-/// Default (delivery_mode = "normal") and overrides the two fields that
-/// differ per-endpoint: current_chunk_id (start position) and
-/// delivery_mode (warmup if rescue video configured, else normal).
-///
-/// Extracted from EndpointHandle::spawn to make the field-assignment
-/// mutation-testable without spinning up S3/ffmpeg infrastructure.
-/// Uses explicit assignment (not struct literal) so `delete stmt`
-/// mutations on each field are caught by unit tests.
+/// Initial EndpointStats: Default + per-endpoint overrides.
+/// Explicit assignment (not struct literal) for mutation-test coverage.
 #[allow(clippy::field_reassign_with_default)]
 pub fn initial_endpoint_stats(start_chunk_id: i64, initial_mode: String) -> EndpointStats {
     let mut s = EndpointStats::default();
@@ -213,56 +205,40 @@ pub struct EndpointHandle {
 }
 
 impl EndpointHandle {
+    /// Spawn an endpoint task backed by the shared per-event `DiskCache`.
+    /// `disk_cache` is required: if construction failed at /api/init, the
+    /// orchestrator already received a 500 and never reaches here.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         ep_cfg: EndpointConfig,
-        s3_cfg: S3Config,
-        event_identifier: String,
         start_chunk_id: i64,
         delivery_delay_ms: u64,
         rescue_video_url: Option<String>,
         audit_ring: Option<Arc<AuditRing>>,
+        disk_cache: Arc<crate::disk_cache::DiskCache>,
     ) -> Self {
         let (stop_tx, stop_rx) = watch::channel(false);
-
         let initial_mode = initial_delivery_mode(
             rescue_video_url.is_some(),
             ep_cfg.is_fast,
             delivery_delay_ms,
         );
-
         let stats: Stats = Arc::new(Mutex::new(initial_endpoint_stats(
             start_chunk_id,
             initial_mode,
         )));
-
         let buffer_state = Arc::new(BufferState::new());
-
-        let fetcher = match S3Fetcher::new(&s3_cfg, &event_identifier) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::error!(alias = %ep_cfg.alias, "Failed to create S3 fetcher: {e}");
-                endpoint_audit::emit_s3_fetcher_init_failed(
-                    &audit_ring,
-                    &ep_cfg.alias,
-                    &e.to_string(),
-                );
-                let stats_clone = stats.clone();
-                let task = tokio::spawn(async move {
-                    let mut s = stats_clone.lock().await;
-                    s.last_error = Some(format!("S3 fetcher init failed: {e}"));
-                });
-                return Self {
-                    task,
-                    stop_tx,
-                    stats,
-                };
-            }
-        };
-
-        // Fast endpoints skip the delay entirely
+        // Fast endpoints skip the delay entirely.
         let effective_delay = if ep_cfg.is_fast { 0 } else { delivery_delay_ms };
-
+        let window = disk_cache.window_chunks;
+        let fetcher = crate::disk_cache_fetcher::DiskCacheFetcher::new(
+            disk_cache,
+            ep_cfg.alias.clone(),
+            start_chunk_id,
+            window,
+            60,
+        );
+        tracing::info!(alias = %ep_cfg.alias, window, "DiskCacheFetcher wired");
         let task = tokio::spawn(endpoint_loop(
             fetcher,
             FfmpegProcessFactory,
@@ -275,7 +251,6 @@ impl EndpointHandle {
             buffer_state,
             audit_ring,
         ));
-
         Self {
             task,
             stop_tx,
@@ -329,20 +304,27 @@ pub(crate) fn build_rtmp_url_pub(service_type: ServiceType, stream_key: &str) ->
 }
 
 /// Producer task: fetches chunks from S3 and sends them into the bounded channel.
-/// Blocks on channel send when buffer is full (backpressure).
 #[allow(clippy::too_many_arguments)]
 async fn producer_task<F: ChunkFetcher>(
     fetcher: F,
     tx: mpsc::Sender<PrefetchedChunk>,
     start_chunk_id: i64,
+    delivery_delay_ms: u64,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
     alias: String,
     buffer_state: Arc<BufferState>,
+    audit_ring: Option<Arc<AuditRing>>,
 ) {
     let mut chunk_id = start_chunk_id;
     let mut consecutive_chunk_misses: u32 = 0;
     let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
+    // Issue #173: rate-limited audit-row emitter, owned by this task.
+    let mut s3_fetch_audit = crate::endpoint_audit::S3FetchAuditLimiter::new();
+    // Lag-detect state. typical_chunk_dur_ms is updated from observed
+    // `duration_ms` so it tracks operator config without a hardcode.
+    let mut typical_chunk_dur_ms: u64 = 1000;
+    let mut iters_since_lag_probe: u32 = 0;
 
     loop {
         if *stop_rx.borrow() {
@@ -389,6 +371,22 @@ async fn producer_task<F: ChunkFetcher>(
                 }
 
                 chunk_id += 1;
+                // EWMA + [500,5000]ms clamp guards against outlier duration_ms.
+                if duration_ms > 0 {
+                    let c = (duration_ms as u64).clamp(500, 5000);
+                    typical_chunk_dur_ms = (3 * typical_chunk_dur_ms + c) / 4;
+                }
+                let delivery_delay_chunks: i64 =
+                    ((delivery_delay_ms / typical_chunk_dur_ms.max(1)) as i64).max(1);
+                maybe_jump_ahead(
+                    &fetcher,
+                    &mut chunk_id,
+                    delivery_delay_chunks,
+                    delivery_delay_ms,
+                    &mut iters_since_lag_probe,
+                    &alias,
+                )
+                .await;
                 tokio::task::yield_now().await;
             }
             Ok(None) => {
@@ -469,6 +467,8 @@ async fn producer_task<F: ChunkFetcher>(
                     backoff_secs = s3_backoff_secs,
                     "Producer: S3 fetch error, retrying in {s3_backoff_secs}s: {e}"
                 );
+                // Issue #173: emit audit row (rate-limited per error_class).
+                s3_fetch_audit.try_emit(&audit_ring, &alias, chunk_id, &e, s3_backoff_secs);
                 let mut s = stats.lock().await;
                 s.last_error = Some(e);
                 drop(s);
@@ -497,6 +497,7 @@ async fn consumer_task<P: OutputProcessFactory>(
     mut rx: mpsc::Receiver<PrefetchedChunk>,
     factory: P,
     ep_cfg: EndpointConfig,
+    delivery_delay_ms: u64,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
     rescue_video_url: Option<String>,
@@ -529,6 +530,11 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut last_heartbeat = std::time::Instant::now();
     // Consecutive push errors for the Rust pusher exponential backoff ladder.
     let mut consecutive_push_errors: u32 = 0;
+    // Phase 1 telemetry for the Rust RTMP pusher -- reset on each connect.
+    let mut rust_telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
+    // Phase 1 (#176): per-consumer rate limiter + clocks for DiskCachePushSample.
+    let push_audit_rl = rs_core::audit::RateLimiter::new();
+    let push_ctx = PushSampleCtx::new(&audit_ring, &push_audit_rl, &alias, delivery_delay_ms);
 
     let use_rust_pusher = ep_cfg.pusher == PusherKind::Rust;
 
@@ -756,6 +762,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                     &mut consecutive_write_failures,
                     &stats,
                     &audit_ring,
+                    &mut rust_telemetry,
                     &mut stop_rx,
                     &mut flv_normalizer,
                 )
@@ -763,6 +770,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                 match action {
                     RustPushAction::Continue => {}
                     RustPushAction::Break => break,
+                }
+                if matches!(action, RustPushAction::Continue) {
+                    let cur_delay = stats.lock().await.duration_processed_ms as f64 / 1000.0;
+                    emit_push_sample(&push_ctx, chunk_id, chunk_duration_ms, cur_delay);
                 }
             }
         } else if let Some(ref mut p) = proc {
@@ -788,6 +799,9 @@ async fn consumer_task<P: OutputProcessFactory>(
                     s.duration_processed_ms += chunk_duration_ms.max(0) as u64;
                     s.current_chunk_id = chunk_id;
                     s.chunks_processed += 1;
+                    drop(s);
+                    let cur_delay = chunk_duration_ms.max(0) as f64 / 1000.0;
+                    emit_push_sample(&push_ctx, chunk_id, chunk_duration_ms, cur_delay);
                 }
                 Ok(Err(e)) => {
                     consecutive_write_failures += 1;
@@ -912,14 +926,17 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
     let producer_stats = stats.clone();
     let producer_alias = alias.clone();
     let producer_buffer_state = buffer_state.clone();
+    let producer_audit_ring = audit_ring.clone();
     let producer = tokio::spawn(producer_task(
         fetcher,
         tx,
         start_chunk_id,
+        delivery_delay_ms,
         producer_stop,
         producer_stats,
         producer_alias,
         producer_buffer_state,
+        producer_audit_ring,
     ));
 
     let consumer_stop = stop_rx.clone();
@@ -928,6 +945,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
         rx,
         factory,
         ep_cfg,
+        delivery_delay_ms,
         consumer_stop,
         consumer_stats,
         rescue_video_url,

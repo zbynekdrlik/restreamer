@@ -17,9 +17,9 @@ pub use migrations::{MAX_SCHEMA_VERSION, current_schema_version, run_migrations}
 
 pub mod upload;
 pub use upload::{
-    list_recent_uploads, mark_chunk_in_process, mark_upload_permanently_failed,
-    pick_next_uploadable_chunk, pick_next_uploadable_chunks, record_upload_attempt,
-    record_upload_failure, record_upload_success, reset_orphaned_in_process,
+    count_permanently_failed_since, list_recent_uploads, mark_chunk_in_process,
+    mark_upload_permanently_failed, pick_next_uploadable_chunk, pick_next_uploadable_chunks,
+    record_upload_attempt, record_upload_failure, record_upload_success, reset_orphaned_in_process,
 };
 
 pub mod audit;
@@ -446,74 +446,30 @@ pub async fn get_latest_sequence_number_for_event(
     Ok(row.get::<Option<i64>, _>("max_seq"))
 }
 
-/// Compute the start chunk that gives approximately `target_ms` of buffer
-/// from the latest sent chunk. Walks backwards from the newest sent chunk,
-/// accumulating `duration_ms` until the target is reached.
-///
-/// Return values:
-/// - **Content ≤ target (within the scanned window):** returns the oldest
-///   seq in the scanned window. Normally that is the event's `first_seq`,
-///   so VPS starts from the beginning and warmup waits for more content.
-/// - **Content > target:** returns a later seq so the VPS starts with
-///   exactly the target window of buffer (VPS boot took longer than the
-///   cache target, or OBS was started early).
-/// - **Scanned window exhausted without reaching target** (very long
-///   event with >MAX_WALK_ROWS sent chunks but short per-chunk duration):
-///   returns the oldest seq in the scanned window, not the event's true
-///   first_seq. Those older chunks are well past the live edge and
-///   irrelevant anyway.
-pub async fn compute_target_start_chunk(
-    pool: &SqlitePool,
-    event_id: i64,
-    target_ms: i64,
-) -> Result<i64> {
-    // Bounded walk: for any realistic target (up to 1000s = 17 min) and chunk
-    // size (≥100ms), 10_000 rows is far more than the accumulator needs.
-    // Capping prevents loading millions of rows on a multi-hour event.
-    const MAX_WALK_ROWS: i64 = 10_000;
-
-    let rows: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT sequence_number, duration_ms FROM chunk_records
-         WHERE streaming_event_id = ?1 AND sent = 1
-         ORDER BY sequence_number DESC
-         LIMIT ?2",
+/// Strict live-edge per #174: returns `MAX(sequence_number) + 1` for the
+/// event's sent chunks, or `1` if no chunks sent yet. Never returns a
+/// historical chunk_id. The VPS warmup loop accumulates `delivery_delay_ms`
+/// of NEW chunks before pushing.
+pub async fn compute_target_start_chunk(pool: &SqlitePool, event_id: i64) -> Result<i64> {
+    // STRICT live-edge: never replay historical chunks. Operator policy
+    // (2026-05-07): when "Start Delivering" is pressed, the VPS must only
+    // push chunks produced AFTER that moment. Returning latest+1 means
+    // the VPS waits for the next chunk OBS will create. Combined with
+    // S3 wipe in delivery::start_delivery, the VPS cannot replay any
+    // pre-Start chunk regardless of S3 state.
+    //
+    // delivery_delay buffering is achieved by the warmup loop, which
+    // accumulates `delivery_delay_ms` of NEW chunks before push begins.
+    let row: Option<(Option<i64>,)> = sqlx::query_as(
+        "SELECT MAX(sequence_number) FROM chunk_records
+         WHERE streaming_event_id = ?1 AND sent = 1",
     )
     .bind(event_id)
-    .bind(MAX_WALK_ROWS)
-    .fetch_all(pool)
+    .fetch_optional(pool)
     .await?;
 
-    if rows.is_empty() {
-        return Ok(1);
-    }
-
-    let latest_seq = rows[0].0;
-    let mut accum: i64 = 0;
-    let mut start = latest_seq;
-    for (seq, dur) in &rows {
-        accum += dur;
-        start = *seq;
-        if accum >= target_ms {
-            break;
-        }
-    }
-
-    // Defense-in-depth (#146): if every walked row has duration_ms = 0
-    // (the PR #144 corruption pattern), the loop above walked all rows
-    // and returned the OLDEST seq -- which the orchestrator then sends
-    // as start_chunk_id to the VPS. That chunk has long been pruned
-    // from S3, hanging warmup. Fall back to live-edge so delivery
-    // starts (with empty buffer) instead of hanging.
-    if accum == 0 {
-        tracing::warn!(
-            event_id,
-            row_count = rows.len(),
-            "compute_target_start_chunk: all sent chunks have duration_ms=0; using latest seq as start_chunk_id"
-        );
-        return Ok(latest_seq);
-    }
-
-    Ok(start)
+    let latest_seq = row.and_then(|(s,)| s).unwrap_or(0);
+    Ok(latest_seq + 1)
 }
 
 /// Get all chunks for a specific streaming event, ordered by sequence number.

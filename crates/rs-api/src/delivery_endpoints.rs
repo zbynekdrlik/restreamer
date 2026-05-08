@@ -28,20 +28,19 @@ pub enum StartPosition {
 
 /// Resolve a StartPosition into a concrete start_chunk_id for an event.
 ///
-/// - `Live`      → walks back from the latest sequence by `target_delay_ms`
-///   (same backward-walk used by `delivery_init`). The new endpoint joins
-///   with a buffer matching the existing endpoints instead of zero cache.
+/// - `Live`      → strict live-edge (#174): returns `latest_sent + 1`. The
+///   warmup loop on the VPS accumulates `target_delay_ms` of NEW chunks
+///   before pushing. No historical chunk replay.
 /// - `Beginning` → first sequence number (replay from event start)
 /// - `Resume`    → passes through the chunk_id directly
 ///
-/// `target_delay_ms` is only consulted on the `Live` arm; callers should
-/// compute it once via `compute_delivery_delay_ms(config, event_row.cache_delay_secs)`
-/// to keep this helper independent of `Config` shape.
+/// `target_delay_ms` is currently unused by `Live` but kept in the
+/// signature for future buffering policies and for the other arms.
 pub async fn resolve_start_chunk_id(
     pool: &SqlitePool,
     event_id: i64,
     position: &StartPosition,
-    target_delay_ms: u64,
+    _target_delay_ms: u64,
 ) -> anyhow::Result<i64> {
     match position {
         StartPosition::Resume { chunk_id } => Ok(*chunk_id),
@@ -52,8 +51,7 @@ pub async fn resolve_start_chunk_id(
             Ok(first)
         }
         StartPosition::Live => {
-            let start =
-                db::compute_target_start_chunk(pool, event_id, target_delay_ms as i64).await?;
+            let start = db::compute_target_start_chunk(pool, event_id).await?;
             Ok(start)
         }
     }

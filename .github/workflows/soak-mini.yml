@@ -1,0 +1,27 @@
+name: Soak mini (30 min)
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_id:
+        description: "Streaming event ID (must be already created on stream.snv)"
+        required: true
+        default: "9289"
+
+concurrency:
+  group: soak-mini
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    runs-on: [self-hosted, windows, stream-lan]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run soak-mini
+        shell: pwsh
+        env:
+          EVENT_ID: ${{ github.event.inputs.event_id || '9289' }}
+        run: |
+          .\scripts\soak-mini.ps1

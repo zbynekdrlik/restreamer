@@ -1,5 +1,6 @@
 //! Error types surfaced by `RtmpPusher`. See spec §4.1 + §5.3.
 
+use bytesio::bytesio_errors::{BytesIOError, BytesIOErrorValue};
 use std::io;
 use thiserror::Error;
 
@@ -61,6 +62,32 @@ pub fn backoff_floor_ms(err: &PushError) -> Option<u64> {
         PushError::IoError(_) => Some(15_000),
         PushError::MalformedInput { .. } => Some(15_000),
         PushError::LocalCancel => None,
+    }
+}
+
+/// Map a `BytesIOError` produced by xiu's `TNetIO::read()` (or `read_timeout`)
+/// onto the right `PushError` variant.
+///
+/// Issue #168: `BytesIOErrorValue::NoneReturn` is the bytesio crate's signal
+/// that the peer cleanly closed the TCP/TLS connection (the underlying
+/// framed-codec stream ran dry). For RTMP that is **upstream-initiated
+/// disconnect** — exactly what `PushError::RemoteClosed` already encodes (3 s
+/// backoff floor, non-exponential). Wrapping it in `IoError` was wrong:
+/// 15 s backoff per reset bloated the cache overshoot on FB endpoints.
+///
+/// Apply at every READ site in session.rs that does `.read().await` and was
+/// previously `.map_err(|e| PushError::IoError(io::Error::other(e.to_string())))`.
+pub fn map_read_err(err: BytesIOError) -> PushError {
+    match err.value {
+        BytesIOErrorValue::NoneReturn => {
+            PushError::RemoteClosed(io::Error::from(io::ErrorKind::UnexpectedEof))
+        }
+        BytesIOErrorValue::IOError(io_err) => PushError::IoError(io_err),
+        BytesIOErrorValue::TimeoutError(_) => PushError::Timeout,
+        // ClientClosed / NotEnoughBytes / fall-through: treat as ordinary
+        // I/O error (15 s backoff). These are diagnostic-quality variants
+        // that should not occur on a healthy session.
+        other => PushError::IoError(io::Error::other(format!("{other:?}"))),
     }
 }
 
@@ -261,5 +288,66 @@ mod tests {
             !is_exponential(&e),
             "TlsHandshakeFailed uses fixed floor, not exponential"
         );
+    }
+
+    // --- map_read_err ---
+    //
+    // Issue #168: "I/O error: none return" on FB endpoints was traced to
+    // wait_for_publish_start / wait_for_create_stream_response wrapping
+    // `BytesIOErrorValue::NoneReturn` (= peer EOF) into PushError::IoError
+    // (15 s backoff) instead of PushError::RemoteClosed (3 s backoff).
+    // map_read_err is the centralizing helper applied at every READ site
+    // in session.rs so the variant carries through.
+
+    #[test]
+    fn map_read_err_none_return_is_remote_closed() {
+        let e = BytesIOError {
+            value: BytesIOErrorValue::NoneReturn,
+        };
+        let mapped = map_read_err(e);
+        match mapped {
+            PushError::RemoteClosed(_) => {}
+            other => panic!("expected RemoteClosed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_read_err_io_error_stays_io_error() {
+        let e = BytesIOError {
+            value: BytesIOErrorValue::IOError(io::Error::new(io::ErrorKind::Other, "x")),
+        };
+        let mapped = map_read_err(e);
+        match mapped {
+            PushError::IoError(_) => {}
+            other => panic!("expected IoError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_read_err_remote_closed_has_unexpected_eof_kind() {
+        // Killer: catches a mutant that produces RemoteClosed(io::Error)
+        // with the wrong ErrorKind. The 15s-vs-3s decision lives in
+        // backoff_floor_ms and works on the variant, but downstream
+        // operator tooling reads ErrorKind for triage.
+        let e = BytesIOError {
+            value: BytesIOErrorValue::NoneReturn,
+        };
+        if let PushError::RemoteClosed(inner) = map_read_err(e) {
+            assert_eq!(inner.kind(), io::ErrorKind::UnexpectedEof);
+        } else {
+            panic!("expected RemoteClosed");
+        }
+    }
+
+    #[test]
+    fn backoff_floor_for_mapped_none_return_is_3000_not_15000() {
+        // Round-trip: NoneReturn -> RemoteClosed -> 3s floor (not 15s).
+        // This is the production-impact assertion: 12s saved per reset
+        // event, which historically inflated cache overshoot on FB.
+        let e = BytesIOError {
+            value: BytesIOErrorValue::NoneReturn,
+        };
+        let mapped = map_read_err(e);
+        assert_eq!(backoff_floor_ms(&mapped), Some(3_000));
     }
 }

@@ -152,6 +152,8 @@ pub async fn start_stream(
                         chunk_delay_secs: 0.0,
                         stall_reason: None,
                         ffmpeg_restart_count: 0,
+
+                        reconnect_count: 0,
                         last_error: None,
                         is_fast: ep.is_fast,
                         delivery_mode: None,

@@ -14,13 +14,20 @@ mod audit_ring;
 pub mod buffer_state;
 mod clock_endpoint;
 pub mod db;
+mod disk_cache;
+mod disk_cache_fetcher;
+mod disk_cache_push_sample;
 pub mod endpoint_audit;
 pub mod endpoint_task;
 mod ffmpeg_reason;
+mod producer_lag;
 pub mod rescue;
+pub mod rtmp_push_telemetry;
 mod s3_fetch;
+pub mod s3_fetch_profile;
 
 pub use audit_ring::AuditRing;
+pub use disk_cache::DiskCache;
 pub use endpoint_task::EndpointHandle;
 
 /// In-memory audit ring capacity (last N rows retained for /api/status
@@ -49,6 +56,10 @@ pub struct AppState {
     pub db_pool: SqlitePool,
     /// In-memory audit ring for host-side `?since=<cursor>` polling.
     pub audit_ring: Arc<AuditRing>,
+    /// Per-event disk cache shared across all endpoints. Constructed
+    /// once in `init_endpoints` and held for the lifetime of the
+    /// delivery session. `None` until init runs. Issue #174.
+    pub disk_cache: RwLock<Option<Arc<DiskCache>>>,
 }
 
 impl AppState {
@@ -72,6 +83,7 @@ impl AppState {
             log_buffer: LogBuffer::new(5000),
             db_pool,
             audit_ring,
+            disk_cache: RwLock::new(None),
         }
     }
 }
