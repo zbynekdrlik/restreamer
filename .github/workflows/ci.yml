@@ -3115,18 +3115,22 @@ jobs:
           }
           Write-Host "=== Init latency GATE PASSED: $delaySecs s ==="
 
-      - name: "GATE: chunks_processed > 0 within 90s of init"
+      - name: "GATE: chunks_processed > 0 within 200s of init"
         shell: powershell
         run: |
           # Catches the silent VPS warmup spin (#146). After init returns ok,
           # the VPS must start delivering chunks. If it does not, the dashboard
           # shows "0 delivered" indefinitely -- exactly the production failure
-          # operator hit. Polls every 3s up to 90s.
+          # operator hit. Polls every 3s up to 200s.
+          # Threshold = 200s = delivery_delay_secs (120) + boot/init slack (80).
+          # Under strict-live-edge (#174) the warmup loop legitimately fills
+          # 120s of NEW chunks before push begins, so the previous 90s gate
+          # is too tight.
           $ErrorActionPreference = "Stop"
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $e2eEvent = $events | Where-Object { $_.name -eq $env:EVENT_NAME } | Select-Object -First 1
           if (-not $e2eEvent) { throw "FAILED: no event matching $($env:EVENT_NAME)" }
-          $deadline = (Get-Date).AddSeconds(90)
+          $deadline = (Get-Date).AddSeconds(200)
           $progressed = $false
           $lastChunks = -1
           while ((Get-Date) -lt $deadline) {
@@ -3151,7 +3155,7 @@ jobs:
           if (-not $progressed) {
             $finalStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($e2eEvent.id)" -TimeoutSec 10
             Write-Host "FINAL endpoint_details: $($finalStatus.endpoint_details | ConvertTo-Json -Depth 3)"
-            throw "FAILED: chunks_processed stayed 0 for 90s after init. VPS warmup is stuck (likely start_chunk_id below S3 live-edge -- see issue #146)."
+            throw "FAILED: chunks_processed stayed 0 for 200s after init. VPS warmup is stuck (start_chunk_id sanity / OBS not producing / consumer wedged -- see issues #146, #174)."
           }
           Write-Host "=== chunks_processed GATE PASSED ==="
 
