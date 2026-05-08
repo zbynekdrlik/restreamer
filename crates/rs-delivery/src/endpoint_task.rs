@@ -18,20 +18,19 @@ use crate::s3_fetch::S3Fetcher;
 mod flv_normalizer;
 pub use flv_normalizer::FlvStreamNormalizer;
 
+use crate::producer_lag::maybe_jump as maybe_jump_ahead;
+
 const MAX_FFMPEG_RESTARTS: u32 = 10;
 const MAX_CHUNK_MISS_COUNT: u32 = 40; // ~80s at 2s polls
 const SKIP_AHEAD_PROBE: i64 = 10;
-use crate::producer_lag::maybe_jump as maybe_jump_ahead;
 pub(crate) const WRITE_TIMEOUT_SECS: u64 = 30;
 const MAX_WRITE_FAILURES_PER_CHUNK: u32 = 3;
-/// Base S3 backoff (doubles on each error, max 60s, resets on success).
+/// Base S3 backoff (doubles per error, max 60s, resets on success).
 const S3_BACKOFF_BASE_SECS: u64 = 2;
 const S3_BACKOFF_MAX_SECS: u64 = 60;
-/// Heartbeat interval for endpoint delivery loop.
 const ENDPOINT_HEARTBEAT_SECS: u64 = 60;
-/// Pre-fetch buffer size: 10 chunks (~20 s of media at 2 s/chunk). With
-/// the disk_cache integration in v0.4.x, the heavy cache is on local
-/// SSD; this mpsc just smooths producer/consumer pacing. See #174.
+/// Pre-fetch buffer size: 10 chunks (~20s of media). disk_cache lives on
+/// local SSD; this mpsc just smooths producer/consumer pacing. See #174.
 const PREFETCH_BUFFER_SIZE: usize = 10;
 
 /// A chunk that has been fetched from S3 and is ready for the consumer.
@@ -189,15 +188,8 @@ impl Default for EndpointStats {
 
 pub type Stats = Arc<Mutex<EndpointStats>>;
 
-/// Build initial EndpointStats for a newly spawned endpoint. Starts from
-/// Default (delivery_mode = "normal") and overrides the two fields that
-/// differ per-endpoint: current_chunk_id (start position) and
-/// delivery_mode (warmup if rescue video configured, else normal).
-///
-/// Extracted from EndpointHandle::spawn to make the field-assignment
-/// mutation-testable without spinning up S3/ffmpeg infrastructure.
-/// Uses explicit assignment (not struct literal) so `delete stmt`
-/// mutations on each field are caught by unit tests.
+/// Initial EndpointStats: Default + per-endpoint overrides.
+/// Explicit assignment (not struct literal) for mutation-test coverage.
 #[allow(clippy::field_reassign_with_default)]
 pub fn initial_endpoint_stats(start_chunk_id: i64, initial_mode: String) -> EndpointStats {
     let mut s = EndpointStats::default();
@@ -329,8 +321,9 @@ async fn producer_task<F: ChunkFetcher>(
     let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
     // Issue #173: rate-limited audit-row emitter, owned by this task.
     let mut s3_fetch_audit = crate::endpoint_audit::S3FetchAuditLimiter::new();
-    // Live-edge lag detection state.
-    let delivery_delay_chunks: i64 = ((delivery_delay_ms / 2000) as i64).max(1);
+    // Lag-detect state. typical_chunk_dur_ms is updated from observed
+    // `duration_ms` so it tracks operator config without a hardcode.
+    let mut typical_chunk_dur_ms: u64 = 1000;
     let mut iters_since_lag_probe: u32 = 0;
 
     loop {
@@ -378,6 +371,11 @@ async fn producer_task<F: ChunkFetcher>(
                 }
 
                 chunk_id += 1;
+                if duration_ms > 0 {
+                    typical_chunk_dur_ms = duration_ms as u64;
+                }
+                let delivery_delay_chunks: i64 =
+                    ((delivery_delay_ms / typical_chunk_dur_ms.max(1)) as i64).max(1);
                 maybe_jump_ahead(
                     &fetcher,
                     &mut chunk_id,

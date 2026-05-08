@@ -171,3 +171,30 @@ fn pick_last_error_line_inline_returns_none_when_only_progress() {
     let stderr = "size=  42kB time=00:00:01 bitrate=330kbits/s\nframe=    2 fps=1.0 q=-1.0";
     assert!(pick_last_error_line_inline(stderr).is_none());
 }
+
+#[tokio::test]
+async fn wipe_event_s3_chunks_no_op_when_event_missing() {
+    use crate::delivery::wipe_event_s3_chunks;
+    use rs_core::config::Config;
+    let pool = rs_core::db::create_memory_pool().await.unwrap();
+    rs_core::db::run_migrations(&pool).await.unwrap();
+    // No event with id=999 — function must return without panic.
+    wipe_event_s3_chunks(&pool, &Config::default(), 999).await;
+}
+
+#[tokio::test]
+async fn wipe_event_s3_chunks_warns_and_returns_on_invalid_s3_config() {
+    // Empty S3 credentials → S3Client::new errors → wipe must warn and
+    // return, never panic. This protects the wipe path against config
+    // misconfiguration so start_delivery can still proceed (the strict
+    // live-edge compute_target_start_chunk is the primary barrier).
+    use crate::delivery::wipe_event_s3_chunks;
+    use rs_core::config::Config;
+    let pool = rs_core::db::create_memory_pool().await.unwrap();
+    rs_core::db::run_migrations(&pool).await.unwrap();
+    let event_id = rs_core::db::upsert_streaming_event(&pool, "wipe-test")
+        .await
+        .unwrap();
+    let cfg = Config::default(); // S3 credentials empty by default
+    wipe_event_s3_chunks(&pool, &cfg, event_id).await;
+}

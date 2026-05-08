@@ -153,11 +153,11 @@ async fn remove_endpoint_rejects_when_would_leave_zero_and_delivery_active() {
 }
 
 #[tokio::test]
-async fn start_position_live_walks_back_target_delay_buffer_for_midstream_add() {
-    // #163: mid-stream endpoint add with StartPosition::Live must resolve to
-    // (latest_seq - target_delay), not the bare live edge — otherwise the
-    // new endpoint joins with zero cache and never builds the buffer the
-    // other endpoints already have.
+async fn start_position_live_resolves_to_latest_plus_one_strict_live_edge() {
+    // #174 strict live-edge policy: mid-stream endpoint add with
+    // StartPosition::Live must resolve to `latest_sent_seq + 1`, never to
+    // a historical chunk. Buffering is the warmup loop's responsibility,
+    // not compute_target_start_chunk's.
     use rs_api::delivery_endpoints::{StartPosition, resolve_start_chunk_id};
 
     let pool = db::create_memory_pool().await.unwrap();
