@@ -153,11 +153,13 @@ async fn remove_endpoint_rejects_when_would_leave_zero_and_delivery_active() {
 }
 
 #[tokio::test]
-async fn start_position_live_resolves_to_latest_plus_one_strict_live_edge() {
-    // #174 strict live-edge policy: mid-stream endpoint add with
-    // StartPosition::Live must resolve to `latest_sent_seq + 1`, never to
-    // a historical chunk. Buffering is the warmup loop's responsibility,
-    // not compute_target_start_chunk's.
+async fn start_position_live_steps_back_by_delivery_delay_chunks() {
+    // Mid-stream endpoint add with `StartPosition::Live` must position the
+    // new endpoint at `live_edge - delivery_delay_chunks` so it can push
+    // immediately from S3's existing buffer. Earlier strict-live-edge
+    // (latest_sent + 1) forced the new endpoint to wait `delivery_delay_ms`
+    // building a fresh buffer even though S3 had it already. Fresh starts
+    // are unaffected because PR #170 wipes S3 → live_edge=1 → clamp to 1.
     use rs_api::delivery_endpoints::{StartPosition, resolve_start_chunk_id};
 
     let pool = db::create_memory_pool().await.unwrap();
@@ -166,10 +168,6 @@ async fn start_position_live_resolves_to_latest_plus_one_strict_live_edge() {
         .await
         .unwrap();
 
-    // Insert 100 chunks of 2000 ms each, all sent=1.
-    // Strict live-edge policy (#174): Live always returns latest_seq + 1
-    // regardless of target_delay_ms. The warmup loop, not compute_target,
-    // is what produces the delay buffer (from NEW chunks only).
     for seq in 1i64..=100 {
         sqlx::query(
             "INSERT INTO chunk_records
@@ -185,12 +183,14 @@ async fn start_position_live_resolves_to_latest_plus_one_strict_live_edge() {
         .unwrap();
     }
 
+    // live_edge=101, delivery_delay_ms=120_000, 2s chunks → stepback=60.
+    // Expected start_chunk = max(101-60, 1) = 41.
     let live = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 120_000)
         .await
         .unwrap();
     assert_eq!(
-        live, 101,
-        "Live (strict): latest+1, expected 101 got {live}"
+        live, 41,
+        "Live (stepback): live_edge - delivery_delay_chunks, expected 41 got {live}"
     );
 
     let beg = resolve_start_chunk_id(&pool, event_id, &StartPosition::Beginning, 120_000)
