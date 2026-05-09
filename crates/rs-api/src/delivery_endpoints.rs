@@ -28,19 +28,19 @@ pub enum StartPosition {
 
 /// Resolve a StartPosition into a concrete start_chunk_id for an event.
 ///
-/// - `Live`      → strict live-edge (#174): returns `latest_sent + 1`. The
-///   warmup loop on the VPS accumulates `target_delay_ms` of NEW chunks
-///   before pushing. No historical chunk replay.
+/// - `Live`      → live edge minus `delivery_delay_chunks`. For a mid-stream
+///   add, S3 already holds many minutes of recent chunks; the new endpoint
+///   should step back so it can push immediately from existing buffer
+///   instead of waiting `target_delay_ms` to build a fresh one. After a
+///   fresh `Start Delivering` (S3 was wiped in PR #170), `latest_sent + 1`
+///   is small (1) and the stepback is clamped to 1 — same behavior.
 /// - `Beginning` → first sequence number (replay from event start)
 /// - `Resume`    → passes through the chunk_id directly
-///
-/// `target_delay_ms` is currently unused by `Live` but kept in the
-/// signature for future buffering policies and for the other arms.
 pub async fn resolve_start_chunk_id(
     pool: &SqlitePool,
     event_id: i64,
     position: &StartPosition,
-    _target_delay_ms: u64,
+    target_delay_ms: u64,
 ) -> anyhow::Result<i64> {
     match position {
         StartPosition::Resume { chunk_id } => Ok(*chunk_id),
@@ -51,8 +51,11 @@ pub async fn resolve_start_chunk_id(
             Ok(first)
         }
         StartPosition::Live => {
-            let start = db::compute_target_start_chunk(pool, event_id).await?;
-            Ok(start)
+            let live_edge = db::compute_target_start_chunk(pool, event_id).await?;
+            // Approximate chunks per delivery_delay_ms at the canonical 2s
+            // chunk cadence; clamp so we never land below 1.
+            let delay_chunks = (target_delay_ms as i64 / 2000).max(0);
+            Ok((live_edge - delay_chunks).max(1))
         }
     }
 }
@@ -232,11 +235,92 @@ pub async fn remove_endpoint_from_delivery(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rs_core::db::{
+        create_memory_pool, insert_chunk, run_migrations, set_chunk_sent, upsert_streaming_event,
+    };
 
     #[test]
     fn start_position_default_is_live() {
         let pos = StartPosition::default();
         assert!(matches!(pos, StartPosition::Live));
+    }
+
+    async fn pool_with_chunks(event_name: &str, n_sent: i64) -> (SqlitePool, i64) {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let event_id = upsert_streaming_event(&pool, event_name).await.unwrap();
+        for i in 1..=n_sent {
+            let cid = insert_chunk(
+                &pool,
+                event_id,
+                &format!("/tmp/c{i}.bin"),
+                100,
+                &format!("md5_{i}"),
+                2000,
+            )
+            .await
+            .unwrap();
+            set_chunk_sent(&pool, cid).await.unwrap();
+        }
+        (pool, event_id)
+    }
+
+    #[tokio::test]
+    async fn live_position_steps_back_by_delivery_delay_chunks() {
+        // 200 chunks already sent; live edge = 201. With delivery_delay=120s
+        // and 2s chunks, stepback = 60 → start = 201 - 60 = 141. New endpoint
+        // immediately has 60 chunks (~120s) of buffer ahead and can push
+        // without waiting for a fresh prefill.
+        let (pool, event_id) = pool_with_chunks("live-stepback-test", 200).await;
+        let start = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 120_000)
+            .await
+            .unwrap();
+        assert_eq!(start, 141);
+    }
+
+    #[tokio::test]
+    async fn live_position_clamps_to_one_when_few_chunks() {
+        // Only 5 chunks sent; live edge = 6. Stepback by 60 would land at -54;
+        // clamp to 1 so we don't return a non-existent chunk_id. Matches the
+        // fresh-start case after PR #170 wipes S3.
+        let (pool, event_id) = pool_with_chunks("live-clamp-test", 5).await;
+        let start = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 120_000)
+            .await
+            .unwrap();
+        assert_eq!(start, 1);
+    }
+
+    #[tokio::test]
+    async fn live_position_zero_delay_returns_live_edge() {
+        let (pool, event_id) = pool_with_chunks("live-zero-delay-test", 50).await;
+        let start = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 0)
+            .await
+            .unwrap();
+        // delay_chunks = 0 → start = live_edge = 51.
+        assert_eq!(start, 51);
+    }
+
+    #[tokio::test]
+    async fn beginning_position_returns_first_sequence() {
+        let (pool, event_id) = pool_with_chunks("beginning-test", 10).await;
+        let start = resolve_start_chunk_id(&pool, event_id, &StartPosition::Beginning, 120_000)
+            .await
+            .unwrap();
+        assert_eq!(start, 1);
+    }
+
+    #[tokio::test]
+    async fn resume_position_passes_through() {
+        let (pool, event_id) = pool_with_chunks("resume-test", 100).await;
+        let start = resolve_start_chunk_id(
+            &pool,
+            event_id,
+            &StartPosition::Resume { chunk_id: 42 },
+            120_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(start, 42);
     }
 
     #[test]
