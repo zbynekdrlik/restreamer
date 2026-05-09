@@ -549,6 +549,54 @@ pub async fn get_cache_duration_secs(
     Ok(row.get::<i64, _>("total_ms") as f64 / 1000.0)
 }
 
+/// Find the chunk_id N such that the SUM of duration_ms across sent chunks
+/// with sequence_number > N is approximately `target_delay_ms`. The new
+/// endpoint joining mid-stream uses this to start at a position where S3
+/// already holds `target_delay_ms` of content ahead of it — no rebuild
+/// wait. Walks back from the live edge, summing actual chunk durations,
+/// until the accumulated total reaches the target. This avoids any
+/// hardcoded chunk-cadence assumption: the FLV chunker emits variable
+/// durations (700-2000 ms in production), so a constant divisor would
+/// undershoot or overshoot the buffer.
+///
+/// Returns 1 if no sent chunks exist (fresh start), or if the entire
+/// sent range is shorter than `target_delay_ms`.
+pub async fn compute_live_stepback_start_chunk(
+    pool: &SqlitePool,
+    event_id: i64,
+    target_delay_ms: u64,
+) -> Result<i64> {
+    if target_delay_ms == 0 {
+        // No stepback requested -- caller wants live edge.
+        return compute_target_start_chunk(pool, event_id).await;
+    }
+    let rows = sqlx::query(
+        "SELECT sequence_number, duration_ms FROM chunk_records
+         WHERE streaming_event_id = ?1 AND sent = 1
+         ORDER BY sequence_number DESC",
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await?;
+    let mut accum_ms: u64 = 0;
+    let target = target_delay_ms;
+    for row in &rows {
+        let dur = row.get::<i64, _>("duration_ms").max(0) as u64;
+        accum_ms = accum_ms.saturating_add(dur);
+        if accum_ms >= target {
+            // This row's sequence_number is the first chunk INSIDE the
+            // delay window. The new endpoint should start AT this chunk.
+            return Ok(row.get::<i64, _>("sequence_number"));
+        }
+    }
+    // Not enough sent content to cover the delay -- start from the
+    // earliest sent chunk (or 1 if nothing sent yet).
+    Ok(rows
+        .last()
+        .map(|r| r.get::<i64, _>("sequence_number"))
+        .unwrap_or(1))
+}
+
 /// Total content duration of chunks uploaded to S3 for an event.
 /// Only counts chunks with sent = 1. Used for buffer-fill wait.
 pub async fn get_sent_duration_ms(pool: &SqlitePool, event_id: i64) -> Result<i64> {

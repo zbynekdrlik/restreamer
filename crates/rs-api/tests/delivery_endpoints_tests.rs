@@ -183,14 +183,15 @@ async fn start_position_live_steps_back_by_delivery_delay_chunks() {
         .unwrap();
     }
 
-    // live_edge=101, delivery_delay_ms=120_000, 2s chunks → stepback=60.
-    // Expected start_chunk = max(101-60, 1) = 41.
+    // SQL-based stepback walks DESC accumulating actual duration_ms per
+    // chunk until accum >= target. With 100 chunks of 2000 ms each, hitting
+    // 120_000 ms takes 60 chunks → start = 41.
     let live = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 120_000)
         .await
         .unwrap();
     assert_eq!(
         live, 41,
-        "Live (stepback): live_edge - delivery_delay_chunks, expected 41 got {live}"
+        "Live: SUM(duration_ms) walk back to 120s, expected 41 got {live}"
     );
 
     let beg = resolve_start_chunk_id(&pool, event_id, &StartPosition::Beginning, 120_000)
@@ -198,13 +199,12 @@ async fn start_position_live_steps_back_by_delivery_delay_chunks() {
         .unwrap();
     assert_eq!(beg, 1, "Beginning must resolve to first sequence (1)");
 
-    // Live now scales with target_delay_ms: 60s/2s = 30 chunks stepback.
-    // live_edge=101, stepback=30 → start = 71.
+    // 60_000 ms with 2000 ms chunks → 30 chunks back from edge 101 → 71.
     let live_short = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 60_000)
         .await
         .unwrap();
     assert_eq!(
         live_short, 71,
-        "Live (stepback): live_edge - 30 = 71, got {live_short}"
+        "Live: SUM walk to 60s, expected 71 got {live_short}"
     );
 }
