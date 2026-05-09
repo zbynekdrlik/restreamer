@@ -198,12 +198,13 @@ async fn start_position_live_steps_back_by_delivery_delay_chunks() {
         .unwrap();
     assert_eq!(beg, 1, "Beginning must resolve to first sequence (1)");
 
-    // target_delay_ms is now legacy and ignored by Live.
+    // Live now scales with target_delay_ms: 60s/2s = 30 chunks stepback.
+    // live_edge=101, stepback=30 → start = 71.
     let live_short = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 60_000)
         .await
         .unwrap();
     assert_eq!(
-        live_short, 101,
-        "Live ignores target_delay_ms: latest+1=101, got {live_short}"
+        live_short, 71,
+        "Live (stepback): live_edge - 30 = 71, got {live_short}"
     );
 }
