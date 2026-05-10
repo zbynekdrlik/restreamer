@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::position_registry::EndpointPositionRegistry;
+use super::prefetch_queue::PrefetchQueue;
 use super::registry::{ChunkAvailability, ChunkRegistry};
 
 #[derive(Debug, thiserror::Error)]
@@ -24,7 +25,7 @@ pub trait ReaderPusher: Send {
     async fn push_chunk(&mut self, bytes: Vec<u8>) -> Result<(), String>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReaderConfig {
     pub cache_dir: PathBuf,
     pub alias: String,
@@ -32,6 +33,13 @@ pub struct ReaderConfig {
     pub stall_timeout_secs: u64,
     /// Test-only: stop after pushing this many chunks. `None` = unlimited.
     pub max_chunks: Option<u64>,
+    /// When `Some`, `EndpointReader::run_once` pops pre-fetched chunks from
+    /// this queue instead of polling the registry. The queue is driven by a
+    /// background `PrefetchReader`; lifecycle sampling (stages E/F) is done
+    /// on the pusher side (LifecycleAwarePusher in endpoint_task.rs).
+    /// `None` = registry-poll path (existing behaviour, used by tests and
+    /// non-fast endpoints without explicit prefetch configuration).
+    pub queue: Option<Arc<PrefetchQueue<Arc<Vec<u8>>>>>,
 }
 
 pub struct EndpointReader;
@@ -48,6 +56,37 @@ impl EndpointReader {
     ) -> Result<(), ReaderError> {
         let mut chunk_id = cfg.start_chunk_id;
         let mut pushed = 0u64;
+
+        // Queue-driven path: pops pre-fetched chunks from a PrefetchQueue
+        // instead of polling the registry. The PrefetchReader background task
+        // performs S3 fetch + infinite retry; this loop is pure FIFO drain.
+        // Lifecycle stamping (stages E/F) and LifecycleSampler observation
+        // happen in the pusher wrapper (endpoint_task.rs::LifecycleAwarePusher).
+        if let Some(ref q) = cfg.queue {
+            let q = Arc::clone(q);
+            loop {
+                if let Some(cap) = cfg.max_chunks {
+                    if pushed >= cap {
+                        return Ok(());
+                    }
+                }
+                let arc_bytes = q
+                    .pop_front()
+                    .await
+                    .map_err(|_| ReaderError::PushFailed("queue closed".into()))?;
+                let bytes = (*arc_bytes).clone();
+                pusher
+                    .push_chunk(bytes)
+                    .await
+                    .map_err(ReaderError::PushFailed)?;
+                positions.advance(&cfg.alias, chunk_id);
+                chunk_id += 1;
+                pushed += 1;
+            }
+        }
+
+        // Registry-poll path (existing behaviour): used by non-queue endpoints
+        // and all tests that pass `queue: None`.
         loop {
             if let Some(cap) = cfg.max_chunks {
                 if pushed >= cap {
@@ -172,6 +211,7 @@ mod tests {
             start_chunk_id: 0,
             stall_timeout_secs: 5,
             max_chunks: Some(2),
+            queue: None,
         };
         EndpointReader::run_once(cfg, registry, positions, pusher)
             .await
@@ -199,6 +239,7 @@ mod tests {
             start_chunk_id: 0,
             stall_timeout_secs: 5,
             max_chunks: Some(1),
+            queue: None,
         };
         EndpointReader::run_once(cfg, registry, positions.clone(), pusher)
             .await
@@ -224,6 +265,7 @@ mod tests {
             start_chunk_id: 0,
             stall_timeout_secs: 1,
             max_chunks: Some(1),
+            queue: None,
         };
         let result = EndpointReader::run_once(cfg, registry, positions, pusher).await;
         assert!(matches!(result, Err(ReaderError::StallTimeout { .. })));
