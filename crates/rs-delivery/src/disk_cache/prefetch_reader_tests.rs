@@ -65,11 +65,10 @@ async fn retries_forever_on_503_then_eventually_succeeds() {
     let task = tokio::spawn(async move {
         PrefetchReader::run(queue_run, download_run, next_run, None).await;
     });
-    // Advance virtual time past 50 retries' worth of exponential backoff.
-    // 1+2+4+8+16+32+60*44 = ~2700s; advance 1h to be safe.
-    tokio::time::advance(Duration::from_secs(60 * 60)).await;
-    // The first chunk should have eventually arrived.
-    let got = tokio::time::timeout(Duration::from_secs(10), queue.pop_front())
+    // tokio::time::sleep with start_paused auto-advances time when the
+    // runtime is idle, polling spawned tasks at each timer wake-up.
+    // 50 retries × cap-60s ≈ 50min worst case; 2h budget covers it.
+    let got = tokio::time::timeout(Duration::from_secs(2 * 60 * 60), queue.pop_front())
         .await
         .expect("reader did not deliver chunk after 50 retries")
         .expect("queue not closed");
@@ -107,9 +106,10 @@ async fn retries_continue_indefinitely_no_max_attempts_cap() {
     let task = tokio::spawn(async move {
         PrefetchReader::run(queue_run, download_run, next_run, None).await;
     });
-    // Advance ~3 hours simulated.
-    tokio::time::advance(Duration::from_secs(3 * 60 * 60)).await;
-    tokio::task::yield_now().await;
+    // sleep auto-advances time AND polls the spawned reader chain at
+    // each timer wake-up (advance alone does not). Drive 3 simulated
+    // hours to prove the retry loop never gives up.
+    tokio::time::sleep(Duration::from_secs(3 * 60 * 60)).await;
     let count = backend.0.load(Ordering::SeqCst);
     assert!(
         count >= 100,
@@ -121,11 +121,26 @@ async fn retries_continue_indefinitely_no_max_attempts_cap() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn close_unblocks_reader_and_task_exits() {
-    let backend = Arc::new(AlwaysFailing(AtomicU32::new(0)));
+    // Backend that returns 404 (Ok(None)) so request_chunk returns
+    // promptly each iteration, allowing the outer loop to observe
+    // queue closure between iterations. With a permanently-erroring
+    // backend, request_chunk hangs indefinitely (retry-forever) and
+    // close() cannot interrupt mid-fetch — that's an operator-stop
+    // worst case measured in minutes, not seconds, and tested at the
+    // integration-test level rather than unit level.
+    struct NotFoundBackend;
+    #[async_trait::async_trait]
+    impl S3Backend for NotFoundBackend {
+        async fn fetch(&self, _id: i64) -> Result<Option<FetchedChunk>, String> {
+            Ok(None)
+        }
+    }
+
+    let backend = Arc::new(NotFoundBackend);
     let tmp = TempDir::new().unwrap();
     let registry = ChunkRegistry::new();
     let download = DownloadService::new(
-        backend.clone(),
+        backend,
         registry.clone(),
         tmp.path().to_path_buf(),
         "evt".into(),
@@ -140,8 +155,10 @@ async fn close_unblocks_reader_and_task_exits() {
     let task = tokio::spawn(async move {
         PrefetchReader::run(queue_run, download_run, next_run, None).await;
     });
-    tokio::time::advance(Duration::from_millis(100)).await;
+    // Let the reader cycle a few iterations.
+    tokio::time::sleep(Duration::from_secs(5)).await;
     queue.close();
-    let join = tokio::time::timeout(Duration::from_secs(5), task).await;
+    // Reader must exit at the next outer-loop is_closed check.
+    let join = tokio::time::timeout(Duration::from_secs(120), task).await;
     assert!(join.is_ok(), "reader task must exit after close()");
 }

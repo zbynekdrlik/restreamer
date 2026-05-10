@@ -587,8 +587,13 @@ mod tests {
         );
         let svc2 = Arc::clone(&svc);
         let task = tokio::spawn(async move { svc2.request_chunk(503).await });
-        tokio::time::advance(std::time::Duration::from_secs(30 * 60)).await;
-        tokio::task::yield_now().await;
+        // tokio::time::sleep with start_paused auto-advances time when
+        // the runtime is idle, polling other tasks (including the spawned
+        // request_chunk and its inner fetch_with_retry) at each timer
+        // wake-up. `tokio::time::advance` alone advances the clock but
+        // does not drive the scheduler past the immediate yield, so the
+        // multi-stage spawned chain never progresses past attempt 1.
+        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
         // After 30 simulated minutes the loop must still be retrying.
         let state = registry.peek(503);
         assert!(
@@ -617,10 +622,11 @@ mod tests {
         );
         let svc2 = Arc::clone(&svc);
         let req = tokio::spawn(async move { svc2.request_chunk(503).await });
-        // Advance virtual time by 1 hour. The retry-forever loop should
-        // still be active (registry NOT in NotFound terminal state).
-        tokio::time::advance(std::time::Duration::from_secs(60 * 60)).await;
-        tokio::task::yield_now().await;
+        // sleep (not advance) so the runtime auto-advances time AND
+        // polls the spawned chain on every timer wake-up. See the
+        // comment in fetch_5xx_no_longer_exhausts_retries_loops_forever
+        // for the rationale.
+        tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
         let st = registry.peek(503);
         assert!(
             !matches!(st, Some(ChunkAvailability::NotFound)),

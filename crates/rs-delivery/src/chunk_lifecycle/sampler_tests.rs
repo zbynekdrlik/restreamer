@@ -44,7 +44,11 @@ async fn observe_emits_sample_every_nth_chunk() {
         .filter(|r| r.action == Action::DiskCacheLifecycleSample)
         .collect();
     // pushed_count goes 1..10. With every_n=5, samples emit at counts 5 and 10.
-    assert_eq!(sample_rows.len(), 2, "expected 2 samples for 10 chunks at N=5");
+    assert_eq!(
+        sample_rows.len(),
+        2,
+        "expected 2 samples for 10 chunks at N=5"
+    );
     // Severity must be Info — operators don't want sample rows paging on-call.
     assert_eq!(
         sample_rows[0].severity,
