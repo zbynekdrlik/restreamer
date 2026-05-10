@@ -216,10 +216,10 @@ impl DownloadService {
     }
 
     async fn fetch_with_retry(self: &Arc<Self>, chunk_id: i64) {
-        let mut backoff = Duration::from_millis(500);
-        let max_attempts = 5;
-        for attempt in 1..=max_attempts {
-            // Concurrency gate.
+        let mut backoff_secs: u64 = 1;
+        let mut attempt: u64 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
             let _permit = self
                 .semaphore
                 .clone()
@@ -236,9 +236,11 @@ impl DownloadService {
                     self.token_bucket_consume(fc.data.len() as u64).await;
                     if let Err(e) = self.write_atomic(chunk_id, &fc.data, fc.duration_ms).await {
                         tracing::error!(chunk_id, "disk_cache write failed: {e}");
-                        // Mark NotFound so waiters wake — better to surface a
-                        // visible failure than to leave the slot InFlight and
-                        // block the EndpointReader forever on this chunk.
+                        // Disk-write failures are not handled here -- the
+                        // outer PrefetchReader loop re-requests, and the
+                        // next iteration retries from scratch. Mark
+                        // NotFound so anyone awaiting wait_for_chunk
+                        // wakes immediately rather than hanging.
                         self.registry.mark_not_found(chunk_id);
                         return;
                     }
@@ -247,9 +249,10 @@ impl DownloadService {
                     return;
                 }
                 Ok(None) => {
-                    // 404 is "chunk not yet uploaded" -- normal in-stream signal, not a fetch
-                    // failure for the profile (which dashboards as outage). Counted only via
-                    // existing producer-side audit.
+                    // 404: chunk genuinely not on S3 yet. Don't loop here
+                    // forever -- mark NotFound so the OUTER PrefetchReader
+                    // loop decides whether to retry (genuine miss is rare;
+                    // uploader will eventually PUT).
                     self.registry.mark_not_found(chunk_id);
                     return;
                 }
@@ -257,13 +260,12 @@ impl DownloadService {
                     tracing::warn!(chunk_id, attempt, "disk_cache S3 fetch failed: {e}");
                     let class = crate::endpoint_audit::classify_s3_fetch_error(&e.to_string());
                     self.profile.record_failure(class);
-                    if attempt >= max_attempts {
-                        self.registry.mark_not_found(chunk_id);
-                        return;
-                    }
                     drop(_permit);
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(60);
+                    // No max_attempts check. Loop until success, 404, or
+                    // disk-write hard fail. Per user rule (#184): never
+                    // give up on transient errors; only slow down.
                 }
             }
         }
