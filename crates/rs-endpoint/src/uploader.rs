@@ -643,4 +643,63 @@ mod tests {
         // After drain (live=2) with target now raised to 4: spawn.
         assert!(should_spawn_worker(2, 4));
     }
+
+    #[tokio::test]
+    async fn now_millis_returns_non_zero_monotonic_value() {
+        let a = super::now_millis();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let b = super::now_millis();
+        assert!(a > 0, "now_millis must be non-zero post-1970");
+        assert!(
+            b >= a,
+            "now_millis must be monotonic across awaits (got {a} then {b})"
+        );
+    }
+
+    #[tokio::test]
+    async fn stamp_host_emit_and_s3_complete_columns_via_sql() {
+        // Verifies the SQL the uploader will issue actually populates
+        // both columns. Uses an in-memory pool seeded by the v24
+        // migration from Task 6.
+        let pool = rs_core::db::create_memory_pool().await.unwrap();
+        rs_core::db::run_migrations(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO streaming_events(id, name, date_of_event, received_bytes, receiving_activated, delivering_activated) \
+             VALUES (1,'evt',datetime('now'),0,0,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunk_records \
+             (id, streaming_event_id, sequence_number, chunk_file_path, data_size, md5, sent, in_process, created_at, duration_ms) \
+             VALUES (1,1,1,'/tmp/x',0,'',0,0,datetime('now'),2000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let host_emit = super::now_millis();
+        sqlx::query("UPDATE chunk_records SET host_emit_ts = ?1 WHERE id = ?2")
+            .bind(host_emit)
+            .bind(1i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let s3_complete = super::now_millis();
+        sqlx::query("UPDATE chunk_records SET s3_upload_complete_ts = ?1 WHERE id = ?2")
+            .bind(s3_complete)
+            .bind(1i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let row =
+            sqlx::query("SELECT host_emit_ts, s3_upload_complete_ts FROM chunk_records WHERE id=1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let h: Option<i64> = sqlx::Row::try_get(&row, "host_emit_ts").unwrap();
+        let s: Option<i64> = sqlx::Row::try_get(&row, "s3_upload_complete_ts").unwrap();
+        assert!(h.is_some() && s.is_some());
+        assert!(s.unwrap() >= h.unwrap());
+    }
 }
