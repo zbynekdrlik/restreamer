@@ -119,10 +119,27 @@ impl S3Fetcher {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn chunk_key_format() {
         // Direct key format: {event}/{seq}.bin
         let key = format!("{}/{}.bin", "evt-123", 42);
         assert_eq!(key, "evt-123/42.bin");
+    }
+
+    #[test]
+    fn chunk_data_has_lifecycle_header_fields() {
+        // Compile-time assertion: ChunkData carries host_emit_ts and
+        // s3_upload_complete_ts (both Option<i64> millis since epoch).
+        // The fetcher backfills them from x-amz-meta-* response headers.
+        let cd = ChunkData {
+            data: vec![],
+            duration_ms: 2000,
+            host_emit_ts: Some(1715380800000),
+            s3_upload_complete_ts: Some(1715380800120),
+        };
+        assert_eq!(cd.host_emit_ts, Some(1715380800000));
+        assert_eq!(cd.s3_upload_complete_ts, Some(1715380800120));
     }
 }
