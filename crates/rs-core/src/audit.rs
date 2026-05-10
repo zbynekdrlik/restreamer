@@ -110,6 +110,18 @@ pub enum Action {
     /// `HostInternetUnreachable`. Emitted on first successful probe
     /// after a stretch of failures. Issue #176.
     HostInternetRecovered,
+    /// Per-chunk lifecycle steady-state sample emitted every Nth chunk
+    /// per endpoint (default N=30). Carries the 5 stage gaps + worst-stage
+    /// label. Severity::Info; rate-limit keyed by endpoint_alias.
+    DiskCacheLifecycleSample,
+    /// Single chunk where any one stage gap exceeded the breach threshold
+    /// (default 4_000ms = 2x chunk_duration). Severity::Warn; per-endpoint
+    /// rate-limit window 5s.
+    DiskCacheLifecycleBreach,
+    /// On endpoint death, dump the last 5 chunks' full lifecycle timings
+    /// in one row so the operator can pinpoint which stage stalled.
+    /// Severity::Warn; never rate-limited.
+    EndpointLifecyclePredeath,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
