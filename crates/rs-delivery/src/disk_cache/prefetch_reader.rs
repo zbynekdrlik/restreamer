@@ -15,7 +15,8 @@ pub struct PrefetchReader;
 
 impl PrefetchReader {
     /// Drive the prefetch loop. Returns when the queue is closed
-    /// (endpoint shutdown). Never returns due to fetch errors.
+    /// (endpoint shutdown). Never returns due to fetch errors — even
+    /// across persistent S3 outages, the loop keeps trying.
     pub async fn run(
         queue: Arc<PrefetchQueue<Arc<Vec<u8>>>>,
         download: Arc<DownloadService>,
@@ -23,11 +24,17 @@ impl PrefetchReader {
         _audit_ring: Option<Arc<AuditRing>>,
     ) {
         loop {
+            if queue.is_closed() {
+                return;
+            }
             let id = next_chunk_id.fetch_add(1, Ordering::AcqRel);
-            let bytes = Self::fetch_until_available(&download, id).await;
+            let Some(bytes) = Self::fetch_until_available(&download, &queue, id).await else {
+                // Queue closed mid-fetch (between retries). Exit cleanly.
+                return;
+            };
             let arc_bytes = Arc::new(bytes);
             if queue.push_back(arc_bytes).await.is_err() {
-                // Queue closed -> endpoint shutdown.
+                // Queue closed at push time. Exit cleanly.
                 return;
             }
         }
@@ -35,13 +42,28 @@ impl PrefetchReader {
 
     /// Inner loop: keep calling request_chunk until the registry
     /// reports Available. NotFound triggers a backoff and re-attempt.
-    async fn fetch_until_available(download: &Arc<DownloadService>, chunk_id: i64) -> Vec<u8> {
+    /// Returns None if the queue is closed during a retry — letting
+    /// the caller exit instead of pushing into a dead queue.
+    async fn fetch_until_available(
+        download: &Arc<DownloadService>,
+        queue: &Arc<PrefetchQueue<Arc<Vec<u8>>>>,
+        chunk_id: i64,
+    ) -> Option<Vec<u8>> {
         let mut backoff_secs: u64 = 1;
         loop {
+            if queue.is_closed() {
+                return None;
+            }
             download.request_chunk(chunk_id).await;
+            if queue.is_closed() {
+                return None;
+            }
             match Self::try_read_from_disk(download, chunk_id).await {
-                Some(bytes) => return bytes,
+                Some(bytes) => return Some(bytes),
                 None => {
+                    if queue.is_closed() {
+                        return None;
+                    }
                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(60);
                 }

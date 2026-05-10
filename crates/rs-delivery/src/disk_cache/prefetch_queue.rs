@@ -174,6 +174,13 @@ impl<T: Send + 'static> PrefetchQueue<T> {
         self.capacity
     }
 
+    /// Whether `close()` has been called. Used by background producers
+    /// (e.g. PrefetchReader) to break out of internal retry loops
+    /// without waiting on the next push_back.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
     /// Close the queue. Wakes all waiters; subsequent push_back/pop_front
     /// return `Err(QueueClosed)` after any remaining items are drained.
     pub fn close(&self) {

@@ -76,12 +76,18 @@ impl ChunkRegistry {
         notify.notify_waiters();
     }
 
+    /// Set the slot to InFlight, ALWAYS — even if a previous fetch
+    /// already terminated (NotFound / Evicted). Without this active
+    /// reset, a PrefetchReader retry against a chunk that previously
+    /// 404'd would observe stale NotFound state via `wait_for_chunk`
+    /// and never block on the new in-flight fetch (#184).
     pub fn mark_in_flight(self: &Arc<Self>, chunk_id: i64) {
         let mut g = self.inner.lock().unwrap();
-        g.entry(chunk_id).or_insert_with(|| Slot {
+        let slot = g.entry(chunk_id).or_insert_with(|| Slot {
             state: ChunkAvailability::InFlight,
             notify: Arc::new(Notify::new()),
         });
+        slot.state = ChunkAvailability::InFlight;
     }
 
     pub fn exists(&self, chunk_id: i64) -> bool {
