@@ -134,69 +134,12 @@ mod consumer_helpers;
 use crate::disk_cache_push_sample::{PushSampleCtx, emit_push_sample};
 use consumer_helpers::{FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, handle_rust_push};
 
-/// Stats tracked per endpoint with diagnostics.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct EndpointStats {
-    pub bytes_processed_total: u64,
-    pub duration_processed_ms: u64,
-    pub current_chunk_id: i64,
-    pub chunks_processed: u64,
-    // Diagnostics
-    pub ffmpeg_restart_count: u32,
-    pub consecutive_ffmpeg_failures: u32,
-    pub consecutive_chunk_misses: u32,
-    pub last_error: Option<String>,
-    pub stall_reason: Option<String>,
-    pub ffmpeg_last_stderr: Option<String>,
-    /// Per-endpoint ring buffer of recent ffmpeg restarts. Capped at
-    /// RESTART_HISTORY_CAP — oldest dropped first.
-    pub restart_history: std::collections::VecDeque<FfmpegRestartRecord>,
-    /// Current delivery mode: "normal", "warmup", "rescue", "recovering".
-    pub delivery_mode: String,
-    /// ETA in seconds until rescue mode ends (warmup or buffer refill).
-    pub rescue_eta_secs: Option<u64>,
-    /// Reconnect counter for `PusherKind::Rust` endpoints. Mirrors
-    /// `ffmpeg_restart_count` so the dashboard can use either uniformly.
-    #[serde(default)]
-    pub reconnect_count: u32,
-    /// Per-endpoint ring buffer of recent Rust RTMP pusher reconnects.
-    #[serde(default)]
-    pub rtmp_push_history: std::collections::VecDeque<RtmpPushAuditRecord>,
-}
-
-impl Default for EndpointStats {
-    fn default() -> Self {
-        Self {
-            bytes_processed_total: 0,
-            duration_processed_ms: 0,
-            current_chunk_id: 0,
-            chunks_processed: 0,
-            ffmpeg_restart_count: 0,
-            consecutive_ffmpeg_failures: 0,
-            consecutive_chunk_misses: 0,
-            last_error: None,
-            stall_reason: None,
-            ffmpeg_last_stderr: None,
-            restart_history: std::collections::VecDeque::new(),
-            delivery_mode: "normal".to_string(),
-            rescue_eta_secs: None,
-            reconnect_count: 0,
-            rtmp_push_history: std::collections::VecDeque::new(),
-        }
-    }
-}
-
-pub type Stats = Arc<Mutex<EndpointStats>>;
-
-/// Initial EndpointStats: Default + per-endpoint overrides.
-/// Explicit assignment (not struct literal) for mutation-test coverage.
-#[allow(clippy::field_reassign_with_default)]
-pub fn initial_endpoint_stats(start_chunk_id: i64, initial_mode: String) -> EndpointStats {
-    let mut s = EndpointStats::default();
-    s.current_chunk_id = start_chunk_id;
-    s.delivery_mode = initial_mode;
-    s
-}
+// EndpointStats + initial_endpoint_stats + Stats type alias
+// extracted to crate::endpoint_stats so this file stays under the
+// 1000-line CI cap (#184).
+pub use crate::endpoint_stats::{
+    EndpointStats, LifecycleSummary, PrefetchFill, Stats, initial_endpoint_stats,
+};
 
 pub struct EndpointHandle {
     task: JoinHandle<()>,
