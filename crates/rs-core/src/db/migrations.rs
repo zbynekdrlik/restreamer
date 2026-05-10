@@ -717,23 +717,27 @@ CREATE INDEX IF NOT EXISTS idx_delivery_instances_event_id_active
     WHERE status != 'deleted';
 "#;
 
+/// Adds per-chunk lifecycle timestamps for the fast-endpoint zero-reconnect
+/// feature (#184) — stages A and B on the host clock, millis since epoch.
+///
+/// `host_emit_ts`: stage A — set by the host uploader when the chunker
+/// emits the chunk to local disk.
+/// `s3_upload_complete_ts`: stage B — set when the host uploader receives
+/// the S3 PUT 200 OK.
+///
+/// Both columns are `NULL` on rows uploaded by a pre-v24 host, or when
+/// the uploader did not reach the corresponding stage. NULL-aware callers
+/// return `Duration::ZERO` for any gap involving a NULL timestamp.
+///
+/// Plain `INTEGER` (not `INTEGER NULL`) matches the project's house
+/// style for nullable columns added via `add_column_if_missing`.
 async fn migrate_v24(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
-    // Per-chunk lifecycle stages A and B (host clock, millis since epoch).
-    // NULL on any chunk uploaded by a pre-v24 host or whose uploader did
-    // not complete the second timestamp. Cross-host gap math handles
-    // NULL by returning Duration::ZERO.
-    add_column_if_missing(
-        tx,
-        "chunk_records",
-        "host_emit_ts",
-        "host_emit_ts INTEGER NULL",
-    )
-    .await?;
+    add_column_if_missing(tx, "chunk_records", "host_emit_ts", "host_emit_ts INTEGER").await?;
     add_column_if_missing(
         tx,
         "chunk_records",
         "s3_upload_complete_ts",
-        "s3_upload_complete_ts INTEGER NULL",
+        "s3_upload_complete_ts INTEGER",
     )
     .await
 }
