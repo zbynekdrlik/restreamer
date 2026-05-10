@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::EndpointPrefetchQueue;
 use super::position_registry::EndpointPositionRegistry;
-use super::prefetch_queue::PrefetchQueue;
 use super::registry::{ChunkAvailability, ChunkRegistry};
 
 #[derive(Debug, thiserror::Error)]
@@ -39,7 +39,7 @@ pub struct ReaderConfig {
     /// on the pusher side (LifecycleAwarePusher in endpoint_task.rs).
     /// `None` = registry-poll path (existing behaviour, used by tests and
     /// non-fast endpoints without explicit prefetch configuration).
-    pub queue: Option<Arc<PrefetchQueue<Arc<Vec<u8>>>>>,
+    pub queue: Option<EndpointPrefetchQueue>,
 }
 
 pub struct EndpointReader;

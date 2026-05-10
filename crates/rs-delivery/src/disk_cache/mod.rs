@@ -43,6 +43,11 @@ pub use registry::{ChunkAvailability, ChunkRegistry};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Per-endpoint PrefetchQueue payload type alias. Tames clippy's
+/// `type_complexity` lint and matches the `T = Arc<Vec<u8>>` payload
+/// PrefetchReader pushes.
+pub type EndpointPrefetchQueue = Arc<prefetch_queue::PrefetchQueue<Arc<Vec<u8>>>>;
+
 /// Configuration for a `DiskCache` instance. One per event.
 #[derive(Debug, Clone)]
 pub struct DiskCacheConfig {
@@ -84,9 +89,7 @@ pub struct DiskCache {
     pub window_chunks: i64,
     /// Per-endpoint PrefetchQueue handles, keyed by alias. Lifetimes
     /// match the endpoint's run; close()-d on endpoint stop.
-    endpoint_queues: tokio::sync::Mutex<
-        std::collections::HashMap<String, Arc<prefetch_queue::PrefetchQueue<Arc<Vec<u8>>>>>,
-    >,
+    endpoint_queues: tokio::sync::Mutex<std::collections::HashMap<String, EndpointPrefetchQueue>>,
 }
 
 impl DiskCache {
@@ -160,7 +163,7 @@ impl DiskCache {
         start_chunk_id: i64,
         prefetch_k: usize,
         audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
-    ) -> Arc<prefetch_queue::PrefetchQueue<Arc<Vec<u8>>>> {
+    ) -> EndpointPrefetchQueue {
         use std::sync::atomic::AtomicI64;
         let mut g = self.endpoint_queues.lock().await;
         if let Some(q) = g.get(alias) {

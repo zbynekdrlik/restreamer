@@ -712,8 +712,8 @@ mod tests {
         let pool = rs_core::db::create_memory_pool().await.unwrap();
         rs_core::db::run_migrations(&pool).await.unwrap();
         sqlx::query(
-            "INSERT INTO streaming_events(id, name, date_of_event, received_bytes, receiving_activated, delivering_activated) \
-             VALUES (1,'evt',datetime('now'),0,0,0)",
+            "INSERT INTO streaming_events(id, name, received_bytes, receiving_activated, delivering_activated) \
+             VALUES (1,'evt',0,0,0)",
         )
         .execute(&pool)
         .await
