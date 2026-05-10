@@ -44,23 +44,51 @@ async fn pop_blocks_when_empty_until_push_arrives() {
 }
 
 #[tokio::test]
-async fn close_unblocks_pending_push_and_pop_with_err() {
+async fn close_unblocks_pending_push_with_err() {
+    // K=1, queue full. Spawn a push that blocks at capacity. No pop
+    // ever drains, so close() is the only way the push can return.
     let q: Arc<PrefetchQueue<i64>> = PrefetchQueue::new(1);
     q.push_back(1).await.unwrap();
     let q2 = Arc::clone(&q);
     let push_task = tokio::spawn(async move { q2.push_back(2).await });
-    let q3 = Arc::clone(&q);
-    let pop_task = tokio::spawn(async move {
-        // First pop drains slot, second pop blocks then sees Closed.
-        let _ = q3.pop_front().await;
-        q3.pop_front().await
-    });
     tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!push_task.is_finished(), "push must be blocked on full");
     q.close();
     let push_res = push_task.await.unwrap();
+    assert!(
+        matches!(push_res, Err(QueueClosed)),
+        "close must wake blocked push with Err"
+    );
+}
+
+#[tokio::test]
+async fn close_unblocks_pending_pop_with_err() {
+    // K=1, queue empty. Spawn a pop that blocks waiting for an item.
+    // No push ever arrives, so close() is the only way the pop can return.
+    let q: Arc<PrefetchQueue<i64>> = PrefetchQueue::new(1);
+    let q2 = Arc::clone(&q);
+    let pop_task = tokio::spawn(async move { q2.pop_front().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!pop_task.is_finished(), "pop must be blocked on empty");
+    q.close();
     let pop_res = pop_task.await.unwrap();
-    assert!(matches!(push_res, Err(QueueClosed)));
-    assert!(matches!(pop_res, Err(QueueClosed)));
+    assert!(
+        matches!(pop_res, Err(QueueClosed)),
+        "close must wake blocked pop with Err"
+    );
+}
+
+#[tokio::test]
+async fn close_drains_buffered_items_before_returning_err() {
+    // Closed queue must yield buffered items first; only after the
+    // buffer is empty does pop return Err(QueueClosed).
+    let q: Arc<PrefetchQueue<i64>> = PrefetchQueue::new(3);
+    q.push_back(10).await.unwrap();
+    q.push_back(20).await.unwrap();
+    q.close();
+    assert_eq!(q.pop_front().await.unwrap(), 10);
+    assert_eq!(q.pop_front().await.unwrap(), 20);
+    assert!(matches!(q.pop_front().await, Err(QueueClosed)));
 }
 
 #[tokio::test]
