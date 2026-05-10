@@ -3,15 +3,16 @@
 //!
 //! Component map:
 //! - `timings` — `ChunkLifecycleTimings` struct + gap math + worst-stage selection.
-//! - `sampler` — `LifecycleSampler` decides when to emit which audit row (Task 12).
-//! - `audit`   — emit_lifecycle_sample / breach / predeath helpers (Task 12).
+//! - `sampler` — `LifecycleSampler` decides when to emit which audit row.
+//! - `audit`   — emit_lifecycle_sample / breach / predeath helpers.
 
-// TODO(#184): narrow this allow once Tasks 11-12 add LifecycleSampler
-// (the consumer of ChunkLifecycleTimings).
-#![allow(dead_code, unused_imports)]
-
+pub mod audit;
+pub mod sampler;
 pub mod timings;
+pub use sampler::LifecycleSampler;
 pub use timings::ChunkLifecycleTimings;
 
+#[cfg(test)]
+mod sampler_tests;
 #[cfg(test)]
 mod timings_tests;
