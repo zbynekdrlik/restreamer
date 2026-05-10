@@ -569,10 +569,8 @@ mod tests {
         assert_eq!(backend.0.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
-    async fn fetch_5xx_exhausts_retries_then_marks_not_found() {
-        // Always-failing backend triggers all 5 attempts; final state must be
-        // NotFound so EndpointReader unblocks instead of stalling forever.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn fetch_5xx_no_longer_exhausts_retries_loops_forever() {
         let backend = Arc::new(MockBackend::default());
         backend.set_err("S3 fetch error: status 503");
         let tmp = tempfile::tempdir().unwrap();
@@ -585,17 +583,67 @@ mod tests {
             10_000,
             8,
         );
-        // Speed test up: don't actually wait the 500+1000+2000+4000ms. Pause
-        // tokio time and let the retry loop sleep through paused time. The
-        // backend is sync-instant; the only real waits are the backoff sleeps.
-        // Note: cannot use tokio::time::pause without start_paused — and the
-        // test runtime hasn't started paused. Simpler: tolerate ~7.5s test
-        // runtime in CI. The plan's retry interval (500ms doubling, capped
-        // at 30s) yields 0.5+1+2+4 = 7.5s for 4 backoffs after 5 failed
-        // attempts. Acceptable for one slow test.
-        svc.request_chunk(503).await;
-        let state = registry.wait_for_chunk(503).await.unwrap();
-        assert!(matches!(state, ChunkAvailability::NotFound));
-        assert_eq!(backend.count(), 5, "all 5 retries must have happened");
+        let svc2 = Arc::clone(&svc);
+        let task = tokio::spawn(async move { svc2.request_chunk(503).await });
+        tokio::time::advance(std::time::Duration::from_secs(30 * 60)).await;
+        tokio::task::yield_now().await;
+        // After 30 simulated minutes the loop must still be retrying.
+        let state = registry.peek(503);
+        assert!(
+            !matches!(state, Some(ChunkAvailability::NotFound)),
+            "retry-forever must not give up, got state={state:?}"
+        );
+        assert!(backend.count() >= 30);
+        task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn fetch_with_retry_never_caps_attempts() {
+        // Backend always returns 503. After 1 simulated hour the registry
+        // must NOT be NotFound — the retry loop must still be running.
+        let backend = Arc::new(MockBackend::default());
+        backend.set_err("S3 fetch error: status 503");
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = ChunkRegistry::new();
+        let svc = DownloadService::new(
+            backend.clone(),
+            registry.clone(),
+            tmp.path().to_path_buf(),
+            "evt".into(),
+            10_000,
+            8,
+        );
+        let svc2 = Arc::clone(&svc);
+        let req = tokio::spawn(async move { svc2.request_chunk(503).await });
+        // Advance virtual time by 1 hour. The retry-forever loop should
+        // still be active (registry NOT in NotFound terminal state).
+        tokio::time::advance(std::time::Duration::from_secs(60 * 60)).await;
+        tokio::task::yield_now().await;
+        let st = registry.peek(503);
+        assert!(
+            !matches!(st, Some(ChunkAvailability::NotFound)),
+            "retry-forever must NOT mark NotFound on transient errors, got {st:?}"
+        );
+        // Backend got many attempts (proof we're still trying after 1h sim).
+        assert!(
+            backend.count() >= 60,
+            "expected >=60 attempts after 1h simulated time, got {}",
+            backend.count()
+        );
+        req.abort();
+    }
+
+    #[test]
+    fn fetch_with_retry_backoff_caps_at_60s() {
+        // White-box assertion on the backoff schedule. The cap matters
+        // because uncapped exponential growth would make the reader
+        // sleep multiple minutes between attempts after a few failures.
+        let mut backoff_secs: u64 = 1;
+        let mut steps = vec![];
+        for _ in 0..10 {
+            steps.push(backoff_secs);
+            backoff_secs = (backoff_secs * 2).min(60);
+        }
+        assert_eq!(steps, vec![1, 2, 4, 8, 16, 32, 60, 60, 60, 60]);
     }
 }

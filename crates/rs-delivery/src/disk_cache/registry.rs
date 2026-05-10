@@ -148,6 +148,18 @@ impl ChunkRegistry {
         }
     }
 
+    /// Non-blocking snapshot of the chunk's current state. Returns None
+    /// if the registry has no record of this chunk_id yet, or if the
+    /// internal lock is contended (matches `exists`'s try_lock pattern).
+    /// Used by tests + production code that needs to peek without
+    /// awaiting a terminal state.
+    pub fn peek(&self, chunk_id: i64) -> Option<ChunkAvailability> {
+        match self.inner.try_lock() {
+            Ok(g) => g.get(&chunk_id).map(|s| s.state.clone()),
+            Err(_) => None,
+        }
+    }
+
     /// Same as `wait_for_chunk` but with a timeout.
     pub async fn wait_for_chunk_with_timeout(
         self: &Arc<Self>,
