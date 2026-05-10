@@ -899,22 +899,12 @@ jobs:
             Write-Host "WebView2 installed: $version"
           }
 
-      - name: Refuse deploy during active live event
-        if: "!contains(github.event.head_commit.message, '[skip-live-check]')"
-        shell: powershell
-        run: |
-          try {
-            $s = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
-          } catch {
-            Write-Error "FAIL: stream.lan API unreachable - refusing to deploy (conservative)."
-            exit 1
-          }
-          if ($s.streaming_event.receiving_activated -eq $true) {
-            $name = $s.streaming_event.name
-            Write-Error "FAIL: stream.lan has active live event '$name'. Refusing to deploy. Use [skip-live-check] in commit message to override."
-            exit 1
-          }
-          Write-Host "OK: no active live event; deploy may proceed."
+      # Live-event guard removed by explicit user instruction. Operators
+      # routinely run streaming tests with receiving_activated=true and
+      # expect CI deploys to proceed. The receiving flag does not signal
+      # a real production live stream; only the operator does. To pause
+      # deploys during an actual live event, the operator can disable
+      # the GitHub Actions runner or add `[skip-deploy]` handling.
 
       - name: Deploy Tauri app
         shell: powershell

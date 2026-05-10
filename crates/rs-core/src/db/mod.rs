@@ -529,16 +529,14 @@ pub async fn get_pending_chunk_count_for_event(
 /// Compute the cache duration: total content on S3 that has NOT yet been delivered.
 /// Only counts sent chunks with sequence_number above the delivery position.
 ///
-/// During warmup (`delivered_up_to == 0`) the VPS hasn't started consuming yet,
-/// so the raw sum equals total sent duration and keeps growing past the target.
-/// To prevent dashboard overshoot, the result is capped at `target_secs` when
-/// `delivered_up_to == 0`. Once the VPS starts playing (`delivered_up_to > 0`),
-/// the raw value is returned uncapped.
+/// Returns the raw uncapped value. Earlier versions clamped the result to a
+/// hardcoded target when `delivered_up_to == 0`; that hid the real S3 backlog
+/// and broke per-event cache_delay overrides (a 60s event still showed 120s).
+/// Display-side clamping belongs in the UI, not in this measurement function.
 pub async fn get_cache_duration_secs(
     pool: &SqlitePool,
     event_id: i64,
     delivered_up_to: i64,
-    target_secs: f64,
 ) -> Result<f64> {
     let row = sqlx::query(
         "SELECT COALESCE(SUM(duration_ms), 0) as total_ms FROM chunk_records
@@ -548,12 +546,55 @@ pub async fn get_cache_duration_secs(
     .bind(delivered_up_to)
     .fetch_one(pool)
     .await?;
-    let raw = row.get::<i64, _>("total_ms") as f64 / 1000.0;
-    if delivered_up_to == 0 {
-        Ok(raw.min(target_secs))
-    } else {
-        Ok(raw)
+    Ok(row.get::<i64, _>("total_ms") as f64 / 1000.0)
+}
+
+/// Find the chunk_id N such that the SUM of duration_ms across sent chunks
+/// with sequence_number > N is approximately `target_delay_ms`. The new
+/// endpoint joining mid-stream uses this to start at a position where S3
+/// already holds `target_delay_ms` of content ahead of it — no rebuild
+/// wait. Walks back from the live edge, summing actual chunk durations,
+/// until the accumulated total reaches the target. This avoids any
+/// hardcoded chunk-cadence assumption: the FLV chunker emits variable
+/// durations (700-2000 ms in production), so a constant divisor would
+/// undershoot or overshoot the buffer.
+///
+/// Returns 1 if no sent chunks exist (fresh start), or if the entire
+/// sent range is shorter than `target_delay_ms`.
+pub async fn compute_live_stepback_start_chunk(
+    pool: &SqlitePool,
+    event_id: i64,
+    target_delay_ms: u64,
+) -> Result<i64> {
+    if target_delay_ms == 0 {
+        // No stepback requested -- caller wants live edge.
+        return compute_target_start_chunk(pool, event_id).await;
     }
+    let rows = sqlx::query(
+        "SELECT sequence_number, duration_ms FROM chunk_records
+         WHERE streaming_event_id = ?1 AND sent = 1
+         ORDER BY sequence_number DESC",
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await?;
+    let mut accum_ms: u64 = 0;
+    let target = target_delay_ms;
+    for row in &rows {
+        let dur = row.get::<i64, _>("duration_ms").max(0) as u64;
+        accum_ms = accum_ms.saturating_add(dur);
+        if accum_ms >= target {
+            // This row's sequence_number is the first chunk INSIDE the
+            // delay window. The new endpoint should start AT this chunk.
+            return Ok(row.get::<i64, _>("sequence_number"));
+        }
+    }
+    // Not enough sent content to cover the delay -- start from the
+    // earliest sent chunk (or 1 if nothing sent yet).
+    Ok(rows
+        .last()
+        .map(|r| r.get::<i64, _>("sequence_number"))
+        .unwrap_or(1))
 }
 
 /// Total content duration of chunks uploaded to S3 for an event.

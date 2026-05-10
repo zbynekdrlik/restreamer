@@ -153,11 +153,13 @@ async fn remove_endpoint_rejects_when_would_leave_zero_and_delivery_active() {
 }
 
 #[tokio::test]
-async fn start_position_live_resolves_to_latest_plus_one_strict_live_edge() {
-    // #174 strict live-edge policy: mid-stream endpoint add with
-    // StartPosition::Live must resolve to `latest_sent_seq + 1`, never to
-    // a historical chunk. Buffering is the warmup loop's responsibility,
-    // not compute_target_start_chunk's.
+async fn start_position_live_steps_back_by_delivery_delay_chunks() {
+    // Mid-stream endpoint add with `StartPosition::Live` must position the
+    // new endpoint at `live_edge - delivery_delay_chunks` so it can push
+    // immediately from S3's existing buffer. Earlier strict-live-edge
+    // (latest_sent + 1) forced the new endpoint to wait `delivery_delay_ms`
+    // building a fresh buffer even though S3 had it already. Fresh starts
+    // are unaffected because PR #170 wipes S3 → live_edge=1 → clamp to 1.
     use rs_api::delivery_endpoints::{StartPosition, resolve_start_chunk_id};
 
     let pool = db::create_memory_pool().await.unwrap();
@@ -166,10 +168,6 @@ async fn start_position_live_resolves_to_latest_plus_one_strict_live_edge() {
         .await
         .unwrap();
 
-    // Insert 100 chunks of 2000 ms each, all sent=1.
-    // Strict live-edge policy (#174): Live always returns latest_seq + 1
-    // regardless of target_delay_ms. The warmup loop, not compute_target,
-    // is what produces the delay buffer (from NEW chunks only).
     for seq in 1i64..=100 {
         sqlx::query(
             "INSERT INTO chunk_records
@@ -185,12 +183,15 @@ async fn start_position_live_resolves_to_latest_plus_one_strict_live_edge() {
         .unwrap();
     }
 
+    // SQL-based stepback walks DESC accumulating actual duration_ms per
+    // chunk until accum >= target. With 100 chunks of 2000 ms each, hitting
+    // 120_000 ms takes 60 chunks → start = 41.
     let live = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 120_000)
         .await
         .unwrap();
     assert_eq!(
-        live, 101,
-        "Live (strict): latest+1, expected 101 got {live}"
+        live, 41,
+        "Live: SUM(duration_ms) walk back to 120s, expected 41 got {live}"
     );
 
     let beg = resolve_start_chunk_id(&pool, event_id, &StartPosition::Beginning, 120_000)
@@ -198,12 +199,12 @@ async fn start_position_live_resolves_to_latest_plus_one_strict_live_edge() {
         .unwrap();
     assert_eq!(beg, 1, "Beginning must resolve to first sequence (1)");
 
-    // target_delay_ms is now legacy and ignored by Live.
+    // 60_000 ms with 2000 ms chunks → 30 chunks back from edge 101 → 71.
     let live_short = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 60_000)
         .await
         .unwrap();
     assert_eq!(
-        live_short, 101,
-        "Live ignores target_delay_ms: latest+1=101, got {live_short}"
+        live_short, 71,
+        "Live: SUM walk to 60s, expected 71 got {live_short}"
     );
 }

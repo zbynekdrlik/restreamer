@@ -40,6 +40,22 @@ use rs_core::models::{DeliveryEndpointMetrics, WsEvent};
 
 use crate::state::AppState;
 
+/// Returns the highest `current_chunk_id` among non-fast endpoints, or 0 if
+/// none qualify. Fast (live-edge) endpoints are excluded because their chunk
+/// position races ahead of the producer and would poison the global
+/// `cache_duration_secs` reading. The cache bar tracks the buffer ahead of
+/// the slowest non-fast consumer; that's what operators interpret during the
+/// prefill window. Splitting this out as a pure function makes the policy
+/// unit-testable.
+fn max_non_fast_delivery_chunk(endpoints: &[DeliveryEndpointMetrics]) -> i64 {
+    endpoints
+        .iter()
+        .filter(|m| !m.is_fast)
+        .map(|m| m.current_chunk_id)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Middleware that redirects HTTP requests for the configured domain to HTTPS.
 /// Requests via IP address or with `x-forwarded-proto: https` pass through.
 async fn https_redirect(
@@ -319,21 +335,13 @@ async fn delivery_broadcast_loop(
                 let sent_chunks = db::get_sent_chunk_count_for_event(&pool, event.id)
                     .await
                     .unwrap_or(0);
-                let max_delivery_chunk = final_endpoints
-                    .iter()
-                    .map(|m| m.current_chunk_id)
-                    .max()
-                    .unwrap_or(0);
+                let max_delivery_chunk = max_non_fast_delivery_chunk(&final_endpoints);
                 let s3_queue = (sent_chunks - max_delivery_chunk).max(0);
 
-                let cache_duration = db::get_cache_duration_secs(
-                    &pool,
-                    event.id,
-                    max_delivery_chunk,
-                    target_delay as f64,
-                )
-                .await
-                .unwrap_or(0.0);
+                let cache_duration =
+                    db::get_cache_duration_secs(&pool, event.id, max_delivery_chunk)
+                        .await
+                        .unwrap_or(0.0);
 
                 let _ = ws_tx.send(WsEvent::PipelineState {
                     state: state_str.to_string(),
@@ -415,19 +423,22 @@ async fn delivery_broadcast_loop(
                     let sent = db::get_sent_chunk_count_for_event(&pool, eid)
                         .await
                         .unwrap_or(0);
-                    let cache_duration = db::get_cache_duration_secs(
-                        &pool,
-                        eid,
-                        0,
-                        config.delivery.delivery_delay_secs as f64,
-                    )
-                    .await
-                    .unwrap_or(0.0);
+                    let cache_duration = db::get_cache_duration_secs(&pool, eid, 0)
+                        .await
+                        .unwrap_or(0.0);
+                    // Honor per-event cache_delay_secs override; only fall back
+                    // to the global default when no override is set.
+                    let fallback_target_delay = db::get_streaming_event_by_id(&pool, eid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|ev| ev.cache_delay_secs.map(|s| s as u64))
+                        .unwrap_or(config.delivery.delivery_delay_secs);
                     let _ = ws_tx.send(WsEvent::PipelineState {
                         state: last_state_str.clone(),
                         event_id: Some(eid),
                         event_name: Some(ename.clone()),
-                        target_delay_secs: config.delivery.delivery_delay_secs,
+                        target_delay_secs: fallback_target_delay,
                         session_start: session_start_time.clone(),
                         local_buffer_chunks: pending,
                         s3_queue_chunks: sent,
@@ -436,6 +447,66 @@ async fn delivery_broadcast_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod max_non_fast_tests {
+    use super::*;
+
+    fn ep(alias: &str, current: i64, fast: bool) -> DeliveryEndpointMetrics {
+        DeliveryEndpointMetrics {
+            alias: alias.to_string(),
+            alive: true,
+            current_chunk_id: current,
+            bytes_processed_total: 0,
+            chunks_processed: 0,
+            chunk_delay_secs: 0.0,
+            stall_reason: None,
+            ffmpeg_restart_count: 0,
+            reconnect_count: 0,
+            last_error: None,
+            is_fast: fast,
+            delivery_mode: None,
+            rescue_eta_secs: None,
+        }
+    }
+
+    #[test]
+    fn empty_endpoints_returns_zero() {
+        assert_eq!(max_non_fast_delivery_chunk(&[]), 0);
+    }
+
+    #[test]
+    fn fast_endpoints_alone_returns_zero_during_prefill() {
+        // Reproduces the bug: a fast endpoint races to chunk 240 while non-fast
+        // endpoints sit at 0 during the prefill window. Without the filter,
+        // max=240 → cache_duration_secs reads ~3s for 120s, then jumps to 120
+        // when chunks_processed flips. With the filter, max=0 → cache_duration
+        // ramps 0→target smoothly as the buffer fills.
+        let eps = vec![ep("Kiko", 240, true)];
+        assert_eq!(max_non_fast_delivery_chunk(&eps), 0);
+    }
+
+    #[test]
+    fn fast_endpoint_excluded_when_mixed_with_non_fast() {
+        let eps = vec![
+            ep("Kiko", 240, true),
+            ep("FB-Zbynek", 50, false),
+            ep("YT", 60, false),
+        ];
+        // Excluding fast: max(50, 60) = 60.
+        assert_eq!(max_non_fast_delivery_chunk(&eps), 60);
+    }
+
+    #[test]
+    fn all_non_fast_returns_max() {
+        let eps = vec![
+            ep("FB-Zbynek", 50, false),
+            ep("YT", 60, false),
+            ep("FB-NewLevel", 55, false),
+        ];
+        assert_eq!(max_non_fast_delivery_chunk(&eps), 60);
     }
 }
 

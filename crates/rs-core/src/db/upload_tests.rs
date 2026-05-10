@@ -330,10 +330,10 @@ async fn list_recent_uploads_attempts_gt_zero_no_last_error_is_retrying() {
     );
 }
 
-// --- cache metric cap + compute_target_start_chunk tests ---
+// --- cache metric raw value + compute_target_start_chunk tests ---
 
 #[tokio::test]
-async fn cache_duration_capped_at_target_during_warmup() {
+async fn cache_duration_returns_raw_uncapped_value() {
     let pool = setup_db_for_start_chunk().await;
     let event_id = upsert_streaming_event(&pool, "cache-cap-test")
         .await
@@ -358,23 +358,19 @@ async fn cache_duration_capped_at_target_during_warmup() {
         set_chunk_sent(&pool, id).await.unwrap();
     }
 
-    // delivered_up_to=0 (warmup), target=2.0s → capped at 2.0 (raw=5.0)
-    let dur = db::get_cache_duration_secs(&pool, event_id, 0, 2.0)
-        .await
-        .unwrap();
-    assert!((dur - 2.0).abs() < 0.001, "warmup: expected 2.0, got {dur}");
-
-    // delivered_up_to=0 (warmup), target=10.0s → raw 5.0 < target, no cap
-    let dur = db::get_cache_duration_secs(&pool, event_id, 0, 10.0)
+    // delivered_up_to=0 (warmup): raw 5.0s — NOT capped to a hardcoded target.
+    // Per-event cache_delay overrides demand the raw measurement; UI clamps
+    // for display.
+    let dur = db::get_cache_duration_secs(&pool, event_id, 0)
         .await
         .unwrap();
     assert!(
         (dur - 5.0).abs() < 0.001,
-        "warmup below target: expected 5.0, got {dur}"
+        "expected raw 5.0 (uncapped), got {dur}"
     );
 
-    // delivered_up_to=1 (VPS playing), target=2.0s → NO cap, raw = 4.0
-    let dur = db::get_cache_duration_secs(&pool, event_id, 1, 2.0)
+    // delivered_up_to=1 (VPS playing): raw 4.0s (chunks 2..5).
+    let dur = db::get_cache_duration_secs(&pool, event_id, 1)
         .await
         .unwrap();
     assert!(
