@@ -16,10 +16,17 @@ pub enum S3FetchError {
     Fetch(String),
 }
 
-/// Chunk data with duration from S3 object metadata header.
+/// Chunk data with duration + lifecycle stages from S3 object metadata.
 pub struct ChunkData {
     pub data: Vec<u8>,
     pub duration_ms: i64,
+    /// Stage A: host clock millis since epoch when the chunker wrote the
+    /// chunk to local FS. NULL/None when the chunk was uploaded by a
+    /// pre-lifecycle host. Cross-host with VPS clock — see spec section 4.3.
+    pub host_emit_ts: Option<i64>,
+    /// Stage B: host clock millis since epoch when the uploader received
+    /// the S3 200 OK. NULL/None for legacy chunks.
+    pub s3_upload_complete_ts: Option<i64>,
 }
 
 pub struct S3Fetcher {
@@ -62,14 +69,22 @@ impl S3Fetcher {
 
         match self.bucket.get_object(&key).await {
             Ok(response) if response.status_code() == 200 => {
-                let duration_ms = response
-                    .headers()
+                let headers = response.headers();
+                let duration_ms = headers
                     .get("x-amz-meta-duration-ms")
                     .and_then(|v| v.parse::<i64>().ok())
                     .unwrap_or(0);
+                let host_emit_ts = headers
+                    .get("x-amz-meta-host-emit-ts")
+                    .and_then(|v| v.parse::<i64>().ok());
+                let s3_upload_complete_ts = headers
+                    .get("x-amz-meta-s3-complete-ts")
+                    .and_then(|v| v.parse::<i64>().ok());
                 Ok(Some(ChunkData {
                     data: response.to_vec(),
                     duration_ms,
+                    host_emit_ts,
+                    s3_upload_complete_ts,
                 }))
             }
             Ok(response) if response.status_code() == 404 => Ok(None),

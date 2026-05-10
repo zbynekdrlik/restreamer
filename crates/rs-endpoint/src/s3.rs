@@ -118,6 +118,64 @@ impl S3Client {
         Ok(())
     }
 
+    /// Upload a chunk with extra `x-amz-meta-*` headers in addition to the
+    /// existing `duration-ms`. Used by the lifecycle uploader (#184) so
+    /// the VPS can backfill stage A/B timestamps from the S3 GET response.
+    ///
+    /// `metadata` keys must be lowercase ASCII (Hetzner S3 conformance);
+    /// keys are emitted verbatim as `x-amz-meta-{key}`.
+    pub async fn upload_chunk_with_metadata(
+        &self,
+        local_path: &Path,
+        event_id: &str,
+        seq: i64,
+        duration_ms: i64,
+        metadata: std::collections::HashMap<String, String>,
+    ) -> Result<(), EndpointError> {
+        let s3_key = Self::chunk_key(event_id, seq);
+
+        let mut file = tokio::fs::File::open(local_path)
+            .await
+            .map_err(|e| EndpointError::Io(e.to_string()))?;
+
+        let file_size = file
+            .metadata()
+            .await
+            .map_err(|e| EndpointError::Io(e.to_string()))?
+            .len();
+
+        debug!(
+            "Uploading to s3://{}/{} ({file_size} bytes, duration_ms={duration_ms}, meta_keys={})",
+            self.bucket.name,
+            s3_key,
+            metadata.len(),
+        );
+
+        let mut upload_bucket = (*self.bucket).clone();
+        upload_bucket.add_header("x-amz-meta-duration-ms", &duration_ms.to_string());
+        for (k, v) in &metadata {
+            upload_bucket.add_header(&format!("x-amz-meta-{k}"), v);
+        }
+
+        let response = upload_bucket
+            .put_object_stream(&mut file, &s3_key)
+            .await
+            .map_err(|e| EndpointError::S3(format!("upload failed: {e}")))?;
+
+        if response.status_code() >= 300 {
+            return Err(EndpointError::S3(format!(
+                "upload returned status {}",
+                response.status_code(),
+            )));
+        }
+
+        info!(
+            "Uploaded {s3_key} ({file_size} bytes, duration_ms={duration_ms}, meta_keys={})",
+            metadata.len(),
+        );
+        Ok(())
+    }
+
     /// Upload arbitrary bytes to S3 with public-read ACL and return the
     /// public URL. Used for rescue video uploads — these files must be
     /// publicly readable so the delivery VPS can fetch them via ffmpeg.

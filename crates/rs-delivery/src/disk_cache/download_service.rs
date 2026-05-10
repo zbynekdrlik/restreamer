@@ -21,23 +21,41 @@ use super::registry::ChunkRegistry;
 
 /// Trait abstracting the S3 fetch operation. The real implementation
 /// is `crate::s3_fetch::S3Fetcher`; tests use `MockBackend`.
+///
+/// The `FetchedChunk` return carries the bytes plus all stage-A/B
+/// metadata read from the S3 response headers, so `DownloadService`
+/// can later associate timings with the chunk it cached.
 #[async_trait::async_trait]
 pub trait S3Backend: Send + Sync + 'static {
-    async fn fetch(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String>;
+    async fn fetch(&self, chunk_id: i64) -> Result<Option<FetchedChunk>, String>;
     /// HEAD-only duration probe. Default delegates to `fetch` (full GET)
     /// for backends that don't implement HEAD; production `S3Fetcher`
     /// overrides with a real HEAD request to keep skip-ahead probes
     /// from downloading full chunk bodies (#174 review finding 2).
     async fn head_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
-        self.fetch(chunk_id).await.map(|o| o.map(|(_, d)| d))
+        self.fetch(chunk_id).await.map(|o| o.map(|c| c.duration_ms))
     }
+}
+
+/// Bytes + metadata returned by an `S3Backend::fetch` call.
+#[derive(Debug, Clone)]
+pub struct FetchedChunk {
+    pub data: Vec<u8>,
+    pub duration_ms: i64,
+    pub host_emit_ts: Option<i64>,
+    pub s3_upload_complete_ts: Option<i64>,
 }
 
 #[async_trait::async_trait]
 impl S3Backend for crate::s3_fetch::S3Fetcher {
-    async fn fetch(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+    async fn fetch(&self, chunk_id: i64) -> Result<Option<FetchedChunk>, String> {
         match crate::s3_fetch::S3Fetcher::fetch_chunk_with_meta(self, chunk_id).await {
-            Ok(Some(cd)) => Ok(Some((cd.data, cd.duration_ms))),
+            Ok(Some(cd)) => Ok(Some(FetchedChunk {
+                data: cd.data,
+                duration_ms: cd.duration_ms,
+                host_emit_ts: cd.host_emit_ts,
+                s3_upload_complete_ts: cd.s3_upload_complete_ts,
+            })),
             Ok(None) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
@@ -198,10 +216,11 @@ impl DownloadService {
             let result = self.backend.fetch(chunk_id).await;
             let elapsed_ms = fetch_start.elapsed().as_millis() as u64;
             match result {
-                Ok(Some((data, duration_ms))) => {
-                    self.profile.record_success(elapsed_ms, data.len() as u64);
-                    self.token_bucket_consume(data.len() as u64).await;
-                    if let Err(e) = self.write_atomic(chunk_id, &data, duration_ms).await {
+                Ok(Some(fc)) => {
+                    self.profile
+                        .record_success(elapsed_ms, fc.data.len() as u64);
+                    self.token_bucket_consume(fc.data.len() as u64).await;
+                    if let Err(e) = self.write_atomic(chunk_id, &fc.data, fc.duration_ms).await {
                         tracing::error!(chunk_id, "disk_cache write failed: {e}");
                         // Mark NotFound so waiters wake — better to surface a
                         // visible failure than to leave the slot InFlight and
@@ -209,8 +228,8 @@ impl DownloadService {
                         self.registry.mark_not_found(chunk_id);
                         return;
                     }
-                    self.durations.lock().await.insert(chunk_id, duration_ms);
-                    self.registry.mark_available(chunk_id, data.len() as u64);
+                    self.durations.lock().await.insert(chunk_id, fc.duration_ms);
+                    self.registry.mark_available(chunk_id, fc.data.len() as u64);
                     return;
                 }
                 Ok(None) => {
@@ -313,10 +332,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl S3Backend for MockBackend {
-        async fn fetch(&self, _chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+        async fn fetch(&self, _chunk_id: i64) -> Result<Option<FetchedChunk>, String> {
             self.get_count.fetch_add(1, Ordering::SeqCst);
             match self.result.lock().unwrap().clone() {
-                Some(Ok((d, dur))) => Ok(Some((d, dur))),
+                Some(Ok((d, dur))) => Ok(Some(FetchedChunk {
+                    data: d,
+                    duration_ms: dur,
+                    host_emit_ts: None,
+                    s3_upload_complete_ts: None,
+                })),
                 Some(Err(e)) => Err(e),
                 None => Ok(None),
             }
@@ -400,12 +424,17 @@ mod tests {
         struct FlakyBackend(Arc<AtomicU32>);
         #[async_trait::async_trait]
         impl S3Backend for FlakyBackend {
-            async fn fetch(&self, _id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+            async fn fetch(&self, _id: i64) -> Result<Option<FetchedChunk>, String> {
                 let n = self.0.fetch_add(1, Ordering::SeqCst);
                 if n < 2 {
                     Err("S3 fetch error: status 503".into())
                 } else {
-                    Ok(Some((vec![1, 2, 3], 2000)))
+                    Ok(Some(FetchedChunk {
+                        data: vec![1, 2, 3],
+                        duration_ms: 2000,
+                        host_emit_ts: None,
+                        s3_upload_complete_ts: None,
+                    }))
                 }
             }
         }
@@ -468,7 +497,7 @@ mod tests {
         struct PanicBackend;
         #[async_trait::async_trait]
         impl S3Backend for PanicBackend {
-            async fn fetch(&self, _id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+            async fn fetch(&self, _id: i64) -> Result<Option<FetchedChunk>, String> {
                 panic!("simulated backend panic");
             }
         }
@@ -498,7 +527,7 @@ mod tests {
         struct HeadOnlyBackend(AtomicU32);
         #[async_trait::async_trait]
         impl S3Backend for HeadOnlyBackend {
-            async fn fetch(&self, _id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+            async fn fetch(&self, _id: i64) -> Result<Option<FetchedChunk>, String> {
                 panic!("fetch must not be called for HEAD probe");
             }
             async fn head_duration_ms(&self, _id: i64) -> Result<Option<i64>, String> {
