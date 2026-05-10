@@ -1239,8 +1239,9 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await expect(cacheLabel).toContainText("0s / 120s cache", {
       timeout: 5000,
     });
-    // 0/120 = 0% -> critical (correct: nothing pushed yet).
-    await expect(page.locator(".buffer-bar-fill.critical")).toBeVisible();
+    // 0/120 = 0% -> critical class (use attached, not visible — bar has
+    // width:0% so Playwright considers it hidden).
+    await expect(page.locator(".buffer-bar-fill.critical")).toHaveCount(1);
     // Hard regression guard: NEVER any 4-digit cache value.
     await expect(cacheLabel).not.toContainText(/\d{4,}s \/ /);
   });
