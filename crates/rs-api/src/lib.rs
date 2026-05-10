@@ -338,10 +338,21 @@ async fn delivery_broadcast_loop(
                 let max_delivery_chunk = max_non_fast_delivery_chunk(&final_endpoints);
                 let s3_queue = (sent_chunks - max_delivery_chunk).max(0);
 
+                // Cap at 1.5x the per-event target. The raw value sums all
+                // sent chunks above max_delivery_chunk; when no endpoint
+                // is actively delivering yet (Stop+Start cycle, VPS spin-up,
+                // pre-first-push prefill), max_delivery_chunk == 0 and the
+                // raw value reflects the entire S3 backlog (e.g. 1726s for
+                // an event that's been streaming 28 min). Operator sees
+                // that as "1726s / 120s cache" which is nonsense (#187).
+                // 1.5x leaves room to surface a genuine oversized cache
+                // without flooding the dashboard with the historical sum.
+                let cache_cap = (target_delay as f64) * 1.5;
                 let cache_duration =
                     db::get_cache_duration_secs(&pool, event.id, max_delivery_chunk)
                         .await
-                        .unwrap_or(0.0);
+                        .unwrap_or(0.0)
+                        .min(cache_cap);
 
                 let _ = ws_tx.send(WsEvent::PipelineState {
                     state: state_str.to_string(),
@@ -423,9 +434,6 @@ async fn delivery_broadcast_loop(
                     let sent = db::get_sent_chunk_count_for_event(&pool, eid)
                         .await
                         .unwrap_or(0);
-                    let cache_duration = db::get_cache_duration_secs(&pool, eid, 0)
-                        .await
-                        .unwrap_or(0.0);
                     // Honor per-event cache_delay_secs override; only fall back
                     // to the global default when no override is set.
                     let fallback_target_delay = db::get_streaming_event_by_id(&pool, eid)
@@ -434,6 +442,13 @@ async fn delivery_broadcast_loop(
                         .flatten()
                         .and_then(|ev| ev.cache_delay_secs.map(|s| s as u64))
                         .unwrap_or(config.delivery.delivery_delay_secs);
+                    // Cap at 1.5x target (#187) — see notes on the success
+                    // path for the rationale.
+                    let cache_cap = (fallback_target_delay as f64) * 1.5;
+                    let cache_duration = db::get_cache_duration_secs(&pool, eid, 0)
+                        .await
+                        .unwrap_or(0.0)
+                        .min(cache_cap);
                     let _ = ws_tx.send(WsEvent::PipelineState {
                         state: last_state_str.clone(),
                         event_id: Some(eid),
