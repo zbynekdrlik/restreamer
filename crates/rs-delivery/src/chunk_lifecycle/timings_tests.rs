@@ -61,6 +61,17 @@ fn is_partial_true_when_a_or_b_missing() {
 }
 
 #[test]
+fn gap_b_to_c_returns_zero_when_either_missing() {
+    // B->C is cross-clock and excluded from worst_stage but is still
+    // serialized to the audit row by Task 12. Confirm it follows the
+    // same None-safety contract as gap_a_to_b.
+    let mut t = ChunkLifecycleTimings::new(1, 1, "x".into());
+    assert_eq!(t.gap_b_to_c(), Duration::ZERO);
+    t.s3_upload_complete_ts = Some(SystemTime::UNIX_EPOCH);
+    assert_eq!(t.gap_b_to_c(), Duration::ZERO, "C missing -> ZERO");
+}
+
+#[test]
 fn gap_returns_zero_on_negative_duration_due_to_skew() {
     // If `later` is BEFORE `earlier` (e.g. clock jump), gap math must
     // saturate to ZERO instead of underflowing.

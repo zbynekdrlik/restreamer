@@ -6,6 +6,8 @@
 //! - `sampler` — `LifecycleSampler` decides when to emit which audit row (Task 12).
 //! - `audit`   — emit_lifecycle_sample / breach / predeath helpers (Task 12).
 
+// TODO(#184): narrow this allow once Tasks 11-12 add LifecycleSampler
+// (the consumer of ChunkLifecycleTimings).
 #![allow(dead_code, unused_imports)]
 
 pub mod timings;
