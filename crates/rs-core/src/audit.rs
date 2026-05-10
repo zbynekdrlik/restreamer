@@ -297,4 +297,34 @@ mod tests {
         assert!(rl.allow(Action::DiskCachePushSample, "YT NLCH 4K"));
         assert!(!rl.allow(Action::DiskCachePushSample, "YT NLCH 4K"));
     }
+
+    #[test]
+    fn action_disk_cache_lifecycle_sample_serdes() {
+        assert_eq!(
+            serde_json::to_string(&Action::DiskCacheLifecycleSample).unwrap(),
+            r#""disk_cache_lifecycle_sample""#
+        );
+        let back: Action = serde_json::from_str(r#""disk_cache_lifecycle_sample""#).unwrap();
+        assert_eq!(back, Action::DiskCacheLifecycleSample);
+    }
+
+    #[test]
+    fn action_disk_cache_lifecycle_breach_serdes() {
+        assert_eq!(
+            serde_json::to_string(&Action::DiskCacheLifecycleBreach).unwrap(),
+            r#""disk_cache_lifecycle_breach""#
+        );
+        let back: Action = serde_json::from_str(r#""disk_cache_lifecycle_breach""#).unwrap();
+        assert_eq!(back, Action::DiskCacheLifecycleBreach);
+    }
+
+    #[test]
+    fn action_endpoint_lifecycle_predeath_serdes() {
+        assert_eq!(
+            serde_json::to_string(&Action::EndpointLifecyclePredeath).unwrap(),
+            r#""endpoint_lifecycle_predeath""#
+        );
+        let back: Action = serde_json::from_str(r#""endpoint_lifecycle_predeath""#).unwrap();
+        assert_eq!(back, Action::EndpointLifecyclePredeath);
+    }
 }
