@@ -43,20 +43,23 @@ impl S3Backend for FlakyBackend {
 
 #[tokio::test(flavor = "current_thread")]
 async fn retries_forever_on_503_then_eventually_succeeds() {
-    // Real-time test (not paused). FlakyBackend fails 7 times then
-    // succeeds. The inner fetch_with_retry backoff is 1s,2s,4s,8s,...
-    // 7 attempts ≈ 1+2+4+8+16+32+60 = 123s real time worst case.
-    // We use fail_until=7 so the test runs in <30s real time on CI
-    // (3 backoffs of 1+2+4=7s plus a few more).
+    // Real-time test (not paused). FlakyBackend fails 5 times then
+    // succeeds. The inner fetch_with_retry backoff is 1s,2s,4s,8s,16s,
+    // so 5 fails = 31s real time before the 6th attempt succeeds.
+    //
+    // fail_until=5 is the critical regression boundary: the OLD
+    // download_service.rs::fetch_with_retry capped at 5 attempts and
+    // would mark NotFound after the 5th fail; the new retry-forever
+    // loop keeps going to attempt 6 and delivers.
     //
     // start_paused was rejected for these tests because tarpaulin's
     // coverage instrumentation is slow enough that paused-time tests
-    // with hundreds of virtual sleep wake-ups exhaust tarpaulin's
-    // 5-min per-test timeout. Real time + small fail counts is the
-    // robust pattern.
+    // with many virtual sleep wake-ups exhaust tarpaulin's 5-min
+    // per-test timeout. Real time + small fail counts is the robust
+    // pattern.
     let backend = Arc::new(FlakyBackend {
         fail_count: AtomicU32::new(0),
-        fail_until: 7,
+        fail_until: 5,
     });
     let tmp = TempDir::new().unwrap();
     let registry = ChunkRegistry::new();
@@ -76,15 +79,16 @@ async fn retries_forever_on_503_then_eventually_succeeds() {
     let task = tokio::spawn(async move {
         PrefetchReader::run(queue_run, download_run, next_run, None).await;
     });
-    // Wait up to 2 min real time for the chunk to arrive.
-    let got = tokio::time::timeout(Duration::from_secs(120), queue.pop_front())
+    // Wait up to 60s real time for the chunk to arrive (5 backoffs
+    // total ≈ 31s plus runtime overhead).
+    let got = tokio::time::timeout(Duration::from_secs(60), queue.pop_front())
         .await
-        .expect("reader did not deliver chunk after 7 retries")
+        .expect("reader did not deliver chunk after 5 retries")
         .expect("queue not closed");
     assert!(!got.is_empty());
     assert!(
-        backend.fail_count.load(Ordering::SeqCst) >= 7,
-        "expected >=7 attempts (proving past the old 5-attempt cap), got {}",
+        backend.fail_count.load(Ordering::SeqCst) >= 5,
+        "expected >=5 attempts (proving past the old 5-attempt cap), got {}",
         backend.fail_count.load(Ordering::SeqCst)
     );
     queue.close();
