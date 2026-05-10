@@ -138,6 +138,7 @@ pub async fn get_template_endpoints(
             delivered_bytes: r.get("delivered_bytes"),
             is_fast: r.get::<i32, _>("is_fast") != 0,
             pusher: Default::default(),
+            prefetch_chunks: None,
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         })

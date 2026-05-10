@@ -87,6 +87,12 @@ pub struct EndpointConfig {
     /// config.json files parsing unchanged (missing field -> `Ffmpeg`).
     #[serde(default)]
     pub pusher: PusherKind,
+    /// Number of chunks to pre-fetch ahead of the pusher. Resolution
+    /// at endpoint init: explicit Some(K) wins; else is_fast=true => K=1
+    /// (double-buffered, ~zero added delay); else K=0 (current bypass
+    /// behavior). Operator may override per endpoint.
+    #[serde(default)]
+    pub prefetch_chunks: Option<u32>,
     pub created_at: String,
     pub updated_at: String,
 }
