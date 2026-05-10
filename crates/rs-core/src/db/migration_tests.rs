@@ -207,22 +207,20 @@ async fn migration_v20_adds_drift_telemetry_schema() {
 async fn migrate_v24_adds_host_emit_ts_and_s3_upload_complete_ts() {
     let pool = crate::db::create_memory_pool().await.unwrap();
     crate::db::run_migrations(&pool).await.unwrap();
-    let host_emit: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM pragma_table_info('chunk_records') WHERE name = ?1",
-    )
-    .bind("host_emit_ts")
-    .fetch_optional(&pool)
-    .await
-    .unwrap();
+    let host_emit: Option<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('chunk_records') WHERE name = ?1")
+            .bind("host_emit_ts")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
     assert_eq!(host_emit.as_deref(), Some("host_emit_ts"));
 
-    let s3_complete: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM pragma_table_info('chunk_records') WHERE name = ?1",
-    )
-    .bind("s3_upload_complete_ts")
-    .fetch_optional(&pool)
-    .await
-    .unwrap();
+    let s3_complete: Option<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('chunk_records') WHERE name = ?1")
+            .bind("s3_upload_complete_ts")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
     assert_eq!(s3_complete.as_deref(), Some("s3_upload_complete_ts"));
 }
 
@@ -232,11 +230,10 @@ async fn migrate_v24_is_idempotent() {
     crate::db::run_migrations(&pool).await.unwrap();
     // Re-run: must be a no-op (no column-already-exists error).
     crate::db::run_migrations(&pool).await.unwrap();
-    let v: i32 =
-        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_version")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let v: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_version")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(v, 24);
 }
 
