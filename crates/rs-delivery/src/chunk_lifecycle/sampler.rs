@@ -10,11 +10,13 @@ use std::time::{Duration, Instant};
 const PREDEATH_RING_CAP: usize = 5;
 
 pub struct LifecycleSampler {
-    pub sample_every_n: u64,
-    pub breach_threshold_ms: u64,
-    pub breach_rate_limit_window: Duration,
-    pub last_breach_emit: Option<Instant>,
-    pub pushed_count: u64,
+    sample_every_n: u64,
+    breach_threshold_ms: u64,
+    breach_rate_limit_window: Duration,
+    last_breach_emit: Option<Instant>,
+    pushed_count: u64,
+    /// Public so tests can inspect cap + content. External (non-test)
+    /// code should treat this as opaque and call `predeath_len()` instead.
     pub predeath_ring: VecDeque<ChunkLifecycleTimings>,
 }
 
@@ -79,5 +81,10 @@ impl LifecycleSampler {
         };
         let snapshot: Vec<_> = self.predeath_ring.iter().cloned().collect();
         emit_lifecycle_predeath(ring, &snapshot);
+    }
+
+    /// Number of chunks currently held in the predeath ring (0..=5).
+    pub fn predeath_len(&self) -> usize {
+        self.predeath_ring.len()
     }
 }

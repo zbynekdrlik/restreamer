@@ -1,7 +1,7 @@
 use super::sampler::LifecycleSampler;
 use super::timings::ChunkLifecycleTimings;
 use crate::audit_ring::AuditRing;
-use rs_core::audit::Action;
+use rs_core::audit::{Action, Severity};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -38,16 +38,19 @@ async fn observe_emits_sample_every_nth_chunk() {
     for i in 0..10 {
         s.observe(&fast_chunk(i), &ring);
     }
-    let samples = ring
-        .as_ref()
-        .unwrap()
-        .since(0)
-        .0
-        .into_iter()
+    let rows = ring.as_ref().unwrap().since(0).0;
+    let sample_rows: Vec<_> = rows
+        .iter()
         .filter(|r| r.action == Action::DiskCacheLifecycleSample)
-        .count();
+        .collect();
     // pushed_count goes 1..10. With every_n=5, samples emit at counts 5 and 10.
-    assert_eq!(samples, 2, "expected 2 samples for 10 chunks at N=5");
+    assert_eq!(sample_rows.len(), 2, "expected 2 samples for 10 chunks at N=5");
+    // Severity must be Info — operators don't want sample rows paging on-call.
+    assert_eq!(
+        sample_rows[0].severity,
+        Severity::Info,
+        "lifecycle_sample must be Severity::Info"
+    );
 }
 
 #[tokio::test]
@@ -55,15 +58,43 @@ async fn observe_emits_breach_when_any_stage_exceeds_threshold() {
     let ring = Some(AuditRing::new(500));
     let mut s = LifecycleSampler::new(30, 4_000);
     s.observe(&slow_chunk(1), &ring);
-    let breaches = ring
-        .as_ref()
-        .unwrap()
-        .since(0)
-        .0
-        .into_iter()
+    let rows = ring.as_ref().unwrap().since(0).0;
+    let breach_rows: Vec<_> = rows
+        .iter()
+        .filter(|r| r.action == Action::DiskCacheLifecycleBreach)
+        .collect();
+    assert_eq!(breach_rows.len(), 1);
+    // Severity MUST be Warn — operators page off Severity, not Action.
+    assert_eq!(
+        breach_rows[0].severity,
+        Severity::Warn,
+        "lifecycle_breach must be Severity::Warn"
+    );
+}
+
+#[tokio::test]
+async fn observe_sample_wins_over_breach_at_n_boundary() {
+    // every_n=1 (every chunk samples), threshold=0 (every chunk would
+    // also breach). The early-return after sample emission must
+    // suppress the breach for that chunk. Catches a regression that
+    // removes the `return` in observe.
+    let ring = Some(AuditRing::new(500));
+    let mut s = LifecycleSampler::new(1, 0);
+    s.observe(&slow_chunk(1), &ring);
+    let rows = ring.as_ref().unwrap().since(0).0;
+    let samples = rows
+        .iter()
+        .filter(|r| r.action == Action::DiskCacheLifecycleSample)
+        .count();
+    let breaches = rows
+        .iter()
         .filter(|r| r.action == Action::DiskCacheLifecycleBreach)
         .count();
-    assert_eq!(breaches, 1);
+    assert_eq!(samples, 1, "sample must fire");
+    assert_eq!(
+        breaches, 0,
+        "breach MUST be suppressed when sample arm fires for the same chunk"
+    );
 }
 
 #[tokio::test]
