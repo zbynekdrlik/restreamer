@@ -369,19 +369,6 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
         ..
     } = ctx;
 
-    // Stage A: capture host_emit_ts BEFORE S3 PUT so the VPS can measure
-    // how long the chunk sat in the uploader queue. Best-effort — a warn
-    // is logged but the upload proceeds regardless. (#184)
-    let host_emit = now_millis();
-    if let Err(e) = sqlx::query("UPDATE chunk_records SET host_emit_ts = ?1 WHERE id = ?2")
-        .bind(host_emit)
-        .bind(chunk.id)
-        .execute(pool)
-        .await
-    {
-        tracing::warn!(chunk_id = chunk.id, "stamp host_emit_ts failed: {e}");
-    }
-
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     // Resolve event identifier; if parent is gone, mark as sent and drop out of queue.
@@ -396,6 +383,21 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
             return;
         }
     };
+
+    // Stage A: capture host_emit_ts immediately before the PUT so the
+    // VPS can measure how long the chunk sat in the uploader queue.
+    // Stamped AFTER event resolution so chunks belonging to deleted
+    // events don't accumulate orphan timestamps. Best-effort — a warn
+    // is logged but the upload proceeds regardless. (#184)
+    let host_emit = now_millis();
+    if let Err(e) = sqlx::query("UPDATE chunk_records SET host_emit_ts = ?1 WHERE id = ?2")
+        .bind(host_emit)
+        .bind(chunk.id)
+        .execute(pool)
+        .await
+    {
+        tracing::warn!(chunk_id = chunk.id, "stamp host_emit_ts failed: {e}");
+    }
 
     let _ = db::record_upload_attempt(pool, chunk.id, now_ms).await;
     let attempt = chunk.upload_attempts + 1;
