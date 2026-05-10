@@ -1177,13 +1177,21 @@ test.describe("Per-Endpoint Cache Bar", () => {
     await expect(criticalBar).toBeVisible({ timeout: 5000 });
   });
 
-  test("pending endpoint shows S3 cache from first second", async ({
+  test("pending endpoint reads chunk_delay_secs directly, NEVER ps.cache_duration_secs (regression #187)", async ({
     page,
   }) => {
+    // #187 root cause: the dashboard cache bar fell back to GLOBAL
+    // ps.cache_duration_secs when chunks_processed=0. After a Stop+Start
+    // cycle that global metric still held the pre-stop accumulated value
+    // (1700+ seconds), so the bar showed nonsense like "1726s / 120s"
+    // until the per-endpoint metric kicked in. This test pins the bar
+    // to the per-endpoint chunk_delay_secs even when ps.cache_duration_secs
+    // is large + stale.
     await page.goto("/");
     await page.waitForTimeout(1000);
 
-    // Broadcast PipelineState with S3 chunks buffered and real cache duration
+    // Stale GLOBAL cache_duration_secs from a prior delivery cycle (1726s).
+    // The buggy fallback would show this; the fix ignores it.
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "PipelineState",
@@ -1195,12 +1203,11 @@ test.describe("Per-Endpoint Cache Bar", () => {
           session_start: null,
           local_buffer_chunks: 0,
           s3_queue_chunks: 20,
-          cache_duration_secs: 100.0,
+          cache_duration_secs: 1726.0,
         },
       },
     });
 
-    // Broadcast endpoint with alive=false, chunks_processed=0
     await page.request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
         type: "DeliveryStatus",
@@ -1224,17 +1231,18 @@ test.describe("Per-Endpoint Cache Bar", () => {
       },
     });
 
-    // Wait for endpoint node to appear
     await expect(page.locator(".endpoint-node")).toHaveCount(1, {
       timeout: 5000,
     });
-    // Pending endpoint should show cache bar using backend-computed cache duration
+    // Bar reads per-endpoint chunk_delay_secs (0.0) — NOT the stale 1726s.
     const cacheLabel = page.locator(".endpoint-cache-label");
-    await expect(cacheLabel).toContainText("100s / 120s cache", {
+    await expect(cacheLabel).toContainText("0s / 120s cache", {
       timeout: 5000,
     });
-    // 100/120 = 83% -> healthy
-    await expect(page.locator(".buffer-bar-fill.healthy")).toBeVisible();
+    // 0/120 = 0% -> critical (correct: nothing pushed yet).
+    await expect(page.locator(".buffer-bar-fill.critical")).toBeVisible();
+    // Hard regression guard: NEVER any 4-digit cache value.
+    await expect(cacheLabel).not.toContainText(/\d{4,}s \/ /);
   });
 
   test("buffering indicator shows S3 chunk count", async ({ page }) => {
