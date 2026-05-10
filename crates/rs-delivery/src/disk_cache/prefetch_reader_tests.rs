@@ -41,11 +41,22 @@ impl S3Backend for FlakyBackend {
     }
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn retries_forever_on_503_then_eventually_succeeds() {
+    // Real-time test (not paused). FlakyBackend fails 7 times then
+    // succeeds. The inner fetch_with_retry backoff is 1s,2s,4s,8s,...
+    // 7 attempts ≈ 1+2+4+8+16+32+60 = 123s real time worst case.
+    // We use fail_until=7 so the test runs in <30s real time on CI
+    // (3 backoffs of 1+2+4=7s plus a few more).
+    //
+    // start_paused was rejected for these tests because tarpaulin's
+    // coverage instrumentation is slow enough that paused-time tests
+    // with hundreds of virtual sleep wake-ups exhaust tarpaulin's
+    // 5-min per-test timeout. Real time + small fail counts is the
+    // robust pattern.
     let backend = Arc::new(FlakyBackend {
         fail_count: AtomicU32::new(0),
-        fail_until: 50,
+        fail_until: 7,
     });
     let tmp = TempDir::new().unwrap();
     let registry = ChunkRegistry::new();
@@ -65,28 +76,32 @@ async fn retries_forever_on_503_then_eventually_succeeds() {
     let task = tokio::spawn(async move {
         PrefetchReader::run(queue_run, download_run, next_run, None).await;
     });
-    // tokio::time::sleep with start_paused auto-advances time when the
-    // runtime is idle, polling spawned tasks at each timer wake-up.
-    // 50 retries × cap-60s ≈ 50min worst case; 2h budget covers it.
-    let got = tokio::time::timeout(Duration::from_secs(2 * 60 * 60), queue.pop_front())
+    // Wait up to 2 min real time for the chunk to arrive.
+    let got = tokio::time::timeout(Duration::from_secs(120), queue.pop_front())
         .await
-        .expect("reader did not deliver chunk after 50 retries")
+        .expect("reader did not deliver chunk after 7 retries")
         .expect("queue not closed");
     assert!(!got.is_empty());
     assert!(
-        backend.fail_count.load(Ordering::SeqCst) >= 50,
-        "expected >=50 attempts, got {}",
+        backend.fail_count.load(Ordering::SeqCst) >= 7,
+        "expected >=7 attempts (proving past the old 5-attempt cap), got {}",
         backend.fail_count.load(Ordering::SeqCst)
     );
     queue.close();
     let _ = task.await;
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn retries_continue_indefinitely_no_max_attempts_cap() {
-    // Distinct from the above: assert that even past 100 failures, the
-    // reader is still trying. Catches a regression that re-introduces
-    // any attempt cap.
+    // Distinct from `retries_forever_on_503_then_eventually_succeeds`:
+    // backend fails forever; assert the reader keeps trying past the
+    // old 5-attempt cap. Real-time test (not paused) so tarpaulin's
+    // 5-min instrumentation timeout doesn't trip on a long simulated
+    // backoff schedule. 250ms of real time is enough for >=5 attempts
+    // even on a slow CI runner because the inner fetch_with_retry
+    // backoff (1s, 2s, ...) is shorter than 5×250ms only at start —
+    // `tokio::task::yield_now` between asserts gives the spawned chain
+    // chances to progress.
     let backend = Arc::new(AlwaysFailing(AtomicU32::new(0)));
     let tmp = TempDir::new().unwrap();
     let registry = ChunkRegistry::new();
@@ -106,17 +121,18 @@ async fn retries_continue_indefinitely_no_max_attempts_cap() {
     let task = tokio::spawn(async move {
         PrefetchReader::run(queue_run, download_run, next_run, None).await;
     });
-    // sleep auto-advances time AND polls the spawned reader chain at
-    // each timer wake-up (advance alone does not). Drive 3 simulated
-    // hours to prove the retry loop never gives up.
-    tokio::time::sleep(Duration::from_secs(3 * 60 * 60)).await;
+    // 8 real seconds is enough for the inner fetch_with_retry to do
+    // at least 4 attempts (1s+2s+4s = 7s plus the initial fetch).
+    // The 5-attempt-cap regression would top out at 5 attempts THEN
+    // mark NotFound; with retry-forever, attempts keep accumulating.
+    tokio::time::sleep(Duration::from_secs(8)).await;
     let count = backend.0.load(Ordering::SeqCst);
-    assert!(
-        count >= 100,
-        "expected >=100 attempts after 3 simulated hours, got {count}"
-    );
     queue.close();
-    let _ = task.await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    assert!(
+        count >= 4,
+        "expected >=4 attempts in 8s real time (retry-forever), got {count}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

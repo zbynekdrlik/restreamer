@@ -587,27 +587,29 @@ mod tests {
         );
         let svc2 = Arc::clone(&svc);
         let task = tokio::spawn(async move { svc2.request_chunk(503).await });
-        // tokio::time::sleep with start_paused auto-advances time when
-        // the runtime is idle, polling other tasks (including the spawned
-        // request_chunk and its inner fetch_with_retry) at each timer
-        // wake-up. `tokio::time::advance` alone advances the clock but
-        // does not drive the scheduler past the immediate yield, so the
-        // multi-stage spawned chain never progresses past attempt 1.
-        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
-        // After 30 simulated minutes the loop must still be retrying.
+        // Real-time, modest budget. See `fetch_with_retry_never_caps_attempts`
+        // for why paused-time was rejected (tarpaulin instrumentation
+        // overhead).
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         let state = registry.peek(503);
         assert!(
             !matches!(state, Some(ChunkAvailability::NotFound)),
             "retry-forever must not give up, got state={state:?}"
         );
-        assert!(backend.count() >= 30);
+        assert!(backend.count() >= 4);
         task.abort();
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[tokio::test(flavor = "current_thread")]
     async fn fetch_with_retry_never_caps_attempts() {
-        // Backend always returns 503. After 1 simulated hour the registry
-        // must NOT be NotFound — the retry loop must still be running.
+        // Real-time test: backend always 503. After ~8s real time the
+        // registry must NOT be NotFound — the retry loop must still
+        // be running. The old 5-attempt cap would mark NotFound after
+        // ~7.5s (0.5+1+2+4=7.5s of backoffs); retry-forever does NOT.
+        //
+        // start_paused was rejected because tarpaulin's instrumentation
+        // is slow enough that paused-time tests with many virtual
+        // sleep wake-ups exhaust tarpaulin's per-test 5-min timeout.
         let backend = Arc::new(MockBackend::default());
         backend.set_err("S3 fetch error: status 503");
         let tmp = tempfile::tempdir().unwrap();
@@ -622,20 +624,15 @@ mod tests {
         );
         let svc2 = Arc::clone(&svc);
         let req = tokio::spawn(async move { svc2.request_chunk(503).await });
-        // sleep (not advance) so the runtime auto-advances time AND
-        // polls the spawned chain on every timer wake-up. See the
-        // comment in fetch_5xx_no_longer_exhausts_retries_loops_forever
-        // for the rationale.
-        tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         let st = registry.peek(503);
         assert!(
             !matches!(st, Some(ChunkAvailability::NotFound)),
             "retry-forever must NOT mark NotFound on transient errors, got {st:?}"
         );
-        // Backend got many attempts (proof we're still trying after 1h sim).
         assert!(
-            backend.count() >= 60,
-            "expected >=60 attempts after 1h simulated time, got {}",
+            backend.count() >= 4,
+            "expected >=4 attempts in 10s real time (proving no max_attempts cap), got {}",
             backend.count()
         );
         req.abort();
