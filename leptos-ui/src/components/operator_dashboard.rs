@@ -840,23 +840,26 @@ fn EndpointTree() -> impl IntoView {
                                     if target == 0 {
                                         return None;
                                     }
-                                    // Use per-endpoint delivery delay so each
-                                    // endpoint's cache bar reflects its own
-                                    // state. Previously we used the global
-                                    // ps.cache_duration_secs (S3 queue depth),
-                                    // which showed the same value for every
-                                    // endpoint and hid per-endpoint drift.
+                                    // Per-endpoint cache. Pre-first-push the
+                                    // endpoint reports chunk_delay_secs=0, so
+                                    // we read it directly. The previous code
+                                    // here fell back to ps.cache_duration_secs
+                                    // (issue #187) which is the GLOBAL
+                                    // pipeline cache duration — it accumulates
+                                    // since event_started and showed
+                                    // nonsensical values like "1726s / 120s"
+                                    // during a Stop+Start cycle's VPS-recreate
+                                    // window. The fallback also jumped to 0
+                                    // when the host reset its global cache,
+                                    // creating a misleading 1726s -> 0 ->
+                                    // climbing-from-0 visual on the bar.
                                     //
-                                    // During the initial buffer-fill phase
-                                    // each endpoint reports chunk_delay_secs
-                                    // = 0, so we fall back to the global
-                                    // cache_duration_secs until delivery has
-                                    // started.
-                                    let cache_secs = if ep.chunks_processed > 0 {
-                                        ep.chunk_delay_secs
-                                    } else {
-                                        ps.cache_duration_secs
-                                    };
+                                    // Reading chunk_delay_secs directly: bar
+                                    // sits at 0 during VPS spin-up + initial
+                                    // buffer prefill, then climbs as the
+                                    // endpoint actually pushes. Honest, no
+                                    // global-state leak.
+                                    let cache_secs = ep.chunk_delay_secs;
                                     // Per-service threshold lives in utils.rs so
                                     // a service-type rename touches one site.
                                     let alias_lookup = ep.alias.clone();
