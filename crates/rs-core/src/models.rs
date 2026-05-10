@@ -755,4 +755,44 @@ mod tests {
         state.set_connected(false);
         assert!(!state.is_connected());
     }
+
+    #[test]
+    fn endpoint_prefetch_chunks_defaults_to_none_when_missing() {
+        let json = r#"{
+            "id": 1,
+            "alias": "Kiko",
+            "service_type": "RTMP",
+            "stream_key": "rtmp://x/y",
+            "enabled": true,
+            "position_last": 0,
+            "delivered_bytes": 0,
+            "is_fast": true,
+            "created_at": "2026-05-10T00:00:00Z",
+            "updated_at": "2026-05-10T00:00:00Z"
+        }"#;
+        let parsed: EndpointConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            parsed.prefetch_chunks.is_none(),
+            "missing field must default to None"
+        );
+    }
+
+    #[test]
+    fn endpoint_prefetch_chunks_round_trips_explicit_value() {
+        let json = r#"{
+            "id": 1,
+            "alias": "Kiko",
+            "service_type": "RTMP",
+            "stream_key": "rtmp://x/y",
+            "enabled": true,
+            "position_last": 0,
+            "delivered_bytes": 0,
+            "is_fast": true,
+            "prefetch_chunks": 3,
+            "created_at": "2026-05-10T00:00:00Z",
+            "updated_at": "2026-05-10T00:00:00Z"
+        }"#;
+        let parsed: EndpointConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.prefetch_chunks, Some(3));
+    }
 }
