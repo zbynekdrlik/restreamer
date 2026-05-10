@@ -25,7 +25,7 @@ mod eviction;
 mod position_registry;
 mod registry;
 
-pub use download_service::{DownloadService, S3Backend};
+pub use download_service::{DownloadService, FetchedChunk, S3Backend};
 pub use endpoint_reader::EndpointReader;
 pub use eviction::EvictionTask;
 pub use position_registry::{EndpointPositionRegistry, EndpointWindow};

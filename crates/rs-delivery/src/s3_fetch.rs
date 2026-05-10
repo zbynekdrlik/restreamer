@@ -21,11 +21,16 @@ pub struct ChunkData {
     pub data: Vec<u8>,
     pub duration_ms: i64,
     /// Stage A: host clock millis since epoch when the chunker wrote the
-    /// chunk to local FS. NULL/None when the chunk was uploaded by a
+    /// chunk to local FS. Backfilled from `x-amz-meta-host-emit-ts` on
+    /// the S3 GET response. NULL/None when the chunk was uploaded by a
     /// pre-lifecycle host. Cross-host with VPS clock — see spec section 4.3.
     pub host_emit_ts: Option<i64>,
     /// Stage B: host clock millis since epoch when the uploader received
-    /// the S3 200 OK. NULL/None for legacy chunks.
+    /// the S3 200 OK. NOT carried via S3 header (the value is unknown
+    /// at PUT time — only after PUT returns). The VPS backfills this
+    /// field from the host's `chunk_records.s3_upload_complete_ts` DB
+    /// row inside `LifecycleAwarePusher` (Task 18). Always None on the
+    /// S3 fetch path; populated downstream.
     pub s3_upload_complete_ts: Option<i64>,
 }
 
@@ -77,14 +82,14 @@ impl S3Fetcher {
                 let host_emit_ts = headers
                     .get("x-amz-meta-host-emit-ts")
                     .and_then(|v| v.parse::<i64>().ok());
-                let s3_upload_complete_ts = headers
-                    .get("x-amz-meta-s3-complete-ts")
-                    .and_then(|v| v.parse::<i64>().ok());
+                // s3_upload_complete_ts (stage B) cannot be carried via
+                // S3 header — unknown at PUT time. Always None here;
+                // backfilled from chunk_records DB in LifecycleAwarePusher.
                 Ok(Some(ChunkData {
                     data: response.to_vec(),
                     duration_ms,
                     host_emit_ts,
-                    s3_upload_complete_ts,
+                    s3_upload_complete_ts: None,
                 }))
             }
             Ok(response) if response.status_code() == 404 => Ok(None),

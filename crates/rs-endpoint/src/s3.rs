@@ -3,6 +3,7 @@ use rs_core::config::S3Config;
 use s3::Region;
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -81,41 +82,8 @@ impl S3Client {
         seq: i64,
         duration_ms: i64,
     ) -> Result<(), EndpointError> {
-        let s3_key = Self::chunk_key(event_id, seq);
-
-        let mut file = tokio::fs::File::open(local_path)
+        self.upload_chunk_inner(local_path, event_id, seq, duration_ms, &HashMap::new())
             .await
-            .map_err(|e| EndpointError::Io(e.to_string()))?;
-
-        let metadata = file
-            .metadata()
-            .await
-            .map_err(|e| EndpointError::Io(e.to_string()))?;
-        let file_size = metadata.len();
-
-        debug!(
-            "Uploading to s3://{}/{} ({file_size} bytes, duration_ms={duration_ms})",
-            self.bucket.name, s3_key,
-        );
-
-        // Clone bucket to add per-upload metadata without leaking headers
-        let mut upload_bucket = (*self.bucket).clone();
-        upload_bucket.add_header("x-amz-meta-duration-ms", &duration_ms.to_string());
-
-        let response = upload_bucket
-            .put_object_stream(&mut file, &s3_key)
-            .await
-            .map_err(|e| EndpointError::S3(format!("upload failed: {e}")))?;
-
-        if response.status_code() >= 300 {
-            return Err(EndpointError::S3(format!(
-                "upload returned status {}",
-                response.status_code(),
-            )));
-        }
-
-        info!("Uploaded {s3_key} ({file_size} bytes, duration_ms={duration_ms})");
-        Ok(())
     }
 
     /// Upload a chunk with extra `x-amz-meta-*` headers in addition to the
@@ -130,7 +98,22 @@ impl S3Client {
         event_id: &str,
         seq: i64,
         duration_ms: i64,
-        metadata: std::collections::HashMap<String, String>,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), EndpointError> {
+        self.upload_chunk_inner(local_path, event_id, seq, duration_ms, &metadata)
+            .await
+    }
+
+    /// Shared upload core. Both `upload_chunk` and
+    /// `upload_chunk_with_metadata` call this to avoid drift if a future
+    /// fix touches the S3 PUT path.
+    async fn upload_chunk_inner(
+        &self,
+        local_path: &Path,
+        event_id: &str,
+        seq: i64,
+        duration_ms: i64,
+        metadata: &HashMap<String, String>,
     ) -> Result<(), EndpointError> {
         let s3_key = Self::chunk_key(event_id, seq);
 
@@ -151,9 +134,10 @@ impl S3Client {
             metadata.len(),
         );
 
+        // Clone bucket to add per-upload metadata without leaking headers
         let mut upload_bucket = (*self.bucket).clone();
         upload_bucket.add_header("x-amz-meta-duration-ms", &duration_ms.to_string());
-        for (k, v) in &metadata {
+        for (k, v) in metadata {
             upload_bucket.add_header(&format!("x-amz-meta-{k}"), v);
         }
 
