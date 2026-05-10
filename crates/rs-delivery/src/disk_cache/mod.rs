@@ -23,7 +23,11 @@ pub mod download_service;
 mod endpoint_reader;
 mod eviction;
 mod position_registry;
+pub mod prefetch_queue;
 mod registry;
+
+#[cfg(test)]
+mod prefetch_queue_tests;
 
 pub use download_service::{DownloadService, FetchedChunk, S3Backend};
 pub use endpoint_reader::EndpointReader;
