@@ -67,6 +67,32 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Synchronous test constructor — no async DB init, no /var/log writes.
+    /// Suitable for handler-level unit tests that only touch `endpoints` and
+    /// `audit_ring` (e.g., api_update_start_tests).
+    #[cfg(test)]
+    pub fn new_for_test() -> Self {
+        let audit_ring = AuditRing::new(AUDIT_RING_CAP);
+        // connect_lazy never fails on in-memory SQLite; no migrations needed
+        // for update_start tests (they don't touch the DB).
+        let db_pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:")
+            .expect("connect_lazy on in-memory SQLite is infallible");
+        Self {
+            endpoints: RwLock::new(std::collections::HashMap::new()),
+            version: env!("CARGO_PKG_VERSION"),
+            ready: RwLock::new(true),
+            auth_token: RwLock::new(None),
+            s3_config: RwLock::new(None),
+            event_identifier: RwLock::new(None),
+            delivery_delay_ms: RwLock::new(0),
+            rescue_video_url: RwLock::new(None),
+            log_buffer: LogBuffer::new(100),
+            db_pool,
+            audit_ring,
+            disk_cache: RwLock::new(None),
+        }
+    }
+
     pub async fn new() -> Self {
         let db_pool = crate::db::init_pool()
             .await

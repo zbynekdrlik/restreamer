@@ -145,6 +145,8 @@ pub struct EndpointHandle {
     task: JoinHandle<()>,
     stop_tx: watch::Sender<bool>,
     stats: Stats,
+    start_chunk_id: i64,
+    cfg: crate::api::EndpointConfig,
 }
 
 impl EndpointHandle {
@@ -198,7 +200,17 @@ impl EndpointHandle {
             task,
             stop_tx,
             stats,
+            start_chunk_id,
+            cfg: ep_cfg,
         }
+    }
+
+    pub fn start_chunk_id(&self) -> i64 {
+        self.start_chunk_id
+    }
+
+    pub fn config(&self) -> &crate::api::EndpointConfig {
+        &self.cfg
     }
 
     pub fn is_alive(&self) -> bool {
@@ -212,6 +224,34 @@ impl EndpointHandle {
     pub async fn stop(self) {
         let _ = self.stop_tx.send(true);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.task).await;
+    }
+
+    /// Test-only stub: creates a no-op EndpointHandle with the given start_chunk_id.
+    /// Used by api_update_start_tests to seed AppState without a real DiskCache.
+    #[cfg(test)]
+    pub fn stub_for_test(start_chunk_id: i64) -> Self {
+        let (stop_tx, _stop_rx) = watch::channel(false);
+        let task = tokio::spawn(async {});
+        let stats = Arc::new(Mutex::new(crate::endpoint_stats::initial_endpoint_stats(
+            start_chunk_id,
+            "normal".to_string(),
+        )));
+        let cfg = crate::api::EndpointConfig {
+            alias: "stub".to_string(),
+            service_type: "TEST_FILE".to_string(),
+            stream_key: String::new(),
+            is_fast: false,
+            chunk_format: "flv".to_string(),
+            start_chunk_id: None,
+            pusher: Default::default(),
+        };
+        Self {
+            task,
+            stop_tx,
+            stats,
+            start_chunk_id,
+            cfg,
+        }
     }
 }
 

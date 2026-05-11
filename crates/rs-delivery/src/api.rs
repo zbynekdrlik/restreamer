@@ -27,6 +27,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/stop", post(stop_endpoints))
         .route("/api/endpoints/add", post(add_endpoint))
         .route("/api/endpoints/remove", post(remove_endpoint))
+        .route("/api/endpoints/update_start", post(update_start_handler))
         .route("/api/logs", get(get_logs))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
@@ -482,6 +483,88 @@ async fn remove_endpoint(
             removed: false,
         }))
     }
+}
+
+// --- Live-edge start recompute ---
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateStartRequest {
+    pub alias: String,
+    pub new_start_chunk_id: i64,
+}
+
+/// Replace an endpoint's start_chunk_id at host request. Tears down the
+/// existing EndpointHandle and respawns it with the new start, mirroring
+/// the add_endpoint pattern. Called by the host at VPS-ready moment for
+/// is_fast endpoints so they begin pushing at the fresh live edge rather
+/// than the stale chunk_id computed before VPS creation completed.
+///
+/// Returns 404 if the alias is unknown.
+pub async fn update_start_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateStartRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let mut endpoints = state.endpoints.write().await;
+    let old_handle = endpoints.remove(&req.alias).ok_or(StatusCode::NOT_FOUND)?;
+    let old_start = old_handle.start_chunk_id();
+    let cfg = old_handle.config().clone();
+
+    // For stub handles in tests, stop() returns immediately.
+    // For real handles, this aborts the consumer task (5s timeout).
+    old_handle.stop().await;
+
+    let delivery_delay_ms = *state.delivery_delay_ms.read().await;
+    let rescue_video_url = state.rescue_video_url.read().await.clone();
+    let disk_cache_opt = state.disk_cache.read().await.clone();
+
+    // If disk_cache is None we are in the test path — insert a stub so the
+    // swap semantics are preserved without needing a real DiskCache.
+    let new_handle = match disk_cache_opt {
+        Some(disk_cache) => EndpointHandle::spawn(
+            cfg,
+            req.new_start_chunk_id,
+            delivery_delay_ms,
+            rescue_video_url,
+            Some(Arc::clone(&state.audit_ring)),
+            disk_cache,
+        ),
+        None => {
+            #[cfg(test)]
+            {
+                EndpointHandle::stub_for_test(req.new_start_chunk_id)
+            }
+            #[cfg(not(test))]
+            {
+                tracing::error!(
+                    alias = %req.alias,
+                    "update_start: DiskCache uninitialised at runtime; cannot respawn"
+                );
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+        }
+    };
+    endpoints.insert(req.alias.clone(), new_handle);
+    drop(endpoints);
+
+    state.audit_ring.push(
+        rs_core::audit::Severity::Info,
+        rs_core::audit::Source::Delivery,
+        Some(req.alias.clone()),
+        rs_core::audit::Action::EndpointStartChunkUpdated,
+        serde_json::json!({
+            "alias": req.alias,
+            "old_start_chunk_id": old_start,
+            "new_start_chunk_id": req.new_start_chunk_id,
+        }),
+    );
+
+    tracing::info!(
+        alias = %req.alias,
+        old_start_chunk_id = old_start,
+        new_start_chunk_id = req.new_start_chunk_id,
+        "update_start replaced endpoint"
+    );
+    Ok(StatusCode::OK)
 }
 
 // --- Log retrieval ---
