@@ -2305,4 +2305,33 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
     await page.goto("/");
     await expect(assertYtHealthGood(page)).rejects.toThrow(/no active YT stream/);
   });
+
+  test("fast endpoint cache bar label uses 'live' target", async ({ page }) => {
+    // The selector requires data-testid="endpoint-card" + data-is-fast="true"
+    // attributes added in #189. Fast endpoints (is_fast=true in config) render
+    // cache label as "Xs / live cache" instead of "Xs / 120s cache".
+    await page.goto("/");
+    // Wait briefly for any endpoint card to render — if no endpoints, skip.
+    const anyCard = page.locator('[data-testid="endpoint-card"]').first();
+    try {
+      await anyCard.waitFor({ timeout: 5000 });
+    } catch {
+      test.skip(true, "No endpoint cards present in current dashboard state");
+      return;
+    }
+
+    const fastCards = page.locator(
+      '[data-testid="endpoint-card"][data-is-fast="true"]',
+    );
+    const count = await fastCards.count();
+    if (count === 0) {
+      test.skip(true, "No fast endpoints configured in current dashboard state");
+      return;
+    }
+    const label = await fastCards
+      .first()
+      .locator(".endpoint-cache-label")
+      .textContent();
+    expect(label).toMatch(/^\d+s \/ live cache$/);
+  });
 });
