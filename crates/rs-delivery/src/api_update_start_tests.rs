@@ -10,19 +10,20 @@ use crate::{AppState, EndpointHandle};
 use axum::{Json, extract::State, http::StatusCode};
 use std::sync::Arc;
 
-fn test_state_with_stub_endpoint(alias: &str, start: i64) -> Arc<AppState> {
+async fn test_state_with_stub_endpoint(alias: &str, start: i64) -> Arc<AppState> {
     let state = Arc::new(AppState::new_for_test());
     let stub = EndpointHandle::stub_for_test(start);
     state
         .endpoints
-        .blocking_write()
+        .write()
+        .await
         .insert(alias.to_string(), stub);
     state
 }
 
 #[tokio::test]
 async fn update_start_swaps_handle_for_known_alias() {
-    let state = test_state_with_stub_endpoint("kiko", 100);
+    let state = test_state_with_stub_endpoint("kiko", 100).await;
 
     let req = UpdateStartRequest {
         alias: "kiko".to_string(),
@@ -42,7 +43,7 @@ async fn update_start_swaps_handle_for_known_alias() {
 
 #[tokio::test]
 async fn update_start_returns_404_for_unknown_alias() {
-    let state = test_state_with_stub_endpoint("kiko", 100);
+    let state = test_state_with_stub_endpoint("kiko", 100).await;
 
     let req = UpdateStartRequest {
         alias: "ghost".to_string(),
@@ -56,7 +57,7 @@ async fn update_start_returns_404_for_unknown_alias() {
 
 #[tokio::test]
 async fn update_start_emits_endpoint_start_chunk_updated_audit_on_success() {
-    let state = test_state_with_stub_endpoint("kiko", 100);
+    let state = test_state_with_stub_endpoint("kiko", 100).await;
 
     let (pre_rows, _pre_cursor) = state.audit_ring.since(0);
     let pre_count = pre_rows.len();
