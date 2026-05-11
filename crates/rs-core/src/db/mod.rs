@@ -53,6 +53,9 @@ mod audit_tests;
 mod drift_tests;
 
 #[cfg(test)]
+mod lag_tests;
+
+#[cfg(test)]
 mod metrics_tests;
 
 #[cfg(test)]
