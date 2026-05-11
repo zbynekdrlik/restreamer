@@ -552,6 +552,40 @@ pub async fn get_cache_duration_secs(
     Ok(row.get::<i64, _>("total_ms") as f64 / 1000.0)
 }
 
+/// Lag (in seconds) from a specific endpoint's current position to the live edge.
+///
+/// Semantically: how many seconds of stream content sit between this endpoint's
+/// read position (`endpoint_current_chunk_id`) and the most recently uploaded
+/// (sent=1) chunk. Used by `delivery_status.rs` to drive the per-endpoint cache
+/// bar.
+///
+/// Differs from `get_cache_duration_secs` which is a global "everything above
+/// the consumer" metric used for the host-side cache_duration_secs field.
+///
+/// Returns 0.0 if no chunks have been sent yet, or if the endpoint is at or
+/// past the live edge.
+pub async fn get_endpoint_lag_secs(
+    pool: &SqlitePool,
+    event_id: i64,
+    endpoint_current_chunk_id: i64,
+) -> Result<f64> {
+    let row = sqlx::query(
+        "SELECT COALESCE(SUM(duration_ms), 0) AS total_ms FROM chunk_records
+         WHERE streaming_event_id = ?1
+           AND sent = 1
+           AND sequence_number > ?2
+           AND sequence_number <= (
+             SELECT COALESCE(MAX(sequence_number), 0) FROM chunk_records
+             WHERE streaming_event_id = ?1 AND sent = 1
+           )",
+    )
+    .bind(event_id)
+    .bind(endpoint_current_chunk_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get::<i64, _>("total_ms") as f64 / 1000.0)
+}
+
 /// Find the chunk_id N such that the SUM of duration_ms across sent chunks
 /// with sequence_number > N is approximately `target_delay_ms`. The new
 /// endpoint joining mid-stream uses this to start at a position where S3
