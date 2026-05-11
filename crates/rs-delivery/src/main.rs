@@ -27,6 +27,9 @@ pub mod rtmp_push_telemetry;
 mod s3_fetch;
 pub mod s3_fetch_profile;
 
+#[cfg(test)]
+mod api_update_start_tests;
+
 pub use audit_ring::AuditRing;
 pub use disk_cache::DiskCache;
 pub use endpoint_task::EndpointHandle;
