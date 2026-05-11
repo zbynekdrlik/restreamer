@@ -75,6 +75,7 @@ pub async fn on_vps_ready(
         });
         let post_result = client
             .post(&url)
+            .bearer_auth(&instance.auth_token)
             .json(&payload)
             .timeout(Duration::from_secs(5))
             .send()

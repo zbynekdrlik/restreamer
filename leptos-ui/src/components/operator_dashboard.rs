@@ -876,15 +876,18 @@ fn EndpointTree() -> impl IntoView {
                                         };
                                         (secs, "live".to_string(), prog, class_)
                                     } else {
-                                        // Non-fast: original behaviour. During prefill (chunks_processed=0)
-                                        // fall back to the global ps.cache_duration_secs which the
-                                        // backend caps at 1.5x target (#187). Per-service threshold
-                                        // multiplier from utils.rs.
-                                        let secs = if ep.chunks_processed > 0 {
-                                            ep.chunk_delay_secs
-                                        } else {
-                                            ps.cache_duration_secs
-                                        };
+                                        // Non-fast: always use ps.cache_duration_secs (global S3 buffer
+                                        // depth, capped at 1.5x target by backend #187). Live testing
+                                        // 2026-05-11 on streamsnv showed switching to ep.chunk_delay_secs
+                                        // at first-push reproduced the operator-reported drop pattern
+                                        // (42s -> 3s) because the consumer's reported current_chunk_id
+                                        // tracks the FETCHER position (near live edge), so
+                                        // lag-from-live-edge reads ~0s right after first push. The
+                                        // global ps metric grows 0 -> 120 smoothly and stays steady
+                                        // there. Per-endpoint chunk_delay_secs is still recorded in
+                                        // delivery_endpoint_metrics for diagnostics. Per-service
+                                        // threshold multiplier from utils.rs.
+                                        let secs = ps.cache_duration_secs;
                                         let alias_lookup = ep.alias.clone();
                                         let service_type = store.endpoints_list.get()
                                             .iter()
