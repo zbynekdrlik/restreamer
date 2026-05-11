@@ -2307,31 +2307,70 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
   });
 
   test("fast endpoint cache bar label uses 'live' target", async ({ page }) => {
-    // The selector requires data-testid="endpoint-card" + data-is-fast="true"
-    // attributes added in #189. Fast endpoints (is_fast=true in config) render
-    // cache label as "Xs / live cache" instead of "Xs / 120s cache".
+    // Fast endpoints (is_fast=true in config) render cache label as
+    // "Xs / live cache" instead of "Xs / 120s cache". The dashboard card
+    // carries data-testid="endpoint-card" and data-is-fast attributes added
+    // in #189. To make this test deterministic in CI (where no fast endpoint
+    // may be configured), seed the dashboard's PipelineState + DeliveryStatus
+    // via the same _test/ws-broadcast hook used by the per-endpoint
+    // regression test at line ~994.
     await page.goto("/");
-    // Wait briefly for any endpoint card to render — if no endpoints, skip.
-    const anyCard = page.locator('[data-testid="endpoint-card"]').first();
-    try {
-      await anyCard.waitFor({ timeout: 5000 });
-    } catch {
-      test.skip(true, "No endpoint cards present in current dashboard state");
-      return;
-    }
+    await page.waitForTimeout(1000);
 
-    const fastCards = page.locator(
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "PipelineState",
+          data: {
+            state: "streaming",
+            event_id: 1,
+            event_name: "Test Event",
+            target_delay_secs: 120,
+            session_start: null,
+            local_buffer_chunks: 0,
+            s3_queue_chunks: 0,
+            cache_duration_secs: 0.0,
+          },
+        },
+      },
+    );
+
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "e2e-vps",
+            status: "delivering",
+            server_ip: "1.2.3.4",
+            endpoint_count: 1,
+            endpoints: [
+              {
+                alias: "Kiko Fast",
+                alive: true,
+                current_chunk_id: 100,
+                bytes_processed_total: 0,
+                chunks_processed: 10,
+                chunk_delay_secs: 2.0,
+                stall_reason: null,
+                ffmpeg_restart_count: 0,
+                last_error: null,
+                is_fast: true,
+              },
+            ],
+          },
+        },
+      },
+    );
+
+    const fastCard = page.locator(
       '[data-testid="endpoint-card"][data-is-fast="true"]',
     );
-    const count = await fastCards.count();
-    if (count === 0) {
-      test.skip(true, "No fast endpoints configured in current dashboard state");
-      return;
-    }
-    const label = await fastCards
-      .first()
-      .locator(".endpoint-cache-label")
-      .textContent();
-    expect(label).toMatch(/^\d+s \/ live cache$/);
+    await expect(fastCard).toHaveCount(1, { timeout: 5000 });
+    await expect(fastCard.locator(".endpoint-cache-label")).toContainText(
+      /^\d+s \/ live cache$/,
+    );
   });
 });

@@ -110,6 +110,22 @@ pub async fn on_vps_ready(
 
         if success {
             if let Some(tx) = audit_tx {
+                // gap_chunks should be >= 0 in the normal path (chunks keep
+                // arriving during VPS spawn so new_start >= original). If it
+                // goes negative — e.g. original_start_chunk_id was mutated past
+                // the live edge between compute and on_vps_ready — log a warn
+                // and clamp to 0 so post-mortem reviewers see a sensible value.
+                let raw_gap = new_start - original_start_chunk_id;
+                if raw_gap < 0 {
+                    warn!(
+                        alias = %ep.alias,
+                        original_start_chunk_id,
+                        new_start,
+                        raw_gap,
+                        "FastEndpointJumpedToLiveEdge gap_chunks is negative; clamping to 0"
+                    );
+                }
+                let gap = raw_gap.max(0);
                 let _ = tx
                     .send(AuditRow {
                         severity: Severity::Info,
@@ -122,7 +138,7 @@ pub async fn on_vps_ready(
                             "alias": ep.alias,
                             "from_chunk_id": original_start_chunk_id,
                             "to_chunk_id": new_start,
-                            "gap_chunks": new_start - original_start_chunk_id,
+                            "gap_chunks": gap,
                         }),
                         ts_override: None,
                     })

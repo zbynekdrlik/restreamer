@@ -504,11 +504,20 @@ pub async fn update_start_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateStartRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut endpoints = state.endpoints.write().await;
-    let old_handle = endpoints.remove(&req.alias).ok_or(StatusCode::NOT_FOUND)?;
-    let old_start = old_handle.start_chunk_id();
-    let cfg = old_handle.config().clone();
+    // Take the old handle out of the map under a short-held write lock so
+    // other endpoint handlers (status, add, remove, stop) don't block while
+    // we await `stop()` (up to 5s) and spawn the new handle. This matters
+    // because update_start fires at VPS-ready, the same critical operator-
+    // visible transition the status poll covers.
+    let (old_handle, old_start, cfg) = {
+        let mut endpoints = state.endpoints.write().await;
+        let old_handle = endpoints.remove(&req.alias).ok_or(StatusCode::NOT_FOUND)?;
+        let old_start = old_handle.start_chunk_id();
+        let cfg = old_handle.config().clone();
+        (old_handle, old_start, cfg)
+    };
 
+    // Lock dropped. Awaiting stop() is now safe to take its full timeout.
     // For stub handles in tests, stop() returns immediately.
     // For real handles, this aborts the consumer task (5s timeout).
     old_handle.stop().await;
@@ -543,8 +552,13 @@ pub async fn update_start_handler(
             }
         }
     };
-    endpoints.insert(req.alias.clone(), new_handle);
-    drop(endpoints);
+
+    // Re-acquire write lock briefly to insert the new handle.
+    state
+        .endpoints
+        .write()
+        .await
+        .insert(req.alias.clone(), new_handle);
 
     state.audit_ring.push(
         rs_core::audit::Severity::Info,
