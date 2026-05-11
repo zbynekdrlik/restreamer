@@ -184,6 +184,11 @@ impl EndpointHandle {
             60,
         );
         tracing::info!(alias = %ep_cfg.alias, window, "DiskCacheFetcher wired");
+        // Clone for the spawned task so the original survives for the
+        // EndpointHandle's `cfg` field. `cfg` powers the `config()` accessor
+        // used by api::update_start_handler when it tears down and respawns
+        // this endpoint with a new start_chunk_id (#189).
+        let cfg = ep_cfg.clone();
         let task = tokio::spawn(endpoint_loop(
             fetcher,
             FfmpegProcessFactory,
@@ -201,7 +206,7 @@ impl EndpointHandle {
             stop_tx,
             stats,
             start_chunk_id,
-            cfg: ep_cfg,
+            cfg,
         }
     }
 
