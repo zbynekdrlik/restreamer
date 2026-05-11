@@ -251,10 +251,13 @@ impl DeliveryOrchestrator {
                                 load_restart_history_from_db(self.pool(), inst.id, &alias, 10)
                                     .await;
 
-                            // Compute cache delay using actual content duration from DB.
-                            // Returns the raw uncapped value; downstream display layers clamp.
+                            // Per-endpoint lag FROM live edge (NOT "buffer above consumer").
+                            // See spec docs/superpowers/specs/2026-05-11-cache-metric-and-start-reset-design.md
+                            // for why the semantics changed (#189): the old metric caused
+                            // a confusing 112->1 drop at first-push because the endpoint sat at
+                            // the chunk it had just pushed and "buffer above" measured nothing.
                             let chunk_delay_secs =
-                                db::get_cache_duration_secs(self.pool(), event_id, chunk_id)
+                                db::get_endpoint_lag_secs(self.pool(), event_id, chunk_id)
                                     .await
                                     .unwrap_or(0.0);
 
