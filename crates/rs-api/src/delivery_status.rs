@@ -251,13 +251,21 @@ impl DeliveryOrchestrator {
                                 load_restart_history_from_db(self.pool(), inst.id, &alias, 10)
                                     .await;
 
-                            // Per-endpoint lag FROM live edge (NOT "buffer above consumer").
-                            // See spec docs/superpowers/specs/2026-05-11-cache-metric-and-start-reset-design.md
-                            // for why the semantics changed (#189): the old metric caused
-                            // a confusing 112->1 drop at first-push because the endpoint sat at
-                            // the chunk it had just pushed and "buffer above" measured nothing.
+                            // Per-endpoint cache delay = "buffer above the consumer position",
+                            // measured by summing duration_ms of chunks above chunk_id. Gives
+                            // each endpoint its own value so the dashboard surfaces drift on
+                            // individual endpoints (regression test at
+                            // e2e/frontend.spec.ts:994).
+                            //
+                            // Note: the per-endpoint "lag FROM live edge" alternative (helper
+                            // `get_endpoint_lag_secs`, kept for future use) was tried in #189
+                            // but live testing on streamsnv 2026-05-11 showed the VPS reports
+                            // current_chunk_id tracking the FETCHER (near live edge) so the
+                            // lag reads ~0s right after first push — visually worse than the
+                            // 1-tick "buffer above" artifact. The 1726s ghost from #187 is
+                            // already fixed by the 1.5x cap at delivery.rs (commit b928376).
                             let chunk_delay_secs =
-                                db::get_endpoint_lag_secs(self.pool(), event_id, chunk_id)
+                                db::get_cache_duration_secs(self.pool(), event_id, chunk_id)
                                     .await
                                     .unwrap_or(0.0);
 
