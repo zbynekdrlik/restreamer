@@ -67,7 +67,7 @@ async fn compute_fast_endpoint_updates_returns_only_is_fast() {
     insert_endpoint(&pool, event_id, "fb-only", false).await;
     insert_endpoint(&pool, event_id, "yt-only", false).await;
 
-    let updates = crate::delivery::compute_fast_endpoint_updates(&pool, event_id)
+    let updates = crate::delivery_live_edge::compute_fast_endpoint_updates(&pool, event_id)
         .await
         .expect("compute should succeed");
 
@@ -93,7 +93,7 @@ async fn compute_fast_endpoint_updates_returns_max_sent_plus_one() {
     }
     insert_endpoint(&pool, event_id, "kiko-mixed", true).await;
 
-    let updates = crate::delivery::compute_fast_endpoint_updates(&pool, event_id)
+    let updates = crate::delivery_live_edge::compute_fast_endpoint_updates(&pool, event_id)
         .await
         .unwrap();
 
@@ -115,7 +115,7 @@ async fn compute_fast_endpoint_updates_returns_empty_when_no_fast() {
     insert_endpoint(&pool, event_id, "fb-no-fast", false).await;
     insert_endpoint(&pool, event_id, "yt-no-fast", false).await;
 
-    let updates = crate::delivery::compute_fast_endpoint_updates(&pool, event_id)
+    let updates = crate::delivery_live_edge::compute_fast_endpoint_updates(&pool, event_id)
         .await
         .unwrap();
     assert!(updates.is_empty(), "no fast endpoints means empty result");
