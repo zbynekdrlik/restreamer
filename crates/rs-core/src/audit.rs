@@ -125,6 +125,16 @@ pub enum Action {
     /// in one row so the operator can pinpoint which stage stalled.
     /// Severity::Warn; never rate-limited.
     EndpointLifecyclePredeath,
+
+    /// Host-side: at VPS "delivering" transition, recomputed fresh live-edge
+    /// chunk_id for an is_fast=true endpoint and POSTed it to the VPS.
+    /// Detail JSON: {from_chunk_id, to_chunk_id, gap_chunks, alias, instance_id}.
+    FastEndpointJumpedToLiveEdge,
+
+    /// VPS-side: replaced an endpoint's start_chunk_id at host request
+    /// (handler: POST /api/endpoints/update_start). Detail JSON:
+    /// {alias, old_start_chunk_id, new_start_chunk_id}.
+    EndpointStartChunkUpdated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
