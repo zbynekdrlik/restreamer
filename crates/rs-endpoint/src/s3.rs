@@ -3,6 +3,7 @@ use rs_core::config::S3Config;
 use s3::Region;
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -81,26 +82,64 @@ impl S3Client {
         seq: i64,
         duration_ms: i64,
     ) -> Result<(), EndpointError> {
+        self.upload_chunk_inner(local_path, event_id, seq, duration_ms, &HashMap::new())
+            .await
+    }
+
+    /// Upload a chunk with extra `x-amz-meta-*` headers in addition to the
+    /// existing `duration-ms`. Used by the lifecycle uploader (#184) so
+    /// the VPS can backfill stage A/B timestamps from the S3 GET response.
+    ///
+    /// `metadata` keys must be lowercase ASCII (Hetzner S3 conformance);
+    /// keys are emitted verbatim as `x-amz-meta-{key}`.
+    pub async fn upload_chunk_with_metadata(
+        &self,
+        local_path: &Path,
+        event_id: &str,
+        seq: i64,
+        duration_ms: i64,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), EndpointError> {
+        self.upload_chunk_inner(local_path, event_id, seq, duration_ms, &metadata)
+            .await
+    }
+
+    /// Shared upload core. Both `upload_chunk` and
+    /// `upload_chunk_with_metadata` call this to avoid drift if a future
+    /// fix touches the S3 PUT path.
+    async fn upload_chunk_inner(
+        &self,
+        local_path: &Path,
+        event_id: &str,
+        seq: i64,
+        duration_ms: i64,
+        metadata: &HashMap<String, String>,
+    ) -> Result<(), EndpointError> {
         let s3_key = Self::chunk_key(event_id, seq);
 
         let mut file = tokio::fs::File::open(local_path)
             .await
             .map_err(|e| EndpointError::Io(e.to_string()))?;
 
-        let metadata = file
+        let file_size = file
             .metadata()
             .await
-            .map_err(|e| EndpointError::Io(e.to_string()))?;
-        let file_size = metadata.len();
+            .map_err(|e| EndpointError::Io(e.to_string()))?
+            .len();
 
         debug!(
-            "Uploading to s3://{}/{} ({file_size} bytes, duration_ms={duration_ms})",
-            self.bucket.name, s3_key,
+            "Uploading to s3://{}/{} ({file_size} bytes, duration_ms={duration_ms}, meta_keys={})",
+            self.bucket.name,
+            s3_key,
+            metadata.len(),
         );
 
         // Clone bucket to add per-upload metadata without leaking headers
         let mut upload_bucket = (*self.bucket).clone();
         upload_bucket.add_header("x-amz-meta-duration-ms", &duration_ms.to_string());
+        for (k, v) in metadata {
+            upload_bucket.add_header(&format!("x-amz-meta-{k}"), v);
+        }
 
         let response = upload_bucket
             .put_object_stream(&mut file, &s3_key)
@@ -114,7 +153,10 @@ impl S3Client {
             )));
         }
 
-        info!("Uploaded {s3_key} ({file_size} bytes, duration_ms={duration_ms})");
+        info!(
+            "Uploaded {s3_key} ({file_size} bytes, duration_ms={duration_ms}, meta_keys={})",
+            metadata.len(),
+        );
         Ok(())
     }
 

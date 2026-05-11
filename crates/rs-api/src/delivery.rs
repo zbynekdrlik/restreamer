@@ -133,6 +133,28 @@ pub async fn wipe_event_s3_chunks_with(
     }
 }
 
+/// Reset `streaming_events.received_bytes` to 0 for a specific event.
+///
+/// Called from `DeliveryOrchestrator::start_delivery` so the dashboard
+/// byte counter reflects only the current Start Delivering cycle, not
+/// cumulative bytes since event creation (which reached 57GB on a
+/// 3-minute test stream during 2026-05-10 operator soak).
+///
+/// UPDATE with 0 matched rows is treated as success — a concurrent
+/// stop+delete might have removed the row before this runs, and we
+/// don't want to abort Start Delivering for that. Real errors (SQL
+/// connectivity, schema mismatch) return Err.
+pub async fn reset_event_received_bytes(
+    pool: &sqlx::SqlitePool,
+    event_id: i64,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE streaming_events SET received_bytes = 0 WHERE id = ?1")
+        .bind(event_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 impl DeliveryOrchestrator {
     /// Access the database pool (e.g. for background error handling).
     pub fn pool(&self) -> &SqlitePool {
@@ -260,6 +282,14 @@ impl DeliveryOrchestrator {
         // aborting Start Delivering.
         if let Err(e) = wipe_event_s3_chunks(&self.pool, &self.config, event_id).await {
             warn!(event_id, "S3 wipe-on-start: {e}");
+        }
+
+        // Reset cumulative byte counter so dashboard shows current-cycle bytes
+        // only, not cross-session totals (operator confusion: 57GB displayed for
+        // a 3-minute test stream). Best-effort: warn-log on failure, do not abort.
+        // See spec docs/superpowers/specs/2026-05-11-cache-metric-and-start-reset-design.md.
+        if let Err(e) = reset_event_received_bytes(&self.pool, event_id).await {
+            warn!(event_id, "received_bytes reset failed: {e}");
         }
 
         // Get event endpoints to determine server size
@@ -703,6 +733,25 @@ impl DeliveryOrchestrator {
         // of "Initializing".
         db::update_delivery_instance_status(&self.pool, instance_id, "delivering").await?;
         info!(event_id, "Delivery endpoints initialized successfully");
+
+        // Push fresh live-edge start_chunk_id to is_fast endpoints now that the
+        // VPS is delivering. Without this, fast endpoints would stream from a
+        // chunk_id computed 30-50s ago (before VPS creation finished), staying
+        // behind live edge indefinitely. See spec
+        // docs/superpowers/specs/2026-05-11-cache-metric-and-start-reset-design.md.
+        let on_ready_client = reqwest::Client::new();
+        if let Err(e) = crate::delivery_live_edge::on_vps_ready(
+            &self.pool,
+            self.audit_tx.as_ref(),
+            event_id,
+            &instance,
+            start_chunk_id,
+            &on_ready_client,
+        )
+        .await
+        {
+            warn!(event_id, "on_vps_ready failed: {e}");
+        }
 
         // Spawn the per-delivery clock-skew probe now that the VPS is confirmed
         // healthy and delivering. Single spawn point — do NOT spawn this probe

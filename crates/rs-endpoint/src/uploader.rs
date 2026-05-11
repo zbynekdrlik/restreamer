@@ -14,6 +14,16 @@ use rs_core::models::{ChunkRecord, WsEvent};
 use crate::metrics::{UploadEvent, UploadMetrics};
 use crate::s3::S3Client;
 
+/// Wall-clock millis since UNIX epoch. Used for lifecycle stage A/B
+/// timestamps (#184). Saturates to 0 on the impossible pre-1970 case
+/// so the cast never panics.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Process-wide rate limiter for uploader audit rows. Emits at most one
 /// row per minute per (Action, error_class) key so a sustained outage
 /// doesn't swamp `audit_log`. See `rs_core::audit::RateLimiter`.
@@ -374,6 +384,21 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
         }
     };
 
+    // Stage A: capture host_emit_ts immediately before the PUT so the
+    // VPS can measure how long the chunk sat in the uploader queue.
+    // Stamped AFTER event resolution so chunks belonging to deleted
+    // events don't accumulate orphan timestamps. Best-effort — a warn
+    // is logged but the upload proceeds regardless. (#184)
+    let host_emit = now_millis();
+    if let Err(e) = sqlx::query("UPDATE chunk_records SET host_emit_ts = ?1 WHERE id = ?2")
+        .bind(host_emit)
+        .bind(chunk.id)
+        .execute(pool)
+        .await
+    {
+        tracing::warn!(chunk_id = chunk.id, "stamp host_emit_ts failed: {e}");
+    }
+
     let _ = db::record_upload_attempt(pool, chunk.id, now_ms).await;
     let attempt = chunk.upload_attempts + 1;
     let _ = ws_tx.send(WsEvent::ChunkUploadAttempt {
@@ -384,18 +409,41 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
     let n = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
     metrics.set_in_flight(n);
 
+    let mut meta = std::collections::HashMap::new();
+    meta.insert("host-emit-ts".to_string(), host_emit.to_string());
+
     let started = Instant::now();
     let result = s3
-        .upload_chunk(
+        .upload_chunk_with_metadata(
             Path::new(&chunk.chunk_file_path),
             &event_id,
             chunk.sequence_number,
             chunk.duration_ms,
+            meta,
         )
         .await;
     let duration = started.elapsed();
     let n = in_flight.fetch_sub(1, Ordering::SeqCst) - 1;
     metrics.set_in_flight(n);
+
+    // Stage B: capture s3_upload_complete_ts immediately after a successful
+    // PUT 200. Best-effort — logged on error but does not affect success path.
+    // s3-complete-ts is NOT added to the S3 metadata (stage B is DB-only). (#184)
+    if result.is_ok() {
+        let s3_complete = now_millis();
+        if let Err(e) =
+            sqlx::query("UPDATE chunk_records SET s3_upload_complete_ts = ?1 WHERE id = ?2")
+                .bind(s3_complete)
+                .bind(chunk.id)
+                .execute(pool)
+                .await
+        {
+            tracing::warn!(
+                chunk_id = chunk.id,
+                "stamp s3_upload_complete_ts failed: {e}"
+            );
+        }
+    }
 
     match result {
         Ok(()) => {
@@ -642,5 +690,64 @@ mod tests {
         assert!(!should_spawn_worker(5, 2));
         // After drain (live=2) with target now raised to 4: spawn.
         assert!(should_spawn_worker(2, 4));
+    }
+
+    #[tokio::test]
+    async fn now_millis_returns_non_zero_monotonic_value() {
+        let a = super::now_millis();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let b = super::now_millis();
+        assert!(a > 0, "now_millis must be non-zero post-1970");
+        assert!(
+            b >= a,
+            "now_millis must be monotonic across awaits (got {a} then {b})"
+        );
+    }
+
+    #[tokio::test]
+    async fn stamp_host_emit_and_s3_complete_columns_via_sql() {
+        // Verifies the SQL the uploader will issue actually populates
+        // both columns. Uses an in-memory pool seeded by the v24
+        // migration from Task 6.
+        let pool = rs_core::db::create_memory_pool().await.unwrap();
+        rs_core::db::run_migrations(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO streaming_events(id, name, received_bytes, receiving_activated, delivering_activated) \
+             VALUES (1,'evt',0,0,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunk_records \
+             (id, streaming_event_id, sequence_number, chunk_file_path, data_size, md5, sent, in_process, created_at, duration_ms) \
+             VALUES (1,1,1,'/tmp/x',0,'',0,0,datetime('now'),2000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let host_emit = super::now_millis();
+        sqlx::query("UPDATE chunk_records SET host_emit_ts = ?1 WHERE id = ?2")
+            .bind(host_emit)
+            .bind(1i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let s3_complete = super::now_millis();
+        sqlx::query("UPDATE chunk_records SET s3_upload_complete_ts = ?1 WHERE id = ?2")
+            .bind(s3_complete)
+            .bind(1i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let row =
+            sqlx::query("SELECT host_emit_ts, s3_upload_complete_ts FROM chunk_records WHERE id=1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let h: Option<i64> = sqlx::Row::try_get(&row, "host_emit_ts").unwrap();
+        let s: Option<i64> = sqlx::Row::try_get(&row, "s3_upload_complete_ts").unwrap();
+        assert!(h.is_some() && s.is_some());
+        assert!(s.unwrap() >= h.unwrap());
     }
 }

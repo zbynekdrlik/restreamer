@@ -698,7 +698,11 @@ fn EndpointTree() -> impl IntoView {
                     view! {
                         <div class="endpoint-branch">
                             <span class="branch-connector">{connector}</span>
-                            <div class=status_class>
+                            <div
+                                class=status_class
+                                data-testid="endpoint-card"
+                                data-is-fast=if ep.is_fast { "true" } else { "false" }
+                            >
                                 <div class=dot_class></div>
                                 <span class="endpoint-alias">{ep.alias.clone()}</span>
                                 {if is_youtube {
@@ -842,41 +846,67 @@ fn EndpointTree() -> impl IntoView {
                                     }
                                     // Use per-endpoint delivery delay so each
                                     // endpoint's cache bar reflects its own
-                                    // state. Previously we used the global
-                                    // ps.cache_duration_secs (S3 queue depth),
-                                    // which showed the same value for every
-                                    // endpoint and hid per-endpoint drift.
+                                    // state. During the initial buffer-fill
+                                    // phase each endpoint reports
+                                    // chunk_delay_secs = 0, so we fall back to
+                                    // the global cache_duration_secs until
+                                    // delivery has started.
                                     //
-                                    // During the initial buffer-fill phase
-                                    // each endpoint reports chunk_delay_secs
-                                    // = 0, so we fall back to the global
-                                    // cache_duration_secs until delivery has
-                                    // started.
-                                    let cache_secs = if ep.chunks_processed > 0 {
-                                        ep.chunk_delay_secs
+                                    // The backend caps cache_duration_secs at
+                                    // ~1.5x target (#187) so a Stop+Start
+                                    // cycle no longer surfaces stale
+                                    // accumulated values like 1726s.
+                                    // Branch on is_fast: fast endpoints measure lag-from-live-edge
+                                    // and want a low number (<=5s = green, >8s = critical). Non-fast
+                                    // endpoints want the bar to fill to the target buffer (~120s).
+                                    // See spec docs/superpowers/specs/2026-05-11-cache-metric-and-start-reset-design.md.
+                                    let (cache_secs, target_label, progress, bar_class) = if ep.is_fast {
+                                        // Fast endpoint UX: "Xs / live cache". Bar fill proportional
+                                        // to lag / 8s ceiling (so a healthy 2s reads as a thin green
+                                        // sliver, not an empty bar). Threshold: healthy <=5s, critical
+                                        // >8s, warning otherwise.
+                                        let secs = ep.chunk_delay_secs;
+                                        let prog = (secs / 8.0).clamp(0.0, 1.0);
+                                        let class_ = if secs > 8.0 {
+                                            "buffer-bar-fill critical"
+                                        } else if secs <= 5.0 {
+                                            "buffer-bar-fill healthy"
+                                        } else {
+                                            "buffer-bar-fill warning"
+                                        };
+                                        (secs, "live".to_string(), prog, class_)
                                     } else {
-                                        ps.cache_duration_secs
+                                        // Non-fast: prefer per-endpoint chunk_delay_secs so each
+                                        // endpoint's bar shows ITS own buffer depth (regression
+                                        // test at e2e/frontend.spec.ts:994). During prefill
+                                        // (chunks_processed=0) fall back to ps.cache_duration_secs
+                                        // which the backend caps at 1.5x target (#187).
+                                        // Per-service threshold multiplier from utils.rs.
+                                        let secs = if ep.chunks_processed > 0 {
+                                            ep.chunk_delay_secs
+                                        } else {
+                                            ps.cache_duration_secs
+                                        };
+                                        let alias_lookup = ep.alias.clone();
+                                        let service_type = store.endpoints_list.get()
+                                            .iter()
+                                            .find(|e| e.alias == alias_lookup)
+                                            .map(|e| e.service_type.clone())
+                                            .unwrap_or_default();
+                                        let threshold_mult = cache_threshold_for_service(&service_type);
+                                        let prog = (secs / target as f64).min(1.0);
+                                        let class_ = if secs > target as f64 * threshold_mult {
+                                            "buffer-bar-fill critical"
+                                        } else if prog >= 0.75 {
+                                            "buffer-bar-fill healthy"
+                                        } else if prog >= 0.40 {
+                                            "buffer-bar-fill warning"
+                                        } else {
+                                            "buffer-bar-fill critical"
+                                        };
+                                        (secs, format!("{}s", target), prog, class_)
                                     };
-                                    // Per-service threshold lives in utils.rs so
-                                    // a service-type rename touches one site.
-                                    let alias_lookup = ep.alias.clone();
-                                    let service_type = store.endpoints_list.get()
-                                        .iter()
-                                        .find(|e| e.alias == alias_lookup)
-                                        .map(|e| e.service_type.clone())
-                                        .unwrap_or_default();
-                                    let threshold_mult = cache_threshold_for_service(&service_type);
-                                    let progress = (cache_secs / target as f64).min(1.0);
-                                    let bar_class = if cache_secs > target as f64 * threshold_mult {
-                                        "buffer-bar-fill critical"
-                                    } else if progress >= 0.75 {
-                                        "buffer-bar-fill healthy"
-                                    } else if progress >= 0.40 {
-                                        "buffer-bar-fill warning"
-                                    } else {
-                                        "buffer-bar-fill critical"
-                                    };
-                                    let label = format!("{}s / {}s cache", cache_secs as u64, target);
+                                    let label = format!("{}s / {} cache", cache_secs as u64, target_label);
                                     Some(view! {
                                         <div class="endpoint-cache">
                                             <div class="buffer-bar">

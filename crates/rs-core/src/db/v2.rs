@@ -40,6 +40,7 @@ pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConf
             delivered_bytes: r.get("delivered_bytes"),
             is_fast: r.get::<i32, _>("is_fast") != 0,
             pusher: parse_pusher_kind(r.get("pusher")),
+            prefetch_chunks: None,
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         })
@@ -66,6 +67,7 @@ pub async fn get_endpoint_config(pool: &SqlitePool, id: i64) -> Result<Option<En
         delivered_bytes: r.get("delivered_bytes"),
         is_fast: r.get::<i32, _>("is_fast") != 0,
         pusher: parse_pusher_kind(r.get("pusher")),
+        prefetch_chunks: None,
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     }))
@@ -177,6 +179,7 @@ pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec
             delivered_bytes: r.get("delivered_bytes"),
             is_fast: r.get::<i32, _>("is_fast") != 0,
             pusher: parse_pusher_kind(r.get("pusher")),
+            prefetch_chunks: None,
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         })

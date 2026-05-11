@@ -16,10 +16,22 @@ pub enum S3FetchError {
     Fetch(String),
 }
 
-/// Chunk data with duration from S3 object metadata header.
+/// Chunk data with duration + lifecycle stages from S3 object metadata.
 pub struct ChunkData {
     pub data: Vec<u8>,
     pub duration_ms: i64,
+    /// Stage A: host clock millis since epoch when the chunker wrote the
+    /// chunk to local FS. Backfilled from `x-amz-meta-host-emit-ts` on
+    /// the S3 GET response. NULL/None when the chunk was uploaded by a
+    /// pre-lifecycle host. Cross-host with VPS clock — see spec section 4.3.
+    pub host_emit_ts: Option<i64>,
+    /// Stage B: host clock millis since epoch when the uploader received
+    /// the S3 200 OK. NOT carried via S3 header (the value is unknown
+    /// at PUT time — only after PUT returns). The VPS backfills this
+    /// field from the host's `chunk_records.s3_upload_complete_ts` DB
+    /// row inside `LifecycleAwarePusher` (Task 18). Always None on the
+    /// S3 fetch path; populated downstream.
+    pub s3_upload_complete_ts: Option<i64>,
 }
 
 pub struct S3Fetcher {
@@ -62,14 +74,22 @@ impl S3Fetcher {
 
         match self.bucket.get_object(&key).await {
             Ok(response) if response.status_code() == 200 => {
-                let duration_ms = response
-                    .headers()
+                let headers = response.headers();
+                let duration_ms = headers
                     .get("x-amz-meta-duration-ms")
                     .and_then(|v| v.parse::<i64>().ok())
                     .unwrap_or(0);
+                let host_emit_ts = headers
+                    .get("x-amz-meta-host-emit-ts")
+                    .and_then(|v| v.parse::<i64>().ok());
+                // s3_upload_complete_ts (stage B) cannot be carried via
+                // S3 header — unknown at PUT time. Always None here;
+                // backfilled from chunk_records DB in LifecycleAwarePusher.
                 Ok(Some(ChunkData {
                     data: response.to_vec(),
                     duration_ms,
+                    host_emit_ts,
+                    s3_upload_complete_ts: None,
                 }))
             }
             Ok(response) if response.status_code() == 404 => Ok(None),
@@ -119,10 +139,27 @@ impl S3Fetcher {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn chunk_key_format() {
         // Direct key format: {event}/{seq}.bin
         let key = format!("{}/{}.bin", "evt-123", 42);
         assert_eq!(key, "evt-123/42.bin");
+    }
+
+    #[test]
+    fn chunk_data_has_lifecycle_header_fields() {
+        // Compile-time assertion: ChunkData carries host_emit_ts and
+        // s3_upload_complete_ts (both Option<i64> millis since epoch).
+        // The fetcher backfills them from x-amz-meta-* response headers.
+        let cd = ChunkData {
+            data: vec![],
+            duration_ms: 2000,
+            host_emit_ts: Some(1715380800000),
+            s3_upload_complete_ts: Some(1715380800120),
+        };
+        assert_eq!(cd.host_emit_ts, Some(1715380800000));
+        assert_eq!(cd.s3_upload_complete_ts, Some(1715380800120));
     }
 }

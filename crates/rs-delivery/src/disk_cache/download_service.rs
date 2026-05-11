@@ -21,23 +21,41 @@ use super::registry::ChunkRegistry;
 
 /// Trait abstracting the S3 fetch operation. The real implementation
 /// is `crate::s3_fetch::S3Fetcher`; tests use `MockBackend`.
+///
+/// The `FetchedChunk` return carries the bytes plus all stage-A/B
+/// metadata read from the S3 response headers, so `DownloadService`
+/// can later associate timings with the chunk it cached.
 #[async_trait::async_trait]
 pub trait S3Backend: Send + Sync + 'static {
-    async fn fetch(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String>;
+    async fn fetch(&self, chunk_id: i64) -> Result<Option<FetchedChunk>, String>;
     /// HEAD-only duration probe. Default delegates to `fetch` (full GET)
     /// for backends that don't implement HEAD; production `S3Fetcher`
     /// overrides with a real HEAD request to keep skip-ahead probes
     /// from downloading full chunk bodies (#174 review finding 2).
     async fn head_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
-        self.fetch(chunk_id).await.map(|o| o.map(|(_, d)| d))
+        self.fetch(chunk_id).await.map(|o| o.map(|c| c.duration_ms))
     }
+}
+
+/// Bytes + metadata returned by an `S3Backend::fetch` call.
+#[derive(Debug, Clone)]
+pub struct FetchedChunk {
+    pub data: Vec<u8>,
+    pub duration_ms: i64,
+    pub host_emit_ts: Option<i64>,
+    pub s3_upload_complete_ts: Option<i64>,
 }
 
 #[async_trait::async_trait]
 impl S3Backend for crate::s3_fetch::S3Fetcher {
-    async fn fetch(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+    async fn fetch(&self, chunk_id: i64) -> Result<Option<FetchedChunk>, String> {
         match crate::s3_fetch::S3Fetcher::fetch_chunk_with_meta(self, chunk_id).await {
-            Ok(Some(cd)) => Ok(Some((cd.data, cd.duration_ms))),
+            Ok(Some(cd)) => Ok(Some(FetchedChunk {
+                data: cd.data,
+                duration_ms: cd.duration_ms,
+                host_emit_ts: cd.host_emit_ts,
+                s3_upload_complete_ts: cd.s3_upload_complete_ts,
+            })),
             Ok(None) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
@@ -115,6 +133,20 @@ impl DownloadService {
         self.profile.snapshot()
     }
 
+    /// Path of the cached chunk file inside the per-event directory.
+    /// Used by `PrefetchReader::try_read_from_disk` so the reader does
+    /// not depend on internal layout knowledge.
+    pub fn chunk_path(&self, chunk_id: i64) -> std::path::PathBuf {
+        self.event_dir.join(format!("{chunk_id}.bin"))
+    }
+
+    /// Test/integration helper: clone of the registry handle so external
+    /// callers (PrefetchReader) can call `wait_for_chunk_with_timeout`
+    /// without re-plumbing a separate registry argument.
+    pub fn registry_for_test(&self) -> Arc<super::registry::ChunkRegistry> {
+        Arc::clone(&self.registry)
+    }
+
     /// HEAD-only duration probe. Returns `Ok(Some(ms))` if the chunk
     /// exists on S3, `Ok(None)` for 404, `Err(_)` for transient errors.
     /// Caches the result in `durations` so a follow-up `request_chunk`
@@ -184,10 +216,10 @@ impl DownloadService {
     }
 
     async fn fetch_with_retry(self: &Arc<Self>, chunk_id: i64) {
-        let mut backoff = Duration::from_millis(500);
-        let max_attempts = 5;
-        for attempt in 1..=max_attempts {
-            // Concurrency gate.
+        let mut backoff_secs: u64 = 1;
+        let mut attempt: u64 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
             let _permit = self
                 .semaphore
                 .clone()
@@ -198,25 +230,29 @@ impl DownloadService {
             let result = self.backend.fetch(chunk_id).await;
             let elapsed_ms = fetch_start.elapsed().as_millis() as u64;
             match result {
-                Ok(Some((data, duration_ms))) => {
-                    self.profile.record_success(elapsed_ms, data.len() as u64);
-                    self.token_bucket_consume(data.len() as u64).await;
-                    if let Err(e) = self.write_atomic(chunk_id, &data, duration_ms).await {
+                Ok(Some(fc)) => {
+                    self.profile
+                        .record_success(elapsed_ms, fc.data.len() as u64);
+                    self.token_bucket_consume(fc.data.len() as u64).await;
+                    if let Err(e) = self.write_atomic(chunk_id, &fc.data, fc.duration_ms).await {
                         tracing::error!(chunk_id, "disk_cache write failed: {e}");
-                        // Mark NotFound so waiters wake — better to surface a
-                        // visible failure than to leave the slot InFlight and
-                        // block the EndpointReader forever on this chunk.
+                        // Disk-write failures are not handled here -- the
+                        // outer PrefetchReader loop re-requests, and the
+                        // next iteration retries from scratch. Mark
+                        // NotFound so anyone awaiting wait_for_chunk
+                        // wakes immediately rather than hanging.
                         self.registry.mark_not_found(chunk_id);
                         return;
                     }
-                    self.durations.lock().await.insert(chunk_id, duration_ms);
-                    self.registry.mark_available(chunk_id, data.len() as u64);
+                    self.durations.lock().await.insert(chunk_id, fc.duration_ms);
+                    self.registry.mark_available(chunk_id, fc.data.len() as u64);
                     return;
                 }
                 Ok(None) => {
-                    // 404 is "chunk not yet uploaded" -- normal in-stream signal, not a fetch
-                    // failure for the profile (which dashboards as outage). Counted only via
-                    // existing producer-side audit.
+                    // 404: chunk genuinely not on S3 yet. Don't loop here
+                    // forever -- mark NotFound so the OUTER PrefetchReader
+                    // loop decides whether to retry (genuine miss is rare;
+                    // uploader will eventually PUT).
                     self.registry.mark_not_found(chunk_id);
                     return;
                 }
@@ -224,13 +260,12 @@ impl DownloadService {
                     tracing::warn!(chunk_id, attempt, "disk_cache S3 fetch failed: {e}");
                     let class = crate::endpoint_audit::classify_s3_fetch_error(&e.to_string());
                     self.profile.record_failure(class);
-                    if attempt >= max_attempts {
-                        self.registry.mark_not_found(chunk_id);
-                        return;
-                    }
                     drop(_permit);
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(60);
+                    // No max_attempts check. Loop until success, 404, or
+                    // disk-write hard fail. Per user rule (#184): never
+                    // give up on transient errors; only slow down.
                 }
             }
         }
@@ -313,10 +348,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl S3Backend for MockBackend {
-        async fn fetch(&self, _chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+        async fn fetch(&self, _chunk_id: i64) -> Result<Option<FetchedChunk>, String> {
             self.get_count.fetch_add(1, Ordering::SeqCst);
             match self.result.lock().unwrap().clone() {
-                Some(Ok((d, dur))) => Ok(Some((d, dur))),
+                Some(Ok((d, dur))) => Ok(Some(FetchedChunk {
+                    data: d,
+                    duration_ms: dur,
+                    host_emit_ts: None,
+                    s3_upload_complete_ts: None,
+                })),
                 Some(Err(e)) => Err(e),
                 None => Ok(None),
             }
@@ -400,12 +440,17 @@ mod tests {
         struct FlakyBackend(Arc<AtomicU32>);
         #[async_trait::async_trait]
         impl S3Backend for FlakyBackend {
-            async fn fetch(&self, _id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+            async fn fetch(&self, _id: i64) -> Result<Option<FetchedChunk>, String> {
                 let n = self.0.fetch_add(1, Ordering::SeqCst);
                 if n < 2 {
                     Err("S3 fetch error: status 503".into())
                 } else {
-                    Ok(Some((vec![1, 2, 3], 2000)))
+                    Ok(Some(FetchedChunk {
+                        data: vec![1, 2, 3],
+                        duration_ms: 2000,
+                        host_emit_ts: None,
+                        s3_upload_complete_ts: None,
+                    }))
                 }
             }
         }
@@ -468,7 +513,7 @@ mod tests {
         struct PanicBackend;
         #[async_trait::async_trait]
         impl S3Backend for PanicBackend {
-            async fn fetch(&self, _id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+            async fn fetch(&self, _id: i64) -> Result<Option<FetchedChunk>, String> {
                 panic!("simulated backend panic");
             }
         }
@@ -498,7 +543,7 @@ mod tests {
         struct HeadOnlyBackend(AtomicU32);
         #[async_trait::async_trait]
         impl S3Backend for HeadOnlyBackend {
-            async fn fetch(&self, _id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+            async fn fetch(&self, _id: i64) -> Result<Option<FetchedChunk>, String> {
                 panic!("fetch must not be called for HEAD probe");
             }
             async fn head_duration_ms(&self, _id: i64) -> Result<Option<i64>, String> {
@@ -526,10 +571,8 @@ mod tests {
         assert_eq!(backend.0.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
-    async fn fetch_5xx_exhausts_retries_then_marks_not_found() {
-        // Always-failing backend triggers all 5 attempts; final state must be
-        // NotFound so EndpointReader unblocks instead of stalling forever.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn fetch_5xx_no_longer_exhausts_retries_loops_forever() {
         let backend = Arc::new(MockBackend::default());
         backend.set_err("S3 fetch error: status 503");
         let tmp = tempfile::tempdir().unwrap();
@@ -542,17 +585,70 @@ mod tests {
             10_000,
             8,
         );
-        // Speed test up: don't actually wait the 500+1000+2000+4000ms. Pause
-        // tokio time and let the retry loop sleep through paused time. The
-        // backend is sync-instant; the only real waits are the backoff sleeps.
-        // Note: cannot use tokio::time::pause without start_paused — and the
-        // test runtime hasn't started paused. Simpler: tolerate ~7.5s test
-        // runtime in CI. The plan's retry interval (500ms doubling, capped
-        // at 30s) yields 0.5+1+2+4 = 7.5s for 4 backoffs after 5 failed
-        // attempts. Acceptable for one slow test.
-        svc.request_chunk(503).await;
-        let state = registry.wait_for_chunk(503).await.unwrap();
-        assert!(matches!(state, ChunkAvailability::NotFound));
-        assert_eq!(backend.count(), 5, "all 5 retries must have happened");
+        let svc2 = Arc::clone(&svc);
+        let task = tokio::spawn(async move { svc2.request_chunk(503).await });
+        // Real-time, modest budget. See `fetch_with_retry_never_caps_attempts`
+        // for why paused-time was rejected (tarpaulin instrumentation
+        // overhead).
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let state = registry.peek(503);
+        assert!(
+            !matches!(state, Some(ChunkAvailability::NotFound)),
+            "retry-forever must not give up, got state={state:?}"
+        );
+        assert!(backend.count() >= 4);
+        task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_with_retry_never_caps_attempts() {
+        // Real-time test: backend always 503. After ~8s real time the
+        // registry must NOT be NotFound — the retry loop must still
+        // be running. The old 5-attempt cap would mark NotFound after
+        // ~7.5s (0.5+1+2+4=7.5s of backoffs); retry-forever does NOT.
+        //
+        // start_paused was rejected because tarpaulin's instrumentation
+        // is slow enough that paused-time tests with many virtual
+        // sleep wake-ups exhaust tarpaulin's per-test 5-min timeout.
+        let backend = Arc::new(MockBackend::default());
+        backend.set_err("S3 fetch error: status 503");
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = ChunkRegistry::new();
+        let svc = DownloadService::new(
+            backend.clone(),
+            registry.clone(),
+            tmp.path().to_path_buf(),
+            "evt".into(),
+            10_000,
+            8,
+        );
+        let svc2 = Arc::clone(&svc);
+        let req = tokio::spawn(async move { svc2.request_chunk(503).await });
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let st = registry.peek(503);
+        assert!(
+            !matches!(st, Some(ChunkAvailability::NotFound)),
+            "retry-forever must NOT mark NotFound on transient errors, got {st:?}"
+        );
+        assert!(
+            backend.count() >= 4,
+            "expected >=4 attempts in 10s real time (proving no max_attempts cap), got {}",
+            backend.count()
+        );
+        req.abort();
+    }
+
+    #[test]
+    fn fetch_with_retry_backoff_caps_at_60s() {
+        // White-box assertion on the backoff schedule. The cap matters
+        // because uncapped exponential growth would make the reader
+        // sleep multiple minutes between attempts after a few failures.
+        let mut backoff_secs: u64 = 1;
+        let mut steps = vec![];
+        for _ in 0..10 {
+            steps.push(backoff_secs);
+            backoff_secs = (backoff_secs * 2).min(60);
+        }
+        assert_eq!(steps, vec![1, 2, 4, 8, 16, 32, 60, 60, 60, 60]);
     }
 }

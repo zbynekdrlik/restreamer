@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 23;
+pub const MAX_SCHEMA_VERSION: i32 = 24;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -339,6 +339,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             21 => migrate_v21(&mut tx).await?,
             22 => migrate_v22(&mut tx).await?,
             23 => execute_sql_statements(&mut tx, MIGRATION_V23_SQL).await?,
+            24 => migrate_v24(&mut tx).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -715,3 +716,28 @@ CREATE INDEX IF NOT EXISTS idx_delivery_instances_event_id_active
     ON delivery_instances(event_id, id DESC)
     WHERE status != 'deleted';
 "#;
+
+/// Adds per-chunk lifecycle timestamps for the fast-endpoint zero-reconnect
+/// feature (#184) — stages A and B on the host clock, millis since epoch.
+///
+/// `host_emit_ts`: stage A — set by the host uploader when the chunker
+/// emits the chunk to local disk.
+/// `s3_upload_complete_ts`: stage B — set when the host uploader receives
+/// the S3 PUT 200 OK.
+///
+/// Both columns are `NULL` on rows uploaded by a pre-v24 host, or when
+/// the uploader did not reach the corresponding stage. NULL-aware callers
+/// return `Duration::ZERO` for any gap involving a NULL timestamp.
+///
+/// Plain `INTEGER` (not `INTEGER NULL`) matches the project's house
+/// style for nullable columns added via `add_column_if_missing`.
+async fn migrate_v24(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(tx, "chunk_records", "host_emit_ts", "host_emit_ts INTEGER").await?;
+    add_column_if_missing(
+        tx,
+        "chunk_records",
+        "s3_upload_complete_ts",
+        "s3_upload_complete_ts INTEGER",
+    )
+    .await
+}

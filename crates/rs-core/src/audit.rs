@@ -110,6 +110,31 @@ pub enum Action {
     /// `HostInternetUnreachable`. Emitted on first successful probe
     /// after a stretch of failures. Issue #176.
     HostInternetRecovered,
+    /// Per-chunk lifecycle steady-state sample emitted every Nth chunk
+    /// per endpoint (default N=30). Carries the 5 inter-stage gaps
+    /// (A->B through E->F) + worst-stage label. Severity::Info.
+    /// Counter-based sampling owned by LifecycleSampler — NOT routed
+    /// through the shared RateLimiter.
+    DiskCacheLifecycleSample,
+    /// Single chunk where any one stage gap exceeded the breach threshold
+    /// (default 4_000ms = 2x chunk_duration). Severity::Warn; per-endpoint
+    /// 5s window owned by LifecycleSampler (a separate Instant per
+    /// endpoint — NOT the shared 60s RateLimiter).
+    DiskCacheLifecycleBreach,
+    /// On endpoint death, dump the last 5 chunks' full lifecycle timings
+    /// in one row so the operator can pinpoint which stage stalled.
+    /// Severity::Warn; never rate-limited.
+    EndpointLifecyclePredeath,
+
+    /// Host-side: at VPS "delivering" transition, recomputed fresh live-edge
+    /// chunk_id for an is_fast=true endpoint and POSTed it to the VPS.
+    /// Detail JSON: {from_chunk_id, to_chunk_id, gap_chunks, alias, instance_id}.
+    FastEndpointJumpedToLiveEdge,
+
+    /// VPS-side: replaced an endpoint's start_chunk_id at host request
+    /// (handler: POST /api/endpoints/update_start). Detail JSON:
+    /// {alias, old_start_chunk_id, new_start_chunk_id}.
+    EndpointStartChunkUpdated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,5 +321,35 @@ mod tests {
         // Different endpoint key -> separate slot, must allow.
         assert!(rl.allow(Action::DiskCachePushSample, "YT NLCH 4K"));
         assert!(!rl.allow(Action::DiskCachePushSample, "YT NLCH 4K"));
+    }
+
+    #[test]
+    fn action_disk_cache_lifecycle_sample_serdes() {
+        assert_eq!(
+            serde_json::to_string(&Action::DiskCacheLifecycleSample).unwrap(),
+            r#""disk_cache_lifecycle_sample""#
+        );
+        let back: Action = serde_json::from_str(r#""disk_cache_lifecycle_sample""#).unwrap();
+        assert_eq!(back, Action::DiskCacheLifecycleSample);
+    }
+
+    #[test]
+    fn action_disk_cache_lifecycle_breach_serdes() {
+        assert_eq!(
+            serde_json::to_string(&Action::DiskCacheLifecycleBreach).unwrap(),
+            r#""disk_cache_lifecycle_breach""#
+        );
+        let back: Action = serde_json::from_str(r#""disk_cache_lifecycle_breach""#).unwrap();
+        assert_eq!(back, Action::DiskCacheLifecycleBreach);
+    }
+
+    #[test]
+    fn action_endpoint_lifecycle_predeath_serdes() {
+        assert_eq!(
+            serde_json::to_string(&Action::EndpointLifecyclePredeath).unwrap(),
+            r#""endpoint_lifecycle_predeath""#
+        );
+        let back: Action = serde_json::from_str(r#""endpoint_lifecycle_predeath""#).unwrap();
+        assert_eq!(back, Action::EndpointLifecyclePredeath);
     }
 }

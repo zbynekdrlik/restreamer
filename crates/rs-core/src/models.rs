@@ -87,6 +87,12 @@ pub struct EndpointConfig {
     /// config.json files parsing unchanged (missing field -> `Ffmpeg`).
     #[serde(default)]
     pub pusher: PusherKind,
+    /// Number of chunks to pre-fetch ahead of the pusher. Resolution
+    /// at endpoint init: explicit Some(K) wins; else is_fast=true => K=1
+    /// (double-buffered, ~zero added delay); else K=0 (current bypass
+    /// behavior). Operator may override per endpoint.
+    #[serde(default)]
+    pub prefetch_chunks: Option<u32>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -754,5 +760,72 @@ mod tests {
         assert!(state.is_connected());
         state.set_connected(false);
         assert!(!state.is_connected());
+    }
+
+    #[test]
+    fn endpoint_prefetch_chunks_defaults_to_none_when_missing() {
+        let json = r#"{
+            "id": 1,
+            "alias": "Kiko",
+            "service_type": "RTMP",
+            "stream_key": "rtmp://x/y",
+            "enabled": true,
+            "position_last": 0,
+            "delivered_bytes": 0,
+            "is_fast": true,
+            "created_at": "2026-05-10T00:00:00Z",
+            "updated_at": "2026-05-10T00:00:00Z"
+        }"#;
+        let parsed: EndpointConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            parsed.prefetch_chunks.is_none(),
+            "missing field must default to None"
+        );
+    }
+
+    #[test]
+    fn endpoint_prefetch_chunks_round_trips_explicit_value() {
+        let json = r#"{
+            "id": 1,
+            "alias": "Kiko",
+            "service_type": "RTMP",
+            "stream_key": "rtmp://x/y",
+            "enabled": true,
+            "position_last": 0,
+            "delivered_bytes": 0,
+            "is_fast": true,
+            "prefetch_chunks": 3,
+            "created_at": "2026-05-10T00:00:00Z",
+            "updated_at": "2026-05-10T00:00:00Z"
+        }"#;
+        let parsed: EndpointConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.prefetch_chunks, Some(3));
+        // True round-trip: re-serialize and re-parse to catch a future
+        // accidental skip / skip_serializing_if attribute.
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        assert!(serialized.contains("\"prefetch_chunks\":3"));
+        let reparsed: EndpointConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.prefetch_chunks, Some(3));
+    }
+
+    #[test]
+    fn endpoint_prefetch_chunks_explicit_zero_round_trips() {
+        // Operator may set K=0 to force bypass even on a fast endpoint.
+        // Distinct from None (auto-resolve to K=1 on fast).
+        let json = r#"{
+            "id": 1,
+            "alias": "x",
+            "service_type": "RTMP",
+            "stream_key": "rtmp://x/y",
+            "enabled": true,
+            "position_last": 0,
+            "delivered_bytes": 0,
+            "is_fast": true,
+            "prefetch_chunks": 0,
+            "created_at": "2026-05-10T00:00:00Z",
+            "updated_at": "2026-05-10T00:00:00Z"
+        }"#;
+        let parsed: EndpointConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.prefetch_chunks, Some(0));
     }
 }

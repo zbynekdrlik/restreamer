@@ -1235,6 +1235,10 @@ test.describe("Per-Endpoint Cache Bar", () => {
     });
     // 100/120 = 83% -> healthy
     await expect(page.locator(".buffer-bar-fill.healthy")).toBeVisible();
+    // Regression #187: backend caps cache_duration_secs at 1.5x target so
+    // the bar never surfaces stale post-stop values like 1726s. This is
+    // enforced server-side in lib.rs::get_cache_duration_secs callsites,
+    // covered by unit + integration tests there.
   });
 
   test("buffering indicator shows S3 chunk count", async ({ page }) => {
@@ -2300,5 +2304,73 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
     });
     await page.goto("/");
     await expect(assertYtHealthGood(page)).rejects.toThrow(/no active YT stream/);
+  });
+
+  test("fast endpoint cache bar label uses 'live' target", async ({ page }) => {
+    // Fast endpoints (is_fast=true in config) render cache label as
+    // "Xs / live cache" instead of "Xs / 120s cache". The dashboard card
+    // carries data-testid="endpoint-card" and data-is-fast attributes added
+    // in #189. To make this test deterministic in CI (where no fast endpoint
+    // may be configured), seed the dashboard's PipelineState + DeliveryStatus
+    // via the same _test/ws-broadcast hook used by the per-endpoint
+    // regression test at line ~994.
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "PipelineState",
+          data: {
+            state: "streaming",
+            event_id: 1,
+            event_name: "Test Event",
+            target_delay_secs: 120,
+            session_start: null,
+            local_buffer_chunks: 0,
+            s3_queue_chunks: 0,
+            cache_duration_secs: 0.0,
+          },
+        },
+      },
+    );
+
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "e2e-vps",
+            status: "delivering",
+            server_ip: "1.2.3.4",
+            endpoint_count: 1,
+            endpoints: [
+              {
+                alias: "Kiko Fast",
+                alive: true,
+                current_chunk_id: 100,
+                bytes_processed_total: 0,
+                chunks_processed: 10,
+                chunk_delay_secs: 2.0,
+                stall_reason: null,
+                ffmpeg_restart_count: 0,
+                last_error: null,
+                is_fast: true,
+              },
+            ],
+          },
+        },
+      },
+    );
+
+    const fastCard = page.locator(
+      '[data-testid="endpoint-card"][data-is-fast="true"]',
+    );
+    await expect(fastCard).toHaveCount(1, { timeout: 5000 });
+    await expect(fastCard.locator(".endpoint-cache-label")).toContainText(
+      /^\d+s \/ live cache$/,
+    );
   });
 });

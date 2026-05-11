@@ -76,12 +76,18 @@ impl ChunkRegistry {
         notify.notify_waiters();
     }
 
+    /// Set the slot to InFlight, ALWAYS — even if a previous fetch
+    /// already terminated (NotFound / Evicted). Without this active
+    /// reset, a PrefetchReader retry against a chunk that previously
+    /// 404'd would observe stale NotFound state via `wait_for_chunk`
+    /// and never block on the new in-flight fetch (#184).
     pub fn mark_in_flight(self: &Arc<Self>, chunk_id: i64) {
         let mut g = self.inner.lock().unwrap();
-        g.entry(chunk_id).or_insert_with(|| Slot {
+        let slot = g.entry(chunk_id).or_insert_with(|| Slot {
             state: ChunkAvailability::InFlight,
             notify: Arc::new(Notify::new()),
         });
+        slot.state = ChunkAvailability::InFlight;
     }
 
     pub fn exists(&self, chunk_id: i64) -> bool {
@@ -139,6 +145,18 @@ impl ChunkRegistry {
             //    steps 2 and 3, the Notified holds the wake permit and this
             //    returns immediately, then we re-check on the next iteration.
             notified.await;
+        }
+    }
+
+    /// Non-blocking snapshot of the chunk's current state. Returns None
+    /// if the registry has no record of this chunk_id yet, or if the
+    /// internal lock is contended (matches `exists`'s try_lock pattern).
+    /// Used by tests + production code that needs to peek without
+    /// awaiting a terminal state.
+    pub fn peek(&self, chunk_id: i64) -> Option<ChunkAvailability> {
+        match self.inner.try_lock() {
+            Ok(g) => g.get(&chunk_id).map(|s| s.state.clone()),
+            Err(_) => None,
         }
     }
 

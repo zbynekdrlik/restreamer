@@ -134,74 +134,19 @@ mod consumer_helpers;
 use crate::disk_cache_push_sample::{PushSampleCtx, emit_push_sample};
 use consumer_helpers::{FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, handle_rust_push};
 
-/// Stats tracked per endpoint with diagnostics.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct EndpointStats {
-    pub bytes_processed_total: u64,
-    pub duration_processed_ms: u64,
-    pub current_chunk_id: i64,
-    pub chunks_processed: u64,
-    // Diagnostics
-    pub ffmpeg_restart_count: u32,
-    pub consecutive_ffmpeg_failures: u32,
-    pub consecutive_chunk_misses: u32,
-    pub last_error: Option<String>,
-    pub stall_reason: Option<String>,
-    pub ffmpeg_last_stderr: Option<String>,
-    /// Per-endpoint ring buffer of recent ffmpeg restarts. Capped at
-    /// RESTART_HISTORY_CAP — oldest dropped first.
-    pub restart_history: std::collections::VecDeque<FfmpegRestartRecord>,
-    /// Current delivery mode: "normal", "warmup", "rescue", "recovering".
-    pub delivery_mode: String,
-    /// ETA in seconds until rescue mode ends (warmup or buffer refill).
-    pub rescue_eta_secs: Option<u64>,
-    /// Reconnect counter for `PusherKind::Rust` endpoints. Mirrors
-    /// `ffmpeg_restart_count` so the dashboard can use either uniformly.
-    #[serde(default)]
-    pub reconnect_count: u32,
-    /// Per-endpoint ring buffer of recent Rust RTMP pusher reconnects.
-    #[serde(default)]
-    pub rtmp_push_history: std::collections::VecDeque<RtmpPushAuditRecord>,
-}
-
-impl Default for EndpointStats {
-    fn default() -> Self {
-        Self {
-            bytes_processed_total: 0,
-            duration_processed_ms: 0,
-            current_chunk_id: 0,
-            chunks_processed: 0,
-            ffmpeg_restart_count: 0,
-            consecutive_ffmpeg_failures: 0,
-            consecutive_chunk_misses: 0,
-            last_error: None,
-            stall_reason: None,
-            ffmpeg_last_stderr: None,
-            restart_history: std::collections::VecDeque::new(),
-            delivery_mode: "normal".to_string(),
-            rescue_eta_secs: None,
-            reconnect_count: 0,
-            rtmp_push_history: std::collections::VecDeque::new(),
-        }
-    }
-}
-
-pub type Stats = Arc<Mutex<EndpointStats>>;
-
-/// Initial EndpointStats: Default + per-endpoint overrides.
-/// Explicit assignment (not struct literal) for mutation-test coverage.
-#[allow(clippy::field_reassign_with_default)]
-pub fn initial_endpoint_stats(start_chunk_id: i64, initial_mode: String) -> EndpointStats {
-    let mut s = EndpointStats::default();
-    s.current_chunk_id = start_chunk_id;
-    s.delivery_mode = initial_mode;
-    s
-}
+// EndpointStats + initial_endpoint_stats + Stats type alias
+// extracted to crate::endpoint_stats so this file stays under the
+// 1000-line CI cap (#184).
+pub use crate::endpoint_stats::{
+    EndpointStats, LifecycleSummary, PrefetchFill, Stats, initial_endpoint_stats,
+};
 
 pub struct EndpointHandle {
     task: JoinHandle<()>,
     stop_tx: watch::Sender<bool>,
     stats: Stats,
+    start_chunk_id: i64,
+    cfg: crate::api::EndpointConfig,
 }
 
 impl EndpointHandle {
@@ -239,6 +184,11 @@ impl EndpointHandle {
             60,
         );
         tracing::info!(alias = %ep_cfg.alias, window, "DiskCacheFetcher wired");
+        // Clone for the spawned task so the original survives for the
+        // EndpointHandle's `cfg` field. `cfg` powers the `config()` accessor
+        // used by api::update_start_handler when it tears down and respawns
+        // this endpoint with a new start_chunk_id (#189).
+        let cfg = ep_cfg.clone();
         let task = tokio::spawn(endpoint_loop(
             fetcher,
             FfmpegProcessFactory,
@@ -255,7 +205,17 @@ impl EndpointHandle {
             task,
             stop_tx,
             stats,
+            start_chunk_id,
+            cfg,
         }
+    }
+
+    pub fn start_chunk_id(&self) -> i64 {
+        self.start_chunk_id
+    }
+
+    pub fn config(&self) -> &crate::api::EndpointConfig {
+        &self.cfg
     }
 
     pub fn is_alive(&self) -> bool {
@@ -269,6 +229,34 @@ impl EndpointHandle {
     pub async fn stop(self) {
         let _ = self.stop_tx.send(true);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.task).await;
+    }
+
+    /// Test-only stub: creates a no-op EndpointHandle with the given start_chunk_id.
+    /// Used by api_update_start_tests to seed AppState without a real DiskCache.
+    #[cfg(test)]
+    pub fn stub_for_test(start_chunk_id: i64) -> Self {
+        let (stop_tx, _stop_rx) = watch::channel(false);
+        let task = tokio::spawn(async {});
+        let stats = Arc::new(Mutex::new(crate::endpoint_stats::initial_endpoint_stats(
+            start_chunk_id,
+            "normal".to_string(),
+        )));
+        let cfg = crate::api::EndpointConfig {
+            alias: "stub".to_string(),
+            service_type: "TEST_FILE".to_string(),
+            stream_key: String::new(),
+            is_fast: false,
+            chunk_format: "flv".to_string(),
+            start_chunk_id: None,
+            pusher: Default::default(),
+        };
+        Self {
+            task,
+            stop_tx,
+            stats,
+            start_chunk_id,
+            cfg,
+        }
     }
 }
 
