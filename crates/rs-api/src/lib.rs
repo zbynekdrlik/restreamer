@@ -18,6 +18,8 @@ pub mod handlers;
 pub mod internet_probe;
 pub mod metrics_handlers;
 pub mod obs;
+#[cfg(test)]
+mod on_vps_ready_tests;
 pub mod rescue_video_handlers;
 pub mod router;
 #[cfg(test)]
