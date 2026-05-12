@@ -225,7 +225,7 @@ async fn migrate_v24_adds_host_emit_ts_and_s3_upload_complete_ts() {
 }
 
 #[tokio::test]
-async fn migrate_v24_is_idempotent() {
+async fn migrate_latest_is_idempotent() {
     let pool = crate::db::create_memory_pool().await.unwrap();
     crate::db::run_migrations(&pool).await.unwrap();
     // Re-run: must be a no-op (no column-already-exists error).
@@ -234,12 +234,14 @@ async fn migrate_v24_is_idempotent() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(v, 24);
+    assert_eq!(v, crate::db::MAX_SCHEMA_VERSION);
 }
 
 #[tokio::test]
-async fn max_schema_version_is_24() {
-    assert_eq!(crate::db::MAX_SCHEMA_VERSION, 24);
+async fn max_schema_version_constant() {
+    // Update this when bumping MAX_SCHEMA_VERSION; protects against silent
+    // changes that skip the migration-versioning convention.
+    assert_eq!(crate::db::MAX_SCHEMA_VERSION, 26);
 }
 
 #[tokio::test]
@@ -289,13 +291,10 @@ async fn migration_v25_adds_label_unique_with_default_backfill() {
     .await;
     assert!(dup.is_err(), "duplicate label should be rejected");
 
-    // 4. Backfill: legacy row that pre-existed migration must have label='default'.
+    // 4. Default row: fresh DB must have a seeded `default` row at id=1
+    //    so the legacy single-row OAuth callers (upsert_youtube_oauth) and
+    //    the multi-label list_oauths always see it.
     let pool2 = crate::db::create_memory_pool().await.unwrap();
-    crate::db::run_migrations(&pool2).await.unwrap();
-    sqlx::query("UPDATE youtube_oauth SET label = '' WHERE id = 1")
-        .execute(&pool2)
-        .await
-        .unwrap();
     crate::db::run_migrations(&pool2).await.unwrap();
     let label: Option<String> = sqlx::query_scalar("SELECT label FROM youtube_oauth WHERE id = 1")
         .fetch_optional(&pool2)
@@ -304,7 +303,7 @@ async fn migration_v25_adds_label_unique_with_default_backfill() {
     assert_eq!(
         label.as_deref(),
         Some("default"),
-        "backfill must restore 'default' label"
+        "fresh DB must have a seeded 'default' row at id=1"
     );
 }
 

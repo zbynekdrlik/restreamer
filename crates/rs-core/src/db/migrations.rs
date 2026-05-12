@@ -751,6 +751,10 @@ async fn migrate_v24(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
 /// - Backfill any empty/NULL `label` to 'default' (defensive for the
 ///   #112 rewound-schema_version recovery path)
 /// - CREATE UNIQUE INDEX on `label`
+/// - Seed a placeholder `default` row if the table is empty, so the legacy
+///   single-row `upsert_youtube_oauth` callers and the multi-label
+///   `list_oauths` always observe a `default` entry. INSERT OR IGNORE is
+///   idempotent on re-run.
 async fn migrate_v25(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
     add_column_if_missing(
         tx,
@@ -765,6 +769,13 @@ async fn migrate_v25(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
         .await?;
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_youtube_oauth_label ON youtube_oauth(label)",
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO youtube_oauth
+            (id, label, access_token, refresh_token, token_uri, client_id, client_secret, scopes)
+         VALUES (1, 'default', '', '', 'https://oauth2.googleapis.com/token', '', '', '')",
     )
     .execute(&mut **tx)
     .await?;
