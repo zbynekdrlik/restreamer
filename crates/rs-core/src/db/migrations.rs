@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 25;
+pub const MAX_SCHEMA_VERSION: i32 = 26;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -341,6 +341,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             23 => execute_sql_statements(&mut tx, MIGRATION_V23_SQL).await?,
             24 => migrate_v24(&mut tx).await?,
             25 => migrate_v25(&mut tx).await?,
+            26 => migrate_v26(&mut tx).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -766,6 +767,19 @@ async fn migrate_v25(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_youtube_oauth_label ON youtube_oauth(label)",
     )
     .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// v26: link each endpoint to an optional YouTube OAuth grant by id.
+/// NULL means "no health probe" (matches existing behavior).
+async fn migrate_v26(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(
+        tx,
+        "endpoint_configs",
+        "youtube_oauth_id",
+        "youtube_oauth_id INTEGER REFERENCES youtube_oauth(id)",
+    )
     .await?;
     Ok(())
 }

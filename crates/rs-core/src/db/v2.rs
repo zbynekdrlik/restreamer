@@ -22,7 +22,7 @@ fn parse_pusher_kind(s: String) -> PusherKind {
 pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConfig>> {
     let rows = sqlx::query(
         "SELECT id, alias, service_type, stream_key, enabled, position_last,
-         delivered_bytes, is_fast, pusher, created_at, updated_at
+         delivered_bytes, is_fast, pusher, youtube_oauth_id, created_at, updated_at
          FROM endpoint_configs ORDER BY id",
     )
     .fetch_all(pool)
@@ -41,6 +41,7 @@ pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConf
             is_fast: r.get::<i32, _>("is_fast") != 0,
             pusher: parse_pusher_kind(r.get("pusher")),
             prefetch_chunks: None,
+            youtube_oauth_id: r.get("youtube_oauth_id"),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         })
@@ -50,7 +51,7 @@ pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConf
 pub async fn get_endpoint_config(pool: &SqlitePool, id: i64) -> Result<Option<EndpointConfig>> {
     let row = sqlx::query(
         "SELECT id, alias, service_type, stream_key, enabled, position_last,
-         delivered_bytes, is_fast, pusher, created_at, updated_at
+         delivered_bytes, is_fast, pusher, youtube_oauth_id, created_at, updated_at
          FROM endpoint_configs WHERE id = ?1",
     )
     .bind(id)
@@ -68,6 +69,7 @@ pub async fn get_endpoint_config(pool: &SqlitePool, id: i64) -> Result<Option<En
         is_fast: r.get::<i32, _>("is_fast") != 0,
         pusher: parse_pusher_kind(r.get("pusher")),
         prefetch_chunks: None,
+        youtube_oauth_id: r.get("youtube_oauth_id"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     }))
@@ -126,6 +128,23 @@ pub async fn delete_endpoint_config(pool: &SqlitePool, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Link or unlink an endpoint's YouTube OAuth grant.
+pub async fn set_endpoint_youtube_oauth_id(
+    pool: &SqlitePool,
+    endpoint_id: i64,
+    oauth_id: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE endpoint_configs SET youtube_oauth_id = ?1, updated_at = datetime('now')
+         WHERE id = ?2",
+    )
+    .bind(oauth_id)
+    .bind(endpoint_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // --- Event Endpoints (M2M) ---
 
 pub async fn attach_endpoint_to_event(
@@ -157,7 +176,7 @@ pub async fn detach_endpoint_from_event(
 pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec<EndpointConfig>> {
     let rows = sqlx::query(
         "SELECT e.id, e.alias, e.service_type, e.stream_key, e.enabled, e.position_last,
-         e.delivered_bytes, e.is_fast, e.pusher, e.created_at, e.updated_at
+         e.delivered_bytes, e.is_fast, e.pusher, e.youtube_oauth_id, e.created_at, e.updated_at
          FROM endpoint_configs e
          INNER JOIN event_endpoints ee ON ee.endpoint_id = e.id
          WHERE ee.event_id = ?1 AND e.enabled = 1
@@ -180,6 +199,7 @@ pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec
             is_fast: r.get::<i32, _>("is_fast") != 0,
             pusher: parse_pusher_kind(r.get("pusher")),
             prefetch_chunks: None,
+            youtube_oauth_id: r.get("youtube_oauth_id"),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         })

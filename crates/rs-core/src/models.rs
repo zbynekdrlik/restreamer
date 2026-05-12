@@ -93,6 +93,10 @@ pub struct EndpointConfig {
     /// behavior). Operator may override per endpoint.
     #[serde(default)]
     pub prefetch_chunks: Option<u32>,
+    /// FK into `youtube_oauth(id)`. `None` => no YT health probe.
+    /// `#[serde(default)]` keeps existing config.json files parsing.
+    #[serde(default)]
+    pub youtube_oauth_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -827,5 +831,27 @@ mod tests {
         }"#;
         let parsed: EndpointConfig = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.prefetch_chunks, Some(0));
+    }
+
+    #[test]
+    fn endpoint_config_serde_preserves_youtube_oauth_id() {
+        let json_some = r#"{
+            "id": 1, "alias": "ytbb", "service_type": "YT_RTMP", "stream_key": "k",
+            "enabled": true, "position_last": 0, "delivered_bytes": 0, "is_fast": false,
+            "pusher": "rust", "youtube_oauth_id": 42,
+            "created_at": "2026-05-12T00:00:00Z", "updated_at": "2026-05-12T00:00:00Z"
+        }"#;
+        let parsed: EndpointConfig = serde_json::from_str(json_some).unwrap();
+        assert_eq!(parsed.youtube_oauth_id, Some(42));
+
+        // Field absent => None (backward compat with pre-v26 config.json).
+        let json_missing = r#"{
+            "id": 1, "alias": "ytbb", "service_type": "YT_RTMP", "stream_key": "k",
+            "enabled": true, "position_last": 0, "delivered_bytes": 0, "is_fast": false,
+            "pusher": "rust",
+            "created_at": "2026-05-12T00:00:00Z", "updated_at": "2026-05-12T00:00:00Z"
+        }"#;
+        let parsed2: EndpointConfig = serde_json::from_str(json_missing).unwrap();
+        assert_eq!(parsed2.youtube_oauth_id, None);
     }
 }
