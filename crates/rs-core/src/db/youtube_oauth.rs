@@ -82,12 +82,3 @@ pub async fn upsert_oauth_by_label(
     .await?;
     Ok(row.get("id"))
 }
-
-pub async fn set_channel_id(pool: &SqlitePool, id: i64, channel_id: &str) -> Result<()> {
-    sqlx::query("UPDATE youtube_oauth SET channel_id = ?1 WHERE id = ?2")
-        .bind(channel_id)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}

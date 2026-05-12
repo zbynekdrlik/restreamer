@@ -629,10 +629,10 @@ test(testName, async () => {
       let hostHealthAttached = false;
       while (Date.now() - hostHealthStart < 60_000) {
         const body = await page.evaluate(async () => {
-          const r = await fetch("http://10.77.9.204:8910/api/v1/delivery/instances");
+          const r = await fetch("http://10.77.9.204:8910/api/v1/delivery/status/cached");
           return r.json();
         });
-        const ep = (body?.instances?.[0]?.endpoints || []).find(
+        const ep = (body?.endpoints || []).find(
           (e: any) => e.alias === "e2e rtmp",
         );
         if (ep?.youtube_health?.health_status === "good") {

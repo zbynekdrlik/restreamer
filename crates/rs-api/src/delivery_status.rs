@@ -387,7 +387,7 @@ impl DeliveryOrchestrator {
             };
             if let Some(cfg) = configs.iter().find(|c| c.alias == m.alias) {
                 if cfg.youtube_oauth_id.is_some() && cfg.service_type == "YT_RTMP" {
-                    attach_yt_health_cached(self.pool(), cfg, &mut m, None).await;
+                    attach_yt_health_cached(self.pool(), cfg, &mut m, self.audit_tx()).await;
                 }
             }
             metrics.push(m);
@@ -429,7 +429,16 @@ pub async fn attach_yt_health(
             return;
         }
         Err(e) => {
-            tracing::warn!(error = %e, "yt_health: db lookup failed");
+            tracing::warn!(error = %e, endpoint_id = endpoint.id, oauth_id = oauth_id, "yt_health: db lookup failed");
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("db_error".into()),
+            });
             return;
         }
     };
