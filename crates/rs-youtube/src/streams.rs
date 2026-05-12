@@ -194,7 +194,7 @@ pub async fn list_streams_for_label(
         .ok_or_else(|| crate::YouTubeError::OAuth(format!("no oauth grant for label '{label}'")))?;
 
     if crate::oauth::is_token_expired(oauth.expires_at.as_deref()) {
-        let tokens = crate::oauth::OAuthTokens {
+        let tokens = crate::OAuthTokens {
             access_token: oauth.access_token.clone(),
             refresh_token: oauth.refresh_token.clone(),
             token_uri: oauth.token_uri.clone(),
