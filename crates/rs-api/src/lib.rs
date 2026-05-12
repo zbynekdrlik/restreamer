@@ -40,6 +40,9 @@ mod yt_health_extract_tests;
 #[cfg(test)]
 mod delivery_status_yt_health_tests;
 
+#[cfg(test)]
+mod yt_health_cache_tests;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
