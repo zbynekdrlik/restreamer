@@ -138,10 +138,14 @@ pub struct DeliveryEndpointStatus {
     pub last_check_at: String,
 }
 
-/// YouTube OAuth tokens (single row, id=1).
+/// YouTube OAuth tokens, keyed by a unique `label`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YouTubeOAuth {
     pub id: i64,
+    /// Human-readable label uniquely identifying this grant
+    /// (e.g. `default`, `bb`). Used by endpoint linkage and OAuth flow `?label=`.
+    #[serde(default = "default_oauth_label")]
+    pub label: String,
     pub access_token: String,
     pub refresh_token: String,
     pub token_uri: String,
@@ -149,6 +153,14 @@ pub struct YouTubeOAuth {
     pub client_secret: String,
     pub scopes: String,
     pub expires_at: Option<String>,
+    /// Captured from `liveStreams.list` items' `snippet.channelId` after
+    /// the first successful probe.
+    #[serde(default)]
+    pub channel_id: Option<String>,
+}
+
+fn default_oauth_label() -> String {
+    "default".to_string()
 }
 
 /// Real-time event broadcast over WebSocket.

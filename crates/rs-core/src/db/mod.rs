@@ -12,6 +12,8 @@ pub use templates::*;
 mod v2;
 pub use v2::*;
 
+pub mod youtube_oauth;
+
 mod migrations;
 pub use migrations::{MAX_SCHEMA_VERSION, current_schema_version, run_migrations};
 

@@ -397,14 +397,15 @@ pub async fn get_delivery_endpoint_statuses(
 
 pub async fn get_youtube_oauth(pool: &SqlitePool) -> Result<Option<YouTubeOAuth>> {
     let row = sqlx::query(
-        "SELECT id, access_token, refresh_token, token_uri, client_id, client_secret, scopes, expires_at
-         FROM youtube_oauth WHERE id = 1",
+        "SELECT id, label, access_token, refresh_token, token_uri, client_id, client_secret,
+         scopes, expires_at, channel_id
+         FROM youtube_oauth WHERE label = 'default'",
     )
     .fetch_optional(pool)
     .await?;
-
     Ok(row.map(|r| YouTubeOAuth {
         id: r.get("id"),
+        label: r.get("label"),
         access_token: r.get("access_token"),
         refresh_token: r.get("refresh_token"),
         token_uri: r.get("token_uri"),
@@ -412,6 +413,7 @@ pub async fn get_youtube_oauth(pool: &SqlitePool) -> Result<Option<YouTubeOAuth>
         client_secret: r.get("client_secret"),
         scopes: r.get("scopes"),
         expires_at: r.get("expires_at"),
+        channel_id: r.get("channel_id"),
     }))
 }
 
@@ -427,11 +429,17 @@ pub async fn upsert_youtube_oauth(
     expires_at: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO youtube_oauth (id, access_token, refresh_token, token_uri, client_id, client_secret, scopes, expires_at)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(id) DO UPDATE SET
-             access_token = ?1, refresh_token = ?2, token_uri = ?3,
-             client_id = ?4, client_secret = ?5, scopes = ?6, expires_at = ?7",
+        "INSERT INTO youtube_oauth
+            (label, access_token, refresh_token, token_uri, client_id, client_secret, scopes, expires_at)
+         VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(label) DO UPDATE SET
+            access_token = excluded.access_token,
+            refresh_token = excluded.refresh_token,
+            token_uri = excluded.token_uri,
+            client_id = excluded.client_id,
+            client_secret = excluded.client_secret,
+            scopes = excluded.scopes,
+            expires_at = excluded.expires_at",
     )
     .bind(access_token)
     .bind(refresh_token)
