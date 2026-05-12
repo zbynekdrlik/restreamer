@@ -1821,7 +1821,7 @@ jobs:
           Write-Host "YouTube OAuth tokens seeded"
 
       - name: Link e2e-test endpoint to default OAuth
-        shell: pwsh
+        shell: powershell
         run: |
           $endpoints = Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/endpoints -Method GET
           $ep = $endpoints | Where-Object { $_.alias -eq 'e2e-test' }
