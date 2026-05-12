@@ -79,6 +79,9 @@ tokio-tungstenite = "0.26"
 sha2 = "0.10"
 base64 = "0.22"
 
+# Concurrent data structures
+dashmap = "6"
+
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

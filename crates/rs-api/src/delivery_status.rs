@@ -9,7 +9,8 @@
 //! - `DeliveryOrchestrator::get_delivery_status` and `poll_delivery_metrics`
 //!   (second impl block).
 
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
@@ -362,10 +363,13 @@ impl DeliveryOrchestrator {
             None => ("none".to_string(), "none".to_string(), None),
         };
 
-        let metrics: Vec<DeliveryEndpointMetrics> = status
-            .endpoints
-            .into_iter()
-            .map(|ep| DeliveryEndpointMetrics {
+        // Load endpoint_configs once so we can look up youtube_oauth_id by alias.
+        let configs = rs_core::db::list_endpoint_configs(self.pool())
+            .await
+            .unwrap_or_default();
+        let mut metrics: Vec<DeliveryEndpointMetrics> = Vec::with_capacity(status.endpoints.len());
+        for ep in status.endpoints.into_iter() {
+            let mut m = DeliveryEndpointMetrics {
                 alias: ep.alias,
                 alive: ep.alive,
                 current_chunk_id: ep.current_chunk_id,
@@ -380,8 +384,14 @@ impl DeliveryOrchestrator {
                 delivery_mode: ep.delivery_mode,
                 rescue_eta_secs: ep.rescue_eta_secs,
                 youtube_health: None,
-            })
-            .collect();
+            };
+            if let Some(cfg) = configs.iter().find(|c| c.alias == m.alias) {
+                if cfg.youtube_oauth_id.is_some() && cfg.service_type == "YT_RTMP" {
+                    attach_yt_health_cached(self.pool(), cfg, &mut m).await;
+                }
+            }
+            metrics.push(m);
+        }
 
         let endpoint_count = metrics.len() as u32;
         Ok((name, inst_status, server_ip, endpoint_count, metrics))
@@ -491,5 +501,35 @@ pub async fn attach_yt_health(
                 error: Some("probe_error".into()),
             });
         }
+    }
+}
+
+fn yt_health_cache() -> &'static dashmap::DashMap<i64, (Instant, rs_core::models::YoutubeHealth)> {
+    static C: OnceLock<dashmap::DashMap<i64, (Instant, rs_core::models::YoutubeHealth)>> =
+        OnceLock::new();
+    C.get_or_init(dashmap::DashMap::new)
+}
+
+/// 15 s minimum interval per endpoint id.
+/// Returns the cached value (with refreshed `age_secs`) if still fresh;
+/// otherwise calls `attach_yt_health` and stores the result.
+pub async fn attach_yt_health_cached(
+    pool: &sqlx::SqlitePool,
+    endpoint: &rs_core::models::EndpointConfig,
+    metrics: &mut rs_core::models::DeliveryEndpointMetrics,
+) {
+    if let Some(entry) = yt_health_cache().get(&endpoint.id) {
+        let (when, h) = entry.value().clone();
+        let age = when.elapsed();
+        if age < Duration::from_secs(15) {
+            let mut h_aged = h;
+            h_aged.age_secs = age.as_secs() as i64;
+            metrics.youtube_health = Some(h_aged);
+            return;
+        }
+    }
+    attach_yt_health(pool, endpoint, metrics).await;
+    if let Some(h) = metrics.youtube_health.as_ref() {
+        yt_health_cache().insert(endpoint.id, (Instant::now(), h.clone()));
     }
 }
