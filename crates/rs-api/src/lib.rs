@@ -16,6 +16,7 @@ mod delivery_youtube;
 pub mod delivery_yt_health;
 pub(crate) mod diag;
 pub mod diagnostics_pacing;
+pub mod endpoint_oauth;
 pub mod handlers;
 pub mod internet_probe;
 pub mod metrics_handlers;

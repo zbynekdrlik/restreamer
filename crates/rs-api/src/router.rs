@@ -118,7 +118,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/endpoints/{id}/link-oauth",
-            post(handlers::link_endpoint_oauth),
+            post(crate::endpoint_oauth::link_endpoint_oauth),
         )
         // Template CRUD
         .route(
