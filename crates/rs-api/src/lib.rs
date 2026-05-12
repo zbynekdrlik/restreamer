@@ -46,6 +46,9 @@ mod yt_health_cache_tests;
 #[cfg(test)]
 mod yt_health_audit_tests;
 
+#[cfg(test)]
+mod youtube_label_tests;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
