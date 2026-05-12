@@ -158,6 +158,7 @@ pub async fn start_stream(
                         is_fast: ep.is_fast,
                         delivery_mode: None,
                         rescue_eta_secs: None,
+                        youtube_health: None,
                     })
                     .collect();
                 let _ = state.ws_tx.send(WsEvent::DeliveryStatus {

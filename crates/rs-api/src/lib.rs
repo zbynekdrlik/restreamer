@@ -13,6 +13,7 @@ pub(crate) mod delivery_status;
 #[cfg(test)]
 mod delivery_tests;
 mod delivery_youtube;
+pub mod delivery_yt_health;
 pub(crate) mod diag;
 pub mod diagnostics_pacing;
 pub mod handlers;
@@ -32,6 +33,9 @@ pub mod template_handlers;
 pub mod uploads_endpoints;
 pub mod websocket;
 pub mod youtube;
+
+#[cfg(test)]
+mod yt_health_extract_tests;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -291,6 +295,7 @@ async fn delivery_broadcast_loop(
                             is_fast: ep.is_fast,
                             delivery_mode: None,
                             rescue_eta_secs: None,
+                            youtube_health: None,
                         })
                         .collect();
                     let count = placeholders.len() as u32;
@@ -489,6 +494,7 @@ mod max_non_fast_tests {
             is_fast: fast,
             delivery_mode: None,
             rescue_eta_secs: None,
+            youtube_health: None,
         }
     }
 

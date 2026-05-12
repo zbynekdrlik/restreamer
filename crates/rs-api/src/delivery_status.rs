@@ -379,6 +379,7 @@ impl DeliveryOrchestrator {
                 is_fast: ep.is_fast,
                 delivery_mode: ep.delivery_mode,
                 rescue_eta_secs: ep.rescue_eta_secs,
+                youtube_health: None,
             })
             .collect();
 

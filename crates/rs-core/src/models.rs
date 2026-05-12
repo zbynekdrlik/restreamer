@@ -263,6 +263,28 @@ pub enum WsEvent {
     },
 }
 
+/// Snapshot of YT `liveStreams.list` health for a single endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct YoutubeHealth {
+    /// `status.streamStatus` (`active` | `ready` | `inactive` | ...).
+    pub stream_status: String,
+    /// `status.healthStatus.status` (`good` | `ok` | `bad` | `noData` | ...).
+    pub health_status: String,
+    /// `status.healthStatus.configurationIssues[0].type` if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<String>,
+    /// Seconds since the data was probed.
+    #[serde(default)]
+    pub age_secs: i64,
+    /// Set when the probe could not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Per-endpoint delivery metrics broadcast via WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryEndpointMetrics {
@@ -288,6 +310,8 @@ pub struct DeliveryEndpointMetrics {
     pub delivery_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rescue_eta_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub youtube_health: Option<YoutubeHealth>,
 }
 
 /// Service status summary returned by the /status endpoint.
@@ -503,6 +527,7 @@ mod tests {
                     is_fast: false,
                     delivery_mode: None,
                     rescue_eta_secs: None,
+                    youtube_health: None,
                 }],
             },
             WsEvent::Error {
@@ -628,6 +653,7 @@ mod tests {
             is_fast: true,
             delivery_mode: None,
             rescue_eta_secs: None,
+            youtube_health: None,
         };
         let json = serde_json::to_string(&metrics).unwrap();
         let parsed: DeliveryEndpointMetrics = serde_json::from_str(&json).unwrap();
@@ -675,6 +701,7 @@ mod tests {
                 is_fast: false,
                 delivery_mode: None,
                 rescue_eta_secs: None,
+                youtube_health: None,
             }],
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -701,6 +728,7 @@ mod tests {
                 is_fast: true,
                 delivery_mode: None,
                 rescue_eta_secs: None,
+                youtube_health: None,
             },
             DeliveryEndpointMetrics {
                 alias: "BufferedEP".to_string(),
@@ -717,6 +745,7 @@ mod tests {
                 is_fast: false,
                 delivery_mode: None,
                 rescue_eta_secs: None,
+                youtube_health: None,
             },
         ];
         let delay = endpoints
@@ -745,6 +774,7 @@ mod tests {
             is_fast: true,
             delivery_mode: None,
             rescue_eta_secs: None,
+            youtube_health: None,
         }];
         let delay = endpoints
             .iter()
