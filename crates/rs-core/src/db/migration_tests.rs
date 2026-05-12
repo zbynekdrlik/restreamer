@@ -307,3 +307,65 @@ async fn migration_v25_adds_label_unique_with_default_backfill() {
         "backfill must restore 'default' label"
     );
 }
+
+#[tokio::test]
+async fn migration_v26_adds_youtube_oauth_id_to_endpoint_configs() {
+    let pool = crate::db::create_memory_pool().await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap(); // idempotent
+
+    // 1. Column exists.
+    let cols: Vec<(String, String, i64)> =
+        sqlx::query_as("SELECT name, type, \"notnull\" FROM pragma_table_info('endpoint_configs')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let oauth_col = cols
+        .iter()
+        .find(|(n, _, _)| n == "youtube_oauth_id")
+        .expect("endpoint_configs must have youtube_oauth_id column");
+    assert!(
+        oauth_col.1.to_uppercase().contains("INTEGER"),
+        "youtube_oauth_id must be INTEGER; got type={}",
+        oauth_col.1
+    );
+    assert_eq!(oauth_col.2, 0, "youtube_oauth_id must be nullable");
+
+    // 2. New endpoints default to NULL.
+    sqlx::query(
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key) VALUES ('e1','YT_RTMP','k')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let oauth_id: Option<i64> =
+        sqlx::query_scalar("SELECT youtube_oauth_id FROM endpoint_configs WHERE alias = 'e1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(oauth_id.is_none(), "new row must default to NULL");
+
+    // 3. Linkage works: insert oauth row, link endpoint, read back.
+    sqlx::query(
+        "INSERT INTO youtube_oauth (label, access_token, refresh_token, token_uri, client_id, client_secret, scopes)
+         VALUES ('bb','a','r','u','c','s','sc')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let bb_id: i64 = sqlx::query_scalar("SELECT id FROM youtube_oauth WHERE label = 'bb'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE endpoint_configs SET youtube_oauth_id = ?1 WHERE alias = 'e1'")
+        .bind(bb_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let read_back: i64 =
+        sqlx::query_scalar("SELECT youtube_oauth_id FROM endpoint_configs WHERE alias = 'e1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(read_back, bb_id);
+}
