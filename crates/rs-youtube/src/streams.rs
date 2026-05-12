@@ -204,8 +204,8 @@ pub async fn list_streams_for_label(
             expires_at: oauth.expires_at.clone(),
         };
         let refreshed = crate::oauth::refresh_access_token(&tokens).await?;
-        let new_expires = chrono::Utc::now()
-            + chrono::Duration::seconds(refreshed.expires_in.unwrap_or(3600) as i64);
+        let new_expires =
+            chrono::Utc::now() + chrono::Duration::seconds(refreshed.expires_in.unwrap_or(3600));
         let new_expires_str = new_expires.to_rfc3339();
         yo::upsert_oauth_by_label(
             pool,

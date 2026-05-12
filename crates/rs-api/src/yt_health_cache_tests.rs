@@ -2,6 +2,7 @@
 //! per endpoint id, even when called repeatedly.
 
 use crate::delivery_status::attach_yt_health_cached;
+use crate::yt_health_test_env::env_guard;
 use rs_core::db::youtube_oauth as yo;
 use rs_core::db::{create_memory_pool, run_migrations, v2};
 use rs_core::models::DeliveryEndpointMetrics;
@@ -29,6 +30,8 @@ fn empty_metrics(alias: &str) -> DeliveryEndpointMetrics {
 
 #[tokio::test]
 async fn attach_yt_health_cached_calls_api_once_within_window() {
+    let _g = env_guard().lock().await;
+    crate::delivery_status::clear_yt_health_cache_for_test();
     let server = MockServer::start().await;
     unsafe {
         std::env::set_var("YOUTUBE_API_BASE", server.uri());

@@ -467,7 +467,7 @@ pub async fn attach_yt_health(
                 error: Some("oauth_invalid".into()),
             });
         }
-        Err(rs_youtube::YouTubeError::Api { status, .. }) if status == 403 => {
+        Err(rs_youtube::YouTubeError::Api { status: 403, .. }) => {
             metrics.youtube_health = Some(YoutubeHealth {
                 stream_status: "unknown".into(),
                 health_status: "unknown".into(),
@@ -478,7 +478,7 @@ pub async fn attach_yt_health(
                 error: Some("oauth_app_not_production".into()),
             });
         }
-        Err(rs_youtube::YouTubeError::Api { status, .. }) if status == 429 => {
+        Err(rs_youtube::YouTubeError::Api { status: 429, .. }) => {
             metrics.youtube_health = Some(YoutubeHealth {
                 stream_status: "unknown".into(),
                 health_status: "unknown".into(),
@@ -502,6 +502,14 @@ pub async fn attach_yt_health(
             });
         }
     }
+}
+
+/// Test-only: clear the per-endpoint YT health cache. Different tests use
+/// pools that allocate endpoint id=1 each, so the cache must be reset to
+/// avoid one test seeing another's cached snapshot.
+#[cfg(test)]
+pub fn clear_yt_health_cache_for_test() {
+    yt_health_cache().clear();
 }
 
 fn yt_health_cache() -> &'static dashmap::DashMap<i64, (Instant, rs_core::models::YoutubeHealth)> {

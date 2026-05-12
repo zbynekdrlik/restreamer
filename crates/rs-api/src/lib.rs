@@ -38,6 +38,9 @@ pub mod youtube;
 mod yt_health_extract_tests;
 
 #[cfg(test)]
+mod yt_health_test_env;
+
+#[cfg(test)]
 mod delivery_status_yt_health_tests;
 
 #[cfg(test)]

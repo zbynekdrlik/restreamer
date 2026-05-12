@@ -1,0 +1,387 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - link "⚙ Settings" [ref=e4] [cursor=pointer]:
+      - /url: /settings
+    - heading "Restreamer" [level=1] [ref=e5]
+    - generic [ref=e6]: Connected
+    - generic [ref=e7]: 0.8.0-dev
+  - main [ref=e8]:
+    - generic [ref=e11]:
+      - generic [ref=e12]:
+        - generic [ref=e13]:
+          - generic [ref=e14]:
+            - generic [ref=e15]: "Event:"
+            - combobox [ref=e16]:
+              - option "-- Select Event --" [selected]
+              - option "SNV-stream-2026-05-10"
+              - option "SNV-Štvrtok večer-2026-05-09"
+              - option "E2E-Test"
+            - button "Start Delivering" [disabled] [ref=e17]
+            - button "Stop Delivering" [disabled] [ref=e18]
+          - generic [ref=e19]:
+            - generic [ref=e20]: Idle
+            - generic [ref=e21]: "--:--:--"
+        - generic [ref=e22]:
+          - generic [ref=e23]:
+            - generic [ref=e26]: OBS
+            - generic [ref=e27]: Connected
+            - button "Start" [ref=e384] [cursor=pointer]
+          - generic [ref=e28]: │
+          - generic [ref=e29]:
+            - generic [ref=e32]: RTMP
+            - generic [ref=e33]: Idle
+          - generic [ref=e34]: │
+          - generic [ref=e35]:
+            - generic [ref=e38]: Local Buffer
+            - generic [ref=e39]: 0 chunks
+          - generic [ref=e40]: │
+          - generic [ref=e41]:
+            - generic [ref=e44]: S3 → VPS
+            - generic [ref=e45]: 816 on S3
+          - generic "S3 upload telemetry — click for detail" [ref=e46] [cursor=pointer]:
+            - generic [ref=e47]: "Upload: 0.0 c/s"
+            - generic [ref=e48]: median 0ms
+            - generic [ref=e49]: in-flight 0/8
+            - generic "S3 uploads steady, no failures in the last minute." [ref=e50]: Uploads OK
+      - complementary [ref=e51]:
+        - generic [ref=e52]:
+          - generic [ref=e53]:
+            - heading "Activity" [level=3] [ref=e54]
+            - combobox [ref=e55]:
+              - option "all sources" [selected]
+              - option "operator"
+              - option "inpoint"
+              - option "uploader"
+              - option "delivery"
+              - option "vps"
+              - option "ffmpeg"
+              - option "s3"
+              - option "system"
+          - list [ref=e56]:
+            - listitem [ref=e385]:
+              - generic [ref=e386]: 05:56:13
+              - generic [ref=e387]: operator
+              - generic [ref=e388]: delivery_stopped
+              - group [ref=e389]:
+                - generic "detail" [ref=e390] [cursor=pointer]
+            - listitem [ref=e57]:
+              - generic [ref=e58]: 00:57:21
+              - generic [ref=e59]: operator
+              - generic [ref=e60]: delivery_stopped
+              - group [ref=e61]:
+                - generic "detail" [ref=e62] [cursor=pointer]
+            - listitem [ref=e63]:
+              - generic [ref=e64]: 00:57:21
+              - generic [ref=e65]: delivery
+              - generic [ref=e66]: vps_deleted
+              - group [ref=e67]:
+                - generic "detail" [ref=e68] [cursor=pointer]
+            - listitem [ref=e69]:
+              - generic [ref=e70]: 00:57:17
+              - generic [ref=e71]: inpoint
+              - generic [ref=e72]: rtmp_disconnected
+              - group [ref=e73]:
+                - generic "detail" [ref=e74] [cursor=pointer]
+            - listitem [ref=e75]:
+              - generic [ref=e76]: 00:56:37
+              - generic [ref=e77]: inpoint
+              - generic [ref=e78]: rtmp_connected
+              - group [ref=e79]:
+                - generic "detail" [ref=e80] [cursor=pointer]
+            - listitem [ref=e81]:
+              - generic [ref=e82]: 00:56:33
+              - generic [ref=e83]: system
+              - generic [ref=e84]: restreamer_started
+              - group [ref=e85]:
+                - generic "detail" [ref=e86] [cursor=pointer]
+            - listitem [ref=e87]:
+              - generic [ref=e88]: 00:56:21
+              - generic [ref=e89]: vps
+              - generic [ref=e90]: disk_cache_push_sample
+              - generic [ref=e91]: e2e rtmp
+              - group [ref=e92]:
+                - generic "detail" [ref=e93] [cursor=pointer]
+            - listitem [ref=e94]:
+              - generic [ref=e95]: 00:55:19
+              - generic [ref=e96]: vps
+              - generic [ref=e97]: disk_cache_push_sample
+              - generic [ref=e98]: e2e rtmp
+              - group [ref=e99]:
+                - generic "detail" [ref=e100] [cursor=pointer]
+            - listitem [ref=e101]:
+              - generic [ref=e102]: 00:54:17
+              - generic [ref=e103]: vps
+              - generic [ref=e104]: disk_cache_push_sample
+              - generic [ref=e105]: e2e rtmp
+              - group [ref=e106]:
+                - generic "detail" [ref=e107] [cursor=pointer]
+            - listitem [ref=e108]:
+              - generic [ref=e109]: 00:53:16
+              - generic [ref=e110]: vps
+              - generic [ref=e111]: disk_cache_push_sample
+              - generic [ref=e112]: e2e rtmp
+              - group [ref=e113]:
+                - generic "detail" [ref=e114] [cursor=pointer]
+            - listitem [ref=e115]:
+              - generic [ref=e116]: 00:52:15
+              - generic [ref=e117]: vps
+              - generic [ref=e118]: disk_cache_push_sample
+              - generic [ref=e119]: e2e rtmp
+              - group [ref=e120]:
+                - generic "detail" [ref=e121] [cursor=pointer]
+            - listitem [ref=e122]:
+              - generic [ref=e123]: 00:51:15
+              - generic [ref=e124]: vps
+              - generic [ref=e125]: disk_cache_push_sample
+              - generic [ref=e126]: e2e rtmp
+              - group [ref=e127]:
+                - generic "detail" [ref=e128] [cursor=pointer]
+            - listitem [ref=e129]:
+              - generic [ref=e130]: 00:50:13
+              - generic [ref=e131]: vps
+              - generic [ref=e132]: disk_cache_push_sample
+              - generic [ref=e133]: e2e rtmp
+              - group [ref=e134]:
+                - generic "detail" [ref=e135] [cursor=pointer]
+            - listitem [ref=e136]:
+              - generic [ref=e137]: 00:49:11
+              - generic [ref=e138]: vps
+              - generic [ref=e139]: disk_cache_push_sample
+              - generic [ref=e140]: e2e rtmp
+              - group [ref=e141]:
+                - generic "detail" [ref=e142] [cursor=pointer]
+            - listitem [ref=e143]:
+              - generic [ref=e144]: 00:48:11
+              - generic [ref=e145]: vps
+              - generic [ref=e146]: disk_cache_push_sample
+              - generic [ref=e147]: e2e rtmp
+              - group [ref=e148]:
+                - generic "detail" [ref=e149] [cursor=pointer]
+            - listitem [ref=e150]:
+              - generic [ref=e151]: 00:47:09
+              - generic [ref=e152]: vps
+              - generic [ref=e153]: disk_cache_push_sample
+              - generic [ref=e154]: e2e rtmp
+              - group [ref=e155]:
+                - generic "detail" [ref=e156] [cursor=pointer]
+            - listitem [ref=e157]:
+              - generic [ref=e158]: 00:46:07
+              - generic [ref=e159]: vps
+              - generic [ref=e160]: disk_cache_push_sample
+              - generic [ref=e161]: e2e rtmp
+              - group [ref=e162]:
+                - generic "detail" [ref=e163] [cursor=pointer]
+            - listitem [ref=e164]:
+              - generic [ref=e165]: 00:45:06
+              - generic [ref=e166]: vps
+              - generic [ref=e167]: disk_cache_push_sample
+              - generic [ref=e168]: e2e rtmp
+              - group [ref=e169]:
+                - generic "detail" [ref=e170] [cursor=pointer]
+            - listitem [ref=e171]:
+              - generic [ref=e172]: 00:44:05
+              - generic [ref=e173]: vps
+              - generic [ref=e174]: disk_cache_push_sample
+              - generic [ref=e175]: e2e rtmp
+              - group [ref=e176]:
+                - generic "detail" [ref=e177] [cursor=pointer]
+            - listitem [ref=e178]:
+              - generic [ref=e179]: 00:43:03
+              - generic [ref=e180]: vps
+              - generic [ref=e181]: disk_cache_push_sample
+              - generic [ref=e182]: e2e rtmp
+              - group [ref=e183]:
+                - generic "detail" [ref=e184] [cursor=pointer]
+            - listitem [ref=e185]:
+              - generic [ref=e186]: 00:42:01
+              - generic [ref=e187]: vps
+              - generic [ref=e188]: disk_cache_push_sample
+              - generic [ref=e189]: e2e rtmp
+              - group [ref=e190]:
+                - generic "detail" [ref=e191] [cursor=pointer]
+            - listitem [ref=e192]:
+              - generic [ref=e193]: 00:40:59
+              - generic [ref=e194]: vps
+              - generic [ref=e195]: disk_cache_push_sample
+              - generic [ref=e196]: e2e rtmp
+              - group [ref=e197]:
+                - generic "detail" [ref=e198] [cursor=pointer]
+            - listitem [ref=e199]:
+              - generic [ref=e200]: 00:39:59
+              - generic [ref=e201]: vps
+              - generic [ref=e202]: disk_cache_push_sample
+              - generic [ref=e203]: e2e rtmp
+              - group [ref=e204]:
+                - generic "detail" [ref=e205] [cursor=pointer]
+            - listitem [ref=e206]:
+              - generic [ref=e207]: 00:38:59
+              - generic [ref=e208]: vps
+              - generic [ref=e209]: disk_cache_push_sample
+              - generic [ref=e210]: e2e rtmp
+              - group [ref=e211]:
+                - generic "detail" [ref=e212] [cursor=pointer]
+            - listitem [ref=e213]:
+              - generic [ref=e214]: 00:37:57
+              - generic [ref=e215]: vps
+              - generic [ref=e216]: disk_cache_push_sample
+              - generic [ref=e217]: e2e rtmp
+              - group [ref=e218]:
+                - generic "detail" [ref=e219] [cursor=pointer]
+            - listitem [ref=e220]:
+              - generic [ref=e221]: 00:36:57
+              - generic [ref=e222]: vps
+              - generic [ref=e223]: disk_cache_push_sample
+              - generic [ref=e224]: e2e rtmp
+              - group [ref=e225]:
+                - generic "detail" [ref=e226] [cursor=pointer]
+            - listitem [ref=e227]:
+              - generic [ref=e228]: 00:35:56
+              - generic [ref=e229]: vps
+              - generic [ref=e230]: disk_cache_push_sample
+              - generic [ref=e231]: e2e rtmp
+              - group [ref=e232]:
+                - generic "detail" [ref=e233] [cursor=pointer]
+            - listitem [ref=e234]:
+              - generic [ref=e235]: 00:34:56
+              - generic [ref=e236]: vps
+              - generic [ref=e237]: disk_cache_push_sample
+              - generic [ref=e238]: e2e rtmp
+              - group [ref=e239]:
+                - generic "detail" [ref=e240] [cursor=pointer]
+            - listitem [ref=e241]:
+              - generic [ref=e242]: 00:33:54
+              - generic [ref=e243]: vps
+              - generic [ref=e244]: disk_cache_push_sample
+              - generic [ref=e245]: e2e rtmp
+              - group [ref=e246]:
+                - generic "detail" [ref=e247] [cursor=pointer]
+            - listitem [ref=e248]:
+              - generic [ref=e249]: 00:32:54
+              - generic [ref=e250]: vps
+              - generic [ref=e251]: disk_cache_push_sample
+              - generic [ref=e252]: e2e rtmp
+              - group [ref=e253]:
+                - generic "detail" [ref=e254] [cursor=pointer]
+            - listitem [ref=e255]:
+              - generic [ref=e256]: 00:30:51
+              - generic [ref=e257]: delivery
+              - generic [ref=e258]: delivery_init_response
+              - group [ref=e259]:
+                - generic "detail" [ref=e260] [cursor=pointer]
+            - listitem [ref=e261]:
+              - generic [ref=e262]: 00:30:51
+              - generic [ref=e263]: delivery
+              - generic [ref=e264]: delivery_init_sent
+              - group [ref=e265]:
+                - generic "detail" [ref=e266] [cursor=pointer]
+            - listitem [ref=e267]:
+              - generic [ref=e268]: 00:30:51
+              - generic [ref=e269]: delivery
+              - generic [ref=e270]: vps_ready
+              - group [ref=e271]:
+                - generic "detail" [ref=e272] [cursor=pointer]
+            - listitem [ref=e273]:
+              - generic [ref=e274]: 00:30:45
+              - generic [ref=e275]: system
+              - generic [ref=e276]: vps_unreachable
+              - group [ref=e277]:
+                - generic "detail" [ref=e278] [cursor=pointer]
+            - listitem [ref=e279]:
+              - generic [ref=e280]: 00:30:39
+              - generic [ref=e281]: system
+              - generic [ref=e282]: vps_unreachable
+              - group [ref=e283]:
+                - generic "detail" [ref=e284] [cursor=pointer]
+            - listitem [ref=e285]:
+              - generic [ref=e286]: 00:30:33
+              - generic [ref=e287]: system
+              - generic [ref=e288]: vps_unreachable
+              - group [ref=e289]:
+                - generic "detail" [ref=e290] [cursor=pointer]
+            - listitem [ref=e291]:
+              - generic [ref=e292]: 00:30:26
+              - generic [ref=e293]: system
+              - generic [ref=e294]: vps_unreachable
+              - group [ref=e295]:
+                - generic "detail" [ref=e296] [cursor=pointer]
+            - listitem [ref=e297]:
+              - generic [ref=e298]: 00:30:20
+              - generic [ref=e299]: system
+              - generic [ref=e300]: vps_unreachable
+              - group [ref=e301]:
+                - generic "detail" [ref=e302] [cursor=pointer]
+            - listitem [ref=e303]:
+              - generic [ref=e304]: 00:30:08
+              - generic [ref=e305]: system
+              - generic [ref=e306]: vps_unreachable
+              - group [ref=e307]:
+                - generic "detail" [ref=e308] [cursor=pointer]
+            - listitem [ref=e309]:
+              - generic [ref=e310]: 00:30:01
+              - generic [ref=e311]: system
+              - generic [ref=e312]: vps_unreachable
+              - group [ref=e313]:
+                - generic "detail" [ref=e314] [cursor=pointer]
+            - listitem [ref=e315]:
+              - generic [ref=e316]: 00:29:54
+              - generic [ref=e317]: inpoint
+              - generic [ref=e318]: rtmp_connected
+              - group [ref=e319]:
+                - generic "detail" [ref=e320] [cursor=pointer]
+            - listitem [ref=e321]:
+              - generic [ref=e322]: 00:29:54
+              - generic [ref=e323]: delivery
+              - generic [ref=e324]: vps_creating
+              - group [ref=e325]:
+                - generic "detail" [ref=e326] [cursor=pointer]
+            - listitem [ref=e327]:
+              - generic [ref=e328]: 00:29:53
+              - generic [ref=e329]: operator
+              - generic [ref=e330]: event_started
+              - group [ref=e331]:
+                - generic "detail" [ref=e332] [cursor=pointer]
+            - listitem [ref=e333]:
+              - generic [ref=e334]: 00:25:39
+              - generic [ref=e335]: system
+              - generic [ref=e336]: restreamer_started
+              - group [ref=e337]:
+                - generic "detail" [ref=e338] [cursor=pointer]
+            - listitem [ref=e339]:
+              - generic [ref=e340]: 00:25:21
+              - generic [ref=e341]: operator
+              - generic [ref=e342]: s3_cleared
+              - group [ref=e343]:
+                - generic "detail" [ref=e344] [cursor=pointer]
+            - listitem [ref=e345]:
+              - generic [ref=e346]: 00:25:15
+              - generic [ref=e347]: inpoint
+              - generic [ref=e348]: rtmp_disconnected
+              - group [ref=e349]:
+                - generic "detail" [ref=e350] [cursor=pointer]
+            - listitem [ref=e351]:
+              - generic [ref=e352]: 00:15:16
+              - generic [ref=e353]: inpoint
+              - generic [ref=e354]: rtmp_connected
+              - group [ref=e355]:
+                - generic "detail" [ref=e356] [cursor=pointer]
+            - listitem [ref=e357]:
+              - generic [ref=e358]: 00:14:57
+              - generic [ref=e359]: uploader
+              - generic [ref=e360]: s3_upload_failed
+              - group [ref=e361]:
+                - generic "detail" [ref=e362] [cursor=pointer]
+            - listitem [ref=e363]:
+              - generic [ref=e364]: 00:14:57
+              - generic [ref=e365]: system
+              - generic [ref=e366]: restreamer_started
+              - group [ref=e367]:
+                - generic "detail" [ref=e368] [cursor=pointer]
+            - listitem [ref=e369]:
+              - generic [ref=e370]: 23:37:37
+              - generic [ref=e371]: inpoint
+              - generic [ref=e372]: rtmp_connected
+              - group [ref=e373]:
+                - generic "detail" [ref=e374] [cursor=pointer]
+        - generic [ref=e381]:
+          - heading "Pacing diagnostics" [level=3] [ref=e382]
+          - paragraph [ref=e383]: No event selected

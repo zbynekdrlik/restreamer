@@ -45,7 +45,7 @@ impl DeliveryOrchestrator {
             match oauth::refresh_access_token(&oauth_tokens).await {
                 Ok(resp) => {
                     let new_expires = resp.expires_in.map(|secs| {
-                        (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339()
+                        (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339()
                     });
 
                     if let Err(e) = db::upsert_youtube_oauth(

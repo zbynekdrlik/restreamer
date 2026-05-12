@@ -251,7 +251,7 @@ pub async fn youtube_oauth_callback(
 
     let expires_at = tokens
         .expires_in
-        .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339());
+        .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339());
 
     let label = {
         let raw = params.state.as_deref().unwrap_or("");

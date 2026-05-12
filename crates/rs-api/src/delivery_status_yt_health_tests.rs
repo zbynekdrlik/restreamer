@@ -3,6 +3,7 @@
 //! `DeliveryEndpointMetrics.youtube_health` is populated correctly.
 
 use crate::delivery_status::attach_yt_health;
+use crate::yt_health_test_env::env_guard;
 use rs_core::db::youtube_oauth as yo;
 use rs_core::db::{create_memory_pool, run_migrations, v2};
 use rs_core::models::{DeliveryEndpointMetrics, EndpointConfig};
@@ -62,6 +63,7 @@ async fn pool_with_endpoint(
 
 #[tokio::test]
 async fn attach_yt_health_populates_for_linked_endpoint() {
+    let _g = env_guard().lock().await;
     let server = MockServer::start().await;
     unsafe {
         std::env::set_var("YOUTUBE_API_BASE", server.uri());
@@ -115,6 +117,7 @@ async fn attach_yt_health_no_op_when_unlinked() {
 
 #[tokio::test]
 async fn attach_yt_health_marks_error_on_oauth_invalid() {
+    let _g = env_guard().lock().await;
     let server = MockServer::start().await;
     unsafe {
         std::env::set_var("YOUTUBE_API_BASE", server.uri());
@@ -164,6 +167,7 @@ async fn attach_yt_health_marks_error_on_oauth_invalid() {
 
 #[tokio::test]
 async fn attach_yt_health_marks_unbound_when_key_not_in_list() {
+    let _g = env_guard().lock().await;
     let server = MockServer::start().await;
     unsafe {
         std::env::set_var("YOUTUBE_API_BASE", server.uri());

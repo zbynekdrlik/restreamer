@@ -3,8 +3,15 @@
 use crate::streams::list_streams_for_label;
 use rs_core::db::youtube_oauth as yo;
 use rs_core::db::{create_memory_pool, run_migrations};
+use std::sync::OnceLock;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// Serializes tests that mutate the process-global YOUTUBE_API_BASE env.
+fn env_guard() -> &'static tokio::sync::Mutex<()> {
+    static M: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 async fn pool_with_label(
     label: &str,
@@ -31,6 +38,7 @@ async fn pool_with_label(
 
 #[tokio::test]
 async fn list_streams_for_label_sends_bearer_for_that_label() {
+    let _g = env_guard().lock().await;
     let server = MockServer::start().await;
     unsafe {
         std::env::set_var("YOUTUBE_API_BASE", server.uri());
@@ -56,6 +64,7 @@ async fn list_streams_for_label_sends_bearer_for_that_label() {
 
 #[tokio::test]
 async fn list_streams_for_label_refreshes_when_expired() {
+    let _g = env_guard().lock().await;
     let server = MockServer::start().await;
     unsafe {
         std::env::set_var("YOUTUBE_API_BASE", server.uri());
