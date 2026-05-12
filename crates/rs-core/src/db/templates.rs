@@ -116,7 +116,7 @@ pub async fn get_template_endpoints(
 ) -> Result<Vec<EndpointConfig>> {
     let rows = sqlx::query(
         "SELECT e.id, e.alias, e.service_type, e.stream_key, e.enabled, e.position_last,
-         e.delivered_bytes, e.is_fast, e.created_at, e.updated_at
+         e.delivered_bytes, e.is_fast, e.youtube_oauth_id, e.created_at, e.updated_at
          FROM endpoint_configs e
          INNER JOIN template_endpoints te ON te.endpoint_id = e.id
          WHERE te.template_id = ?1 AND e.enabled = 1
@@ -139,6 +139,7 @@ pub async fn get_template_endpoints(
             is_fast: r.get::<i32, _>("is_fast") != 0,
             pusher: Default::default(),
             prefetch_chunks: None,
+            youtube_oauth_id: r.get("youtube_oauth_id"),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         })
