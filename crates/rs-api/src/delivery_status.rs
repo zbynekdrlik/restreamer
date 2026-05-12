@@ -387,7 +387,7 @@ impl DeliveryOrchestrator {
             };
             if let Some(cfg) = configs.iter().find(|c| c.alias == m.alias) {
                 if cfg.youtube_oauth_id.is_some() && cfg.service_type == "YT_RTMP" {
-                    attach_yt_health_cached(self.pool(), cfg, &mut m).await;
+                    attach_yt_health_cached(self.pool(), cfg, &mut m, None).await;
                 }
             }
             metrics.push(m);
@@ -517,7 +517,14 @@ pub async fn attach_yt_health_cached(
     pool: &sqlx::SqlitePool,
     endpoint: &rs_core::models::EndpointConfig,
     metrics: &mut rs_core::models::DeliveryEndpointMetrics,
+    audit_tx: Option<&tokio::sync::mpsc::Sender<rs_core::audit::AuditRow>>,
 ) {
+    // Capture prior top_issue BEFORE the freshness short-circuit so we can
+    // emit the audit transition only on the slow path.
+    let prior_issue: Option<String> = yt_health_cache()
+        .get(&endpoint.id)
+        .and_then(|e| e.value().1.top_issue.clone());
+
     if let Some(entry) = yt_health_cache().get(&endpoint.id) {
         let (when, h) = entry.value().clone();
         let age = when.elapsed();
@@ -531,5 +538,14 @@ pub async fn attach_yt_health_cached(
     attach_yt_health(pool, endpoint, metrics).await;
     if let Some(h) = metrics.youtube_health.as_ref() {
         yt_health_cache().insert(endpoint.id, (Instant::now(), h.clone()));
+        if let Some(tx) = audit_tx {
+            let _ = crate::delivery_yt_health::record_and_maybe_emit(
+                prior_issue.as_deref(),
+                h.top_issue.as_deref(),
+                &endpoint.alias,
+                tx,
+            )
+            .await;
+        }
     }
 }

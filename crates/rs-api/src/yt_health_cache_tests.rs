@@ -74,7 +74,7 @@ async fn attach_yt_health_cached_calls_api_once_within_window() {
 
     for _ in 0..3 {
         let mut m = empty_metrics(&ep.alias);
-        attach_yt_health_cached(&pool, &ep, &mut m).await;
+        attach_yt_health_cached(&pool, &ep, &mut m, None).await;
         assert!(m.youtube_health.is_some());
     }
     // wiremock's `.expect(1)` panics on Drop if count != 1.
