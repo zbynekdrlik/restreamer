@@ -1820,13 +1820,13 @@ jobs:
             -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
           Write-Host "YouTube OAuth tokens seeded"
 
-      - name: Link e2e-test endpoint to default OAuth
+      - name: Link e2e rtmp endpoint to default OAuth
         shell: powershell
         run: |
           $endpoints = Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/endpoints -Method GET
-          $ep = $endpoints | Where-Object { $_.alias -eq 'e2e-test' }
+          $ep = $endpoints | Where-Object { $_.alias -eq 'e2e rtmp' }
           if ($null -eq $ep) {
-            Write-Host "FATAL: no e2e-test endpoint configured"
+            Write-Host "FATAL: no 'e2e rtmp' endpoint configured"
             exit 1
           }
           $oauths = Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/youtube/oauths -Method GET
@@ -1837,7 +1837,7 @@ jobs:
           }
           $body = @{ oauth_id = $oauth.id } | ConvertTo-Json
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($ep.id)/link-oauth" -Method POST -Body $body -ContentType 'application/json'
-          Write-Host "Linked endpoint $($ep.id) to oauth $($oauth.id)"
+          Write-Host "Linked endpoint $($ep.id) ('e2e rtmp') to oauth $($oauth.id)"
 
       - name: Ensure OBS is running
         shell: powershell

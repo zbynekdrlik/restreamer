@@ -622,8 +622,9 @@ test(testName, async () => {
       await assertYtHealthGood(page);
 
       // Issue #194: assert host-side metric mirror populates youtube_health
-      // for the e2e-test endpoint with health_status="good" within 60s of
-      // deliver_start. Locks the diagnostic regression independently of YT.
+      // for the 'e2e rtmp' endpoint (YT_RTMP push) with health_status="good"
+      // within 60s of deliver_start. Locks the diagnostic regression
+      // independently of YT.
       const hostHealthStart = Date.now();
       let hostHealthAttached = false;
       while (Date.now() - hostHealthStart < 60_000) {
@@ -632,7 +633,7 @@ test(testName, async () => {
           return r.json();
         });
         const ep = (body?.instances?.[0]?.endpoints || []).find(
-          (e: any) => e.alias === "e2e-test",
+          (e: any) => e.alias === "e2e rtmp",
         );
         if (ep?.youtube_health?.health_status === "good") {
           hostHealthAttached = true;
