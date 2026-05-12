@@ -1679,35 +1679,10 @@ test.describe("Navigation", () => {
   });
 });
 
-test.describe("YouTube Health Badge", () => {
-  test("YouTube endpoint node shows health badge after polling", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    // Wait for WebSocket delivery status (includes "YouTube Main" endpoint)
-    // and for the initial YouTube health poll to fire (5s interval detects endpoints, then fetches)
-    const ytNode = page.locator(
-      '.endpoint-node:has(.endpoint-alias:has-text("YouTube Main"))',
-    );
-    await expect(ytNode).toBeVisible({ timeout: 10000 });
-    const badge = ytNode.locator(".yt-health-badge");
-    // Badge renders immediately as "unknown", then updates after poll fetches YouTube status
-    await expect(badge).toHaveClass(/good/, { timeout: 15000 });
-    await expect(badge).toHaveText("good");
-  });
-
-  test("non-YouTube endpoint does not show health badge", async ({ page }) => {
-    await page.goto("/");
-    await page.waitForTimeout(2000);
-
-    const fbNode = page.locator(
-      '.endpoint-node:has(.endpoint-alias:has-text("Facebook Page"))',
-    );
-    await expect(fbNode).toBeVisible({ timeout: 5000 });
-    const badge = fbNode.locator(".yt-health-badge");
-    await expect(badge).toHaveCount(0);
-  });
-});
+// YouTube health badge tests moved to issue #194 — the global polled
+// `store.youtube_health` badge was replaced with a per-endpoint badge
+// keyed off `DeliveryEndpointMetrics.youtube_health`. The new test lives
+// in the YT health gate describe block below.
 
 // --- Endpoint Tree ---
 
@@ -2384,6 +2359,10 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
       });
 
       await page.goto("/");
+      // Give the WS client time to connect before broadcasting; otherwise
+      // the test broadcast fires before any subscriber exists and the
+      // DeliveryStatus is dropped.
+      await page.waitForTimeout(1000);
 
       // Deterministically broadcast a DeliveryStatus carrying youtube_health.bad.
       await page.request.post("/api/v1/_test/ws-broadcast", {

@@ -395,6 +395,10 @@ pub async fn get_delivery_endpoint_statuses(
 
 // --- YouTube OAuth ---
 
+/// Legacy single-row accessor. Migration v25 seeds an empty `default` row
+/// so multi-label list_oauths always observes it; but for callers that
+/// treat "no OAuth grant" as "not authenticated", an empty `refresh_token`
+/// must be reported as `None`.
 pub async fn get_youtube_oauth(pool: &SqlitePool) -> Result<Option<YouTubeOAuth>> {
     let row = sqlx::query(
         "SELECT id, label, access_token, refresh_token, token_uri, client_id, client_secret,
@@ -403,7 +407,8 @@ pub async fn get_youtube_oauth(pool: &SqlitePool) -> Result<Option<YouTubeOAuth>
     )
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|r| YouTubeOAuth {
+    let Some(r) = row else { return Ok(None) };
+    let oauth = YouTubeOAuth {
         id: r.get("id"),
         label: r.get("label"),
         access_token: r.get("access_token"),
@@ -414,7 +419,13 @@ pub async fn get_youtube_oauth(pool: &SqlitePool) -> Result<Option<YouTubeOAuth>
         scopes: r.get("scopes"),
         expires_at: r.get("expires_at"),
         channel_id: r.get("channel_id"),
-    }))
+    };
+    // Empty seeded placeholder => treat as "not authenticated" so legacy
+    // callers behave identically to the pre-v25 missing-row case.
+    if oauth.refresh_token.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(oauth))
 }
 
 #[allow(clippy::too_many_arguments)]
