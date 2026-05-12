@@ -620,6 +620,28 @@ test(testName, async () => {
       // configuration issues. Catches videoIngestionFasterThanRealtime
       // and other CDN-side problems that the regex check misses.
       await assertYtHealthGood(page);
+
+      // Issue #194: assert host-side metric mirror populates youtube_health
+      // for the e2e-test endpoint with health_status="good" within 60s of
+      // deliver_start. Locks the diagnostic regression independently of YT.
+      const hostHealthStart = Date.now();
+      let hostHealthAttached = false;
+      while (Date.now() - hostHealthStart < 60_000) {
+        const body = await page.evaluate(async () => {
+          const r = await fetch("http://10.77.9.204:8910/api/v1/delivery/instances");
+          return r.json();
+        });
+        const ep = (body?.instances?.[0]?.endpoints || []).find(
+          (e: any) => e.alias === "e2e-test",
+        );
+        if (ep?.youtube_health?.health_status === "good") {
+          hostHealthAttached = true;
+          break;
+        }
+        await page.waitForTimeout(5_000);
+      }
+      expect(hostHealthAttached, "host metric must show youtube_health.health_status='good' within 60s").toBe(true);
+
       console.log("==========================================");
       console.log("  YOUTUBE STREAM VERIFICATION PASSED");
       console.log("  Stream receiving + no 'Preparing' state detected");
