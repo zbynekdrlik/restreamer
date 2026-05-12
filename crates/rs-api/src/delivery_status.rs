@@ -387,3 +387,109 @@ impl DeliveryOrchestrator {
         Ok((name, inst_status, server_ip, endpoint_count, metrics))
     }
 }
+
+/// Fetch YT `liveStreams.list` for the endpoint's linked OAuth label,
+/// find the stream whose `cdn.ingestionInfo.streamName` matches the
+/// endpoint's `stream_key`, and attach `YoutubeHealth` to `metrics`.
+///
+/// Errors are mapped to `YoutubeHealth.error` (never propagated) so the
+/// probe never breaks the surrounding monitor loop.
+pub async fn attach_yt_health(
+    pool: &sqlx::SqlitePool,
+    endpoint: &rs_core::models::EndpointConfig,
+    metrics: &mut rs_core::models::DeliveryEndpointMetrics,
+) {
+    use rs_core::models::YoutubeHealth;
+
+    let Some(oauth_id) = endpoint.youtube_oauth_id else {
+        return;
+    };
+    let label = match rs_core::db::youtube_oauth::get_oauth_by_id(pool, oauth_id).await {
+        Ok(Some(o)) => o.label,
+        Ok(None) => {
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("oauth_missing".into()),
+            });
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "yt_health: db lookup failed");
+            return;
+        }
+    };
+
+    match rs_youtube::streams::list_streams_for_label(pool, &label).await {
+        Ok(streams) => {
+            let bound = streams.iter().find(|s| {
+                s.cdn
+                    .as_ref()
+                    .and_then(|c| c.ingestion_info.as_ref())
+                    .and_then(|i| i.stream_name.as_deref())
+                    == Some(endpoint.stream_key.as_str())
+            });
+            metrics.youtube_health = Some(match bound {
+                Some(s) => crate::delivery_yt_health::extract_top_issue(s),
+                None => YoutubeHealth {
+                    stream_status: "unbound".into(),
+                    health_status: "n/a".into(),
+                    top_issue: None,
+                    resolution: None,
+                    frame_rate: None,
+                    age_secs: 0,
+                    error: Some("stream_not_in_mine_list".into()),
+                },
+            });
+        }
+        Err(rs_youtube::YouTubeError::TokenExpired(_)) => {
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("oauth_invalid".into()),
+            });
+        }
+        Err(rs_youtube::YouTubeError::Api { status, .. }) if status == 403 => {
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("oauth_app_not_production".into()),
+            });
+        }
+        Err(rs_youtube::YouTubeError::Api { status, .. }) if status == 429 => {
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("quota_exceeded".into()),
+            });
+        }
+        Err(e) => {
+            tracing::warn!(label = %label, error = %e, "yt_health probe failed");
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("probe_error".into()),
+            });
+        }
+    }
+}
