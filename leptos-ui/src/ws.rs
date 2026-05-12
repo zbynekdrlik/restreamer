@@ -134,6 +134,8 @@ struct WsDeliveryEndpoint {
     delivery_mode: Option<String>,
     #[serde(default)]
     rescue_eta_secs: Option<u64>,
+    #[serde(default)]
+    youtube_health: Option<crate::store::YoutubeHealth>,
 }
 
 /// Compute the WebSocket URL from the current page location.
@@ -183,6 +185,7 @@ async fn load_initial_state(store: DashboardStore) {
                     is_fast: ep.is_fast,
                     delivery_mode: ep.delivery_mode.clone(),
                     rescue_eta_secs: ep.rescue_eta_secs,
+                    youtube_health: ep.youtube_health,
                 })
                 .collect();
             store.delivery.set(DeliveryState {
@@ -326,6 +329,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                             is_fast: ep.is_fast,
                             delivery_mode: ep.delivery_mode.clone(),
                             rescue_eta_secs: ep.rescue_eta_secs,
+                            youtube_health: ep.youtube_health.clone(),
                         }
                     })
                     .collect();

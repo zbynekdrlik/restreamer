@@ -75,6 +75,23 @@ pub struct DeliveryState {
     pub endpoints: Vec<DeliveryEndpointState>,
 }
 
+/// Per-endpoint YT health snapshot (mirrors rs-core::models::YoutubeHealth).
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct YoutubeHealth {
+    pub stream_status: String,
+    pub health_status: String,
+    #[serde(default)]
+    pub top_issue: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub frame_rate: Option<String>,
+    #[serde(default)]
+    pub age_secs: i64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// Per-endpoint delivery metrics.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeliveryEndpointState {
@@ -99,6 +116,7 @@ pub struct DeliveryEndpointState {
     pub is_fast: bool,
     pub delivery_mode: Option<String>,
     pub rescue_eta_secs: Option<u64>,
+    pub youtube_health: Option<YoutubeHealth>,
 }
 
 /// OBS status from WebSocket.
