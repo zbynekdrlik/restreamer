@@ -241,3 +241,69 @@ async fn migrate_v24_is_idempotent() {
 async fn max_schema_version_is_24() {
     assert_eq!(crate::db::MAX_SCHEMA_VERSION, 24);
 }
+
+#[tokio::test]
+async fn migration_v25_adds_label_unique_with_default_backfill() {
+    let pool = crate::db::create_memory_pool().await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap(); // idempotent
+
+    // 1. `label` and `channel_id` columns exist.
+    let cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('youtube_oauth')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for expected in ["label", "channel_id"] {
+        assert!(
+            cols.iter().any(|c| c == expected),
+            "youtube_oauth missing column {expected}; have {cols:?}"
+        );
+    }
+
+    // 2. UNIQUE INDEX on label exists.
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='youtube_oauth'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        indexes.iter().any(|i| i == "idx_youtube_oauth_label"),
+        "missing idx_youtube_oauth_label; have {indexes:?}"
+    );
+
+    // 3. UNIQUE actually enforces — two rows with same label must fail.
+    sqlx::query(
+        "INSERT INTO youtube_oauth (label, access_token, refresh_token, token_uri, client_id, client_secret, scopes)
+         VALUES ('bb','a','r','u','c','s','sc')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let dup = sqlx::query(
+        "INSERT INTO youtube_oauth (label, access_token, refresh_token, token_uri, client_id, client_secret, scopes)
+         VALUES ('bb','a2','r2','u','c','s','sc')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(dup.is_err(), "duplicate label should be rejected");
+
+    // 4. Backfill: legacy row that pre-existed migration must have label='default'.
+    let pool2 = crate::db::create_memory_pool().await.unwrap();
+    crate::db::run_migrations(&pool2).await.unwrap();
+    sqlx::query("UPDATE youtube_oauth SET label = '' WHERE id = 1")
+        .execute(&pool2)
+        .await
+        .unwrap();
+    crate::db::run_migrations(&pool2).await.unwrap();
+    let label: Option<String> = sqlx::query_scalar("SELECT label FROM youtube_oauth WHERE id = 1")
+        .fetch_optional(&pool2)
+        .await
+        .unwrap();
+    assert_eq!(
+        label.as_deref(),
+        Some("default"),
+        "backfill must restore 'default' label"
+    );
+}
