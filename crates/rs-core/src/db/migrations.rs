@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 24;
+pub const MAX_SCHEMA_VERSION: i32 = 25;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -340,6 +340,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             22 => migrate_v22(&mut tx).await?,
             23 => execute_sql_statements(&mut tx, MIGRATION_V23_SQL).await?,
             24 => migrate_v24(&mut tx).await?,
+            25 => migrate_v25(&mut tx).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -740,4 +741,31 @@ async fn migrate_v24(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
         "s3_upload_complete_ts INTEGER",
     )
     .await
+}
+
+/// v25: support multiple YouTube OAuth grants keyed by `label`.
+/// - ADD COLUMN `label TEXT NOT NULL DEFAULT 'default'`
+/// - ADD COLUMN `channel_id TEXT` (nullable; populated when we observe a
+///   liveStream's `snippet.channelId`)
+/// - Backfill any empty/NULL `label` to 'default' (defensive for the
+///   #112 rewound-schema_version recovery path)
+/// - CREATE UNIQUE INDEX on `label`
+async fn migrate_v25(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(
+        tx,
+        "youtube_oauth",
+        "label",
+        "label TEXT NOT NULL DEFAULT 'default'",
+    )
+    .await?;
+    add_column_if_missing(tx, "youtube_oauth", "channel_id", "channel_id TEXT").await?;
+    sqlx::query("UPDATE youtube_oauth SET label = 'default' WHERE label IS NULL OR label = ''")
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_youtube_oauth_label ON youtube_oauth(label)",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
