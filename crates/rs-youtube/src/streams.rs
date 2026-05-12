@@ -3,7 +3,12 @@ use crate::{Result, YouTubeError};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-const YOUTUBE_API_BASE: &str = "https://www.googleapis.com/youtube/v3";
+/// Default YouTube Data API base URL. Overridable via the
+/// `YOUTUBE_API_BASE` environment variable for tests (wiremock).
+fn youtube_api_base() -> String {
+    std::env::var("YOUTUBE_API_BASE")
+        .unwrap_or_else(|_| "https://www.googleapis.com/youtube/v3".to_string())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiveStream {
@@ -38,6 +43,19 @@ pub struct StreamCdn {
     pub resolution: Option<String>,
     #[serde(default)]
     pub frame_rate: Option<String>,
+    #[serde(default)]
+    pub ingestion_info: Option<IngestionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestionInfo {
+    #[serde(default)]
+    pub stream_name: Option<String>,
+    #[serde(default)]
+    pub ingestion_address: Option<String>,
+    #[serde(default)]
+    pub backup_ingestion_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,7 +106,7 @@ pub struct BroadcastStatus {
 pub async fn list_live_streams(access_token: &str) -> Result<Vec<LiveStream>> {
     let client = Client::new();
     let resp = client
-        .get(format!("{YOUTUBE_API_BASE}/liveStreams"))
+        .get(format!("{}/liveStreams", youtube_api_base()))
         .bearer_auth(access_token)
         .query(&[("part", "id,snippet,status,cdn"), ("mine", "true")])
         .send()
@@ -119,7 +137,7 @@ pub async fn list_live_broadcasts(access_token: &str) -> Result<Vec<LiveBroadcas
     // Try mine=true first to get all broadcasts for the authenticated user.
     // This returns broadcasts in all lifecycle states (ready, testing, live, complete).
     let resp = client
-        .get(format!("{YOUTUBE_API_BASE}/liveBroadcasts"))
+        .get(format!("{}/liveBroadcasts", youtube_api_base()))
         .bearer_auth(access_token)
         .query(&[("part", "id,snippet,status"), ("mine", "true")])
         .send()
@@ -156,6 +174,57 @@ pub async fn get_broadcast_statuses(access_token: &str) -> Result<Vec<(String, S
         .into_iter()
         .map(|b| (b.snippet.title, b.status.life_cycle_status))
         .collect())
+}
+
+/// Refresh-if-needed wrapper around `list_live_streams`. Uses the OAuth
+/// grant identified by `label` from `youtube_oauth`.
+///
+/// - If `expires_at` is in the past (or absent), refreshes via the
+///   `token_uri` and persists the new access token + expiry.
+/// - Always passes the resulting bearer to `liveStreams.list(mine=true)`.
+pub async fn list_streams_for_label(
+    pool: &sqlx::SqlitePool,
+    label: &str,
+) -> crate::Result<Vec<LiveStream>> {
+    use rs_core::db::youtube_oauth as yo;
+
+    let mut oauth = yo::get_oauth_by_label(pool, label)
+        .await
+        .map_err(|e| crate::YouTubeError::Db(e.to_string()))?
+        .ok_or_else(|| crate::YouTubeError::OAuth(format!("no oauth grant for label '{label}'")))?;
+
+    if crate::oauth::is_token_expired(oauth.expires_at.as_deref()) {
+        let tokens = crate::oauth::OAuthTokens {
+            access_token: oauth.access_token.clone(),
+            refresh_token: oauth.refresh_token.clone(),
+            token_uri: oauth.token_uri.clone(),
+            client_id: oauth.client_id.clone(),
+            client_secret: oauth.client_secret.clone(),
+            scopes: oauth.scopes.clone(),
+            expires_at: oauth.expires_at.clone(),
+        };
+        let refreshed = crate::oauth::refresh_access_token(&tokens).await?;
+        let new_expires = chrono::Utc::now()
+            + chrono::Duration::seconds(refreshed.expires_in.unwrap_or(3600) as i64);
+        let new_expires_str = new_expires.to_rfc3339();
+        yo::upsert_oauth_by_label(
+            pool,
+            label,
+            &refreshed.access_token,
+            &oauth.refresh_token,
+            &oauth.token_uri,
+            &oauth.client_id,
+            &oauth.client_secret,
+            &oauth.scopes,
+            Some(&new_expires_str),
+        )
+        .await
+        .map_err(|e| crate::YouTubeError::Db(e.to_string()))?;
+        oauth.access_token = refreshed.access_token;
+        oauth.expires_at = Some(new_expires_str);
+    }
+
+    list_live_streams(&oauth.access_token).await
 }
 
 #[cfg(test)]

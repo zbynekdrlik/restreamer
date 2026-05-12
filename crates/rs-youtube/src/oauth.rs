@@ -42,7 +42,7 @@ struct RefreshRequest<'a> {
 pub struct TokenResponse {
     pub access_token: String,
     pub refresh_token: Option<String>,
-    pub expires_in: Option<u64>,
+    pub expires_in: Option<i64>,
     pub token_type: String,
     pub scope: Option<String>,
 }
