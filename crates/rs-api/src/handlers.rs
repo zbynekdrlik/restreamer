@@ -698,6 +698,25 @@ pub async fn delete_endpoint(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(serde::Deserialize)]
+pub struct LinkOauthBody {
+    pub oauth_id: Option<i64>,
+}
+
+pub async fn link_endpoint_oauth(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(body): Json<LinkOauthBody>,
+) -> Result<StatusCode, StatusCode> {
+    rs_core::db::v2::set_endpoint_youtube_oauth_id(&state.pool, id, body.oauth_id)
+        .await
+        .map_err(|e| {
+            error!("link_endpoint_oauth failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn attach_endpoint_to_event(
     State(state): State<AppState>,
     axum::extract::Path((event_id, endpoint_id)): axum::extract::Path<(i64, i64)>,

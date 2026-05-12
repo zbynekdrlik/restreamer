@@ -116,6 +116,10 @@ pub fn build_router(state: AppState) -> Router {
                 .put(handlers::update_endpoint)
                 .delete(handlers::delete_endpoint),
         )
+        .route(
+            "/endpoints/{id}/link-oauth",
+            post(handlers::link_endpoint_oauth),
+        )
         // Template CRUD
         .route(
             "/templates",
@@ -164,6 +168,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/obs/stop-stream", post(handlers::obs_stop_stream))
         // YouTube
         .route("/youtube/status", get(youtube::youtube_status))
+        .route("/youtube/oauths", get(youtube::list_oauths))
         .route("/youtube/oauth/seed", post(youtube::youtube_oauth_seed))
         .route("/youtube/oauth/start", get(youtube::youtube_oauth_start))
         .route(

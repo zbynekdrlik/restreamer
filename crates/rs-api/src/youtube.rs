@@ -292,3 +292,15 @@ pub async fn youtube_oauth_callback(
             .to_string(),
     ))
 }
+
+pub async fn list_oauths(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<rs_core::models::YouTubeOAuth>>, StatusCode> {
+    rs_core::db::youtube_oauth::list_oauths(&state.pool)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("list_oauths failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
