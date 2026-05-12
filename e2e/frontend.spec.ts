@@ -2373,4 +2373,63 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
       /^\d+s \/ live cache$/,
     );
   });
+
+  test.describe("YT health badge", () => {
+    test("endpoint card renders YT health badge for ytbb-style payload", async ({ page }) => {
+      const consoleMessages: string[] = [];
+      page.on("console", (msg) => {
+        if (msg.type() === "error" || msg.type() === "warning") {
+          consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
+        }
+      });
+
+      await page.goto("/");
+
+      // Deterministically broadcast a DeliveryStatus carrying youtube_health.bad.
+      await page.request.post("/api/v1/_test/ws-broadcast", {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "inst-1",
+            status: "delivering",
+            server_ip: "127.0.0.1",
+            endpoint_count: 1,
+            endpoints: [
+              {
+                alias: "ytbb",
+                alive: true,
+                current_chunk_id: 0,
+                bytes_processed_total: 0,
+                chunks_processed: 0,
+                chunk_delay_secs: 0.0,
+                ffmpeg_restart_count: 0,
+                reconnect_count: 0,
+                is_fast: false,
+                youtube_health: {
+                  stream_status: "active",
+                  health_status: "bad",
+                  top_issue: "videoIngestionStarved",
+                  resolution: "1920x1080",
+                  frame_rate: "30.0",
+                  age_secs: 3,
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      const card = page.locator('[data-testid="endpoint-card"]', { hasText: "ytbb" });
+      await expect(card).toBeVisible();
+      const badge = card.locator('[data-testid="yt-health-badge"]');
+      await expect(badge).toBeVisible();
+      await expect(badge).toHaveAttribute("data-health", "bad");
+      await badge.hover();
+      const tooltip = card.locator('[data-testid="yt-health-tooltip"]');
+      await expect(tooltip).toContainText("videoIngestionStarved");
+      await expect(tooltip).toContainText("1920x1080");
+
+      expect(consoleMessages).toEqual([]);
+    });
+  });
 });
