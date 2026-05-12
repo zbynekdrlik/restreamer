@@ -2351,12 +2351,9 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
 
   test.describe("YT health badge", () => {
     test("endpoint card renders YT health badge for ytbb-style payload", async ({ page }) => {
-      const consoleMessages: string[] = [];
-      page.on("console", (msg) => {
-        if (msg.type() === "error" || msg.type() === "warning") {
-          consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
-        }
-      });
+      // The module-level beforeEach already wires `consoleMessages` and the
+      // afterEach asserts it is empty modulo the Chromium subresource-integrity
+      // warning. No local console capture needed.
 
       await page.goto("/");
       // Give the WS client time to connect before broadcasting; otherwise
@@ -2407,8 +2404,6 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
       const tooltip = card.locator('[data-testid="yt-health-tooltip"]');
       await expect(tooltip).toContainText("videoIngestionStarved");
       await expect(tooltip).toContainText("1920x1080");
-
-      expect(consoleMessages).toEqual([]);
     });
   });
 });
