@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 26;
+pub const MAX_SCHEMA_VERSION: i32 = 27;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -342,6 +342,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             24 => migrate_v24(&mut tx).await?,
             25 => migrate_v25(&mut tx).await?,
             26 => migrate_v26(&mut tx).await?,
+            27 => migrate_v27(&mut tx).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -791,6 +792,32 @@ async fn migrate_v26(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
         "youtube_oauth_id",
         "youtube_oauth_id INTEGER REFERENCES youtube_oauth(id)",
     )
+    .await?;
+    Ok(())
+}
+
+/// v27 — multi-channel OAuth Device Flow support.
+/// - `youtube_oauth.connected_at TEXT` — RFC3339 timestamp set on Device Flow grant.
+///   Idempotent via `add_column_if_missing` (column may not exist yet on legacy DBs).
+/// - `oauth_device_grants` — transient state for pending Device Flow grants. Rows live
+///   from `device-start` until `granted` / `denied` / `expired` / `error`; granted rows
+///   are deleted (tokens move into `youtube_oauth`).
+async fn migrate_v27(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    add_column_if_missing(tx, "youtube_oauth", "connected_at", "connected_at TEXT").await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS oauth_device_grants (
+            label            TEXT PRIMARY KEY,
+            device_code      TEXT NOT NULL,
+            user_code        TEXT NOT NULL,
+            verification_url TEXT NOT NULL,
+            interval_secs    INTEGER NOT NULL,
+            expires_at       TEXT NOT NULL,
+            status           TEXT NOT NULL DEFAULT 'pending',
+            error            TEXT,
+            started_at       TEXT NOT NULL
+        )",
+    )
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
