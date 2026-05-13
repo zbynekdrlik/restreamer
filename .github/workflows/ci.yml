@@ -1812,6 +1812,7 @@ jobs:
             throw "YOUTUBE_REFRESH_TOKEN secret not set"
           }
           $body = @{
+            label = "default"
             refresh_token = $env:YOUTUBE_REFRESH_TOKEN
             client_id = $env:YOUTUBE_CLIENT_ID
             client_secret = $env:YOUTUBE_CLIENT_SECRET
