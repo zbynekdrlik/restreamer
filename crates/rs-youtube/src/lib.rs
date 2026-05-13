@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod device_flow;
 pub mod oauth;
 pub mod quota;
 pub mod streams;
@@ -50,5 +51,7 @@ pub struct OAuthTokens {
 
 #[cfg(test)]
 mod quota_tests;
+#[cfg(test)]
+mod device_flow_tests;
 #[cfg(test)]
 mod streams_for_label_tests;
