@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use crate::state::AppState;
 
 const GOOGLE_OAUTH_BASE: &str = "https://oauth2.googleapis.com";
-const SCOPE: &str = "https://www.googleapis.com/auth/youtube.readonly openid";
+const SCOPE: &str = "https://www.googleapis.com/auth/youtube.readonly";
 const LABEL_PATTERN: &str = "^[a-z0-9_]{1,32}$";
 
 fn is_valid_label(s: &str) -> bool {

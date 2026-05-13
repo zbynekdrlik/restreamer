@@ -110,7 +110,11 @@ pub async fn list_live_streams(access_token: &str) -> Result<Vec<LiveStream>> {
     let resp = client
         .get(format!("{}/liveStreams", youtube_api_base()))
         .bearer_auth(access_token)
-        .query(&[("part", "id,snippet,status,cdn"), ("mine", "true")])
+        .query(&[
+            ("part", "id,snippet,status,cdn"),
+            ("mine", "true"),
+            ("maxResults", "50"),
+        ])
         .send()
         .await?;
 
@@ -141,7 +145,11 @@ pub async fn list_live_broadcasts(access_token: &str) -> Result<Vec<LiveBroadcas
     let resp = client
         .get(format!("{}/liveBroadcasts", youtube_api_base()))
         .bearer_auth(access_token)
-        .query(&[("part", "id,snippet,status"), ("mine", "true")])
+        .query(&[
+            ("part", "id,snippet,status"),
+            ("mine", "true"),
+            ("maxResults", "50"),
+        ])
         .send()
         .await?;
 
