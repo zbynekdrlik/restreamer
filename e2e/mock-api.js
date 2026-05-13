@@ -16,6 +16,11 @@ app.use(express.static(distDir));
 
 // --- Mock data ---
 
+// OAuth Device Flow state for the OAuthAuthorize E2E test.
+// Keyed by label.  Each entry: { user_code, verification_url, status, channel_id }
+let oauthGrants = {};
+let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
+
 // Scenario selection — set by `POST /api/v1/_test/scenario` before page.goto.
 // Supported values:
 //   - "default" (initial state)
@@ -632,6 +637,72 @@ app.get("/api/v1/youtube/status", (_req, res) => {
   });
 });
 
+// --- OAuth Device Flow mock endpoints ---
+
+// List authorized channels (initially empty; grows when _test/oauth-device-grant fires).
+app.get("/api/v1/youtube/oauths", (_req, res) => {
+  res.json(oauthRows);
+});
+
+// Start device authorization: always returns a fixed mock code.
+app.post("/api/v1/youtube/oauth/device-start", (req, res) => {
+  const label = (req.body && req.body.label) || "unknown";
+  if (oauthGrants[label]) {
+    return res.status(409).json({ error: "Already authorized" });
+  }
+  oauthGrants[label] = {
+    user_code: "AB-CD-12",
+    verification_url: "https://google.com/device",
+    status: "pending",
+    channel_id: null,
+  };
+  res.json({
+    user_code: "AB-CD-12",
+    verification_url: "https://google.com/device",
+    expires_in: 1800,
+  });
+});
+
+// Poll status: returns "pending" until the test fixture calls _test/oauth-device-grant.
+app.get("/api/v1/youtube/oauth/device-status", (req, res) => {
+  const label = req.query.label || "";
+  const grant = oauthGrants[label];
+  if (!grant) {
+    return res.status(404).json({ error: "No pending grant for label" });
+  }
+  res.json({
+    status: grant.status,
+    user_code: grant.user_code,
+    verification_url: grant.verification_url,
+    channel_id: grant.channel_id,
+    error: null,
+  });
+});
+
+// Test fixture: simulate the user completing Device Flow.
+app.post("/api/v1/_test/oauth-device-grant", (req, res) => {
+  const label = (req.body && req.body.label) || "unknown";
+  const channel_id = (req.body && req.body.channel_id) || null;
+  if (oauthGrants[label]) {
+    oauthGrants[label].status = "granted";
+    oauthGrants[label].channel_id = channel_id;
+  }
+  // Persist as a row so GET /api/v1/youtube/oauths reflects the new channel.
+  const existing = oauthRows.findIndex((r) => r.label === label);
+  const row = {
+    id: existing >= 0 ? oauthRows[existing].id : oauthRows.length + 1,
+    label,
+    channel_id,
+    connected_at: new Date().toISOString(),
+  };
+  if (existing >= 0) {
+    oauthRows[existing] = row;
+  } else {
+    oauthRows.push(row);
+  }
+  res.json({ ok: true });
+});
+
 // Diagnostics: pacing time-series (empty series for all E2E tests — no real
 // chunks exist in the mock, but the endpoint must return a valid response so
 // the panel renders without errors).
@@ -655,6 +726,8 @@ app.post("/api/v1/__reset", (_req, res) => {
   rtmpTickStartMs = null;
   rtmpStableSecsOverride = null;
   auditIdCounter = 0;
+  oauthGrants = {};
+  oauthRows = [];
   res.json({ reset: true });
 });
 

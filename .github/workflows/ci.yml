@@ -729,6 +729,8 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Start mock API server (serves frontend + API + WebSocket)
         working-directory: e2e
+        env:
+          RESTREAMER_TEST_HOOKS: "1"
         run: node mock-api.js &
       - name: Wait for server
         run: |

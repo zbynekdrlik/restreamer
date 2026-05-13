@@ -354,3 +354,57 @@ pub async fn device_status(
         None => Err(StatusCode::NOT_FOUND),
     }
 }
+
+#[derive(Debug, serde::Deserialize)]
+pub struct TestGrantBody {
+    pub label: String,
+    pub channel_id: Option<String>,
+}
+
+/// Test fixture: pretend the operator just completed Device Flow for `label`.
+/// Persists a fake refresh token and channel_id, deletes any pending grant,
+/// emits the OAuthGranted audit row. Refuses unless the
+/// `RESTREAMER_TEST_HOOKS=1` env var is set.
+pub async fn test_grant_now(
+    State(state): State<AppState>,
+    Json(body): Json<TestGrantBody>,
+) -> Result<StatusCode, StatusCode> {
+    if std::env::var("RESTREAMER_TEST_HOOKS").as_deref() != Ok("1") {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    rs_core::db::youtube_oauth::upsert_oauth_by_label(
+        &state.pool,
+        &body.label,
+        "test_AT",
+        "test_RT",
+        "https://oauth2.googleapis.com/token",
+        "test_cid",
+        "test_csec",
+        SCOPE,
+        Some(&(chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = sqlx::query(
+        "UPDATE youtube_oauth SET channel_id = ?1, connected_at = ?2 WHERE label = ?3",
+    )
+    .bind(&body.channel_id)
+    .bind(&now)
+    .bind(&body.label)
+    .execute(&state.pool)
+    .await;
+    let _ = rs_core::db::oauth_device_grants::delete(&state.pool, &body.label).await;
+    let row = rs_core::audit::AuditRow {
+        severity: rs_core::audit::Severity::Info,
+        source: rs_core::audit::Source::Operator,
+        event_id: None,
+        instance_id: None,
+        endpoint: None,
+        action: rs_core::audit::Action::OAuthGranted,
+        detail: serde_json::json!({"label": body.label, "channel_id": body.channel_id}),
+        ts_override: None,
+    };
+    let _ = state.audit_tx.send(row).await;
+    Ok(StatusCode::OK)
+}

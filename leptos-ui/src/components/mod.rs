@@ -1,6 +1,7 @@
 //! UI components for the Restreamer dashboard.
 
 pub mod add_endpoint_modal;
+pub mod oauth_authorize;
 pub mod audit_panel;
 mod confirm_modal;
 pub mod endpoint_history;

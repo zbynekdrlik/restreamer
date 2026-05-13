@@ -192,7 +192,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/diag/dump", post(crate::diag::diag_dump_handler))
         // Test hooks for CI E2E testing
         .route("/_test/s3-block", post(handlers::test_s3_block))
-        .route("/_test/s3-unblock", post(handlers::test_s3_unblock));
+        .route("/_test/s3-unblock", post(handlers::test_s3_unblock))
+        .route(
+            "/_test/oauth-device-grant",
+            post(crate::oauth_device::test_grant_now),
+        );
 
     // Allow any origin so the dashboard is accessible from LAN devices
     let cors = CorsLayer::new()

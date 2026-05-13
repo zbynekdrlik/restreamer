@@ -9,6 +9,7 @@ use super::audit_panel::AuditPanel;
 use super::confirm_modal::ConfirmModal;
 use super::endpoint_history::EndpointHistory;
 use super::endpoint_remove_confirm_modal::EndpointRemoveConfirmModal;
+use super::oauth_authorize::OAuthAuthorize;
 use super::pacing_panel::PacingPanel;
 use super::upload_strip::UploadStrip;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
@@ -40,6 +41,7 @@ pub fn OperatorDashboard() -> impl IntoView {
                 <aside class="operator-dashboard__sidebar">
                     <AuditPanel />
                     <PacingPanel />
+                    <OAuthAuthorize />
                 </aside>
             </div>
             <AddEndpointModal show=show_add_modal />
