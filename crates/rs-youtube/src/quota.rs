@@ -4,7 +4,9 @@
 //! process — Google's quota is per-project, not per-channel/endpoint.
 
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+#[cfg(test)]
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
 pub struct QuotaExhausted;
