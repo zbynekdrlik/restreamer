@@ -11,6 +11,7 @@ fn liveStream_with(top_issue: Option<&str>, health: &str) -> LiveStream {
         id: "s1".into(),
         snippet: StreamSnippet {
             title: "ytbb".into(),
+            channel_id: None,
         },
         status: StreamStatus {
             stream_status: "active".into(),
