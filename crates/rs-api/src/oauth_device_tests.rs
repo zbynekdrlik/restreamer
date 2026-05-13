@@ -27,10 +27,16 @@ async fn device_start_rejects_invalid_label() {
     let state = make_state_with_device_config("http://unused").await;
     let r = device_start(
         State(state),
-        Json(DeviceStartBody { label: "Bad Label!".into() }),
-    ).await;
-    assert!(matches!(r, Err(StatusCode::BAD_REQUEST)),
-        "invalid label must yield 400; got {:?}", r.err());
+        Json(DeviceStartBody {
+            label: "Bad Label!".into(),
+        }),
+    )
+    .await;
+    assert!(
+        matches!(r, Err(StatusCode::BAD_REQUEST)),
+        "invalid label must yield 400; got {:?}",
+        r.err()
+    );
 }
 
 #[tokio::test]
@@ -38,13 +44,20 @@ async fn device_start_409_when_label_already_authorized() {
     use wiremock::MockServer;
     let server = MockServer::start().await;
     let state = make_state_with_device_config(&server.uri()).await;
-    yo::upsert_oauth_by_label(&state.pool, "bb", "AT", "RT",
-        "https://oauth2.googleapis.com/token", "cid", "csec", "scope",
-        Some("2099-01-01T00:00:00Z")).await.unwrap();
-    let r = device_start(
-        State(state),
-        Json(DeviceStartBody { label: "bb".into() }),
-    ).await;
+    yo::upsert_oauth_by_label(
+        &state.pool,
+        "bb",
+        "AT",
+        "RT",
+        "https://oauth2.googleapis.com/token",
+        "cid",
+        "csec",
+        "scope",
+        Some("2099-01-01T00:00:00Z"),
+    )
+    .await
+    .unwrap();
+    let r = device_start(State(state), Json(DeviceStartBody { label: "bb".into() })).await;
     assert!(matches!(r, Err(StatusCode::CONFLICT)));
 }
 
@@ -60,10 +73,7 @@ async fn device_start_happy_path_persists_grant() {
         .mount(&server).await;
     let state = make_state_with_device_config(&server.uri()).await;
     let pool = state.pool.clone();
-    let r = device_start(
-        State(state),
-        Json(DeviceStartBody { label: "bb".into() }),
-    ).await;
+    let r = device_start(State(state), Json(DeviceStartBody { label: "bb".into() })).await;
     let Json(resp): Json<DeviceStartResponse> = r.expect("ok");
     assert_eq!(resp.user_code, "AB-CD-12");
     assert_eq!(resp.verification_url, "https://www.google.com/device");

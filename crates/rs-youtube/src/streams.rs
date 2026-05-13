@@ -22,6 +22,8 @@ pub struct LiveStream {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamSnippet {
     pub title: String,
+    #[serde(default, rename = "channelId")]
+    pub channel_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

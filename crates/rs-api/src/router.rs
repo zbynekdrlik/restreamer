@@ -169,6 +169,14 @@ pub fn build_router(state: AppState) -> Router {
         // YouTube
         .route("/youtube/status", get(youtube::youtube_status))
         .route("/youtube/oauths", get(youtube::list_oauths))
+        .route(
+            "/youtube/oauth/device-start",
+            post(crate::oauth_device::device_start),
+        )
+        .route(
+            "/youtube/oauth/device-status",
+            get(crate::oauth_device::device_status),
+        )
         .route("/youtube/oauth/seed", post(youtube::youtube_oauth_seed))
         .route("/youtube/oauth/start", get(youtube::youtube_oauth_start))
         .route(
