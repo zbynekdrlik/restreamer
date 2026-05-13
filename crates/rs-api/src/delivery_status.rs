@@ -527,7 +527,18 @@ fn yt_health_cache() -> &'static dashmap::DashMap<i64, (Instant, rs_core::models
     C.get_or_init(dashmap::DashMap::new)
 }
 
-/// 15 s minimum interval per endpoint id.
+/// Adaptive cache TTL for the YT health probe. 60s when both `health_status`
+/// is `good` AND no `top_issue` is set AND no `error` is present; 15s otherwise.
+/// Spec section 5.
+pub fn ttl_for_health(h: &rs_core::models::YoutubeHealth) -> Duration {
+    if h.health_status == "good" && h.top_issue.is_none() && h.error.is_none() {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(15)
+    }
+}
+
+/// Adaptive-TTL minimum interval per endpoint id (see `ttl_for_health`).
 /// Returns the cached value (with refreshed `age_secs`) if still fresh;
 /// otherwise calls `attach_yt_health` and stores the result.
 pub async fn attach_yt_health_cached(
@@ -545,7 +556,7 @@ pub async fn attach_yt_health_cached(
     if let Some(entry) = yt_health_cache().get(&endpoint.id) {
         let (when, h) = entry.value().clone();
         let age = when.elapsed();
-        if age < Duration::from_secs(15) {
+        if age < ttl_for_health(&h) {
             let mut h_aged = h;
             h_aged.age_secs = age.as_secs() as i64;
             metrics.youtube_health = Some(h_aged);
