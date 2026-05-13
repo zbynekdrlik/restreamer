@@ -53,8 +53,89 @@ pub async fn check_all_youtube_status(pool: &sqlx::SqlitePool) -> Vec<YouTubeSta
     out
 }
 
-pub async fn youtube_status(State(state): State<AppState>) -> Json<Vec<YouTubeStatusPerChannel>> {
-    Json(check_all_youtube_status(&state.pool).await)
+#[derive(Debug, serde::Serialize)]
+pub struct YouTubeStreamInfo {
+    pub title: String,
+    pub stream_status: String,
+    pub health_status: Option<String>,
+    pub configuration_issues: Vec<String>,
+    pub cdn_resolution: Option<String>,
+    pub cdn_frame_rate: Option<String>,
+    pub cdn_ingestion_type: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct YouTubeStatusResponse {
+    pub authenticated: bool,
+    pub stream_receiving: Option<bool>,
+    pub stream_count: usize,
+    pub streams: Vec<YouTubeStreamInfo>,
+    pub error: Option<String>,
+}
+
+/// Legacy single-channel (`label = "default"`) status endpoint. CI gates +
+/// dashboards consume this shape. Multi-channel listing lives at
+/// `/youtube/oauths`. Internal refactor kept the shape stable across PR #197.
+pub async fn youtube_status(State(state): State<AppState>) -> Json<YouTubeStatusResponse> {
+    let oauth = match rs_core::db::youtube_oauth::get_oauth_by_label(&state.pool, "default").await {
+        Ok(Some(o)) if !o.refresh_token.is_empty() => o,
+        _ => {
+            return Json(YouTubeStatusResponse {
+                authenticated: false,
+                stream_receiving: None,
+                stream_count: 0,
+                streams: Vec::new(),
+                error: None,
+            });
+        }
+    };
+    let _ = oauth;
+    match rs_youtube::streams::list_streams_for_label(&state.pool, "default").await {
+        Ok(list) => {
+            let stream_receiving = Some(list.iter().any(|s| s.status.stream_status == "active"));
+            let stream_count = list.len();
+            let streams: Vec<YouTubeStreamInfo> = list
+                .into_iter()
+                .map(|s| {
+                    let issues = s
+                        .status
+                        .health_status
+                        .as_ref()
+                        .map(|h| {
+                            h.configuration_issues
+                                .iter()
+                                .map(|i| format!("{}: {} ({})", i.issue_type, i.reason, i.severity))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let cdn = s.cdn.as_ref();
+                    YouTubeStreamInfo {
+                        title: s.snippet.title,
+                        stream_status: s.status.stream_status,
+                        health_status: s.status.health_status.map(|h| h.status),
+                        configuration_issues: issues,
+                        cdn_resolution: cdn.and_then(|c| c.resolution.clone()),
+                        cdn_frame_rate: cdn.and_then(|c| c.frame_rate.clone()),
+                        cdn_ingestion_type: cdn.and_then(|c| c.ingestion_type.clone()),
+                    }
+                })
+                .collect();
+            Json(YouTubeStatusResponse {
+                authenticated: true,
+                stream_receiving,
+                stream_count,
+                streams,
+                error: None,
+            })
+        }
+        Err(e) => Json(YouTubeStatusResponse {
+            authenticated: true,
+            stream_receiving: None,
+            stream_count: 0,
+            streams: Vec::new(),
+            error: Some(format!("{e}")),
+        }),
+    }
 }
 
 #[derive(Deserialize)]

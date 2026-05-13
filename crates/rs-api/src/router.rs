@@ -893,16 +893,15 @@ mod tests {
             .await
             .unwrap();
 
-        // Migration v25 seeds an empty `default` row so multi-label list_oauths
-        // is non-empty; check_all_youtube_status reports it as unauthenticated.
+        // Legacy single-channel shape — CI gate consumer relies on this.
+        // No refresh_token on the v25-seeded default row -> authenticated=false.
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .unwrap();
-        let arr: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["label"], "default");
-        assert_eq!(arr[0]["authenticated"], false);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["authenticated"], false);
+        assert_eq!(v["stream_count"], 0);
     }
 
     #[tokio::test]
