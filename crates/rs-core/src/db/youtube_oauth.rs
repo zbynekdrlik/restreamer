@@ -9,7 +9,7 @@ use sqlx::Row;
 use sqlx::sqlite::SqlitePool;
 
 const SELECT_COLS: &str = "id, label, access_token, refresh_token, token_uri, client_id, client_secret, scopes, \
-     expires_at, channel_id";
+     expires_at, channel_id, connected_at";
 
 fn row_to_oauth(r: sqlx::sqlite::SqliteRow) -> YouTubeOAuth {
     YouTubeOAuth {
@@ -23,6 +23,7 @@ fn row_to_oauth(r: sqlx::sqlite::SqliteRow) -> YouTubeOAuth {
         scopes: r.get("scopes"),
         expires_at: r.get("expires_at"),
         channel_id: r.get("channel_id"),
+        connected_at: r.get("connected_at"),
     }
 }
 

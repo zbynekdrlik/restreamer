@@ -157,6 +157,9 @@ pub struct YouTubeOAuth {
     /// the first successful probe.
     #[serde(default)]
     pub channel_id: Option<String>,
+    /// RFC3339 timestamp when the Device Flow grant was completed.
+    #[serde(default)]
+    pub connected_at: Option<String>,
 }
 
 fn default_oauth_label() -> String {

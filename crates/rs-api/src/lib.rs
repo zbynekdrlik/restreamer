@@ -48,6 +48,8 @@ mod delivery_status_yt_health_tests;
 mod yt_health_cache_tests;
 #[cfg(test)]
 mod adaptive_ttl_tests;
+#[cfg(test)]
+mod oauth_device_tests;
 
 #[cfg(test)]
 mod yt_health_audit_tests;
