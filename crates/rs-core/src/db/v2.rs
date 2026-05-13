@@ -5,7 +5,6 @@ use sqlx::sqlite::SqlitePool;
 use crate::error::{CoreError, Result};
 use crate::models::{
     DeliveryEndpointStatus, DeliveryInstance, EndpointConfig, PusherKind, StreamingEvent,
-    YouTubeOAuth,
 };
 
 /// Parse a `pusher` TEXT column value from the database into `PusherKind`.
@@ -391,78 +390,6 @@ pub async fn get_delivery_endpoint_statuses(
             last_check_at: r.get("last_check_at"),
         })
         .collect())
-}
-
-// --- YouTube OAuth ---
-
-/// Legacy single-row accessor. Migration v25 seeds an empty `default` row
-/// so multi-label list_oauths always observes it; but for callers that
-/// treat "no OAuth grant" as "not authenticated", an empty `refresh_token`
-/// must be reported as `None`.
-pub async fn get_youtube_oauth(pool: &SqlitePool) -> Result<Option<YouTubeOAuth>> {
-    let row = sqlx::query(
-        "SELECT id, label, access_token, refresh_token, token_uri, client_id, client_secret,
-         scopes, expires_at, channel_id, connected_at
-         FROM youtube_oauth WHERE label = 'default'",
-    )
-    .fetch_optional(pool)
-    .await?;
-    let Some(r) = row else { return Ok(None) };
-    let oauth = YouTubeOAuth {
-        id: r.get("id"),
-        label: r.get("label"),
-        access_token: r.get("access_token"),
-        refresh_token: r.get("refresh_token"),
-        token_uri: r.get("token_uri"),
-        client_id: r.get("client_id"),
-        client_secret: r.get("client_secret"),
-        scopes: r.get("scopes"),
-        expires_at: r.get("expires_at"),
-        channel_id: r.get("channel_id"),
-        connected_at: r.get("connected_at"),
-    };
-    // Empty seeded placeholder => treat as "not authenticated" so legacy
-    // callers behave identically to the pre-v25 missing-row case.
-    if oauth.refresh_token.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(oauth))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn upsert_youtube_oauth(
-    pool: &SqlitePool,
-    access_token: &str,
-    refresh_token: &str,
-    token_uri: &str,
-    client_id: &str,
-    client_secret: &str,
-    scopes: &str,
-    expires_at: Option<&str>,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO youtube_oauth
-            (label, access_token, refresh_token, token_uri, client_id, client_secret, scopes, expires_at)
-         VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(label) DO UPDATE SET
-            access_token = excluded.access_token,
-            refresh_token = excluded.refresh_token,
-            token_uri = excluded.token_uri,
-            client_id = excluded.client_id,
-            client_secret = excluded.client_secret,
-            scopes = excluded.scopes,
-            expires_at = excluded.expires_at",
-    )
-    .bind(access_token)
-    .bind(refresh_token)
-    .bind(token_uri)
-    .bind(client_id)
-    .bind(client_secret)
-    .bind(scopes)
-    .bind(expires_at)
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 // --- Streaming Events (extended) ---

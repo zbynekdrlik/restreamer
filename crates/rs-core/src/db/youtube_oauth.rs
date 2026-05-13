@@ -1,7 +1,4 @@
 //! Multi-account YouTube OAuth ops. Each grant is keyed by a unique `label`.
-//!
-//! The single-row legacy ops in `db::v2` (`get_youtube_oauth`,
-//! `upsert_youtube_oauth`) keep working as the `label = 'default'` path.
 
 use crate::error::Result;
 use crate::models::YouTubeOAuth;

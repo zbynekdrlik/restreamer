@@ -50,8 +50,8 @@ pub struct OAuthTokens {
 }
 
 #[cfg(test)]
-mod quota_tests;
-#[cfg(test)]
 mod device_flow_tests;
+#[cfg(test)]
+mod quota_tests;
 #[cfg(test)]
 mod streams_for_label_tests;

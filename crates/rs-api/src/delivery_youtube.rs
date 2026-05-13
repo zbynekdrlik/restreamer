@@ -11,8 +11,7 @@ use crate::delivery::DeliveryOrchestrator;
 
 impl DeliveryOrchestrator {
     /// Refresh OAuth tokens for a single label if expired. Returns the access
-    /// token. Used by code paths that previously called the deleted
-    /// `db::get_youtube_oauth` directly.
+    /// token.
     pub async fn refresh_token_for_label(&self, label: &str) -> Option<String> {
         let oauth_row = yo::get_oauth_by_label(self.pool(), label)
             .await

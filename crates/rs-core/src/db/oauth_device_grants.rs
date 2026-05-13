@@ -80,9 +80,11 @@ pub async fn get_by_label(pool: &SqlitePool, label: &str) -> Result<Option<Devic
 }
 
 pub async fn list_pending(pool: &SqlitePool) -> Result<Vec<DeviceGrant>> {
-    let rows = sqlx::query("SELECT * FROM oauth_device_grants WHERE status = 'pending' ORDER BY started_at")
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT * FROM oauth_device_grants WHERE status = 'pending' ORDER BY started_at",
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(rows.into_iter().map(row_to_grant).collect())
 }
 

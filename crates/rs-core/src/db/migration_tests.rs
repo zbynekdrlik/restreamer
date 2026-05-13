@@ -248,12 +248,16 @@ async fn max_schema_version_constant() {
 async fn migrate_v27_adds_connected_at_column() {
     let pool = crate::db::create_memory_pool().await.unwrap();
     crate::db::run_migrations(&pool).await.unwrap();
-    let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('youtube_oauth')")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-    assert!(cols.iter().any(|c| c == "connected_at"),
-        "connected_at column missing; got {:?}", cols);
+    let cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('youtube_oauth')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        cols.iter().any(|c| c == "connected_at"),
+        "connected_at column missing; got {:?}",
+        cols
+    );
 }
 
 #[tokio::test]
@@ -261,17 +265,33 @@ async fn migrate_v27_creates_oauth_device_grants_table() {
     let pool = crate::db::create_memory_pool().await.unwrap();
     crate::db::run_migrations(&pool).await.unwrap();
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='oauth_device_grants'"
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='oauth_device_grants'",
     )
-    .fetch_one(&pool).await.unwrap();
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(count, 1, "oauth_device_grants table missing");
-    let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('oauth_device_grants')")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-    for expected in ["label", "device_code", "user_code", "verification_url",
-                     "interval_secs", "expires_at", "status", "error", "started_at"] {
-        assert!(cols.iter().any(|c| c == expected), "missing column {expected}; got {:?}", cols);
+    let cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('oauth_device_grants')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for expected in [
+        "label",
+        "device_code",
+        "user_code",
+        "verification_url",
+        "interval_secs",
+        "expires_at",
+        "status",
+        "error",
+        "started_at",
+    ] {
+        assert!(
+            cols.iter().any(|c| c == expected),
+            "missing column {expected}; got {:?}",
+            cols
+        );
     }
 }
 
@@ -282,16 +302,21 @@ async fn migrate_v27_is_idempotent() {
     // Re-run; must not error and must not duplicate the table.
     crate::db::run_migrations(&pool).await.unwrap();
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='oauth_device_grants'"
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='oauth_device_grants'",
     )
-    .fetch_one(&pool).await.unwrap();
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(count, 1);
 }
 
 #[tokio::test]
 async fn max_schema_version_is_27() {
-    assert_eq!(crate::db::migrations::MAX_SCHEMA_VERSION, 27,
-        "bump MAX_SCHEMA_VERSION when adding a migration");
+    assert_eq!(
+        crate::db::migrations::MAX_SCHEMA_VERSION,
+        27,
+        "bump MAX_SCHEMA_VERSION when adding a migration"
+    );
 }
 
 #[tokio::test]
@@ -342,8 +367,7 @@ async fn migration_v25_adds_label_unique_with_default_backfill() {
     assert!(dup.is_err(), "duplicate label should be rejected");
 
     // 4. Default row: fresh DB must have a seeded `default` row at id=1
-    //    so the legacy single-row OAuth callers (upsert_youtube_oauth) and
-    //    the multi-label list_oauths always see it.
+    //    so multi-label list_oauths always sees it.
     let pool2 = crate::db::create_memory_pool().await.unwrap();
     crate::db::run_migrations(&pool2).await.unwrap();
     let label: Option<String> = sqlx::query_scalar("SELECT label FROM youtube_oauth WHERE id = 1")

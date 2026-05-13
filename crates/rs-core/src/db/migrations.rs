@@ -752,9 +752,8 @@ async fn migrate_v24(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
 /// - Backfill any empty/NULL `label` to 'default' (defensive for the
 ///   #112 rewound-schema_version recovery path)
 /// - CREATE UNIQUE INDEX on `label`
-/// - Seed a placeholder `default` row if the table is empty, so the legacy
-///   single-row `upsert_youtube_oauth` callers and the multi-label
-///   `list_oauths` always observe a `default` entry. INSERT OR IGNORE is
+/// - Seed a placeholder `default` row if the table is empty, so
+///   `list_oauths` always observes a `default` entry. INSERT OR IGNORE is
 ///   idempotent on re-run.
 async fn migrate_v25(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
     add_column_if_missing(

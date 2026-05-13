@@ -178,11 +178,6 @@ pub fn build_router(state: AppState) -> Router {
             get(crate::oauth_device::device_status),
         )
         .route("/youtube/oauth/seed", post(youtube::youtube_oauth_seed))
-        .route("/youtube/oauth/start", get(youtube::youtube_oauth_start))
-        .route(
-            "/youtube/oauth/callback",
-            get(youtube::youtube_oauth_callback),
-        )
         // Upload telemetry
         .route("/uploads/stats", get(uploads_endpoints::get_uploads_stats))
         .route(
