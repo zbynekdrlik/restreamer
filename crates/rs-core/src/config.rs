@@ -72,6 +72,34 @@ pub struct YouTubeOAuthConfig {
     pub client_id: String,
     #[serde(default)]
     pub client_secret: String,
+    #[serde(default)]
+    pub device_flow: DeviceFlowConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeviceFlowConfig {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+    /// Daily quota units allowed against `liveStreams.list` (default 10000 per
+    /// Google's published per-project budget). Read by the quota tracker.
+    #[serde(default = "default_daily_quota")]
+    pub daily_quota: u32,
+}
+
+impl Default for DeviceFlowConfig {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            client_secret: String::new(),
+            daily_quota: default_daily_quota(),
+        }
+    }
+}
+
+fn default_daily_quota() -> u32 {
+    10_000
 }
 
 #[derive(Clone, Serialize, Deserialize)]

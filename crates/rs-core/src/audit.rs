@@ -141,6 +141,9 @@ pub enum Action {
     /// `{from: Option<String>, to: Option<String>}`. Bounded at most once
     /// per 30 s per endpoint by the surrounding caller.
     YoutubeIssueChanged,
+    /// Operator successfully completed an OAuth 2.0 Device Code Flow grant
+    /// for a YouTube channel. Detail JSON: `{label, channel_id, scopes}`.
+    OAuthGranted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
