@@ -103,6 +103,10 @@ pub fn OAuthAuthorize() -> impl IntoView {
                         spawn_local(async move {
                             loop {
                                 TimeoutFuture::new(3_000).await;
+                                // Cancel if user closed modal or started another flow.
+                                if !modal_open.get_untracked() {
+                                    break;
+                                }
                                 let url = format!(
                                     "/api/v1/youtube/oauth/device-status?label={l}"
                                 );

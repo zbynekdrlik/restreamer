@@ -77,8 +77,8 @@ pub struct YouTubeStatusResponse {
 /// dashboards consume this shape. Multi-channel listing lives at
 /// `/youtube/oauths`. Internal refactor kept the shape stable across PR #197.
 pub async fn youtube_status(State(state): State<AppState>) -> Json<YouTubeStatusResponse> {
-    let oauth = match rs_core::db::youtube_oauth::get_oauth_by_label(&state.pool, "default").await {
-        Ok(Some(o)) if !o.refresh_token.is_empty() => o,
+    match rs_core::db::youtube_oauth::get_oauth_by_label(&state.pool, "default").await {
+        Ok(Some(o)) if !o.refresh_token.is_empty() => {}
         _ => {
             return Json(YouTubeStatusResponse {
                 authenticated: false,
@@ -88,8 +88,7 @@ pub async fn youtube_status(State(state): State<AppState>) -> Json<YouTubeStatus
                 error: None,
             });
         }
-    };
-    let _ = oauth;
+    }
     match rs_youtube::streams::list_streams_for_label(&state.pool, "default").await {
         Ok(list) => {
             let stream_receiving = Some(list.iter().any(|s| s.status.stream_status == "active"));
@@ -174,11 +173,17 @@ pub async fn youtube_oauth_seed(
 pub async fn list_oauths(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<rs_core::models::YouTubeOAuth>>, StatusCode> {
-    rs_core::db::youtube_oauth::list_oauths(&state.pool)
+    let all = rs_core::db::youtube_oauth::list_oauths(&state.pool)
         .await
-        .map(Json)
         .map_err(|e| {
             error!("list_oauths failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
-        })
+        })?;
+    // Filter out the migration-v25-seeded empty `default` placeholder so the
+    // dashboard's Channels panel only shows actually-authorized grants.
+    let authorized: Vec<_> = all
+        .into_iter()
+        .filter(|o| !o.refresh_token.is_empty())
+        .collect();
+    Ok(Json(authorized))
 }

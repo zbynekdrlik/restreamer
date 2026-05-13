@@ -119,16 +119,34 @@ pub fn spawn_grant_poller(
     expires_at: String,
 ) {
     tokio::spawn(async move {
-        let mut interval = initial_interval.max(1) as u64;
+        // Clamp interval to [1, 60] on entry; cap doublings to 120 below.
+        // Without bounds a hostile/malformed Google interval could saturate
+        // `u64` (sleep ~584B years), defeating the expiration check.
+        let mut interval: u64 = initial_interval.clamp(1, 60) as u64;
         let exp = chrono::DateTime::parse_from_rfc3339(&expires_at)
             .map(|d| d.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| Utc::now() + chrono::Duration::seconds(900));
         loop {
+            // Check expiry BEFORE sleeping so an oversized interval can't
+            // stretch us past the deadline.
+            if Utc::now() > exp {
+                if let Err(e) =
+                    rs_core::db::oauth_device_grants::update_status(&pool, &label, "expired", None)
+                        .await
+                {
+                    warn!("device_poller: mark-expired UPDATE failed for '{label}': {e}");
+                }
+                warn!("device_poller: label='{label}' expired");
+                return;
+            }
             tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
             if Utc::now() > exp {
-                let _ =
+                if let Err(e) =
                     rs_core::db::oauth_device_grants::update_status(&pool, &label, "expired", None)
-                        .await;
+                        .await
+                {
+                    warn!("device_poller: mark-expired UPDATE failed for '{label}': {e}");
+                }
                 warn!("device_poller: label='{label}' expired");
                 return;
             }
@@ -150,31 +168,44 @@ pub fn spawn_grant_poller(
             match rs_youtube::device_flow::poll_decision(&resp) {
                 Continue => continue,
                 DoubleInterval => {
-                    interval *= 2;
+                    // Cap at 120s — a slow_down chain shouldn't push us past
+                    // the 15-min expiration window in a single sleep.
+                    interval = interval.saturating_mul(2).min(120);
                     continue;
                 }
                 TerminalDenied => {
-                    let _ = rs_core::db::oauth_device_grants::update_status(
+                    if let Err(e) = rs_core::db::oauth_device_grants::update_status(
                         &pool, &label, "denied", None,
                     )
-                    .await;
+                    .await
+                    {
+                        warn!("device_poller: mark-denied UPDATE failed for '{label}': {e}");
+                    }
                     return;
                 }
                 TerminalExpired => {
-                    let _ = rs_core::db::oauth_device_grants::update_status(
+                    if let Err(e) = rs_core::db::oauth_device_grants::update_status(
                         &pool, &label, "expired", None,
                     )
-                    .await;
+                    .await
+                    {
+                        warn!("device_poller: mark-expired UPDATE failed for '{label}': {e}");
+                    }
                     return;
                 }
                 TerminalError(e) => {
-                    let _ = rs_core::db::oauth_device_grants::update_status(
+                    if let Err(db_err) = rs_core::db::oauth_device_grants::update_status(
                         &pool,
                         &label,
                         "error",
                         Some(&e),
                     )
-                    .await;
+                    .await
+                    {
+                        warn!(
+                            "device_poller: mark-error UPDATE failed for '{label}': {db_err} (original: {e})"
+                        );
+                    }
                     return;
                 }
                 TerminalGranted {
@@ -199,13 +230,18 @@ pub fn spawn_grant_poller(
                     .await
                     {
                         error!("device_poller: upsert failed for '{label}': {e}");
-                        let _ = rs_core::db::oauth_device_grants::update_status(
+                        if let Err(db_err) = rs_core::db::oauth_device_grants::update_status(
                             &pool,
                             &label,
                             "error",
                             Some(&format!("upsert: {e}")),
                         )
-                        .await;
+                        .await
+                        {
+                            warn!(
+                                "device_poller: mark-error UPDATE failed for '{label}': {db_err} (original: {e})"
+                            );
+                        }
                         return;
                     }
                     let channel_id = rs_youtube::streams::list_streams_for_label(&pool, &label)
@@ -215,15 +251,20 @@ pub fn spawn_grant_poller(
                             streams.first().and_then(|s| s.snippet.channel_id.clone())
                         });
                     let connected_at = Utc::now().to_rfc3339();
-                    let _ = sqlx::query(
+                    if let Err(e) = sqlx::query(
                         "UPDATE youtube_oauth SET channel_id = ?1, connected_at = ?2 WHERE label = ?3",
                     )
                     .bind(&channel_id)
                     .bind(&connected_at)
                     .bind(&label)
                     .execute(&pool)
-                    .await;
-                    let _ = rs_core::db::oauth_device_grants::delete(&pool, &label).await;
+                    .await
+                    {
+                        warn!("device_poller: channel_id/connected_at UPDATE failed for '{label}': {e}");
+                    }
+                    if let Err(e) = rs_core::db::oauth_device_grants::delete(&pool, &label).await {
+                        warn!("device_poller: delete grant row failed for '{label}': {e}");
+                    }
                     let row = rs_core::audit::AuditRow {
                         severity: rs_core::audit::Severity::Info,
                         source: rs_core::audit::Source::Operator,
@@ -238,7 +279,9 @@ pub fn spawn_grant_poller(
                         }),
                         ts_override: None,
                     };
-                    let _ = audit_tx.send(row).await;
+                    if let Err(e) = audit_tx.send(row).await {
+                        warn!("device_poller: audit channel send failed for '{label}': {e}");
+                    }
                     info!(
                         "device_poller: label='{label}' GRANTED (channel_id={:?})",
                         channel_id

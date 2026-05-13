@@ -443,6 +443,22 @@ pub async fn attach_yt_health(
         }
     };
 
+    // Spec §11: per-project quota tracker. `liveStreams.list` costs 1 unit;
+    // when budget is exhausted, skip the probe and surface `quota_throttled`
+    // so the dashboard shows the operator the project hit Google's daily cap.
+    if youtube_quota_tracker().acquire(1).is_err() {
+        metrics.youtube_health = Some(YoutubeHealth {
+            stream_status: "unknown".into(),
+            health_status: "unknown".into(),
+            top_issue: None,
+            resolution: None,
+            frame_rate: None,
+            age_secs: 0,
+            error: Some("quota_throttled".into()),
+        });
+        return;
+    }
+
     match rs_youtube::streams::list_streams_for_label(pool, &label).await {
         Ok(streams) => {
             let bound = streams.iter().find(|s| {
@@ -519,6 +535,15 @@ pub async fn attach_yt_health(
 #[cfg(test)]
 pub fn clear_yt_health_cache_for_test() {
     yt_health_cache().clear();
+}
+
+/// Per-project YouTube Data API quota tracker. Single global instance keyed
+/// by `daily_quota` from `youtube.device_flow` config (default 10_000).
+/// `acquire(1)` is called before every `liveStreams.list` probe in
+/// `attach_yt_health`. Exhausted budget → `error: "quota_throttled"`.
+fn youtube_quota_tracker() -> &'static rs_youtube::quota::QuotaTracker {
+    static T: OnceLock<rs_youtube::quota::QuotaTracker> = OnceLock::new();
+    T.get_or_init(|| rs_youtube::quota::QuotaTracker::new(10_000))
 }
 
 fn yt_health_cache() -> &'static dashmap::DashMap<i64, (Instant, rs_core::models::YoutubeHealth)> {
