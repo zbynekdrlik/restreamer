@@ -21,12 +21,18 @@ fn poll_decision_slow_down_doubles_interval() {
 
 #[test]
 fn poll_decision_denied_is_terminal() {
-    assert!(matches!(poll_decision(&PollResponse::Denied), PollDecision::TerminalDenied));
+    assert!(matches!(
+        poll_decision(&PollResponse::Denied),
+        PollDecision::TerminalDenied
+    ));
 }
 
 #[test]
 fn poll_decision_expired_is_terminal() {
-    assert!(matches!(poll_decision(&PollResponse::Expired), PollDecision::TerminalExpired));
+    assert!(matches!(
+        poll_decision(&PollResponse::Expired),
+        PollDecision::TerminalExpired
+    ));
 }
 
 #[test]
@@ -38,7 +44,11 @@ fn poll_decision_granted_is_terminal_with_tokens() {
         id_token: None,
     });
     match dec {
-        PollDecision::TerminalGranted { access_token, refresh_token, .. } => {
+        PollDecision::TerminalGranted {
+            access_token,
+            refresh_token,
+            ..
+        } => {
             assert_eq!(access_token, "AT");
             assert_eq!(refresh_token, "RT");
         }
@@ -56,7 +66,9 @@ async fn request_device_code_parses_response() {
         .expect(1)
         .mount(&server)
         .await;
-    let r = request_device_code(&server.uri(), "client_id", "scope1 scope2").await.unwrap();
+    let r = request_device_code(&server.uri(), "client_id", "scope1 scope2")
+        .await
+        .unwrap();
     assert_eq!(r.device_code, "D1");
     assert_eq!(r.user_code, "USR-XYZ");
     assert_eq!(r.verification_url, "https://www.google.com/device");
@@ -67,22 +79,26 @@ async fn request_device_code_parses_response() {
 #[tokio::test]
 async fn poll_token_pending() {
     let server = MockServer::start().await;
-    Mock::given(method("POST")).and(path("/token"))
+    Mock::given(method("POST"))
+        .and(path("/token"))
         .and(body_string_contains("grant_type=urn"))
-        .respond_with(ResponseTemplate::new(400).set_body_string(
-            r#"{"error":"authorization_pending"}"#))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_string(r#"{"error":"authorization_pending"}"#),
+        )
         .mount(&server)
         .await;
-    let r = poll_token(&server.uri(), "client_id", "client_secret", "DEVICE").await.unwrap();
+    let r = poll_token(&server.uri(), "client_id", "client_secret", "DEVICE")
+        .await
+        .unwrap();
     assert!(matches!(r, PollResponse::Pending));
 }
 
 #[tokio::test]
 async fn poll_token_slow_down() {
     let server = MockServer::start().await;
-    Mock::given(method("POST")).and(path("/token"))
-        .respond_with(ResponseTemplate::new(400).set_body_string(
-            r#"{"error":"slow_down"}"#))
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(r#"{"error":"slow_down"}"#))
         .mount(&server)
         .await;
     let r = poll_token(&server.uri(), "c", "s", "D").await.unwrap();
@@ -99,7 +115,12 @@ async fn poll_token_granted_parses_tokens() {
         .await;
     let r = poll_token(&server.uri(), "c", "s", "D").await.unwrap();
     match r {
-        PollResponse::Granted { access_token, refresh_token, expires_in, .. } => {
+        PollResponse::Granted {
+            access_token,
+            refresh_token,
+            expires_in,
+            ..
+        } => {
             assert_eq!(access_token, "AT");
             assert_eq!(refresh_token, "RT");
             assert_eq!(expires_in, Some(3600));
@@ -111,9 +132,9 @@ async fn poll_token_granted_parses_tokens() {
 #[tokio::test]
 async fn poll_token_denied() {
     let server = MockServer::start().await;
-    Mock::given(method("POST")).and(path("/token"))
-        .respond_with(ResponseTemplate::new(400).set_body_string(
-            r#"{"error":"access_denied"}"#))
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(r#"{"error":"access_denied"}"#))
         .mount(&server)
         .await;
     let r = poll_token(&server.uri(), "c", "s", "D").await.unwrap();
@@ -123,9 +144,9 @@ async fn poll_token_denied() {
 #[tokio::test]
 async fn poll_token_expired() {
     let server = MockServer::start().await;
-    Mock::given(method("POST")).and(path("/token"))
-        .respond_with(ResponseTemplate::new(400).set_body_string(
-            r#"{"error":"expired_token"}"#))
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(r#"{"error":"expired_token"}"#))
         .mount(&server)
         .await;
     let r = poll_token(&server.uri(), "c", "s", "D").await.unwrap();

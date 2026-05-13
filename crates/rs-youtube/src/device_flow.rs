@@ -133,14 +133,17 @@ pub fn poll_decision(resp: &PollResponse) -> PollDecision {
         PollResponse::SlowDown => PollDecision::DoubleInterval,
         PollResponse::Denied => PollDecision::TerminalDenied,
         PollResponse::Expired => PollDecision::TerminalExpired,
-        PollResponse::Granted { access_token, refresh_token, expires_in, id_token } => {
-            PollDecision::TerminalGranted {
-                access_token: access_token.clone(),
-                refresh_token: refresh_token.clone(),
-                expires_in: *expires_in,
-                id_token: id_token.clone(),
-            }
-        }
+        PollResponse::Granted {
+            access_token,
+            refresh_token,
+            expires_in,
+            id_token,
+        } => PollDecision::TerminalGranted {
+            access_token: access_token.clone(),
+            refresh_token: refresh_token.clone(),
+            expires_in: *expires_in,
+            id_token: id_token.clone(),
+        },
         PollResponse::Error(e) => PollDecision::TerminalError(e.clone()),
     }
 }
