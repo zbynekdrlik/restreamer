@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod oauth;
+pub mod quota;
 pub mod streams;
 
 #[derive(Debug, Error)]
@@ -47,5 +48,7 @@ pub struct OAuthTokens {
     pub expires_at: Option<String>,
 }
 
+#[cfg(test)]
+mod quota_tests;
 #[cfg(test)]
 mod streams_for_label_tests;
