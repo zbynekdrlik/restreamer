@@ -53,9 +53,7 @@ pub async fn check_all_youtube_status(pool: &sqlx::SqlitePool) -> Vec<YouTubeSta
     out
 }
 
-pub async fn youtube_status(
-    State(state): State<AppState>,
-) -> Json<Vec<YouTubeStatusPerChannel>> {
+pub async fn youtube_status(State(state): State<AppState>) -> Json<Vec<YouTubeStatusPerChannel>> {
     Json(check_all_youtube_status(&state.pool).await)
 }
 

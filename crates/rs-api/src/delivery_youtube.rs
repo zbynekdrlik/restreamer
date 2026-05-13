@@ -39,9 +39,9 @@ impl DeliveryOrchestrator {
                 return None;
             }
         };
-        let new_expires = refreshed.expires_in.map(|s| {
-            (chrono::Utc::now() + chrono::Duration::seconds(s)).to_rfc3339()
-        });
+        let new_expires = refreshed
+            .expires_in
+            .map(|s| (chrono::Utc::now() + chrono::Duration::seconds(s)).to_rfc3339());
         if let Err(e) = yo::upsert_oauth_by_label(
             self.pool(),
             label,

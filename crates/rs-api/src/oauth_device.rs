@@ -290,10 +290,9 @@ pub async fn resume_pending_grants(
             .map(|d| d.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now());
         if Utc::now() > exp {
-            let _ = rs_core::db::oauth_device_grants::update_status(
-                pool, &g.label, "expired", None,
-            )
-            .await;
+            let _ =
+                rs_core::db::oauth_device_grants::update_status(pool, &g.label, "expired", None)
+                    .await;
             continue;
         }
         spawn_grant_poller(
@@ -386,14 +385,13 @@ pub async fn test_grant_now(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let now = chrono::Utc::now().to_rfc3339();
-    let _ = sqlx::query(
-        "UPDATE youtube_oauth SET channel_id = ?1, connected_at = ?2 WHERE label = ?3",
-    )
-    .bind(&body.channel_id)
-    .bind(&now)
-    .bind(&body.label)
-    .execute(&state.pool)
-    .await;
+    let _ =
+        sqlx::query("UPDATE youtube_oauth SET channel_id = ?1, connected_at = ?2 WHERE label = ?3")
+            .bind(&body.channel_id)
+            .bind(&now)
+            .bind(&body.label)
+            .execute(&state.pool)
+            .await;
     let _ = rs_core::db::oauth_device_grants::delete(&state.pool, &body.label).await;
     let row = rs_core::audit::AuditRow {
         severity: rs_core::audit::Severity::Info,

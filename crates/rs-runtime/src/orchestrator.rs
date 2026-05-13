@@ -244,7 +244,9 @@ impl ServiceCore {
                 "https://oauth2.googleapis.com",
                 &self.config.youtube.device_flow.client_id,
                 &self.config.youtube.device_flow.client_secret,
-            ).await {
+            )
+            .await
+            {
                 tracing::warn!("resume_pending_grants failed: {e}");
             }
         }
