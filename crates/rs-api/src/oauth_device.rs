@@ -270,6 +270,48 @@ pub struct DeviceStatusResponse {
     pub error: Option<String>,
 }
 
+/// On startup, scan `oauth_device_grants WHERE status='pending'`. For each
+/// row whose `expires_at` is still in the future, spawn a poller. For each
+/// row already expired, update its status to `expired`. Returns the number
+/// of pollers actually spawned.
+pub async fn resume_pending_grants(
+    pool: &sqlx::SqlitePool,
+    audit_tx: &tokio::sync::mpsc::Sender<rs_core::audit::AuditRow>,
+    api_base: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> sqlx::Result<usize> {
+    let pending = rs_core::db::oauth_device_grants::list_pending(pool)
+        .await
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let mut resumed = 0usize;
+    for g in pending {
+        let exp = chrono::DateTime::parse_from_rfc3339(&g.expires_at)
+            .map(|d| d.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+        if Utc::now() > exp {
+            let _ = rs_core::db::oauth_device_grants::update_status(
+                pool, &g.label, "expired", None,
+            )
+            .await;
+            continue;
+        }
+        spawn_grant_poller(
+            pool.clone(),
+            audit_tx.clone(),
+            api_base.to_string(),
+            client_id.to_string(),
+            client_secret.to_string(),
+            g.label,
+            g.device_code,
+            g.interval_secs,
+            g.expires_at,
+        );
+        resumed += 1;
+    }
+    Ok(resumed)
+}
+
 pub async fn device_status(
     State(state): State<AppState>,
     Query(q): Query<DeviceStatusQuery>,
