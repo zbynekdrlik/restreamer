@@ -83,3 +83,37 @@ async fn device_start_happy_path_persists_grant() {
     assert_eq!(got.status, "pending");
     assert_eq!(got.user_code, "AB-CD-12");
 }
+
+#[tokio::test]
+async fn resume_pending_grants_on_startup() {
+    use rs_core::db::oauth_device_grants as g;
+    use chrono::Utc;
+    let pool = create_memory_pool().await.unwrap();
+    run_migrations(&pool).await.unwrap();
+    let exp = (Utc::now() + chrono::Duration::seconds(900)).to_rfc3339();
+    g::insert(&pool, "bb", "DEV", "USR", "https://x", 5, &exp, &Utc::now().to_rfc3339())
+        .await.unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let resumed = crate::oauth_device::resume_pending_grants(
+        &pool, &tx, "http://example.test", "cid", "csec"
+    ).await.unwrap();
+    assert_eq!(resumed, 1, "must resume exactly one pending grant");
+}
+
+#[tokio::test]
+async fn resume_marks_expired_grants() {
+    use rs_core::db::oauth_device_grants as g;
+    use chrono::Utc;
+    let pool = create_memory_pool().await.unwrap();
+    run_migrations(&pool).await.unwrap();
+    let past = (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
+    g::insert(&pool, "bb", "DEV", "USR", "https://x", 5, &past, &Utc::now().to_rfc3339())
+        .await.unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let resumed = crate::oauth_device::resume_pending_grants(
+        &pool, &tx, "http://example.test", "cid", "csec"
+    ).await.unwrap();
+    assert_eq!(resumed, 0, "expired grants must not be resumed");
+    let got = g::get_by_label(&pool, "bb").await.unwrap().expect("row");
+    assert_eq!(got.status, "expired");
+}
