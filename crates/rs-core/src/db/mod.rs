@@ -9,8 +9,10 @@ use crate::models::{ChunkRecord, ChunkStats, ClientProfile, StreamingEvent};
 mod templates;
 pub use templates::*;
 
-mod v2;
+pub mod v2;
 pub use v2::*;
+
+pub mod youtube_oauth;
 
 mod migrations;
 pub use migrations::{MAX_SCHEMA_VERSION, current_schema_version, run_migrations};
@@ -69,6 +71,9 @@ mod v2_tests;
 
 #[cfg(test)]
 mod chunk_stats_tests;
+
+#[cfg(test)]
+mod youtube_oauth_tests;
 
 /// Create a SQLite connection pool.
 pub async fn create_pool(db_path: &Path) -> Result<SqlitePool> {

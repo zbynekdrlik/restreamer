@@ -225,7 +225,7 @@ async fn migrate_v24_adds_host_emit_ts_and_s3_upload_complete_ts() {
 }
 
 #[tokio::test]
-async fn migrate_v24_is_idempotent() {
+async fn migrate_latest_is_idempotent() {
     let pool = crate::db::create_memory_pool().await.unwrap();
     crate::db::run_migrations(&pool).await.unwrap();
     // Re-run: must be a no-op (no column-already-exists error).
@@ -234,10 +234,137 @@ async fn migrate_v24_is_idempotent() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(v, 24);
+    assert_eq!(v, crate::db::MAX_SCHEMA_VERSION);
 }
 
 #[tokio::test]
-async fn max_schema_version_is_24() {
-    assert_eq!(crate::db::MAX_SCHEMA_VERSION, 24);
+async fn max_schema_version_constant() {
+    // Update this when bumping MAX_SCHEMA_VERSION; protects against silent
+    // changes that skip the migration-versioning convention.
+    assert_eq!(crate::db::MAX_SCHEMA_VERSION, 26);
+}
+
+#[tokio::test]
+async fn migration_v25_adds_label_unique_with_default_backfill() {
+    let pool = crate::db::create_memory_pool().await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap(); // idempotent
+
+    // 1. `label` and `channel_id` columns exist.
+    let cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('youtube_oauth')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for expected in ["label", "channel_id"] {
+        assert!(
+            cols.iter().any(|c| c == expected),
+            "youtube_oauth missing column {expected}; have {cols:?}"
+        );
+    }
+
+    // 2. UNIQUE INDEX on label exists.
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='youtube_oauth'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        indexes.iter().any(|i| i == "idx_youtube_oauth_label"),
+        "missing idx_youtube_oauth_label; have {indexes:?}"
+    );
+
+    // 3. UNIQUE actually enforces — two rows with same label must fail.
+    sqlx::query(
+        "INSERT INTO youtube_oauth (label, access_token, refresh_token, token_uri, client_id, client_secret, scopes)
+         VALUES ('bb','a','r','u','c','s','sc')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let dup = sqlx::query(
+        "INSERT INTO youtube_oauth (label, access_token, refresh_token, token_uri, client_id, client_secret, scopes)
+         VALUES ('bb','a2','r2','u','c','s','sc')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(dup.is_err(), "duplicate label should be rejected");
+
+    // 4. Default row: fresh DB must have a seeded `default` row at id=1
+    //    so the legacy single-row OAuth callers (upsert_youtube_oauth) and
+    //    the multi-label list_oauths always see it.
+    let pool2 = crate::db::create_memory_pool().await.unwrap();
+    crate::db::run_migrations(&pool2).await.unwrap();
+    let label: Option<String> = sqlx::query_scalar("SELECT label FROM youtube_oauth WHERE id = 1")
+        .fetch_optional(&pool2)
+        .await
+        .unwrap();
+    assert_eq!(
+        label.as_deref(),
+        Some("default"),
+        "fresh DB must have a seeded 'default' row at id=1"
+    );
+}
+
+#[tokio::test]
+async fn migration_v26_adds_youtube_oauth_id_to_endpoint_configs() {
+    let pool = crate::db::create_memory_pool().await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap(); // idempotent
+
+    // 1. Column exists.
+    let cols: Vec<(String, String, i64)> =
+        sqlx::query_as("SELECT name, type, \"notnull\" FROM pragma_table_info('endpoint_configs')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let oauth_col = cols
+        .iter()
+        .find(|(n, _, _)| n == "youtube_oauth_id")
+        .expect("endpoint_configs must have youtube_oauth_id column");
+    assert!(
+        oauth_col.1.to_uppercase().contains("INTEGER"),
+        "youtube_oauth_id must be INTEGER; got type={}",
+        oauth_col.1
+    );
+    assert_eq!(oauth_col.2, 0, "youtube_oauth_id must be nullable");
+
+    // 2. New endpoints default to NULL.
+    sqlx::query(
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key) VALUES ('e1','YT_RTMP','k')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let oauth_id: Option<i64> =
+        sqlx::query_scalar("SELECT youtube_oauth_id FROM endpoint_configs WHERE alias = 'e1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(oauth_id.is_none(), "new row must default to NULL");
+
+    // 3. Linkage works: insert oauth row, link endpoint, read back.
+    sqlx::query(
+        "INSERT INTO youtube_oauth (label, access_token, refresh_token, token_uri, client_id, client_secret, scopes)
+         VALUES ('bb','a','r','u','c','s','sc')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let bb_id: i64 = sqlx::query_scalar("SELECT id FROM youtube_oauth WHERE label = 'bb'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE endpoint_configs SET youtube_oauth_id = ?1 WHERE alias = 'e1'")
+        .bind(bb_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let read_back: i64 =
+        sqlx::query_scalar("SELECT youtube_oauth_id FROM endpoint_configs WHERE alias = 'e1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(read_back, bb_id);
 }

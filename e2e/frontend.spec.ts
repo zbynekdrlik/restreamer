@@ -1679,35 +1679,10 @@ test.describe("Navigation", () => {
   });
 });
 
-test.describe("YouTube Health Badge", () => {
-  test("YouTube endpoint node shows health badge after polling", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    // Wait for WebSocket delivery status (includes "YouTube Main" endpoint)
-    // and for the initial YouTube health poll to fire (5s interval detects endpoints, then fetches)
-    const ytNode = page.locator(
-      '.endpoint-node:has(.endpoint-alias:has-text("YouTube Main"))',
-    );
-    await expect(ytNode).toBeVisible({ timeout: 10000 });
-    const badge = ytNode.locator(".yt-health-badge");
-    // Badge renders immediately as "unknown", then updates after poll fetches YouTube status
-    await expect(badge).toHaveClass(/good/, { timeout: 15000 });
-    await expect(badge).toHaveText("good");
-  });
-
-  test("non-YouTube endpoint does not show health badge", async ({ page }) => {
-    await page.goto("/");
-    await page.waitForTimeout(2000);
-
-    const fbNode = page.locator(
-      '.endpoint-node:has(.endpoint-alias:has-text("Facebook Page"))',
-    );
-    await expect(fbNode).toBeVisible({ timeout: 5000 });
-    const badge = fbNode.locator(".yt-health-badge");
-    await expect(badge).toHaveCount(0);
-  });
-});
+// YouTube health badge tests moved to issue #194 — the global polled
+// `store.youtube_health` badge was replaced with a per-endpoint badge
+// keyed off `DeliveryEndpointMetrics.youtube_health`. The new test lives
+// in the YT health gate describe block below.
 
 // --- Endpoint Tree ---
 
@@ -2372,5 +2347,63 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
     await expect(fastCard.locator(".endpoint-cache-label")).toContainText(
       /^\d+s \/ live cache$/,
     );
+  });
+
+  test.describe("YT health badge", () => {
+    test("endpoint card renders YT health badge for ytbb-style payload", async ({ page }) => {
+      // The module-level beforeEach already wires `consoleMessages` and the
+      // afterEach asserts it is empty modulo the Chromium subresource-integrity
+      // warning. No local console capture needed.
+
+      await page.goto("/");
+      // Give the WS client time to connect before broadcasting; otherwise
+      // the test broadcast fires before any subscriber exists and the
+      // DeliveryStatus is dropped.
+      await page.waitForTimeout(1000);
+
+      // Deterministically broadcast a DeliveryStatus carrying youtube_health.bad.
+      await page.request.post("/api/v1/_test/ws-broadcast", {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "inst-1",
+            status: "delivering",
+            server_ip: "127.0.0.1",
+            endpoint_count: 1,
+            endpoints: [
+              {
+                alias: "ytbb",
+                alive: true,
+                current_chunk_id: 0,
+                bytes_processed_total: 0,
+                chunks_processed: 0,
+                chunk_delay_secs: 0.0,
+                ffmpeg_restart_count: 0,
+                reconnect_count: 0,
+                is_fast: false,
+                youtube_health: {
+                  stream_status: "active",
+                  health_status: "bad",
+                  top_issue: "videoIngestionStarved",
+                  resolution: "1920x1080",
+                  frame_rate: "30.0",
+                  age_secs: 3,
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      const card = page.locator('[data-testid="endpoint-card"]', { hasText: "ytbb" });
+      await expect(card).toBeVisible();
+      const badge = card.locator('[data-testid="yt-health-badge"]');
+      await expect(badge).toBeVisible();
+      await expect(badge).toHaveAttribute("data-health", "bad");
+      await badge.hover();
+      const tooltip = card.locator('[data-testid="yt-health-tooltip"]');
+      await expect(tooltip).toContainText("videoIngestionStarved");
+      await expect(tooltip).toContainText("1920x1080");
+    });
   });
 });

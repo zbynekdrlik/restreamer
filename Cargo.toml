@@ -22,7 +22,7 @@ members = [
 exclude = ["src-tauri", "leptos-ui"]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/restreamer"
@@ -78,6 +78,9 @@ log = "0.4"
 tokio-tungstenite = "0.26"
 sha2 = "0.10"
 base64 = "0.22"
+
+# Concurrent data structures
+dashmap = "6"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }

@@ -220,3 +220,11 @@ No external manager server or SSH needed. All E2E orchestration is local.
 Operational guides for common tasks:
 
 - `stream-lan-operations.md` — MCP tools, OBS WebSocket, client config
+
+## Local Build Policy
+
+<!-- airuleset:local-builds=fast-iterate -->
+
+**Fast-iterate mode (Tier 2) ENABLED.** Iterate locally; push to CI only when the feature works end-to-end.
+Reason: PR #194 had 9 CI roundtrips for compile/lint/test errors that `cargo check --workspace` + `cargo clippy --workspace -- -D warnings` would have caught in seconds. Cold-compile CI is 20+ min per cycle; local check is ~90s cold / ~15s warm.
+Activated: 2026-05-12. Revert with `/fast-iterate off` once #194 ships and dev is stable for ≥1 day.

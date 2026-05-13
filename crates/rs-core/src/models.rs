@@ -93,6 +93,10 @@ pub struct EndpointConfig {
     /// behavior). Operator may override per endpoint.
     #[serde(default)]
     pub prefetch_chunks: Option<u32>,
+    /// FK into `youtube_oauth(id)`. `None` => no YT health probe.
+    /// `#[serde(default)]` keeps existing config.json files parsing.
+    #[serde(default)]
+    pub youtube_oauth_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -134,10 +138,14 @@ pub struct DeliveryEndpointStatus {
     pub last_check_at: String,
 }
 
-/// YouTube OAuth tokens (single row, id=1).
+/// YouTube OAuth tokens, keyed by a unique `label`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YouTubeOAuth {
     pub id: i64,
+    /// Human-readable label uniquely identifying this grant
+    /// (e.g. `default`, `bb`). Used by endpoint linkage and OAuth flow `?label=`.
+    #[serde(default = "default_oauth_label")]
+    pub label: String,
     pub access_token: String,
     pub refresh_token: String,
     pub token_uri: String,
@@ -145,6 +153,14 @@ pub struct YouTubeOAuth {
     pub client_secret: String,
     pub scopes: String,
     pub expires_at: Option<String>,
+    /// Captured from `liveStreams.list` items' `snippet.channelId` after
+    /// the first successful probe.
+    #[serde(default)]
+    pub channel_id: Option<String>,
+}
+
+fn default_oauth_label() -> String {
+    "default".to_string()
 }
 
 /// Real-time event broadcast over WebSocket.
@@ -247,6 +263,28 @@ pub enum WsEvent {
     },
 }
 
+/// Snapshot of YT `liveStreams.list` health for a single endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct YoutubeHealth {
+    /// `status.streamStatus` (`active` | `ready` | `inactive` | ...).
+    pub stream_status: String,
+    /// `status.healthStatus.status` (`good` | `ok` | `bad` | `noData` | ...).
+    pub health_status: String,
+    /// `status.healthStatus.configurationIssues[0].type` if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<String>,
+    /// Seconds since the data was probed.
+    #[serde(default)]
+    pub age_secs: i64,
+    /// Set when the probe could not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Per-endpoint delivery metrics broadcast via WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryEndpointMetrics {
@@ -272,6 +310,8 @@ pub struct DeliveryEndpointMetrics {
     pub delivery_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rescue_eta_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub youtube_health: Option<YoutubeHealth>,
 }
 
 /// Service status summary returned by the /status endpoint.
@@ -487,6 +527,7 @@ mod tests {
                     is_fast: false,
                     delivery_mode: None,
                     rescue_eta_secs: None,
+                    youtube_health: None,
                 }],
             },
             WsEvent::Error {
@@ -612,6 +653,7 @@ mod tests {
             is_fast: true,
             delivery_mode: None,
             rescue_eta_secs: None,
+            youtube_health: None,
         };
         let json = serde_json::to_string(&metrics).unwrap();
         let parsed: DeliveryEndpointMetrics = serde_json::from_str(&json).unwrap();
@@ -659,6 +701,7 @@ mod tests {
                 is_fast: false,
                 delivery_mode: None,
                 rescue_eta_secs: None,
+                youtube_health: None,
             }],
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -685,6 +728,7 @@ mod tests {
                 is_fast: true,
                 delivery_mode: None,
                 rescue_eta_secs: None,
+                youtube_health: None,
             },
             DeliveryEndpointMetrics {
                 alias: "BufferedEP".to_string(),
@@ -701,6 +745,7 @@ mod tests {
                 is_fast: false,
                 delivery_mode: None,
                 rescue_eta_secs: None,
+                youtube_health: None,
             },
         ];
         let delay = endpoints
@@ -729,6 +774,7 @@ mod tests {
             is_fast: true,
             delivery_mode: None,
             rescue_eta_secs: None,
+            youtube_health: None,
         }];
         let delay = endpoints
             .iter()
@@ -827,5 +873,27 @@ mod tests {
         }"#;
         let parsed: EndpointConfig = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.prefetch_chunks, Some(0));
+    }
+
+    #[test]
+    fn endpoint_config_serde_preserves_youtube_oauth_id() {
+        let json_some = r#"{
+            "id": 1, "alias": "ytbb", "service_type": "YT_RTMP", "stream_key": "k",
+            "enabled": true, "position_last": 0, "delivered_bytes": 0, "is_fast": false,
+            "pusher": "rust", "youtube_oauth_id": 42,
+            "created_at": "2026-05-12T00:00:00Z", "updated_at": "2026-05-12T00:00:00Z"
+        }"#;
+        let parsed: EndpointConfig = serde_json::from_str(json_some).unwrap();
+        assert_eq!(parsed.youtube_oauth_id, Some(42));
+
+        // Field absent => None (backward compat with pre-v26 config.json).
+        let json_missing = r#"{
+            "id": 1, "alias": "ytbb", "service_type": "YT_RTMP", "stream_key": "k",
+            "enabled": true, "position_last": 0, "delivered_bytes": 0, "is_fast": false,
+            "pusher": "rust",
+            "created_at": "2026-05-12T00:00:00Z", "updated_at": "2026-05-12T00:00:00Z"
+        }"#;
+        let parsed2: EndpointConfig = serde_json::from_str(json_missing).unwrap();
+        assert_eq!(parsed2.youtube_oauth_id, None);
     }
 }

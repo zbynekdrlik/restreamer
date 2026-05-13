@@ -9,7 +9,8 @@
 //! - `DeliveryOrchestrator::get_delivery_status` and `poll_delivery_metrics`
 //!   (second impl block).
 
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
@@ -362,10 +363,13 @@ impl DeliveryOrchestrator {
             None => ("none".to_string(), "none".to_string(), None),
         };
 
-        let metrics: Vec<DeliveryEndpointMetrics> = status
-            .endpoints
-            .into_iter()
-            .map(|ep| DeliveryEndpointMetrics {
+        // Load endpoint_configs once so we can look up youtube_oauth_id by alias.
+        let configs = rs_core::db::list_endpoint_configs(self.pool())
+            .await
+            .unwrap_or_default();
+        let mut metrics: Vec<DeliveryEndpointMetrics> = Vec::with_capacity(status.endpoints.len());
+        for ep in status.endpoints.into_iter() {
+            let mut m = DeliveryEndpointMetrics {
                 alias: ep.alias,
                 alive: ep.alive,
                 current_chunk_id: ep.current_chunk_id,
@@ -379,10 +383,186 @@ impl DeliveryOrchestrator {
                 is_fast: ep.is_fast,
                 delivery_mode: ep.delivery_mode,
                 rescue_eta_secs: ep.rescue_eta_secs,
-            })
-            .collect();
+                youtube_health: None,
+            };
+            if let Some(cfg) = configs.iter().find(|c| c.alias == m.alias) {
+                if cfg.youtube_oauth_id.is_some() && cfg.service_type == "YT_RTMP" {
+                    attach_yt_health_cached(self.pool(), cfg, &mut m, self.audit_tx()).await;
+                }
+            }
+            metrics.push(m);
+        }
 
         let endpoint_count = metrics.len() as u32;
         Ok((name, inst_status, server_ip, endpoint_count, metrics))
+    }
+}
+
+/// Fetch YT `liveStreams.list` for the endpoint's linked OAuth label,
+/// find the stream whose `cdn.ingestionInfo.streamName` matches the
+/// endpoint's `stream_key`, and attach `YoutubeHealth` to `metrics`.
+///
+/// Errors are mapped to `YoutubeHealth.error` (never propagated) so the
+/// probe never breaks the surrounding monitor loop.
+pub async fn attach_yt_health(
+    pool: &sqlx::SqlitePool,
+    endpoint: &rs_core::models::EndpointConfig,
+    metrics: &mut rs_core::models::DeliveryEndpointMetrics,
+) {
+    use rs_core::models::YoutubeHealth;
+
+    let Some(oauth_id) = endpoint.youtube_oauth_id else {
+        return;
+    };
+    let label = match rs_core::db::youtube_oauth::get_oauth_by_id(pool, oauth_id).await {
+        Ok(Some(o)) => o.label,
+        Ok(None) => {
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("oauth_missing".into()),
+            });
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, endpoint_id = endpoint.id, oauth_id = oauth_id, "yt_health: db lookup failed");
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("db_error".into()),
+            });
+            return;
+        }
+    };
+
+    match rs_youtube::streams::list_streams_for_label(pool, &label).await {
+        Ok(streams) => {
+            let bound = streams.iter().find(|s| {
+                s.cdn
+                    .as_ref()
+                    .and_then(|c| c.ingestion_info.as_ref())
+                    .and_then(|i| i.stream_name.as_deref())
+                    == Some(endpoint.stream_key.as_str())
+            });
+            metrics.youtube_health = Some(match bound {
+                Some(s) => crate::delivery_yt_health::extract_top_issue(s),
+                None => YoutubeHealth {
+                    stream_status: "unbound".into(),
+                    health_status: "n/a".into(),
+                    top_issue: None,
+                    resolution: None,
+                    frame_rate: None,
+                    age_secs: 0,
+                    error: Some("stream_not_in_mine_list".into()),
+                },
+            });
+        }
+        Err(rs_youtube::YouTubeError::TokenExpired(_)) => {
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("oauth_invalid".into()),
+            });
+        }
+        Err(rs_youtube::YouTubeError::Api { status: 403, .. }) => {
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("oauth_app_not_production".into()),
+            });
+        }
+        Err(rs_youtube::YouTubeError::Api { status: 429, .. }) => {
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("quota_exceeded".into()),
+            });
+        }
+        Err(e) => {
+            tracing::warn!(label = %label, error = %e, "yt_health probe failed");
+            metrics.youtube_health = Some(YoutubeHealth {
+                stream_status: "unknown".into(),
+                health_status: "unknown".into(),
+                top_issue: None,
+                resolution: None,
+                frame_rate: None,
+                age_secs: 0,
+                error: Some("probe_error".into()),
+            });
+        }
+    }
+}
+
+/// Test-only: clear the per-endpoint YT health cache. Different tests use
+/// pools that allocate endpoint id=1 each, so the cache must be reset to
+/// avoid one test seeing another's cached snapshot.
+#[cfg(test)]
+pub fn clear_yt_health_cache_for_test() {
+    yt_health_cache().clear();
+}
+
+fn yt_health_cache() -> &'static dashmap::DashMap<i64, (Instant, rs_core::models::YoutubeHealth)> {
+    static C: OnceLock<dashmap::DashMap<i64, (Instant, rs_core::models::YoutubeHealth)>> =
+        OnceLock::new();
+    C.get_or_init(dashmap::DashMap::new)
+}
+
+/// 15 s minimum interval per endpoint id.
+/// Returns the cached value (with refreshed `age_secs`) if still fresh;
+/// otherwise calls `attach_yt_health` and stores the result.
+pub async fn attach_yt_health_cached(
+    pool: &sqlx::SqlitePool,
+    endpoint: &rs_core::models::EndpointConfig,
+    metrics: &mut rs_core::models::DeliveryEndpointMetrics,
+    audit_tx: Option<&tokio::sync::mpsc::Sender<rs_core::audit::AuditRow>>,
+) {
+    // Capture prior top_issue BEFORE the freshness short-circuit so we can
+    // emit the audit transition only on the slow path.
+    let prior_issue: Option<String> = yt_health_cache()
+        .get(&endpoint.id)
+        .and_then(|e| e.value().1.top_issue.clone());
+
+    if let Some(entry) = yt_health_cache().get(&endpoint.id) {
+        let (when, h) = entry.value().clone();
+        let age = when.elapsed();
+        if age < Duration::from_secs(15) {
+            let mut h_aged = h;
+            h_aged.age_secs = age.as_secs() as i64;
+            metrics.youtube_health = Some(h_aged);
+            return;
+        }
+    }
+    attach_yt_health(pool, endpoint, metrics).await;
+    if let Some(h) = metrics.youtube_health.as_ref() {
+        yt_health_cache().insert(endpoint.id, (Instant::now(), h.clone()));
+        if let Some(tx) = audit_tx {
+            let _ = crate::delivery_yt_health::record_and_maybe_emit(
+                prior_issue.as_deref(),
+                h.top_issue.as_deref(),
+                &endpoint.alias,
+                tx,
+            )
+            .await;
+        }
     }
 }

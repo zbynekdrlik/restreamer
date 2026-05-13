@@ -632,10 +632,6 @@ fn EndpointTree() -> impl IntoView {
                 children=move |ep| {
                     let store = use_context::<DashboardStore>().expect("DashboardStore");
                     let alias = ep.alias.clone();
-                    let is_youtube = {
-                        let a = alias.to_lowercase();
-                        a.contains("youtube") || a.contains("yt")
-                    };
                     let remove_alias = alias.clone();
                     let ep_alias_key = alias.clone();
                     // Per-card toggle for the EndpointHistory sparkline.
@@ -705,29 +701,32 @@ fn EndpointTree() -> impl IntoView {
                             >
                                 <div class=dot_class></div>
                                 <span class="endpoint-alias">{ep.alias.clone()}</span>
-                                {if is_youtube {
-                                    Some(view! {
-                                        <span class=move || {
-                                            let health = store.youtube_health.get()
-                                                .and_then(|r| r.streams.first()
-                                                    .and_then(|s| s.health_status.clone()));
-                                            match health.as_deref() {
-                                                Some("good") => "yt-health-badge good",
-                                                Some("ok") => "yt-health-badge ok",
-                                                Some("bad") => "yt-health-badge bad",
-                                                _ => "yt-health-badge unknown",
-                                            }
-                                        }>
-                                            {move || {
-                                                store.youtube_health.get()
-                                                    .and_then(|r| r.streams.first()
-                                                        .and_then(|s| s.health_status.clone()))
-                                                    .unwrap_or_else(|| "\u{2014}".to_string())
-                                            }}
-                                        </span>
+                                {move || {
+                                    ep_data.get().youtube_health.map(|h| {
+                                        let data_health = h.health_status.clone();
+                                        let tooltip = format!(
+                                            "Status: {} / {}\nIssue: {}\n{}{}{}",
+                                            h.stream_status,
+                                            h.health_status,
+                                            h.top_issue.clone().unwrap_or_else(|| "(none)".into()),
+                                            h.resolution.clone().unwrap_or_default(),
+                                            if h.resolution.is_some() && h.frame_rate.is_some() { " @ " } else { "" },
+                                            h.frame_rate.clone().map(|f| format!("{f}fps")).unwrap_or_default(),
+                                        );
+                                        view! {
+                                            <div
+                                                class="yt-health-badge"
+                                                data-testid="yt-health-badge"
+                                                data-health=data_health
+                                            >
+                                                <span class="yt-health-dot"></span>
+                                                <span class="yt-health-text">{h.health_status.clone()}</span>
+                                                <div class="yt-health-tooltip" data-testid="yt-health-tooltip">
+                                                    {tooltip}
+                                                </div>
+                                            </div>
+                                        }
                                     })
-                                } else {
-                                    None
                                 }}
                                 <span class="endpoint-metrics">
                                     {move || {

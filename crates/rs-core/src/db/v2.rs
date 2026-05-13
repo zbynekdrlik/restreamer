@@ -22,7 +22,7 @@ fn parse_pusher_kind(s: String) -> PusherKind {
 pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConfig>> {
     let rows = sqlx::query(
         "SELECT id, alias, service_type, stream_key, enabled, position_last,
-         delivered_bytes, is_fast, pusher, created_at, updated_at
+         delivered_bytes, is_fast, pusher, youtube_oauth_id, created_at, updated_at
          FROM endpoint_configs ORDER BY id",
     )
     .fetch_all(pool)
@@ -41,6 +41,7 @@ pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConf
             is_fast: r.get::<i32, _>("is_fast") != 0,
             pusher: parse_pusher_kind(r.get("pusher")),
             prefetch_chunks: None,
+            youtube_oauth_id: r.get("youtube_oauth_id"),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         })
@@ -50,7 +51,7 @@ pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConf
 pub async fn get_endpoint_config(pool: &SqlitePool, id: i64) -> Result<Option<EndpointConfig>> {
     let row = sqlx::query(
         "SELECT id, alias, service_type, stream_key, enabled, position_last,
-         delivered_bytes, is_fast, pusher, created_at, updated_at
+         delivered_bytes, is_fast, pusher, youtube_oauth_id, created_at, updated_at
          FROM endpoint_configs WHERE id = ?1",
     )
     .bind(id)
@@ -68,6 +69,7 @@ pub async fn get_endpoint_config(pool: &SqlitePool, id: i64) -> Result<Option<En
         is_fast: r.get::<i32, _>("is_fast") != 0,
         pusher: parse_pusher_kind(r.get("pusher")),
         prefetch_chunks: None,
+        youtube_oauth_id: r.get("youtube_oauth_id"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     }))
@@ -126,6 +128,23 @@ pub async fn delete_endpoint_config(pool: &SqlitePool, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Link or unlink an endpoint's YouTube OAuth grant.
+pub async fn set_endpoint_youtube_oauth_id(
+    pool: &SqlitePool,
+    endpoint_id: i64,
+    oauth_id: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE endpoint_configs SET youtube_oauth_id = ?1, updated_at = datetime('now')
+         WHERE id = ?2",
+    )
+    .bind(oauth_id)
+    .bind(endpoint_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // --- Event Endpoints (M2M) ---
 
 pub async fn attach_endpoint_to_event(
@@ -157,7 +176,7 @@ pub async fn detach_endpoint_from_event(
 pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec<EndpointConfig>> {
     let rows = sqlx::query(
         "SELECT e.id, e.alias, e.service_type, e.stream_key, e.enabled, e.position_last,
-         e.delivered_bytes, e.is_fast, e.pusher, e.created_at, e.updated_at
+         e.delivered_bytes, e.is_fast, e.pusher, e.youtube_oauth_id, e.created_at, e.updated_at
          FROM endpoint_configs e
          INNER JOIN event_endpoints ee ON ee.endpoint_id = e.id
          WHERE ee.event_id = ?1 AND e.enabled = 1
@@ -180,6 +199,7 @@ pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec
             is_fast: r.get::<i32, _>("is_fast") != 0,
             pusher: parse_pusher_kind(r.get("pusher")),
             prefetch_chunks: None,
+            youtube_oauth_id: r.get("youtube_oauth_id"),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         })
@@ -375,16 +395,22 @@ pub async fn get_delivery_endpoint_statuses(
 
 // --- YouTube OAuth ---
 
+/// Legacy single-row accessor. Migration v25 seeds an empty `default` row
+/// so multi-label list_oauths always observes it; but for callers that
+/// treat "no OAuth grant" as "not authenticated", an empty `refresh_token`
+/// must be reported as `None`.
 pub async fn get_youtube_oauth(pool: &SqlitePool) -> Result<Option<YouTubeOAuth>> {
     let row = sqlx::query(
-        "SELECT id, access_token, refresh_token, token_uri, client_id, client_secret, scopes, expires_at
-         FROM youtube_oauth WHERE id = 1",
+        "SELECT id, label, access_token, refresh_token, token_uri, client_id, client_secret,
+         scopes, expires_at, channel_id
+         FROM youtube_oauth WHERE label = 'default'",
     )
     .fetch_optional(pool)
     .await?;
-
-    Ok(row.map(|r| YouTubeOAuth {
+    let Some(r) = row else { return Ok(None) };
+    let oauth = YouTubeOAuth {
         id: r.get("id"),
+        label: r.get("label"),
         access_token: r.get("access_token"),
         refresh_token: r.get("refresh_token"),
         token_uri: r.get("token_uri"),
@@ -392,7 +418,14 @@ pub async fn get_youtube_oauth(pool: &SqlitePool) -> Result<Option<YouTubeOAuth>
         client_secret: r.get("client_secret"),
         scopes: r.get("scopes"),
         expires_at: r.get("expires_at"),
-    }))
+        channel_id: r.get("channel_id"),
+    };
+    // Empty seeded placeholder => treat as "not authenticated" so legacy
+    // callers behave identically to the pre-v25 missing-row case.
+    if oauth.refresh_token.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(oauth))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -407,11 +440,17 @@ pub async fn upsert_youtube_oauth(
     expires_at: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO youtube_oauth (id, access_token, refresh_token, token_uri, client_id, client_secret, scopes, expires_at)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(id) DO UPDATE SET
-             access_token = ?1, refresh_token = ?2, token_uri = ?3,
-             client_id = ?4, client_secret = ?5, scopes = ?6, expires_at = ?7",
+        "INSERT INTO youtube_oauth
+            (label, access_token, refresh_token, token_uri, client_id, client_secret, scopes, expires_at)
+         VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(label) DO UPDATE SET
+            access_token = excluded.access_token,
+            refresh_token = excluded.refresh_token,
+            token_uri = excluded.token_uri,
+            client_id = excluded.client_id,
+            client_secret = excluded.client_secret,
+            scopes = excluded.scopes,
+            expires_at = excluded.expires_at",
     )
     .bind(access_token)
     .bind(refresh_token)

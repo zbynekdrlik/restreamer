@@ -15,6 +15,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 urlencoding = "2"
+rs-core = { path = "../rs-core" }
+sqlx = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+wiremock = "0.6"
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }

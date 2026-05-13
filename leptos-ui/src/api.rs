@@ -780,6 +780,8 @@ pub struct CachedDeliveryEndpoint {
     pub delivery_mode: Option<String>,
     #[serde(default)]
     pub rescue_eta_secs: Option<u64>,
+    #[serde(default)]
+    pub youtube_health: Option<crate::store::YoutubeHealth>,
 }
 
 /// Get cached delivery status (instant, no VPS round-trip).

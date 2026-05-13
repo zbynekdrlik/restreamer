@@ -22,6 +22,8 @@ pub enum YouTubeError {
     Api { status: u16, message: String },
     #[error("{0}")]
     Other(String),
+    #[error("DB error: {0}")]
+    Db(String),
 }
 
 pub type Result<T> = std::result::Result<T, YouTubeError>;
@@ -44,3 +46,6 @@ pub struct OAuthTokens {
     pub scopes: String,
     pub expires_at: Option<String>,
 }
+
+#[cfg(test)]
+mod streams_for_label_tests;

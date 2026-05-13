@@ -135,6 +135,12 @@ pub enum Action {
     /// (handler: POST /api/endpoints/update_start). Detail JSON:
     /// {alias, old_start_chunk_id, new_start_chunk_id}.
     EndpointStartChunkUpdated,
+
+    /// Host-side: YT health probe observed `configurationIssues[0].type`
+    /// change for an endpoint. Detail JSON:
+    /// `{from: Option<String>, to: Option<String>}`. Bounded at most once
+    /// per 30 s per endpoint by the surrounding caller.
+    YoutubeIssueChanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
