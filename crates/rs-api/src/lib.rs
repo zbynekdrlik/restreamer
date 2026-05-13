@@ -50,6 +50,8 @@ mod adaptive_ttl_tests;
 #[cfg(test)]
 mod oauth_device_tests;
 #[cfg(test)]
+mod multi_label_oauth_tests;
+#[cfg(test)]
 mod yt_health_cache_tests;
 
 #[cfg(test)]
