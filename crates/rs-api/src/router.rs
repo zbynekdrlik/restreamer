@@ -893,13 +893,16 @@ mod tests {
             .await
             .unwrap();
 
-        // New multi-channel endpoint returns 200 + empty array when no OAuth rows exist.
+        // Migration v25 seeds an empty `default` row so multi-label list_oauths
+        // is non-empty; check_all_youtube_status reports it as unauthenticated.
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .unwrap();
         let arr: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-        assert!(arr.is_empty());
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["label"], "default");
+        assert_eq!(arr[0]["authenticated"], false);
     }
 
     #[tokio::test]
