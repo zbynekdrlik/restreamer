@@ -880,7 +880,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn youtube_status_returns_503_without_hetzner_token() {
+    async fn youtube_status_returns_empty_array_without_tokens() {
         let state = test_state().await;
         let app = build_router(state);
 
@@ -894,7 +894,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // New multi-channel endpoint returns 200 + empty array when no OAuth rows exist.
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let arr: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(arr.is_empty());
     }
 
     #[tokio::test]
@@ -910,6 +916,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
+                            "label": "default",
                             "refresh_token": "test-refresh",
                             "client_id": "test-client",
                             "client_secret": "test-secret"
@@ -923,8 +930,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify tokens stored
-        let oauth = rs_core::db::get_youtube_oauth(&state.pool)
+        // Verify tokens stored via the label-aware API.
+        let oauth = rs_core::db::youtube_oauth::get_oauth_by_label(&state.pool, "default")
             .await
             .unwrap()
             .unwrap();

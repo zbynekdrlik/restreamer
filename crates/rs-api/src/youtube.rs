@@ -4,8 +4,6 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use rs_core::db;
-
 use crate::state::AppState;
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -30,123 +28,63 @@ pub fn parse_label_from_query(q: &OAuthStartQuery) -> String {
     }
 }
 
-#[derive(Serialize)]
-pub struct YouTubeStatusResponse {
+
+#[derive(Debug, serde::Serialize)]
+pub struct YouTubeStatusPerChannel {
+    pub label: String,
+    pub channel_id: Option<String>,
     pub authenticated: bool,
     pub stream_receiving: Option<bool>,
-    pub broadcast_testing: Option<bool>,
-    pub broadcast_statuses: Vec<BroadcastStatusInfo>,
-    pub stream_count: usize,
-    pub streams: Vec<YouTubeStreamInfo>,
     pub error: Option<String>,
+    pub connected_at: Option<String>,
 }
 
-#[derive(Serialize)]
-pub struct BroadcastStatusInfo {
-    pub title: String,
-    pub life_cycle_status: String,
-}
-
-#[derive(Serialize)]
-pub struct YouTubeStreamInfo {
-    pub title: String,
-    pub stream_status: String,
-    pub health_status: Option<String>,
-    pub configuration_issues: Vec<String>,
-    pub cdn_resolution: Option<String>,
-    pub cdn_frame_rate: Option<String>,
-    pub cdn_ingestion_type: Option<String>,
+pub async fn check_all_youtube_status(pool: &sqlx::SqlitePool) -> Vec<YouTubeStatusPerChannel> {
+    let oauths = match rs_core::db::youtube_oauth::list_oauths(pool).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("list_oauths failed: {e}");
+            return vec![];
+        }
+    };
+    let mut out = Vec::with_capacity(oauths.len());
+    for o in oauths {
+        if o.refresh_token.is_empty() {
+            out.push(YouTubeStatusPerChannel {
+                label: o.label,
+                channel_id: o.channel_id,
+                authenticated: false,
+                stream_receiving: None,
+                error: None,
+                connected_at: o.connected_at,
+            });
+            continue;
+        }
+        let receiving = rs_youtube::streams::list_streams_for_label(pool, &o.label)
+            .await
+            .ok()
+            .map(|streams| streams.iter().any(|s| s.status.stream_status == "active"));
+        out.push(YouTubeStatusPerChannel {
+            label: o.label,
+            channel_id: o.channel_id,
+            authenticated: true,
+            stream_receiving: receiving,
+            error: None,
+            connected_at: o.connected_at,
+        });
+    }
+    out
 }
 
 pub async fn youtube_status(
     State(state): State<AppState>,
-) -> Result<Json<YouTubeStatusResponse>, StatusCode> {
-    let orch = state.delivery_orchestrator.as_ref().ok_or_else(|| {
-        error!("Delivery orchestrator not configured");
-        StatusCode::SERVICE_UNAVAILABLE
-    })?;
-
-    let status = orch.check_youtube_status().await;
-
-    // Fetch broadcast lifecycle status (testing = video playing in preview)
-    let (broadcast_testing, broadcast_statuses) = if status.authenticated && status.error.is_none()
-    {
-        match orch.get_broadcast_statuses().await {
-            Ok(statuses) => {
-                tracing::info!("Broadcast statuses: {:?}", statuses);
-                let testing = statuses.iter().any(|(_, s)| s == "testing");
-                let infos = statuses
-                    .into_iter()
-                    .map(|(title, status)| BroadcastStatusInfo {
-                        title,
-                        life_cycle_status: status,
-                    })
-                    .collect();
-                (Some(testing), infos)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to fetch broadcast statuses: {e}");
-                (None, Vec::new())
-            }
-        }
-    } else {
-        (None, Vec::new())
-    };
-
-    // Fetch stream details for diagnostics
-    let (stream_count, streams) = if status.authenticated && status.error.is_none() {
-        match orch.list_youtube_streams().await {
-            Ok(list) => {
-                let count = list.len();
-                let infos: Vec<YouTubeStreamInfo> = list
-                    .into_iter()
-                    .map(|s| {
-                        let issues = s
-                            .status
-                            .health_status
-                            .as_ref()
-                            .map(|h| {
-                                h.configuration_issues
-                                    .iter()
-                                    .map(|i| {
-                                        format!("{}: {} ({})", i.issue_type, i.reason, i.severity)
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let cdn = s.cdn.as_ref();
-                        YouTubeStreamInfo {
-                            title: s.snippet.title,
-                            stream_status: s.status.stream_status,
-                            health_status: s.status.health_status.map(|h| h.status),
-                            configuration_issues: issues,
-                            cdn_resolution: cdn.and_then(|c| c.resolution.clone()),
-                            cdn_frame_rate: cdn.and_then(|c| c.frame_rate.clone()),
-                            cdn_ingestion_type: cdn.and_then(|c| c.ingestion_type.clone()),
-                        }
-                    })
-                    .collect();
-                (count, infos)
-            }
-            Err(_) => (0, Vec::new()),
-        }
-    } else {
-        (0, Vec::new())
-    };
-
-    Ok(Json(YouTubeStatusResponse {
-        authenticated: status.authenticated,
-        stream_receiving: status.stream_receiving,
-        broadcast_testing,
-        broadcast_statuses,
-        stream_count,
-        streams,
-        error: status.error,
-    }))
+) -> Json<Vec<YouTubeStatusPerChannel>> {
+    Json(check_all_youtube_status(&state.pool).await)
 }
 
 #[derive(Deserialize)]
 pub struct YouTubeOAuthSeedRequest {
+    pub label: String,
     pub refresh_token: String,
     pub client_id: String,
     pub client_secret: String,
@@ -156,8 +94,9 @@ pub async fn youtube_oauth_seed(
     State(state): State<AppState>,
     Json(req): Json<YouTubeOAuthSeedRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    db::upsert_youtube_oauth(
+    rs_core::db::youtube_oauth::upsert_oauth_by_label(
         &state.pool,
+        &req.label,
         "",
         &req.refresh_token,
         "https://oauth2.googleapis.com/token",
@@ -168,11 +107,11 @@ pub async fn youtube_oauth_seed(
     )
     .await
     .map_err(|e| {
-        error!("Failed to seed YouTube OAuth: {e}");
+        error!("seed failed for label '{}': {e}", req.label);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    tracing::info!("YouTube OAuth tokens seeded");
+    tracing::info!("youtube oauth seeded for label '{}'", req.label);
     Ok(StatusCode::OK)
 }
 
