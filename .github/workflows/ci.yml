@@ -4478,15 +4478,19 @@ jobs:
                 }
               }
 
-              if (-not $response.stream_receiving) {
+              # Scope to e2e rtmp specifically -- default OAuth account owns
+              # multiple streams; other titles (operator OBS testing, parallel
+              # production traffic) must not gate the CI deactivation check.
+              $e2e = $response.streams | Where-Object { $_.title -eq "e2e rtmp" }
+              if (-not $e2e -or $e2e.stream_status -ne "active") {
                 Write-Host "=========================================="
-                Write-Host "  YOUTUBE CONFIRMED NOT RECEIVING (post-deactivation)"
+                Write-Host "  YOUTUBE CONFIRMED NOT RECEIVING for e2e rtmp (post-deactivation)"
                 Write-Host "  3-phase lifecycle verified: inactive -> active -> inactive"
                 Write-Host "=========================================="
                 return
               }
 
-              Write-Host "  YouTube still receiving stream data"
+              Write-Host "  e2e rtmp stream still active on YouTube"
             } catch {
               Write-Host "  Request failed: $_"
             }
@@ -4497,7 +4501,7 @@ jobs:
             }
           }
 
-          throw "FAILED: YouTube is still receiving stream data after deactivation ($maxRetries attempts, ~$($maxRetries * $retryDelay)s). Deactivation did not stop delivery to YouTube."
+          throw "FAILED: e2e rtmp stream still active on YouTube after deactivation ($maxRetries attempts, ~$($maxRetries * $retryDelay)s). Deactivation did not stop delivery to YouTube."
 
       - name: Restore OBS scene
         if: always()
