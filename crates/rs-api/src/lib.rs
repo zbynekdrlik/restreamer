@@ -20,6 +20,7 @@ pub mod endpoint_oauth;
 pub mod handlers;
 pub mod internet_probe;
 pub mod metrics_handlers;
+pub mod oauth_device;
 pub mod obs;
 #[cfg(test)]
 mod on_vps_ready_tests;
@@ -45,13 +46,16 @@ mod yt_health_test_env;
 mod delivery_status_yt_health_tests;
 
 #[cfg(test)]
+mod adaptive_ttl_tests;
+#[cfg(test)]
+mod multi_label_oauth_tests;
+#[cfg(test)]
+mod oauth_device_tests;
+#[cfg(test)]
 mod yt_health_cache_tests;
 
 #[cfg(test)]
 mod yt_health_audit_tests;
-
-#[cfg(test)]
-mod youtube_label_tests;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

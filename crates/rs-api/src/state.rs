@@ -73,6 +73,9 @@ pub struct AppState {
     /// Constructed by the runtime together with the writer task; tests use
     /// [`AppState::new_for_tests`] which wires a dummy channel.
     pub audit_tx: mpsc::Sender<AuditRow>,
+    /// Override for the Google OAuth2 API base URL used by the Device Code Flow.
+    /// Set to a wiremock URI in tests; `None` means use the real Google endpoint.
+    pub device_flow_api_base: Option<String>,
 }
 
 impl AppState {
@@ -117,6 +120,7 @@ impl AppState {
             upload_metrics: Arc::new(UploadMetrics::default()),
             rtmp_stable_since: Arc::new(Mutex::new(None)),
             audit_tx,
+            device_flow_api_base: None,
         }
     }
 
@@ -188,6 +192,11 @@ impl AppState {
     ) -> Self {
         self.inpoint_restart_tx = Some(inpoint_tx);
         self.endpoint_restart_tx = Some(endpoint_tx);
+        self
+    }
+
+    pub fn with_device_flow_api_base(mut self, base: String) -> Self {
+        self.device_flow_api_base = Some(base);
         self
     }
 }

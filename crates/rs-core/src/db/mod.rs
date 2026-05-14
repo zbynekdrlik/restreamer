@@ -12,6 +12,7 @@ pub use templates::*;
 pub mod v2;
 pub use v2::*;
 
+pub mod oauth_device_grants;
 pub mod youtube_oauth;
 
 mod migrations;
@@ -71,6 +72,9 @@ mod v2_tests;
 
 #[cfg(test)]
 mod chunk_stats_tests;
+
+#[cfg(test)]
+mod oauth_device_grants_tests;
 
 #[cfg(test)]
 mod youtube_oauth_tests;

@@ -431,48 +431,6 @@ async fn delivery_instance_crud() {
 }
 
 #[tokio::test]
-async fn youtube_oauth_crud() {
-    let pool = setup_db().await;
-
-    assert!(get_youtube_oauth(&pool).await.unwrap().is_none());
-
-    upsert_youtube_oauth(
-        &pool,
-        "access-tok",
-        "refresh-tok",
-        "https://oauth2.googleapis.com/token",
-        "client-id",
-        "client-val",
-        "youtube.readonly",
-        Some("2099-01-01T00:00:00Z"),
-    )
-    .await
-    .unwrap();
-
-    let oauth = get_youtube_oauth(&pool).await.unwrap().unwrap();
-    assert_eq!(oauth.access_token, "access-tok");
-    assert_eq!(oauth.refresh_token, "refresh-tok");
-    assert_eq!(oauth.scopes, "youtube.readonly");
-
-    upsert_youtube_oauth(
-        &pool,
-        "new-access",
-        "refresh-tok",
-        "https://oauth2.googleapis.com/token",
-        "client-id",
-        "client-val",
-        "youtube.readonly",
-        None,
-    )
-    .await
-    .unwrap();
-
-    let oauth = get_youtube_oauth(&pool).await.unwrap().unwrap();
-    assert_eq!(oauth.access_token, "new-access");
-    assert!(oauth.expires_at.is_none());
-}
-
-#[tokio::test]
 async fn list_streaming_events_and_create() {
     let pool = setup_db().await;
     assert!(list_streaming_events(&pool).await.unwrap().is_empty());

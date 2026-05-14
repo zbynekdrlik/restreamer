@@ -236,6 +236,21 @@ impl ServiceCore {
         let (actual_addr, api_handle) = rs_api::serve(api_state, api_addr).await?;
         info!("API server running on {actual_addr}");
 
+        // Resume any pending OAuth Device Flow grants left over from a previous run.
+        if !self.config.youtube.device_flow.client_id.is_empty() {
+            if let Err(e) = rs_api::oauth_device::resume_pending_grants(
+                &pool,
+                &audit_tx,
+                "https://oauth2.googleapis.com",
+                &self.config.youtube.device_flow.client_id,
+                &self.config.youtube.device_flow.client_secret,
+            )
+            .await
+            {
+                tracing::warn!("resume_pending_grants failed: {e}");
+            }
+        }
+
         // Chunk directory
         tokio::fs::create_dir_all(&self.chunk_dir).await?;
 

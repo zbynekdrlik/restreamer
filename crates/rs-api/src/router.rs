@@ -169,12 +169,15 @@ pub fn build_router(state: AppState) -> Router {
         // YouTube
         .route("/youtube/status", get(youtube::youtube_status))
         .route("/youtube/oauths", get(youtube::list_oauths))
-        .route("/youtube/oauth/seed", post(youtube::youtube_oauth_seed))
-        .route("/youtube/oauth/start", get(youtube::youtube_oauth_start))
         .route(
-            "/youtube/oauth/callback",
-            get(youtube::youtube_oauth_callback),
+            "/youtube/oauth/device-start",
+            post(crate::oauth_device::device_start),
         )
+        .route(
+            "/youtube/oauth/device-status",
+            get(crate::oauth_device::device_status),
+        )
+        .route("/youtube/oauth/seed", post(youtube::youtube_oauth_seed))
         // Upload telemetry
         .route("/uploads/stats", get(uploads_endpoints::get_uploads_stats))
         .route(
@@ -189,7 +192,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/diag/dump", post(crate::diag::diag_dump_handler))
         // Test hooks for CI E2E testing
         .route("/_test/s3-block", post(handlers::test_s3_block))
-        .route("/_test/s3-unblock", post(handlers::test_s3_unblock));
+        .route("/_test/s3-unblock", post(handlers::test_s3_unblock))
+        .route(
+            "/_test/oauth-device-grant",
+            post(crate::oauth_device::test_grant_now),
+        );
 
     // Allow any origin so the dashboard is accessible from LAN devices
     let cors = CorsLayer::new()
@@ -872,7 +879,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn youtube_status_returns_503_without_hetzner_token() {
+    async fn youtube_status_returns_empty_array_without_tokens() {
         let state = test_state().await;
         let app = build_router(state);
 
@@ -886,7 +893,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // Legacy single-channel shape — CI gate consumer relies on this.
+        // No refresh_token on the v25-seeded default row -> authenticated=false.
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["authenticated"], false);
+        assert_eq!(v["stream_count"], 0);
     }
 
     #[tokio::test]
@@ -902,6 +917,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
+                            "label": "default",
                             "refresh_token": "test-refresh",
                             "client_id": "test-client",
                             "client_secret": "test-secret"
@@ -915,8 +931,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify tokens stored
-        let oauth = rs_core::db::get_youtube_oauth(&state.pool)
+        // Verify tokens stored via the label-aware API.
+        let oauth = rs_core::db::youtube_oauth::get_oauth_by_label(&state.pool, "default")
             .await
             .unwrap()
             .unwrap();
