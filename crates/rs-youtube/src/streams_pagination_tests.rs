@@ -7,7 +7,7 @@
 
 use crate::streams::{list_live_broadcasts, list_live_streams};
 use std::sync::OnceLock;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Serializes tests that mutate the process-global YOUTUBE_API_BASE env.
@@ -49,6 +49,7 @@ async fn list_live_streams_follows_next_page_token() {
         .and(path("/liveStreams"))
         .and(query_param("mine", "true"))
         .and(query_param("maxResults", "50"))
+        .and(query_param_is_missing("pageToken"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&page1))
         .expect(1)
         .mount(&server)
@@ -97,6 +98,7 @@ async fn list_live_broadcasts_follows_next_page_token() {
         .and(path("/liveBroadcasts"))
         .and(query_param("mine", "true"))
         .and(query_param("maxResults", "50"))
+        .and(query_param_is_missing("pageToken"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&page1))
         .expect(1)
         .mount(&server)
