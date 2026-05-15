@@ -334,3 +334,87 @@ mod tests {
         assert!(dump["audit_60min"].is_array());
     }
 }
+
+#[cfg(test)]
+mod loopback_tests {
+    //! Issue #179 — /api/v1/diag/dump must refuse non-loopback callers.
+    //! The dump exposes the audit log and endpoint state; only the local
+    //! operator (127.0.0.1 / ::1) is allowed to read it.
+
+    use crate::router::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::models::WsEvent;
+    use std::net::SocketAddr;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let pool = rs_core::db::create_memory_pool().await.unwrap();
+        rs_core::db::run_migrations(&pool).await.unwrap();
+        let config = Config::for_testing();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        AppState::new_for_tests(pool, config, ws_tx)
+    }
+
+    fn req_with_peer(peer: &str) -> Request<Body> {
+        let addr: SocketAddr = peer.parse().unwrap();
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/diag/dump")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        req
+    }
+
+    #[tokio::test]
+    async fn diag_dump_rejects_non_loopback_ipv4() {
+        let app = build_router(test_state().await);
+        let resp = app.oneshot(req_with_peer("8.8.8.8:65432")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "non-loopback 8.8.8.8 must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_rejects_lan_peer() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req_with_peer("10.77.9.42:54000"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "LAN peer 10.77.9.42 must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_accepts_loopback_ipv4() {
+        let app = build_router(test_state().await);
+        let resp = app.oneshot(req_with_peer("127.0.0.1:54321")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "loopback 127.0.0.1 must be allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_accepts_loopback_ipv6() {
+        let app = build_router(test_state().await);
+        let resp = app.oneshot(req_with_peer("[::1]:54321")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "loopback ::1 must be allowed"
+        );
+    }
+}
