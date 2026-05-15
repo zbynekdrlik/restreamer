@@ -195,7 +195,10 @@ pub async fn serve(
     info!("API server listening on {local_addr}");
 
     let handle = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
+        // Wire ConnectInfo<SocketAddr> so handlers (e.g. /diag/dump per
+        // issue #179) can refuse non-loopback callers.
+        let make_service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+        if let Err(e) = axum::serve(listener, make_service).await {
             tracing::error!("API server error: {e}");
         }
     });

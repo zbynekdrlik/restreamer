@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -169,20 +169,25 @@ pub async fn build_dump<S: DumpSources>(sources: &S) -> Value {
     })
 }
 
-// TODO #176-followup: enforce loopback-only access on /diag/dump
-// ConnectInfo<SocketAddr> requires into_make_service_with_connect_info at the
-// server bind site (crates/rs-api/src/lib.rs::serve). The current server uses
-// axum::serve(listener, app) without connect-info plumbing, so the extractor
-// is unavailable. See GitHub issue "Enforce loopback-only on /api/v1/diag/dump
-// (#176 follow-up)" for the tracking item.
-pub async fn diag_dump_handler(State(state): State<AppState>) -> Json<Value> {
+/// Refuses non-loopback callers. The dump exposes the audit log and
+/// endpoint state; only the local operator (127.0.0.1 / ::1) is allowed
+/// to read it. `lib.rs::serve` wires the request peer address via
+/// `into_make_service_with_connect_info::<SocketAddr>()`. Issue #179.
+pub async fn diag_dump_handler(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+) -> Result<Json<Value>, axum::http::StatusCode> {
+    if !addr.ip().is_loopback() {
+        tracing::warn!("/diag/dump refused: peer {addr} is not loopback");
+        return Err(axum::http::StatusCode::FORBIDDEN);
+    }
     let event_id = current_event_id_from_state(&state).await;
     let sources = ProductionSources {
         pool: state.pool.clone(),
         event_id,
         orchestrator: state.delivery_orchestrator.clone(),
     };
-    Json(build_dump(&sources).await)
+    Ok(Json(build_dump(&sources).await))
 }
 
 /// Best-effort accessor: returns the most-recent active streaming event
