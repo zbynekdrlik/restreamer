@@ -41,7 +41,6 @@ fn poll_decision_granted_is_terminal_with_tokens() {
         access_token: "AT".into(),
         refresh_token: "RT".into(),
         expires_in: Some(3600),
-        id_token: None,
     });
     match dec {
         PollDecision::TerminalGranted {
