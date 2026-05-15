@@ -6,15 +6,9 @@
 //! `stream_not_in_mine_list`.
 
 use crate::streams::{list_live_broadcasts, list_live_streams};
-use std::sync::OnceLock;
+use crate::test_env::env_guard;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-/// Serializes tests that mutate the process-global YOUTUBE_API_BASE env.
-fn env_guard() -> &'static tokio::sync::Mutex<()> {
-    static M: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    M.get_or_init(|| tokio::sync::Mutex::new(()))
-}
 
 fn item(id: &str) -> serde_json::Value {
     serde_json::json!({

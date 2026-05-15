@@ -1,17 +1,11 @@
 //! Tests for `list_streams_for_label`: token refresh + correct bearer per label.
 
 use crate::streams::list_streams_for_label;
+use crate::test_env::env_guard;
 use rs_core::db::youtube_oauth as yo;
 use rs_core::db::{create_memory_pool, run_migrations};
-use std::sync::OnceLock;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-/// Serializes tests that mutate the process-global YOUTUBE_API_BASE env.
-fn env_guard() -> &'static tokio::sync::Mutex<()> {
-    static M: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    M.get_or_init(|| tokio::sync::Mutex::new(()))
-}
 
 async fn pool_with_label(
     label: &str,
