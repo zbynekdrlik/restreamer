@@ -2999,11 +2999,52 @@ jobs:
 
           # Target the e2e-rtmp specific stream by title -- the default OAuth
           # account may legitimately own other streams that are active (user
-          # OBS testing, parallel production traffic). Only fail if the
-          # specific CI test stream key is already active.
+          # OBS testing, parallel production traffic). When this CI test key
+          # is already active we must distinguish two cases:
+          #   1. Stuck previous run     -- prior CI run's DeliveryStopped was
+          #                                >10 min ago and the stream is still
+          #                                live. That's our residue; throw.
+          #   2. Operator collision     -- recent DeliveryStopped (or none at
+          #                                all in the window) means our last
+          #                                run cleaned up and the active
+          #                                stream is operator OBS testing.
+          #                                Warn and continue; post-delivery
+          #                                health check still validates the
+          #                                round-trip. Issue #201.
           $e2e = $response.streams | Where-Object { $_.title -eq "e2e rtmp" }
           if ($e2e -and $e2e.stream_status -eq "active") {
-            Write-Warning "e2e rtmp stream shows active at baseline -- previous run did not shut down cleanly OR operator testing collision. Continuing; post-delivery health check still validates the round-trip."
+            try {
+              $audit = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=DeliveryStopped&limit=1" -TimeoutSec 10
+              $latestStop = $audit.rows | Select-Object -First 1
+            } catch {
+              Write-Warning "audit query for DeliveryStopped failed: $_ -- treating as operator collision"
+              $latestStop = $null
+            }
+
+            $nowUtc = [DateTime]::UtcNow
+            $stuckThresholdMin = 10
+            $isStuck = $false
+
+            if ($latestStop) {
+              try {
+                $stopTs = [DateTime]::Parse($latestStop.ts, $null, [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+                $ageMin = ($nowUtc - $stopTs).TotalMinutes
+                Write-Host "Latest DeliveryStopped: ts=$($latestStop.ts) age=${ageMin}min"
+                if ($ageMin -gt $stuckThresholdMin) {
+                  $isStuck = $true
+                }
+              } catch {
+                Write-Warning "could not parse DeliveryStopped ts '$($latestStop.ts)': $_ -- treating as operator collision"
+              }
+            } else {
+              Write-Host "No DeliveryStopped audit row -- treating as operator collision (or fresh install)"
+            }
+
+            if ($isStuck) {
+              throw "BASELINE FAILED: e2e rtmp stream still active AND latest DeliveryStopped is >$stuckThresholdMin min old. Previous CI run did not shut down cleanly -- investigate before retrying."
+            } else {
+              Write-Warning "e2e rtmp stream shows active at baseline -- recent DeliveryStopped or none, treating as operator OBS testing collision. Continuing; post-delivery health check still validates the round-trip."
+            }
           } else {
             Write-Host "=== Baseline PASSED: e2e rtmp stream is not active ==="
           }
