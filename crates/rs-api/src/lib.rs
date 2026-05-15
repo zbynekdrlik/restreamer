@@ -174,8 +174,11 @@ pub async fn serve(
 
             let https_app = app.clone();
             tokio::spawn(async move {
+                // Same ConnectInfo<SocketAddr> wiring as the HTTP listener
+                // below (issue #179) so /diag/dump returns 403, not 500,
+                // on the HTTPS path too.
                 if let Err(e) = axum_server::bind_rustls(https_addr, tls_config)
-                    .serve(https_app.into_make_service())
+                    .serve(https_app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                     .await
                 {
                     tracing::error!("HTTPS server error: {e}");
