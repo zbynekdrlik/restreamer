@@ -24,7 +24,6 @@ pub enum PollResponse {
         access_token: String,
         refresh_token: String,
         expires_in: Option<i64>,
-        id_token: Option<String>,
     },
     Error(String),
 }
@@ -39,7 +38,6 @@ pub enum PollDecision {
         access_token: String,
         refresh_token: String,
         expires_in: Option<i64>,
-        id_token: Option<String>,
     },
     TerminalError(String),
 }
@@ -73,7 +71,6 @@ struct TokenSuccess {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: Option<i64>,
-    id_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -111,7 +108,6 @@ pub async fn poll_token(
             access_token: ts.access_token,
             refresh_token,
             expires_in: ts.expires_in,
-            id_token: ts.id_token,
         });
     }
 
@@ -137,12 +133,10 @@ pub fn poll_decision(resp: &PollResponse) -> PollDecision {
             access_token,
             refresh_token,
             expires_in,
-            id_token,
         } => PollDecision::TerminalGranted {
             access_token: access_token.clone(),
             refresh_token: refresh_token.clone(),
             expires_in: *expires_in,
-            id_token: id_token.clone(),
         },
         PollResponse::Error(e) => PollDecision::TerminalError(e.clone()),
     }

@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -169,20 +169,25 @@ pub async fn build_dump<S: DumpSources>(sources: &S) -> Value {
     })
 }
 
-// TODO #176-followup: enforce loopback-only access on /diag/dump
-// ConnectInfo<SocketAddr> requires into_make_service_with_connect_info at the
-// server bind site (crates/rs-api/src/lib.rs::serve). The current server uses
-// axum::serve(listener, app) without connect-info plumbing, so the extractor
-// is unavailable. See GitHub issue "Enforce loopback-only on /api/v1/diag/dump
-// (#176 follow-up)" for the tracking item.
-pub async fn diag_dump_handler(State(state): State<AppState>) -> Json<Value> {
+/// Refuses non-loopback callers. The dump exposes the audit log and
+/// endpoint state; only the local operator (127.0.0.1 / ::1) is allowed
+/// to read it. `lib.rs::serve` wires the request peer address via
+/// `into_make_service_with_connect_info::<SocketAddr>()`. Issue #179.
+pub async fn diag_dump_handler(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+) -> Result<Json<Value>, axum::http::StatusCode> {
+    if !addr.ip().is_loopback() {
+        tracing::warn!("/diag/dump refused: peer {addr} is not loopback");
+        return Err(axum::http::StatusCode::FORBIDDEN);
+    }
     let event_id = current_event_id_from_state(&state).await;
     let sources = ProductionSources {
         pool: state.pool.clone(),
         event_id,
         orchestrator: state.delivery_orchestrator.clone(),
     };
-    Json(build_dump(&sources).await)
+    Ok(Json(build_dump(&sources).await))
 }
 
 /// Best-effort accessor: returns the most-recent active streaming event
@@ -332,5 +337,89 @@ mod tests {
         assert!(dump["s3_fetch_profile"].is_null());
         // Other sections still populated.
         assert!(dump["audit_60min"].is_array());
+    }
+}
+
+#[cfg(test)]
+mod loopback_tests {
+    //! Issue #179 — /api/v1/diag/dump must refuse non-loopback callers.
+    //! The dump exposes the audit log and endpoint state; only the local
+    //! operator (127.0.0.1 / ::1) is allowed to read it.
+
+    use crate::router::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::models::WsEvent;
+    use std::net::SocketAddr;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let pool = rs_core::db::create_memory_pool().await.unwrap();
+        rs_core::db::run_migrations(&pool).await.unwrap();
+        let config = Config::for_testing();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        AppState::new_for_tests(pool, config, ws_tx)
+    }
+
+    fn req_with_peer(peer: &str) -> Request<Body> {
+        let addr: SocketAddr = peer.parse().unwrap();
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/diag/dump")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        req
+    }
+
+    #[tokio::test]
+    async fn diag_dump_rejects_non_loopback_ipv4() {
+        let app = build_router(test_state().await);
+        let resp = app.oneshot(req_with_peer("8.8.8.8:65432")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "non-loopback 8.8.8.8 must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_rejects_lan_peer() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req_with_peer("10.77.9.42:54000"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "LAN peer 10.77.9.42 must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_accepts_loopback_ipv4() {
+        let app = build_router(test_state().await);
+        let resp = app.oneshot(req_with_peer("127.0.0.1:54321")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "loopback 127.0.0.1 must be allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_accepts_loopback_ipv6() {
+        let app = build_router(test_state().await);
+        let resp = app.oneshot(req_with_peer("[::1]:54321")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "loopback ::1 must be allowed"
+        );
     }
 }

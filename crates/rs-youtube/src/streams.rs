@@ -84,7 +84,17 @@ pub struct ConfigurationIssue {
 #[derive(Debug, Deserialize)]
 struct ListResponse<T> {
     items: Vec<T>,
+    #[serde(default, rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
+
+/// Hard caps on pagination to protect against runaway quota burn on a
+/// misbehaving server (e.g., one that returns the same `nextPageToken`
+/// forever). 10 pages × 50 items = 500 covers every realistic YouTube
+/// account; anything beyond is logged with `warn!` and truncated. See
+/// issue #200.
+const MAX_PAGES: usize = 10;
+const MAX_ITEMS: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiveBroadcast {
@@ -104,31 +114,11 @@ pub struct BroadcastStatus {
     pub life_cycle_status: String,
 }
 
-/// List live streams (mine=True) to check stream health.
+/// List live streams (mine=True) to check stream health. Follows
+/// `nextPageToken` up to `MAX_PAGES` / `MAX_ITEMS`; emits a `warn!` if
+/// the cap kicks in. Issue #200.
 pub async fn list_live_streams(access_token: &str) -> Result<Vec<LiveStream>> {
-    let client = Client::new();
-    let resp = client
-        .get(format!("{}/liveStreams", youtube_api_base()))
-        .bearer_auth(access_token)
-        .query(&[
-            ("part", "id,snippet,status,cdn"),
-            ("mine", "true"),
-            ("maxResults", "50"),
-        ])
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(YouTubeError::Api {
-            status,
-            message: body,
-        });
-    }
-
-    let body: ListResponse<LiveStream> = resp.json().await?;
-    Ok(body.items)
+    paginate(access_token, "liveStreams", "id,snippet,status,cdn").await
 }
 
 /// Check if any live stream is actively receiving data.
@@ -137,33 +127,73 @@ pub async fn is_stream_receiving(access_token: &str) -> Result<bool> {
     Ok(streams.iter().any(|s| s.status.stream_status == "active"))
 }
 
-/// List all live broadcasts (mine=true, all types, all states).
+/// List all live broadcasts (mine=true, all types, all states). Follows
+/// `nextPageToken` up to `MAX_PAGES` / `MAX_ITEMS`. Issue #200.
 pub async fn list_live_broadcasts(access_token: &str) -> Result<Vec<LiveBroadcast>> {
-    let client = Client::new();
-    // Try mine=true first to get all broadcasts for the authenticated user.
-    // This returns broadcasts in all lifecycle states (ready, testing, live, complete).
-    let resp = client
-        .get(format!("{}/liveBroadcasts", youtube_api_base()))
-        .bearer_auth(access_token)
-        .query(&[
-            ("part", "id,snippet,status"),
-            ("mine", "true"),
-            ("maxResults", "50"),
-        ])
-        .send()
-        .await?;
+    paginate(access_token, "liveBroadcasts", "id,snippet,status").await
+}
 
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(YouTubeError::Api {
-            status,
-            message: body,
-        });
+/// Shared pagination loop for `liveStreams` and `liveBroadcasts`. Sends
+/// `maxResults=50` plus `pageToken=<prev>` and accumulates `items`
+/// until the response omits `nextPageToken` or the hard cap fires.
+async fn paginate<T: for<'de> Deserialize<'de>>(
+    access_token: &str,
+    endpoint: &str,
+    part: &str,
+) -> Result<Vec<T>> {
+    let client = Client::new();
+    let url = format!("{}/{endpoint}", youtube_api_base());
+    let mut acc: Vec<T> = Vec::new();
+    let mut page_token: Option<String> = None;
+
+    for page_idx in 0..MAX_PAGES {
+        let mut params: Vec<(&str, String)> = vec![
+            ("part", part.to_string()),
+            ("mine", "true".to_string()),
+            ("maxResults", "50".to_string()),
+        ];
+        if let Some(t) = &page_token {
+            params.push(("pageToken", t.clone()));
+        }
+
+        let resp = client
+            .get(&url)
+            .bearer_auth(access_token)
+            .query(&params)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(YouTubeError::Api {
+                status,
+                message: body,
+            });
+        }
+
+        let body: ListResponse<T> = resp.json().await?;
+        acc.extend(body.items);
+
+        if acc.len() >= MAX_ITEMS {
+            tracing::warn!(
+                "{endpoint}: hard cap {MAX_ITEMS} items reached at page {} - truncating",
+                page_idx + 1
+            );
+            acc.truncate(MAX_ITEMS);
+            return Ok(acc);
+        }
+
+        match body.next_page_token {
+            Some(t) if !t.is_empty() => page_token = Some(t),
+            _ => return Ok(acc),
+        }
     }
 
-    let body: ListResponse<LiveBroadcast> = resp.json().await?;
-    Ok(body.items)
+    tracing::warn!(
+        "{endpoint}: hard cap {MAX_PAGES} pages reached - truncating, server may be misbehaving"
+    );
+    Ok(acc)
 }
 
 /// Check if any broadcast is in "testing" state (video preview is playing).
