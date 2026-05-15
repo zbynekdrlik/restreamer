@@ -3838,8 +3838,26 @@ jobs:
                 throw "FAILED: sample $i/$samples - YT stream '$($s.title)' health='$($s.health_status)' (must stay 'good' across full window). Detected drift-class regression."
               }
               if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
-                $issueList = $s.configuration_issues -join ', '
-                throw "FAILED: sample $i/$samples - YT stream '$($s.title)' has configuration_issues: $issueList. videoIngestionFasterThanRealtime / bitrateLow / videoIngestionStarved are drift-class regressions per Phase 1 spec."
+                # YouTube returns issues at info / warning / error severity.
+                # Info-level advisories (e.g. audioBitrateLow "Check audio
+                # settings") are NOT drift-class regressions; YT consistently
+                # raises audioBitrateLow on our synthetic test feed and that
+                # has nothing to do with restreamer correctness. Only fail on
+                # warning / error severity. (See #193 sustained-gate noise.)
+                $blocking = @($s.configuration_issues | Where-Object {
+                  $_.severity -ne "info"
+                })
+                $advisory = @($s.configuration_issues | Where-Object {
+                  $_.severity -eq "info"
+                })
+                if ($advisory.Count -gt 0) {
+                  $adv = ($advisory | ForEach-Object { "$($_.type)($($_.severity))" }) -join ', '
+                  Write-Host "  sample ${i}: ignoring advisory configuration_issues: $adv"
+                }
+                if ($blocking.Count -gt 0) {
+                  $issueList = ($blocking | ForEach-Object { "$($_.type)($($_.severity))" }) -join ', '
+                  throw "FAILED: sample $i/$samples - YT stream '$($s.title)' has blocking configuration_issues: $issueList. videoIngestionFasterThanRealtime / bitrateLow / videoIngestionStarved are drift-class regressions per Phase 1 spec."
+                }
               }
             }
 
