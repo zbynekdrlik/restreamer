@@ -3725,11 +3725,13 @@ jobs:
               }
 
               if ($response.stream_receiving -and $healthValue -eq "good") {
-                # Check for bitrateLow in configuration_issues even when health is "good"
+                # Check for bitrateLow in configuration_issues even when health is "good".
+                # configuration_issues entries are "{type}: {reason} ({severity})"
+                # strings, so match "^bitrateLow:" not bare contains.
                 $hasBitrateLow = $false
                 if ($response.streams) {
                   foreach ($s in $response.streams) {
-                    if ($s.configuration_issues -and $s.configuration_issues -contains "bitrateLow") {
+                    if ($s.configuration_issues -and @($s.configuration_issues | Where-Object { $_ -match '^bitrateLow:' }).Count -gt 0) {
                       $hasBitrateLow = $true
                       Write-Host "  WARNING: bitrateLow detected on stream '$($s.title)' despite 'good' health"
                     }
@@ -3827,8 +3829,11 @@ jobs:
               Write-Host "  sample ${i}: host_internet_unreachable audit query failed: $($_.Exception.Message)"
             }
 
-            # YT health sample.
-            $yt = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 10
+            # YT health sample. TimeoutSec 30 matches the other 5 call
+            # sites in this workflow — the /api/v1/youtube/status handler
+            # makes upstream Google API calls that can take >10s during
+            # transient YT lag.
+            $yt = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
             $activeStreams = @($yt.streams | Where-Object { $_.stream_status -eq "active" })
             if ($activeStreams.Count -eq 0) {
               throw "FAILED: sample $i/$samples - no active YT stream observed mid-window (was active earlier; means upstream broke)"
@@ -3838,8 +3843,32 @@ jobs:
                 throw "FAILED: sample $i/$samples - YT stream '$($s.title)' health='$($s.health_status)' (must stay 'good' across full window). Detected drift-class regression."
               }
               if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
-                $issueList = $s.configuration_issues -join ', '
-                throw "FAILED: sample $i/$samples - YT stream '$($s.title)' has configuration_issues: $issueList. videoIngestionFasterThanRealtime / bitrateLow / videoIngestionStarved are drift-class regressions per Phase 1 spec."
+                # /api/v1/youtube/status returns configuration_issues as
+                # Vec<String> formatted "{type}: {reason} ({severity})" by
+                # crates/rs-api/src/youtube.rs:106. Filter by parsing the
+                # trailing (severity) and the leading {type}. Two policies:
+                #   1. Drift-class type list ALWAYS blocks regardless of
+                #      severity (defends against YT silently downgrading).
+                #   2. Otherwise, info-level advisories (e.g. persistent
+                #      audioBitrateLow on the synthetic test feed) are
+                #      logged + ignored; warning/error throws.
+                # Follow-up #209 tracks moving issues to structured Rust
+                # types so this string parsing goes away.
+                $driftTypes = @('videoIngestionStarved', 'videoIngestionFasterThanRealtime', 'bitrateLow')
+                $driftPattern = '^(' + ($driftTypes -join '|') + '):'
+                $blocking = @($s.configuration_issues | Where-Object {
+                  $_ -match $driftPattern -or $_ -notmatch '\(info\)$'
+                })
+                $advisory = @($s.configuration_issues | Where-Object {
+                  $_ -match '\(info\)$' -and $_ -notmatch $driftPattern
+                })
+                if ($advisory.Count -gt 0) {
+                  Write-Host "  sample ${i}: ignoring advisory configuration_issues: $($advisory -join ', ')"
+                }
+                if ($blocking.Count -gt 0) {
+                  $issueList = $blocking -join ', '
+                  throw "FAILED: sample $i/$samples - YT stream '$($s.title)' has blocking configuration_issues: $issueList. Drift-class types ($($driftTypes -join '/')) always block; other types block at warning/error severity per Phase 1 spec."
+                }
               }
             }
 
@@ -4291,11 +4320,13 @@ jobs:
               }
 
               if ($response.stream_receiving -and $healthValue -eq "good") {
-                # Check for bitrateLow even when health reports "good"
+                # Check for bitrateLow even when health reports "good".
+                # configuration_issues entries are "{type}: {reason} ({severity})"
+                # strings, so match "^bitrateLow:" not bare contains.
                 $hasBitrateLow = $false
                 if ($response.streams) {
                   foreach ($s in $response.streams) {
-                    if ($s.configuration_issues -and $s.configuration_issues -contains "bitrateLow") {
+                    if ($s.configuration_issues -and @($s.configuration_issues | Where-Object { $_ -match '^bitrateLow:' }).Count -gt 0) {
                       $hasBitrateLow = $true
                       Write-Host "  WARNING: bitrateLow detected on stream '$($s.title)'"
                     }
