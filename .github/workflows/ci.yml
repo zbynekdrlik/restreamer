@@ -3829,8 +3829,11 @@ jobs:
               Write-Host "  sample ${i}: host_internet_unreachable audit query failed: $($_.Exception.Message)"
             }
 
-            # YT health sample.
-            $yt = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 10
+            # YT health sample. TimeoutSec 30 matches the other 5 call
+            # sites in this workflow — the /api/v1/youtube/status handler
+            # makes upstream Google API calls that can take >10s during
+            # transient YT lag.
+            $yt = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
             $activeStreams = @($yt.streams | Where-Object { $_.stream_status -eq "active" })
             if ($activeStreams.Count -eq 0) {
               throw "FAILED: sample $i/$samples - no active YT stream observed mid-window (was active earlier; means upstream broke)"
