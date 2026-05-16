@@ -522,6 +522,21 @@ jobs:
             exit 1
           fi
           echo "OK: No destructive Hetzner config overwrites found."
+      - name: Scan for SQLite WAL/SHM deletion
+        run: |
+          # In journal_mode=WAL, restreamer.db-wal and restreamer.db-shm are part
+          # of the live database. Deleting them between a forced kill and the
+          # next process start permanently destroys uncheckpointed transactions
+          # (e.g. OAuth grants created seconds before redeploy). SQLite re-opens
+          # and replays the WAL on its own. Block any reintroduction of WAL/SHM
+          # deletion in deploy / install scripts. Regression for #210.
+          BAD=$(grep -Prn 'Remove-Item[^\n]*restreamer\.db-(wal|shm)' scripts/ .github/workflows/ || true)
+          if [ -n "$BAD" ]; then
+            echo "ERROR: SQLite WAL/SHM file deletion is FORBIDDEN — it destroys uncheckpointed transactions."
+            echo "$BAD"
+            exit 1
+          fi
+          echo "OK: No SQLite WAL/SHM file deletion found."
       - name: Verify zero ignored tests in cargo test output
         run: |
           # Run tests and capture output
@@ -1034,11 +1049,12 @@ jobs:
           }
           Start-Sleep -Seconds 2
 
-          Write-Host "=== Step 1.5: Clean stale files (preserve database) ==="
+          Write-Host "=== Step 1.5: Clean stale chunk files (preserve database AND WAL) ==="
           $DataDir = "C:\ProgramData\Restreamer"
-          Remove-Item "$DataDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$DataDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
-          Write-Host "Cleaned SQLite WAL/SHM files"
+          # WAL/SHM files are part of the live database in journal_mode=WAL.
+          # Deleting them between a forced kill and the next process start
+          # destroys uncheckpointed transactions (e.g. OAuth grants created
+          # seconds before the redeploy). SQLite replays WAL safely on open.
 
           $chunksDir = "$DataDir\chunks"
           if (Test-Path $chunksDir) {

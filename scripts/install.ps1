@@ -50,10 +50,11 @@ Write-Status "Stopping existing Restreamer..."
 Get-Process -Name $AppName -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
 
-# --- Clean up stale SQLite WAL files ---
-Write-Status "Cleaning up stale database files..."
-Remove-Item "$ConfigDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
-Remove-Item "$ConfigDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
+# NOTE: We intentionally do NOT delete restreamer.db-wal / restreamer.db-shm.
+# In WAL journaling mode these files hold transactions that have not yet been
+# checkpointed into the main .db. Deleting them between a forced kill and the
+# next process start permanently destroys those transactions (e.g. OAuth grants
+# created seconds before redeploy). SQLite re-opens and replays the WAL safely.
 
 # --- Remove legacy Windows service if it exists ---
 Write-Status "Removing legacy Windows service..."
