@@ -67,8 +67,20 @@ pub struct ChunkRecord {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PusherKind {
-    #[default]
+    /// Legacy ffmpeg-subprocess push. Kept as a DB / config value for
+    /// backward compatibility with rows created before the rust-pusher
+    /// migration, but new endpoints MUST NOT use this — they will silently
+    /// stream into the ffmpeg-subprocess path which produces oscillating
+    /// `videoIngestionStarved` / `videoIngestionFasterThanRealtime` health
+    /// in YT Studio (root cause of #196 — YT-BB endpoints had been left
+    /// behind on this path while every other endpoint was migrated to
+    /// `Rust`). Migration v28 flips any remaining `ffmpeg` rows to `rust`
+    /// and the API rejects explicit `pusher: "ffmpeg"` on create/update.
     Ffmpeg,
+    /// In-process Rust RTMP pusher (rs-rtmp-push). The only supported
+    /// push backend for new endpoints. `#[default]` so any config without
+    /// an explicit pusher field starts on the working path.
+    #[default]
     Rust,
 }
 

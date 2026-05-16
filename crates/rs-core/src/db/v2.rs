@@ -81,9 +81,17 @@ pub async fn create_endpoint_config(
     stream_key: &str,
     is_fast: bool,
 ) -> Result<i64> {
+    // Explicit `pusher='rust'` overrides the v22 column DEFAULT 'ffmpeg'.
+    // SQLite ALTER COLUMN can't change a column DEFAULT cleanly, so we
+    // override at every INSERT site instead. Together with migration v28
+    // (flips all existing 'ffmpeg' rows to 'rust') this closes the gap
+    // where new endpoints silently landed on the broken ffmpeg-subprocess
+    // path (root cause of #196 "YT-BB always bad"). PusherKind::default()
+    // is also `Rust` so anything that deserializes from config.json picks
+    // the right path automatically.
     let row = sqlx::query(
-        "INSERT INTO endpoint_configs (alias, service_type, stream_key, is_fast)
-         VALUES (?1, ?2, ?3, ?4) RETURNING id",
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key, is_fast, pusher)
+         VALUES (?1, ?2, ?3, ?4, 'rust') RETURNING id",
     )
     .bind(alias)
     .bind(service_type)

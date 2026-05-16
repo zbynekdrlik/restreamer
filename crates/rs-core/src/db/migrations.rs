@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 27;
+pub const MAX_SCHEMA_VERSION: i32 = 28;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -343,6 +343,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             25 => migrate_v25(&mut tx).await?,
             26 => migrate_v26(&mut tx).await?,
             27 => migrate_v27(&mut tx).await?,
+            28 => migrate_v28(&mut tx).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -818,5 +819,21 @@ async fn migrate_v27(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
     )
     .execute(&mut **tx)
     .await?;
+    Ok(())
+}
+
+/// v28 — root-cause fix for #196 "YT-BB always bad".
+/// The BB endpoints (id 32-35) were created with `pusher='ffmpeg'` and
+/// never flipped to `rust` like every other endpoint was. The ffmpeg
+/// subprocess path produces oscillating `videoIngestionStarved` /
+/// `videoIngestionFasterThanRealtime` health on YT for those streams.
+/// Migration v22 set the column default to 'ffmpeg' to preserve legacy
+/// behaviour; that default is gone in `PusherKind::default() = Rust`.
+/// This migration flips any remaining `ffmpeg` rows to `rust` so the
+/// gap can never reopen for endpoints that already exist.
+async fn migrate_v28(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    sqlx::query("UPDATE endpoint_configs SET pusher = 'rust' WHERE pusher = 'ffmpeg'")
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
