@@ -4907,7 +4907,11 @@ jobs:
     name: FB endpoint config + ingest smoke (#215)
     runs-on: ubuntu-latest
     needs: [rust-ci-gate]
-    if: ${{ needs.rust-ci-gate.result == 'success' }}
+    # always() overrides the implicit success() check so the job runs even when
+    # transitive upstream jobs (version-check, mutation-testing) are skipped on
+    # non-PR events. Without always(), GitHub auto-skips the job and e2e-gate
+    # fails because it requires e2e-fb-push.result == 'success'.
+    if: always() && needs.rust-ci-gate.result == 'success'
     timeout-minutes: 8
     env:
       FB_TEST_STREAM_KEY: ${{ secrets.FB_TEST_STREAM_KEY }}
