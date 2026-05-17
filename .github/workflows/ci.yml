@@ -4929,20 +4929,30 @@ jobs:
         env:
           SQLX_OFFLINE: true
 
-      - name: Start restreamer-service
-        env:
-          # Minimal env-var config to satisfy validate(). The chunker writes
-          # locally before async S3 upload, so placeholder S3 creds are fine
-          # for this smoke test (S3 upload will fail but local chunks still
-          # exist for the assertion).
-          RESTREAMER_CLIENT_UUID: ci-test-fb-smoke
-          RESTREAMER_S3_BUCKET: ci-placeholder
-          RESTREAMER_S3_REGION: us-east-1
-          RESTREAMER_S3_ENDPOINT: http://127.0.0.1:9000
-          RESTREAMER_S3_ACCESS_KEY_ID: ci-placeholder
-          RESTREAMER_S3_SECRET_ACCESS_KEY: ci-placeholder
+      - name: Write minimal restreamer config
         run: |
-          ./target/release/restreamer-service > restreamer.log 2>&1 &
+          # rs-service `load_config` only applies env-var overrides when a
+          # config file exists. When the file is missing it returns
+          # Config::default() and skips overrides, so we MUST provide a file.
+          # All values are placeholders; the chunker writes locally before
+          # async S3 upload, so fake credentials are fine for this smoke test.
+          cat > /tmp/restreamer-config.json <<'EOF'
+          {
+            "client_uuid": "ci-test-fb-smoke",
+            "s3": {
+              "bucket": "ci-placeholder",
+              "region": "us-east-1",
+              "endpoint": "http://127.0.0.1:9000",
+              "access_key_id": "ci-placeholder",
+              "secret_access_key": "ci-placeholder"
+            }
+          }
+          EOF
+          cat /tmp/restreamer-config.json
+
+      - name: Start restreamer-service
+        run: |
+          ./target/release/restreamer-service /tmp/restreamer-config.json > restreamer.log 2>&1 &
           echo $! > restreamer.pid
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8910/api/v1/status > /dev/null; then
