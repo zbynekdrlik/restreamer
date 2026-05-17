@@ -335,6 +335,14 @@ async fn negotiate(
         // Live rejects publish when tcUrl carries the default port suffix
         // or when swfUrl/pageUrl are absent on some ingest paths (#215).
         let props = build_connect_props(scheme, host, port, app);
+        tracing::debug!(
+            target: "rs_rtmp_push::connect",
+            host = %host,
+            port = port,
+            app = %app,
+            ?props,
+            "sending NetConnection.connect"
+        );
         nc.write_connect(&(TRANSACTION_ID_CONNECT as f64), &props)
             .await
             .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
