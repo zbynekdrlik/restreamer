@@ -532,24 +532,21 @@ async fn v29_flips_fb_endpoints_from_ffmpeg_to_rust() {
     // Re-run migrations (this is the contract under test: dispatcher reaches v29).
     crate::db::run_migrations(&pool).await.unwrap();
 
-    let fb: String = sqlx::query_scalar(
-        "SELECT pusher FROM endpoint_configs WHERE alias = 'fb-test'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let yt: String = sqlx::query_scalar(
-        "SELECT pusher FROM endpoint_configs WHERE alias = 'yt-test'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let vimeo: String = sqlx::query_scalar(
-        "SELECT pusher FROM endpoint_configs WHERE alias = 'vimeo-test'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let fb: String =
+        sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'fb-test'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let yt: String =
+        sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'yt-test'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let vimeo: String =
+        sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'vimeo-test'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
     assert_eq!(fb, "rust", "v29 must flip FB ffmpeg->rust");
     assert_eq!(yt, "ffmpeg", "v29 must NOT touch non-FB rows");
@@ -583,12 +580,11 @@ async fn v29_is_idempotent() {
         .unwrap();
     crate::db::run_migrations(&pool).await.unwrap();
 
-    let fb: String = sqlx::query_scalar(
-        "SELECT pusher FROM endpoint_configs WHERE alias = 'fb-idem'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let fb: String =
+        sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'fb-idem'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(fb, "rust", "v29 idempotent: still rust after re-run");
 }
 
@@ -611,11 +607,10 @@ async fn v29_does_not_touch_fb_rows_already_on_rust() {
         .unwrap();
     crate::db::run_migrations(&pool).await.unwrap();
 
-    let fb: String = sqlx::query_scalar(
-        "SELECT pusher FROM endpoint_configs WHERE alias = 'fb-already-rust'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let fb: String =
+        sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'fb-already-rust'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(fb, "rust", "v29 only matches WHERE pusher='ffmpeg'");
 }
