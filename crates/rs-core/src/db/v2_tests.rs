@@ -24,7 +24,9 @@ async fn parse_pusher_kind_rust_roundtrip() {
     let id = create_endpoint_config(&pool, "yt-rust", "YT_RTMP", "key1", false)
         .await
         .unwrap();
-    // Set pusher = "rust" directly — create_endpoint_config defaults to "ffmpeg".
+    // `create_endpoint_config` now defaults to "rust" explicitly (post-#196);
+    // the redundant UPDATE makes the intent obvious and exercises the
+    // round-trip path for the literal "rust" parser arm.
     sqlx::query("UPDATE endpoint_configs SET pusher = 'rust' WHERE id = ?1")
         .bind(id)
         .execute(&pool)
@@ -59,9 +61,13 @@ async fn parse_pusher_kind_ffmpeg_roundtrip() {
     assert_eq!(configs[0].pusher, PusherKind::Ffmpeg);
 }
 
-/// An unknown pusher value must fall back to `PusherKind::Ffmpeg` (the default).
+/// An unknown pusher value must fall back to `PusherKind::default()` —
+/// post-#196 the default is `Rust`. The wildcard arm in
+/// `parse_pusher_kind` exists for read-back resilience: if a future
+/// binary writes a new variant name we don't recognise here, we should
+/// still surface the working backend rather than the broken legacy one.
 #[tokio::test]
-async fn parse_pusher_kind_unknown_defaults_to_ffmpeg() {
+async fn parse_pusher_kind_unknown_defaults_to_rust() {
     let pool = setup().await;
     let id = create_endpoint_config(&pool, "vimeo-unk", "VIMEO", "key3", false)
         .await
@@ -76,8 +82,9 @@ async fn parse_pusher_kind_unknown_defaults_to_ffmpeg() {
     assert_eq!(configs.len(), 1);
     assert_eq!(
         configs[0].pusher,
-        PusherKind::Ffmpeg,
-        "unknown pusher string must fall back to PusherKind::Ffmpeg (the wildcard arm)"
+        PusherKind::Rust,
+        "unknown pusher string must fall back to PusherKind::default() — \
+         post-#196 default is Rust (was Ffmpeg before v0.17.0)"
     );
 }
 

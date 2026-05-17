@@ -522,6 +522,45 @@ jobs:
             exit 1
           fi
           echo "OK: No destructive Hetzner config overwrites found."
+      - name: Scan for SQLite WAL/SHM deletion
+        run: |
+          # In journal_mode=WAL, restreamer.db-wal and restreamer.db-shm are part
+          # of the live database. Deleting them between a forced kill and the
+          # next process start permanently destroys uncheckpointed transactions
+          # (e.g. OAuth grants created seconds before redeploy). SQLite re-opens
+          # and replays the WAL on its own. Block any reintroduction of WAL/SHM
+          # deletion in deploy / install scripts. Regression for #210.
+          #
+          # Strategy: flag any line in scripts/ or .github/workflows/ that pairs
+          # a deletion verb (Remove-Item, rm / ri / del / erase, Get-ChildItem
+          # piped to Remove-Item via -Filter / -Include, or -Recurse against the
+          # data dir) with the WAL/SHM filenames. Pure comment lines and our own
+          # error-message echo lines are ignored. The point is to catch indirect
+          # patterns the original regex missed:
+          #   Remove-Item "$D\*" -Include *.db-wal,*.db-shm
+          #   rm $env:USERPROFILE\restreamer.db-wal
+          #   Get-ChildItem -Filter '*.db-wal' | Remove-Item
+          # Anything that names .db-wal/.db-shm AND a deletion verb on the same
+          # line is rejected.
+          #
+          # The regex below combines into one alternation. `[^\n]*` enforces
+          # same-line pairing in both directions (verb-before-filename and
+          # filename-before-verb). The wider verb set: Remove-Item, ^rm /
+          # whitespace-bounded `rm `, `ri `, `del `, `erase `, -Include
+          # (matches `*.db-wal`), and -Recurse (deletes parent dir).
+          DELETE_VERB='(Remove-Item|^\s*(rm|ri|del|erase)\s|\bremove\s+'\''[^'\'']*\.db-(wal|shm)|-Include[^\n]*\.db-(wal|shm)|-Filter[^\n]*\.db-(wal|shm))'
+          BAD=$(grep -PrnE "${DELETE_VERB}[^\n]*restreamer\.db-(wal|shm)|restreamer\.db-(wal|shm)[^\n]*${DELETE_VERB}" \
+                  scripts/ .github/workflows/ 2>/dev/null \
+                | grep -vP '^\S+:[0-9]+:\s*#' \
+                | grep -vP 'echo\s+"(ERROR|OK|Any\s+reference)' \
+                || true)
+          if [ -n "$BAD" ]; then
+            echo "ERROR: SQLite WAL/SHM file deletion is FORBIDDEN — it destroys uncheckpointed transactions."
+            echo "Any deletion verb on the same line as restreamer.db-wal / restreamer.db-shm is rejected."
+            echo "$BAD"
+            exit 1
+          fi
+          echo "OK: No SQLite WAL/SHM file deletion patterns found."
       - name: Verify zero ignored tests in cargo test output
         run: |
           # Run tests and capture output
@@ -1034,11 +1073,12 @@ jobs:
           }
           Start-Sleep -Seconds 2
 
-          Write-Host "=== Step 1.5: Clean stale files (preserve database) ==="
+          Write-Host "=== Step 1.5: Clean stale chunk files (preserve database AND WAL) ==="
           $DataDir = "C:\ProgramData\Restreamer"
-          Remove-Item "$DataDir\restreamer.db-wal" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$DataDir\restreamer.db-shm" -Force -ErrorAction SilentlyContinue
-          Write-Host "Cleaned SQLite WAL/SHM files"
+          # WAL/SHM files are part of the live database in journal_mode=WAL.
+          # Deleting them between a forced kill and the next process start
+          # destroys uncheckpointed transactions (e.g. OAuth grants created
+          # seconds before the redeploy). SQLite replays WAL safely on open.
 
           $chunksDir = "$DataDir\chunks"
           if (Test-Path $chunksDir) {

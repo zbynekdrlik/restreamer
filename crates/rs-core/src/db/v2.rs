@@ -9,10 +9,17 @@ use crate::models::{
 
 /// Parse a `pusher` TEXT column value from the database into `PusherKind`.
 /// Unknown values default to `Ffmpeg` so existing rows are never broken.
-fn parse_pusher_kind(s: String) -> PusherKind {
+/// Parse the `pusher` TEXT column. Known values `'rust'` and `'ffmpeg'`
+/// round-trip cleanly. Unknown / malformed values fall back to the enum
+/// default (`Rust` post-#196). Migration v28 flips any literal `'ffmpeg'`
+/// rows to `'rust'` on the next deploy, so the `'ffmpeg'` arm should
+/// rarely fire in practice but is kept for read-back of legacy rows
+/// on stale binaries.
+pub(super) fn parse_pusher_kind(s: String) -> PusherKind {
     match s.as_str() {
         "rust" => PusherKind::Rust,
-        _ => PusherKind::Ffmpeg,
+        "ffmpeg" => PusherKind::Ffmpeg,
+        _ => PusherKind::default(),
     }
 }
 
@@ -81,9 +88,17 @@ pub async fn create_endpoint_config(
     stream_key: &str,
     is_fast: bool,
 ) -> Result<i64> {
+    // Explicit `pusher='rust'` overrides the v22 column DEFAULT 'ffmpeg'.
+    // SQLite ALTER COLUMN can't change a column DEFAULT cleanly, so we
+    // override at every INSERT site instead. Together with migration v28
+    // (flips all existing 'ffmpeg' rows to 'rust') this closes the gap
+    // where new endpoints silently landed on the broken ffmpeg-subprocess
+    // path (root cause of #196 "YT-BB always bad"). PusherKind::default()
+    // is also `Rust` so anything that deserializes from config.json picks
+    // the right path automatically.
     let row = sqlx::query(
-        "INSERT INTO endpoint_configs (alias, service_type, stream_key, is_fast)
-         VALUES (?1, ?2, ?3, ?4) RETURNING id",
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key, is_fast, pusher)
+         VALUES (?1, ?2, ?3, ?4, 'rust') RETURNING id",
     )
     .bind(alias)
     .bind(service_type)

@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 27;
+pub const MAX_SCHEMA_VERSION: i32 = 28;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -343,6 +343,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             25 => migrate_v25(&mut tx).await?,
             26 => migrate_v26(&mut tx).await?,
             27 => migrate_v27(&mut tx).await?,
+            28 => migrate_v28(&mut tx).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -818,5 +819,40 @@ async fn migrate_v27(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
     )
     .execute(&mut **tx)
     .await?;
+    Ok(())
+}
+
+/// v28 — root-cause fix for #196 "YT-BB always bad".
+/// The BB endpoints (id 32-35) were created with `pusher='ffmpeg'` and
+/// never flipped to `rust` like every other endpoint was. The ffmpeg
+/// subprocess path produces oscillating `videoIngestionStarved` /
+/// `videoIngestionFasterThanRealtime` health on YT for those streams.
+///
+/// Migration v22 set the column DEFAULT to `'ffmpeg'` to preserve legacy
+/// behaviour. The SQL DEFAULT itself is still `'ffmpeg'` on the column —
+/// this migration does NOT change it. What changes in v0.17.0 is:
+///   1. `PusherKind::default()` is now `Rust` (was `Ffmpeg`), so anything
+///      deserialized in-process without an explicit `pusher` field picks
+///      the working path.
+///   2. `create_endpoint_config` INSERTs `pusher='rust'` explicitly,
+///      overriding the SQL DEFAULT at the only production INSERT site.
+///   3. This migration UPDATEs any pre-existing rows that landed on the
+///      SQL DEFAULT before changes (1) and (2) shipped.
+///
+/// Removing the SQL DEFAULT itself is the cleanest fix but requires a
+/// table rebuild on older SQLite; tracked separately.
+async fn migrate_v28(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    let result = sqlx::query("UPDATE endpoint_configs SET pusher = 'rust' WHERE pusher = 'ffmpeg'")
+        .execute(&mut **tx)
+        .await?;
+    let rows = result.rows_affected();
+    if rows > 0 {
+        tracing::info!(
+            rows_affected = rows,
+            "v28: flipped 'ffmpeg' → 'rust' pusher rows"
+        );
+    } else {
+        tracing::debug!("v28: no-op (no 'ffmpeg' pusher rows present)");
+    }
     Ok(())
 }
