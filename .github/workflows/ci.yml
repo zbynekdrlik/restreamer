@@ -4988,12 +4988,13 @@ jobs:
       - name: Push 60s test stream into restreamer ingest
         timeout-minutes: 3
         run: |
+          # restreamer-service default RTMP port is 1234, not 1935.
           ffmpeg -nostdin -hide_banner -loglevel warning \
             -re -f lavfi -i "testsrc2=size=1280x720:rate=30" \
             -f lavfi -i "sine=frequency=440" \
             -c:v libx264 -preset veryfast -tune zerolatency -b:v 2500k -g 60 \
             -c:a aac -b:a 128k -ar 44100 -ac 2 \
-            -t 60 -f flv rtmp://127.0.0.1:1935/live/CI
+            -t 60 -f flv rtmp://127.0.0.1:1234/live/CI
 
       - name: Wait for audit log to settle
         run: sleep 8
