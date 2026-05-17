@@ -4930,6 +4930,17 @@ jobs:
           SQLX_OFFLINE: true
 
       - name: Start restreamer-service
+        env:
+          # Minimal env-var config to satisfy validate(). The chunker writes
+          # locally before async S3 upload, so placeholder S3 creds are fine
+          # for this smoke test (S3 upload will fail but local chunks still
+          # exist for the assertion).
+          RESTREAMER_CLIENT_UUID: ci-test-fb-smoke
+          RESTREAMER_S3_BUCKET: ci-placeholder
+          RESTREAMER_S3_REGION: us-east-1
+          RESTREAMER_S3_ENDPOINT: http://127.0.0.1:9000
+          RESTREAMER_S3_ACCESS_KEY_ID: ci-placeholder
+          RESTREAMER_S3_SECRET_ACCESS_KEY: ci-placeholder
         run: |
           ./target/release/restreamer-service > restreamer.log 2>&1 &
           echo $! > restreamer.pid
