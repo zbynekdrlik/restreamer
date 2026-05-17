@@ -330,22 +330,10 @@ async fn negotiate(
             .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
 
         let mut nc = NetConnection::new(Arc::clone(&io));
-        let mut props = ConnectProperties::new_none();
-        props.app = Some(app.to_string());
-        props.pub_type = Some("nonprivate".to_string());
-        // OBS advertises these on every RTMP connect. Without them, Facebook
-        // Live silently accepts the publish and then discards the media (no
-        // RTMP error returned, no preview shown in Live Producer). Operator
-        // confirmed 2026-05-03 that FB shows zero data ingestion despite
-        // pusher reporting healthy chunk-done logs. Mirror libobs values.
-        props.flash_ver = Some("FMLE/3.0 (compatible; FMSc/1.0)".to_string());
-        props.fpad = Some(false);
-        props.capabilities = Some(239.0);
-        props.audio_codecs = Some(3575.0); // OBS bitmask: AAC + MP3 + ...
-        props.video_codecs = Some(252.0); // OBS bitmask: H.264 + ...
-        props.video_function = Some(1.0); // CLIENT_SEEK
-        props.object_encoding = Some(0.0); // AMF0
-        props.tc_url = Some(build_tc_url(scheme, host, port, app));
+        // libobs-mirrored ConnectProperties incl. swfUrl + pageUrl. Facebook
+        // Live rejects publish when tcUrl carries the default port suffix
+        // or when swfUrl/pageUrl are absent on some ingest paths (#215).
+        let props = build_connect_props(scheme, host, port, app);
         nc.write_connect(&(TRANSACTION_ID_CONNECT as f64), &props)
             .await
             .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
@@ -729,6 +717,35 @@ pub(crate) fn build_tc_url(scheme: Scheme, host: &str, port: u16, app: &str) -> 
     } else {
         format!("{scheme_str}://{host}:{port}/{app}")
     }
+}
+
+/// Construct the AMF `ConnectProperties` for `NetConnection.connect`.
+///
+/// Mirrors libobs `obs-outputs/rtmp-stream.c` values: `flashVer`, `fpad`,
+/// `capabilities`, `audioCodecs`, `videoCodecs`, `videoFunction`,
+/// `objectEncoding`. Adds `swfUrl` + `pageUrl` matching `tcUrl` because
+/// Facebook Live validates these fields on some publish paths (#215).
+pub(crate) fn build_connect_props(
+    scheme: Scheme,
+    host: &str,
+    port: u16,
+    app: &str,
+) -> ConnectProperties {
+    let tc_url = build_tc_url(scheme, host, port, app);
+    let mut props = ConnectProperties::new_none();
+    props.app = Some(app.to_string());
+    props.pub_type = Some("nonprivate".to_string());
+    props.flash_ver = Some("FMLE/3.0 (compatible; FMSc/1.0)".to_string());
+    props.fpad = Some(false);
+    props.capabilities = Some(239.0);
+    props.audio_codecs = Some(3575.0);
+    props.video_codecs = Some(252.0);
+    props.video_function = Some(1.0);
+    props.object_encoding = Some(0.0);
+    props.swf_url = Some(tc_url.clone());
+    props.page_url = Some(tc_url.clone());
+    props.tc_url = Some(tc_url);
+    props
 }
 
 fn parse_rtmp_url(url: &str) -> Result<(Scheme, String, u16, String, String), PushError> {
