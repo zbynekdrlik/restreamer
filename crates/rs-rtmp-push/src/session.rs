@@ -919,6 +919,11 @@ mod tests {
         assert_eq!(props.video_function, Some(1.0));
         assert_eq!(props.object_encoding, Some(0.0));
         assert_eq!(props.pub_type.as_deref(), Some("nonprivate"));
+        assert_eq!(props.app.as_deref(), Some("live2"));
+        assert_eq!(
+            props.tc_url.as_deref(),
+            Some("rtmp://a.rtmp.youtube.com/live2")
+        );
     }
 
     // --- Liveness-stub tests (make send_audio_tag / send_video_tag reachable)
