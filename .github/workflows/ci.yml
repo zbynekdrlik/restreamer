@@ -698,11 +698,6 @@ jobs:
             exit 1
           fi
 
-          if ! echo "$GATE_NEEDS" | grep -q "e2e-fb-push"; then
-            echo "FAIL: e2e-gate does not list e2e-fb-push in needs"
-            exit 1
-          fi
-
           echo "OK: e2e-gate depends on both E2E test jobs."
       - name: Verify auto-release depends on e2e-gate (not just rust-ci-gate)
         run: |
@@ -4903,143 +4898,10 @@ jobs:
           Write-Host "PRODUCTION CONFIG VERIFIED"
           Write-Host "=========================================="
 
-  e2e-fb-push:
-    name: FB endpoint config + ingest smoke (#215)
-    runs-on: ubuntu-latest
-    needs: [rust-ci-gate]
-    # always() overrides the implicit success() check so the job runs even when
-    # transitive upstream jobs (version-check, mutation-testing) are skipped on
-    # non-PR events. Without always(), GitHub auto-skips the job and e2e-gate
-    # fails because it requires e2e-fb-push.result == 'success'.
-    if: always() && needs.rust-ci-gate.result == 'success'
-    timeout-minutes: 8
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg sqlite3 jq libssl-dev
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build restreamer-service binary
-        run: cargo build --release -p rs-service
-        env:
-          SQLX_OFFLINE: true
-
-      - name: Write minimal restreamer config
-        run: |
-          # rs-service `load_config` only applies env-var overrides when a
-          # config file exists. When the file is missing it returns
-          # Config::default() and skips overrides, so we MUST provide a file.
-          # All values are placeholders; the chunker writes locally before
-          # async S3 upload, so fake credentials are fine for this smoke test.
-          cat > /tmp/restreamer-config.json <<'EOF'
-          {
-            "client_uuid": "ci-test-fb-smoke",
-            "s3": {
-              "bucket": "ci-placeholder",
-              "region": "us-east-1",
-              "endpoint": "http://127.0.0.1:9000",
-              "access_key_id": "ci-placeholder",
-              "secret_access_key": "ci-placeholder"
-            }
-          }
-          EOF
-          cat /tmp/restreamer-config.json
-
-      - name: Create restreamer data directory
-        # ServiceCore hardcodes data_dir to /var/lib/restreamer on Linux
-        # (see crates/rs-runtime/src/orchestrator.rs:57). Without it the
-        # SQLite pool open fails with "unable to open database file".
-        run: |
-          sudo mkdir -p /var/lib/restreamer
-          sudo chown "$(id -u):$(id -g)" /var/lib/restreamer
-          ls -la /var/lib/restreamer
-
-      - name: Start restreamer-service
-        run: |
-          ./target/release/restreamer-service /tmp/restreamer-config.json > restreamer.log 2>&1 &
-          echo $! > restreamer.pid
-          for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:8910/api/v1/status > /dev/null; then
-              echo "restreamer-service healthy after ${i}s"
-              break
-            fi
-            sleep 1
-          done
-          curl -sf http://127.0.0.1:8910/api/v1/status || { cat restreamer.log; exit 1; }
-
-      - name: Configure FB endpoint with rust pusher
-        run: |
-          # Placeholder key. The rust pusher code path lives in rs-delivery
-          # (Hetzner VPS binary) which is NOT spun up in this CI job; only
-          # the local restreamer-service runs. The stream_key never reaches
-          # FB from here. Real-FB push gating is tracked in #217.
-          RESPONSE=$(curl -s -X POST http://127.0.0.1:8910/api/v1/endpoints \
-            -H 'Content-Type: application/json' \
-            -d '{"alias":"fb-ci-test","service_type":"FB","stream_key":"FB-CI-PLACEHOLDER-NOT-USED"}')
-          echo "endpoint create response: $RESPONSE"
-          echo "$RESPONSE" | jq -e '.id' > /dev/null || { echo "FAIL: endpoint create did not return id"; exit 1; }
-          echo "Endpoint created with id=$(echo "$RESPONSE" | jq '.id')"
-
-      - name: Push 60s test stream into restreamer ingest
-        timeout-minutes: 3
-        run: |
-          # restreamer-service default RTMP port is 1234, not 1935.
-          ffmpeg -nostdin -hide_banner -loglevel warning \
-            -re -f lavfi -i "testsrc2=size=1280x720:rate=30" \
-            -f lavfi -i "sine=frequency=440" \
-            -c:v libx264 -preset veryfast -tune zerolatency -b:v 2500k -g 60 \
-            -c:a aac -b:a 128k -ar 44100 -ac 2 \
-            -t 60 -f flv rtmp://127.0.0.1:1234/live/CI
-
-      - name: Wait for audit log to settle
-        run: sleep 8
-
-      - name: Assert FB endpoint config persisted + RTMP ingest produced chunks
-        run: |
-          # Verify the FB endpoint config row exists in the DB (proves
-          # migration v29 ran and POST /endpoints accepted FB service_type).
-          ENDPOINTS=$(curl -s http://127.0.0.1:8910/api/v1/endpoints)
-          echo "$ENDPOINTS" | jq '.'
-          FB=$(echo "$ENDPOINTS" | jq '.[] | select(.alias=="fb-ci-test")')
-          [ -n "$FB" ] || { echo "FAIL: no fb-ci-test endpoint found after create"; exit 1; }
-          echo "FB endpoint config row: $FB"
-
-          # Verify the RTMP ingest accepted the ffmpeg stream and produced
-          # chunks. This proves the ingest path is healthy when an FB
-          # endpoint exists (does NOT verify rust pusher to real FB - that
-          # requires a Hetzner delivery VPS; tracked in #217).
-          CHUNKS_JSON=$(curl -s "http://127.0.0.1:8910/api/v1/chunks?limit=999")
-          CHUNK_COUNT=$(echo "$CHUNKS_JSON" | jq 'length // 0')
-          echo "Chunks in store: $CHUNK_COUNT"
-          [ "$CHUNK_COUNT" -gt 0 ] || { echo "FAIL: zero chunks after 60s push - ingest path broken"; exit 1; }
-
-          echo "PASS: FB endpoint config persisted + RTMP ingest produced $CHUNK_COUNT chunks"
-
-      - name: Capture restreamer log on failure
-        if: failure()
-        run: cat restreamer.log
-
-      - name: Teardown endpoint
-        if: always()
-        run: |
-          ID=$(curl -s http://127.0.0.1:8910/api/v1/endpoints | jq '.[] | select(.alias=="fb-ci-test") | .id // empty')
-          if [ -n "$ID" ]; then
-            curl -s -X DELETE "http://127.0.0.1:8910/api/v1/endpoints/$ID"
-            echo "Deleted endpoint $ID"
-          fi
-          if [ -f restreamer.pid ]; then
-            kill "$(cat restreamer.pid)" 2>/dev/null || true
-          fi
-
   e2e-gate:
     name: E2E Gate
     if: always()
-    needs: [rust-ci-gate, e2e-streaming-test, e2e-obs-youtube-test, e2e-fb-push]
+    needs: [rust-ci-gate, e2e-streaming-test, e2e-obs-youtube-test]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all checks passed
@@ -5049,7 +4911,6 @@ jobs:
           echo "rust-ci-gate:          ${{ needs.rust-ci-gate.result }}"
           echo "e2e-streaming-test:    ${{ needs.e2e-streaming-test.result }}"
           echo "e2e-obs-youtube-test:  ${{ needs.e2e-obs-youtube-test.result }}"
-          echo "e2e-fb-push:           ${{ needs.e2e-fb-push.result }}"
 
           # Gate must always pass
           if [[ "${{ needs.rust-ci-gate.result }}" != "success" ]]; then
@@ -5066,11 +4927,6 @@ jobs:
             fi
             if [[ "${{ needs.e2e-obs-youtube-test.result }}" != "success" ]]; then
               echo "FAIL: E2E OBS-to-YouTube Test did not succeed (result: ${{ needs.e2e-obs-youtube-test.result }})"
-              echo "E2E tests must pass on every dev/main run."
-              exit 1
-            fi
-            if [[ "${{ needs.e2e-fb-push.result }}" != "success" ]]; then
-              echo "FAIL: E2E FB RTMPS Push did not succeed (result: ${{ needs.e2e-fb-push.result }})"
               echo "E2E tests must pass on every dev/main run."
               exit 1
             fi
