@@ -12,6 +12,7 @@ mod pusher;
 mod session;
 mod state;
 pub mod tls;
+mod url;
 
 pub use error::{PushError, backoff_floor_ms, is_exponential, map_read_err};
 pub use pusher::RtmpPusher;
