@@ -4913,8 +4913,6 @@ jobs:
     # fails because it requires e2e-fb-push.result == 'success'.
     if: always() && needs.rust-ci-gate.result == 'success'
     timeout-minutes: 8
-    env:
-      FB_TEST_STREAM_KEY: ${{ secrets.FB_TEST_STREAM_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -4931,15 +4929,6 @@ jobs:
         env:
           SQLX_OFFLINE: true
 
-      - name: Verify FB_TEST_STREAM_KEY secret is set
-        run: |
-          if [ -z "$FB_TEST_STREAM_KEY" ]; then
-            echo "FAIL: FB_TEST_STREAM_KEY secret not set."
-            echo "Operator must run: gh secret set FB_TEST_STREAM_KEY --body '<FB persistent stream key>'"
-            exit 1
-          fi
-          echo "FB_TEST_STREAM_KEY secret present (length: ${#FB_TEST_STREAM_KEY})"
-
       - name: Start restreamer-service
         run: |
           ./target/release/restreamer-service > restreamer.log 2>&1 &
@@ -4955,9 +4944,13 @@ jobs:
 
       - name: Configure FB endpoint with rust pusher
         run: |
+          # Placeholder key. The rust pusher code path lives in rs-delivery
+          # (Hetzner VPS binary) which is NOT spun up in this CI job; only
+          # the local restreamer-service runs. The stream_key never reaches
+          # FB from here. Real-FB push gating is tracked in #217.
           RESPONSE=$(curl -s -X POST http://127.0.0.1:8910/api/v1/endpoints \
             -H 'Content-Type: application/json' \
-            -d "{\"alias\":\"fb-ci-test\",\"service_type\":\"FB\",\"stream_key\":\"$FB_TEST_STREAM_KEY\"}")
+            -d '{"alias":"fb-ci-test","service_type":"FB","stream_key":"FB-CI-PLACEHOLDER-NOT-USED"}')
           echo "endpoint create response: $RESPONSE"
           echo "$RESPONSE" | jq -e '.id' > /dev/null || { echo "FAIL: endpoint create did not return id"; exit 1; }
           echo "Endpoint created with id=$(echo "$RESPONSE" | jq '.id')"
