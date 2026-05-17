@@ -769,7 +769,7 @@ fn bad_url(reason: &str, url: &str) -> PushError {
 
 #[cfg(test)]
 mod tests {
-    use super::{READ_LOOP_HOLD_MS, READ_LOOP_IDLE_MS, Scheme, parse_rtmp_url};
+    use super::{READ_LOOP_HOLD_MS, READ_LOOP_IDLE_MS, Scheme, build_tc_url, parse_rtmp_url};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -835,6 +835,32 @@ mod tests {
     #[test]
     fn rejects_empty_app() {
         assert!(parse_rtmp_url("rtmp://host//stream").is_err());
+    }
+
+    // --- tc_url builder tests -----------------------------------------------
+
+    #[test]
+    fn build_tc_url_omits_default_port_for_rtmps() {
+        let url = build_tc_url(Scheme::Rtmps, "live-api-s.facebook.com", 443, "rtmp");
+        assert_eq!(url, "rtmps://live-api-s.facebook.com/rtmp");
+    }
+
+    #[test]
+    fn build_tc_url_omits_default_port_for_rtmp() {
+        let url = build_tc_url(Scheme::Rtmp, "a.rtmp.youtube.com", 1935, "live2");
+        assert_eq!(url, "rtmp://a.rtmp.youtube.com/live2");
+    }
+
+    #[test]
+    fn build_tc_url_retains_custom_port_for_rtmp() {
+        let url = build_tc_url(Scheme::Rtmp, "127.0.0.1", 19350, "live");
+        assert_eq!(url, "rtmp://127.0.0.1:19350/live");
+    }
+
+    #[test]
+    fn build_tc_url_retains_custom_port_for_rtmps() {
+        let url = build_tc_url(Scheme::Rtmps, "127.0.0.1", 19443, "live");
+        assert_eq!(url, "rtmps://127.0.0.1:19443/live");
     }
 
     // --- Liveness-stub tests (make send_audio_tag / send_video_tag reachable)
