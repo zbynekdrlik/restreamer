@@ -4950,6 +4950,15 @@ jobs:
           EOF
           cat /tmp/restreamer-config.json
 
+      - name: Create restreamer data directory
+        # ServiceCore hardcodes data_dir to /var/lib/restreamer on Linux
+        # (see crates/rs-runtime/src/orchestrator.rs:57). Without it the
+        # SQLite pool open fails with "unable to open database file".
+        run: |
+          sudo mkdir -p /var/lib/restreamer
+          sudo chown "$(id -u):$(id -g)" /var/lib/restreamer
+          ls -la /var/lib/restreamer
+
       - name: Start restreamer-service
         run: |
           ./target/release/restreamer-service /tmp/restreamer-config.json > restreamer.log 2>&1 &
