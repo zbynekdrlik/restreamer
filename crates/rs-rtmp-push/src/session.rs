@@ -788,7 +788,10 @@ fn bad_url(reason: &str, url: &str) -> PushError {
 
 #[cfg(test)]
 mod tests {
-    use super::{READ_LOOP_HOLD_MS, READ_LOOP_IDLE_MS, Scheme, build_tc_url, parse_rtmp_url};
+    use super::{
+        READ_LOOP_HOLD_MS, READ_LOOP_IDLE_MS, Scheme, build_connect_props, build_tc_url,
+        parse_rtmp_url,
+    };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -880,6 +883,42 @@ mod tests {
     fn build_tc_url_retains_custom_port_for_rtmps() {
         let url = build_tc_url(Scheme::Rtmps, "127.0.0.1", 19443, "live");
         assert_eq!(url, "rtmps://127.0.0.1:19443/live");
+    }
+
+    // --- build_connect_props tests ------------------------------------------
+
+    #[test]
+    fn connect_props_for_fb_sets_swf_url_and_page_url_without_port() {
+        let props = build_connect_props(Scheme::Rtmps, "live-api-s.facebook.com", 443, "rtmp");
+        assert_eq!(props.app.as_deref(), Some("rtmp"));
+        assert_eq!(
+            props.tc_url.as_deref(),
+            Some("rtmps://live-api-s.facebook.com/rtmp")
+        );
+        assert_eq!(
+            props.swf_url.as_deref(),
+            Some("rtmps://live-api-s.facebook.com/rtmp")
+        );
+        assert_eq!(
+            props.page_url.as_deref(),
+            Some("rtmps://live-api-s.facebook.com/rtmp")
+        );
+    }
+
+    #[test]
+    fn connect_props_preserves_legacy_fields() {
+        let props = build_connect_props(Scheme::Rtmp, "a.rtmp.youtube.com", 1935, "live2");
+        assert_eq!(
+            props.flash_ver.as_deref(),
+            Some("FMLE/3.0 (compatible; FMSc/1.0)")
+        );
+        assert_eq!(props.fpad, Some(false));
+        assert_eq!(props.capabilities, Some(239.0));
+        assert_eq!(props.audio_codecs, Some(3575.0));
+        assert_eq!(props.video_codecs, Some(252.0));
+        assert_eq!(props.video_function, Some(1.0));
+        assert_eq!(props.object_encoding, Some(0.0));
+        assert_eq!(props.pub_type.as_deref(), Some("nonprivate"));
     }
 
     // --- Liveness-stub tests (make send_audio_tag / send_video_tag reachable)
