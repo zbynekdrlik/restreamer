@@ -230,7 +230,12 @@ fn scan_amf_string_value(buf: &[u8], key: &str) -> Option<String> {
                     return Some(s.to_string());
                 }
             }
-            return None;
+            // Needle matched but value extends past buffer (truncated chunk) or
+            // UTF-8 decode failed — advance past this occurrence and keep
+            // scanning. This makes the "robust to chunked transport" doc comment
+            // accurate: a false-match mid-buffer does not abort the entire scan.
+            i += 1;
+            continue;
         }
         i += 1;
     }
@@ -269,6 +274,16 @@ async fn rust_pusher_sends_fb_compliant_connect_amf() {
         .await
         .expect("inspection oneshot did not fire within 2s")
         .expect("inspection oneshot sender was dropped");
+
+    // Guard: the mock must NOT have rejected before completing AMF capture.
+    // If it did, the field asserts below might still pass on partial data while
+    // the integration test should actually fail (e.g. three fields seen but the
+    // third triggers the reject path before all three are stored).
+    assert!(
+        inspection.rejected.is_none(),
+        "mock rejected before capture: {:?}",
+        inspection.rejected
+    );
 
     // The mock must have completed at least the AMF capture before any
     // bail-out reason it might have recorded. We check captures FIRST so
