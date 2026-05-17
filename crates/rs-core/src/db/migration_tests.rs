@@ -310,22 +310,20 @@ async fn migrate_v27_is_idempotent() {
     assert_eq!(count, 1);
 }
 
-#[tokio::test]
-async fn max_schema_version_is_28() {
-    assert_eq!(
-        crate::db::migrations::MAX_SCHEMA_VERSION,
-        28,
-        "bump MAX_SCHEMA_VERSION when adding a migration"
-    );
-}
+// `max_schema_version_is_28` removed — duplicate of `max_schema_version_constant`
+// above which asserts the same thing via the same import path. Update the
+// constant in one place when adding a new migration.
 
 #[tokio::test]
 async fn migrate_v28_flips_ffmpeg_pushers_to_rust() {
+    // Exercises the migration DISPATCHER (not the inlined SQL): runs all
+    // migrations, rewinds `schema_version` to 27, inserts a legacy ffmpeg
+    // row, then re-invokes `run_migrations` so the dispatcher fires
+    // `migrate_v28` against the populated table. Any future typo /
+    // wrong-WHERE / flipped-operands inside `migrate_v28` itself fails the
+    // assertion.
     let pool = crate::db::create_memory_pool().await.unwrap();
     crate::db::run_migrations(&pool).await.unwrap();
-    // Inject a legacy 'ffmpeg' row directly (simulates a row that existed
-    // before the v28 binary deployed; e.g. created on an older release
-    // that took the v22 column DEFAULT 'ffmpeg' or via an older API path).
     sqlx::query(
         "INSERT INTO endpoint_configs (alias, service_type, stream_key, is_fast, pusher) \
          VALUES ('legacy-ffmpeg', 'YT_RTMP', 'sk-test', 0, 'ffmpeg')",
@@ -333,13 +331,13 @@ async fn migrate_v28_flips_ffmpeg_pushers_to_rust() {
     .execute(&pool)
     .await
     .unwrap();
-    // Run the v28 SQL directly (the migration dispatcher won't re-run v28
-    // because schema_version is already at MAX). This proves the SQL flips
-    // the row — which is what would happen on first upgrade from <v28.
-    sqlx::query("UPDATE endpoint_configs SET pusher = 'rust' WHERE pusher = 'ffmpeg'")
+    // Rewind schema_version so the dispatcher's `(current+1)..=MAX` loop
+    // re-applies v28 against the now-populated table.
+    sqlx::query("DELETE FROM schema_version WHERE version > 27")
         .execute(&pool)
         .await
         .unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
     let pusher: String =
         sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'legacy-ffmpeg'")
             .fetch_one(&pool)
@@ -347,7 +345,23 @@ async fn migrate_v28_flips_ffmpeg_pushers_to_rust() {
             .unwrap();
     assert_eq!(
         pusher, "rust",
-        "v28 SQL must flip any 'ffmpeg' pusher to 'rust'"
+        "migrate_v28 dispatcher must flip any 'ffmpeg' pusher to 'rust'"
+    );
+    // Idempotency: re-running once more (now with no ffmpeg rows) must
+    // not error and must leave the rust row untouched.
+    sqlx::query("DELETE FROM schema_version WHERE version > 27")
+        .execute(&pool)
+        .await
+        .unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+    let pusher: String =
+        sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'legacy-ffmpeg'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        pusher, "rust",
+        "v28 must be idempotent on already-flipped rows"
     );
 }
 

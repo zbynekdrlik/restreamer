@@ -827,13 +827,32 @@ async fn migrate_v27(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
 /// never flipped to `rust` like every other endpoint was. The ffmpeg
 /// subprocess path produces oscillating `videoIngestionStarved` /
 /// `videoIngestionFasterThanRealtime` health on YT for those streams.
-/// Migration v22 set the column default to 'ffmpeg' to preserve legacy
-/// behaviour; that default is gone in `PusherKind::default() = Rust`.
-/// This migration flips any remaining `ffmpeg` rows to `rust` so the
-/// gap can never reopen for endpoints that already exist.
+///
+/// Migration v22 set the column DEFAULT to `'ffmpeg'` to preserve legacy
+/// behaviour. The SQL DEFAULT itself is still `'ffmpeg'` on the column —
+/// this migration does NOT change it. What changes in v0.17.0 is:
+///   1. `PusherKind::default()` is now `Rust` (was `Ffmpeg`), so anything
+///      deserialized in-process without an explicit `pusher` field picks
+///      the working path.
+///   2. `create_endpoint_config` INSERTs `pusher='rust'` explicitly,
+///      overriding the SQL DEFAULT at the only production INSERT site.
+///   3. This migration UPDATEs any pre-existing rows that landed on the
+///      SQL DEFAULT before changes (1) and (2) shipped.
+///
+/// Removing the SQL DEFAULT itself is the cleanest fix but requires a
+/// table rebuild on older SQLite; tracked separately.
 async fn migrate_v28(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
-    sqlx::query("UPDATE endpoint_configs SET pusher = 'rust' WHERE pusher = 'ffmpeg'")
+    let result = sqlx::query("UPDATE endpoint_configs SET pusher = 'rust' WHERE pusher = 'ffmpeg'")
         .execute(&mut **tx)
         .await?;
+    let rows = result.rows_affected();
+    if rows > 0 {
+        tracing::info!(
+            rows_affected = rows,
+            "v28: flipped 'ffmpeg' → 'rust' pusher rows"
+        );
+    } else {
+        tracing::debug!("v28: no-op (no 'ffmpeg' pusher rows present)");
+    }
     Ok(())
 }

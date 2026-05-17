@@ -9,10 +9,17 @@ use crate::models::{
 
 /// Parse a `pusher` TEXT column value from the database into `PusherKind`.
 /// Unknown values default to `Ffmpeg` so existing rows are never broken.
-fn parse_pusher_kind(s: String) -> PusherKind {
+/// Parse the `pusher` TEXT column. Known values `'rust'` and `'ffmpeg'`
+/// round-trip cleanly. Unknown / malformed values fall back to the enum
+/// default (`Rust` post-#196). Migration v28 flips any literal `'ffmpeg'`
+/// rows to `'rust'` on the next deploy, so the `'ffmpeg'` arm should
+/// rarely fire in practice but is kept for read-back of legacy rows
+/// on stale binaries.
+pub(super) fn parse_pusher_kind(s: String) -> PusherKind {
     match s.as_str() {
         "rust" => PusherKind::Rust,
-        _ => PusherKind::Ffmpeg,
+        "ffmpeg" => PusherKind::Ffmpeg,
+        _ => PusherKind::default(),
     }
 }
 

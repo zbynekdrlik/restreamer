@@ -116,7 +116,7 @@ pub async fn get_template_endpoints(
 ) -> Result<Vec<EndpointConfig>> {
     let rows = sqlx::query(
         "SELECT e.id, e.alias, e.service_type, e.stream_key, e.enabled, e.position_last,
-         e.delivered_bytes, e.is_fast, e.youtube_oauth_id, e.created_at, e.updated_at
+         e.delivered_bytes, e.is_fast, e.pusher, e.youtube_oauth_id, e.created_at, e.updated_at
          FROM endpoint_configs e
          INNER JOIN template_endpoints te ON te.endpoint_id = e.id
          WHERE te.template_id = ?1 AND e.enabled = 1
@@ -137,7 +137,14 @@ pub async fn get_template_endpoints(
             position_last: r.get("position_last"),
             delivered_bytes: r.get("delivered_bytes"),
             is_fast: r.get::<i32, _>("is_fast") != 0,
-            pusher: Default::default(),
+            // Read the actual `pusher` row value rather than `Default::default()`.
+            // Pre-#196 this returned `Ffmpeg` (the old default) regardless of
+            // what the row said; now it would silently return `Rust` for the
+            // same reason — both are wrong. The correct value is whatever
+            // `endpoint_configs.pusher` actually stores for this template
+            // endpoint, parsed via the same helper `list_endpoint_configs`
+            // uses.
+            pusher: super::v2::parse_pusher_kind(r.get("pusher")),
             prefetch_chunks: None,
             youtube_oauth_id: r.get("youtube_oauth_id"),
             created_at: r.get("created_at"),

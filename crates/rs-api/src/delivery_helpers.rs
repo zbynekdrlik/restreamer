@@ -9,9 +9,10 @@ use rs_core::models::{EndpointConfig, PusherKind};
 /// Build the per-endpoint JSON object embedded in the `/api/init` payload sent
 /// to the rs-delivery VPS. The `pusher` field MUST be included so the VPS
 /// honors the per-endpoint backend selection (#103) — without it, the VPS-side
-/// `EndpointConfig` deserializer falls back to `PusherKind::Ffmpeg` via
-/// `#[serde(default)]` and silently runs ffmpeg even when the operator
-/// requested the rust pusher.
+/// `EndpointConfig` deserializer falls back to `PusherKind::default()`. The
+/// default is `Rust` post-#196 (was `Ffmpeg` until v0.17.0), so even with the
+/// landmine removed it's worth being explicit: a stale VPS binary deserializing
+/// against the OLD `PusherKind` definition still honors the operator's choice.
 pub(crate) fn build_endpoint_init_entry(
     ep: &EndpointConfig,
     chunk_format: &str,
