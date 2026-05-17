@@ -160,7 +160,7 @@ impl Session {
         // --- 3-5. Negotiate (handshake + connect + publish) ------------------
         let msg_stream_id = tokio::time::timeout(
             Duration::from_secs(NEGOTIATE_TIMEOUT_SECS),
-            negotiate(Arc::clone(&io), scheme, &addr, &app, &stream_name),
+            negotiate(Arc::clone(&io), scheme, &host, port, &app, &stream_name),
         )
         .await
         .map_err(|_| PushError::Timeout)??;
@@ -283,7 +283,8 @@ impl Drop for Session {
 async fn negotiate(
     io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
     scheme: Scheme,
-    raw_domain: &str,
+    host: &str,
+    port: u16,
     app: &str,
     stream_name: &str,
 ) -> Result<u32, PushError> {
@@ -344,11 +345,7 @@ async fn negotiate(
         props.video_codecs = Some(252.0); // OBS bitmask: H.264 + ...
         props.video_function = Some(1.0); // CLIENT_SEEK
         props.object_encoding = Some(0.0); // AMF0
-        let scheme_str = match scheme {
-            Scheme::Rtmp => "rtmp",
-            Scheme::Rtmps => "rtmps",
-        };
-        props.tc_url = Some(format!("{scheme_str}://{raw_domain}/{app}"));
+        props.tc_url = Some(build_tc_url(scheme, host, port, app));
         nc.write_connect(&(TRANSACTION_ID_CONNECT as f64), &props)
             .await
             .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
@@ -710,6 +707,28 @@ fn amf_u8(v: &Amf0ValueType) -> u8 {
 pub(crate) enum Scheme {
     Rtmp,
     Rtmps,
+}
+
+/// Build the `tcUrl` AMF property for `NetConnection.connect`.
+///
+/// Per libobs / ffmpeg convention, the port is omitted from `tcUrl` when
+/// it equals the scheme default (443 for rtmps, 1935 for rtmp). Facebook
+/// Live ingest validates `tcUrl` strictly and rejects publish with
+/// "Invalid URL" when the literal `:443` port suffix appears (#215).
+pub(crate) fn build_tc_url(scheme: Scheme, host: &str, port: u16, app: &str) -> String {
+    let scheme_str = match scheme {
+        Scheme::Rtmp => "rtmp",
+        Scheme::Rtmps => "rtmps",
+    };
+    let default_port = match scheme {
+        Scheme::Rtmp => 1935,
+        Scheme::Rtmps => 443,
+    };
+    if port == default_port {
+        format!("{scheme_str}://{host}/{app}")
+    } else {
+        format!("{scheme_str}://{host}:{port}/{app}")
+    }
 }
 
 fn parse_rtmp_url(url: &str) -> Result<(Scheme, String, u16, String, String), PushError> {
