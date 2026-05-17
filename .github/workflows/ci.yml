@@ -698,6 +698,11 @@ jobs:
             exit 1
           fi
 
+          if ! echo "$GATE_NEEDS" | grep -q "e2e-fb-push"; then
+            echo "FAIL: e2e-gate does not list e2e-fb-push in needs"
+            exit 1
+          fi
+
           echo "OK: e2e-gate depends on both E2E test jobs."
       - name: Verify auto-release depends on e2e-gate (not just rust-ci-gate)
         run: |
@@ -4899,7 +4904,7 @@ jobs:
           Write-Host "=========================================="
 
   e2e-fb-push:
-    name: E2E FB RTMPS Push (rust pusher)
+    name: FB endpoint config + ingest smoke (#215)
     runs-on: ubuntu-latest
     needs: [rust-ci-gate]
     if: ${{ needs.rust-ci-gate.result == 'success' }}
@@ -4966,25 +4971,26 @@ jobs:
       - name: Wait for audit log to settle
         run: sleep 8
 
-      - name: Assert FB endpoint exists and no push deaths occurred
+      - name: Assert FB endpoint config persisted + RTMP ingest produced chunks
         run: |
+          # Verify the FB endpoint config row exists in the DB (proves
+          # migration v29 ran and POST /endpoints accepted FB service_type).
           ENDPOINTS=$(curl -s http://127.0.0.1:8910/api/v1/endpoints)
           echo "$ENDPOINTS" | jq '.'
           FB=$(echo "$ENDPOINTS" | jq '.[] | select(.alias=="fb-ci-test")')
-          [ -n "$FB" ] || { echo "FAIL: no fb-ci-test endpoint found"; exit 1; }
-          echo "FB endpoint config: $FB"
+          [ -n "$FB" ] || { echo "FAIL: no fb-ci-test endpoint found after create"; exit 1; }
+          echo "FB endpoint config row: $FB"
 
-          AUDIT=$(curl -s "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&limit=20")
-          echo "$AUDIT" | jq '.'
-          DIED=$(echo "$AUDIT" | jq '.rows | length')
+          # Verify the RTMP ingest accepted the ffmpeg stream and produced
+          # chunks. This proves the ingest path is healthy when an FB
+          # endpoint exists (does NOT verify rust pusher to real FB - that
+          # requires a Hetzner delivery VPS; tracked in #217).
+          CHUNKS_JSON=$(curl -s "http://127.0.0.1:8910/api/v1/chunks?limit=999")
+          CHUNK_COUNT=$(echo "$CHUNKS_JSON" | jq 'length // 0')
+          echo "Chunks in store: $CHUNK_COUNT"
+          [ "$CHUNK_COUNT" -gt 0 ] || { echo "FAIL: zero chunks after 60s push - ingest path broken"; exit 1; }
 
-          echo "endpoint_rtmp_push_died events: $DIED"
-          [ "$DIED" -eq 0 ] || { echo "FAIL: $DIED endpoint_rtmp_push_died events recorded"; exit 1; }
-
-          CHUNKS=$(curl -s http://127.0.0.1:8910/api/v1/chunks)
-          echo "Chunks in store: $(echo "$CHUNKS" | jq 'length // 0')"
-
-          echo "PASS: FB endpoint configured, rust pusher started, zero push deaths in 60s test"
+          echo "PASS: FB endpoint config persisted + RTMP ingest produced $CHUNK_COUNT chunks"
 
       - name: Capture restreamer log on failure
         if: failure()
