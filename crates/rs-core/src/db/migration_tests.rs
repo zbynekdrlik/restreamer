@@ -241,7 +241,7 @@ async fn migrate_latest_is_idempotent() {
 async fn max_schema_version_constant() {
     // Update this when bumping MAX_SCHEMA_VERSION; protects against silent
     // changes that skip the migration-versioning convention.
-    assert_eq!(crate::db::MAX_SCHEMA_VERSION, 28);
+    assert_eq!(crate::db::MAX_SCHEMA_VERSION, 29);
 }
 
 #[tokio::test]
