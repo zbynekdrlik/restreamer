@@ -5060,38 +5060,44 @@ jobs:
       - name: Local watchdog (30 min sustained-soak on rust pusher)
         shell: powershell
         run: |
+          # Resolve the active event id (E2E-Test). delivery/status REQUIRES ?event_id=...
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10
+          $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          if ($null -eq $ev) { throw "WATCHDOG FAIL: E2E-Test event missing for status query" }
+          $statusUri = "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($ev.id)"
+          $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&limit=10"
+
           $deadline = (Get-Date).AddMinutes(30)
           $lastChunks = -1
           $lastBytes = -1
           $stagnantPolls = 0
           while ((Get-Date) -lt $deadline) {
-            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status" -Method GET -TimeoutSec 10
+            $status = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 10
             $ep = $status.endpoints | Where-Object { $_.alias -eq "e2e fb" }
             if ($null -eq $ep) { throw "WATCHDOG FAIL: e2e fb endpoint missing from delivery status" }
             if (-not $ep.alive) { throw "WATCHDOG FAIL: e2e fb endpoint alive=false at $(Get-Date)" }
-            if ($ep.chunks_pushed -le $lastChunks) {
+            if ($ep.chunks_processed -le $lastChunks) {
               $stagnantPolls += 1
               if ($stagnantPolls -ge 3) {
-                throw "WATCHDOG FAIL: chunks_pushed stagnant at $($ep.chunks_pushed) for 30s"
+                throw "WATCHDOG FAIL: chunks_processed stagnant at $($ep.chunks_processed) for 30s"
               }
             } else {
               $stagnantPolls = 0
             }
-            if ($ep.bytes_sent_since_connect -le $lastBytes) {
+            if ($ep.bytes_processed_total -le $lastBytes) {
               if ($lastBytes -gt 0) {
-                throw "WATCHDOG FAIL: bytes_sent_since_connect did not grow ($lastBytes -> $($ep.bytes_sent_since_connect))"
+                throw "WATCHDOG FAIL: bytes_processed_total did not grow ($lastBytes -> $($ep.bytes_processed_total))"
               }
             }
-            $lastChunks = $ep.chunks_pushed
-            $lastBytes = $ep.bytes_sent_since_connect
+            $lastChunks = $ep.chunks_processed
+            $lastBytes = $ep.bytes_processed_total
 
-            $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&limit=10"
             $audit = Invoke-RestMethod -Uri $auditUri -Method GET -TimeoutSec 10
             if ($audit.rows.Count -gt 0) {
               throw "WATCHDOG FAIL: endpoint_rtmp_push_died audit row(s) for 'e2e fb' (count: $($audit.rows.Count))"
             }
 
-            Write-Host "watchdog OK: alive=$($ep.alive) chunks=$($ep.chunks_pushed) bytes=$($ep.bytes_sent_since_connect)"
+            Write-Host "watchdog OK: alive=$($ep.alive) chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total)"
             Start-Sleep -Seconds 10
           }
           Write-Host "Local watchdog: 30 min sustained soak GREEN"
