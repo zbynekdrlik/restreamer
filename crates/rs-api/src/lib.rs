@@ -17,6 +17,9 @@ pub mod delivery_yt_health;
 pub(crate) mod diag;
 pub mod diagnostics_pacing;
 pub mod endpoint_oauth;
+pub mod facebook;
+#[cfg(test)]
+mod facebook_tests;
 pub mod handlers;
 pub mod internet_probe;
 pub mod metrics_handlers;
@@ -35,9 +38,6 @@ pub mod template_handlers;
 pub mod uploads_endpoints;
 pub mod websocket;
 pub mod youtube;
-pub mod facebook;
-#[cfg(test)]
-mod facebook_tests;
 
 #[cfg(test)]
 mod yt_health_extract_tests;
