@@ -5115,7 +5115,7 @@ jobs:
   e2e-gate:
     name: E2E Gate
     if: always()
-    needs: [rust-ci-gate, e2e-streaming-test, e2e-obs-youtube-test]
+    needs: [rust-ci-gate, e2e-streaming-test, e2e-obs-youtube-test, e2e-fb-push-stream-lan]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all checks passed
@@ -5125,6 +5125,7 @@ jobs:
           echo "rust-ci-gate:          ${{ needs.rust-ci-gate.result }}"
           echo "e2e-streaming-test:    ${{ needs.e2e-streaming-test.result }}"
           echo "e2e-obs-youtube-test:  ${{ needs.e2e-obs-youtube-test.result }}"
+          echo "e2e-fb-push-stream-lan:  ${{ needs.e2e-fb-push-stream-lan.result }}"
 
           # Gate must always pass
           if [[ "${{ needs.rust-ci-gate.result }}" != "success" ]]; then
@@ -5141,6 +5142,11 @@ jobs:
             fi
             if [[ "${{ needs.e2e-obs-youtube-test.result }}" != "success" ]]; then
               echo "FAIL: E2E OBS-to-YouTube Test did not succeed (result: ${{ needs.e2e-obs-youtube-test.result }})"
+              echo "E2E tests must pass on every dev/main run."
+              exit 1
+            fi
+            if [[ "${{ needs.e2e-fb-push-stream-lan.result }}" != "success" ]]; then
+              echo "FAIL: E2E FB Push (stream-lan) did not succeed (result: ${{ needs.e2e-fb-push-stream-lan.result }})"
               echo "E2E tests must pass on every dev/main run."
               exit 1
             fi
