@@ -5071,11 +5071,23 @@ jobs:
           $lastChunks = -1
           $lastBytes = -1
           $stagnantPolls = 0
+          # delivery/status returns endpoints under `endpoint_details`
+          # (DeliveryStatusResponse.endpoint_details Vec<DeliveryEndpointEntry>).
+          # During VPS warmup, the rust pusher pushes a rescue video and the
+          # state flips `delivery_mode` from "warmup" to "normal" once cached
+          # live chunks overtake the rescue. chunks_processed only increments
+          # in "normal" mode, so tolerate "warmup" without failing the soak.
           while ((Get-Date) -lt $deadline) {
             $status = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 10
-            $ep = $status.endpoints | Where-Object { $_.alias -eq "e2e fb" }
+            $ep = $status.endpoint_details | Where-Object { $_.alias -eq "e2e fb" }
             if ($null -eq $ep) { throw "WATCHDOG FAIL: e2e fb endpoint missing from delivery status" }
             if (-not $ep.alive) { throw "WATCHDOG FAIL: e2e fb endpoint alive=false at $(Get-Date)" }
+            if ($ep.delivery_mode -eq "warmup") {
+              # Still pushing rescue video; chunks_processed will stay 0. Keep polling.
+              Write-Host "watchdog: warmup (mode=warmup, alive=$($ep.alive), reconnect=$($ep.reconnect_count))"
+              Start-Sleep -Seconds 10
+              continue
+            }
             if ($ep.chunks_processed -le $lastChunks) {
               $stagnantPolls += 1
               if ($stagnantPolls -ge 3) {
