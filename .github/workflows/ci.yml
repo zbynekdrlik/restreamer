@@ -5068,6 +5068,24 @@ jobs:
           $statusUri = "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($ev.id)"
           $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&limit=10"
 
+          # VPS boot wait. delivery_start returns the moment Hetzner has
+          # created the server; the actual rs-delivery process takes another
+          # 30-90s to boot, run cloud-init, pull the binary from S3, start,
+          # POST /api/init to the host, and populate metrics. Until then,
+          # delivery/status.endpoint_details is empty — DON'T treat that as
+          # failure; wait up to 3 min for the FB row to register.
+          $bootDeadline = (Get-Date).AddMinutes(3)
+          while ((Get-Date) -lt $bootDeadline) {
+            $status = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 10
+            $ep = $status.endpoint_details | Where-Object { $_.alias -eq "e2e fb" }
+            if ($null -ne $ep) {
+              Write-Host "watchdog: e2e fb endpoint registered (alive=$($ep.alive) mode=$($ep.delivery_mode))"
+              break
+            }
+            Write-Host "watchdog: waiting for VPS to register e2e fb endpoint..."
+            Start-Sleep -Seconds 10
+          }
+
           $deadline = (Get-Date).AddMinutes(30)
           $lastChunks = -1
           $lastBytes = -1
@@ -5081,7 +5099,7 @@ jobs:
           while ((Get-Date) -lt $deadline) {
             $status = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 10
             $ep = $status.endpoint_details | Where-Object { $_.alias -eq "e2e fb" }
-            if ($null -eq $ep) { throw "WATCHDOG FAIL: e2e fb endpoint missing from delivery status" }
+            if ($null -eq $ep) { throw "WATCHDOG FAIL: e2e fb endpoint missing from delivery status after VPS boot wait" }
             if (-not $ep.alive) { throw "WATCHDOG FAIL: e2e fb endpoint alive=false at $(Get-Date)" }
             if ($ep.delivery_mode -eq "warmup") {
               # Still pushing rescue video; chunks_processed will stay 0. Keep polling.
