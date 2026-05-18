@@ -459,7 +459,7 @@ async fn negotiate(
 const AMF0_MARKER_NUMBER: u8 = 0x00;
 const AMF0_MARKER_BOOLEAN: u8 = 0x01;
 const AMF0_MARKER_STRING: u8 = 0x02;
-const AMF0_MARKER_ECMA_ARRAY: u8 = 0x08;
+const AMF0_MARKER_OBJECT: u8 = 0x03;
 const AMF0_OBJECT_END_MARKER: [u8; 3] = [0x00, 0x00, 0x09];
 
 fn write_amf0_string(buf: &mut Vec<u8>, s: &str) {
@@ -503,12 +503,12 @@ fn build_default_onmetadata_amf0() -> Vec<u8> {
     write_amf0_string(&mut buf, "@setDataFrame");
     write_amf0_string(&mut buf, "onMetaData");
 
-    // ECMA Array (Adobe convention for onMetaData payloads; FB / YT both
-    // accept Object marker too, but ECMA Array is what ffmpeg / OBS emit).
-    buf.push(AMF0_MARKER_ECMA_ARRAY);
-    // Length hint: 0 means "unknown; parser must read until end-marker".
-    // This is safe per AMF0 spec and what most encoders emit.
-    buf.extend_from_slice(&0u32.to_be_bytes());
+    // AMF0 Object marker. FB's RTMP ingress accepts Object payloads for
+    // @setDataFrame onMetaData; the ECMA Array variant we tried first
+    // caused FB to close the publish 4s after Publish.Start with bytes=0
+    // (observed 2026-05-18). Object marker is broadly compatible across
+    // FB / YT / wowza receivers and is what librtmp + OBS emit.
+    buf.push(AMF0_MARKER_OBJECT);
 
     write_amf0_kv_number(&mut buf, "duration", 0.0);
     write_amf0_kv_number(&mut buf, "fileSize", 0.0);
