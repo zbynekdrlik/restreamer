@@ -4908,7 +4908,10 @@ jobs:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
       OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}
-      EVENT_NAME: "E2E-Test"
+      # Dedicated event so this job's `e2e fb` endpoint does not contaminate
+      # the YT-focused `E2E-Test` event (run 26057586037: YT failed at cache-
+      # overshoot 158.4s on `e2e fb` because both endpoints shared E2E-Test).
+      EVENT_NAME: "E2E-FB-Test"
       HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
       FB_TEST_STREAM_KEY: ${{ secrets.FB_TEST_STREAM_KEY }}
       FB_BROADCAST_URL: ${{ secrets.FB_BROADCAST_URL }}
