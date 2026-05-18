@@ -5010,27 +5010,49 @@ jobs:
       - name: Activate E2E event + attach FB endpoint
         shell: powershell
         run: |
-          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10
+
+          # Deactivate other events so get_streaming_event() returns ours
+          foreach ($e in $events) {
+            if ($e.name -ne $env:EVENT_NAME -and $e.receiving_activated) {
+              try { Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($e.id)/deactivate" -Method POST -TimeoutSec 10 } catch {}
+            }
+          }
+
           $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           if ($null -eq $ev) {
             $body = @{ name = $env:EVENT_NAME } | ConvertTo-Json
-            $ev = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method POST -Body $body -ContentType "application/json"
+            $ev = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
           }
-          $endpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET
+
+          $endpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10
           $fb = $endpoints | Where-Object { $_.alias -eq "e2e fb" }
           if ($null -eq $fb) { throw "FATAL: e2e fb endpoint missing after seed" }
-          $attach = @{ endpoint_id = $fb.id } | ConvertTo-Json
-          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/endpoints" -Method POST -Body $attach -ContentType "application/json"
-          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/activate" -Method POST
+
+          # Attach uses path params (event_id + endpoint_id), no body
+          $attached = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/endpoints" -Method GET -TimeoutSec 10
+          if (-not ($attached | Where-Object { $_.id -eq $fb.id })) {
+            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/endpoints/$($fb.id)" -Method POST -TimeoutSec 10
+            Write-Host "Attached FB endpoint $($fb.id) to event $($ev.id)"
+          } else {
+            Write-Host "FB endpoint $($fb.id) already attached to event $($ev.id)"
+          }
+
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/activate" -Method POST -TimeoutSec 10
+
+          $check = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)" -TimeoutSec 10
+          if (-not $check.receiving_activated) { throw "FAIL: E2E-Test event not activated" }
           Write-Host "Event $($ev.id) activated with FB endpoint $($fb.id)"
 
       - name: Start OBS stream + delivery
         shell: powershell
         run: |
-          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10
           $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
-          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/obs/start-streaming" -Method POST -TimeoutSec 30
-          Start-Sleep -Seconds 10
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/obs/start-stream" -Method POST -TimeoutSec 30
+          # delivery_start enforces 15s RTMP-stable gate (RTMP_STABLE_REQUIRED_SECS).
+          # Wait 20s so the publisher is unambiguously stable before spinning a VPS.
+          Start-Sleep -Seconds 20
           $startBody = @{ event_id = $ev.id } | ConvertTo-Json
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/start" -Method POST -Body $startBody -ContentType "application/json" -TimeoutSec 120
           Write-Host "OBS streaming + delivery started for event $($ev.id)"
