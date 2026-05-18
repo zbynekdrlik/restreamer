@@ -13,7 +13,7 @@ use crate::error::Result;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
-pub const MAX_SCHEMA_VERSION: i32 = 28;
+pub const MAX_SCHEMA_VERSION: i32 = 29;
 
 /// Returns true if the column exists on the table, false otherwise.
 ///
@@ -344,6 +344,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             26 => migrate_v26(&mut tx).await?,
             27 => migrate_v27(&mut tx).await?,
             28 => migrate_v28(&mut tx).await?,
+            29 => migrate_v29(&mut tx).await?,
             _ => unreachable!("unhandled migration version {version}"),
         }
         sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)")
@@ -853,6 +854,36 @@ async fn migrate_v28(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
         );
     } else {
         tracing::debug!("v28: no-op (no 'ffmpeg' pusher rows present)");
+    }
+    Ok(())
+}
+
+/// Migration v29: flip `service_type='FB'` rows from `pusher='ffmpeg'` to
+/// `pusher='rust'`. Reverses the v28 over-broad blanket flip that included
+/// FB endpoints alongside YT, which broke FB delivery (#215) because the
+/// rust RTMP push handshake was rejected by Facebook with "Invalid URL".
+///
+/// v29 is the scoped re-flip that runs AFTER the rust pusher's CONNECT AMF
+/// is fixed in the same PR (build_tc_url drops default port, build_connect_props
+/// adds swfUrl + pageUrl).
+///
+/// Idempotent: the WHERE clause only matches rows still on `ffmpeg`; rows
+/// already on `rust` are not touched.
+async fn migrate_v29(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    let result = sqlx::query(
+        "UPDATE endpoint_configs SET pusher = 'rust' \
+         WHERE pusher = 'ffmpeg' AND service_type = 'FB'",
+    )
+    .execute(&mut **tx)
+    .await?;
+    let rows = result.rows_affected();
+    if rows > 0 {
+        tracing::info!(
+            rows_affected = rows,
+            "v29: flipped FB endpoints 'ffmpeg' -> 'rust' pusher"
+        );
+    } else {
+        tracing::debug!("v29: no-op (no FB rows on 'ffmpeg')");
     }
     Ok(())
 }

@@ -31,7 +31,7 @@ use rtmp::handshake::define::ClientHandshakeState;
 use rtmp::handshake::handshake_client::SimpleHandshakeClient;
 use rtmp::messages::define::RtmpMessageData;
 use rtmp::messages::parser::MessageParser;
-use rtmp::netconnection::writer::{ConnectProperties, NetConnection};
+use rtmp::netconnection::writer::NetConnection;
 use rtmp::netstream::writer::NetStreamWriter;
 use rtmp::protocol_control_messages::writer::ProtocolControlMessagesWriter;
 use rtmp::session::define::{TRANSACTION_ID_CONNECT, TRANSACTION_ID_CREATE_STREAM};
@@ -39,6 +39,7 @@ use tokio::net::TcpSocket;
 use tokio::sync::Mutex;
 use xflv::amf0::define::Amf0ValueType;
 
+use crate::url::{Scheme, build_connect_props, parse_rtmp_url};
 use crate::{PushError, map_read_err};
 
 // -------------------------------------------------------------------------
@@ -160,7 +161,7 @@ impl Session {
         // --- 3-5. Negotiate (handshake + connect + publish) ------------------
         let msg_stream_id = tokio::time::timeout(
             Duration::from_secs(NEGOTIATE_TIMEOUT_SECS),
-            negotiate(Arc::clone(&io), scheme, &addr, &app, &stream_name),
+            negotiate(Arc::clone(&io), scheme, &host, port, &app, &stream_name),
         )
         .await
         .map_err(|_| PushError::Timeout)??;
@@ -283,7 +284,8 @@ impl Drop for Session {
 async fn negotiate(
     io: Arc<Mutex<Box<dyn TNetIO + Send + Sync>>>,
     scheme: Scheme,
-    raw_domain: &str,
+    host: &str,
+    port: u16,
     app: &str,
     stream_name: &str,
 ) -> Result<u32, PushError> {
@@ -329,26 +331,18 @@ async fn negotiate(
             .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
 
         let mut nc = NetConnection::new(Arc::clone(&io));
-        let mut props = ConnectProperties::new_none();
-        props.app = Some(app.to_string());
-        props.pub_type = Some("nonprivate".to_string());
-        // OBS advertises these on every RTMP connect. Without them, Facebook
-        // Live silently accepts the publish and then discards the media (no
-        // RTMP error returned, no preview shown in Live Producer). Operator
-        // confirmed 2026-05-03 that FB shows zero data ingestion despite
-        // pusher reporting healthy chunk-done logs. Mirror libobs values.
-        props.flash_ver = Some("FMLE/3.0 (compatible; FMSc/1.0)".to_string());
-        props.fpad = Some(false);
-        props.capabilities = Some(239.0);
-        props.audio_codecs = Some(3575.0); // OBS bitmask: AAC + MP3 + ...
-        props.video_codecs = Some(252.0); // OBS bitmask: H.264 + ...
-        props.video_function = Some(1.0); // CLIENT_SEEK
-        props.object_encoding = Some(0.0); // AMF0
-        let scheme_str = match scheme {
-            Scheme::Rtmp => "rtmp",
-            Scheme::Rtmps => "rtmps",
-        };
-        props.tc_url = Some(format!("{scheme_str}://{raw_domain}/{app}"));
+        // libobs-mirrored ConnectProperties incl. swfUrl + pageUrl. Facebook
+        // Live rejects publish when tcUrl carries the default port suffix
+        // or when swfUrl/pageUrl are absent on some ingest paths (#215).
+        let props = build_connect_props(scheme, host, port, app);
+        tracing::debug!(
+            target: "rs_rtmp_push::connect",
+            host = %host,
+            port = port,
+            app = %app,
+            ?props,
+            "sending NetConnection.connect"
+        );
         nc.write_connect(&(TRANSACTION_ID_CONNECT as f64), &props)
             .await
             .map_err(|e| PushError::IoError(io::Error::other(e.to_string())))?;
@@ -702,140 +696,16 @@ fn amf_u8(v: &Amf0ValueType) -> u8 {
 }
 
 // -------------------------------------------------------------------------
-// URL parsing
-// -------------------------------------------------------------------------
-
-/// URL scheme of the upstream RTMP endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Scheme {
-    Rtmp,
-    Rtmps,
-}
-
-fn parse_rtmp_url(url: &str) -> Result<(Scheme, String, u16, String, String), PushError> {
-    let (scheme, rest, default_port) = if let Some(r) = url.strip_prefix("rtmps://") {
-        (Scheme::Rtmps, r, 443u16)
-    } else if let Some(r) = url.strip_prefix("rtmp://") {
-        (Scheme::Rtmp, r, 1935u16)
-    } else {
-        return Err(bad_url("must start with rtmp:// or rtmps://", url));
-    };
-
-    let slash = rest
-        .find('/')
-        .ok_or_else(|| bad_url("missing /app/stream path", url))?;
-
-    let authority = &rest[..slash];
-    let path = &rest[slash + 1..];
-
-    let (host, port) = if let Some(colon) = authority.rfind(':') {
-        let h = &authority[..colon];
-        let p: u16 = authority[colon + 1..]
-            .parse()
-            .map_err(|_| bad_url("invalid port number", url))?;
-        (h.to_string(), p)
-    } else {
-        (authority.to_string(), default_port)
-    };
-
-    if host.is_empty() {
-        return Err(bad_url("host is empty", url));
-    }
-
-    let slash2 = path
-        .find('/')
-        .ok_or_else(|| bad_url("path must contain /app/stream (two components)", url))?;
-
-    let app = path[..slash2].to_string();
-    let stream = path[slash2 + 1..].to_string();
-
-    if app.is_empty() {
-        return Err(bad_url("app name is empty", url));
-    }
-    if stream.is_empty() {
-        return Err(bad_url("stream name is empty", url));
-    }
-
-    Ok((scheme, host, port, app, stream))
-}
-
-fn bad_url(reason: &str, url: &str) -> PushError {
-    PushError::IoError(io::Error::other(format!("bad RTMP URL ({reason}): {url}")))
-}
-
-// -------------------------------------------------------------------------
 // Unit tests
 // -------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::{READ_LOOP_HOLD_MS, READ_LOOP_IDLE_MS, Scheme, parse_rtmp_url};
+    use super::{READ_LOOP_HOLD_MS, READ_LOOP_IDLE_MS};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tokio::time::Instant;
-
-    // --- URL parser tests ---------------------------------------------------
-
-    #[test]
-    fn parse_standard_rtmp_url() {
-        let (scheme, host, port, app, stream) =
-            parse_rtmp_url("rtmp://a.example.com/live/test").unwrap();
-        assert_eq!(scheme, Scheme::Rtmp);
-        assert_eq!(host, "a.example.com");
-        assert_eq!(port, 1935);
-        assert_eq!(app, "live");
-        assert_eq!(stream, "test");
-    }
-
-    #[test]
-    fn parse_rtmp_url_with_port() {
-        let (scheme, host, port, app, stream) =
-            parse_rtmp_url("rtmp://127.0.0.1:19350/live/mykey").unwrap();
-        assert_eq!(scheme, Scheme::Rtmp);
-        assert_eq!(host, "127.0.0.1");
-        assert_eq!(port, 19350);
-        assert_eq!(app, "live");
-        assert_eq!(stream, "mykey");
-    }
-
-    #[test]
-    fn parse_standard_rtmps_url() {
-        let (scheme, host, port, app, stream) =
-            parse_rtmp_url("rtmps://live-api-s.facebook.com/rtmp/abc123").unwrap();
-        assert_eq!(scheme, Scheme::Rtmps);
-        assert_eq!(host, "live-api-s.facebook.com");
-        assert_eq!(port, 443);
-        assert_eq!(app, "rtmp");
-        assert_eq!(stream, "abc123");
-    }
-
-    #[test]
-    fn parse_rtmps_url_with_explicit_port() {
-        let (scheme, host, port, app, stream) =
-            parse_rtmp_url("rtmps://127.0.0.1:19443/live/test").unwrap();
-        assert_eq!(scheme, Scheme::Rtmps);
-        assert_eq!(host, "127.0.0.1");
-        assert_eq!(port, 19443);
-        assert_eq!(app, "live");
-        assert_eq!(stream, "test");
-    }
-
-    #[test]
-    fn rejects_non_rtmp_scheme() {
-        assert!(parse_rtmp_url("http://host/live/test").is_err());
-    }
-
-    #[test]
-    fn rejects_missing_stream() {
-        assert!(parse_rtmp_url("rtmp://host/live").is_err());
-        assert!(parse_rtmp_url("rtmps://host/live").is_err());
-    }
-
-    #[test]
-    fn rejects_empty_app() {
-        assert!(parse_rtmp_url("rtmp://host//stream").is_err());
-    }
 
     // --- Liveness-stub tests (make send_audio_tag / send_video_tag reachable)
 

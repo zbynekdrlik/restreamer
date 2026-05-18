@@ -241,7 +241,7 @@ async fn migrate_latest_is_idempotent() {
 async fn max_schema_version_constant() {
     // Update this when bumping MAX_SCHEMA_VERSION; protects against silent
     // changes that skip the migration-versioning convention.
-    assert_eq!(crate::db::MAX_SCHEMA_VERSION, 28);
+    assert_eq!(crate::db::MAX_SCHEMA_VERSION, 29);
 }
 
 #[tokio::test]
@@ -505,4 +505,112 @@ async fn migration_v26_adds_youtube_oauth_id_to_endpoint_configs() {
             .await
             .unwrap();
     assert_eq!(read_back, bb_id);
+}
+
+#[tokio::test]
+async fn v29_flips_fb_endpoints_from_ffmpeg_to_rust() {
+    let pool = crate::db::create_memory_pool().await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+
+    // Insert one FB row on ffmpeg, one YT_RTMP row on ffmpeg, one VIMEO row on ffmpeg.
+    sqlx::query(
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key, is_fast, pusher) \
+         VALUES ('fb-test', 'FB', 'fb-key', 0, 'ffmpeg'), \
+                ('yt-test', 'YT_RTMP', 'yt-key', 0, 'ffmpeg'), \
+                ('vimeo-test', 'VIMEO', 'v-key', 0, 'ffmpeg')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Rewind schema_version so v29 re-runs through the dispatcher.
+    sqlx::query("DELETE FROM schema_version WHERE version > 28")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Re-run migrations (this is the contract under test: dispatcher reaches v29).
+    crate::db::run_migrations(&pool).await.unwrap();
+
+    let fb: String =
+        sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'fb-test'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let yt: String =
+        sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'yt-test'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let vimeo: String =
+        sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'vimeo-test'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    assert_eq!(fb, "rust", "v29 must flip FB ffmpeg->rust");
+    assert_eq!(yt, "ffmpeg", "v29 must NOT touch non-FB rows");
+    assert_eq!(vimeo, "ffmpeg", "v29 must NOT touch non-FB rows");
+}
+
+#[tokio::test]
+async fn v29_is_idempotent() {
+    let pool = crate::db::create_memory_pool().await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key, is_fast, pusher) \
+         VALUES ('fb-idem', 'FB', 'fb-key', 0, 'ffmpeg')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // First v29 run.
+    sqlx::query("DELETE FROM schema_version WHERE version > 28")
+        .execute(&pool)
+        .await
+        .unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+
+    // Second v29 run (idempotency check).
+    sqlx::query("DELETE FROM schema_version WHERE version > 28")
+        .execute(&pool)
+        .await
+        .unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+
+    let fb: String =
+        sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'fb-idem'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(fb, "rust", "v29 idempotent: still rust after re-run");
+}
+
+#[tokio::test]
+async fn v29_does_not_touch_fb_rows_already_on_rust() {
+    let pool = crate::db::create_memory_pool().await.unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key, is_fast, pusher) \
+         VALUES ('fb-already-rust', 'FB', 'fb-key', 0, 'rust')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query("DELETE FROM schema_version WHERE version > 28")
+        .execute(&pool)
+        .await
+        .unwrap();
+    crate::db::run_migrations(&pool).await.unwrap();
+
+    let fb: String =
+        sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'fb-already-rust'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(fb, "rust", "v29 only matches WHERE pusher='ffmpeg'");
 }
