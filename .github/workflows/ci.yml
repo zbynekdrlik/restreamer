@@ -4911,7 +4911,6 @@ jobs:
       EVENT_NAME: "E2E-Test"
       HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
       FB_TEST_STREAM_KEY: ${{ secrets.FB_TEST_STREAM_KEY }}
-      FB_BROADCAST_URL: ${{ secrets.FB_BROADCAST_URL }}
     steps:
       - uses: actions/checkout@v4
 
@@ -4955,12 +4954,9 @@ jobs:
         shell: powershell
         run: |
           if (-not $env:FB_TEST_STREAM_KEY) {
-            throw "FB_TEST_STREAM_KEY secret not set. Operator must run: gh secret set FB_TEST_STREAM_KEY --body <persistent-FB-stream-key>"
+            throw "FB_TEST_STREAM_KEY secret not set. Operator must run: gh secret set FB_TEST_STREAM_KEY --body <FB-Page-persistent-stream-key>"
           }
-          if (-not $env:FB_BROADCAST_URL) {
-            throw "FB_BROADCAST_URL secret not set. Operator must run: gh secret set FB_BROADCAST_URL --body https://www.facebook.com/live/producer/<broadcast-id>"
-          }
-          Write-Host "FB secrets present (key length: $($env:FB_TEST_STREAM_KEY.Length))"
+          Write-Host "FB_TEST_STREAM_KEY present (length: $($env:FB_TEST_STREAM_KEY.Length))"
 
       - name: Seed FB endpoint config
         shell: powershell
