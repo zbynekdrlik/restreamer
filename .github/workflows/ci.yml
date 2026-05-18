@@ -4898,6 +4898,220 @@ jobs:
           Write-Host "PRODUCTION CONFIG VERIFIED"
           Write-Host "=========================================="
 
+  e2e-fb-push-stream-lan:
+    name: E2E FB Push (stream-lan, real FB)
+    needs: [deploy-stream-lan]
+    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, windows, stream-lan]
+    timeout-minutes: 60
+    env:
+      OBS_WS_HOST: "127.0.0.1"
+      OBS_WS_PORT: "4455"
+      OBS_WS_PASSWORD: ${{ secrets.OBS_WS_PASSWORD }}
+      EVENT_NAME: "E2E-Test"
+      HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+      FB_TEST_STREAM_KEY: ${{ secrets.FB_TEST_STREAM_KEY }}
+      FB_BROADCAST_URL: ${{ secrets.FB_BROADCAST_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure Hetzner API token
+        shell: powershell
+        run: |
+          if (-not $env:HETZNER_API_TOKEN) {
+            throw "HETZNER_API_TOKEN secret not set"
+          }
+          $configPath = "C:\ProgramData\Restreamer\config.json"
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.hetzner) {
+            $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue ([pscustomobject]@{})
+          }
+          $config.hetzner | Add-Member -NotePropertyName "api_token" -NotePropertyValue $env:HETZNER_API_TOKEN -Force
+          $config.hetzner | Add-Member -NotePropertyName "location" -NotePropertyValue "nbg1" -Force
+          $config.hetzner | Add-Member -NotePropertyName "default_server_type" -NotePropertyValue "cpx22" -Force
+          $config.hetzner | Add-Member -NotePropertyName "snapshot_label" -NotePropertyValue "rs-delivery" -Force
+          $config.hetzner | Add-Member -NotePropertyName "ssh_key_name" -NotePropertyValue "restreamer-ci" -Force
+          $json = $config | ConvertTo-Json -Depth 10
+          [System.IO.File]::WriteAllText($configPath, $json)
+
+          $TaskName = "RestreamerGUI"
+          $null = cmd /c "taskkill /F /IM Restreamer.exe 2>nul"
+          Start-Sleep -Seconds 3
+          schtasks.exe /run /tn $TaskName
+          if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start $TaskName (exit code: $LASTEXITCODE)" }
+          Start-Sleep -Seconds 10
+          for ($i = 1; $i -le 15; $i++) {
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5 | Out-Null
+              Write-Host "Restreamer restarted with Hetzner API token configured"
+              return
+            } catch {
+              Start-Sleep -Seconds 3
+            }
+          }
+          throw "FAILED: Restreamer did not restart after config update"
+
+      - name: Verify FB_TEST_STREAM_KEY secret is set
+        shell: powershell
+        run: |
+          if (-not $env:FB_TEST_STREAM_KEY) {
+            throw "FB_TEST_STREAM_KEY secret not set. Operator must run: gh secret set FB_TEST_STREAM_KEY --body <persistent-FB-stream-key>"
+          }
+          if (-not $env:FB_BROADCAST_URL) {
+            throw "FB_BROADCAST_URL secret not set. Operator must run: gh secret set FB_BROADCAST_URL --body https://www.facebook.com/live/producer/<broadcast-id>"
+          }
+          Write-Host "FB secrets present (key length: $($env:FB_TEST_STREAM_KEY.Length))"
+
+      - name: Seed FB endpoint config
+        shell: powershell
+        run: |
+          $body = @{
+            alias = "e2e fb"
+            stream_key = $env:FB_TEST_STREAM_KEY
+          } | ConvertTo-Json
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/facebook/config/seed" `
+            -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
+          Write-Host "FB endpoint 'e2e fb' seeded with persistent stream key"
+
+      - name: Verify FB Playwright profile exists
+        shell: powershell
+        run: |
+          $profileDir = "C:\Users\newlevel\.playwright-fb-profile"
+          if (-not (Test-Path $profileDir)) {
+            throw "FB profile not found at $profileDir. Operator must run scripts\setup-fb-profile.ps1 to log into Facebook manually first."
+          }
+          $cookieFile = Join-Path $profileDir "Default\Cookies"
+          if (-not (Test-Path $cookieFile)) {
+            throw "FB profile exists but Cookies file missing. Re-run scripts\setup-fb-profile.ps1."
+          }
+          Write-Host "FB Playwright profile present"
+
+      - name: Ensure OBS is running
+        shell: powershell
+        run: |
+          $allObs = Get-Process obs64 -ErrorAction SilentlyContinue
+          if ($allObs) {
+            $zombies = $allObs | Where-Object { ($_.WorkingSet64 / 1MB) -lt 500 }
+            if ($zombies) {
+              Write-Host "Killing $($zombies.Count) zombie obs64 process(es)"
+              $zombies | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+              Start-Sleep -Seconds 3
+            }
+          }
+          $obs = Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { ($_.WorkingSet64 / 1MB) -ge 500 }
+          if (-not $obs) {
+            schtasks.exe /run /tn "OBSStudio"
+            if ($LASTEXITCODE -ne 0) { throw "schtasks.exe failed to start OBSStudio" }
+            Start-Sleep -Seconds 15
+            $obs = Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { ($_.WorkingSet64 / 1MB) -ge 500 }
+            if (-not $obs) { throw "OBS did not start" }
+          }
+          Write-Host "OBS running (PID $($obs.Id), $([int]($obs.WorkingSet64 / 1MB)) MB)"
+
+      - name: Activate E2E event + attach FB endpoint
+        shell: powershell
+        run: |
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET
+          $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          if ($null -eq $ev) {
+            $body = @{ name = $env:EVENT_NAME } | ConvertTo-Json
+            $ev = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method POST -Body $body -ContentType "application/json"
+          }
+          $endpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET
+          $fb = $endpoints | Where-Object { $_.alias -eq "e2e fb" }
+          if ($null -eq $fb) { throw "FATAL: e2e fb endpoint missing after seed" }
+          $attach = @{ endpoint_id = $fb.id } | ConvertTo-Json
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/endpoints" -Method POST -Body $attach -ContentType "application/json"
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/activate" -Method POST
+          Write-Host "Event $($ev.id) activated with FB endpoint $($fb.id)"
+
+      - name: Start OBS stream + delivery
+        shell: powershell
+        run: |
+          $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET
+          $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/obs/start-streaming" -Method POST -TimeoutSec 30
+          Start-Sleep -Seconds 10
+          $startBody = @{ event_id = $ev.id } | ConvertTo-Json
+          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/start" -Method POST -Body $startBody -ContentType "application/json" -TimeoutSec 120
+          Write-Host "OBS streaming + delivery started for event $($ev.id)"
+
+      - name: Local watchdog (30 min sustained-soak on rust pusher)
+        shell: powershell
+        run: |
+          $deadline = (Get-Date).AddMinutes(30)
+          $lastChunks = -1
+          $lastBytes = -1
+          $stagnantPolls = 0
+          while ((Get-Date) -lt $deadline) {
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status" -Method GET -TimeoutSec 10
+            $ep = $status.endpoints | Where-Object { $_.alias -eq "e2e fb" }
+            if ($null -eq $ep) { throw "WATCHDOG FAIL: e2e fb endpoint missing from delivery status" }
+            if (-not $ep.alive) { throw "WATCHDOG FAIL: e2e fb endpoint alive=false at $(Get-Date)" }
+            if ($ep.chunks_pushed -le $lastChunks) {
+              $stagnantPolls += 1
+              if ($stagnantPolls -ge 3) {
+                throw "WATCHDOG FAIL: chunks_pushed stagnant at $($ep.chunks_pushed) for 30s"
+              }
+            } else {
+              $stagnantPolls = 0
+            }
+            if ($ep.bytes_sent_since_connect -le $lastBytes) {
+              if ($lastBytes -gt 0) {
+                throw "WATCHDOG FAIL: bytes_sent_since_connect did not grow ($lastBytes -> $($ep.bytes_sent_since_connect))"
+              }
+            }
+            $lastChunks = $ep.chunks_pushed
+            $lastBytes = $ep.bytes_sent_since_connect
+
+            $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&limit=10"
+            $audit = Invoke-RestMethod -Uri $auditUri -Method GET -TimeoutSec 10
+            if ($audit.rows.Count -gt 0) {
+              throw "WATCHDOG FAIL: endpoint_rtmp_push_died audit row(s) for 'e2e fb' (count: $($audit.rows.Count))"
+            }
+
+            Write-Host "watchdog OK: alive=$($ep.alive) chunks=$($ep.chunks_pushed) bytes=$($ep.bytes_sent_since_connect)"
+            Start-Sleep -Seconds 10
+          }
+          Write-Host "Local watchdog: 30 min sustained soak GREEN"
+
+      - name: FB-side Playwright check (parallel verification)
+        shell: powershell
+        working-directory: e2e
+        run: |
+          $env:FB_SOAK_MINUTES = "30"
+          $env:FB_POLL_INTERVAL_MS = "60000"
+          npx playwright test --config playwright-facebook.config.ts
+          if ($LASTEXITCODE -ne 0) { throw "FB Live Producer Playwright check FAILED" }
+
+      - name: Upload FB Live Producer screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fb-live-producer-screenshots
+          path: C:\Users\newlevel\.playwright-fb-screenshots\
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Stop delivery + deactivate event
+        if: always()
+        shell: powershell
+        run: |
+          try {
+            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/stop" -Method POST -TimeoutSec 60 -ErrorAction Stop
+          } catch {
+            Write-Host "delivery/stop error (ignored on teardown): $_"
+          }
+          try {
+            $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET
+            $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+            if ($ev) {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/deactivate" -Method POST -ErrorAction Stop
+            }
+          } catch {
+            Write-Host "event deactivate error (ignored on teardown): $_"
+          }
+
   e2e-gate:
     name: E2E Gate
     if: always()
