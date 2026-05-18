@@ -171,13 +171,37 @@ impl Session {
         let poisoned = Arc::new(AtomicBool::new(false));
         let read_loop_handle = tokio::spawn(read_loop(Arc::clone(&io), Arc::clone(&poisoned)));
 
-        Ok(Self {
+        let mut session = Self {
             io,
             packetizer,
             msg_stream_id,
             poisoned,
             read_loop_handle: Some(read_loop_handle),
-        })
+        };
+
+        // --- 7. Announce the stream via @setDataFrame onMetaData -------------
+        //
+        // Facebook Live Producer silently rejects video that arrives without
+        // an onMetaData announcement first, even when CONNECT + Publish.Start
+        // succeed and bytes flow over TCP (no error, no preview). The inpoint
+        // chunker only stores audio + video FLV tags, so any onMetaData from
+        // OBS is lost upstream — synthesize sensible defaults here before the
+        // first audio/video tag goes out.
+        session
+            .send_default_onmetadata()
+            .await
+            .map_err(|e| PushError::IoError(io::Error::other(format!("onMetaData: {e}"))))?;
+
+        Ok(session)
+    }
+
+    /// Synthesize a minimal `@setDataFrame onMetaData` AMF0 payload and emit
+    /// it as a Data Message on the publish stream. Called once per session,
+    /// immediately after `NetStream.Publish.Start`. See `Self::connect` for
+    /// why this is non-optional for Facebook (and harmless for YouTube).
+    async fn send_default_onmetadata(&mut self) -> Result<(), PushError> {
+        let body = build_default_onmetadata_amf0();
+        self.send_data_tag(0, &body).await
     }
 
     /// Send an audio FLV tag body via ChunkPacketizer.
@@ -198,6 +222,29 @@ impl Session {
     ) -> Result<(), PushError> {
         self.send_tag(rtmp::chunk::define::csid_type::VIDEO, 9, timestamp_ms, body)
             .await
+    }
+
+    /// Send an AMF0 data tag (FLV script tag body) via ChunkPacketizer.
+    ///
+    /// Used for `@setDataFrame onMetaData` (RTMP msg_type_id=18, AMF0 Data
+    /// Message). Facebook Live Producer silently rejects video streams that
+    /// arrive without an onMetaData announcement before the first video tag,
+    /// even when the CONNECT handshake and Publish succeed and the TCP
+    /// connection stays open. ffmpeg/OBS always send this; the rs-rtmp-push
+    /// pipeline used to drop FLV script tags entirely (see the now-removed
+    /// `_ => continue` arm in `pusher.rs`).
+    ///
+    /// `timestamp_ms` should be 0 — onMetaData is a stream-setup announcement,
+    /// not a media sample, and FB Studio expects it timestamped at the very
+    /// start of the publish.
+    pub async fn send_data_tag(&mut self, timestamp_ms: u32, body: &[u8]) -> Result<(), PushError> {
+        self.send_tag(
+            rtmp::chunk::define::csid_type::DATA_AMF0_AMF3,
+            18,
+            timestamp_ms,
+            body,
+        )
+        .await
     }
 
     /// Packetize and write a single RTMP chunk for the given tag body.
@@ -402,6 +449,85 @@ async fn negotiate(
     wait_for_publish_start(Arc::clone(&io), &mut unpacketizer).await?;
 
     Ok(msg_stream_id)
+}
+
+// -------------------------------------------------------------------------
+// AMF0 helpers for @setDataFrame onMetaData synthesis
+// -------------------------------------------------------------------------
+
+/// AMF0 marker bytes (per RTMP spec / Adobe AMF0 0.0 spec).
+const AMF0_MARKER_NUMBER: u8 = 0x00;
+const AMF0_MARKER_BOOLEAN: u8 = 0x01;
+const AMF0_MARKER_STRING: u8 = 0x02;
+const AMF0_MARKER_ECMA_ARRAY: u8 = 0x08;
+const AMF0_OBJECT_END_MARKER: [u8; 3] = [0x00, 0x00, 0x09];
+
+fn write_amf0_string(buf: &mut Vec<u8>, s: &str) {
+    buf.push(AMF0_MARKER_STRING);
+    buf.extend_from_slice(&(s.len() as u16).to_be_bytes());
+    buf.extend_from_slice(s.as_bytes());
+}
+
+fn write_amf0_kv_key(buf: &mut Vec<u8>, key: &str) {
+    buf.extend_from_slice(&(key.len() as u16).to_be_bytes());
+    buf.extend_from_slice(key.as_bytes());
+}
+
+fn write_amf0_kv_number(buf: &mut Vec<u8>, key: &str, value: f64) {
+    write_amf0_kv_key(buf, key);
+    buf.push(AMF0_MARKER_NUMBER);
+    buf.extend_from_slice(&value.to_be_bytes());
+}
+
+fn write_amf0_kv_boolean(buf: &mut Vec<u8>, key: &str, value: bool) {
+    write_amf0_kv_key(buf, key);
+    buf.push(AMF0_MARKER_BOOLEAN);
+    buf.push(if value { 1 } else { 0 });
+}
+
+fn write_amf0_kv_string(buf: &mut Vec<u8>, key: &str, value: &str) {
+    write_amf0_kv_key(buf, key);
+    write_amf0_string(buf, value);
+}
+
+/// Build a minimal `@setDataFrame onMetaData {...}` AMF0 payload suitable
+/// for emitting as an RTMP AMF0 Data Message (msg_type_id=18) on the
+/// publish stream. Values are sensible defaults for the OBS feed flowing
+/// through this project (1080p30 H.264 + AAC stereo 44.1 kHz). FB Live
+/// Producer rejects without it; YouTube tolerates it. Both accept these
+/// values whether they exactly match the embedded codec headers or not —
+/// the real codec parameters arrive separately in the AVCDecoderConfig
+/// and AAC sequence header tags.
+fn build_default_onmetadata_amf0() -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    write_amf0_string(&mut buf, "@setDataFrame");
+    write_amf0_string(&mut buf, "onMetaData");
+
+    // ECMA Array (Adobe convention for onMetaData payloads; FB / YT both
+    // accept Object marker too, but ECMA Array is what ffmpeg / OBS emit).
+    buf.push(AMF0_MARKER_ECMA_ARRAY);
+    // Length hint: 0 means "unknown; parser must read until end-marker".
+    // This is safe per AMF0 spec and what most encoders emit.
+    buf.extend_from_slice(&0u32.to_be_bytes());
+
+    write_amf0_kv_number(&mut buf, "duration", 0.0);
+    write_amf0_kv_number(&mut buf, "fileSize", 0.0);
+    write_amf0_kv_number(&mut buf, "width", 1920.0);
+    write_amf0_kv_number(&mut buf, "height", 1080.0);
+    write_amf0_kv_number(&mut buf, "videodatarate", 4500.0);
+    write_amf0_kv_number(&mut buf, "framerate", 30.0);
+    // videocodecid: 7 = AVC/H.264 per FLV spec table 8-6
+    write_amf0_kv_number(&mut buf, "videocodecid", 7.0);
+    write_amf0_kv_number(&mut buf, "audiodatarate", 128.0);
+    write_amf0_kv_number(&mut buf, "audiosamplerate", 44100.0);
+    write_amf0_kv_number(&mut buf, "audiosamplesize", 16.0);
+    write_amf0_kv_boolean(&mut buf, "stereo", true);
+    // audiocodecid: 10 = AAC per FLV spec table 8-4
+    write_amf0_kv_number(&mut buf, "audiocodecid", 10.0);
+    write_amf0_kv_string(&mut buf, "encoder", "rs-rtmp-push");
+
+    buf.extend_from_slice(&AMF0_OBJECT_END_MARKER);
+    buf
 }
 
 // -------------------------------------------------------------------------

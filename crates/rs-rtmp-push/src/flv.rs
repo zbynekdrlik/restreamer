@@ -105,12 +105,14 @@ impl<'a> Iterator for FlvTagIter<'a> {
 
 pub const FLV_TAG_AUDIO: u8 = 8;
 pub const FLV_TAG_VIDEO: u8 = 9;
-/// Used only by unit tests to verify that script-data tags are filtered
-/// out by the pusher's `_ => continue` arm. Production code never matches
-/// against this constant — script tags are silently dropped (they carry
-/// onMetaData / cuepoints, which RTMP servers don't need on the push side
-/// since the receiver builds metadata from the codec headers).
-#[allow(dead_code)]
+/// FLV script-data tag. Carries AMF0 `@setDataFrame onMetaData` (width,
+/// height, framerate, audio rate, codec ids, ...) at the start of every
+/// publish. Facebook Live Producer silently rejects streams that arrive
+/// without this announcement — the CONNECT handshake and Publish succeed,
+/// bytes flow over TCP, but no preview ever appears in the Page dashboard.
+/// rs-rtmp-push therefore forwards script tags as RTMP AMF0 Data Messages
+/// (msg_type_id=18) via `Session::send_data_tag`. See pusher.rs for the
+/// dispatch site and session.rs for the wire helper.
 pub const FLV_TAG_SCRIPT: u8 = 18;
 
 // ---------------------------------------------------------------------------
