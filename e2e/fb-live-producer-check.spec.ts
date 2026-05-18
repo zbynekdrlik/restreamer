@@ -8,23 +8,35 @@ import * as fs from "fs";
  *
  * Architectural twin of `youtube-studio-check.spec.ts`. Uses a persistent
  * Chrome profile with a saved Facebook session to open the configured FB
- * Live Producer broadcast and poll for the three signals that prove FB
- * is receiving our rust-pusher feed:
+ * Live Producer broadcast and poll for the signals that prove FB is
+ * receiving our rust-pusher feed.
  *
- *   1. A `<video>` element exists, `readyState >= 3` (HAVE_FUTURE_DATA),
- *      and `currentTime` advances between polls (preview is playing).
- *   2. A non-empty stream-health label that is NOT a known error state
- *      ("No signal", "Connecting", "Disconnected").
- *   3. A bitrate readout matching `\d+ kbps` with a non-zero value.
+ * `FB_BROADCAST_URL` must point at a Page's Live Producer
+ * (`https://www.facebook.com/live/producer/<page-id>`). The default
+ * `/live/producer` URL redirects to the LOGGED-IN account's PERSONAL
+ * profile target, where the broadcast does NOT appear regardless of
+ * what the rust pusher sends — FB routes persistent-key streams to
+ * the Page that minted the key.
  *
- * All three must hold for `SOAK_MINUTES` continuous minutes, polled every
- * `POLL_INTERVAL_MS` milliseconds. Any single failure during the soak
- * fails the test loud. No retry, no flake-tolerance, per `test-strictness.md`.
+ * Required signals (assertions every poll):
+ *   - `<video>` element present in DOM
+ *   - `video.readyState >= 3` (HAVE_FUTURE_DATA) — FB has buffered frames
+ *   - `video.videoWidth > 0` and `video.videoHeight > 0` — FB decoded codec
+ *   - `video.paused === false` — preview is playing
+ *   - `video.currentTime` strictly advances between consecutive polls
+ *
+ * Notes deliberately NOT asserted:
+ *   - Stream-health badges, bitrate readouts, "Receiving"/"Live" labels:
+ *     these only render once the broadcast is "Live" (publicly aired).
+ *     Auto-Go-Live is banned because FB destroys the broadcast on stop,
+ *     making subsequent CI runs fail — see `youtube-studio-check.spec.ts`
+ *     for the same constraint on YT.
  *
  * Setup (one-time, on stream.lan via MCP `win-stream-snv`):
  *   pwsh.exe -File C:\restreamer\scripts\setup-fb-profile.ps1
  *   -> a HEADED Chromium opens
- *   -> operator signs into Facebook with the dedicated test-account
+ *   -> operator signs into FB with the account that admins the Page
+ *      that minted the persistent stream key
  *   -> close the browser; session is saved to PROFILE_DIR
  *
  * CI runs in headless mode using the saved session automatically.
@@ -43,8 +55,7 @@ const SCREENSHOT_DIR =
     : path.join(os.homedir(), ".playwright-fb-screenshots"));
 
 const FB_BROADCAST_URL =
-  process.env.FB_BROADCAST_URL ||
-  "https://www.facebook.com/live/producer";
+  process.env.FB_BROADCAST_URL || "https://www.facebook.com/live/producer";
 
 const SOAK_MINUTES = parseInt(process.env.FB_SOAK_MINUTES || "30", 10);
 const POLL_INTERVAL_MS = parseInt(
@@ -53,46 +64,24 @@ const POLL_INTERVAL_MS = parseInt(
 );
 const SCREENSHOT_MINUTES = [0, 5, 15, 30];
 
-const BANNED_HEALTH_PATTERNS = /no signal|connecting|disconnected|offline/i;
-
-async function readHealthSnapshot(page: Page): Promise<{
+interface FbVideoSnapshot {
   videoCurrentTime: number;
   videoReadyState: number;
-  healthLabel: string;
-  bitrateKbps: number;
-}> {
-  // Preview <video> element
+  videoWidth: number;
+  videoHeight: number;
+  videoPaused: boolean;
+}
+
+async function readVideoSnapshot(page: Page): Promise<FbVideoSnapshot> {
   const videoLocator = page.locator("video").first();
   await videoLocator.waitFor({ state: "attached", timeout: 30_000 });
-  const videoCurrentTime = await videoLocator.evaluate(
-    (v: HTMLVideoElement) => v.currentTime,
-  );
-  const videoReadyState = await videoLocator.evaluate(
-    (v: HTMLVideoElement) => v.readyState,
-  );
-
-  // Health label (FB renders this with various wrappers; selector list
-  // is intentionally broad and tuned during T5 against the real DOM).
-  const healthLocator = page
-    .locator(
-      [
-        '[data-testid="live-producer-stream-health"]',
-        '[data-testid="stream-health"]',
-        '[aria-label*="stream health" i]',
-        '[aria-label*="ingest" i]',
-        'div:has-text("Stream Health")',
-      ].join(", "),
-    )
-    .first();
-  const healthLabel = ((await healthLocator.textContent()) || "").trim();
-
-  // Bitrate readout — match the first "<number> kbps" text on page.
-  const bitrateText =
-    (await page.locator("text=/\\d+\\s*kbps/i").first().textContent()) || "";
-  const bitrateMatch = bitrateText.match(/(\d+)\s*kbps/i);
-  const bitrateKbps = bitrateMatch ? parseInt(bitrateMatch[1], 10) : 0;
-
-  return { videoCurrentTime, videoReadyState, healthLabel, bitrateKbps };
+  return await videoLocator.evaluate((v: HTMLVideoElement) => ({
+    videoCurrentTime: v.currentTime,
+    videoReadyState: v.readyState,
+    videoWidth: v.videoWidth,
+    videoHeight: v.videoHeight,
+    videoPaused: v.paused,
+  }));
 }
 
 test(`FB Live Producer receives rust-pusher feed for ${SOAK_MINUTES} min`, async () => {
@@ -123,16 +112,33 @@ test(`FB Live Producer receives rust-pusher feed for ${SOAK_MINUTES} min`, async
   const page = context.pages()[0] || (await context.newPage());
 
   // Collect console errors throughout the soak per `browser-console-zero-errors.md`.
+  // Filter out known FB-internal noise that does NOT reflect a fault on our
+  // rust pusher or our stream-delivery pipeline:
+  //   - "Permissions policy violation: unload is not allowed" — FB's own
+  //     SDKs still call addEventListener("unload") under their own
+  //     Permissions-Policy ban, so Chrome logs a violation. Not ours.
+  //   - WebSocket failures to `gateway.facebook.com/ws/...` — FB Live Producer
+  //     opens auxiliary realtime channels (rpsignaling / streamcontroller /
+  //     realtime / lightspeed) that fail to resolve / connect from headless
+  //     Chrome (no DNS for the regional gateway hostnames). The stream
+  //     itself is served separately and is unaffected; video.currentTime
+  //     continues to advance even with all four WS endpoints down.
+  const FB_INTERNAL_NOISE_PATTERNS = [
+    /Permissions policy violation: unload is not allowed/i,
+    /WebSocket connection to 'wss:\/\/gateway\.facebook\.com\/ws\//i,
+    /WebSocket is closed before the connection is established/i,
+  ];
   const consoleErrors: string[] = [];
   page.on("console", (msg) => {
-    if (msg.type() === "error" || msg.type() === "warning") {
-      consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
-    }
+    if (msg.type() !== "error" && msg.type() !== "warning") return;
+    const text = msg.text();
+    if (FB_INTERNAL_NOISE_PATTERNS.some((p) => p.test(text))) return;
+    consoleErrors.push(`[${msg.type()}] ${text}`);
   });
 
   try {
     await page.goto(FB_BROADCAST_URL, {
-      waitUntil: "networkidle",
+      waitUntil: "domcontentloaded",
       timeout: 60_000,
     });
 
@@ -142,8 +148,8 @@ test(`FB Live Producer receives rust-pusher feed for ${SOAK_MINUTES} min`, async
       );
     }
 
-    // Initial settle for the FB SPA.
-    await page.waitForTimeout(5_000);
+    // Initial settle for the FB SPA (heavy React tree + WebRTC preview).
+    await page.waitForTimeout(8_000);
     await page.screenshot({
       path: path.join(SCREENSHOT_DIR, `00-initial-load.png`),
       fullPage: true,
@@ -158,7 +164,7 @@ test(`FB Live Producer receives rust-pusher feed for ${SOAK_MINUTES} min`, async
     while (Date.now() < endMs) {
       const elapsedMin = Math.floor((Date.now() - startMs) / 60000);
 
-      const snap = await readHealthSnapshot(page);
+      const snap = await readVideoSnapshot(page);
 
       // Optional screenshot at minute boundaries.
       while (
@@ -175,11 +181,25 @@ test(`FB Live Producer receives rust-pusher feed for ${SOAK_MINUTES} min`, async
         nextScreenshotIdx += 1;
       }
 
-      // Assertions — any failure kills the test loud.
       expect(
         snap.videoReadyState,
         `poll ${pollIdx} (${elapsedMin} min): videoReadyState must be >= 3 (HAVE_FUTURE_DATA), got ${snap.videoReadyState}`,
       ).toBeGreaterThanOrEqual(3);
+
+      expect(
+        snap.videoWidth,
+        `poll ${pollIdx} (${elapsedMin} min): videoWidth must be > 0, got ${snap.videoWidth}`,
+      ).toBeGreaterThan(0);
+
+      expect(
+        snap.videoHeight,
+        `poll ${pollIdx} (${elapsedMin} min): videoHeight must be > 0, got ${snap.videoHeight}`,
+      ).toBeGreaterThan(0);
+
+      expect(
+        snap.videoPaused,
+        `poll ${pollIdx} (${elapsedMin} min): video.paused must be false`,
+      ).toBe(false);
 
       if (prevVideoTime >= 0) {
         expect(
@@ -188,21 +208,6 @@ test(`FB Live Producer receives rust-pusher feed for ${SOAK_MINUTES} min`, async
         ).toBeGreaterThan(prevVideoTime);
       }
       prevVideoTime = snap.videoCurrentTime;
-
-      expect(
-        snap.healthLabel.length,
-        `poll ${pollIdx} (${elapsedMin} min): empty health label`,
-      ).toBeGreaterThan(0);
-
-      expect(
-        snap.healthLabel,
-        `poll ${pollIdx} (${elapsedMin} min): banned health state "${snap.healthLabel}"`,
-      ).not.toMatch(BANNED_HEALTH_PATTERNS);
-
-      expect(
-        snap.bitrateKbps,
-        `poll ${pollIdx} (${elapsedMin} min): bitrate not positive (got ${snap.bitrateKbps} kbps)`,
-      ).toBeGreaterThan(0);
 
       pollIdx += 1;
       const sleepUntil = startMs + pollIdx * POLL_INTERVAL_MS;
