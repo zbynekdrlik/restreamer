@@ -4976,9 +4976,12 @@ jobs:
           if (-not (Test-Path $profileDir)) {
             throw "FB profile not found at $profileDir. Operator must run scripts\setup-fb-profile.ps1 to log into Facebook manually first."
           }
-          $cookieFile = Join-Path $profileDir "Default\Cookies"
-          if (-not (Test-Path $cookieFile)) {
-            throw "FB profile exists but Cookies file missing. Re-run scripts\setup-fb-profile.ps1."
+          # Chrome moved cookies under Default\Network\Cookies in recent versions.
+          # Accept either legacy or modern path so the gate stays valid as Chrome evolves.
+          $cookieLegacy = Join-Path $profileDir "Default\Cookies"
+          $cookieModern = Join-Path $profileDir "Default\Network\Cookies"
+          if (-not (Test-Path $cookieLegacy) -and -not (Test-Path $cookieModern)) {
+            throw "FB profile exists but Cookies file missing (checked $cookieLegacy and $cookieModern). Re-run scripts\setup-fb-profile.ps1."
           }
           Write-Host "FB Playwright profile present"
 
