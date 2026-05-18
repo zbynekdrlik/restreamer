@@ -5156,23 +5156,61 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Stop delivery + deactivate event
+      - name: Stop delivery + detach + delete e2e fb endpoint + deactivate event
         if: always()
         shell: powershell
         run: |
-          try {
-            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/stop" -Method POST -TimeoutSec 60 -ErrorAction Stop
-          } catch {
-            Write-Host "delivery/stop error (ignored on teardown): $_"
-          }
-          try {
-            $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET
-            $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
-            if ($ev) {
-              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/deactivate" -Method POST -ErrorAction Stop
+          $events = $null
+          try { $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10 } catch {}
+          $ev = $null
+          if ($events) { $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME } }
+          $endpoints = $null
+          try { $endpoints = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints" -Method GET -TimeoutSec 10 } catch {}
+          $fb = $null
+          if ($endpoints) { $fb = $endpoints | Where-Object { $_.alias -eq "e2e fb" } }
+
+          # Stop delivery first (frees the Hetzner VPS).
+          if ($ev) {
+            try {
+              $stopBody = @{ event_id = $ev.id } | ConvertTo-Json
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/stop" -Method POST -Body $stopBody -ContentType "application/json" -TimeoutSec 60 -ErrorAction Stop | Out-Null
+            } catch {
+              Write-Host "delivery/stop error (ignored on teardown): $_"
             }
-          } catch {
-            Write-Host "event deactivate error (ignored on teardown): $_"
+          }
+
+          # Detach e2e fb from the event so the next CI run's YT test does
+          # not see it (its cache-overshoot threshold trips on the seeded
+          # endpoint's slow init — observed in CI run 26053457858 where YT
+          # E2E failed with cache 160.4s > init max 156s on alias e2e fb).
+          if ($ev -and $fb) {
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/endpoints/$($fb.id)" -Method DELETE -TimeoutSec 10 -ErrorAction Stop | Out-Null
+              Write-Host "detached e2e fb (id=$($fb.id)) from event $($ev.id)"
+            } catch {
+              Write-Host "detach e2e fb error (ignored on teardown): $_"
+            }
+          }
+
+          # Delete the e2e fb endpoint row so the seed step in the next CI
+          # run creates it fresh (idempotent — seed will recreate by alias).
+          if ($fb) {
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($fb.id)" -Method DELETE -TimeoutSec 10 -ErrorAction Stop | Out-Null
+              Write-Host "deleted e2e fb endpoint row (id=$($fb.id))"
+            } catch {
+              Write-Host "delete e2e fb endpoint error (ignored on teardown): $_"
+            }
+          }
+
+          # Deactivate event last (also stops any RTMP receive on this run).
+          if ($ev) {
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events/$($ev.id)/deactivate" -Method POST -TimeoutSec 10 -ErrorAction Stop | Out-Null
+              Write-Host "deactivated event $($ev.id)"
+            } catch {
+              Write-Host "event deactivate error (ignored on teardown): $_"
+            }
           }
 
   e2e-gate:
