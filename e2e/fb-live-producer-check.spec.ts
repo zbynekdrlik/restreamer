@@ -142,18 +142,40 @@ test(`FB Live Producer receives rust-pusher feed for ${SOAK_MINUTES} min`, async
       timeout: 60_000,
     });
 
-    if (page.url().includes("/login")) {
-      throw new Error(
-        "FB session expired or missing. Operator must rerun setup-fb-profile.ps1.",
-      );
-    }
-
     // Initial settle for the FB SPA (heavy React tree + WebRTC preview).
     await page.waitForTimeout(8_000);
     await page.screenshot({
       path: path.join(SCREENSHOT_DIR, `00-initial-load.png`),
       fullPage: true,
     });
+
+    // FB Playwright sessions expire ~12-18h post-login (observed 2026-05-19,
+    // CI run 26077355204). FB then either redirects to /login OR keeps the
+    // broadcast URL but overlays the login + cookie-consent dialog. Detect
+    // both forms BEFORE waiting 30s for a <video> that will never appear.
+    if (page.url().includes("/login")) {
+      throw new Error(
+        "FB session expired - page redirected to /login. Operator must rerun scripts/setup-fb-profile.ps1.",
+      );
+    }
+    const passwordInputs = await page
+      .locator('input[name="pass"], input[type="password"]')
+      .count();
+    if (passwordInputs > 0) {
+      throw new Error(
+        "FB session expired - page shows password input (login overlay on broadcast URL). Operator must rerun scripts/setup-fb-profile.ps1.",
+      );
+    }
+    const cookieConsent = await page
+      .locator(
+        'h2:has-text("Allow the use of cookies"), :text("Allow the use of cookies from Facebook")',
+      )
+      .count();
+    if (cookieConsent > 0) {
+      throw new Error(
+        "FB shows cookie-consent dialog - session likely lost. Operator must rerun scripts/setup-fb-profile.ps1.",
+      );
+    }
 
     let prevVideoTime = -1;
     const startMs = Date.now();
