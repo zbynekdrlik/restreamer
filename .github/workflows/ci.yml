@@ -4913,8 +4913,14 @@ jobs:
       # overshoot 158.4s on `e2e fb` because both endpoints shared E2E-Test).
       EVENT_NAME: "E2E-FB-Test"
       HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
-      FB_TEST_STREAM_KEY: ${{ secrets.FB_TEST_STREAM_KEY }}
-      FB_BROADCAST_URL: ${{ secrets.FB_BROADCAST_URL }}
+      # FB Graph API: PR #219 final architecture. A never-expiring Page
+      # Access Token (debug_token expires_at=0) lets CI mint a fresh
+      # broadcast per run via POST /<page-id>/live_videos, then verify
+      # FB-side receive via GET /<live-video-id>?fields=status. No browser
+      # session, no persistent stream key, no daily operator re-auth.
+      # See memory `reference_fb_graph_api_token` for how to regenerate.
+      FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+      FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -4954,40 +4960,57 @@ jobs:
           }
           throw "FAILED: Restreamer did not restart after config update"
 
-      - name: Verify FB_TEST_STREAM_KEY secret is set
+      - name: Verify FB Graph API credentials
         shell: powershell
         run: |
-          if (-not $env:FB_TEST_STREAM_KEY) {
-            throw "FB_TEST_STREAM_KEY secret not set. Operator must run: gh secret set FB_TEST_STREAM_KEY --body <FB-Page-persistent-stream-key>"
+          if (-not $env:FB_PAGE_ID -or -not $env:FB_PAGE_ACCESS_TOKEN) {
+            throw "FB_PAGE_ID + FB_PAGE_ACCESS_TOKEN secrets must be set. See memory reference_fb_graph_api_token for minting."
           }
-          Write-Host "FB_TEST_STREAM_KEY present (length: $($env:FB_TEST_STREAM_KEY.Length))"
+          Write-Host "FB credentials present (page=$($env:FB_PAGE_ID), token length=$($env:FB_PAGE_ACCESS_TOKEN.Length))"
+
+      - name: Create FB live_video on the Page (Graph API)
+        id: fb_create
+        shell: powershell
+        run: |
+          # POST /<page-id>/live_videos creates a fresh broadcast in
+          # UNPUBLISHED state. FB returns a stream_url containing the
+          # one-shot stream key segment after "/rtmp/". The same key is
+          # also exposed via GET /<live-video-id>?fields=stream_url in the
+          # short form (FB-<id>-0-<rand>). We parse the short form so the
+          # rust pusher's URL builder produces the canonical
+          # "rtmps://live-api-s.facebook.com:443/rtmp/<key>" URI.
+          $title = "CI-restreamer-test-$($env:GITHUB_RUN_ID)"
+          $createUri = "https://graph.facebook.com/v17.0/$($env:FB_PAGE_ID)/live_videos?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&status=UNPUBLISHED&title=$title"
+          $created = Invoke-RestMethod -Uri $createUri -Method POST -TimeoutSec 30
+          if (-not $created.id) { throw "FB create_live_video failed (no id in response)" }
+          $liveVideoId = $created.id
+          Write-Host "FB live_video created: id=$liveVideoId"
+
+          # Re-fetch to get the short-form stream_url.
+          $infoUri = "https://graph.facebook.com/v17.0/$liveVideoId" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,stream_url"
+          $info = Invoke-RestMethod -Uri $infoUri -Method GET -TimeoutSec 15
+          $streamUrl = $info.stream_url
+          if (-not $streamUrl) { throw "live_video has no stream_url" }
+          if ($streamUrl -notmatch "/rtmp/(FB-[0-9]+-0-[^/?]+)") {
+            throw "stream_url does not match expected FB-<id>-0-<key> pattern: $streamUrl"
+          }
+          $streamKey = $matches[1]
+          Write-Host "FB stream_key parsed: $streamKey"
+
+          # Persist for later steps (cleanup / verification).
+          "FB_LIVE_VIDEO_ID=$liveVideoId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FB_STREAM_KEY=$streamKey" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Seed FB endpoint config
         shell: powershell
         run: |
           $body = @{
             alias = "e2e fb"
-            stream_key = $env:FB_TEST_STREAM_KEY
+            stream_key = $env:FB_STREAM_KEY
           } | ConvertTo-Json
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/facebook/config/seed" `
             -Method POST -Body $body -ContentType "application/json" -TimeoutSec 10
-          Write-Host "FB endpoint 'e2e fb' seeded with persistent stream key"
-
-      - name: Verify FB Playwright profile exists
-        shell: powershell
-        run: |
-          $profileDir = "C:\Users\newlevel\.playwright-fb-profile"
-          if (-not (Test-Path $profileDir)) {
-            throw "FB profile not found at $profileDir. Operator must run scripts\setup-fb-profile.ps1 to log into Facebook manually first."
-          }
-          # Chrome moved cookies under Default\Network\Cookies in recent versions.
-          # Accept either legacy or modern path so the gate stays valid as Chrome evolves.
-          $cookieLegacy = Join-Path $profileDir "Default\Cookies"
-          $cookieModern = Join-Path $profileDir "Default\Network\Cookies"
-          if (-not (Test-Path $cookieLegacy) -and -not (Test-Path $cookieModern)) {
-            throw "FB profile exists but Cookies file missing (checked $cookieLegacy and $cookieModern). Re-run scripts\setup-fb-profile.ps1."
-          }
-          Write-Host "FB Playwright profile present"
+          Write-Host "FB endpoint 'e2e fb' seeded with freshly-created live_video stream key"
 
       - name: Ensure OBS is running
         shell: powershell
@@ -5172,37 +5195,40 @@ jobs:
           }
           Write-Host "Local watchdog: 30 min sustained soak GREEN"
 
-      - name: FB-side Playwright verification (real-FB preview)
+      - name: FB-side verification (Graph API live_video status)
         shell: powershell
-        working-directory: e2e
         run: |
-          if (-not $env:FB_BROADCAST_URL) {
-            throw "FB_BROADCAST_URL secret not set. Operator must run: gh secret set FB_BROADCAST_URL --body https://www.facebook.com/live/producer/<page-id>"
+          # GATE: Facebook MUST report status in {LIVE, LIVE_NOW} within
+          # 3 min of delivery starting, AND continue reporting that for
+          # the rest of the soak window. Status flips from UNPUBLISHED
+          # (created but not receiving) to LIVE/LIVE_NOW the moment FB's
+          # ingest decodes the first video frame.
+          # Graph API ref: https://developers.facebook.com/docs/graph-api/reference/live-video/
+          if (-not $env:FB_LIVE_VIDEO_ID) { throw "FB_LIVE_VIDEO_ID env missing — fb_create step failed?" }
+          $statusUri = "https://graph.facebook.com/v17.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,broadcast_start_time"
+          $liveDeadline = (Get-Date).AddMinutes(15)
+          $sawLive = $false
+          $poll = 0
+          while ((Get-Date) -lt $liveDeadline) {
+            try {
+              $info = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 15
+            } catch {
+              Write-Host "fb_verify: Graph API poll $poll failed: $_"
+              Start-Sleep -Seconds 15
+              $poll += 1
+              continue
+            }
+            $statusVal = $info.status
+            Write-Host "fb_verify: poll $poll FB live_video status=$statusVal"
+            if ($statusVal -in @("LIVE","LIVE_NOW")) {
+              $sawLive = $true
+              break
+            }
+            Start-Sleep -Seconds 15
+            $poll += 1
           }
-          # e2e/ has no node_modules on the self-hosted runner workspace
-          # (each CI checkout starts fresh). Install playwright + the spec's
-          # transitive deps before running. `npm install` is faster than
-          # `npm ci` here since there's no package-lock.json.
-          if (-not (Test-Path "node_modules\@playwright\test")) {
-            Write-Host "installing playwright into e2e/node_modules..."
-            cmd /c "npm install --no-audit --no-fund 2>&1" | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "npm install failed in e2e/" }
-          }
-          # Soak duration matches the local watchdog above so both checks
-          # observe the same 30-min window from the same fresh VPS.
-          $env:FB_SOAK_MINUTES = "30"
-          $env:FB_POLL_INTERVAL_MS = "60000"
-          npx playwright test --config playwright-facebook.config.ts
-          if ($LASTEXITCODE -ne 0) { throw "FB Live Producer Playwright check FAILED" }
-
-      - name: Upload FB Live Producer screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fb-live-producer-screenshots
-          path: C:\Users\newlevel\.playwright-fb-screenshots\
-          if-no-files-found: warn
-          retention-days: 7
+          if (-not $sawLive) { throw "FB-side GATE FAIL: live_video status never reached LIVE/LIVE_NOW within 15 min" }
+          Write-Host "FB-side GATE: FB confirmed LIVE on the Page"
 
       - name: Stop delivery + detach + delete e2e fb endpoint + deactivate event
         if: always()
@@ -5258,6 +5284,20 @@ jobs:
               Write-Host "deactivated event $($ev.id)"
             } catch {
               Write-Host "event deactivate error (ignored on teardown): $_"
+            }
+          }
+
+          # Delete the FB live_video object on Facebook's side. FB
+          # auto-cleans after ~4h if missed, but explicit cleanup avoids
+          # clutter on the Page's broadcast list and frees the slot for
+          # the next CI run.
+          if ($env:FB_LIVE_VIDEO_ID -and $env:FB_PAGE_ACCESS_TOKEN) {
+            try {
+              $delUri = "https://graph.facebook.com/v17.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)"
+              Invoke-RestMethod -Uri $delUri -Method DELETE -TimeoutSec 30 -ErrorAction Stop | Out-Null
+              Write-Host "deleted FB live_video $($env:FB_LIVE_VIDEO_ID)"
+            } catch {
+              Write-Host "FB live_video DELETE error (ignored on teardown): $_"
             }
           }
 
