@@ -5165,7 +5165,7 @@ jobs:
               if ($missingPolls -ge 6) {
                 throw "WATCHDOG FAIL: e2e fb endpoint missing from delivery status for 60s+"
               }
-              Write-Host "watchdog: e2e fb endpoint missing transiently ($missingPolls/6) — vps_unreachable?"
+              Write-Host "watchdog: e2e fb endpoint missing transiently ($missingPolls/6) -- vps_unreachable?"
               Start-Sleep -Seconds 10
               continue
             }
@@ -5233,7 +5233,7 @@ jobs:
           # 2026-05-19 against Page 163104934022649: bitrate 204487, framerate
           # 28.9, 1920x1080 within ~2 min of delivery_start.
           # Graph API ref: https://developers.facebook.com/docs/graph-api/reference/live-video/
-          if (-not $env:FB_LIVE_VIDEO_ID) { throw "FB_LIVE_VIDEO_ID env missing — fb_create step failed?" }
+          if (-not $env:FB_LIVE_VIDEO_ID) { throw "FB_LIVE_VIDEO_ID env missing -- fb_create step failed?" }
           $statusUri = "https://graph.facebook.com/v17.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,ingest_streams{stream_health}"
           $liveDeadline = (Get-Date).AddMinutes(15)
           $sawHealth = $false
@@ -5251,7 +5251,7 @@ jobs:
             $health = $null
             if ($ingest -and $ingest.Count -gt 0) { $health = $ingest[0].stream_health }
             if ($health -and $health.video_bitrate -gt 0 -and $health.video_framerate -gt 0 -and $health.video_width -gt 0) {
-              Write-Host ("fb_verify: poll {0} FB ingest healthy — bitrate={1} kbps, fps={2}, res={3}x{4}, audio_bitrate={5}" -f $poll, [int]($health.video_bitrate/1000), [Math]::Round($health.video_framerate,1), $health.video_width, $health.video_height, [int]($health.audio_bitrate/1000))
+              Write-Host ("fb_verify: poll {0} FB ingest healthy -- bitrate={1} kbps, fps={2}, res={3}x{4}, audio_bitrate={5}" -f $poll, [int]($health.video_bitrate/1000), [Math]::Round($health.video_framerate,1), $health.video_width, $health.video_height, [int]($health.audio_bitrate/1000))
               $sawHealth = $true
               break
             }
