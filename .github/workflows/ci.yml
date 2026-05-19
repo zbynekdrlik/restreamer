@@ -4900,7 +4900,12 @@ jobs:
 
   e2e-fb-push-stream-lan:
     name: E2E FB Push (stream-lan, real FB)
-    needs: [deploy-stream-lan]
+    # Sequence AFTER both Streaming + OBS-YouTube tests on the same stream-lan
+    # runner. They share the restreamer-service's single active-event lock
+    # (only one event can have `receiving_activated=true` at a time); if FB
+    # ran in parallel it would deactivate the YT event mid-observation and
+    # break the sustained YT health gate (CI run 26085993055 regression).
+    needs: [deploy-stream-lan, e2e-streaming-test, e2e-obs-youtube-test]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 60
