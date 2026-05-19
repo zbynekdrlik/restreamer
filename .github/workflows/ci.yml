@@ -5069,7 +5069,14 @@ jobs:
           $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           if ($null -eq $ev) { throw "WATCHDOG FAIL: E2E-Test event missing for status query" }
           $statusUri = "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($ev.id)"
-          $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&limit=10"
+          # Audit `since` cutoff = now. The initial Publish.Start handshake
+          # to FB typically produces 5-10 `endpoint_rtmp_push_died` rows
+          # during VPS warmup as the rust pusher retries CONNECT until the
+          # AVC/AAC sequence headers + first chunk arrive in time. Those
+          # pre-soak rows are stale — only NEW dies after watchdog start
+          # indicate a real soak fault.
+          $watchdogStartIso = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&since=$watchdogStartIso&limit=10"
 
           # VPS boot wait. delivery_start returns the moment Hetzner has
           # created the server; the actual rs-delivery process takes another
