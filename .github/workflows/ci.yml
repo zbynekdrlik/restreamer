@@ -5195,19 +5195,28 @@ jobs:
           }
           Write-Host "Local watchdog: 30 min sustained soak GREEN"
 
-      - name: FB-side verification (Graph API live_video status)
+      - name: FB-side verification (Graph API ingest_streams.stream_health)
         shell: powershell
         run: |
-          # GATE: Facebook MUST report status in {LIVE, LIVE_NOW} within
-          # 3 min of delivery starting, AND continue reporting that for
-          # the rest of the soak window. Status flips from UNPUBLISHED
-          # (created but not receiving) to LIVE/LIVE_NOW the moment FB's
-          # ingest decodes the first video frame.
+          # GATE: Facebook MUST report a populated ingest_streams.stream_health
+          # block (video_bitrate, video_framerate, video_width > 0) within 15
+          # min of delivery starting. That block populates exactly when FB's
+          # ingest decodes incoming H.264 — direct proof FB accepted, parsed,
+          # and is transcoding the rust-pusher feed.
+          #
+          # `status` is NOT a good signal for an UNPUBLISHED-style broadcast:
+          # it stays UNPUBLISHED whether or not bytes are flowing because we
+          # never POST `status=LIVE_NOW` (which would publicly air the test
+          # broadcast on the Page — undesirable). `ingest_streams.stream_health`
+          # is FB's authoritative receive-side telemetry and is populated
+          # regardless of publication status. Confirmed via live probe
+          # 2026-05-19 against Page 163104934022649: bitrate 204487, framerate
+          # 28.9, 1920x1080 within ~2 min of delivery_start.
           # Graph API ref: https://developers.facebook.com/docs/graph-api/reference/live-video/
           if (-not $env:FB_LIVE_VIDEO_ID) { throw "FB_LIVE_VIDEO_ID env missing — fb_create step failed?" }
-          $statusUri = "https://graph.facebook.com/v17.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,broadcast_start_time"
+          $statusUri = "https://graph.facebook.com/v17.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,ingest_streams{stream_health}"
           $liveDeadline = (Get-Date).AddMinutes(15)
-          $sawLive = $false
+          $sawHealth = $false
           $poll = 0
           while ((Get-Date) -lt $liveDeadline) {
             try {
@@ -5218,17 +5227,20 @@ jobs:
               $poll += 1
               continue
             }
-            $statusVal = $info.status
-            Write-Host "fb_verify: poll $poll FB live_video status=$statusVal"
-            if ($statusVal -in @("LIVE","LIVE_NOW")) {
-              $sawLive = $true
+            $ingest = $info.ingest_streams
+            $health = $null
+            if ($ingest -and $ingest.Count -gt 0) { $health = $ingest[0].stream_health }
+            if ($health -and $health.video_bitrate -gt 0 -and $health.video_framerate -gt 0 -and $health.video_width -gt 0) {
+              Write-Host ("fb_verify: poll {0} FB ingest healthy — bitrate={1} kbps, fps={2}, res={3}x{4}, audio_bitrate={5}" -f $poll, [int]($health.video_bitrate/1000), [Math]::Round($health.video_framerate,1), $health.video_width, $health.video_height, [int]($health.audio_bitrate/1000))
+              $sawHealth = $true
               break
             }
+            Write-Host "fb_verify: poll $poll FB ingest_streams.stream_health not yet populated (status=$($info.status))"
             Start-Sleep -Seconds 15
             $poll += 1
           }
-          if (-not $sawLive) { throw "FB-side GATE FAIL: live_video status never reached LIVE/LIVE_NOW within 15 min" }
-          Write-Host "FB-side GATE: FB confirmed LIVE on the Page"
+          if (-not $sawHealth) { throw "FB-side GATE FAIL: ingest_streams.stream_health never populated within 15 min (FB never decoded our H.264)" }
+          Write-Host "FB-side GATE: FB confirmed real-time decode of rust-pusher feed"
 
       - name: Stop delivery + detach + delete e2e fb endpoint + deactivate event
         if: always()
