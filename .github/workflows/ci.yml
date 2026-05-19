@@ -5058,7 +5058,24 @@ jobs:
           # Wait 20s so the publisher is unambiguously stable before spinning a VPS.
           Start-Sleep -Seconds 20
           $startBody = @{ event_id = $ev.id } | ConvertTo-Json
-          Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/start" -Method POST -Body $startBody -ContentType "application/json" -TimeoutSec 120
+          # Hetzner API returns transient HTTP errors (observed twice in recent
+          # CI runs: 26063943700, 26074917591). Retry up to 3 times with 30s
+          # backoff before giving up — the call is idempotent server-side; if
+          # the VPS already got created, the second attempt returns the same
+          # instance row.
+          $lastErr = $null
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/start" -Method POST -Body $startBody -ContentType "application/json" -TimeoutSec 120 -ErrorAction Stop | Out-Null
+              $lastErr = $null
+              break
+            } catch {
+              $lastErr = $_
+              Write-Host "delivery_start attempt $attempt failed: $_"
+              if ($attempt -lt 3) { Start-Sleep -Seconds 30 }
+            }
+          }
+          if ($null -ne $lastErr) { throw "delivery_start failed after 3 attempts: $lastErr" }
           Write-Host "OBS streaming + delivery started for event $($ev.id)"
 
       - name: Local watchdog (30 min sustained-soak on rust pusher)
