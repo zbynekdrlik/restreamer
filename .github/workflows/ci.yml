@@ -5117,6 +5117,18 @@ jobs:
               Start-Sleep -Seconds 10
               continue
             }
+            # First-chunk-push grace: FB sometimes flips warmup -> normal while
+            # the rust pusher is still completing its first AVC/AAC sequence-
+            # header handshake. chunks_processed stays at 0 for up to ~90s
+            # before the first live chunk lands. Don't count those polls as
+            # stagnant — only require progress AFTER chunks_processed crosses
+            # zero. If it never crosses zero within the soak deadline, the
+            # outer while loop's timeout still trips the test.
+            if ($ep.chunks_processed -eq 0) {
+              Write-Host "watchdog: waiting first chunk (mode=normal, chunks=0, reconnect=$($ep.reconnect_count))"
+              Start-Sleep -Seconds 10
+              continue
+            }
             if ($ep.chunks_processed -le $lastChunks) {
               $stagnantPolls += 1
               if ($stagnantPolls -ge 3) {
