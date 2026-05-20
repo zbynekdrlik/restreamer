@@ -44,7 +44,7 @@ pub async fn facebook_config_seed(
         sqlx::query(
             "UPDATE endpoint_configs \
              SET stream_key = ?1, service_type = 'FB', pusher = 'rust', \
-                 updated_at = datetime('now') \
+                 enabled = 1, updated_at = datetime('now') \
              WHERE id = ?2",
         )
         .bind(&req.stream_key)

@@ -4985,14 +4985,14 @@ jobs:
           # rust pusher's URL builder produces the canonical
           # "rtmps://live-api-s.facebook.com:443/rtmp/<key>" URI.
           $title = "CI-restreamer-test-$($env:GITHUB_RUN_ID)"
-          $createUri = "https://graph.facebook.com/v17.0/$($env:FB_PAGE_ID)/live_videos?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&status=UNPUBLISHED&title=$title"
+          $createUri = "https://graph.facebook.com/v21.0/$($env:FB_PAGE_ID)/live_videos?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&status=UNPUBLISHED&title=$title"
           $created = Invoke-RestMethod -Uri $createUri -Method POST -TimeoutSec 30
           if (-not $created.id) { throw "FB create_live_video failed (no id in response)" }
           $liveVideoId = $created.id
           Write-Host "FB live_video created: id=$liveVideoId"
 
           # Re-fetch to get the short-form stream_url.
-          $infoUri = "https://graph.facebook.com/v17.0/$liveVideoId" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,stream_url"
+          $infoUri = "https://graph.facebook.com/v21.0/$liveVideoId" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,stream_url"
           $info = Invoke-RestMethod -Uri $infoUri -Method GET -TimeoutSec 15
           $streamUrl = $info.stream_url
           if (-not $streamUrl) { throw "live_video has no stream_url" }
@@ -5146,6 +5146,12 @@ jobs:
           $lastBytes = -1
           $stagnantPolls = 0
           $missingPolls = 0
+          # Track whether the endpoint EVER delivered a real chunk. Without
+          # this, an endpoint stuck at chunks_processed=0 for the whole soak
+          # (push dies before first chunk, repeatedly) would hit the `continue`
+          # at the chunks==0 guard on every poll and then fall out of the loop
+          # to a FALSE "soak GREEN". Require at least one delivered chunk.
+          $everDelivered = $false
           # delivery/status returns endpoints under `endpoint_details`
           # (DeliveryStatusResponse.endpoint_details Vec<DeliveryEndpointEntry>).
           # During VPS warmup, the rust pusher pushes a rescue video and the
@@ -5204,6 +5210,7 @@ jobs:
             }
             $lastChunks = $ep.chunks_processed
             $lastBytes = $ep.bytes_processed_total
+            $everDelivered = $true
 
             $audit = Invoke-RestMethod -Uri $auditUri -Method GET -TimeoutSec 10
             if ($audit.rows.Count -gt 0) {
@@ -5212,6 +5219,9 @@ jobs:
 
             Write-Host "watchdog OK: alive=$($ep.alive) chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total)"
             Start-Sleep -Seconds 10
+          }
+          if (-not $everDelivered) {
+            throw "WATCHDOG FAIL: e2e fb endpoint never delivered a chunk (chunks_processed stayed 0 for the full 30 min soak) -- FB push never reached steady state."
           }
           Write-Host "Local watchdog: 30 min sustained soak GREEN"
 
@@ -5234,7 +5244,7 @@ jobs:
           # 28.9, 1920x1080 within ~2 min of delivery_start.
           # Graph API ref: https://developers.facebook.com/docs/graph-api/reference/live-video/
           if (-not $env:FB_LIVE_VIDEO_ID) { throw "FB_LIVE_VIDEO_ID env missing -- fb_create step failed?" }
-          $statusUri = "https://graph.facebook.com/v17.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,ingest_streams{stream_health}"
+          $statusUri = "https://graph.facebook.com/v21.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,ingest_streams{stream_health}"
           $liveDeadline = (Get-Date).AddMinutes(15)
           $sawHealth = $false
           $poll = 0
@@ -5325,7 +5335,7 @@ jobs:
           # the next CI run.
           if ($env:FB_LIVE_VIDEO_ID -and $env:FB_PAGE_ACCESS_TOKEN) {
             try {
-              $delUri = "https://graph.facebook.com/v17.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)"
+              $delUri = "https://graph.facebook.com/v21.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)"
               Invoke-RestMethod -Uri $delUri -Method DELETE -TimeoutSec 30 -ErrorAction Stop | Out-Null
               Write-Host "deleted FB live_video $($env:FB_LIVE_VIDEO_ID)"
             } catch {

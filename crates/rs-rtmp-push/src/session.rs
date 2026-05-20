@@ -463,12 +463,23 @@ const AMF0_MARKER_OBJECT: u8 = 0x03;
 const AMF0_OBJECT_END_MARKER: [u8; 3] = [0x00, 0x00, 0x09];
 
 fn write_amf0_string(buf: &mut Vec<u8>, s: &str) {
+    // AMF0 strings carry a u16 length prefix. All call sites use short
+    // literals, but guard against a silent length-truncation that would
+    // corrupt the wire payload if a longer string is ever passed.
+    debug_assert!(
+        s.len() <= u16::MAX as usize,
+        "AMF0 string exceeds u16 length"
+    );
     buf.push(AMF0_MARKER_STRING);
     buf.extend_from_slice(&(s.len() as u16).to_be_bytes());
     buf.extend_from_slice(s.as_bytes());
 }
 
 fn write_amf0_kv_key(buf: &mut Vec<u8>, key: &str) {
+    debug_assert!(
+        key.len() <= u16::MAX as usize,
+        "AMF0 object key exceeds u16 length"
+    );
     buf.extend_from_slice(&(key.len() as u16).to_be_bytes());
     buf.extend_from_slice(key.as_bytes());
 }
