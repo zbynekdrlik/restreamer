@@ -292,7 +292,28 @@ impl RtmpPusher {
                     let ts = self.state.video_base_ms + delta;
                     (ts, &mut max_video_output_ts)
                 }
-                _ => continue, // SCRIPT/unknown — drop, no PTS to assign
+                crate::flv::FLV_TAG_SCRIPT => {
+                    // Forward FLV script tag (typically `@setDataFrame onMetaData`)
+                    // straight through to the RTMP server with timestamp 0, no
+                    // pacing, no PTS bookkeeping. FB Live Producer silently
+                    // rejects video without an onMetaData announcement first.
+                    // Send before any audio/video tags from this chunk.
+                    if let Some(session) = self.session.as_mut() {
+                        let body_len = tag.body.len();
+                        match session.send_data_tag(0, tag.body).await {
+                            Ok(()) => {
+                                tags_sent += 1;
+                                bytes_sent += body_len as u64;
+                            }
+                            Err(e) => {
+                                self.state.connected = false;
+                                return Err(e);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                _ => continue, // unknown — drop, no PTS to assign
             };
             let output_ts = output_ts_u64 as u32;
             if output_ts_u64 > *track_max {

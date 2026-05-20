@@ -178,6 +178,11 @@ pub fn build_router(state: AppState) -> Router {
             get(crate::oauth_device::device_status),
         )
         .route("/youtube/oauth/seed", post(youtube::youtube_oauth_seed))
+        // Facebook config seed (CI-only — see crates/rs-api/src/facebook.rs)
+        .route(
+            "/facebook/config/seed",
+            post(crate::facebook::facebook_config_seed),
+        )
         // Upload telemetry
         .route("/uploads/stats", get(uploads_endpoints::get_uploads_stats))
         .route(
