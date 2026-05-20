@@ -5199,18 +5199,20 @@ jobs:
               Start-Sleep -Seconds 10
               continue
             }
-            if ($ep.chunks_processed -le $lastChunks) {
+            # Progress = EITHER chunks OR bytes grew this poll. Tolerate up to
+            # 3 consecutive no-progress polls (30s) before failing. A single
+            # flat poll is normal jitter between chunk writes -- main CI run
+            # 26160538246 hard-failed on ONE flat-bytes poll after 6 min of
+            # healthy delivery (2 GB, chunks 263->455) because the old bytes
+            # check had ZERO tolerance while chunks tolerated 3. A real stall
+            # still trips 3 consecutive polls and fails.
+            if ($ep.chunks_processed -le $lastChunks -and $ep.bytes_processed_total -le $lastBytes) {
               $stagnantPolls += 1
               if ($stagnantPolls -ge 3) {
-                throw "WATCHDOG FAIL: chunks_processed stagnant at $($ep.chunks_processed) for 30s"
+                throw "WATCHDOG FAIL: no delivery progress for 30s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
               }
             } else {
               $stagnantPolls = 0
-            }
-            if ($ep.bytes_processed_total -le $lastBytes) {
-              if ($lastBytes -gt 0) {
-                throw "WATCHDOG FAIL: bytes_processed_total did not grow ($lastBytes -> $($ep.bytes_processed_total))"
-              }
             }
             $lastChunks = $ep.chunks_processed
             $lastBytes = $ep.bytes_processed_total
