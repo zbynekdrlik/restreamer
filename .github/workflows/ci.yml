@@ -5114,14 +5114,18 @@ jobs:
           $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           if ($null -eq $ev) { throw "WATCHDOG FAIL: E2E-Test event missing for status query" }
           $statusUri = "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($ev.id)"
-          # Audit `since` cutoff = now. The initial Publish.Start handshake
-          # to FB typically produces 5-10 `endpoint_rtmp_push_died` rows
-          # during VPS warmup as the rust pusher retries CONNECT until the
-          # AVC/AAC sequence headers + first chunk arrive in time. Those
-          # pre-soak rows are stale — only NEW dies after watchdog start
-          # indicate a real soak fault.
-          $watchdogStartIso = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-          $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&since=$watchdogStartIso&limit=10"
+          # Audit `since` cutoff. The initial Publish.Start handshake to FB
+          # typically produces 5-10 `endpoint_rtmp_push_died` rows during VPS
+          # warmup as the rust pusher retries CONNECT until the AVC/AAC
+          # sequence headers + first chunk arrive in time. Those warmup dies
+          # are expected and must NOT fail the soak. The cutoff is therefore
+          # set to FIRST-CHUNK time (captured when chunks_processed first
+          # crosses zero below), not watchdog-start: warmup happens AFTER the
+          # 3-min VPS boot wait, so a watchdog-start cutoff would still
+          # include the warmup dies. Only dies AFTER the first delivered
+          # chunk indicate a real steady-state fault. Built lazily on first
+          # delivery; the placeholder below is overwritten before any query.
+          $auditUri = $null
 
           # VPS boot wait. delivery_start returns the moment Hetzner has
           # created the server; the actual rs-delivery process takes another
@@ -5210,11 +5214,19 @@ jobs:
             }
             $lastChunks = $ep.chunks_processed
             $lastBytes = $ep.bytes_processed_total
-            $everDelivered = $true
+            if (-not $everDelivered) {
+              # First real chunk delivered. Set the die-audit cutoff to NOW so
+              # warmup CONNECT-retry dies (which fired during boot/warmup,
+              # before this point) are excluded; only steady-state dies after
+              # the first chunk count as a soak fault.
+              $everDelivered = $true
+              $firstChunkIso = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+              $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&since=$firstChunkIso&limit=10"
+            }
 
             $audit = Invoke-RestMethod -Uri $auditUri -Method GET -TimeoutSec 10
             if ($audit.rows.Count -gt 0) {
-              throw "WATCHDOG FAIL: endpoint_rtmp_push_died audit row(s) for 'e2e fb' (count: $($audit.rows.Count))"
+              throw "WATCHDOG FAIL: endpoint_rtmp_push_died audit row(s) for 'e2e fb' after first chunk (count: $($audit.rows.Count))"
             }
 
             Write-Host "watchdog OK: alive=$($ep.alive) chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total)"
