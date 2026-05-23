@@ -570,7 +570,10 @@ mod tests {
         // 403/404 mean S3 structurally rejected the object — retrying can
         // never succeed. Absorb a few transient auth/propagation hiccups,
         // then abandon.
-        assert!(!should_abandon_upload("403", 4), "below budget: keep trying");
+        assert!(
+            !should_abandon_upload("403", 4),
+            "below budget: keep trying"
+        );
         assert!(should_abandon_upload("403", 5), "at budget: abandon");
         assert!(should_abandon_upload("404", 50), "above budget: abandon");
     }
