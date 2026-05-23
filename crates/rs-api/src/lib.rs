@@ -325,6 +325,8 @@ async fn delivery_broadcast_loop(
                             delivery_mode: None,
                             rescue_eta_secs: None,
                             youtube_health: None,
+                            // Configured but not yet live => Pending (gray).
+                            lifecycle: rs_core::models::EndpointLifecycle::Pending,
                         })
                         .collect();
                     let count = placeholders.len() as u32;
@@ -524,6 +526,7 @@ mod max_non_fast_tests {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            lifecycle: rs_core::models::EndpointLifecycle::Live,
         }
     }
 

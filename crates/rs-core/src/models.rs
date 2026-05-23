@@ -685,6 +685,7 @@ mod tests {
                     delivery_mode: None,
                     rescue_eta_secs: None,
                     youtube_health: None,
+                    lifecycle: EndpointLifecycle::Live,
                 }],
             },
             WsEvent::Error {
@@ -811,6 +812,7 @@ mod tests {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            lifecycle: EndpointLifecycle::Live,
         };
         let json = serde_json::to_string(&metrics).unwrap();
         let parsed: DeliveryEndpointMetrics = serde_json::from_str(&json).unwrap();
@@ -859,6 +861,7 @@ mod tests {
                 delivery_mode: None,
                 rescue_eta_secs: None,
                 youtube_health: None,
+                lifecycle: EndpointLifecycle::Live,
             }],
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -886,6 +889,7 @@ mod tests {
                 delivery_mode: None,
                 rescue_eta_secs: None,
                 youtube_health: None,
+                lifecycle: EndpointLifecycle::Live,
             },
             DeliveryEndpointMetrics {
                 alias: "BufferedEP".to_string(),
@@ -903,6 +907,7 @@ mod tests {
                 delivery_mode: None,
                 rescue_eta_secs: None,
                 youtube_health: None,
+                lifecycle: EndpointLifecycle::Live,
             },
         ];
         let delay = endpoints
@@ -932,6 +937,7 @@ mod tests {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            lifecycle: EndpointLifecycle::Live,
         }];
         let delay = endpoints
             .iter()

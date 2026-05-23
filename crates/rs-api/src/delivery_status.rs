@@ -384,12 +384,25 @@ impl DeliveryOrchestrator {
                 delivery_mode: ep.delivery_mode,
                 rescue_eta_secs: ep.rescue_eta_secs,
                 youtube_health: None,
+                lifecycle: rs_core::models::EndpointLifecycle::Live,
             };
             if let Some(cfg) = configs.iter().find(|c| c.alias == m.alias) {
                 if cfg.youtube_oauth_id.is_some() && cfg.service_type == "YT_RTMP" {
                     attach_yt_health_cached(self.pool(), cfg, &mut m, self.audit_tx()).await;
                 }
             }
+            // Host-compute the operator-facing lifecycle from the metrics we
+            // just assembled (outage = blue/buffering, auth/disk = red).
+            m.lifecycle = rs_core::models::EndpointLifecycle::compute(
+                &rs_core::models::LifecycleInput {
+                    alive: m.alive,
+                    chunks_processed: m.chunks_processed,
+                    delivery_mode: m.delivery_mode.clone(),
+                    stall_reason: m.stall_reason.clone(),
+                    last_error: m.last_error.clone(),
+                    disk_critical: false,
+                },
+            );
             metrics.push(m);
         }
 
