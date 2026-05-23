@@ -1,3 +1,4 @@
+pub mod disk_pressure;
 pub mod metrics;
 pub mod s3;
 pub mod uploader;

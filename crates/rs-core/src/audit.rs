@@ -118,6 +118,11 @@ pub enum Action {
     /// `HostInternetUnreachable`. Emitted on first successful probe
     /// after a stretch of failures. Issue #176.
     HostInternetRecovered,
+    /// Local chunk-store volume crossed a disk-pressure threshold on the
+    /// host (stream.lan). Warn at 80% used, Critical at 90%. Alert-only --
+    /// chunks are never dropped (continuity guarantee). Detail JSON:
+    /// {used_fraction, used_bytes, total_bytes}.
+    LocalDiskPressure,
     /// Per-chunk lifecycle steady-state sample emitted every Nth chunk
     /// per endpoint (default N=30). Carries the 5 inter-stage gaps
     /// (A->B through E->F) + worst-stage label. Severity::Info.

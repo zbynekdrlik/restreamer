@@ -368,6 +368,24 @@ impl ServiceCore {
             .await;
         });
 
+        // Local disk-pressure monitor (Task 4). With never-drop uploads, a
+        // long outage buffers chunks until the chunk-store volume fills. We
+        // never silently drop (continuity guarantee) — instead this samples
+        // the volume holding `chunk_dir` every 10s and emits a rate-limited
+        // LocalDiskPressure audit row at Warn (>=80% used) / Critical
+        // (>=90%) so the operator can act before a true disk-full.
+        let disk_monitor_chunk_dir = self.chunk_dir.clone();
+        let disk_monitor_audit_tx = uploader_audit_tx.clone();
+        let disk_monitor_shutdown_rx = shutdown.subscribe();
+        tokio::spawn(async move {
+            rs_endpoint::disk_pressure::run_disk_monitor(
+                disk_monitor_chunk_dir,
+                Some(disk_monitor_audit_tx),
+                disk_monitor_shutdown_rx,
+            )
+            .await;
+        });
+
         // Periodic status broadcast for live dashboard updates
         let status_pool = pool.clone();
         let status_ws_tx = ws_tx.clone();

@@ -20,6 +20,9 @@ sqlx.workspace = true
 md-5.workspace = true
 futures.workspace = true
 chrono.workspace = true
+# Disk-pressure monitor (Task 4). Already compiled transitively via rust-s3
+# with default features (incl. `disk`), so a direct dep adds zero compile cost.
+sysinfo = "0.37"
 
 [dev-dependencies]
 tempfile = "3"
