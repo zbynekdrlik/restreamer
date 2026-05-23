@@ -1311,6 +1311,7 @@ test.describe("Pending Endpoint State", () => {
               stall_reason: null,
               ffmpeg_restart_count: 0,
               last_error: null,
+              lifecycle: "pending",
             },
             {
               alias: "Facebook Page",
@@ -1322,6 +1323,7 @@ test.describe("Pending Endpoint State", () => {
               stall_reason: null,
               ffmpeg_restart_count: 0,
               last_error: null,
+              lifecycle: "pending",
             },
           ],
         },
@@ -1357,6 +1359,7 @@ test.describe("Pending Endpoint State", () => {
               stall_reason: null,
               ffmpeg_restart_count: 0,
               last_error: null,
+              lifecycle: "pending",
             },
           ],
         },
@@ -1386,17 +1389,18 @@ test.describe("Pending Endpoint State", () => {
               stall_reason: null,
               ffmpeg_restart_count: 0,
               last_error: null,
+              lifecycle: "live",
             },
           ],
         },
       },
     });
 
-    // Pending class should be gone, healthy class should appear
+    // Pending class should be gone, live class should appear
     await expect(page.locator(".endpoint-node.pending")).toHaveCount(0, {
       timeout: 5000,
     });
-    await expect(page.locator(".endpoint-node.healthy")).toBeVisible();
+    await expect(page.locator(".endpoint-node.live")).toBeVisible();
   });
 });
 
