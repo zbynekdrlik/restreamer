@@ -136,6 +136,8 @@ struct WsDeliveryEndpoint {
     rescue_eta_secs: Option<u64>,
     #[serde(default)]
     youtube_health: Option<crate::store::YoutubeHealth>,
+    #[serde(default = "crate::store::default_lifecycle")]
+    lifecycle: crate::store::EndpointLifecycle,
 }
 
 /// Compute the WebSocket URL from the current page location.
@@ -330,6 +332,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                             delivery_mode: ep.delivery_mode.clone(),
                             rescue_eta_secs: ep.rescue_eta_secs,
                             youtube_health: ep.youtube_health.clone(),
+                            lifecycle: ep.lifecycle,
                         }
                     })
                     .collect();
