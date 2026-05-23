@@ -515,6 +515,9 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut proc_spawned_at: Option<tokio::time::Instant> = None;
     let mut circuit_trips: u32 = 0;
     let mut consecutive_write_failures: u32 = 0;
+    // Last chunk id delivered to the endpoint; recorded into the rescue
+    // audit row when the chunk supply stalls (outage forensics).
+    let mut last_delivered_chunk_id: i64 = -1;
     let mut last_heartbeat = std::time::Instant::now();
     // Consecutive push errors for the Rust pusher exponential backoff ladder.
     let mut consecutive_push_errors: u32 = 0;
@@ -667,6 +670,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                         let dur = c.duration_ms.max(0) as u64;
                         let current = buffer_state.buffer_duration_ms.load(AtomicOrdering::Relaxed);
                         buffer_state.buffer_duration_ms.store(current.saturating_sub(dur), AtomicOrdering::Relaxed);
+                        last_delivered_chunk_id = c.chunk_id;
                         c
                     }
                     None => {
@@ -679,6 +683,16 @@ async fn consumer_task<P: OutputProcessFactory>(
                 if let Some(ref rescue_url) = rescue_video_url {
                     if !buffer_state.producer_active.load(AtomicOrdering::Relaxed) {
                         tracing::warn!(alias = %alias, "Consumer: buffer empty + producer stalled, entering rescue mode");
+
+                        // Outage forensics: record rescue activation + when it
+                        // started so RescueRecovered can report the gap duration.
+                        let rescue_started = std::time::Instant::now();
+                        if let Some(ring) = &audit_ring {
+                            ring.push_parts(crate::rescue_audit::rescue_activated_row(
+                                &alias,
+                                last_delivered_chunk_id,
+                            ));
+                        }
 
                         // Kill current ffmpeg before entering rescue
                         if let Some(mut p) = proc.take() {
@@ -710,6 +724,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                             let mut s = stats.lock().await;
                             s.delivery_mode = "normal".to_string();
                             s.rescue_eta_secs = None;
+                        }
+                        if let Some(ring) = &audit_ring {
+                            let gap = rescue_started.elapsed().as_secs();
+                            ring.push_parts(crate::rescue_audit::rescue_recovered_row(&alias, gap));
                         }
                         flv_normalizer = FlvStreamNormalizer::new();
                         tracing::info!(alias = %alias, "Consumer: resumed normal delivery");
