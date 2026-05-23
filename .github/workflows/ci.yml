@@ -4224,6 +4224,98 @@ jobs:
 
           Write-Host "=== Network Disconnect Simulation PASSED ==="
 
+      - name: Long outage - never-drop + rescue + calm UI
+        if: success()
+        shell: powershell
+        timeout-minutes: 15
+        run: |
+          # Rationale: this extends the already-gated e2e-obs-youtube job. The
+          # single self-hosted runner serializes e2e jobs, so a new job would
+          # add ~30-40 min of serial CI; this step adds only the block+drain
+          # time (~6-7 min) and is already wired into e2e-gate via this job's
+          # needs:. It blocks S3 for 5 min (past the OLD 10-attempt ~3-min
+          # permanent-drop cap) to prove never-drop continuity, rescue
+          # activation, calm-blue UI, in-order drain, and rescue recovery.
+          $ErrorActionPreference = 'Stop'
+          $base = "http://127.0.0.1:8910"
+
+          # Event id: match the neighbouring outage step (ci.yml :4078-4079
+          # uses $appStatus.streaming_event.id). /api/v1/status has no
+          # current_event_id field; the event id lives under streaming_event.
+          $appStatus = Invoke-RestMethod -Uri "$base/api/v1/status"
+          $eventId = $appStatus.streaming_event.id
+          Write-Host "Event id: $eventId"
+
+          # ISO since-cursor in audit_log ts format (strftime %Y-%m-%dT%H:%M:%fZ).
+          $sinceIso = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+
+          Write-Host "Blocking S3 for 300s (past the old 10-attempt permanent-drop cap)..."
+          Invoke-RestMethod -Method Post -Uri "$base/api/v1/_test/s3-block" -TimeoutSec 5 | Out-Null
+          Start-Sleep -Seconds 300
+
+          # ASSERT 1: zero chunks abandoned during the outage (continuity).
+          # detail is a parsed JSON object (AuditLogRow.detail: serde_json::Value),
+          # so access $_.detail.permanent directly - do NOT string-match.
+          # permanent:true rows bypass the 1/min rate limiter, so this is exact.
+          $perm = Invoke-RestMethod -Uri "$base/api/v1/audit?action=s3_upload_failed&since=$sinceIso&limit=5000" -TimeoutSec 30
+          $permRows = if ($perm.rows) { $perm.rows } elseif ($perm.items) { $perm.items } else { @() }
+          $abandoned = @($permRows | Where-Object { $_.detail.permanent -eq $true }).Count
+          if ($abandoned -ne 0) { throw "FAILED: $abandoned chunks permanently dropped during outage (continuity broken)" }
+          Write-Host "OK: zero chunks abandoned during 5-min outage"
+
+          # ASSERT 2: rescue activated (cache window drained -> rescue video).
+          $rescue = Invoke-RestMethod -Uri "$base/api/v1/audit?action=rescue_activated&since=$sinceIso&limit=100" -TimeoutSec 30
+          $rescueRows = if ($rescue.rows) { $rescue.rows } elseif ($rescue.items) { $rescue.items } else { @() }
+          if (@($rescueRows).Count -lt 1) { throw "FAILED: RescueActivated not recorded - rescue video did not engage" }
+          Write-Host "OK: rescue activated during outage"
+
+          # ASSERT 3: dashboard shows calm blue banner, not a red wall.
+          # Mirror the inline Playwright launch pattern at ci.yml :2877-3014:
+          # install playwright in e2e, write an ASCII .cjs, run via node.
+          Set-Location "$env:GITHUB_WORKSPACE\e2e"
+          cmd /c "npm install playwright 2>&1" | Out-Null
+          cmd /c "npx playwright install chromium 2>&1" | Out-Null
+
+          $check = @'
+          const { chromium } = require('playwright');
+          (async () => {
+            const b = await chromium.launch({ headless: true });
+            const p = await b.newPage();
+            await p.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
+            await p.waitForTimeout(3000);
+            const banner = await p.locator('.banner--recovering').count();
+            const attention = await p.locator('.endpoint-node.attention').count();
+            await b.close();
+            if (banner < 1) { console.error('FAILED: NO calm recovering banner'); process.exit(1); }
+            if (attention > 0) { console.error('FAILED: endpoint shown RED during survivable outage'); process.exit(1); }
+            console.log('OK: calm blue banner shown, no red');
+          })().catch(e => { console.error(e); process.exit(1); });
+          '@
+          $check | Out-File -FilePath "outage_ui_check.cjs" -Encoding ascii
+          node outage_ui_check.cjs
+          if ($LASTEXITCODE -ne 0) { throw "FAILED: dashboard outage UI check failed" }
+          Remove-Item "outage_ui_check.cjs" -ErrorAction SilentlyContinue
+
+          Write-Host "Unblocking S3 - backlog must drain and replay in order..."
+          Invoke-RestMethod -Method Post -Uri "$base/api/v1/_test/s3-unblock" -TimeoutSec 5 | Out-Null
+
+          # ASSERT 4: backlog drains (pending_chunks -> ~0) within 180s.
+          # /api/v1/chunks/stats returns .pending_chunks (ci.yml :2859,:4116).
+          $drained = $false
+          for ($i = 1; $i -le 36; $i++) {
+            $stats = Invoke-RestMethod -Uri "$base/api/v1/chunks/stats" -TimeoutSec 5
+            Write-Host "drain poll ${i}: pending_chunks=$($stats.pending_chunks)"
+            if ($stats.pending_chunks -le 2) { $drained = $true; break }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $drained) { throw "FAILED: backlog did not drain after recovery" }
+
+          # ASSERT 5: rescue recovered (back to live).
+          $rec = Invoke-RestMethod -Uri "$base/api/v1/audit?action=rescue_recovered&since=$sinceIso&limit=100" -TimeoutSec 30
+          $recRows = if ($rec.rows) { $rec.rows } elseif ($rec.items) { $rec.items } else { @() }
+          if (@($recRows).Count -lt 1) { throw "FAILED: RescueRecovered not recorded - never returned to live" }
+          Write-Host "OK: outage survived end-to-end with zero chunk loss"
+
       - name: Restreamer crash recovery test
         if: success()
         shell: powershell
