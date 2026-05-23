@@ -171,7 +171,8 @@ impl DeliveryOrchestrator {
     /// monitor). True when the chunk-store volume is critically full. Used by
     /// `poll_delivery_metrics` to drive endpoints RED Attention.
     pub(crate) fn disk_critical(&self) -> bool {
-        self.disk_critical.load(std::sync::atomic::Ordering::Relaxed)
+        self.disk_critical
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn new(pool: SqlitePool, config: Config) -> Option<Self> {
