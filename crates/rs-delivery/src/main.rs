@@ -23,6 +23,7 @@ pub mod endpoint_task;
 mod ffmpeg_reason;
 mod producer_lag;
 pub mod rescue;
+pub mod rescue_audit;
 pub mod rtmp_push_telemetry;
 mod s3_fetch;
 pub mod s3_fetch_profile;
