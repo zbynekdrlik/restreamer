@@ -61,6 +61,18 @@ impl DiskCacheFetcher {
         let positions = &cache.position_registry;
         positions.register(alias_for_register, window_chunks);
         positions.advance(&alias, start_chunk_id);
+        // Outage forensics: one fetcher per endpoint => construction is the
+        // endpoint's first cache registration. Bracket the prefill with
+        // PrefillStarted here and PrefillReady at warmup-complete (rescue.rs).
+        if let Some(ring) = &audit_ring {
+            ring.push_parts(crate::audit_ring::RingRowParts {
+                severity: rs_core::audit::Severity::Info,
+                source: rs_core::audit::Source::Vps,
+                endpoint: Some(alias.clone()),
+                action: rs_core::audit::Action::DiskCachePrefillStarted,
+                detail: serde_json::json!({ "start_chunk_id": start_chunk_id }),
+            });
+        }
         Self {
             cache,
             alias,

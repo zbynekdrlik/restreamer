@@ -318,6 +318,7 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
     rescue_video_url: Option<&str>,
     stats: &crate::endpoint_task::Stats,
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    audit_ring: Option<&std::sync::Arc<crate::audit_ring::AuditRing>>,
 ) -> bool {
     let mut warmup_proc: Option<tokio::process::Child> = None;
 
@@ -429,6 +430,18 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
                         probe_id,
                         "Warmup complete — buffer target met"
                     );
+                    // Outage forensics: warmup-complete == the cache window
+                    // first reached its delivery target. Pairs with the
+                    // DiskCachePrefillStarted emitted at fetcher construction.
+                    if let Some(ring) = audit_ring {
+                        ring.push_parts(crate::audit_ring::RingRowParts {
+                            severity: rs_core::audit::Severity::Info,
+                            source: rs_core::audit::Source::Vps,
+                            endpoint: Some(alias.to_string()),
+                            action: rs_core::audit::Action::DiskCachePrefillReady,
+                            detail: serde_json::json!({ "alias": alias }),
+                        });
+                    }
                     break false;
                 }
             }

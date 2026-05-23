@@ -917,6 +917,7 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
             rescue_video_url.as_deref(),
             &stats,
             &mut stop_rx,
+            audit_ring.as_ref(),
         )
         .await;
         if stopped {

@@ -324,6 +324,7 @@ async fn warmup_exits_as_soon_as_buffer_fills() {
         Some("file:///tmp/nonexistent-rescue.mp4"),
         &stats,
         &mut stop_rx,
+        None,
     )
     .await;
 
@@ -357,6 +358,7 @@ async fn warmup_without_rescue_url_skips_ffmpeg_but_waits_for_fill() {
         None,
         &stats,
         &mut stop_rx,
+        None,
     )
     .await;
 
@@ -409,6 +411,7 @@ async fn warmup_with_rescue_url_updates_mode_to_warmup() {
         Some("file:///tmp/nonexistent-rescue.mp4"),
         &stats,
         &mut stop_rx,
+        None,
     )
     .await;
 
@@ -470,6 +473,7 @@ async fn warmup_writes_countdown_file_with_warmup_text() {
         Some("file:///tmp/nonexistent.mp4"),
         &stats,
         &mut stop_rx,
+        None,
     )
     .await;
 
@@ -502,6 +506,7 @@ async fn warmup_fast_endpoint_skips_rescue_ffmpeg() {
         Some("file:///tmp/nonexistent.mp4"),
         &stats,
         &mut stop_rx,
+        None,
     )
     .await;
 
@@ -536,6 +541,7 @@ async fn warmup_stop_signal_cleans_up_and_returns_true() {
         Some("file:///tmp/nonexistent.mp4"),
         &stats,
         &mut stop_rx,
+        None,
     )
     .await;
 
@@ -574,6 +580,7 @@ async fn warmup_skips_forward_when_chunk_missing_for_n_seconds() {
         None, // no rescue video — keeps test simple
         &stats,
         &mut stop_rx,
+        None,
     )
     .await;
 
@@ -611,6 +618,7 @@ async fn warmup_exponential_probe_clears_large_pruned_gap() {
         None,
         &stats,
         &mut stop_rx,
+        None,
     )
     .await;
 
