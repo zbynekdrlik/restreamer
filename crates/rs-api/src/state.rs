@@ -76,6 +76,12 @@ pub struct AppState {
     /// Override for the Google OAuth2 API base URL used by the Device Code Flow.
     /// Set to a wiremock URI in tests; `None` means use the real Google endpoint.
     pub device_flow_api_base: Option<String>,
+    /// Shared local-disk-critical flag. Written by the disk-pressure monitor
+    /// (spawned by the runtime) and read by the delivery poller so endpoints
+    /// go RED Attention when the chunk-store volume is critically full. The
+    /// runtime passes this SAME Arc to `run_disk_monitor` so monitor and
+    /// reader share one source of truth.
+    pub disk_critical: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -90,8 +96,15 @@ impl AppState {
         ws_tx: broadcast::Sender<WsEvent>,
         audit_tx: mpsc::Sender<AuditRow>,
     ) -> Self {
-        let delivery = DeliveryOrchestrator::new(pool.clone(), config.clone())
-            .map(|o| o.with_audit_tx(audit_tx.clone()));
+        // Shared local-disk-critical flag. Forward the SAME Arc to the
+        // delivery orchestrator (the reader in `poll_delivery_metrics`) and
+        // store it in the field so the runtime can hand it to the
+        // disk-pressure monitor (the writer).
+        let disk_critical = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let delivery = DeliveryOrchestrator::new(pool.clone(), config.clone()).map(|o| {
+            o.with_audit_tx(audit_tx.clone())
+                .with_disk_critical(Arc::clone(&disk_critical))
+        });
         let obs_client = if config.obs.enabled {
             Some(Arc::new(ObsClient::spawn(
                 config.obs.clone(),
@@ -121,6 +134,7 @@ impl AppState {
             rtmp_stable_since: Arc::new(Mutex::new(None)),
             audit_tx,
             device_flow_api_base: None,
+            disk_critical,
         }
     }
 

@@ -29,9 +29,16 @@ pub fn classify_disk_pressure(used_fraction: f64) -> DiskPressure {
 /// Sample the volume containing `chunk_dir` every 10s; emit LocalDiskPressure
 /// (rate-limited 1/min per severity) on Warn/Critical. Returns when the
 /// shutdown channel fires.
+///
+/// `disk_critical`, when set, is updated every sample to reflect whether the
+/// volume is at `DiskPressure::Critical` (true) or not (false). It feeds the
+/// endpoint lifecycle so endpoints go RED Attention on a critically-full
+/// chunk disk — the compensating signal for never-drop. It self-clears once
+/// the disk recovers.
 pub async fn run_disk_monitor(
     chunk_dir: PathBuf,
     audit_tx: Option<mpsc::Sender<AuditRow>>,
+    disk_critical: Option<Arc<std::sync::atomic::AtomicBool>>,
     mut shutdown: broadcast::Receiver<()>,
 ) {
     let rl = Arc::new(RateLimiter::new());
@@ -48,6 +55,14 @@ pub async fn run_disk_monitor(
         }
         let frac = used as f64 / total as f64;
         let pressure = classify_disk_pressure(frac);
+        // Update the shared critical flag every sample (set true only on
+        // Critical, false otherwise) so it self-clears when disk recovers.
+        if let Some(f) = &disk_critical {
+            f.store(
+                pressure == DiskPressure::Critical,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         let (sev, class) = match pressure {
             DiskPressure::Ok => continue,
             DiskPressure::Warn => (Severity::Warn, "warn"),

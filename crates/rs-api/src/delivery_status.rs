@@ -400,7 +400,7 @@ impl DeliveryOrchestrator {
                     delivery_mode: m.delivery_mode.clone(),
                     stall_reason: m.stall_reason.clone(),
                     last_error: m.last_error.clone(),
-                    disk_critical: false,
+                    disk_critical: self.disk_critical(),
                 });
             metrics.push(m);
         }
