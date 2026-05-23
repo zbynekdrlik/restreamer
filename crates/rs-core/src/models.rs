@@ -328,8 +328,16 @@ pub struct LifecycleInput {
 
 impl EndpointLifecycle {
     pub fn compute(i: &LifecycleInput) -> Self {
-        // RED only for states the operator must act on.
-        if i.disk_critical || last_error_is_actionable(i.last_error.as_deref()) {
+        // RED only for states the operator must act on. Disk-critical always
+        // forces Attention. An actionable last_error (auth/key reject) only
+        // forces Attention while the endpoint is DOWN — a recovered (alive)
+        // endpoint can carry a STALE actionable error that is cleared only on
+        // the next successful push, so it must not paint a healthy endpoint
+        // red.
+        if i.disk_critical {
+            return EndpointLifecycle::Attention;
+        }
+        if !i.alive && last_error_is_actionable(i.last_error.as_deref()) {
             return EndpointLifecycle::Attention;
         }
         match i.delivery_mode.as_deref() {
@@ -460,6 +468,20 @@ mod lifecycle_tests {
     fn auth_reject_is_red_attention() {
         let i = input(false, None, None, Some("PublishRejected: bad stream key"));
         assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Attention);
+    }
+
+    #[test]
+    fn alive_endpoint_with_stale_actionable_error_is_live_not_red() {
+        // A recovered endpoint (alive=true) can still carry a STALE
+        // actionable last_error — it is cleared only on the next successful
+        // push. The stale error must NOT paint the healthy endpoint red.
+        let i = input(
+            true,
+            Some("normal"),
+            None,
+            Some("PublishRejected: bad stream key"),
+        );
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Live);
     }
 
     #[test]
