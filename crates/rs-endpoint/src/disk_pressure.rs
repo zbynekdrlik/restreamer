@@ -121,7 +121,10 @@ mod tests {
         let dir = std::env::temp_dir();
         if let Some((used, total)) = volume_usage(&dir) {
             assert!(total > 0, "a mounted volume must report non-zero total");
-            assert!(used <= total, "used ({used}) must not exceed total ({total})");
+            assert!(
+                used <= total,
+                "used ({used}) must not exceed total ({total})"
+            );
         }
         // If no disk matched (sandboxed CI with no enumerable mounts), the
         // monitor simply skips that tick — `None` is an acceptable outcome,
