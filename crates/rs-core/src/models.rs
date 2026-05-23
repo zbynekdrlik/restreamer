@@ -433,15 +433,26 @@ mod lifecycle_tests {
     #[test]
     fn recovering_and_warmup_are_blue_recovering() {
         let r = input(true, Some("recovering"), None, None);
-        assert_eq!(EndpointLifecycle::compute(&r), EndpointLifecycle::Recovering);
+        assert_eq!(
+            EndpointLifecycle::compute(&r),
+            EndpointLifecycle::Recovering
+        );
         let w = input(true, Some("warmup"), None, None);
-        assert_eq!(EndpointLifecycle::compute(&w), EndpointLifecycle::Recovering);
+        assert_eq!(
+            EndpointLifecycle::compute(&w),
+            EndpointLifecycle::Recovering
+        );
     }
 
     #[test]
     fn upstream_stall_is_blue_buffering_not_red() {
         // A transient network stall must NOT be red — it is survivable.
-        let i = input(true, Some("normal"), Some("waiting for chunk 42 (S3)"), None);
+        let i = input(
+            true,
+            Some("normal"),
+            Some("waiting for chunk 42 (S3)"),
+            None,
+        );
         assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Buffering);
     }
 

@@ -393,16 +393,15 @@ impl DeliveryOrchestrator {
             }
             // Host-compute the operator-facing lifecycle from the metrics we
             // just assembled (outage = blue/buffering, auth/disk = red).
-            m.lifecycle = rs_core::models::EndpointLifecycle::compute(
-                &rs_core::models::LifecycleInput {
+            m.lifecycle =
+                rs_core::models::EndpointLifecycle::compute(&rs_core::models::LifecycleInput {
                     alive: m.alive,
                     chunks_processed: m.chunks_processed,
                     delivery_mode: m.delivery_mode.clone(),
                     stall_reason: m.stall_reason.clone(),
                     last_error: m.last_error.clone(),
                     disk_critical: false,
-                },
-            );
+                });
             metrics.push(m);
         }
 
