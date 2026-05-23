@@ -547,6 +547,84 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
     }
 }
 
+/// Test-only driver that exercises the REAL `upload_one` path against a
+/// mock S3 endpoint with an accelerated retry clock. Compiled only when the
+/// `testing` feature (or `cfg(test)`) is on — never in release binaries.
+/// Production retry/backoff code is left intact; we only shrink the test
+/// clock by resetting `upload_next_retry_at` so the next pick is immediate.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) mod testing_support {
+    use super::*;
+    use rs_core::config::S3Config;
+
+    /// Drive the upload worker loop against `s3_endpoint`/`bucket` until no
+    /// uploadable chunk remains (two consecutive empty picks) or a 30s wall
+    /// deadline. Calls the unchanged `upload_one`, so the never-drop decision
+    /// is exercised, not bypassed. After each failed `upload_one`, the failed
+    /// chunk's `upload_next_retry_at` is forced to 0 so the next pick is
+    /// immediate (5ms apart) instead of waiting the real capped backoff.
+    pub async fn drive_until_idle(
+        pool: &SqlitePool,
+        s3_endpoint: &str,
+        bucket: &str,
+    ) -> anyhow::Result<()> {
+        let s3 = S3Client::new(&S3Config {
+            bucket: bucket.to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: s3_endpoint.to_string(),
+            access_key_id: "test-key".to_string(),
+            secret_access_key: "test-secret".to_string(),
+        })
+        .map_err(|e| anyhow::anyhow!("build mock S3 client: {e}"))?;
+
+        let (ws_tx, _ws_rx) = broadcast::channel::<WsEvent>(64);
+        let ctx = WorkerCtx {
+            pool: pool.clone(),
+            s3: Arc::new(s3),
+            ws_tx,
+            metrics: Arc::new(UploadMetrics::default()),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            blocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            drain_needed: Arc::new(AtomicUsize::new(0)),
+            client_uuid: "test-uuid".to_string(),
+            audit_tx: None,
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut consecutive_empty = 0;
+        while Instant::now() < deadline {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            match db::pick_next_uploadable_chunk(&ctx.pool, now_ms).await {
+                Ok(Some(chunk)) => {
+                    consecutive_empty = 0;
+                    upload_one(&ctx, chunk).await;
+                    // Accelerate the test clock: any chunk left unsent and not
+                    // permanently failed becomes immediately re-pickable. This
+                    // does NOT alter the production decision (still made by
+                    // `should_abandon_upload`) — it only collapses the backoff
+                    // wait so >15 retries finish in well under the deadline.
+                    sqlx::query(
+                        "UPDATE chunk_records SET upload_next_retry_at = 0 \
+                         WHERE sent = 0 AND upload_failed_permanently = 0",
+                    )
+                    .execute(&ctx.pool)
+                    .await?;
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Ok(None) => {
+                    consecutive_empty += 1;
+                    if consecutive_empty >= 2 {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(e) => return Err(anyhow::anyhow!("pick chunk failed: {e}")),
+            }
+        }
+        Err(anyhow::anyhow!("drive_until_idle hit the 30s deadline"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
