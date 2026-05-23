@@ -73,9 +73,16 @@ async fn outage_longer_than_old_cap_drops_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunk1.flv");
     std::fs::write(&path, b"FLVchunkbytes").unwrap();
-    let chunk_id = db::insert_chunk(&pool, event.id, path.to_str().unwrap(), 13, "deadbeef", 2000)
-        .await
-        .unwrap();
+    let chunk_id = db::insert_chunk(
+        &pool,
+        event.id,
+        path.to_str().unwrap(),
+        13,
+        "deadbeef",
+        2000,
+    )
+    .await
+    .unwrap();
 
     // 3. Drive the REAL uploader against the mock S3 until idle. Backoff is
     //    accelerated by the test driver (5ms), so >15 retries finish fast.
