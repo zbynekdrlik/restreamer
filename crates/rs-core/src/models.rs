@@ -331,6 +331,73 @@ pub struct DeliveryEndpointMetrics {
     pub youtube_health: Option<YoutubeHealth>,
 }
 
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    fn input(
+        alive: bool,
+        mode: Option<&str>,
+        stall: Option<&str>,
+        err: Option<&str>,
+    ) -> LifecycleInput {
+        LifecycleInput {
+            alive,
+            chunks_processed: if alive { 100 } else { 0 },
+            delivery_mode: mode.map(|s| s.to_string()),
+            stall_reason: stall.map(|s| s.to_string()),
+            last_error: err.map(|s| s.to_string()),
+            disk_critical: false,
+        }
+    }
+
+    #[test]
+    fn rescue_mode_is_blue_rescue() {
+        let i = input(true, Some("rescue"), None, None);
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Rescue);
+    }
+
+    #[test]
+    fn recovering_and_warmup_are_blue_recovering() {
+        let r = input(true, Some("recovering"), None, None);
+        assert_eq!(EndpointLifecycle::compute(&r), EndpointLifecycle::Recovering);
+        let w = input(true, Some("warmup"), None, None);
+        assert_eq!(EndpointLifecycle::compute(&w), EndpointLifecycle::Recovering);
+    }
+
+    #[test]
+    fn upstream_stall_is_blue_buffering_not_red() {
+        // A transient network stall must NOT be red — it is survivable.
+        let i = input(true, Some("normal"), Some("waiting for chunk 42 (S3)"), None);
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Buffering);
+    }
+
+    #[test]
+    fn auth_reject_is_red_attention() {
+        let i = input(false, None, None, Some("PublishRejected: bad stream key"));
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Attention);
+    }
+
+    #[test]
+    fn disk_critical_is_red_attention() {
+        let mut i = input(true, Some("normal"), None, None);
+        i.disk_critical = true;
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Attention);
+    }
+
+    #[test]
+    fn healthy_is_green_live() {
+        let i = input(true, Some("normal"), None, None);
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Live);
+    }
+
+    #[test]
+    fn not_started_is_pending() {
+        let i = input(false, None, None, None);
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Pending);
+    }
+}
+
 /// Service status summary returned by the /status endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServiceStatus {
