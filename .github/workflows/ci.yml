@@ -4310,10 +4310,19 @@ jobs:
           }
           if (-not $drained) { throw "FAILED: backlog did not drain after recovery" }
 
-          # ASSERT 5: rescue recovered (back to live).
-          $rec = Invoke-RestMethod -Uri "$base/api/v1/audit?action=rescue_recovered&since=$sinceIso&limit=100" -TimeoutSec 30
-          $recRows = if ($rec.rows) { $rec.rows } elseif ($rec.items) { $rec.items } else { @() }
-          if (@($recRows).Count -lt 1) { throw "FAILED: RescueRecovered not recorded - never returned to live" }
+          # ASSERT 5: rescue recovered (back to live). The VPS exits rescue only
+          # after RESCUE_REFILL_TARGET_SECS (120s) of continuous producer activity
+          # AFTER chunks resume, so the rescue_recovered audit row appears ~120s
+          # post-drain. Poll up to 180s rather than checking once.
+          $recovered = $false
+          for ($i = 1; $i -le 36; $i++) {
+            $rec = Invoke-RestMethod -Uri "$base/api/v1/audit?action=rescue_recovered&since=$sinceIso&limit=100" -TimeoutSec 30
+            $recRows = if ($rec.rows) { $rec.rows } elseif ($rec.items) { $rec.items } else { @() }
+            if (@($recRows).Count -ge 1) { $recovered = $true; break }
+            Write-Host "rescue_recovered poll ${i}: not yet (rescue refill is 120s post-resume)"
+            Start-Sleep -Seconds 5
+          }
+          if (-not $recovered) { throw "FAILED: RescueRecovered not recorded - never returned to live" }
           Write-Host "OK: outage survived end-to-end with zero chunk loss"
 
       - name: Restreamer crash recovery test
