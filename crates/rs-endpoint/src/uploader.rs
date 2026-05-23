@@ -537,6 +537,27 @@ mod tests {
     use rs_core::db;
     use std::time::Duration;
 
+    #[test]
+    fn network_class_errors_never_abandon_even_after_many_attempts() {
+        // Continuity guarantee: a long outage must never drop a chunk.
+        for class in ["timeout", "5xx", "conn", "other"] {
+            assert!(
+                !should_abandon_upload(class, 9_999),
+                "network class {class} must retry forever, never abandon"
+            );
+        }
+    }
+
+    #[test]
+    fn structural_reject_classes_abandon_only_after_budget() {
+        // 403/404 mean S3 structurally rejected the object — retrying can
+        // never succeed. Absorb a few transient auth/propagation hiccups,
+        // then abandon.
+        assert!(!should_abandon_upload("403", 4), "below budget: keep trying");
+        assert!(should_abandon_upload("403", 5), "at budget: abandon");
+        assert!(should_abandon_upload("404", 50), "above budget: abandon");
+    }
+
     fn test_s3_config() -> S3Config {
         S3Config {
             bucket: "test-bucket".to_string(),
