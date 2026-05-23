@@ -36,6 +36,8 @@ fn classify_upload_error(msg: &str) -> &'static str {
     let m = msg.to_ascii_lowercase();
     if m.contains("timeout") || m.contains("timed out") {
         "timeout"
+    } else if m.contains(" 400") || m.contains("bad request") {
+        "400"
     } else if m.contains(" 403") || m.contains("forbidden") {
         "403"
     } else if m.contains(" 404") || m.contains("not found") {
@@ -81,7 +83,7 @@ fn should_spawn_worker(live: usize, target: usize) -> bool {
     live < target
 }
 
-/// Attempt budget for STRUCTURAL-reject classes (403/404) only. Network
+/// Attempt budget for STRUCTURAL-reject classes (400/403/404) only. Network
 /// classes (timeout/5xx/conn/other) are never abandoned — see
 /// `should_abandon_upload`. This is the continuity guarantee: a long outage
 /// must lose nothing while the laptop runs (2026-05-22 event fix).
@@ -104,11 +106,11 @@ const _: () = assert!(MAX_CONCURRENCY > MIN_CONCURRENCY);
 /// Network-class errors (`timeout`/`5xx`/`conn`/`other`) are NEVER terminal:
 /// the chunk stays on disk and is retried forever at capped backoff so an
 /// outage of any duration loses nothing (continuity guarantee). Only
-/// structural client rejects (`403`/`404`) — where retrying can never
+/// structural client rejects (`400`/`403`/`404`) — where retrying can never
 /// succeed — abandon, and only after `ABANDON_ATTEMPT_BUDGET` attempts to
 /// absorb transient auth/propagation hiccups.
 fn should_abandon_upload(class: &str, attempt: i64) -> bool {
-    matches!(class, "403" | "404") && attempt >= ABANDON_ATTEMPT_BUDGET
+    matches!(class, "400" | "403" | "404") && attempt >= ABANDON_ATTEMPT_BUDGET
 }
 
 pub(crate) fn backoff_ms(attempt: i64) -> u64 {
@@ -654,6 +656,18 @@ mod tests {
         );
         assert!(should_abandon_upload("403", 5), "at budget: abandon");
         assert!(should_abandon_upload("404", 50), "above budget: abandon");
+    }
+
+    #[test]
+    fn http_400_abandons_only_after_budget() {
+        // A 400 Bad Request PUT can never succeed by retrying — it is a
+        // structural reject like 403/404. Absorb a few transient hiccups
+        // (below budget), then abandon (at/above budget).
+        assert!(
+            !should_abandon_upload("400", 4),
+            "below budget: keep trying"
+        );
+        assert!(should_abandon_upload("400", 5), "at budget: abandon");
     }
 
     fn test_s3_config() -> S3Config {
