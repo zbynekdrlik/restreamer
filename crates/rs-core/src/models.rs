@@ -302,6 +302,75 @@ pub struct YoutubeHealth {
     pub error: Option<String>,
 }
 
+/// Operator-facing endpoint lifecycle. Drives the dashboard semaphore:
+/// Pending=gray, Live=green, Buffering/Rescue/Recovering=blue (survivable,
+/// auto-recovering, NO action needed), Attention=red (operator MUST act).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointLifecycle {
+    Pending,
+    Live,
+    Buffering,
+    Rescue,
+    Recovering,
+    Attention,
+}
+
+/// Inputs the host has when computing lifecycle for one endpoint.
+pub struct LifecycleInput {
+    pub alive: bool,
+    pub chunks_processed: i64,
+    pub delivery_mode: Option<String>,
+    pub stall_reason: Option<String>,
+    pub last_error: Option<String>,
+    pub disk_critical: bool,
+}
+
+impl EndpointLifecycle {
+    pub fn compute(i: &LifecycleInput) -> Self {
+        // RED only for states the operator must act on.
+        if i.disk_critical || last_error_is_actionable(i.last_error.as_deref()) {
+            return EndpointLifecycle::Attention;
+        }
+        match i.delivery_mode.as_deref() {
+            Some("rescue") => return EndpointLifecycle::Rescue,
+            Some("recovering") | Some("warmup") => return EndpointLifecycle::Recovering,
+            _ => {}
+        }
+        if i.alive && i.stall_reason.is_some() {
+            return EndpointLifecycle::Buffering; // survivable upstream stall = blue
+        }
+        if !i.alive && i.chunks_processed == 0 {
+            return EndpointLifecycle::Pending;
+        }
+        if !i.alive {
+            // Dead with no actionable error => treat as recovering (the
+            // pusher reconnects forever); never a bare red.
+            return EndpointLifecycle::Recovering;
+        }
+        EndpointLifecycle::Live
+    }
+}
+
+/// An error string the OPERATOR must act on (auth/key rejected). Network /
+/// transient errors are NOT actionable — they auto-recover.
+fn last_error_is_actionable(err: Option<&str>) -> bool {
+    let Some(e) = err else { return false };
+    let e = e.to_ascii_lowercase();
+    e.contains("rejected")
+        || e.contains("bad stream key")
+        || e.contains("unauthorized")
+        || e.contains("forbidden")
+        || e.contains("invalid stream key")
+        || e.contains("badname")
+}
+
+/// Default lifecycle for older payloads lacking the field — degrade to Live
+/// so the dashboard does not flag a false alarm.
+fn default_lifecycle() -> EndpointLifecycle {
+    EndpointLifecycle::Live
+}
+
 /// Per-endpoint delivery metrics broadcast via WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryEndpointMetrics {
@@ -329,6 +398,10 @@ pub struct DeliveryEndpointMetrics {
     pub rescue_eta_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub youtube_health: Option<YoutubeHealth>,
+    /// Operator-facing lifecycle (host-computed). Older payloads default to
+    /// Live so the dashboard degrades gracefully.
+    #[serde(default = "default_lifecycle")]
+    pub lifecycle: EndpointLifecycle,
 }
 
 #[cfg(test)]
