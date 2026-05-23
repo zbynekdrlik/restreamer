@@ -11,6 +11,16 @@ use tracing::warn;
 use rs_core::audit::{Action, AuditRow, Severity, Source};
 use rs_core::db;
 
+/// Decide whether an endpoint should jump to the live edge at VPS-ready time.
+///
+/// Continuity invariant: ONLY `is_fast` endpoints with a positive `gap_chunks`
+/// jump. Non-fast (continuity) endpoints NEVER jump — they replay from their
+/// exact `start_chunk_id` so an outage loses nothing. A zero-gap fast endpoint
+/// is already at the live edge, so there is nothing to jump.
+pub fn should_jump_to_live_edge(is_fast: bool, gap_chunks: i64) -> bool {
+    is_fast && gap_chunks > 0
+}
+
 /// Pure-DB helper: enumerate is_fast endpoints for an event together with
 /// the fresh live-edge `start_chunk_id` that should be POSTed to the VPS
 /// via /api/endpoints/update_start. Returned tuple is (endpoint, new_start).
@@ -69,6 +79,31 @@ pub async fn on_vps_ready(
     }
     let url = format!("http://{}:8000/api/endpoints/update_start", instance.ipv4);
     for (ep, new_start) in updates {
+        // gap_chunks should be >= 0 in the normal path (chunks keep arriving
+        // during VPS spawn so new_start >= original). If it goes negative —
+        // e.g. original_start_chunk_id was mutated past the live edge between
+        // compute and on_vps_ready — log a warn and clamp to 0 so post-mortem
+        // reviewers see a sensible value.
+        let raw_gap = new_start - original_start_chunk_id;
+        if raw_gap < 0 {
+            warn!(
+                alias = %ep.alias,
+                original_start_chunk_id,
+                new_start,
+                raw_gap,
+                "FastEndpointJumpedToLiveEdge gap_chunks is negative; clamping to 0"
+            );
+        }
+        let gap = raw_gap.max(0);
+
+        // Continuity invariant: only is_fast endpoints with a real gap jump to
+        // the live edge. Non-fast (continuity) endpoints NEVER skip the gap —
+        // they replay from their exact start_chunk_id. A zero-gap fast endpoint
+        // is already at the live edge, so there is nothing to jump.
+        if !should_jump_to_live_edge(ep.is_fast, gap) {
+            continue;
+        }
+
         let payload = serde_json::json!({
             "alias": ep.alias,
             "new_start_chunk_id": new_start,
@@ -110,22 +145,6 @@ pub async fn on_vps_ready(
 
         if success {
             if let Some(tx) = audit_tx {
-                // gap_chunks should be >= 0 in the normal path (chunks keep
-                // arriving during VPS spawn so new_start >= original). If it
-                // goes negative — e.g. original_start_chunk_id was mutated past
-                // the live edge between compute and on_vps_ready — log a warn
-                // and clamp to 0 so post-mortem reviewers see a sensible value.
-                let raw_gap = new_start - original_start_chunk_id;
-                if raw_gap < 0 {
-                    warn!(
-                        alias = %ep.alias,
-                        original_start_chunk_id,
-                        new_start,
-                        raw_gap,
-                        "FastEndpointJumpedToLiveEdge gap_chunks is negative; clamping to 0"
-                    );
-                }
-                let gap = raw_gap.max(0);
                 let _ = tx
                     .send(AuditRow {
                         severity: Severity::Info,
@@ -147,4 +166,19 @@ pub async fn on_vps_ready(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continuity_endpoint_never_jumps_to_live_edge() {
+        // is_fast = false => replay from exact position, never skip the gap.
+        assert!(!should_jump_to_live_edge(false, 9_999));
+        // is_fast = true with a gap => jump is allowed (unchanged behavior).
+        assert!(should_jump_to_live_edge(true, 9_999));
+        // is_fast = true but no gap => already at the live edge, no jump.
+        assert!(!should_jump_to_live_edge(true, 0));
+    }
 }
