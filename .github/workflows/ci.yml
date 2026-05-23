@@ -142,6 +142,15 @@ jobs:
         run: cargo test --workspace --verbose
         env:
           SQLX_OFFLINE: true
+      # The outage-continuity integration test in crates/rs-endpoint is gated
+      # behind `#![cfg(feature = "testing")]`, so `cargo test --workspace`
+      # (no --features) never compiles or runs it. Run it explicitly here so
+      # green CI means this test actually executed (test-strictness). Scoped to
+      # one package + feature - no double-count or conflict with the step above.
+      - name: Run rs-endpoint feature-gated integration tests
+        run: cargo test -p rs-endpoint --features testing --verbose
+        env:
+          SQLX_OFFLINE: true
 
   coverage:
     name: Coverage
