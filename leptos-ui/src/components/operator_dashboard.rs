@@ -10,6 +10,7 @@ use super::confirm_modal::ConfirmModal;
 use super::endpoint_history::EndpointHistory;
 use super::endpoint_remove_confirm_modal::EndpointRemoveConfirmModal;
 use super::oauth_authorize::OAuthAuthorize;
+use super::outage_banner::OutageBanner;
 use super::pacing_panel::PacingPanel;
 use super::upload_strip::UploadStrip;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
@@ -33,6 +34,7 @@ pub fn OperatorDashboard() -> impl IntoView {
     view! {
         <div class="operator-dashboard">
             <ZeroEndpointBanner />
+            <OutageBanner />
             <div class="operator-dashboard__layout">
                 <div class="operator-dashboard__main">
                     <ControlBar />
