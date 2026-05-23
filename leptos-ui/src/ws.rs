@@ -188,6 +188,7 @@ async fn load_initial_state(store: DashboardStore) {
                     delivery_mode: ep.delivery_mode.clone(),
                     rescue_eta_secs: ep.rescue_eta_secs,
                     youtube_health: ep.youtube_health,
+                    lifecycle: ep.lifecycle,
                 })
                 .collect();
             store.delivery.set(DeliveryState {
