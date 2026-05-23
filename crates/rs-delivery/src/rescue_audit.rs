@@ -2,8 +2,23 @@
 //! enter/recover semantics are unit-testable; the consumer task calls these
 //! and pushes the result onto the VPS [`AuditRing`](crate::audit_ring::AuditRing).
 
-use crate::audit_ring::RingRowParts;
+use crate::audit_ring::{AuditRing, RingRowParts};
 use rs_core::audit::{Action, Severity, Source};
+use std::sync::Arc;
+
+/// Push a RescueActivated row if a ring is present (no-op otherwise).
+pub fn emit_activated(ring: &Option<Arc<AuditRing>>, alias: &str, stalled_at_chunk_id: i64) {
+    if let Some(r) = ring {
+        r.push_parts(rescue_activated_row(alias, stalled_at_chunk_id));
+    }
+}
+
+/// Push a RescueRecovered row if a ring is present (no-op otherwise).
+pub fn emit_recovered(ring: &Option<Arc<AuditRing>>, alias: &str, gap_secs: u64) {
+    if let Some(r) = ring {
+        r.push_parts(rescue_recovered_row(alias, gap_secs));
+    }
+}
 
 /// Row emitted when an endpoint enters rescue (chunk supply dried up).
 pub fn rescue_activated_row(alias: &str, stalled_at_chunk_id: i64) -> RingRowParts {

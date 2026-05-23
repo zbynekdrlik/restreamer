@@ -516,8 +516,7 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut proc_spawned_at: Option<tokio::time::Instant> = None;
     let mut circuit_trips: u32 = 0;
     let mut consecutive_write_failures: u32 = 0;
-    // Last chunk id delivered to the endpoint; recorded into the rescue
-    // audit row when the chunk supply stalls (outage forensics).
+    // Last delivered chunk id, recorded in the rescue audit row on stall.
     let mut last_delivered_chunk_id: i64 = -1;
     let mut last_heartbeat = std::time::Instant::now();
     // Consecutive push errors for the Rust pusher exponential backoff ladder.
@@ -685,15 +684,8 @@ async fn consumer_task<P: OutputProcessFactory>(
                     if !buffer_state.producer_active.load(AtomicOrdering::Relaxed) {
                         tracing::warn!(alias = %alias, "Consumer: buffer empty + producer stalled, entering rescue mode");
 
-                        // Outage forensics: record rescue activation + when it
-                        // started so RescueRecovered can report the gap duration.
                         let rescue_started = std::time::Instant::now();
-                        if let Some(ring) = &audit_ring {
-                            ring.push_parts(crate::rescue_audit::rescue_activated_row(
-                                &alias,
-                                last_delivered_chunk_id,
-                            ));
-                        }
+                        crate::rescue_audit::emit_activated(&audit_ring, &alias, last_delivered_chunk_id);
 
                         // Kill current ffmpeg before entering rescue
                         if let Some(mut p) = proc.take() {
@@ -726,10 +718,8 @@ async fn consumer_task<P: OutputProcessFactory>(
                             s.delivery_mode = "normal".to_string();
                             s.rescue_eta_secs = None;
                         }
-                        if let Some(ring) = &audit_ring {
-                            let gap = rescue_started.elapsed().as_secs();
-                            ring.push_parts(crate::rescue_audit::rescue_recovered_row(&alias, gap));
-                        }
+                        let gap = rescue_started.elapsed().as_secs();
+                        crate::rescue_audit::emit_recovered(&audit_ring, &alias, gap);
                         flv_normalizer = FlvStreamNormalizer::new();
                         tracing::info!(alias = %alias, "Consumer: resumed normal delivery");
                     }
