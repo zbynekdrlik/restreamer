@@ -66,6 +66,14 @@ pub enum Action {
     EndpointRtmpPushDied,
     S3UploadFailed,
     S3FetchFailed,
+    /// Delivery VPS switched an endpoint to the rescue video because the
+    /// chunk supply ran dry (upstream outage). Severity::Warn. Detail JSON:
+    /// {stalled_at_chunk_id}. Pairs with RescueRecovered.
+    RescueActivated,
+    /// Delivery VPS exited rescue and resumed live delivery after the chunk
+    /// supply recovered. Severity::Info. Detail JSON: {gap_secs} -- how long
+    /// the rescue video covered the outage.
+    RescueRecovered,
     /// Disk cache started pre-filling for an event. Emitted on first
     /// EndpointReader registration. Issue #174.
     DiskCachePrefillStarted,
