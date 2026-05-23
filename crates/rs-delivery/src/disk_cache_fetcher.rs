@@ -29,6 +29,10 @@ pub struct DiskCacheFetcher {
     /// waits for a single chunk before returning Err. The producer's
     /// existing backoff loop turns the Err into a retry.
     stall_timeout_secs: u64,
+    /// VPS audit ring for outage-forensics events (stall-timeout,
+    /// reader-recovered, prefill-started). `None` outside production.
+    /// Emissions wired in Tasks 9 + 11; T8 only plumbs it through.
+    audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
 }
 
 impl DiskCacheFetcher {
@@ -38,6 +42,7 @@ impl DiskCacheFetcher {
         start_chunk_id: i64,
         window_chunks: i64,
         stall_timeout_secs: u64,
+        audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
     ) -> Self {
         let event_dir = cache.event_dir();
         // Register synchronously: a same-tick `advance` from the producer
@@ -55,6 +60,7 @@ impl DiskCacheFetcher {
             event_dir,
             window_chunks,
             stall_timeout_secs,
+            audit_ring,
         }
     }
 }

@@ -177,10 +177,12 @@ async fn init_endpoints(
     // Required: a failure to construct the cache means the stream cannot
     // run with bandwidth-managed prefetch, so surface as 500 to the
     // orchestrator (rather than silently downgrading the data path).
-    let disk_cache_arc = build_disk_cache(&s3_config, &req).await.map_err(|e| {
-        tracing::error!("DiskCache init failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let disk_cache_arc = build_disk_cache(&s3_config, &req, Some(Arc::clone(&state.audit_ring)))
+        .await
+        .map_err(|e| {
+            tracing::error!("DiskCache init failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     tracing::info!("DiskCache initialized");
     *state.disk_cache.write().await = Some(Arc::clone(&disk_cache_arc));
 
@@ -226,6 +228,7 @@ async fn init_endpoints(
 async fn build_disk_cache(
     s3_config: &S3Config,
     req: &InitRequest,
+    audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
 ) -> std::io::Result<Arc<DiskCache>> {
     let backend: Arc<dyn crate::disk_cache::S3Backend> = Arc::new(
         S3Fetcher::new(s3_config, &req.event_identifier)
@@ -235,7 +238,7 @@ async fn build_disk_cache(
         window_chunks: ((req.delivery_delay_ms as i64) / 2000).max(10),
         ..Default::default()
     };
-    let cache = DiskCache::new(cfg, backend, req.event_identifier.clone()).await?;
+    let cache = DiskCache::new(cfg, backend, req.event_identifier.clone(), audit_ring).await?;
     Ok(Arc::new(cache))
 }
 

@@ -17,13 +17,20 @@ pub struct EvictionTask;
 
 impl EvictionTask {
     /// Spawn the eviction loop. Returns the JoinHandle the caller stores.
+    ///
+    /// `audit_ring` (threaded from `DiskCache::new`) is captured for the
+    /// `DiskCacheChunkEvicted` emission wired in Task 10. T8 only plumbs it
+    /// through — the loop behaves exactly as before.
     pub fn spawn(
         cache_dir: std::path::PathBuf,
         positions: Arc<EndpointPositionRegistry>,
         registry: Arc<ChunkRegistry>,
         interval: Duration,
+        audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
     ) -> tokio::task::JoinHandle<()> {
+        let _ = &audit_ring; // emission wired in T10
         tokio::spawn(async move {
+            let _audit_ring = audit_ring;
             loop {
                 tokio::time::sleep(interval).await;
                 if let Err(e) = Self::run_once(&cache_dir, &positions, &registry).await {

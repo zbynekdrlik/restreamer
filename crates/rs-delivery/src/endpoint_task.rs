@@ -182,6 +182,7 @@ impl EndpointHandle {
             start_chunk_id,
             window,
             60,
+            audit_ring.clone(),
         );
         tracing::info!(alias = %ep_cfg.alias, window, "DiskCacheFetcher wired");
         // Clone for the spawned task so the original survives for the
