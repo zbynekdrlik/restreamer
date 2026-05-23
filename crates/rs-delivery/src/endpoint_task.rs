@@ -765,6 +765,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                     chunk_id,
                     chunk_duration_ms,
                     &alias,
+                    &service_type_str,
                     &mut consecutive_push_errors,
                     &mut consecutive_write_failures,
                     &stats,
