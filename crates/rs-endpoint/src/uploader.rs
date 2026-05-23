@@ -81,8 +81,11 @@ fn should_spawn_worker(live: usize, target: usize) -> bool {
     live < target
 }
 
-const MAX_ATTEMPTS: i64 = 10;
-const MAX_WALL_CLOCK_MS: i64 = 600_000; // 10 min total retry budget
+/// Attempt budget for STRUCTURAL-reject classes (403/404) only. Network
+/// classes (timeout/5xx/conn/other) are never abandoned — see
+/// `should_abandon_upload`. This is the continuity guarantee: a long outage
+/// must lose nothing while the laptop runs (2026-05-22 event fix).
+const ABANDON_ATTEMPT_BUDGET: i64 = 5;
 // Concurrency bounds tuned for Hetzner Object Storage NBG1 per-bucket
 // rate limits. 32-worker sustained load triggered 503/504 cascades
 // during 2026-05-02 4-h soak. boto3 burst test: 30 parallel PUTs from
@@ -93,6 +96,20 @@ const MAX_WALL_CLOCK_MS: i64 = 600_000; // 10 min total retry budget
 // requests/sec exceeds it. 8 sustained workers stays within budget.
 const MIN_CONCURRENCY: usize = 2;
 pub(crate) const MAX_CONCURRENCY: usize = 8;
+// Compile-time invariant (replaces a runtime tautology test).
+const _: () = assert!(MAX_CONCURRENCY > MIN_CONCURRENCY);
+
+/// Decide whether an upload error is terminal for the chunk.
+///
+/// Network-class errors (`timeout`/`5xx`/`conn`/`other`) are NEVER terminal:
+/// the chunk stays on disk and is retried forever at capped backoff so an
+/// outage of any duration loses nothing (continuity guarantee). Only
+/// structural client rejects (`403`/`404`) — where retrying can never
+/// succeed — abandon, and only after `ABANDON_ATTEMPT_BUDGET` attempts to
+/// absorb transient auth/propagation hiccups.
+fn should_abandon_upload(class: &str, attempt: i64) -> bool {
+    matches!(class, "403" | "404") && attempt >= ABANDON_ATTEMPT_BUDGET
+}
 
 pub(crate) fn backoff_ms(attempt: i64) -> u64 {
     // 1s, 2s, 4s, 8s, 16s, 30s (cap)
@@ -466,9 +483,10 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
         }
         Err(e) => {
             let err_msg = e.to_string();
-            let wall_clock_ms = chrono::Utc::now().timestamp_millis()
-                - chunk.upload_first_attempt_at.unwrap_or(now_ms);
-            let permanent = attempt >= MAX_ATTEMPTS || wall_clock_ms >= MAX_WALL_CLOCK_MS;
+            let class = classify_upload_error(&err_msg);
+            // Continuity: network-class errors retry forever; only structural
+            // rejects abandon after the budget.
+            let permanent = should_abandon_upload(class, attempt);
             if permanent {
                 let _ = db::mark_upload_permanently_failed(pool, chunk.id).await;
             } else {
@@ -499,7 +517,6 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
             // Permanent failures always emit (bypass rate limit) because
             // they are terminal for the chunk and worth surfacing.
             if let Some(tx) = &ctx.audit_tx {
-                let class = classify_upload_error(&err_msg);
                 if permanent || UPLOAD_RL.allow(Action::S3UploadFailed, class) {
                     rs_core::audit::record(
                         tx,
@@ -615,11 +632,6 @@ mod tests {
     #[test]
     fn backoff_attempt_zero_is_sane() {
         assert!(backoff_ms(0) >= 1000);
-    }
-
-    #[test]
-    fn max_concurrency_constant_is_valid() {
-        assert!(MAX_CONCURRENCY > MIN_CONCURRENCY);
     }
 
     #[test]
