@@ -246,6 +246,21 @@ impl DownloadService {
                     self.token_bucket_consume(fc.data.len() as u64).await;
                     if let Err(e) = self.write_atomic(chunk_id, &fc.data, fc.duration_ms).await {
                         tracing::error!(chunk_id, "disk_cache write failed: {e}");
+                        // Outage forensics: a local disk-write failure (full
+                        // volume, I/O error) is operator-actionable — surface
+                        // it on the audit timeline, not just the log.
+                        if let Some(ring) = &self.audit_ring {
+                            ring.push_parts(crate::audit_ring::RingRowParts {
+                                severity: rs_core::audit::Severity::Error,
+                                source: rs_core::audit::Source::Vps,
+                                endpoint: None,
+                                action: rs_core::audit::Action::DiskCacheWriteFailed,
+                                detail: serde_json::json!({
+                                    "chunk_id": chunk_id,
+                                    "error": e.to_string(),
+                                }),
+                            });
+                        }
                         // Disk-write failures are not handled here -- the
                         // outer PrefetchReader loop re-requests, and the
                         // next iteration retries from scratch. Mark
@@ -307,7 +322,28 @@ impl DownloadService {
         };
         let now = Instant::now();
         if slot_end > now {
-            tokio::time::sleep(slot_end - now).await;
+            let queued = slot_end - now;
+            // Outage forensics: when the bandwidth cap has backed downloads
+            // up by >=1s, the cache is filling slower than real-time —
+            // surface a rate-limited (1/min) warning so the operator sees
+            // the throttle on the timeline, not just sustained lag.
+            if queued >= Duration::from_secs(1) {
+                if let Some(ring) = &self.audit_ring {
+                    if self.audit_rl.allow(
+                        rs_core::audit::Action::DiskCacheDownloadThrottled,
+                        "throttle",
+                    ) {
+                        ring.push_parts(crate::audit_ring::RingRowParts {
+                            severity: rs_core::audit::Severity::Warn,
+                            source: rs_core::audit::Source::Vps,
+                            endpoint: None,
+                            action: rs_core::audit::Action::DiskCacheDownloadThrottled,
+                            detail: serde_json::json!({ "queued_ms": queued.as_millis() as u64 }),
+                        });
+                    }
+                }
+            }
+            tokio::time::sleep(queued).await;
         }
     }
 

@@ -18,9 +18,10 @@ pub struct EvictionTask;
 impl EvictionTask {
     /// Spawn the eviction loop. Returns the JoinHandle the caller stores.
     ///
-    /// `audit_ring` (threaded from `DiskCache::new`) is captured for the
-    /// `DiskCacheChunkEvicted` emission wired in Task 10. T8 only plumbs it
-    /// through — the loop behaves exactly as before.
+    /// `audit_ring` (threaded from `DiskCache::new`) receives a rate-limited
+    /// (1/min) `DiskCacheChunkEvicted` row whenever a sweep deletes chunks.
+    /// The `RateLimiter` lives for the loop's lifetime so the cap spans
+    /// sweeps.
     pub fn spawn(
         cache_dir: std::path::PathBuf,
         positions: Arc<EndpointPositionRegistry>,
@@ -28,16 +29,39 @@ impl EvictionTask {
         interval: Duration,
         audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
     ) -> tokio::task::JoinHandle<()> {
-        let _ = &audit_ring; // emission wired in T10
+        let rl = rs_core::audit::RateLimiter::new();
         tokio::spawn(async move {
-            let _audit_ring = audit_ring;
             loop {
                 tokio::time::sleep(interval).await;
-                if let Err(e) = Self::run_once(&cache_dir, &positions, &registry).await {
-                    tracing::warn!("disk_cache eviction error: {e}");
+                match Self::run_once(&cache_dir, &positions, &registry).await {
+                    Ok(evicted) if evicted > 0 => Self::emit_evicted(&audit_ring, &rl, evicted),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("disk_cache eviction error: {e}"),
                 }
             }
         })
+    }
+
+    /// Emit a rate-limited (1/min) `DiskCacheChunkEvicted` audit row. Only
+    /// the live spawn loop emits; tests call `run_once` directly without an
+    /// audit ring, so eviction behaviour stays test-observable via the
+    /// returned count.
+    fn emit_evicted(
+        audit_ring: &Option<Arc<crate::audit_ring::AuditRing>>,
+        rl: &rs_core::audit::RateLimiter,
+        evicted: u64,
+    ) {
+        if let Some(ring) = audit_ring {
+            if rl.allow(rs_core::audit::Action::DiskCacheChunkEvicted, "evicted") {
+                ring.push_parts(crate::audit_ring::RingRowParts {
+                    severity: rs_core::audit::Severity::Info,
+                    source: rs_core::audit::Source::Vps,
+                    endpoint: None,
+                    action: rs_core::audit::Action::DiskCacheChunkEvicted,
+                    detail: serde_json::json!({ "evicted": evicted }),
+                });
+            }
+        }
     }
 
     /// Single sweep pass: list cache_dir, delete files not in any
