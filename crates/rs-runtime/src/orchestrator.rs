@@ -171,6 +171,12 @@ impl ServiceCore {
         .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked))
         .with_upload_metrics(Arc::clone(&upload_metrics));
 
+        // Capture the disk-critical Arc before `api_state` is moved into
+        // `rs_api::serve` below. The disk-pressure monitor (spawned later)
+        // writes to this SAME Arc that the delivery poller reads, so a
+        // critically-full chunk disk drives endpoints RED Attention.
+        let disk_critical_flag = Arc::clone(&api_state.disk_critical);
+
         // Spawn the audit writer that drains the receiver and batches
         // INSERTs + WS broadcasts, and schedule nightly rotation of the
         // audit_log and metrics tables.
@@ -364,6 +370,28 @@ impl ServiceCore {
                 upload_metrics,
                 endpoint_client_uuid,
                 endpoint_audit_tx,
+            )
+            .await;
+        });
+
+        // Local disk-pressure monitor (Task 4). With never-drop uploads, a
+        // long outage buffers chunks until the chunk-store volume fills. We
+        // never silently drop (continuity guarantee) — instead this samples
+        // the volume holding `chunk_dir` every 10s and emits a rate-limited
+        // LocalDiskPressure audit row at Warn (>=80% used) / Critical
+        // (>=90%) so the operator can act before a true disk-full.
+        let disk_monitor_chunk_dir = self.chunk_dir.clone();
+        let disk_monitor_audit_tx = uploader_audit_tx.clone();
+        // Same Arc the delivery poller reads in `poll_delivery_metrics`, so a
+        // critically-full chunk disk paints endpoints RED Attention.
+        let disk_monitor_critical = Arc::clone(&disk_critical_flag);
+        let disk_monitor_shutdown_rx = shutdown.subscribe();
+        tokio::spawn(async move {
+            rs_endpoint::disk_pressure::run_disk_monitor(
+                disk_monitor_chunk_dir,
+                Some(disk_monitor_audit_tx),
+                Some(disk_monitor_critical),
+                disk_monitor_shutdown_rx,
             )
             .await;
         });

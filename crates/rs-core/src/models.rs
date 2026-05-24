@@ -302,6 +302,12 @@ pub struct YoutubeHealth {
     pub error: Option<String>,
 }
 
+// `EndpointLifecycle` + `LifecycleInput` + `compute` live in
+// `crate::endpoint_lifecycle` (extracted to keep this file under the
+// 1000-line CI cap). Re-exported here so `rs_core::models::EndpointLifecycle`
+// paths keep resolving.
+pub use crate::endpoint_lifecycle::{EndpointLifecycle, LifecycleInput};
+
 /// Per-endpoint delivery metrics broadcast via WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryEndpointMetrics {
@@ -329,6 +335,10 @@ pub struct DeliveryEndpointMetrics {
     pub rescue_eta_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub youtube_health: Option<YoutubeHealth>,
+    /// Operator-facing lifecycle (host-computed). Older payloads default to
+    /// Live so the dashboard degrades gracefully.
+    #[serde(default = "crate::endpoint_lifecycle::default_lifecycle")]
+    pub lifecycle: EndpointLifecycle,
 }
 
 /// Service status summary returned by the /status endpoint.
@@ -545,6 +555,7 @@ mod tests {
                     delivery_mode: None,
                     rescue_eta_secs: None,
                     youtube_health: None,
+                    lifecycle: EndpointLifecycle::Live,
                 }],
             },
             WsEvent::Error {
@@ -671,6 +682,7 @@ mod tests {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            lifecycle: EndpointLifecycle::Live,
         };
         let json = serde_json::to_string(&metrics).unwrap();
         let parsed: DeliveryEndpointMetrics = serde_json::from_str(&json).unwrap();
@@ -719,6 +731,7 @@ mod tests {
                 delivery_mode: None,
                 rescue_eta_secs: None,
                 youtube_health: None,
+                lifecycle: EndpointLifecycle::Live,
             }],
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -746,6 +759,7 @@ mod tests {
                 delivery_mode: None,
                 rescue_eta_secs: None,
                 youtube_health: None,
+                lifecycle: EndpointLifecycle::Live,
             },
             DeliveryEndpointMetrics {
                 alias: "BufferedEP".to_string(),
@@ -763,6 +777,7 @@ mod tests {
                 delivery_mode: None,
                 rescue_eta_secs: None,
                 youtube_health: None,
+                lifecycle: EndpointLifecycle::Live,
             },
         ];
         let delay = endpoints
@@ -792,6 +807,7 @@ mod tests {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            lifecycle: EndpointLifecycle::Live,
         }];
         let delay = endpoints
             .iter()

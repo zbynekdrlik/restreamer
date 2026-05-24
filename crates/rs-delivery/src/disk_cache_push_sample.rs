@@ -41,11 +41,18 @@ impl<'a> PushSampleCtx<'a> {
 /// Emit a DiskCachePushSample audit row for one successful chunk push.
 /// Rate-limited via push_audit_rl keyed by (DiskCachePushSample, alias) so
 /// the audit log gets ~1 row/min/endpoint instead of ~1/2s.
+///
+/// `cumulative_pushed_secs` is the total media duration this endpoint has
+/// pushed so far (≈ stream age), NOT behind-live lag. It was previously
+/// emitted under the key `current_chunk_delay_secs`, which read like a
+/// behind-live number (showing ~7800s = stream age) and misled operators.
+/// The behind-live signal is `chunk_supply_lag_ms` / the dashboard's
+/// per-endpoint `chunk_delay_secs`; this field is purely a progress counter.
 pub(crate) fn emit_push_sample(
     ctx: &PushSampleCtx<'_>,
     chunk_id: i64,
     chunk_duration_ms: i64,
-    current_chunk_delay_secs: f64,
+    cumulative_pushed_secs: f64,
 ) {
     let now = std::time::Instant::now();
     let prev = ctx.last_push_at.replace(Some(now));
@@ -78,7 +85,7 @@ pub(crate) fn emit_push_sample(
         "inter_chunk_gap_ms": inter_chunk_gap_ms,
         "burst_factor": burst_factor,
         "delivery_delay_secs": ctx.delivery_delay_ms / 1000,
-        "current_chunk_delay_secs": current_chunk_delay_secs,
+        "cumulative_pushed_secs": cumulative_pushed_secs,
     });
     ring.push(
         rs_core::audit::Severity::Warn,

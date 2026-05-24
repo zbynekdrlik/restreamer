@@ -27,6 +27,8 @@ let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
 //   - "zero-endpoints"  — delivering_activated=true, endpoints=[]
 //   - "last-endpoint"   — delivering_activated=true, 1 endpoint configured
 //   - "rtmp-gate-tick"  — rtmp_stable_secs ticks from 0 upward on each /status poll
+//   - "outage-rescue"   — 1 endpoint lifecycle="rescue" (survivable outage, calm blue UX)
+//   - "outage-attention" — 1 endpoint lifecycle="attention" (auth-reject, red, no calm banner)
 let scenario = "default";
 let rtmpStableSecs = 999; // default: stream has been stable plenty long
 let rtmpTickStartMs = null; // when the tick scenario started
@@ -583,6 +585,56 @@ app.get("/api/v1/delivery/status/cached", (_req, res) => {
   res.json(cachedDelivery);
 });
 
+// Build the DeliveryStatus payload for the outage-survival UX scenarios
+// (Task T19). Used for BOTH the HTTP cached-status response and the
+// WebSocket DeliveryStatus broadcast on connect, so the dashboard's initial
+// HTTP load and the follow-up WS push stay coherent (otherwise the WS would
+// clobber the routed lifecycle with the default "live").
+function buildOutageDelivery(which) {
+  const base = {
+    alias: "yt1",
+    alive: true,
+    current_chunk_id: 142,
+    bytes_processed_total: 1073741824,
+    chunks_processed: 1847,
+    chunk_delay_secs: 3.2,
+    stall_reason: null,
+    ffmpeg_restart_count: 0,
+    reconnect_count: 0,
+    last_error: null,
+    is_fast: false,
+    delivery_mode: "normal",
+    rescue_eta_secs: null,
+    lifecycle: "live",
+  };
+  let endpoint;
+  if (which === "outage-rescue") {
+    // Survivable outage: rescue video is live, recovering automatically.
+    endpoint = {
+      ...base,
+      alive: true,
+      delivery_mode: "rescue",
+      rescue_eta_secs: 45,
+      lifecycle: "rescue",
+    };
+  } else {
+    // Auth-reject: endpoint is dead and needs operator attention (red).
+    endpoint = {
+      ...base,
+      alive: false,
+      last_error: "PublishRejected: bad stream key",
+      lifecycle: "attention",
+    };
+  }
+  return {
+    instance_name: "rs-delivery-evt1",
+    status: "running",
+    server_ip: "1.2.3.4",
+    endpoint_count: 1,
+    endpoints: [endpoint],
+  };
+}
+
 // --- Logs endpoint ---
 app.get("/api/v1/logs", (_req, res) => {
   res.json([
@@ -790,6 +842,19 @@ app.post("/api/v1/_test/scenario", (req, res) => {
         },
       ],
     };
+  } else if (scenario === "outage-rescue" || scenario === "outage-attention") {
+    // Outage-survival UX scenarios (Task T19). Both keep the event active and
+    // delivering so the dashboard renders the endpoint tree. The endpoint's
+    // `lifecycle` field drives the calm/blue vs. red semaphore:
+    //   - outage-rescue:    lifecycle="rescue" -> blue node + calm banner.
+    //   - outage-attention: lifecycle="attention" -> red node, NO calm banner.
+    events = events.map((e) =>
+      e.id === 1
+        ? { ...e, receiving_activated: true, delivering_activated: true }
+        : e,
+    );
+    eventEndpoints[1] = [1];
+    cachedDelivery = buildOutageDelivery(scenario);
   }
   res.json({ scenario });
 });
@@ -938,7 +1003,9 @@ wss.on("connection", (ws) => {
 
   // Choose the initial delivery payload based on the active scenario.
   let deliveryData;
-  if (scenario === "zero-endpoints") {
+  if (scenario === "outage-rescue" || scenario === "outage-attention") {
+    deliveryData = buildOutageDelivery(scenario);
+  } else if (scenario === "zero-endpoints") {
     deliveryData = {
       instance_name: "rs-delivery-evt1",
       status: "running",
@@ -1015,20 +1082,25 @@ wss.on("connection", (ws) => {
   // For scenarios that need an "active" pipeline (zero-endpoints,
   // last-endpoint), also emit a PipelineState event so the frontend
   // knows we're in streaming/buffering and shows the banner/controls.
-  const pipelineData =
-    scenario === "zero-endpoints" || scenario === "last-endpoint"
-      ? {
-          state: "streaming",
-          event_id: 1,
-          event_name:
-            scenario === "last-endpoint" ? "test-event" : "Sunday Service",
-          target_delay_secs: 120,
-          session_start: new Date().toISOString(),
-          local_buffer_chunks: 10,
-          s3_queue_chunks: 5,
-          cache_duration_secs: 118.0,
-        }
-      : null;
+  const activePipelineScenarios = [
+    "zero-endpoints",
+    "last-endpoint",
+    "outage-rescue",
+    "outage-attention",
+  ];
+  const pipelineData = activePipelineScenarios.includes(scenario)
+    ? {
+        state: "streaming",
+        event_id: 1,
+        event_name:
+          scenario === "last-endpoint" ? "test-event" : "Sunday Service",
+        target_delay_secs: 120,
+        session_start: new Date().toISOString(),
+        local_buffer_chunks: 10,
+        s3_queue_chunks: 5,
+        cache_duration_secs: 118.0,
+      }
+    : null;
 
   // Update cache and send after a brief delay
   cachedDelivery = deliveryData;

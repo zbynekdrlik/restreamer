@@ -201,6 +201,7 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 .status-dot.active { background: var(--status-ok); opacity: 1; animation: pulse 2s ease-in-out infinite; }
 .status-dot.warning { background: var(--status-warn); opacity: 1; }
 .status-dot.error { background: var(--status-error); opacity: 1; animation: pulse 1s ease-in-out infinite; }
+.status-dot.recovering { background: #3b82f6; opacity: 1; animation: pulse 2s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
 /* OBS Toggle */
@@ -373,6 +374,10 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 .endpoint-node.ok { border-left-color: var(--status-ok); }
 .endpoint-node.warning { border-left-color: var(--status-warn); }
 .endpoint-node.error { border-left-color: var(--status-error); }
+.endpoint-node.live { border-left-color: var(--status-ok); }
+.endpoint-node.pending { border-left-color: var(--border); }
+.endpoint-node.recovering { border-left-color: #3b82f6; }
+.endpoint-node.attention { border-left-color: var(--status-error); }
 .endpoint-anomaly { font-size: 13px; color: var(--status-warn); }
 .endpoint-mode-warmup {
     background: #3b82f6;
@@ -612,6 +617,7 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 /* --- ZeroEndpointBanner --- */
 .banner { padding: 12px; font-weight: 600; text-align: center; border-radius: var(--radius); margin-bottom: var(--spacing-sm); }
 .banner--critical { background: #4a1416; color: #ffdede; border: 1px solid #e85c47; animation: auditPulse 1.5s infinite; }
+.banner--recovering { background: #11243f; color: #cfe3ff; border: 1px solid #3b82f6; }
 
 /* --- EndpointRemoveConfirmModal --- */
 .modal__backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 50; }

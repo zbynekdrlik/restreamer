@@ -94,9 +94,16 @@ pub struct DownloadService {
     /// S3 fetch latency + byte + failure profiler. Surfaced via
     /// `profile_snapshot()` for the `/api/v1/delivery/status` endpoint.
     profile: Arc<crate::s3_fetch_profile::S3FetchProfile>,
+    /// VPS audit ring for outage-forensics events (write-failed, throttled).
+    /// `None` in unit tests. Threaded through `DiskCache::new`.
+    audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
+    /// Rate-limiter for noisy disk-cache audit events (download-throttled).
+    /// Keeps the audit ring from flooding during a sustained throttle.
+    audit_rl: rs_core::audit::RateLimiter,
 }
 
 impl DownloadService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         backend: Arc<dyn S3Backend>,
         registry: Arc<ChunkRegistry>,
@@ -104,6 +111,7 @@ impl DownloadService {
         event_id: String,
         bandwidth_cap_mbit: u64,
         max_concurrent: usize,
+        audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
     ) -> Arc<Self> {
         let event_dir = cache_dir.join(&event_id);
         Arc::new(Self {
@@ -116,6 +124,8 @@ impl DownloadService {
             next_slot_start: Mutex::new(Instant::now()),
             durations: Mutex::new(HashMap::new()),
             profile: Arc::new(crate::s3_fetch_profile::S3FetchProfile::new()),
+            audit_ring,
+            audit_rl: rs_core::audit::RateLimiter::new(),
         })
     }
 
@@ -236,6 +246,21 @@ impl DownloadService {
                     self.token_bucket_consume(fc.data.len() as u64).await;
                     if let Err(e) = self.write_atomic(chunk_id, &fc.data, fc.duration_ms).await {
                         tracing::error!(chunk_id, "disk_cache write failed: {e}");
+                        // Outage forensics: a local disk-write failure (full
+                        // volume, I/O error) is operator-actionable — surface
+                        // it on the audit timeline, not just the log.
+                        if let Some(ring) = &self.audit_ring {
+                            ring.push_parts(crate::audit_ring::RingRowParts {
+                                severity: rs_core::audit::Severity::Error,
+                                source: rs_core::audit::Source::Vps,
+                                endpoint: None,
+                                action: rs_core::audit::Action::DiskCacheWriteFailed,
+                                detail: serde_json::json!({
+                                    "chunk_id": chunk_id,
+                                    "error": e.to_string(),
+                                }),
+                            });
+                        }
                         // Disk-write failures are not handled here -- the
                         // outer PrefetchReader loop re-requests, and the
                         // next iteration retries from scratch. Mark
@@ -297,7 +322,28 @@ impl DownloadService {
         };
         let now = Instant::now();
         if slot_end > now {
-            tokio::time::sleep(slot_end - now).await;
+            let queued = slot_end - now;
+            // Outage forensics: when the bandwidth cap has backed downloads
+            // up by >=1s, the cache is filling slower than real-time —
+            // surface a rate-limited (1/min) warning so the operator sees
+            // the throttle on the timeline, not just sustained lag.
+            if queued >= Duration::from_secs(1) {
+                if let Some(ring) = &self.audit_ring {
+                    if self.audit_rl.allow(
+                        rs_core::audit::Action::DiskCacheDownloadThrottled,
+                        "throttle",
+                    ) {
+                        ring.push_parts(crate::audit_ring::RingRowParts {
+                            severity: rs_core::audit::Severity::Warn,
+                            source: rs_core::audit::Source::Vps,
+                            endpoint: None,
+                            action: rs_core::audit::Action::DiskCacheDownloadThrottled,
+                            detail: serde_json::json!({ "queued_ms": queued.as_millis() as u64 }),
+                        });
+                    }
+                }
+            }
+            tokio::time::sleep(queued).await;
         }
     }
 
@@ -376,6 +422,7 @@ mod tests {
             "evt".into(),
             10_000, // 10 Gbit cap so test isn't bandwidth-limited
             8,
+            None,
         );
         let mut handles = Vec::new();
         for _ in 0..6 {
@@ -401,6 +448,7 @@ mod tests {
             "evt".into(),
             10_000,
             8,
+            None,
         );
         svc.request_chunk(7).await;
         let path = tmp.path().join("evt").join("7.bin");
@@ -425,6 +473,7 @@ mod tests {
             "evt".into(),
             10_000,
             8,
+            None,
         );
         svc.request_chunk(404).await;
         let state = registry.wait_for_chunk(404).await.unwrap();
@@ -464,6 +513,7 @@ mod tests {
             "evt".into(),
             10_000,
             8,
+            None,
         );
         svc.request_chunk(99).await;
         let state = registry.wait_for_chunk(99).await.unwrap();
@@ -490,6 +540,7 @@ mod tests {
             "evt".into(),
             100, // 100 Mbit/s cap
             10,
+            None,
         );
         let started = Instant::now();
         let mut handles = Vec::new();
@@ -527,6 +578,7 @@ mod tests {
             "evt".into(),
             10_000,
             8,
+            None,
         );
         // Should resolve to NotFound, NOT hang.
         let result = tokio::time::timeout(Duration::from_secs(2), svc.request_chunk(7)).await;
@@ -561,6 +613,7 @@ mod tests {
             "evt".into(),
             10_000,
             8,
+            None,
         );
         let result = svc.head_duration(7).await.unwrap();
         assert_eq!(result, Some(2000));
@@ -584,6 +637,7 @@ mod tests {
             "evt".into(),
             10_000,
             8,
+            None,
         );
         let svc2 = Arc::clone(&svc);
         let task = tokio::spawn(async move { svc2.request_chunk(503).await });
@@ -621,6 +675,7 @@ mod tests {
             "evt".into(),
             10_000,
             8,
+            None,
         );
         let svc2 = Arc::clone(&svc);
         let req = tokio::spawn(async move { svc2.request_chunk(503).await });

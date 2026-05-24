@@ -161,6 +161,45 @@ pub struct YouTubeStatus {
     pub error: Option<String>,
 }
 
+/// Display cap (seconds) for a FAST endpoint's per-endpoint delay number.
+/// Fast endpoints (`delivery_delay == 0`) are meant to be near-live and, after
+/// an outage, jump back to the live edge (see `producer_lag`). Their "buffer
+/// above the consumer" can momentarily spike (a burst of fresh chunks lands
+/// before the next poll reads `current_chunk_id`), so the raw value is
+/// meaningless as a steady-state number. Cap it at a small constant so the
+/// dashboard shows a bounded, sane figure instead of a 7800s ghost.
+const FAST_ENDPOINT_DELAY_CAP_SECS: f64 = 30.0;
+
+/// Multiplier for the DELAYED-endpoint per-endpoint delay cap. Mirrors the
+/// global pipeline cap at `lib.rs` (`target_delay * 1.5`): 1.5× leaves room to
+/// surface a genuinely oversized cache without surfacing the entire historical
+/// S3 backlog when `current_chunk_id` briefly reads 0 (Stop+Start, VPS spin-up,
+/// pre-first-push prefill). See #187.
+const DELAYED_ENDPOINT_DELAY_CAP_MULT: f64 = 1.5;
+
+/// Bound the per-endpoint `chunk_delay_secs` shown on the dashboard.
+///
+/// The raw value from `get_cache_duration_secs` is uncapped — it sums every
+/// sent chunk above the endpoint's read position, which can be the entire S3
+/// backlog (e.g. 7800s) when the endpoint is behind or `current_chunk_id`
+/// reads 0. The GLOBAL pipeline value is already capped at `target * 1.5`
+/// (lib.rs), but the per-endpoint value was not — so individual endpoints
+/// showed nonsensical huge numbers.
+///
+/// - **Fast endpoints** (`delivery_delay_secs == 0`): a `target * 1.5` cap
+///   would be `0`, which is wrong. Cap at `FAST_ENDPOINT_DELAY_CAP_SECS`.
+/// - **Delayed endpoints**: cap at `target_delay_secs * 1.5`, mirroring the
+///   global cap. A zero/garbage target falls back to the fast cap so the
+///   number can never blow up.
+pub(crate) fn cap_endpoint_delay_secs(raw: f64, is_fast: bool, target_delay_secs: u64) -> f64 {
+    let raw = raw.max(0.0);
+    if is_fast || target_delay_secs == 0 {
+        raw.min(FAST_ENDPOINT_DELAY_CAP_SECS)
+    } else {
+        raw.min(target_delay_secs as f64 * DELAYED_ENDPOINT_DELAY_CAP_MULT)
+    }
+}
+
 impl DeliveryOrchestrator {
     /// Get delivery status for an event.
     pub async fn get_delivery_status(&self, event_id: i64) -> anyhow::Result<DeliveryStatus> {
@@ -171,6 +210,16 @@ impl DeliveryOrchestrator {
             let cache = self.endpoint_fast_cache_lock().await;
             cache.get(&event_id).cloned().unwrap_or_default()
         };
+
+        // Per-event target delay (seconds) for the delayed-endpoint display cap.
+        // Honor the per-event cache_delay_secs override; fall back to the
+        // configured default. Same resolution as lib.rs / delivery.rs.
+        let target_delay_secs: u64 = db::get_streaming_event_by_id(self.pool(), event_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|ev| ev.cache_delay_secs.map(|s| s as u64))
+            .unwrap_or(self.config().delivery.delivery_delay_secs);
 
         let (server_ready, endpoints) = match &instance {
             Some(inst) if is_delivery_active(&inst.status) => {
@@ -265,10 +314,20 @@ impl DeliveryOrchestrator {
                             // lag reads ~0s right after first push — visually worse than the
                             // 1-tick "buffer above" artifact. The 1726s ghost from #187 is
                             // already fixed by the 1.5x cap at delivery.rs (commit b928376).
-                            let chunk_delay_secs =
+                            //
+                            // The raw value is UNCAPPED — a fast/behind endpoint (or one
+                            // reading current_chunk_id=0) sums the whole S3 backlog and shows
+                            // a 7800s ghost. The global pipeline value is capped at
+                            // target*1.5 in lib.rs; mirror that per-endpoint. Fast endpoints
+                            // (target=0) get a small constant cap instead of 1.5*0=0.
+                            let is_fast = fast_map.get(&alias).copied().unwrap_or(false);
+                            let chunk_delay_secs = cap_endpoint_delay_secs(
                                 db::get_cache_duration_secs(self.pool(), event_id, chunk_id)
                                     .await
-                                    .unwrap_or(0.0);
+                                    .unwrap_or(0.0),
+                                is_fast,
+                                target_delay_secs,
+                            );
 
                             // Update DB with latest status
                             if let Err(e) = db::upsert_delivery_endpoint_status(
@@ -297,7 +356,7 @@ impl DeliveryOrchestrator {
                                 reconnect_count,
                                 last_error,
                                 ffmpeg_last_stderr,
-                                is_fast: fast_map.get(&alias).copied().unwrap_or(false),
+                                is_fast,
                                 restart_history,
                                 delivery_mode,
                                 rescue_eta_secs,
@@ -384,12 +443,24 @@ impl DeliveryOrchestrator {
                 delivery_mode: ep.delivery_mode,
                 rescue_eta_secs: ep.rescue_eta_secs,
                 youtube_health: None,
+                lifecycle: rs_core::models::EndpointLifecycle::Live,
             };
             if let Some(cfg) = configs.iter().find(|c| c.alias == m.alias) {
                 if cfg.youtube_oauth_id.is_some() && cfg.service_type == "YT_RTMP" {
                     attach_yt_health_cached(self.pool(), cfg, &mut m, self.audit_tx()).await;
                 }
             }
+            // Host-compute the operator-facing lifecycle from the metrics we
+            // just assembled (outage = blue/buffering, auth/disk = red).
+            m.lifecycle =
+                rs_core::models::EndpointLifecycle::compute(&rs_core::models::LifecycleInput {
+                    alive: m.alive,
+                    chunks_processed: m.chunks_processed,
+                    delivery_mode: m.delivery_mode.clone(),
+                    stall_reason: m.stall_reason.clone(),
+                    last_error: m.last_error.clone(),
+                    disk_critical: self.disk_critical(),
+                });
             metrics.push(m);
         }
 

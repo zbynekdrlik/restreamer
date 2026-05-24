@@ -46,6 +46,12 @@ pub struct DeliveryOrchestrator {
     resume_positions: Arc<Mutex<HashMap<i64, HashMap<String, i64>>>>,
     /// Audit channel. `None` in tests; emit sites are guarded by `if let Some`.
     audit_tx: Option<mpsc::Sender<AuditRow>>,
+    /// Shared local-disk-critical flag, written by the disk-pressure monitor
+    /// and read in `poll_delivery_metrics` so endpoints go RED Attention when
+    /// the chunk-store volume is critically full. Defaults to a private
+    /// always-false flag; the runtime replaces it with the SAME Arc the
+    /// monitor writes to via `with_disk_critical`.
+    disk_critical: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Rate limiter for noisy delivery audit rows (VpsUnreachable). Emits at
@@ -161,6 +167,14 @@ impl DeliveryOrchestrator {
         &self.pool
     }
 
+    /// Read the live local-disk-critical flag (written by the disk-pressure
+    /// monitor). True when the chunk-store volume is critically full. Used by
+    /// `poll_delivery_metrics` to drive endpoints RED Attention.
+    pub(crate) fn disk_critical(&self) -> bool {
+        self.disk_critical
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn new(pool: SqlitePool, config: Config) -> Option<Self> {
         let token = &config.hetzner.api_token;
         if token.is_empty() {
@@ -174,6 +188,7 @@ impl DeliveryOrchestrator {
             endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
             resume_positions: Arc::new(Mutex::new(HashMap::new())),
             audit_tx: None,
+            disk_critical: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -187,6 +202,7 @@ impl DeliveryOrchestrator {
             endpoint_fast_cache: Arc::new(Mutex::new(HashMap::new())),
             resume_positions: Arc::new(Mutex::new(HashMap::new())),
             audit_tx: None,
+            disk_critical: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -195,6 +211,14 @@ impl DeliveryOrchestrator {
     /// emits through this channel. Call once at construction.
     pub fn with_audit_tx(mut self, tx: mpsc::Sender<AuditRow>) -> Self {
         self.audit_tx = Some(tx);
+        self
+    }
+
+    /// Share the local-disk-critical flag with the disk-pressure monitor.
+    /// MUST be the SAME Arc the monitor writes to, so `poll_delivery_metrics`
+    /// reads the live state. Call once at construction.
+    pub fn with_disk_critical(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.disk_critical = flag;
         self
     }
 

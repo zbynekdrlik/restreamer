@@ -10,11 +10,12 @@ use super::confirm_modal::ConfirmModal;
 use super::endpoint_history::EndpointHistory;
 use super::endpoint_remove_confirm_modal::EndpointRemoveConfirmModal;
 use super::oauth_authorize::OAuthAuthorize;
+use super::outage_banner::OutageBanner;
 use super::pacing_panel::PacingPanel;
 use super::upload_strip::UploadStrip;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
-use crate::store::DashboardStore;
+use crate::store::{DashboardStore, EndpointLifecycle};
 use crate::utils::cache_threshold_for_service;
 
 /// Minimum seconds the RTMP publisher must be connected before the
@@ -33,6 +34,7 @@ pub fn OperatorDashboard() -> impl IntoView {
     view! {
         <div class="operator-dashboard">
             <ZeroEndpointBanner />
+            <OutageBanner />
             <div class="operator-dashboard__layout">
                 <div class="operator-dashboard__main">
                     <ControlBar />
@@ -662,29 +664,24 @@ fn EndpointTree() -> impl IntoView {
                     };
 
                     let status_class = move || {
-                        let ep = ep_data.get();
-                        if !ep.alive && ep.chunks_processed == 0 {
-                            "endpoint-node pending"
-                        } else if !ep.alive {
-                            "endpoint-node dead"
-                        } else if ep.stall_reason.is_some() || ep.ffmpeg_restart_count >= 10 {
-                            "endpoint-node stalled"
-                        } else {
-                            "endpoint-node healthy"
+                        match ep_data.get().lifecycle {
+                            EndpointLifecycle::Live => "endpoint-node live",
+                            EndpointLifecycle::Pending => "endpoint-node pending",
+                            EndpointLifecycle::Buffering
+                            | EndpointLifecycle::Rescue
+                            | EndpointLifecycle::Recovering => "endpoint-node recovering",
+                            EndpointLifecycle::Attention => "endpoint-node attention",
                         }
                     };
 
                     let dot_class = move || {
-                        let ep = ep_data.get();
-                        let is_pending = !ep.alive && ep.chunks_processed == 0 && ep.chunk_delay_secs == 0.0;
-                        let has_critical_error = ep.ffmpeg_restart_count >= 10
-                            || ep.stall_reason.is_some();
-                        if is_pending {
-                            "status-dot"
-                        } else if !ep.alive || has_critical_error {
-                            "status-dot error"
-                        } else {
-                            "status-dot active"
+                        match ep_data.get().lifecycle {
+                            EndpointLifecycle::Live => "status-dot active",
+                            EndpointLifecycle::Pending => "status-dot",
+                            EndpointLifecycle::Buffering
+                            | EndpointLifecycle::Rescue
+                            | EndpointLifecycle::Recovering => "status-dot recovering",
+                            EndpointLifecycle::Attention => "status-dot error",
                         }
                     };
 
@@ -775,9 +772,22 @@ fn EndpointTree() -> impl IntoView {
                                     })
                                 }}
                                 {move || {
-                                    ep_data.get().last_error.clone().map(|e| view! {
-                                        <span class="endpoint-anomaly">{e}</span>
-                                    })
+                                    let ep = ep_data.get();
+                                    if ep.lifecycle == EndpointLifecycle::Attention {
+                                        ep.last_error.clone().map(|e| {
+                                            let short: String = e.chars().take(60).collect();
+                                            let short = if e.chars().count() > 60 {
+                                                format!("{short}\u{2026}")
+                                            } else {
+                                                short
+                                            };
+                                            view! {
+                                                <span class="endpoint-anomaly" title=e>{short}</span>
+                                            }
+                                        })
+                                    } else {
+                                        None // survivable states: no scary raw error
+                                    }
                                 }}
                                 {move || {
                                     let count = ep_data.get().ffmpeg_restart_count;

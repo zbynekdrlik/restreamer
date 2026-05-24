@@ -696,7 +696,7 @@ async fn test_write_timeout_kills_ffmpeg() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
 }
 #[tokio::test]
-async fn test_processes_100_sequential_chunks() {
+async fn test_fast_endpoint_jumps_to_live_edge_with_backlog() {
     tokio::time::pause();
     let chunks: Vec<(i64, Vec<u8>)> = (1..=100).map(|i| (i, vec![i as u8; 100])).collect();
     let fetcher = MockFetcher::new(chunks);
@@ -723,19 +723,19 @@ async fn test_processes_100_sequential_chunks() {
         .await;
     });
 
-    // Direct write + 1s sleep per chunk. 100 chunks = 100s.
-    // Advance in 10ms steps. Need 100 * 100 = 10000 steps minimum.
     for _ in 0..12000 {
         tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
     }
 
     let s = stats.lock().await;
-    assert_eq!(s.chunks_processed, 100, "Must process all 100 chunks");
-    assert_eq!(s.current_chunk_id, 100);
-    assert_eq!(s.bytes_processed_total, 10000);
-    // After consuming all 100 chunks, the loop hits None repeatedly
-    // and may set chunk_gap stall -- that's expected when data is exhausted.
+    // Fast endpoint jumps to live edge instead of replaying the backlog (#232).
+    assert_eq!(s.current_chunk_id, 100); // converged to live edge
+    assert!(
+        s.chunks_processed > 0 && s.chunks_processed < 100,
+        "fast endpoint must JUMP (skip backlog), not replay all 100; got {}",
+        s.chunks_processed
+    );
     assert!(
         s.stall_reason.is_none() || s.stall_reason.as_deref() == Some("chunk_gap"),
         "Unexpected stall: {:?}",
@@ -744,7 +744,7 @@ async fn test_processes_100_sequential_chunks() {
     drop(s);
 
     let w = writes.lock().await;
-    assert!(w.len() >= 100, "expected >=100 writes, got {}", w.len());
+    assert!(!w.is_empty(), "expected some writes, got {}", w.len());
     drop(w);
 
     let _ = stop_tx.send(true);

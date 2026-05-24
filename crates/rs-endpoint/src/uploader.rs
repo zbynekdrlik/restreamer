@@ -36,6 +36,8 @@ fn classify_upload_error(msg: &str) -> &'static str {
     let m = msg.to_ascii_lowercase();
     if m.contains("timeout") || m.contains("timed out") {
         "timeout"
+    } else if m.contains(" 400") || m.contains("bad request") {
+        "400"
     } else if m.contains(" 403") || m.contains("forbidden") {
         "403"
     } else if m.contains(" 404") || m.contains("not found") {
@@ -81,8 +83,11 @@ fn should_spawn_worker(live: usize, target: usize) -> bool {
     live < target
 }
 
-const MAX_ATTEMPTS: i64 = 10;
-const MAX_WALL_CLOCK_MS: i64 = 600_000; // 10 min total retry budget
+/// Attempt budget for STRUCTURAL-reject classes (400/403/404) only. Network
+/// classes (timeout/5xx/conn/other) are never abandoned — see
+/// `should_abandon_upload`. This is the continuity guarantee: a long outage
+/// must lose nothing while the laptop runs (2026-05-22 event fix).
+const ABANDON_ATTEMPT_BUDGET: i64 = 5;
 // Concurrency bounds tuned for Hetzner Object Storage NBG1 per-bucket
 // rate limits. 32-worker sustained load triggered 503/504 cascades
 // during 2026-05-02 4-h soak. boto3 burst test: 30 parallel PUTs from
@@ -93,6 +98,20 @@ const MAX_WALL_CLOCK_MS: i64 = 600_000; // 10 min total retry budget
 // requests/sec exceeds it. 8 sustained workers stays within budget.
 const MIN_CONCURRENCY: usize = 2;
 pub(crate) const MAX_CONCURRENCY: usize = 8;
+// Compile-time invariant (replaces a runtime tautology test).
+const _: () = assert!(MAX_CONCURRENCY > MIN_CONCURRENCY);
+
+/// Decide whether an upload error is terminal for the chunk.
+///
+/// Network-class errors (`timeout`/`5xx`/`conn`/`other`) are NEVER terminal:
+/// the chunk stays on disk and is retried forever at capped backoff so an
+/// outage of any duration loses nothing (continuity guarantee). Only
+/// structural client rejects (`400`/`403`/`404`) — where retrying can never
+/// succeed — abandon, and only after `ABANDON_ATTEMPT_BUDGET` attempts to
+/// absorb transient auth/propagation hiccups.
+fn should_abandon_upload(class: &str, attempt: i64) -> bool {
+    matches!(class, "400" | "403" | "404") && attempt >= ABANDON_ATTEMPT_BUDGET
+}
 
 pub(crate) fn backoff_ms(attempt: i64) -> u64 {
     // 1s, 2s, 4s, 8s, 16s, 30s (cap)
@@ -466,9 +485,10 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
         }
         Err(e) => {
             let err_msg = e.to_string();
-            let wall_clock_ms = chrono::Utc::now().timestamp_millis()
-                - chunk.upload_first_attempt_at.unwrap_or(now_ms);
-            let permanent = attempt >= MAX_ATTEMPTS || wall_clock_ms >= MAX_WALL_CLOCK_MS;
+            let class = classify_upload_error(&err_msg);
+            // Continuity: network-class errors retry forever; only structural
+            // rejects abandon after the budget.
+            let permanent = should_abandon_upload(class, attempt);
             if permanent {
                 let _ = db::mark_upload_permanently_failed(pool, chunk.id).await;
             } else {
@@ -499,7 +519,6 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
             // Permanent failures always emit (bypass rate limit) because
             // they are terminal for the chunk and worth surfacing.
             if let Some(tx) = &ctx.audit_tx {
-                let class = classify_upload_error(&err_msg);
                 if permanent || UPLOAD_RL.allow(Action::S3UploadFailed, class) {
                     rs_core::audit::record(
                         tx,
@@ -530,12 +549,126 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
     }
 }
 
+/// Test-only driver that exercises the REAL `upload_one` path against a
+/// mock S3 endpoint with an accelerated retry clock. Compiled only when the
+/// `testing` feature (or `cfg(test)`) is on — never in release binaries.
+/// Production retry/backoff code is left intact; we only shrink the test
+/// clock by resetting `upload_next_retry_at` so the next pick is immediate.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) mod testing_support {
+    use super::*;
+    use rs_core::config::S3Config;
+
+    /// Drive the upload worker loop against `s3_endpoint`/`bucket` until no
+    /// uploadable chunk remains (two consecutive empty picks) or a 30s wall
+    /// deadline. Calls the unchanged `upload_one`, so the never-drop decision
+    /// is exercised, not bypassed. After each failed `upload_one`, the failed
+    /// chunk's `upload_next_retry_at` is forced to 0 so the next pick is
+    /// immediate (5ms apart) instead of waiting the real capped backoff.
+    pub async fn drive_until_idle(
+        pool: &SqlitePool,
+        s3_endpoint: &str,
+        bucket: &str,
+    ) -> anyhow::Result<()> {
+        let s3 = S3Client::new(&S3Config {
+            bucket: bucket.to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: s3_endpoint.to_string(),
+            access_key_id: "test-key".to_string(),
+            secret_access_key: "test-secret".to_string(),
+        })
+        .map_err(|e| anyhow::anyhow!("build mock S3 client: {e}"))?;
+
+        let (ws_tx, _ws_rx) = broadcast::channel::<WsEvent>(64);
+        let ctx = WorkerCtx {
+            pool: pool.clone(),
+            s3: Arc::new(s3),
+            ws_tx,
+            metrics: Arc::new(UploadMetrics::default()),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            blocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            drain_needed: Arc::new(AtomicUsize::new(0)),
+            client_uuid: "test-uuid".to_string(),
+            audit_tx: None,
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut consecutive_empty = 0;
+        while Instant::now() < deadline {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            match db::pick_next_uploadable_chunk(&ctx.pool, now_ms).await {
+                Ok(Some(chunk)) => {
+                    consecutive_empty = 0;
+                    upload_one(&ctx, chunk).await;
+                    // Accelerate the test clock: any chunk left unsent and not
+                    // permanently failed becomes immediately re-pickable. This
+                    // does NOT alter the production decision (still made by
+                    // `should_abandon_upload`) — it only collapses the backoff
+                    // wait so >15 retries finish in well under the deadline.
+                    sqlx::query(
+                        "UPDATE chunk_records SET upload_next_retry_at = 0 \
+                         WHERE sent = 0 AND upload_failed_permanently = 0",
+                    )
+                    .execute(&ctx.pool)
+                    .await?;
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Ok(None) => {
+                    consecutive_empty += 1;
+                    if consecutive_empty >= 2 {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(e) => return Err(anyhow::anyhow!("pick chunk failed: {e}")),
+            }
+        }
+        Err(anyhow::anyhow!("drive_until_idle hit the 30s deadline"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rs_core::config::S3Config;
     use rs_core::db;
     use std::time::Duration;
+
+    #[test]
+    fn network_class_errors_never_abandon_even_after_many_attempts() {
+        // Continuity guarantee: a long outage must never drop a chunk.
+        for class in ["timeout", "5xx", "conn", "other"] {
+            assert!(
+                !should_abandon_upload(class, 9_999),
+                "network class {class} must retry forever, never abandon"
+            );
+        }
+    }
+
+    #[test]
+    fn structural_reject_classes_abandon_only_after_budget() {
+        // 403/404 mean S3 structurally rejected the object — retrying can
+        // never succeed. Absorb a few transient auth/propagation hiccups,
+        // then abandon.
+        assert!(
+            !should_abandon_upload("403", 4),
+            "below budget: keep trying"
+        );
+        assert!(should_abandon_upload("403", 5), "at budget: abandon");
+        assert!(should_abandon_upload("404", 50), "above budget: abandon");
+    }
+
+    #[test]
+    fn http_400_abandons_only_after_budget() {
+        // A 400 Bad Request PUT can never succeed by retrying — it is a
+        // structural reject like 403/404. Absorb a few transient hiccups
+        // (below budget), then abandon (at/above budget).
+        assert!(
+            !should_abandon_upload("400", 4),
+            "below budget: keep trying"
+        );
+        assert!(should_abandon_upload("400", 5), "at budget: abandon");
+    }
 
     fn test_s3_config() -> S3Config {
         S3Config {
@@ -594,11 +727,6 @@ mod tests {
     #[test]
     fn backoff_attempt_zero_is_sane() {
         assert!(backoff_ms(0) >= 1000);
-    }
-
-    #[test]
-    fn max_concurrency_constant_is_valid() {
-        assert!(MAX_CONCURRENCY > MIN_CONCURRENCY);
     }
 
     #[test]

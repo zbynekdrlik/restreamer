@@ -22,6 +22,17 @@ pub struct RingRow {
     pub detail: serde_json::Value,
 }
 
+/// The per-row fields for [`AuditRing::push_parts`]. Lets builder functions
+/// (e.g. `rescue_audit`) return one value instead of a 5-tuple, keeping
+/// emission call sites tidy.
+pub struct RingRowParts {
+    pub severity: Severity,
+    pub source: Source,
+    pub endpoint: Option<String>,
+    pub action: Action,
+    pub detail: serde_json::Value,
+}
+
 pub struct AuditRing {
     cap: usize,
     rows: Mutex<VecDeque<RingRow>>,
@@ -53,6 +64,11 @@ impl AuditRing {
     ) -> RingRow {
         let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.push_ts(ts, severity, source, endpoint, action, detail)
+    }
+
+    /// Push a pre-built [`RingRowParts`] bundle (current wall-clock ts).
+    pub fn push_parts(&self, p: RingRowParts) -> RingRow {
+        self.push(p.severity, p.source, p.endpoint, p.action, p.detail)
     }
 
     #[allow(clippy::too_many_arguments)]

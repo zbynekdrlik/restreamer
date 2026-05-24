@@ -1,10 +1,22 @@
 //! Live-edge lag detection for the producer hot loop.
 //!
 //! Periodically probes far ahead via HEAD-only S3 calls. If chunks exist
-//! beyond `delivery_delay_chunks × 2`, jumps the read pointer back to
+//! beyond the current read position, jumps the read pointer to
 //! `(latest_known - delivery_delay_chunks)`. Without this, any one-time
 //! slowdown (slow start, transient stall, OBS pause) accumulates lag
 //! forever — producer reads at 1x and never catches up.
+//!
+//! Two endpoint classes, two jump targets (operator-locked behavior):
+//! - **Fast endpoints** (`delivery_delay_ms == 0`, e.g. the control/monitor
+//!   stream): jump target is the LIVE EDGE itself (`delivery_delay_chunks == 0`
+//!   → `latest_known`). After an outage they MUST skip the gap to stay
+//!   near-live; falling behind unbounded is what killed them repeatedly.
+//! - **Delayed endpoints** (`delivery_delay_ms > 0`, main YT/FB): jump target
+//!   is `latest_known - delivery_delay_chunks`, holding a constant gap behind
+//!   live equal to the configured delay. Unchanged behavior.
+//!
+//! RTMP push itself is always strictly 1× — this only moves the READ pointer
+//! (which chunk to fetch next); it never speeds up delivery.
 //!
 //! Observed in prod (event 9289 on 2026-05-07): VPS read pointer 70+
 //! min behind live edge, OBS-stop didn't drain cache because fresh
@@ -25,15 +37,22 @@ const LAG_PROBE_LADDER_MAX: u32 = 12;
 /// Exponential-probe ladder for the highest known-existing chunk_id ahead
 /// of `current`. Returns `Some(new_id)` to jump to, or `None` if no skip
 /// needed. Cost: O(log lag) probes when lag is large, 1 probe when not.
+///
+/// `delivery_delay_chunks == 0` means "jump target = live edge" (fast
+/// endpoints). `> 0` means "jump target = live edge - delay" (delayed
+/// endpoints). Negative is nonsensical → `None`.
 pub(crate) async fn detect_lag_and_jump<F: ChunkFetcher>(
     fetcher: &F,
     current: i64,
     delivery_delay_chunks: i64,
 ) -> Option<i64> {
-    if delivery_delay_chunks <= 0 {
+    if delivery_delay_chunks < 0 {
         return None;
     }
-    let mut probe_offset: i64 = delivery_delay_chunks.saturating_mul(2);
+    // The ladder must always step strictly forward. For fast endpoints the
+    // natural start `delivery_delay_chunks * 2` is 0, which would probe
+    // `current` forever and never advance — clamp the first rung to +2.
+    let mut probe_offset: i64 = delivery_delay_chunks.saturating_mul(2).max(2);
     let mut last_existing: Option<i64> = None;
     for _ in 0..LAG_PROBE_LADDER_MAX {
         let probe_id = current + probe_offset;
@@ -51,16 +70,21 @@ pub(crate) async fn detect_lag_and_jump<F: ChunkFetcher>(
 /// Convenience wrapper called once per successful fetch in producer_task.
 /// Bumps the counter; every `LAG_PROBE_INTERVAL_ITERS` invocations it
 /// runs the ladder probe and (if lag detected) updates `chunk_id`.
+///
+/// `delivery_delay_ms` is no longer a short-circuit: fast endpoints
+/// (`delivery_delay_ms == 0`) probe too, so they can jump to the live edge
+/// after an outage. The parameter is kept only for tracing context / future
+/// use; the jump target is fully determined by `delivery_delay_chunks`.
 pub(crate) async fn maybe_jump<F: ChunkFetcher>(
     fetcher: &F,
     chunk_id: &mut i64,
     delivery_delay_chunks: i64,
-    delivery_delay_ms: u64,
+    _delivery_delay_ms: u64,
     iters: &mut u32,
     alias: &str,
 ) {
     *iters += 1;
-    if *iters < LAG_PROBE_INTERVAL_ITERS || delivery_delay_ms == 0 {
+    if *iters < LAG_PROBE_INTERVAL_ITERS {
         return;
     }
     *iters = 0;
@@ -176,15 +200,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_returns_none_when_delay_chunks_is_zero_or_negative() {
+    async fn detect_returns_none_when_delay_chunks_is_negative() {
+        // Negative delivery_delay_chunks is nonsensical → no jump.
         let f = MockFetcher {
             highest_existing: 1_000_000,
             probe_count: AtomicU32::new(0),
         };
-        assert_eq!(detect_lag_and_jump(&f, 100, 0).await, None);
         assert_eq!(detect_lag_and_jump(&f, 100, -1).await, None);
-        // Early-return guards: no probes issued.
+        // Early-return guard: no probes issued.
         assert_eq!(f.probe_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn detect_fast_endpoint_jumps_to_live_edge() {
+        // Fast endpoint (delivery_delay_chunks=0) behind a live edge.
+        // current=100, highest=5000. probe_id = current + probe_offset where
+        // probe_offset starts at max(0*2, 2) = 2 and DOUBLES each rung (the
+        // offset doubles; `current` is fixed). Probe ids:
+        //   100+2=102, 100+4=104, 100+8=108, 100+16=116, 100+32=132,
+        //   100+64=164, 100+128=228, 100+256=356, 100+512=612, 100+1024=1124,
+        //   100+2048=2148, 100+4096=4196  (12th rung = LAG_PROBE_LADDER_MAX).
+        // All <= 5000 → all exist. Last existing = 4196.
+        // delay_chunks=0 → target = max(4196-0, 101) = 4196.
+        // Asserts it jumps FORWARD toward the live edge, not stays at 100.
+        let f = MockFetcher {
+            highest_existing: 5000,
+            probe_count: AtomicU32::new(0),
+        };
+        let r = detect_lag_and_jump(&f, 100, 0).await;
+        assert_eq!(
+            r,
+            Some(4196),
+            "fast endpoint must jump forward to highest-found chunk (live edge)"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_fast_endpoint_at_live_edge_does_not_jump() {
+        // Fast endpoint already at the live edge: no chunks ahead.
+        // current=100, highest=100. First probe at 102 (>100) → None → break,
+        // last_existing=None → returns None (no jump).
+        let f = MockFetcher {
+            highest_existing: 100,
+            probe_count: AtomicU32::new(0),
+        };
+        assert_eq!(detect_lag_and_jump(&f, 100, 0).await, None);
+        // Only the first probe (at 102) was issued before the ladder broke.
+        assert_eq!(f.probe_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -208,15 +270,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maybe_jump_short_circuits_when_delivery_delay_ms_is_zero() {
+    async fn maybe_jump_fast_endpoint_jumps_to_live_edge_when_behind() {
+        // Fast endpoint (delivery_delay_ms=0, delivery_delay_chunks=0) that has
+        // fallen behind MUST probe and jump to the live edge. Previously this
+        // path short-circuited on `delivery_delay_ms == 0` and the fast
+        // endpoint never caught up → fell behind unbounded → died repeatedly.
         let f = MockFetcher {
-            highest_existing: 1_000_000,
+            highest_existing: 5000,
+            probe_count: AtomicU32::new(0),
+        };
+        let mut chunk_id = 100;
+        // One call short of the interval: this call fires the probe.
+        let mut iters = LAG_PROBE_INTERVAL_ITERS - 1;
+        maybe_jump(&f, &mut chunk_id, 0, 0, &mut iters, "test").await;
+        assert!(
+            f.probe_count.load(Ordering::SeqCst) > 0,
+            "fast endpoint must probe for the live edge"
+        );
+        assert!(
+            chunk_id > 100,
+            "fast endpoint behind the live edge must jump FORWARD (was 100, now {chunk_id})"
+        );
+        assert_eq!(iters, 0, "interval counter resets after firing");
+    }
+
+    #[tokio::test]
+    async fn maybe_jump_fast_endpoint_at_edge_does_not_jump() {
+        // Fast endpoint already at the live edge: probe runs but finds no
+        // chunks ahead, so the read pointer stays put.
+        let f = MockFetcher {
+            highest_existing: 100,
             probe_count: AtomicU32::new(0),
         };
         let mut chunk_id = 100;
         let mut iters = LAG_PROBE_INTERVAL_ITERS - 1;
-        maybe_jump(&f, &mut chunk_id, 60, 0, &mut iters, "test").await;
-        assert_eq!(f.probe_count.load(Ordering::SeqCst), 0);
-        assert_eq!(chunk_id, 100, "fast endpoint stays at live edge");
+        maybe_jump(&f, &mut chunk_id, 0, 0, &mut iters, "test").await;
+        // Probe issued (interval reached), but no forward jump.
+        assert!(f.probe_count.load(Ordering::SeqCst) > 0);
+        assert_eq!(chunk_id, 100, "fast endpoint at live edge stays put");
     }
 }

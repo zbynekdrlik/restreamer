@@ -29,6 +29,17 @@ pub struct DiskCacheFetcher {
     /// waits for a single chunk before returning Err. The producer's
     /// existing backoff loop turns the Err into a retry.
     stall_timeout_secs: u64,
+    /// VPS audit ring for outage-forensics events (stall-timeout,
+    /// reader-recovered, prefill-started). `None` outside production.
+    audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
+    /// True after a stall-timeout, until the next successful `Available`
+    /// fetch — that transition emits `DiskCacheReaderRecovered` so the
+    /// audit timeline brackets each outage window. `&self` fetch path, so
+    /// an atomic (not Cell).
+    was_stalled: std::sync::atomic::AtomicBool,
+    /// Rate-limits the `DiskCacheStallTimeout` emit (a sustained outage
+    /// would otherwise emit one row per stall_timeout window).
+    stall_rl: rs_core::audit::RateLimiter,
 }
 
 impl DiskCacheFetcher {
@@ -38,6 +49,7 @@ impl DiskCacheFetcher {
         start_chunk_id: i64,
         window_chunks: i64,
         stall_timeout_secs: u64,
+        audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
     ) -> Self {
         let event_dir = cache.event_dir();
         // Register synchronously: a same-tick `advance` from the producer
@@ -49,12 +61,27 @@ impl DiskCacheFetcher {
         let positions = &cache.position_registry;
         positions.register(alias_for_register, window_chunks);
         positions.advance(&alias, start_chunk_id);
+        // Outage forensics: one fetcher per endpoint => construction is the
+        // endpoint's first cache registration. Bracket the prefill with
+        // PrefillStarted here and PrefillReady at warmup-complete (rescue.rs).
+        if let Some(ring) = &audit_ring {
+            ring.push_parts(crate::audit_ring::RingRowParts {
+                severity: rs_core::audit::Severity::Info,
+                source: rs_core::audit::Source::Vps,
+                endpoint: Some(alias.clone()),
+                action: rs_core::audit::Action::DiskCachePrefillStarted,
+                detail: serde_json::json!({ "start_chunk_id": start_chunk_id }),
+            });
+        }
         Self {
             cache,
             alias,
             event_dir,
             window_chunks,
             stall_timeout_secs,
+            audit_ring,
+            was_stalled: std::sync::atomic::AtomicBool::new(false),
+            stall_rl: rs_core::audit::RateLimiter::new(),
         }
     }
 }
@@ -79,15 +106,61 @@ impl ChunkFetcher for DiskCacheFetcher {
 
         // Trigger the targeted fetch and wait for terminal state.
         self.cache.download_service.request_chunk(chunk_id).await;
-        let state = self
+        let state = match self
             .cache
             .registry
             .wait_for_chunk_with_timeout(chunk_id, Duration::from_secs(self.stall_timeout_secs))
             .await
-            .map_err(|e| format!("disk_cache stall on chunk {chunk_id}: {e}"))?;
+        {
+            Ok(s) => s,
+            Err(e) => {
+                // Outage forensics: the cache window emptied (S3 outage
+                // longer than the window). Audit-only — do NOT abort; the
+                // producer's outer backoff retries and rescue covers the
+                // gap. The next successful Available fetch emits the paired
+                // DiskCacheReaderRecovered to bracket the outage window.
+                self.was_stalled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(ring) = &self.audit_ring {
+                    if self
+                        .stall_rl
+                        .allow(rs_core::audit::Action::DiskCacheStallTimeout, &self.alias)
+                    {
+                        ring.push_parts(crate::audit_ring::RingRowParts {
+                            severity: rs_core::audit::Severity::Error,
+                            source: rs_core::audit::Source::Vps,
+                            endpoint: Some(self.alias.clone()),
+                            action: rs_core::audit::Action::DiskCacheStallTimeout,
+                            detail: serde_json::json!({
+                                "chunk_id": chunk_id,
+                                "timeout_secs": self.stall_timeout_secs,
+                            }),
+                        });
+                    }
+                }
+                return Err(format!("disk_cache stall on chunk {chunk_id}: {e}"));
+            }
+        };
 
         match state {
             ChunkAvailability::Available { .. } => {
+                // Recovered after a stall: emit the paired ReaderRecovered
+                // exactly once per outage so the audit timeline brackets the
+                // gap. `swap` is the atomic test-and-clear.
+                if self
+                    .was_stalled
+                    .swap(false, std::sync::atomic::Ordering::Relaxed)
+                {
+                    if let Some(ring) = &self.audit_ring {
+                        ring.push_parts(crate::audit_ring::RingRowParts {
+                            severity: rs_core::audit::Severity::Info,
+                            source: rs_core::audit::Source::Vps,
+                            endpoint: Some(self.alias.clone()),
+                            action: rs_core::audit::Action::DiskCacheReaderRecovered,
+                            detail: serde_json::json!({ "chunk_id": chunk_id }),
+                        });
+                    }
+                }
                 let path = self.event_dir.join(format!("{chunk_id}.bin"));
                 // Single ENOENT retry: an EvictionTask sweep can race
                 // a reader between the registry mark_available and the

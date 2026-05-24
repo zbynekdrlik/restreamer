@@ -92,6 +92,33 @@ pub struct YoutubeHealth {
     pub error: Option<String>,
 }
 
+/// Endpoint lifecycle (frontend mirror of `rs-core::models::EndpointLifecycle`).
+///
+/// Drives the dashboard semaphore: survivable auto-recovery states
+/// (`Buffering`/`Rescue`/`Recovering`) render calm/blue, only `Attention`
+/// renders red. snake_case on the wire matches the backend serialization.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointLifecycle {
+    Pending,
+    Live,
+    Buffering,
+    Rescue,
+    Recovering,
+    Attention,
+}
+
+impl Default for EndpointLifecycle {
+    fn default() -> Self {
+        EndpointLifecycle::Live
+    }
+}
+
+/// serde `default` helper for `WsDeliveryEndpoint::lifecycle`.
+pub fn default_lifecycle() -> EndpointLifecycle {
+    EndpointLifecycle::Live
+}
+
 /// Per-endpoint delivery metrics.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeliveryEndpointState {
@@ -117,6 +144,7 @@ pub struct DeliveryEndpointState {
     pub delivery_mode: Option<String>,
     pub rescue_eta_secs: Option<u64>,
     pub youtube_health: Option<YoutubeHealth>,
+    pub lifecycle: EndpointLifecycle,
 }
 
 /// OBS status from WebSocket.

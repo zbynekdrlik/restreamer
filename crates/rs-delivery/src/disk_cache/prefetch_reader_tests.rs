@@ -70,6 +70,7 @@ async fn retries_forever_on_503_then_eventually_succeeds() {
         "evt".into(),
         10_000,
         8,
+        None,
     );
     let queue: Arc<PrefetchQueue<Arc<Vec<u8>>>> = PrefetchQueue::new(1);
     let next_id = Arc::new(AtomicI64::new(0));
@@ -116,6 +117,7 @@ async fn retries_continue_indefinitely_no_max_attempts_cap() {
         "evt".into(),
         10_000,
         8,
+        None,
     );
     let queue: Arc<PrefetchQueue<Arc<Vec<u8>>>> = PrefetchQueue::new(1);
     let next_id = Arc::new(AtomicI64::new(0));
@@ -166,6 +168,7 @@ async fn close_unblocks_reader_and_task_exits() {
         "evt".into(),
         10_000,
         8,
+        None,
     );
     let queue: Arc<PrefetchQueue<Arc<Vec<u8>>>> = PrefetchQueue::new(1);
     let next_id = Arc::new(AtomicI64::new(0));

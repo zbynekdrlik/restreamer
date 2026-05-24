@@ -101,6 +101,7 @@ impl DiskCache {
         cfg: DiskCacheConfig,
         backend: Arc<dyn download_service::S3Backend>,
         event_id: String,
+        audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
     ) -> std::io::Result<Self> {
         let event_dir = cfg.cache_dir.join(&event_id);
         tokio::fs::create_dir_all(&event_dir).await?;
@@ -113,12 +114,14 @@ impl DiskCache {
             event_id.clone(),
             cfg.s3_ingress_cap_mbit,
             8,
+            audit_ring.clone(),
         );
         let eviction_handle = EvictionTask::spawn(
             event_dir.clone(),
             Arc::clone(&position_registry),
             Arc::clone(&registry),
             std::time::Duration::from_secs(cfg.eviction_interval_secs),
+            audit_ring.clone(),
         );
         Ok(Self {
             registry,

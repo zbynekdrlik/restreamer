@@ -25,6 +25,7 @@ fn empty_metrics(alias: &str) -> DeliveryEndpointMetrics {
         delivery_mode: None,
         rescue_eta_secs: None,
         youtube_health: None,
+        lifecycle: rs_core::models::EndpointLifecycle::Live,
     }
 }
 

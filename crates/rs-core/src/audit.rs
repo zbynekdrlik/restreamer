@@ -66,6 +66,14 @@ pub enum Action {
     EndpointRtmpPushDied,
     S3UploadFailed,
     S3FetchFailed,
+    /// Delivery VPS switched an endpoint to the rescue video because the
+    /// chunk supply ran dry (upstream outage). Severity::Warn. Detail JSON:
+    /// {stalled_at_chunk_id}. Pairs with RescueRecovered.
+    RescueActivated,
+    /// Delivery VPS exited rescue and resumed live delivery after the chunk
+    /// supply recovered. Severity::Info. Detail JSON: {gap_secs} -- how long
+    /// the rescue video covered the outage.
+    RescueRecovered,
     /// Disk cache started pre-filling for an event. Emitted on first
     /// EndpointReader registration. Issue #174.
     DiskCachePrefillStarted,
@@ -90,8 +98,9 @@ pub enum Action {
     /// Per-endpoint push sample emitted by EndpointReader on chunk push.
     /// Rate-limited 1/min/endpoint via RateLimiter keyed by
     /// (DiskCachePushSample, endpoint_alias). Carries chunk_supply_lag_ms,
-    /// inter_chunk_gap_ms, burst_factor, current_chunk_delay_secs, and
-    /// delivery_delay_secs target. Issue #176.
+    /// inter_chunk_gap_ms, burst_factor, cumulative_pushed_secs (total media
+    /// pushed ≈ stream age, NOT behind-live lag), and delivery_delay_secs
+    /// target. Issue #176.
     DiskCachePushSample,
     RestreamerStarted,
     MigrationsApplied,
@@ -110,6 +119,11 @@ pub enum Action {
     /// `HostInternetUnreachable`. Emitted on first successful probe
     /// after a stretch of failures. Issue #176.
     HostInternetRecovered,
+    /// Local chunk-store volume crossed a disk-pressure threshold on the
+    /// host (stream.lan). Warn at 80% used, Critical at 90%. Alert-only --
+    /// chunks are never dropped (continuity guarantee). Detail JSON:
+    /// {used_fraction, used_bytes, total_bytes}.
+    LocalDiskPressure,
     /// Per-chunk lifecycle steady-state sample emitted every Nth chunk
     /// per endpoint (default N=30). Carries the 5 inter-stage gaps
     /// (A->B through E->F) + worst-stage label. Severity::Info.

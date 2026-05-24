@@ -9,6 +9,7 @@ pub mod endpoint_remove_confirm_modal;
 mod endpoints;
 mod header;
 mod operator_dashboard;
+pub mod outage_banner;
 pub mod pacing_panel;
 mod settings;
 mod templates;

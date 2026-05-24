@@ -62,6 +62,7 @@ pub(super) async fn handle_rust_push(
     chunk_id: i64,
     chunk_duration_ms: i64,
     alias: &str,
+    service_type: &str,
     consecutive_push_errors: &mut u32,
     consecutive_write_failures: &mut u32,
     stats: &Stats,
@@ -169,6 +170,25 @@ pub(super) async fn handle_rust_push(
                 &[],
                 0,
             );
+            // A handshake failure is a distinct, often-transient connect-time
+            // fault (TCP/RTMP handshake) vs the generic "push died" row. Emit
+            // an additional RtmpHandshakeFailed row so the connect-failure
+            // dashboard can isolate it. The EndpointRtmpPushDied row above is
+            // kept — the two feed different operator views.
+            if matches!(push_err, PushError::HandshakeFailed(_)) {
+                if let Some(ring) = audit_ring {
+                    ring.push_parts(crate::audit_ring::RingRowParts {
+                        severity: rs_core::audit::Severity::Warn,
+                        source: rs_core::audit::Source::Vps,
+                        endpoint: Some(alias.to_string()),
+                        action: rs_core::audit::Action::RtmpHandshakeFailed,
+                        detail: serde_json::json!({
+                            "error": error_display.clone(),
+                            "backend": service_type,
+                        }),
+                    });
+                }
+            }
             *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
             let record = RtmpPushAuditRecord {
                 timestamp_ms,
