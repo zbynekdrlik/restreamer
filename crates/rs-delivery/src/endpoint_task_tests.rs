@@ -723,23 +723,16 @@ async fn test_fast_endpoint_jumps_to_live_edge_with_backlog() {
         .await;
     });
 
-    // Direct write + 1s sleep per chunk. 100 chunks = 100s.
-    // Advance in 10ms steps. Need 100 * 100 = 10000 steps minimum.
     for _ in 0..12000 {
         tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
     }
 
     let s = stats.lock().await;
-    // Fast endpoint (delivery_delay=0): with a 100-chunk backlog already
-    // available, the producer's live-edge lag-probe JUMPS forward to the live
-    // edge instead of replaying the whole backlog at 1x (#232). So it
-    // converges to the highest available chunk (100) WITHOUT processing all
-    // 100 sequentially. (Before the fix, fast endpoints never jumped and fell
-    // unboundedly behind after an outage.)
+    // Fast endpoint jumps to live edge instead of replaying the backlog (#232).
     assert_eq!(
         s.current_chunk_id, 100,
-        "fast endpoint must converge to the live edge (chunk 100)"
+        "must converge to live edge (chunk 100)"
     );
     assert!(
         s.chunks_processed > 0 && s.chunks_processed < 100,
@@ -747,7 +740,6 @@ async fn test_fast_endpoint_jumps_to_live_edge_with_backlog() {
         s.chunks_processed
     );
     assert!(s.bytes_processed_total > 0);
-    // After reaching the live edge the loop hits None and may set chunk_gap.
     assert!(
         s.stall_reason.is_none() || s.stall_reason.as_deref() == Some("chunk_gap"),
         "Unexpected stall: {:?}",
