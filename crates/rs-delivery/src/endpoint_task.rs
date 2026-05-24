@@ -261,36 +261,11 @@ impl EndpointHandle {
     }
 }
 
-/// Build the plain RTMP URL for a given service type and stream key.
-/// Mirrors `rs_ffmpeg::build_ffmpeg_args` URL construction so `RtmpPusher`
-/// connects to the same upstream that ffmpeg would.
-fn build_rtmp_url(service_type: ServiceType, stream_key: &str) -> String {
-    match service_type {
-        ServiceType::YtRtmp => {
-            format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}")
-        }
-        ServiceType::Facebook => {
-            format!("rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}")
-        }
-        ServiceType::Vimeo => {
-            format!("rtmps://rtmp-global.cloud.vimeo.com:443/live/{stream_key}")
-        }
-        ServiceType::Instagram => {
-            format!("rtmps://live-upload.instagram.com:443/rtmp/{stream_key}")
-        }
-        ServiceType::TestFile => {
-            // TestFile has no upstream — use a local test address.
-            format!("rtmp://127.0.0.1:1935/live/{stream_key}")
-        }
-    }
-}
-
-/// Test-accessible re-export of `build_rtmp_url` so unit tests can call it
-/// without making the function part of the public API.
+#[path = "endpoint_rtmp_url.rs"]
+mod endpoint_rtmp_url;
+use endpoint_rtmp_url::build_rtmp_url;
 #[cfg(test)]
-pub(crate) fn build_rtmp_url_pub(service_type: ServiceType, stream_key: &str) -> String {
-    build_rtmp_url(service_type, stream_key)
-}
+pub(crate) use endpoint_rtmp_url::build_rtmp_url_pub;
 
 /// Producer task: fetches chunks from S3 and sends them into the bounded channel.
 #[allow(clippy::too_many_arguments)]
@@ -365,13 +340,10 @@ async fn producer_task<F: ChunkFetcher>(
                     let c = (duration_ms as u64).clamp(500, 5000);
                     typical_chunk_dur_ms = (3 * typical_chunk_dur_ms + c) / 4;
                 }
-                // Fast endpoints (delivery_delay_ms == 0) target the LIVE EDGE:
-                // delivery_delay_chunks == 0 → maybe_jump skips the gap to the
-                // highest existing chunk (minus the ladder's 1-chunk margin) so
-                // they stay near-live after an outage. Delayed endpoints keep a
-                // >=1-chunk floor so the jump target trails the live edge by the
-                // configured delay. (RTMP push stays strictly 1×; this only
-                // moves the READ pointer.)
+                // Fast endpoints (delay_ms==0) target the LIVE EDGE (delay_chunks=0
+                // → maybe_jump skips to the highest existing chunk); delayed keep a
+                // >=1 floor so the jump trails live by the configured delay. RTMP
+                // push stays strictly 1× — this only moves the READ pointer. (#232)
                 let delivery_delay_chunks: i64 = if delivery_delay_ms == 0 {
                     0
                 } else {
@@ -780,8 +752,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                     RustPushAction::Break => break,
                 }
                 if matches!(action, RustPushAction::Continue) {
-                    let cur_delay = stats.lock().await.duration_processed_ms as f64 / 1000.0;
-                    emit_push_sample(&push_ctx, chunk_id, chunk_duration_ms, cur_delay);
+                    // cumulative media pushed (≈ stream age), NOT behind-live (#232)
+                    let cumulative_pushed_secs =
+                        stats.lock().await.duration_processed_ms as f64 / 1000.0;
+                    emit_push_sample(&push_ctx, chunk_id, chunk_duration_ms, cumulative_pushed_secs);
                 }
             }
         } else if let Some(ref mut p) = proc {
@@ -807,9 +781,11 @@ async fn consumer_task<P: OutputProcessFactory>(
                     s.duration_processed_ms += chunk_duration_ms.max(0) as u64;
                     s.current_chunk_id = chunk_id;
                     s.chunks_processed += 1;
+                    // cumulative media pushed (≈ stream age), NOT behind-live;
+                    // same meaning/key as the rust path above (#232)
+                    let cumulative_pushed_secs = s.duration_processed_ms as f64 / 1000.0;
                     drop(s);
-                    let cur_delay = chunk_duration_ms.max(0) as f64 / 1000.0;
-                    emit_push_sample(&push_ctx, chunk_id, chunk_duration_ms, cur_delay);
+                    emit_push_sample(&push_ctx, chunk_id, chunk_duration_ms, cumulative_pushed_secs);
                 }
                 Ok(Err(e)) => {
                     consecutive_write_failures += 1;

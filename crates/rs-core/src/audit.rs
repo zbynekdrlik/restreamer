@@ -98,8 +98,9 @@ pub enum Action {
     /// Per-endpoint push sample emitted by EndpointReader on chunk push.
     /// Rate-limited 1/min/endpoint via RateLimiter keyed by
     /// (DiskCachePushSample, endpoint_alias). Carries chunk_supply_lag_ms,
-    /// inter_chunk_gap_ms, burst_factor, current_chunk_delay_secs, and
-    /// delivery_delay_secs target. Issue #176.
+    /// inter_chunk_gap_ms, burst_factor, cumulative_pushed_secs (total media
+    /// pushed ≈ stream age, NOT behind-live lag), and delivery_delay_secs
+    /// target. Issue #176.
     DiskCachePushSample,
     RestreamerStarted,
     MigrationsApplied,
