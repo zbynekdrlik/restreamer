@@ -36,9 +36,9 @@ impl EndpointLifecycle {
         // RED only for states the operator must act on. Disk-critical always
         // forces Attention. An actionable last_error (auth/key reject) only
         // forces Attention while the endpoint is DOWN — a recovered (alive)
-        // endpoint can carry a STALE actionable error that is cleared only on
-        // the next successful push, so it must not paint a healthy endpoint
-        // red.
+        // endpoint can carry a STALE actionable error (last_error persists in
+        // stats; the dashboard surfaces it only for Attention endpoints), so a
+        // healthy endpoint must never be painted red by a leftover error.
         if i.disk_critical {
             return EndpointLifecycle::Attention;
         }
@@ -145,8 +145,8 @@ mod lifecycle_tests {
     #[test]
     fn alive_endpoint_with_stale_actionable_error_is_live_not_red() {
         // A recovered endpoint (alive=true) can still carry a STALE
-        // actionable last_error — it is cleared only on the next successful
-        // push. The stale error must NOT paint the healthy endpoint red.
+        // actionable last_error (it persists in stats). The stale error must
+        // NOT paint the healthy endpoint red.
         let i = input(
             true,
             Some("normal"),
