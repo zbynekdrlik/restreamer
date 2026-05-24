@@ -49,6 +49,9 @@ mod yt_health_test_env;
 mod delivery_status_yt_health_tests;
 
 #[cfg(test)]
+mod delivery_status_cap_tests;
+
+#[cfg(test)]
 mod adaptive_ttl_tests;
 #[cfg(test)]
 mod multi_label_oauth_tests;
