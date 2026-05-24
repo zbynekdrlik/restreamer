@@ -365,8 +365,18 @@ async fn producer_task<F: ChunkFetcher>(
                     let c = (duration_ms as u64).clamp(500, 5000);
                     typical_chunk_dur_ms = (3 * typical_chunk_dur_ms + c) / 4;
                 }
-                let delivery_delay_chunks: i64 =
-                    ((delivery_delay_ms / typical_chunk_dur_ms.max(1)) as i64).max(1);
+                // Fast endpoints (delivery_delay_ms == 0) target the LIVE EDGE:
+                // delivery_delay_chunks == 0 → maybe_jump skips the gap to the
+                // highest existing chunk (minus the ladder's 1-chunk margin) so
+                // they stay near-live after an outage. Delayed endpoints keep a
+                // >=1-chunk floor so the jump target trails the live edge by the
+                // configured delay. (RTMP push stays strictly 1×; this only
+                // moves the READ pointer.)
+                let delivery_delay_chunks: i64 = if delivery_delay_ms == 0 {
+                    0
+                } else {
+                    ((delivery_delay_ms / typical_chunk_dur_ms.max(1)) as i64).max(1)
+                };
                 maybe_jump_ahead(
                     &fetcher,
                     &mut chunk_id,

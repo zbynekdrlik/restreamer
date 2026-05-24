@@ -1,10 +1,22 @@
 //! Live-edge lag detection for the producer hot loop.
 //!
 //! Periodically probes far ahead via HEAD-only S3 calls. If chunks exist
-//! beyond `delivery_delay_chunks × 2`, jumps the read pointer back to
+//! beyond the current read position, jumps the read pointer to
 //! `(latest_known - delivery_delay_chunks)`. Without this, any one-time
 //! slowdown (slow start, transient stall, OBS pause) accumulates lag
 //! forever — producer reads at 1x and never catches up.
+//!
+//! Two endpoint classes, two jump targets (operator-locked behavior):
+//! - **Fast endpoints** (`delivery_delay_ms == 0`, e.g. the control/monitor
+//!   stream): jump target is the LIVE EDGE itself (`delivery_delay_chunks == 0`
+//!   → `latest_known`). After an outage they MUST skip the gap to stay
+//!   near-live; falling behind unbounded is what killed them repeatedly.
+//! - **Delayed endpoints** (`delivery_delay_ms > 0`, main YT/FB): jump target
+//!   is `latest_known - delivery_delay_chunks`, holding a constant gap behind
+//!   live equal to the configured delay. Unchanged behavior.
+//!
+//! RTMP push itself is always strictly 1× — this only moves the READ pointer
+//! (which chunk to fetch next); it never speeds up delivery.
 //!
 //! Observed in prod (event 9289 on 2026-05-07): VPS read pointer 70+
 //! min behind live edge, OBS-stop didn't drain cache because fresh
@@ -25,15 +37,22 @@ const LAG_PROBE_LADDER_MAX: u32 = 12;
 /// Exponential-probe ladder for the highest known-existing chunk_id ahead
 /// of `current`. Returns `Some(new_id)` to jump to, or `None` if no skip
 /// needed. Cost: O(log lag) probes when lag is large, 1 probe when not.
+///
+/// `delivery_delay_chunks == 0` means "jump target = live edge" (fast
+/// endpoints). `> 0` means "jump target = live edge - delay" (delayed
+/// endpoints). Negative is nonsensical → `None`.
 pub(crate) async fn detect_lag_and_jump<F: ChunkFetcher>(
     fetcher: &F,
     current: i64,
     delivery_delay_chunks: i64,
 ) -> Option<i64> {
-    if delivery_delay_chunks <= 0 {
+    if delivery_delay_chunks < 0 {
         return None;
     }
-    let mut probe_offset: i64 = delivery_delay_chunks.saturating_mul(2);
+    // The ladder must always step strictly forward. For fast endpoints the
+    // natural start `delivery_delay_chunks * 2` is 0, which would probe
+    // `current` forever and never advance — clamp the first rung to +2.
+    let mut probe_offset: i64 = delivery_delay_chunks.saturating_mul(2).max(2);
     let mut last_existing: Option<i64> = None;
     for _ in 0..LAG_PROBE_LADDER_MAX {
         let probe_id = current + probe_offset;
@@ -51,16 +70,21 @@ pub(crate) async fn detect_lag_and_jump<F: ChunkFetcher>(
 /// Convenience wrapper called once per successful fetch in producer_task.
 /// Bumps the counter; every `LAG_PROBE_INTERVAL_ITERS` invocations it
 /// runs the ladder probe and (if lag detected) updates `chunk_id`.
+///
+/// `delivery_delay_ms` is no longer a short-circuit: fast endpoints
+/// (`delivery_delay_ms == 0`) probe too, so they can jump to the live edge
+/// after an outage. The parameter is kept only for tracing context / future
+/// use; the jump target is fully determined by `delivery_delay_chunks`.
 pub(crate) async fn maybe_jump<F: ChunkFetcher>(
     fetcher: &F,
     chunk_id: &mut i64,
     delivery_delay_chunks: i64,
-    delivery_delay_ms: u64,
+    _delivery_delay_ms: u64,
     iters: &mut u32,
     alias: &str,
 ) {
     *iters += 1;
-    if *iters < LAG_PROBE_INTERVAL_ITERS || delivery_delay_ms == 0 {
+    if *iters < LAG_PROBE_INTERVAL_ITERS {
         return;
     }
     *iters = 0;
