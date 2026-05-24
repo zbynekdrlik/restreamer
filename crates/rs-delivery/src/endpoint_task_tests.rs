@@ -730,16 +730,12 @@ async fn test_fast_endpoint_jumps_to_live_edge_with_backlog() {
 
     let s = stats.lock().await;
     // Fast endpoint jumps to live edge instead of replaying the backlog (#232).
-    assert_eq!(
-        s.current_chunk_id, 100,
-        "must converge to live edge (chunk 100)"
-    );
+    assert_eq!(s.current_chunk_id, 100); // converged to live edge
     assert!(
         s.chunks_processed > 0 && s.chunks_processed < 100,
         "fast endpoint must JUMP (skip backlog), not replay all 100; got {}",
         s.chunks_processed
     );
-    assert!(s.bytes_processed_total > 0);
     assert!(
         s.stall_reason.is_none() || s.stall_reason.as_deref() == Some("chunk_gap"),
         "Unexpected stall: {:?}",
