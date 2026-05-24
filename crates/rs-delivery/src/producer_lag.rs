@@ -214,21 +214,25 @@ mod tests {
     #[tokio::test]
     async fn detect_fast_endpoint_jumps_to_live_edge() {
         // Fast endpoint (delivery_delay_chunks=0) behind a live edge.
-        // current=100, highest=5000.
-        // Ladder for fast starts at probe_offset = max(0*2, 2) = 2.
-        // Probes: 102, 106, 114, 130, 162, 226, 354, 610, 1122, 2146, 4194, 8290.
-        // 8290 > 5000 → break at the 12th probe (LAG_PROBE_LADDER_MAX cap is 12).
-        // Actually the ladder caps at LAG_PROBE_LADDER_MAX=12 rungs:
-        //   100+2=102, +4=106, +8=114, +16=130, +32=162, +64=226, +128=354,
-        //   +256=610, +512=1122, +1024=2146, +2048=4194, +4096=8290(>5000 → None,break).
-        // Last existing = 4194. delay_chunks=0 → target = max(4194-0, 101) = 4194.
+        // current=100, highest=5000. probe_id = current + probe_offset where
+        // probe_offset starts at max(0*2, 2) = 2 and DOUBLES each rung (the
+        // offset doubles; `current` is fixed). Probe ids:
+        //   100+2=102, 100+4=104, 100+8=108, 100+16=116, 100+32=132,
+        //   100+64=164, 100+128=228, 100+256=356, 100+512=612, 100+1024=1124,
+        //   100+2048=2148, 100+4096=4196  (12th rung = LAG_PROBE_LADDER_MAX).
+        // All <= 5000 → all exist. Last existing = 4196.
+        // delay_chunks=0 → target = max(4196-0, 101) = 4196.
         // Asserts it jumps FORWARD toward the live edge, not stays at 100.
         let f = MockFetcher {
             highest_existing: 5000,
             probe_count: AtomicU32::new(0),
         };
         let r = detect_lag_and_jump(&f, 100, 0).await;
-        assert_eq!(r, Some(4194), "fast endpoint must jump forward to highest-found chunk (live edge)");
+        assert_eq!(
+            r,
+            Some(4196),
+            "fast endpoint must jump forward to highest-found chunk (live edge)"
+        );
     }
 
     #[tokio::test]

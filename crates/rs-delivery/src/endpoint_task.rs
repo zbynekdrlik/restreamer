@@ -755,7 +755,12 @@ async fn consumer_task<P: OutputProcessFactory>(
                     // cumulative media pushed (≈ stream age), NOT behind-live (#232)
                     let cumulative_pushed_secs =
                         stats.lock().await.duration_processed_ms as f64 / 1000.0;
-                    emit_push_sample(&push_ctx, chunk_id, chunk_duration_ms, cumulative_pushed_secs);
+                    emit_push_sample(
+                        &push_ctx,
+                        chunk_id,
+                        chunk_duration_ms,
+                        cumulative_pushed_secs,
+                    );
                 }
             }
         } else if let Some(ref mut p) = proc {
@@ -785,7 +790,12 @@ async fn consumer_task<P: OutputProcessFactory>(
                     // same meaning/key as the rust path above (#232)
                     let cumulative_pushed_secs = s.duration_processed_ms as f64 / 1000.0;
                     drop(s);
-                    emit_push_sample(&push_ctx, chunk_id, chunk_duration_ms, cumulative_pushed_secs);
+                    emit_push_sample(
+                        &push_ctx,
+                        chunk_id,
+                        chunk_duration_ms,
+                        cumulative_pushed_secs,
+                    );
                 }
                 Ok(Err(e)) => {
                     consecutive_write_failures += 1;
