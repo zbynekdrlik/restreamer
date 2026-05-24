@@ -176,15 +176,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_returns_none_when_delay_chunks_is_zero_or_negative() {
+    async fn detect_returns_none_when_delay_chunks_is_negative() {
+        // Negative delivery_delay_chunks is nonsensical → no jump.
         let f = MockFetcher {
             highest_existing: 1_000_000,
             probe_count: AtomicU32::new(0),
         };
-        assert_eq!(detect_lag_and_jump(&f, 100, 0).await, None);
         assert_eq!(detect_lag_and_jump(&f, 100, -1).await, None);
-        // Early-return guards: no probes issued.
+        // Early-return guard: no probes issued.
         assert_eq!(f.probe_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn detect_fast_endpoint_jumps_to_live_edge() {
+        // Fast endpoint (delivery_delay_chunks=0) behind a live edge.
+        // current=100, highest=5000.
+        // Ladder for fast starts at probe_offset = max(0*2, 2) = 2.
+        // Probes: 102, 106, 114, 130, 162, 226, 354, 610, 1122, 2146, 4194, 8290.
+        // 8290 > 5000 → break at the 12th probe (LAG_PROBE_LADDER_MAX cap is 12).
+        // Actually the ladder caps at LAG_PROBE_LADDER_MAX=12 rungs:
+        //   100+2=102, +4=106, +8=114, +16=130, +32=162, +64=226, +128=354,
+        //   +256=610, +512=1122, +1024=2146, +2048=4194, +4096=8290(>5000 → None,break).
+        // Last existing = 4194. delay_chunks=0 → target = max(4194-0, 101) = 4194.
+        // Asserts it jumps FORWARD toward the live edge, not stays at 100.
+        let f = MockFetcher {
+            highest_existing: 5000,
+            probe_count: AtomicU32::new(0),
+        };
+        let r = detect_lag_and_jump(&f, 100, 0).await;
+        assert_eq!(r, Some(4194), "fast endpoint must jump forward to highest-found chunk (live edge)");
+    }
+
+    #[tokio::test]
+    async fn detect_fast_endpoint_at_live_edge_does_not_jump() {
+        // Fast endpoint already at the live edge: no chunks ahead.
+        // current=100, highest=100. First probe at 102 (>100) → None → break,
+        // last_existing=None → returns None (no jump).
+        let f = MockFetcher {
+            highest_existing: 100,
+            probe_count: AtomicU32::new(0),
+        };
+        assert_eq!(detect_lag_and_jump(&f, 100, 0).await, None);
+        // Only the first probe (at 102) was issued before the ladder broke.
+        assert_eq!(f.probe_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -208,15 +242,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maybe_jump_short_circuits_when_delivery_delay_ms_is_zero() {
+    async fn maybe_jump_fast_endpoint_jumps_to_live_edge_when_behind() {
+        // Fast endpoint (delivery_delay_ms=0, delivery_delay_chunks=0) that has
+        // fallen behind MUST probe and jump to the live edge. Previously this
+        // path short-circuited on `delivery_delay_ms == 0` and the fast
+        // endpoint never caught up → fell behind unbounded → died repeatedly.
         let f = MockFetcher {
-            highest_existing: 1_000_000,
+            highest_existing: 5000,
+            probe_count: AtomicU32::new(0),
+        };
+        let mut chunk_id = 100;
+        // One call short of the interval: this call fires the probe.
+        let mut iters = LAG_PROBE_INTERVAL_ITERS - 1;
+        maybe_jump(&f, &mut chunk_id, 0, 0, &mut iters, "test").await;
+        assert!(
+            f.probe_count.load(Ordering::SeqCst) > 0,
+            "fast endpoint must probe for the live edge"
+        );
+        assert!(
+            chunk_id > 100,
+            "fast endpoint behind the live edge must jump FORWARD (was 100, now {chunk_id})"
+        );
+        assert_eq!(iters, 0, "interval counter resets after firing");
+    }
+
+    #[tokio::test]
+    async fn maybe_jump_fast_endpoint_at_edge_does_not_jump() {
+        // Fast endpoint already at the live edge: probe runs but finds no
+        // chunks ahead, so the read pointer stays put.
+        let f = MockFetcher {
+            highest_existing: 100,
             probe_count: AtomicU32::new(0),
         };
         let mut chunk_id = 100;
         let mut iters = LAG_PROBE_INTERVAL_ITERS - 1;
-        maybe_jump(&f, &mut chunk_id, 60, 0, &mut iters, "test").await;
-        assert_eq!(f.probe_count.load(Ordering::SeqCst), 0);
-        assert_eq!(chunk_id, 100, "fast endpoint stays at live edge");
+        maybe_jump(&f, &mut chunk_id, 0, 0, &mut iters, "test").await;
+        // Probe issued (interval reached), but no forward jump.
+        assert!(f.probe_count.load(Ordering::SeqCst) > 0);
+        assert_eq!(chunk_id, 100, "fast endpoint at live edge stays put");
     }
 }
