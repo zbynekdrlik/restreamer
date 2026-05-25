@@ -8,11 +8,12 @@ use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogEntry;
 use rs_core::models::{
-    ChunkStats, ComponentStatus, EndpointConfig, ServiceStatus, StreamingEvent, WsEvent,
+    ChunkStats, ComponentStatus, EndpointConfig, EndpointLifecycle, ServiceStatus, StreamingEvent,
+    WsEvent,
 };
 use rs_endpoint::s3::S3Client;
 
-use crate::state::AppState;
+use crate::state::{AppState, CachedDeliveryStatus};
 
 const REDACTED: &str = "***";
 const VALID_SERVICE_TYPES: &[&str] = &["FB", "YT_RTMP", "VIMEO", "INSTAGRAM", "TEST_FILE"];
@@ -50,11 +51,77 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
         }),
     };
 
+    // #228: derive endpoint + delivery summary from the cached delivery status
+    // (refreshed every 2s by the broadcast loop). After an app restart
+    // mid-event the loop repopulates the cache within one poll, so the summary
+    // reflects true health instead of an empty (false-RED) Default.
+    let (endpoint, delivery) = match state.cached_delivery.read() {
+        Ok(c) => summarize_delivery(&c),
+        Err(_) => (ComponentStatus::default(), ComponentStatus::default()),
+    };
+
     Ok(Json(ServiceStatus {
         inpoint,
+        endpoint,
+        delivery,
         streaming_event: event,
-        ..Default::default()
     }))
+}
+
+/// Derive the coarse `endpoint` + `delivery` summary for `/api/v1/status` from
+/// the cached delivery status the broadcast loop maintains. Returns empty
+/// states when idle (broadcast loop caches `status="none"` when not
+/// delivering). When delivering, `delivery.state` mirrors the cached status and
+/// `endpoint.state` is a health rollup of the per-endpoint lifecycles:
+/// `attention` (red) > `recovering` (blue) > `degraded` (some dead) >
+/// `live` (all alive) > `starting` (no metrics yet). #228 fix: this replaces
+/// the previous `Default` (empty) summary that painted a false RED after a
+/// mid-event restart.
+pub fn summarize_delivery(cached: &CachedDeliveryStatus) -> (ComponentStatus, ComponentStatus) {
+    if cached.status.is_empty() || cached.status == "none" {
+        return (ComponentStatus::default(), ComponentStatus::default());
+    }
+
+    let total = cached.endpoints.len();
+    let alive = cached.endpoints.iter().filter(|e| e.alive).count();
+    let any_attention = cached
+        .endpoints
+        .iter()
+        .any(|e| matches!(e.lifecycle, EndpointLifecycle::Attention));
+    let any_recovering = cached.endpoints.iter().any(|e| {
+        matches!(
+            e.lifecycle,
+            EndpointLifecycle::Buffering
+                | EndpointLifecycle::Rescue
+                | EndpointLifecycle::Recovering
+        )
+    });
+
+    let endpoint_state = if total == 0 {
+        "starting"
+    } else if any_attention {
+        "attention"
+    } else if any_recovering {
+        "recovering"
+    } else if alive == total {
+        "live"
+    } else {
+        "degraded"
+    };
+
+    let endpoint = ComponentStatus {
+        state: endpoint_state.to_string(),
+        details: serde_json::json!({ "alive": alive, "total": total }),
+    };
+    let delivery = ComponentStatus {
+        state: cached.status.clone(),
+        details: serde_json::json!({
+            "instance_name": cached.instance_name,
+            "server_ip": cached.server_ip,
+            "endpoint_count": cached.endpoint_count,
+        }),
+    };
+    (endpoint, delivery)
 }
 
 pub async fn get_streaming_event(
