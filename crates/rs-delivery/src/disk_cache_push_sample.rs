@@ -62,8 +62,12 @@ pub(crate) fn emit_push_sample(
     {
         return;
     }
-    // Telemetry is only emitted when audit is configured (the VPS runtime
-    // always sets it); preserves prior behavior of skipping the no-audit path.
+    // The no-audit path is a degenerate/test configuration where this consumer
+    // does no sampling at all -- exactly the pre-#224 behavior (the old code
+    // `let Some(ring) = ctx.audit_ring else { return }` bailed here too). The
+    // VPS runtime always sets the ring, so production telemetry is unaffected.
+    // Keeping the field also anchors the regression test, which asserts the
+    // ring stays empty after a sample (no audit row, only a debug log).
     if ctx.audit_ring.is_none() {
         return;
     }
