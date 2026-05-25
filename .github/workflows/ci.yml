@@ -949,14 +949,41 @@ jobs:
             Write-Host "WebView2 installed: $version"
           }
 
-      # Live-event guard removed by explicit user instruction. Operators
-      # routinely run streaming tests with receiving_activated=true and
-      # expect CI deploys to proceed. The receiving flag does not signal
-      # a real production live stream; only the operator does. To pause
-      # deploys during an actual live event, the operator can disable
-      # the GitHub Actions runner or add `[skip-deploy]` handling.
+      # Live-delivery guard (#229). A late CI deploy must NEVER restart the app
+      # while the VPS is actively delivering a live event -- that bounces the
+      # tray app, empties the local buffer, and caused the 2026-05-20 outage.
+      # We gate ONLY on delivering_activated (the real "VPS pushing to YT/FB"
+      # signal), NOT receiving_activated -- operators routinely run ingest
+      # tests with receiving=true and expect deploys to proceed (the reason the
+      # old receiving-based guard was removed). When live, the restart steps are
+      # skipped and the job still passes green; the new build deploys on the
+      # next push after the event. API unreachable => app is down => cannot be
+      # live-delivering => safe to deploy.
+      - name: Live-delivery guard
+        id: live_guard
+        shell: powershell
+        run: |
+          $live = $false
+          $eventName = ""
+          try {
+            $s = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 10
+            if ($s.streaming_event -and $s.streaming_event.delivering_activated -eq $true) {
+              $live = $true
+              $eventName = [string]$s.streaming_event.name
+            }
+          } catch {
+            Write-Host "Status API unreachable; app not running => no live delivery => deploy may proceed."
+          }
+          if ($live) {
+            Write-Host "::warning::LIVE DELIVERY IN PROGRESS (event '$eventName', delivering_activated=true). Skipping app restart/redeploy to protect the live stream. The new build will deploy on the next push after the event ends."
+          } else {
+            Write-Host "No active live delivery; deploy may proceed."
+          }
+          $liveStr = $live.ToString().ToLower()
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "live=$liveStr"
 
       - name: Deploy Tauri app
+        if: steps.live_guard.outputs.live != 'true'
         shell: powershell
         run: |
           # Deploy single unified Tauri binary (contains embedded service + tray icon)
@@ -1028,6 +1055,7 @@ jobs:
           exit 0
 
       - name: Deploy WASM frontend for LAN access
+        if: steps.live_guard.outputs.live != 'true'
         shell: powershell
         run: |
           $wwwDir = "C:\Program Files\Restreamer\www"
@@ -1062,6 +1090,7 @@ jobs:
           Write-Host "TLS certificates deployed to $configDir"
 
       - name: Deploy and start Restreamer
+        if: steps.live_guard.outputs.live != 'true'
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"

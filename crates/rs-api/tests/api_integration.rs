@@ -534,6 +534,32 @@ async fn status_summary_reflects_live_delivery_after_restart() {
     );
 }
 
+/// Contract guard for #229: the `deploy-stream-lan` CI job reads
+/// `streaming_event.delivering_activated` from `/api/v1/status` to refuse an
+/// app restart during a live event. If that field is ever dropped/renamed the
+/// guard silently stops detecting live delivery and a deploy could bounce the
+/// app mid-event again (the 2026-05-20 outage). Lock the field's presence.
+#[tokio::test]
+async fn status_exposes_delivering_activated_for_deploy_guard() {
+    let state = test_state().await;
+    let pool = state.pool.clone();
+    db::upsert_streaming_event(&pool, "evt-live").await.unwrap();
+
+    let (base, _) = start_server(state).await;
+    let body: serde_json::Value = reqwest::get(format!("{base}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert!(
+        body["streaming_event"]["delivering_activated"].is_boolean(),
+        "CI deploy guard needs streaming_event.delivering_activated as a bool; got: {}",
+        body["streaming_event"]
+    );
+}
+
 #[tokio::test]
 async fn status_shows_inpoint_connected_when_set() {
     let mut state = test_state().await;
