@@ -3533,7 +3533,7 @@ jobs:
 
       - name: Verify cache delay meets target
         shell: powershell
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: |
           # TDD assertion: After delivery is streaming, verify that the
           # chunk_delay_secs for non-fast endpoints is at least 80% of the
@@ -3550,44 +3550,59 @@ jobs:
           $minAcceptable = [math]::Floor($targetDelay * 0.8)
           Write-Host "Target delay: ${targetDelay}s, minimum acceptable: ${minAcceptable}s"
 
-          # Take 3 readings at 10s intervals, check EACH endpoint independently
-          $epDelays = @{}  # alias -> array of delay readings
-          for ($r = 1; $r -le 3; $r++) {
-            if ($r -gt 1) { Start-Sleep -Seconds 10 }
-            $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          # The cache fills GRADUALLY toward the target after delivery starts,
+          # so a check run while it is still ramping reads below target even
+          # though nothing is wrong (#191/#183). Retry the 3-reading median
+          # check for up to ~5 min, waiting for the cache to reach target. A
+          # cache that NEVER reaches target within the budget still fails --
+          # that catches the real 70s bug this assertion guards.
+          $maxAttempts = 6
+          $allPassed = $false
+          $lastMedians = ""
+          for ($attempt = 1; $attempt -le $maxAttempts -and -not $allPassed; $attempt++) {
+            if ($attempt -gt 1) {
+              Write-Host "Cache below target on attempt $($attempt - 1); waiting 30s for cache to fill (#191)..."
+              Start-Sleep -Seconds 30
+            }
+            # Take 3 readings at 10s intervals, check EACH endpoint independently
+            $epDelays = @{}  # alias -> array of delay readings
+            for ($r = 1; $r -le 3; $r++) {
+              if ($r -gt 1) { Start-Sleep -Seconds 10 }
+              $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
 
-            if ($resp.endpoint_details) {
-              foreach ($ep in $resp.endpoint_details) {
-                if (-not $ep.is_fast) {
-                  $alias = $ep.alias
-                  if (-not $epDelays.ContainsKey($alias)) {
-                    $epDelays[$alias] = @()
+              if ($resp.endpoint_details) {
+                foreach ($ep in $resp.endpoint_details) {
+                  if (-not $ep.is_fast) {
+                    $alias = $ep.alias
+                    if (-not $epDelays.ContainsKey($alias)) {
+                      $epDelays[$alias] = @()
+                    }
+                    $epDelays[$alias] += $ep.chunk_delay_secs
+                    Write-Host "Attempt ${attempt} reading ${r}: [$alias] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
                   }
-                  $epDelays[$alias] += $ep.chunk_delay_secs
-                  Write-Host "Reading ${r}: [$alias] delay=$($ep.chunk_delay_secs)s chunk=$($ep.current_chunk_id)"
                 }
               }
             }
-          }
 
-          if ($epDelays.Count -eq 0) {
-            throw "FAILED: No non-fast endpoint delay readings found"
-          }
-
-          # Check EACH endpoint's median delay meets target
-          $allPassed = $true
-          foreach ($alias in $epDelays.Keys) {
-            $sorted = $epDelays[$alias] | Sort-Object
-            $median = $sorted[[math]::Floor($sorted.Count / 2)]
-            Write-Host "  [$alias] median delay: ${median}s (min: ${minAcceptable}s)"
-            if ($median -lt $minAcceptable) {
-              Write-Host "  FAIL: [$alias] cache delay ${median}s < minimum ${minAcceptable}s"
-              $allPassed = $false
+            if ($epDelays.Count -eq 0) {
+              throw "FAILED: No non-fast endpoint delay readings found"
             }
+
+            # Check EACH endpoint's median delay meets target.
+            $allPassed = $true
+            $medians = @()
+            foreach ($alias in $epDelays.Keys) {
+              $sorted = $epDelays[$alias] | Sort-Object
+              $median = $sorted[[math]::Floor($sorted.Count / 2)]
+              $medians += "[$alias]=${median}s"
+              if ($median -lt $minAcceptable) { $allPassed = $false }
+            }
+            $lastMedians = $medians -join ' '
+            Write-Host "Attempt ${attempt}: medians $lastMedians (min: ${minAcceptable}s) allPassed=$allPassed"
           }
 
           if (-not $allPassed) {
-            throw "FAILED: One or more endpoints have cache delay below ${minAcceptable}s (target: ${targetDelay}s)"
+            throw "FAILED: cache delay below ${minAcceptable}s after $maxAttempts attempts (last: $lastMedians, target: ${targetDelay}s)"
           }
 
           Write-Host ""
@@ -3886,6 +3901,9 @@ jobs:
           if (-not $eventId) { throw "FAILED: no active streaming_event.id; cannot run sustained gate" }
           Write-Host "Sustained gate observing event_id=$eventId"
 
+          # Consecutive transient-YT-blip counter (#216 / #226 tolerance).
+          $consecutiveYtBlip = 0
+
           for ($i = 1; $i -le $samples; $i++) {
             Start-Sleep -Seconds $intervalSecs
 
@@ -3913,13 +3931,32 @@ jobs:
             # transient YT lag.
             $yt = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/youtube/status" -TimeoutSec 30
             $activeStreams = @($yt.streams | Where-Object { $_.stream_status -eq "active" })
+            # A single transient YT blip (no active stream, or health momentarily
+            # not "good") is upstream YT jitter, not a code regression -- run
+            # 26419460330 hard-failed on ONE 'no active YT stream' sample (#216)
+            # after 24 good samples. Mirror the #226 transient-tolerance
+            # philosophy: tolerate ONE blip, fail only on 2 consecutive (60s)
+            # sustained bad samples (real drift). configuration_issues +
+            # chunk_delay below are NOT blips and still fail immediately.
+            $ytBlip = $null
             if ($activeStreams.Count -eq 0) {
-              throw "FAILED: sample $i/$samples - no active YT stream observed mid-window (was active earlier; means upstream broke)"
-            }
-            foreach ($s in $activeStreams) {
-              if ($s.health_status -ne "good") {
-                throw "FAILED: sample $i/$samples - YT stream '$($s.title)' health='$($s.health_status)' (must stay 'good' across full window). Detected drift-class regression."
+              $ytBlip = "no active YT stream"
+            } else {
+              $badHealth = @($activeStreams | Where-Object { $_.health_status -ne "good" })
+              if ($badHealth.Count -gt 0) {
+                $ytBlip = "health=" + (($badHealth | ForEach-Object { "$($_.title):$($_.health_status)" }) -join ',')
               }
+            }
+            if ($ytBlip) {
+              $consecutiveYtBlip += 1
+              if ($consecutiveYtBlip -ge 2) {
+                throw "FAILED: sample $i/$samples - sustained YT degradation across $consecutiveYtBlip consecutive samples ($ytBlip). Drift-class regression."
+              }
+              Write-Host "  sample ${i}: transient YT blip ($ytBlip) - tolerating (consecutive=$consecutiveYtBlip)"
+              continue
+            }
+            $consecutiveYtBlip = 0
+            foreach ($s in $activeStreams) {
               if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                 # /api/v1/youtube/status returns configuration_issues as
                 # Vec<String> formatted "{type}: {reason} ({severity})" by
@@ -5411,16 +5448,19 @@ jobs:
               continue
             }
             # Progress = EITHER chunks OR bytes grew this poll. Tolerate up to
-            # 3 consecutive no-progress polls (30s) before failing. A single
+            # 6 consecutive no-progress polls (60s) before failing. A single
             # flat poll is normal jitter between chunk writes -- main CI run
             # 26160538246 hard-failed on ONE flat-bytes poll after 6 min of
-            # healthy delivery (2 GB, chunks 263->455) because the old bytes
-            # check had ZERO tolerance while chunks tolerated 3. A real stall
-            # still trips 3 consecutive polls and fails.
+            # healthy delivery. The 30s bound also fired on a transient
+            # chunk-supply pause (#233): run 26419460330 froze at chunks=676
+            # for exactly 3 polls after healthy delivery (665->676, 2.6 GB),
+            # an OBS/ingest supply hiccup, not a delivery regression. 60s
+            # matches the endpoint-missing tolerance above; a real sustained
+            # stall still trips 6 consecutive polls and fails.
             if ($ep.chunks_processed -le $lastChunks -and $ep.bytes_processed_total -le $lastBytes) {
               $stagnantPolls += 1
-              if ($stagnantPolls -ge 3) {
-                throw "WATCHDOG FAIL: no delivery progress for 30s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
+              if ($stagnantPolls -ge 6) {
+                throw "WATCHDOG FAIL: no delivery progress for 60s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
               }
             } else {
               $stagnantPolls = 0
