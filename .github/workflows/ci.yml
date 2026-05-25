@@ -5215,6 +5215,78 @@ jobs:
           if (-not $check.receiving_activated) { throw "FAIL: E2E-Test event not activated" }
           Write-Host "Event $($ev.id) activated with FB endpoint $($fb.id)"
 
+      - name: Switch OBS stream service to local Restreamer ingest (#221)
+        id: obs-fb-setup
+        shell: powershell
+        run: |
+          # #221: e2e-fb-push must deterministically point OBS at the local
+          # Restreamer RTMP ingest before start-stream. Without this OBS inherits
+          # whatever the prior e2e-obs-youtube restore left (production YouTube),
+          # so the publisher never reaches the inpoint and delivery_start fails
+          # with rtmp_not_stable (current_secs=0). Mirrors the e2e-obs-youtube
+          # "Save original OBS stream settings and switch to Restreamer" step.
+          $ws = New-Object System.Net.WebSockets.ClientWebSocket
+          $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+          $cts = New-Object System.Threading.CancellationTokenSource
+          $cts.CancelAfter(10000)
+          try {
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+            Write-Host "Connected to OBS WebSocket"
+          } catch {
+            throw "FAILED: Cannot connect to OBS WebSocket at $uri - $_"
+          }
+          function Send-OBSMessage($ws, $message) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+            $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+            $cts2 = New-Object System.Threading.CancellationTokenSource
+            $cts2.CancelAfter(10000)
+            $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+          }
+          function Receive-OBSMessage($ws) {
+            $buffer = New-Object byte[] 65536
+            $result = ""
+            do {
+              $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+              $cts3 = New-Object System.Threading.CancellationTokenSource
+              $cts3.CancelAfter(10000)
+              $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+              $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+            } while (-not $recv.EndOfMessage)
+            return $result | ConvertFrom-Json
+          }
+          $hello = Receive-OBSMessage $ws
+          $authRequired = $hello.d.authentication
+          if ($authRequired) {
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+            $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+            $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+            $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+          } else {
+            $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+          }
+          Send-OBSMessage $ws $identify
+          $identified = Receive-OBSMessage $ws
+          Write-Host "OBS identified: op=$($identified.op)"
+          # Save original settings so the always() cleanup can restore them.
+          $getSettings = @{ op = 6; d = @{ requestType = "GetStreamServiceSettings"; requestId = "fb-get-1" } } | ConvertTo-Json -Depth 5
+          Send-OBSMessage $ws $getSettings
+          $settingsResp = Receive-OBSMessage $ws
+          $cur = $settingsResp.d.responseData.streamServiceSettings
+          $curType = $settingsResp.d.responseData.streamServiceType
+          Write-Host "Original stream type: $curType server: $($cur.server)"
+          "ORIG_SERVER=$($cur.server)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "ORIG_KEY=$($cur.key)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "ORIG_TYPE=$curType" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          # Switch to the local Restreamer RTMP ingest (same target e2e-obs-youtube
+          # proves works). The stream key is an arbitrary stream name on /live.
+          $setSettings = @{ op = 6; d = @{ requestType = "SetStreamServiceSettings"; requestId = "fb-set-1"; requestData = @{ streamServiceType = "rtmp_custom"; streamServiceSettings = @{ server = "rtmp://127.0.0.1:1234/live"; key = "obs-e2e-test" } } } } | ConvertTo-Json -Depth 5
+          Send-OBSMessage $ws $setSettings
+          $null = Receive-OBSMessage $ws
+          Write-Host "Switched OBS to Restreamer RTMP: rtmp://127.0.0.1:1234/live/obs-e2e-test"
+          try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+
       - name: Start OBS stream + delivery
         shell: powershell
         run: |
@@ -5494,6 +5566,74 @@ jobs:
             } catch {
               Write-Host "FB live_video DELETE error (ignored on teardown): $_"
             }
+          }
+
+      - name: Stop OBS stream + restore OBS stream settings (#221)
+        if: always()
+        shell: powershell
+        run: |
+          # #221: leave OBS as we found it. e2e-fb-push previously had NO OBS
+          # teardown, so OBS was left streaming after the job. Stop the stream
+          # and restore the operator's original service settings saved by the
+          # obs-fb-setup step.
+          $origServer = "${{ steps.obs-fb-setup.outputs.ORIG_SERVER }}"
+          $origKey = "${{ steps.obs-fb-setup.outputs.ORIG_KEY }}"
+          $origType = "${{ steps.obs-fb-setup.outputs.ORIG_TYPE }}"
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $null = Receive-OBSMessage $ws
+            $stopStream = @{ op = 6; d = @{ requestType = "StopStream"; requestId = "fb-stop-1" } } | ConvertTo-Json -Depth 5
+            Send-OBSMessage $ws $stopStream
+            $null = Receive-OBSMessage $ws
+            Write-Host "OBS stream stopped"
+            if ($origServer -and $origKey) {
+              $serviceType = if ($origType) { $origType } else { "rtmp_custom" }
+              $setSettings = @{ op = 6; d = @{ requestType = "SetStreamServiceSettings"; requestId = "fb-restore-1"; requestData = @{ streamServiceType = $serviceType; streamServiceSettings = @{ server = $origServer; key = $origKey } } } } | ConvertTo-Json -Depth 5
+              Send-OBSMessage $ws $setSettings
+              $null = Receive-OBSMessage $ws
+              Write-Host "Restored OBS stream settings to $origServer"
+            } else {
+              Write-Host "No original OBS settings saved - skipping restore"
+            }
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+          } catch {
+            Write-Host "OBS stop/restore failed (non-fatal on teardown): $_"
           }
 
   e2e-gate:
