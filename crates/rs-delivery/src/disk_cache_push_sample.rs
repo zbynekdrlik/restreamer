@@ -62,7 +62,11 @@ pub(crate) fn emit_push_sample(
     {
         return;
     }
-    let Some(ring) = ctx.audit_ring else { return };
+    // Telemetry is only emitted when audit is configured (the VPS runtime
+    // always sets it); preserves prior behavior of skipping the no-audit path.
+    if ctx.audit_ring.is_none() {
+        return;
+    }
     let inter_chunk_gap_ms = match prev {
         Some(t) => now.saturating_duration_since(t).as_millis() as u64,
         None => 0,
@@ -78,21 +82,19 @@ pub(crate) fn emit_push_sample(
         .saturating_duration_since(ctx.event_start_at)
         .as_millis() as i64;
     let chunk_supply_lag_ms = actual_wallclock_ms.saturating_sub(expected_wallclock_ms as i64);
-    let payload = serde_json::json!({
-        "endpoint": ctx.alias,
-        "chunk_id": chunk_id,
-        "chunk_supply_lag_ms": chunk_supply_lag_ms,
-        "inter_chunk_gap_ms": inter_chunk_gap_ms,
-        "burst_factor": burst_factor,
-        "delivery_delay_secs": ctx.delivery_delay_ms / 1000,
-        "cumulative_pushed_secs": cumulative_pushed_secs,
-    });
-    ring.push(
-        rs_core::audit::Severity::Warn,
-        rs_core::audit::Source::Vps,
-        Some(ctx.alias.to_string()),
-        rs_core::audit::Action::DiskCachePushSample,
-        payload,
+    // #224: pacing telemetry is a debug-only diagnostic, NOT an operator-facing
+    // audit row. Emitting it to the audit ring flooded the activity feed
+    // (197/200 warn rows during a live event), drowning real warn/error events.
+    // Log at debug so it stays retrievable in VPS logs without polluting the feed.
+    tracing::debug!(
+        endpoint = %ctx.alias,
+        chunk_id,
+        chunk_supply_lag_ms,
+        inter_chunk_gap_ms,
+        burst_factor,
+        delivery_delay_secs = ctx.delivery_delay_ms / 1000,
+        cumulative_pushed_secs,
+        "disk_cache_push_sample"
     );
 }
 
