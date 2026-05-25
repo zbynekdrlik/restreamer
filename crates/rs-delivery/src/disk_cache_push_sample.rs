@@ -95,3 +95,31 @@ pub(crate) fn emit_push_sample(
         payload,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit_ring::AuditRing;
+
+    /// Regression for #224: the operator activity feed was flooded with
+    /// `disk_cache_push_sample severity=warn` rows (197/200 during a live
+    /// event). These carry pure pacing telemetry, not actionable warnings, so
+    /// `emit_push_sample` must NOT write an audit row -- it logs at debug
+    /// instead. Asserts the audit ring stays empty after a sample call.
+    #[test]
+    fn emit_push_sample_does_not_write_audit_row() {
+        let ring_opt: Option<Arc<AuditRing>> = Some(AuditRing::new(500));
+        let rl = rs_core::audit::RateLimiter::new();
+        let ctx = PushSampleCtx::new(&ring_opt, &rl, "YT NLCH 4K", 120_000);
+
+        // First call passes the rate limiter; the old code pushed one Warn row.
+        emit_push_sample(&ctx, 42, 6000, 252.0);
+
+        let (rows, _) = ring_opt.as_ref().unwrap().since(0);
+        assert_eq!(
+            rows.len(),
+            0,
+            "disk_cache_push_sample must not emit an audit row (telemetry -> debug log only); found: {rows:?}"
+        );
+    }
+}
