@@ -106,8 +106,14 @@ mod tests {
     fn idle_status_yields_empty_summary() {
         for s in ["", "none"] {
             let (e, d) = summarize_delivery(&cached(s, vec![]));
-            assert_eq!(e.state, "", "idle endpoint.state must be empty for status={s:?}");
-            assert_eq!(d.state, "", "idle delivery.state must be empty for status={s:?}");
+            assert_eq!(
+                e.state, "",
+                "idle endpoint.state must be empty for status={s:?}"
+            );
+            assert_eq!(
+                d.state, "",
+                "idle delivery.state must be empty for status={s:?}"
+            );
         }
     }
 
@@ -142,7 +148,10 @@ mod tests {
                 "delivering",
                 vec![ep("YT", true, EndpointLifecycle::Live), ep("FB", true, lc)],
             ));
-            assert_eq!(e.state, "recovering", "lifecycle {lc:?} must roll up to recovering");
+            assert_eq!(
+                e.state, "recovering",
+                "lifecycle {lc:?} must roll up to recovering"
+            );
         }
     }
 
