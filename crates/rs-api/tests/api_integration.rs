@@ -49,6 +49,33 @@ async fn status_endpoint_returns_valid_json() {
     assert!(body.get("endpoint").is_some());
     assert!(body.get("delivery").is_some());
     assert!(body.get("streaming_event").is_some());
+    // #231: disk-pressure level always present, defaults to "ok".
+    assert_eq!(body["disk_pressure"], "ok");
+}
+
+/// #231: `/api/v1/status` must expose the disk-pressure level so the dashboard
+/// can render a dedicated banner (warn at 80%, critical at 90%). The disk
+/// monitor publishes the level into the shared atomic `get_status` reads.
+#[tokio::test]
+async fn status_exposes_disk_pressure_level() {
+    let state = test_state().await;
+    // Simulate the monitor having sampled a critically-full chunk disk.
+    state
+        .disk_pressure_level
+        .store(2, std::sync::atomic::Ordering::Relaxed);
+    let (base, _) = start_server(state).await;
+
+    let body: serde_json::Value = reqwest::get(format!("{base}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        body["disk_pressure"], "critical",
+        "disk_pressure must reflect the monitor's level, got: {}",
+        body["disk_pressure"]
+    );
 }
 
 #[tokio::test]

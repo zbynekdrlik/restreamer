@@ -82,6 +82,13 @@ pub struct AppState {
     /// runtime passes this SAME Arc to `run_disk_monitor` so monitor and
     /// reader share one source of truth.
     pub disk_critical: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared local-disk-pressure LEVEL (0=ok, 1=warn, 2=critical), encoded via
+    /// [`rs_endpoint::disk_pressure::DiskPressure`]. Written by the disk monitor
+    /// (the runtime hands it the SAME Arc) and read by `get_status` to expose
+    /// the disk-pressure state on `/api/v1/status` for the dashboard banner
+    /// (#231). Unlike `disk_critical` (a bool), this carries the early Warn
+    /// (80%) state so the banner shows before the red wall.
+    pub disk_pressure_level: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl AppState {
@@ -101,6 +108,7 @@ impl AppState {
         // store it in the field so the runtime can hand it to the
         // disk-pressure monitor (the writer).
         let disk_critical = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let disk_pressure_level = Arc::new(std::sync::atomic::AtomicU8::new(0));
         let delivery = DeliveryOrchestrator::new(pool.clone(), config.clone()).map(|o| {
             o.with_audit_tx(audit_tx.clone())
                 .with_disk_critical(Arc::clone(&disk_critical))
@@ -135,6 +143,7 @@ impl AppState {
             audit_tx,
             device_flow_api_base: None,
             disk_critical,
+            disk_pressure_level,
         }
     }
 

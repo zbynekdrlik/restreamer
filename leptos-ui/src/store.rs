@@ -198,6 +198,10 @@ pub struct DashboardStore {
     // RTMP stable-since (seconds the publisher has been connected, monotonic).
     // Populated by polling `/status`; used to gate the Start-Delivery button.
     pub rtmp_stable_secs: RwSignal<u64>,
+
+    // Local chunk-store disk-pressure level: "ok" | "warn" | "critical".
+    // Polled from `/status`; drives the DiskPressureBanner (#231).
+    pub disk_pressure: RwSignal<String>,
 }
 
 impl DashboardStore {
@@ -222,6 +226,7 @@ impl DashboardStore {
             audit_feed: RwSignal::new(Vec::new()),
             endpoint_metrics_history: RwSignal::new(std::collections::HashMap::new()),
             rtmp_stable_secs: RwSignal::new(0),
+            disk_pressure: RwSignal::new("ok".to_string()),
         }
     }
 

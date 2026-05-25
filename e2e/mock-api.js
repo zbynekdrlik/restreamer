@@ -29,6 +29,8 @@ let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
 //   - "rtmp-gate-tick"  — rtmp_stable_secs ticks from 0 upward on each /status poll
 //   - "outage-rescue"   — 1 endpoint lifecycle="rescue" (survivable outage, calm blue UX)
 //   - "outage-attention" — 1 endpoint lifecycle="attention" (auth-reject, red, no calm banner)
+//   - "disk-warn"       — status.disk_pressure="warn" (amber DiskPressureBanner)
+//   - "disk-critical"   — status.disk_pressure="critical" (red DiskPressureBanner)
 let scenario = "default";
 let rtmpStableSecs = 999; // default: stream has been stable plenty long
 let rtmpTickStartMs = null; // when the tick scenario started
@@ -71,6 +73,10 @@ function buildStatusResponse() {
     scenario === "zero-endpoints" ||
     scenario === "last-endpoint" ||
     scenario === "rtmp-gate-tick";
+  // #231: disk-pressure level drives the dashboard DiskPressureBanner.
+  let diskPressure = "ok";
+  if (scenario === "disk-warn") diskPressure = "warn";
+  else if (scenario === "disk-critical") diskPressure = "critical";
   return {
     inpoint: {
       state: rtmpActive ? "connected" : "idle",
@@ -80,6 +86,7 @@ function buildStatusResponse() {
       },
     },
     streaming_event: currentStreamingEvent(),
+    disk_pressure: diskPressure,
     chunk_stats: {
       total_chunks: 42,
       pending_chunks: 3,

@@ -8,6 +8,7 @@ use super::add_endpoint_modal::AddEndpointModal;
 use super::audit_panel::AuditPanel;
 use super::confirm_modal::ConfirmModal;
 use super::endpoint_history::EndpointHistory;
+use super::disk_pressure_banner::DiskPressureBanner;
 use super::endpoint_remove_confirm_modal::EndpointRemoveConfirmModal;
 use super::oauth_authorize::OAuthAuthorize;
 use super::outage_banner::OutageBanner;
@@ -33,6 +34,7 @@ pub fn OperatorDashboard() -> impl IntoView {
 
     view! {
         <div class="operator-dashboard">
+            <DiskPressureBanner />
             <ZeroEndpointBanner />
             <OutageBanner />
             <div class="operator-dashboard__layout">
@@ -74,6 +76,7 @@ fn ControlBar() -> impl IntoView {
         spawn_local(async move {
             if let Ok(s) = api::get_status().await {
                 store.rtmp_stable_secs.set(s.rtmp_stable_secs);
+                store.disk_pressure.set(s.disk_pressure);
             }
         });
     });

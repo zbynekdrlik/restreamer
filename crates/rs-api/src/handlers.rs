@@ -60,11 +60,23 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
         Err(_) => (ComponentStatus::default(), ComponentStatus::default()),
     };
 
+    // #231: expose the local chunk-store disk-pressure level so the dashboard
+    // can show a dedicated banner (warn at 80%, critical at 90%). The disk
+    // monitor publishes the level into this shared atomic every 10s.
+    let disk_pressure = rs_endpoint::disk_pressure::DiskPressure::from_u8(
+        state
+            .disk_pressure_level
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )
+    .as_str()
+    .to_string();
+
     Ok(Json(ServiceStatus {
         inpoint,
         endpoint,
         delivery,
         streaming_event: event,
+        disk_pressure,
     }))
 }
 

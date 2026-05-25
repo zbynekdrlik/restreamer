@@ -67,6 +67,11 @@ pub struct StatusResponse {
     /// at least 15 seconds.
     #[serde(default)]
     pub rtmp_stable_secs: u64,
+    /// Local chunk-store disk-pressure level: "ok" | "warn" | "critical".
+    /// Drives the DiskPressureBanner (#231). Empty/"ok" in Tauri IPC mode
+    /// (the IPC StatusResponse does not carry it) -> banner stays hidden.
+    #[serde(default)]
+    pub disk_pressure: String,
 }
 
 /// Log entry from the backend.
@@ -112,11 +117,16 @@ pub async fn get_status() -> Result<StatusResponse, String> {
     let rtmp_stable_secs = status["inpoint"]["details"]["rtmp_stable_secs"]
         .as_u64()
         .unwrap_or(0);
+    let disk_pressure = status["disk_pressure"]
+        .as_str()
+        .unwrap_or("ok")
+        .to_string();
     Ok(StatusResponse {
         streaming_event: event,
         chunk_stats,
         inpoint_connected,
         rtmp_stable_secs,
+        disk_pressure,
     })
 }
 
