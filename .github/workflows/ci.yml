@@ -5102,6 +5102,13 @@ jobs:
       # See memory `reference_fb_graph_api_token` for how to regenerate.
       FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
       FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
+      # Persistent FB Page stream key (#233). The operator keeps a Live-Producer
+      # "test broadcast" active on the Page (5h preview, never published -- FB
+      # ingests it). The CI pushes to this persistent key and verifies FB
+      # decode via ingest_streams.stream_health. Replaces per-run Graph-API
+      # broadcast creation, which FB stopped auto-ingesting after 2026-05-19
+      # (UNPUBLISHED broadcasts return bitrate=0). NEVER published by CI.
+      FB_PERSISTENT_STREAM_KEY: ${{ secrets.FB_PERSISTENT_STREAM_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -5149,38 +5156,45 @@ jobs:
           }
           Write-Host "FB credentials present (page=$($env:FB_PAGE_ID), token length=$($env:FB_PAGE_ACCESS_TOKEN.Length))"
 
-      - name: Create FB live_video on the Page (Graph API)
-        id: fb_create
+      - name: Find operator's active FB live_video (persistent key, #233)
+        id: fb_find
         shell: powershell
         run: |
-          # POST /<page-id>/live_videos creates a fresh broadcast in
-          # UNPUBLISHED state. FB returns a stream_url containing the
-          # one-shot stream key segment after "/rtmp/". The same key is
-          # also exposed via GET /<live-video-id>?fields=stream_url in the
-          # short form (FB-<id>-0-<rand>). We parse the short form so the
-          # rust pusher's URL builder produces the canonical
-          # "rtmps://live-api-s.facebook.com:443/rtmp/<key>" URI.
-          $title = "CI-restreamer-test-$($env:GITHUB_RUN_ID)"
-          $createUri = "https://graph.facebook.com/v21.0/$($env:FB_PAGE_ID)/live_videos?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&status=UNPUBLISHED&title=$title"
-          $created = Invoke-RestMethod -Uri $createUri -Method POST -TimeoutSec 30
-          if (-not $created.id) { throw "FB create_live_video failed (no id in response)" }
-          $liveVideoId = $created.id
-          Write-Host "FB live_video created: id=$liveVideoId"
-
-          # Re-fetch to get the short-form stream_url.
-          $infoUri = "https://graph.facebook.com/v21.0/$liveVideoId" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,stream_url"
-          $info = Invoke-RestMethod -Uri $infoUri -Method GET -TimeoutSec 15
-          $streamUrl = $info.stream_url
-          if (-not $streamUrl) { throw "live_video has no stream_url" }
-          if ($streamUrl -notmatch "/rtmp/(FB-[0-9]+-0-[^/?]+)") {
-            throw "stream_url does not match expected FB-<id>-0-<key> pattern: $streamUrl"
+          # FB stopped auto-ingesting Graph-API-created UNPUBLISHED broadcasts
+          # after 2026-05-19 (bitrate=0). The only setup FB still ingests is a
+          # Live-Producer "test broadcast" started manually by the operator
+          # (https://www.facebook.com/live/producer/ -> "create test broadcast"
+          # -> "set up live video" -> ~5h preview, never published).
+          #
+          # The operator keeps that preview running; the CI pushes to the
+          # Page's PERSISTENT stream key bound to it, then verifies FB decode
+          # via ingest_streams.stream_health. NEVER publishes (no LIVE_NOW),
+          # NEVER deletes the operator's broadcast.
+          if (-not $env:FB_PERSISTENT_STREAM_KEY) { throw "FB_PERSISTENT_STREAM_KEY secret missing" }
+          $key = $env:FB_PERSISTENT_STREAM_KEY.Trim()
+          # Query the Page for currently-active live_videos (UNPUBLISHED preview
+          # or LIVE_NOW). Pick the one whose stream_url contains our persistent
+          # key — that proves it's bound to our key + currently active.
+          $statuses = '[%22UNPUBLISHED%22%2C%22LIVE_NOW%22]'
+          $listUri = "https://graph.facebook.com/v21.0/$($env:FB_PAGE_ID)/live_videos?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&broadcast_status=$statuses&fields=id,status,stream_url&limit=25"
+          $resp = Invoke-RestMethod -Uri $listUri -Method GET -TimeoutSec 25
+          $videos = @($resp.data)
+          if ($videos.Count -eq 0) {
+            throw "FAIL #233: no active live_videos on Page $($env:FB_PAGE_ID). Operator must start a Live-Producer test broadcast (https://www.facebook.com/live/producer/ -> 'create test broadcast' -> 'set up live video') bound to the persistent key BEFORE this CI step runs. The preview lasts ~5h."
           }
-          $streamKey = $matches[1]
-          Write-Host "FB stream_key parsed: $streamKey"
-
-          # Persist for later steps (cleanup / verification).
-          "FB_LIVE_VIDEO_ID=$liveVideoId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "FB_STREAM_KEY=$streamKey" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $matched = $null
+          foreach ($v in $videos) {
+            if ($v.stream_url -and $v.stream_url.Contains($key)) { $matched = $v; break }
+          }
+          if (-not $matched) {
+            $list = ($videos | ForEach-Object { "$($_.id)/$($_.status)" }) -join ', '
+            throw "FAIL #233: $($videos.Count) active live_video(s) on Page but none bound to the persistent key prefix '$($key.Substring(0,18))...'. Found: $list. Operator must start a Live-Producer test broadcast bound to the church Page's persistent key."
+          }
+          Write-Host ("Operator broadcast bound to persistent key: id=" + $matched.id + " status=" + $matched.status)
+          # FB_LIVE_VIDEO_ID is the operator's broadcast — used ONLY for the
+          # read-only stream_health verify. Cleanup MUST NOT delete it.
+          "FB_LIVE_VIDEO_ID=$($matched.id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FB_STREAM_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Seed FB endpoint config
         shell: powershell
@@ -5594,19 +5608,11 @@ jobs:
             }
           }
 
-          # Delete the FB live_video object on Facebook's side. FB
-          # auto-cleans after ~4h if missed, but explicit cleanup avoids
-          # clutter on the Page's broadcast list and frees the slot for
-          # the next CI run.
-          if ($env:FB_LIVE_VIDEO_ID -and $env:FB_PAGE_ACCESS_TOKEN) {
-            try {
-              $delUri = "https://graph.facebook.com/v21.0/$($env:FB_LIVE_VIDEO_ID)" + "?access_token=$($env:FB_PAGE_ACCESS_TOKEN)"
-              Invoke-RestMethod -Uri $delUri -Method DELETE -TimeoutSec 30 -ErrorAction Stop | Out-Null
-              Write-Host "deleted FB live_video $($env:FB_LIVE_VIDEO_ID)"
-            } catch {
-              Write-Host "FB live_video DELETE error (ignored on teardown): $_"
-            }
-          }
+          # #233: FB_LIVE_VIDEO_ID is now the OPERATOR'S Live-Producer test
+          # broadcast (discovered in fb_find, not created by CI). CI must NEVER
+          # delete it -- it belongs to the operator and lives on the production
+          # church Page. The old per-run CI-created broadcast deletion was
+          # removed when fb_create was replaced by fb_find.
 
       - name: Stop OBS stream + restore OBS stream settings (#221)
         if: always()
