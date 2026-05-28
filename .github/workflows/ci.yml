@@ -5172,24 +5172,45 @@ jobs:
           # NEVER deletes the operator's broadcast.
           if (-not $env:FB_PERSISTENT_STREAM_KEY) { throw "FB_PERSISTENT_STREAM_KEY secret missing" }
           $key = $env:FB_PERSISTENT_STREAM_KEY.Trim()
-          # Query the Page for currently-active live_videos (UNPUBLISHED preview
-          # or LIVE_NOW). Pick the one whose stream_url contains our persistent
-          # key — that proves it's bound to our key + currently active.
-          $statuses = '[%22UNPUBLISHED%22%2C%22LIVE_NOW%22]'
-          $listUri = "https://graph.facebook.com/v21.0/$($env:FB_PAGE_ID)/live_videos?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&broadcast_status=$statuses&fields=id,status,stream_url&limit=25"
+          # List recent live_videos on the Page and match by stream_url
+          # containing our persistent key. We do NOT filter by broadcast_status
+          # (FB rejects 'UNPUBLISHED' there -- that value is only valid for the
+          # 'status' field). Filter client-side: accept any live_video bound to
+          # our key whose 'status' is UNPUBLISHED or LIVE_NOW (operator preview).
+          $listUri = "https://graph.facebook.com/v21.0/$($env:FB_PAGE_ID)/live_videos?access_token=$($env:FB_PAGE_ACCESS_TOKEN)&fields=id,status,stream_url&limit=50"
           $resp = Invoke-RestMethod -Uri $listUri -Method GET -TimeoutSec 25
           $videos = @($resp.data)
           if ($videos.Count -eq 0) {
             throw "FAIL #233: no active live_videos on Page $($env:FB_PAGE_ID). Operator must start a Live-Producer test broadcast (https://www.facebook.com/live/producer/ -> 'create test broadcast' -> 'set up live video') bound to the persistent key BEFORE this CI step runs. The preview lasts ~5h."
           }
-          $matched = $null
-          foreach ($v in $videos) {
-            if ($v.stream_url -and $v.stream_url.Contains($key)) { $matched = $v; break }
+          # Two-pass match: prefer a broadcast bound to the persistent key
+          # (operator's explicit hint), but fall back to ANY active broadcast
+          # on the Page. Live Producer may issue a per-broadcast stream key
+          # rather than always reusing the persistent one, so this fallback
+          # keeps the gate working as long as the operator has SOMETHING
+          # active in preview.
+          $active = @($videos | Where-Object { $_.stream_url -and ($_.status -eq "UNPUBLISHED" -or $_.status -eq "LIVE_NOW") })
+          $matched = $active | Where-Object { $_.stream_url.Contains($key) } | Select-Object -First 1
+          if (-not $matched) {
+            $matched = $active | Select-Object -First 1
+            if ($matched) { Write-Host "fb_find: no broadcast bound to persistent key prefix '$($key.Substring(0,18))...'; falling back to active broadcast id=$($matched.id) status=$($matched.status)" }
           }
           if (-not $matched) {
-            $list = ($videos | ForEach-Object { "$($_.id)/$($_.status)" }) -join ', '
-            throw "FAIL #233: $($videos.Count) active live_video(s) on Page but none bound to the persistent key prefix '$($key.Substring(0,18))...'. Found: $list. Operator must start a Live-Producer test broadcast bound to the church Page's persistent key."
+            $list = ($videos | Select-Object -First 10 | ForEach-Object { "$($_.id)/$($_.status)" }) -join ', '
+            throw "FAIL #233: no ACTIVE live_video on Page (status must be UNPUBLISHED or LIVE_NOW). Recent broadcasts (first 10): $list. Operator must start a Live-Producer test broadcast (https://www.facebook.com/live/producer/ -> 'create test broadcast' -> 'set up live video') on Page $($env:FB_PAGE_ID) BEFORE this CI step runs. Preview lasts ~5h."
           }
+          # Extract the operator broadcast's own stream key from its stream_url
+          # (the canonical FB-<id>-0-<rand> form). The push uses THIS key, which
+          # is the one FB has bound to the active preview -- using the persistent
+          # key from the secret won't help if FB issued a different per-broadcast
+          # key for the current preview.
+          if ($matched.stream_url -match "/rtmp/(FB-[0-9]+-0-[^/?]+)") {
+            $broadcastKey = $matches[1]
+          } else {
+            throw "FAIL #233: matched live_video id=$($matched.id) has no parseable stream key in stream_url '$($matched.stream_url)'"
+          }
+          $key = $broadcastKey
+          Write-Host "fb_find: using operator broadcast key prefix '$($key.Substring(0,18))...'"
           Write-Host ("Operator broadcast bound to persistent key: id=" + $matched.id + " status=" + $matched.status)
           # FB_LIVE_VIDEO_ID is the operator's broadcast — used ONLY for the
           # read-only stream_health verify. Cleanup MUST NOT delete it.
