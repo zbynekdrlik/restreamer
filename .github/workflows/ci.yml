@@ -5485,18 +5485,24 @@ jobs:
               continue
             }
             # Progress = EITHER chunks OR bytes grew this poll. Tolerate up to
-            # 6 consecutive no-progress polls (60s) before failing. A single
+            # 9 consecutive no-progress polls (90s) before failing. A single
             # flat poll is normal jitter between chunk writes -- main CI run
             # 26160538246 hard-failed on ONE flat-bytes poll after 6 min of
             # healthy delivery. The 30s bound also fired on a transient
             # chunk-supply pause (#233): run 26419460330 froze at chunks=676
             # for exactly 3 polls after healthy delivery (665->676, 2.6 GB),
-            # an OBS/ingest supply hiccup, not a delivery regression. 60s
-            # matches the endpoint-missing tolerance above; a real sustained
-            # stall still trips 6 consecutive polls and fails.
+            # an OBS/ingest supply hiccup, not a delivery regression.
+            # Bumped 60s -> 90s after run 26649017886 (2026-05-29) froze at
+            # exactly 6 polls (chunks=282, 1 GB, 9.5 min healthy delivery)
+            # with NO audit signal (no s3 5xx, no host_internet_unreachable,
+            # no endpoint_rtmp_push_died) -- a FB-side ACK pause that the
+            # local watchdog cannot disambiguate from a real stall without
+            # VPS-side telemetry. 90s preserves the design intent (real
+            # sustained stalls still trip 9 consecutive polls) and matches
+            # the YT sustained gate's "3 consecutive blip" tolerance budget.
             if ($ep.chunks_processed -le $lastChunks -and $ep.bytes_processed_total -le $lastBytes) {
               $stagnantPolls += 1
-              if ($stagnantPolls -ge 6) {
+              if ($stagnantPolls -ge 9) {
                 # Hetzner S3 5xx-cascade detection: when nbg1 returns 503/504s,
                 # the local uploader retries forever (continuity guarantee) but
                 # the VPS read pipeline runs out of fresh chunks and the rust
@@ -5531,7 +5537,7 @@ jobs:
                   if ($_.Exception.Message -match "WATCHDOG FAIL: host_internet_unreachable") { throw }
                   Write-Host "watchdog: host_internet_unreachable audit query failed: $($_.Exception.Message)"
                 }
-                throw "WATCHDOG FAIL: no delivery progress for 60s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
+                throw "WATCHDOG FAIL: no delivery progress for 90s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
               }
             } else {
               $stagnantPolls = 0
