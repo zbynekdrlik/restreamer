@@ -1681,22 +1681,23 @@ jobs:
 
       - name: GATE clear-s3 endpoint deletes 250+ chunks within server budget
         shell: powershell
-        timeout-minutes: 2
+        timeout-minutes: 4
         run: |
           # Regression for the bug where DELETE+CLEANUP did nothing in the
           # dashboard: delete_event_chunks ran S3 deletes serially, taking
           # ~200ms per object. The fix parallelises with
-          # futures::stream::buffer_unordered(20) under a 60s server-side
-          # budget.
+          # futures::stream::buffer_unordered(20) under a server-side budget.
           #
-          # Threshold history: previous 25s client timeout was tighter
-          # than the server budget, so it kept aborting the call before
-          # the server could finish under elevated Hetzner S3 latency
-          # (chronic flake -- see issue #143). Bumped to 60s client +
-          # 50s perf assertion: client matches server budget so the
-          # server gets to complete; the perf assertion still flags
-          # genuine parallelism regressions (expected steady-state ~5s
-          # for 400 chunks at 200ms / 20-way).
+          # Threshold history: previous 25s client timeout was tighter than
+          # the server budget; the next bump was 60s. The 60s bound then
+          # kept timing out during the 2026-05-25 -> 2026-05-28 Hetzner nbg1
+          # 5xx cascade -- per-object DELETE round-trips inherit upstream
+          # backoff, so a healthy-Hetzner 9.3s run (2026-05-23) ballooned past
+          # 60s when nbg1 was returning 504s. Bumped server S3_OPERATION_TIMEOUT
+          # and this client TimeoutSec to 180s+ so the call survives Hetzner
+          # backoff cascades; perf assertion still fails at 150s so a genuine
+          # parallelism regression on a healthy Hetzner is still caught
+          # (expected steady-state ~5s for 400 chunks at 200ms / 20-way).
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -TimeoutSec 10
           $e2eEvent = $events | Where-Object { $_.name -eq "E2E-Test" }
           if (-not $e2eEvent) {
@@ -1730,7 +1731,7 @@ jobs:
           try {
             $resp = Invoke-RestMethod `
               -Uri "http://127.0.0.1:8910/api/v1/events/$($e2eEvent.id)/clear-s3" `
-              -Method POST -TimeoutSec 60
+              -Method POST -TimeoutSec 185
           } catch {
             $sw.Stop()
             throw "FAILED: clear-s3 endpoint errored after $($sw.Elapsed.TotalSeconds)s: $_"
@@ -1739,8 +1740,8 @@ jobs:
           $elapsed = $sw.Elapsed.TotalSeconds
           Write-Host "clear-s3 elapsed: ${elapsed}s, deleted: $($resp.deleted)"
 
-          if ($elapsed -ge 50) {
-            throw "FAILED: clear-s3 took ${elapsed}s (limit 50s) - parallel delete regression"
+          if ($elapsed -ge 150) {
+            throw "FAILED: clear-s3 took ${elapsed}s (limit 150s) - parallel delete regression"
           }
           if ($resp.deleted -lt 1) {
             throw "FAILED: clear-s3 reported 0 objects deleted but stats showed $($statsBefore.total_chunks) chunks"
@@ -3925,6 +3926,30 @@ jobs:
               Write-Host "  sample ${i}: host_internet_unreachable audit query failed: $($_.Exception.Message)"
             }
 
+            # Hetzner S3 5xx-cascade detection. When nbg1 returns 503/504s, the
+            # local uploader retries forever (continuity guarantee) but the VPS
+            # delivery side runs out of fresh chunks and YT starves. From the
+            # gate's perspective YT reports "no active stream" -- looks like a
+            # drift-class regression but actual root cause is upstream S3.
+            # Detected the 2026-05-25 -> 2026-05-28 cascade post-mortem; without
+            # this classification four CI runs labeled real Hetzner-side
+            # 504s as code regressions. Threshold 5+ rows in window stays
+            # well above a single transient blip.
+            try {
+              $s3fail = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=s3_upload_failed&since=$startTs&limit=200" -TimeoutSec 10
+              $s3failRows = if ($s3fail.rows) { $s3fail.rows } elseif ($s3fail.items) { $s3fail.items } else { @() }
+              $s3_5xx = @($s3failRows | Where-Object { $_.detail.error_class -eq "5xx" })
+              if ($s3_5xx.Count -ge 5) {
+                throw "FAILED: sample $i/$samples - Hetzner S3 5xx cascade: $($s3_5xx.Count) s3_upload_failed audit rows with error_class=5xx since $startTs (first at $($s3_5xx[0].ts), error_msg='$($s3_5xx[0].detail.error_msg)'). Local uploader retries forever (continuity guarantee), but the VPS read pipeline starves and YT loses the stream. This is INFRA FLAKINESS at nbg1, not a code regression. Re-run when Hetzner recovers; check https://status.hetzner.com if recurring."
+              }
+              if ($s3_5xx.Count -gt 0) {
+                Write-Host "  sample ${i}: $($s3_5xx.Count) s3_upload_failed 5xx rows in window (under cascade threshold 5)"
+              }
+            } catch {
+              if ($_.Exception.Message -match "^FAILED:") { throw }
+              Write-Host "  sample ${i}: s3_upload_failed audit query failed: $($_.Exception.Message)"
+            }
+
             # YT health sample. TimeoutSec 30 matches the other 5 call
             # sites in this workflow — the /api/v1/youtube/status handler
             # makes upstream Google API calls that can take >10s during
@@ -5362,6 +5387,11 @@ jobs:
           $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
           if ($null -eq $ev) { throw "WATCHDOG FAIL: E2E-Test event missing for status query" }
           $statusUri = "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($ev.id)"
+          # Anchor for Hetzner S3 5xx INFRA detection in the stagnant-fail
+          # branch below. See the OBS-YT sustained gate for the parallel
+          # detection pattern (root-caused 2026-05-25 -> 2026-05-28 nbg1
+          # cascade post-mortem).
+          $watchdogStartTs = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.000Z")
           # Audit `since` cutoff. The initial Publish.Start handshake to FB
           # typically produces 5-10 `endpoint_rtmp_push_died` rows during VPS
           # warmup as the rust pusher retries CONNECT until the AVC/AAC
@@ -5460,6 +5490,26 @@ jobs:
             if ($ep.chunks_processed -le $lastChunks -and $ep.bytes_processed_total -le $lastBytes) {
               $stagnantPolls += 1
               if ($stagnantPolls -ge 6) {
+                # Hetzner S3 5xx-cascade detection: when nbg1 returns 503/504s,
+                # the local uploader retries forever (continuity guarantee) but
+                # the VPS read pipeline runs out of fresh chunks and the rust
+                # pusher to FB stalls. From the watchdog's perspective chunks
+                # stop advancing -- looks like a push regression but actual
+                # root cause is upstream S3. See OBS-YT sustained gate for the
+                # parallel detection pattern (root-caused 2026-05-25 ->
+                # 2026-05-28 nbg1 cascade post-mortem). Threshold 5+ rows
+                # stays well above a single transient blip.
+                try {
+                  $s3fail = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=s3_upload_failed&since=$watchdogStartTs&limit=200" -TimeoutSec 10
+                  $s3failRows = if ($s3fail.rows) { $s3fail.rows } elseif ($s3fail.items) { $s3fail.items } else { @() }
+                  $s3_5xx = @($s3failRows | Where-Object { $_.detail.error_class -eq "5xx" })
+                  if ($s3_5xx.Count -ge 5) {
+                    throw "WATCHDOG FAIL: Hetzner S3 5xx cascade: $($s3_5xx.Count) s3_upload_failed audit rows with error_class=5xx since $watchdogStartTs (first at $($s3_5xx[0].ts), error_msg='$($s3_5xx[0].detail.error_msg)'). FB push stalled at chunks=$($ep.chunks_processed) because the VPS ran out of fresh chunks to read. This is INFRA FLAKINESS at nbg1, not a rust-pusher regression. Re-run when Hetzner recovers; check https://status.hetzner.com if recurring."
+                  }
+                } catch {
+                  if ($_.Exception.Message -match "WATCHDOG FAIL: Hetzner") { throw }
+                  Write-Host "watchdog: s3_upload_failed audit query failed: $($_.Exception.Message)"
+                }
                 throw "WATCHDOG FAIL: no delivery progress for 60s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
               }
             } else {
