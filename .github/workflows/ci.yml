@@ -2246,10 +2246,17 @@ jobs:
               # port 4455 open. Healthy OBS on stream.lan reports ~1.3 GB;
               # the old 50MB threshold let partial/crash-dialog states pass
               # and the next test step then failed on WS-connect.
+              # Pick the largest obs64 process: relaunch can briefly leave
+              # the dying old PID alongside the fresh PID, and `$obs` then
+              # becomes a Get-Process array, breaking `$obs.WorkingSet64 / 1MB`
+              # with "op_Division: [System.Object[]] does not contain a method
+              # named 'op_Division'" -- observed run 26645712141 (2026-05-29).
+              # Select-Object -First 1 after Sort by WorkingSet64 descending
+              # picks the real (loaded) process; mem >=500 guard still gates.
               $ready = $false
               for ($i = 1; $i -le 60; $i++) {
                 Start-Sleep -Seconds 2
-                $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+                $obs = Get-Process obs64 -ErrorAction SilentlyContinue | Sort-Object WorkingSet64 -Descending | Select-Object -First 1
                 if (-not $obs) { continue }
                 $mem = [math]::Round($obs.WorkingSet64 / 1MB)
                 $wsOpen = (Test-NetConnection -ComputerName 127.0.0.1 -Port 4455 -WarningAction SilentlyContinue -InformationLevel Quiet)
@@ -2257,7 +2264,7 @@ jobs:
                 if ($mem -ge 500 -and $wsOpen) { $ready = $true; break }
               }
               if (-not $ready) {
-                $obs = Get-Process obs64 -ErrorAction SilentlyContinue
+                $obs = Get-Process obs64 -ErrorAction SilentlyContinue | Sort-Object WorkingSet64 -Descending | Select-Object -First 1
                 $mem = if ($obs) { [math]::Round($obs.WorkingSet64 / 1MB) } else { 0 }
                 throw "OBS did not fully start after bitrate change (mem=${mem}MB, ws4455 not reachable). Recovery dialog may be blocking startup."
               }
@@ -3939,11 +3946,11 @@ jobs:
               $s3fail = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=s3_upload_failed&since=$startTs&limit=200" -TimeoutSec 10
               $s3failRows = if ($s3fail.rows) { $s3fail.rows } elseif ($s3fail.items) { $s3fail.items } else { @() }
               $s3_5xx = @($s3failRows | Where-Object { $_.detail.error_class -eq "5xx" })
-              if ($s3_5xx.Count -ge 5) {
+              if ($s3_5xx.Count -ge 2) {
                 throw "FAILED: sample $i/$samples - Hetzner S3 5xx cascade: $($s3_5xx.Count) s3_upload_failed audit rows with error_class=5xx since $startTs (first at $($s3_5xx[0].ts), error_msg='$($s3_5xx[0].detail.error_msg)'). Local uploader retries forever (continuity guarantee), but the VPS read pipeline starves and YT loses the stream. This is INFRA FLAKINESS at nbg1, not a code regression. Re-run when Hetzner recovers; check https://status.hetzner.com if recurring."
               }
               if ($s3_5xx.Count -gt 0) {
-                Write-Host "  sample ${i}: $($s3_5xx.Count) s3_upload_failed 5xx rows in window (under cascade threshold 5)"
+                Write-Host "  sample ${i}: $($s3_5xx.Count) s3_upload_failed 5xx rows in window (under cascade threshold 2)"
               }
             } catch {
               if ($_.Exception.Message -match "^FAILED:") { throw }
@@ -5495,20 +5502,34 @@ jobs:
                 # the VPS read pipeline runs out of fresh chunks and the rust
                 # pusher to FB stalls. From the watchdog's perspective chunks
                 # stop advancing -- looks like a push regression but actual
-                # root cause is upstream S3. See OBS-YT sustained gate for the
-                # parallel detection pattern (root-caused 2026-05-25 ->
-                # 2026-05-28 nbg1 cascade post-mortem). Threshold 5+ rows
-                # stays well above a single transient blip.
+                # root cause is upstream S3. Threshold initially 5 (run
+                # 26645712141 2026-05-29 stalled at chunks=29 with only 2 5xx
+                # in the 5-min window -- the cascade can be intermittent),
+                # lowered to 2: a single sporadic 5xx is normal jitter (the
+                # uploader retries), but 2+ in the stagnant-poll window with
+                # chunks not advancing is the cascade signature. host
+                # internet probe failures also classify as INFRA -- same
+                # pattern as the OBS-YT gate.
                 try {
                   $s3fail = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=s3_upload_failed&since=$watchdogStartTs&limit=200" -TimeoutSec 10
                   $s3failRows = if ($s3fail.rows) { $s3fail.rows } elseif ($s3fail.items) { $s3fail.items } else { @() }
                   $s3_5xx = @($s3failRows | Where-Object { $_.detail.error_class -eq "5xx" })
-                  if ($s3_5xx.Count -ge 5) {
+                  if ($s3_5xx.Count -ge 2) {
                     throw "WATCHDOG FAIL: Hetzner S3 5xx cascade: $($s3_5xx.Count) s3_upload_failed audit rows with error_class=5xx since $watchdogStartTs (first at $($s3_5xx[0].ts), error_msg='$($s3_5xx[0].detail.error_msg)'). FB push stalled at chunks=$($ep.chunks_processed) because the VPS ran out of fresh chunks to read. This is INFRA FLAKINESS at nbg1, not a rust-pusher regression. Re-run when Hetzner recovers; check https://status.hetzner.com if recurring."
                   }
                 } catch {
                   if ($_.Exception.Message -match "WATCHDOG FAIL: Hetzner") { throw }
                   Write-Host "watchdog: s3_upload_failed audit query failed: $($_.Exception.Message)"
+                }
+                try {
+                  $infra = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=host_internet_unreachable&since=$watchdogStartTs&limit=100" -TimeoutSec 10
+                  $infraRows = if ($infra.rows) { $infra.rows } elseif ($infra.items) { $infra.items } else { @() }
+                  if ($infraRows.Count -gt 0) {
+                    throw "WATCHDOG FAIL: host_internet_unreachable audit row(s) detected ($($infraRows.Count) in window, first at $($infraRows[0].ts)). Stream.snv lost egress to nbg1 during the watchdog window, so the local uploader couldn't push fresh chunks and the VPS pull pipeline starved. FB push stalled at chunks=$($ep.chunks_processed). This is INFRA FLAKINESS, not a rust-pusher regression."
+                  }
+                } catch {
+                  if ($_.Exception.Message -match "WATCHDOG FAIL: host_internet_unreachable") { throw }
+                  Write-Host "watchdog: host_internet_unreachable audit query failed: $($_.Exception.Message)"
                 }
                 throw "WATCHDOG FAIL: no delivery progress for 60s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
               }
