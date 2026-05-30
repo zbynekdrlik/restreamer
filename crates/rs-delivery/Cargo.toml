@@ -10,6 +10,10 @@ rust-version.workspace = true
 name = "rs-delivery"
 path = "src/main.rs"
 
+[[bin]]
+name = "gen_rescue_flv"
+path = "src/bin/gen_rescue_flv.rs"
+
 [dependencies]
 axum.workspace = true
 tokio.workspace = true
@@ -24,12 +28,14 @@ chrono.workspace = true
 parking_lot = "0.12"
 async-trait = "0.1"
 futures = { workspace = true }
+sha2 = { workspace = true }
 rs-core = { path = "../rs-core" }
 rs-ffmpeg = { path = "../rs-ffmpeg" }
 rs-rtmp-push = { path = "../rs-rtmp-push" }
 
 [dev-dependencies]
 tempfile = "3"
+sha2 = { workspace = true }
 reqwest.workspace = true
 tower = { version = "0.5", features = ["util"] }
 tokio = { workspace = true, features = ["test-util"] }
