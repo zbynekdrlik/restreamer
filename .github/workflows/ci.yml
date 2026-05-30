@@ -1866,7 +1866,7 @@ jobs:
           }
           # Overwrite CI-owned fields only — do not touch the rest.
           $config.hetzner | Add-Member -NotePropertyName "api_token" -NotePropertyValue $env:HETZNER_API_TOKEN -Force
-          $config.hetzner | Add-Member -NotePropertyName "location" -NotePropertyValue "nbg1" -Force
+          $config.hetzner | Add-Member -NotePropertyName "location" -NotePropertyValue "fsn1" -Force
           $config.hetzner | Add-Member -NotePropertyName "default_server_type" -NotePropertyValue "cpx22" -Force
           $config.hetzner | Add-Member -NotePropertyName "snapshot_label" -NotePropertyValue "rs-delivery" -Force
           $config.hetzner | Add-Member -NotePropertyName "ssh_key_name" -NotePropertyValue "restreamer-ci" -Force
@@ -5160,7 +5160,7 @@ jobs:
             $config | Add-Member -NotePropertyName "hetzner" -NotePropertyValue ([pscustomobject]@{})
           }
           $config.hetzner | Add-Member -NotePropertyName "api_token" -NotePropertyValue $env:HETZNER_API_TOKEN -Force
-          $config.hetzner | Add-Member -NotePropertyName "location" -NotePropertyValue "nbg1" -Force
+          $config.hetzner | Add-Member -NotePropertyName "location" -NotePropertyValue "fsn1" -Force
           $config.hetzner | Add-Member -NotePropertyName "default_server_type" -NotePropertyValue "cpx22" -Force
           $config.hetzner | Add-Member -NotePropertyName "snapshot_label" -NotePropertyValue "rs-delivery" -Force
           $config.hetzner | Add-Member -NotePropertyName "ssh_key_name" -NotePropertyValue "restreamer-ci" -Force

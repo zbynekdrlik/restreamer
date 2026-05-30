@@ -39,7 +39,7 @@ impl Default for HetznerConfig {
     fn default() -> Self {
         Self {
             api_token: String::new(),
-            location: "nbg1".to_string(),
+            location: "fsn1".to_string(),
             default_server_type: "cpx22".to_string(),
             snapshot_label: "rs-delivery".to_string(),
             ssh_key_name: "restreamer".to_string(),

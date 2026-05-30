@@ -524,4 +524,155 @@ mod tests {
         let result = S3Client::new(&config);
         assert!(result.is_ok());
     }
+
+    // ----- transient-error classifier (#235 round 4 hardening) -----
+
+    #[test]
+    fn classifies_status_5xx_as_transient() {
+        for code in [" 500", " 502", " 503", " 504"] {
+            let msg = format!("upload returned status{code}");
+            assert!(
+                is_transient_s3_error(&msg),
+                "{msg:?} must classify as transient (HTTP {code})"
+            );
+        }
+        assert!(is_transient_s3_error("S3 error: 5xx response"));
+        assert!(is_transient_s3_error(
+            "S3 error: upload failed: Got HTTP 504 with content ''"
+        ));
+    }
+
+    #[test]
+    fn classifies_network_errors_as_transient() {
+        for marker in [
+            "connection refused",
+            "connection reset",
+            "operation timed out",
+            "request timeout",
+            "gateway error",
+            "InternalError occurred",
+            "ServiceUnavailable",
+            "SlowDown - please retry",
+        ] {
+            assert!(
+                is_transient_s3_error(marker),
+                "{marker:?} must classify as transient"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_classify_4xx_as_transient() {
+        // Pure 4xx responses from the rs-s3 wrapper -- not retried.
+        for msg in [
+            "upload returned status 400",
+            "upload returned status 401",
+            "upload returned status 403",
+            "upload returned status 404",
+            "delete object returned status 409",
+            "AccessDenied: invalid signature",
+            "NoSuchBucket",
+        ] {
+            assert!(
+                !is_transient_s3_error(msg),
+                "{msg:?} must NOT classify as transient (4xx surfaces immediately to outer queue)"
+            );
+        }
+    }
+
+    // ----- with_internal_retry semantics -----
+
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn retry_succeeds_immediately_when_op_ok() {
+        let calls = std::sync::Arc::new(Mutex::new(0u32));
+        let calls_c = std::sync::Arc::clone(&calls);
+        let r: Result<u32, EndpointError> = with_internal_retry("ok-first", move || {
+            let c = std::sync::Arc::clone(&calls_c);
+            async move {
+                *c.lock().unwrap() += 1;
+                Ok(42)
+            }
+        })
+        .await;
+        assert_eq!(r.unwrap(), 42);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            1,
+            "should call op exactly once on success"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_recovers_on_transient_then_succeeds() {
+        let calls = std::sync::Arc::new(Mutex::new(0u32));
+        let calls_c = std::sync::Arc::clone(&calls);
+        let r: Result<&'static str, EndpointError> =
+            with_internal_retry("transient-then-ok", move || {
+                let c = std::sync::Arc::clone(&calls_c);
+                async move {
+                    let mut g = c.lock().unwrap();
+                    *g += 1;
+                    let n = *g;
+                    drop(g);
+                    if n < 2 {
+                        Err(EndpointError::S3(
+                            "upload failed: Got HTTP 504 with content ''".into(),
+                        ))
+                    } else {
+                        Ok("ok")
+                    }
+                }
+            })
+            .await;
+        assert_eq!(r.unwrap(), "ok");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            2,
+            "should retry once after transient and succeed on attempt 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_surfaces_4xx_immediately_without_retry() {
+        let calls = std::sync::Arc::new(Mutex::new(0u32));
+        let calls_c = std::sync::Arc::clone(&calls);
+        let r: Result<(), EndpointError> = with_internal_retry("4xx-no-retry", move || {
+            let c = std::sync::Arc::clone(&calls_c);
+            async move {
+                *c.lock().unwrap() += 1;
+                Err(EndpointError::S3("upload returned status 403".into()))
+            }
+        })
+        .await;
+        assert!(r.is_err(), "4xx must surface as error");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            1,
+            "must NOT retry on 4xx (op called once only)"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_exhausts_budget_on_persistent_transient() {
+        let calls = std::sync::Arc::new(Mutex::new(0u32));
+        let calls_c = std::sync::Arc::clone(&calls);
+        let r: Result<(), EndpointError> = with_internal_retry("persistent-5xx", move || {
+            let c = std::sync::Arc::clone(&calls_c);
+            async move {
+                *c.lock().unwrap() += 1;
+                Err(EndpointError::S3(
+                    "S3 error: upload failed: Got HTTP 504 with content ''".into(),
+                ))
+            }
+        })
+        .await;
+        assert!(r.is_err(), "exhausted budget must surface error");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            S3_OP_INTERNAL_RETRIES + 1,
+            "must attempt initial + S3_OP_INTERNAL_RETRIES retries before giving up"
+        );
+    }
 }
