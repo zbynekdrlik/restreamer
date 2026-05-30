@@ -14,11 +14,13 @@ const mockResponses = {
     const chunk_stats = await chunkResp.json();
     const inpoint_connected = status.inpoint?.details?.rtmp_connected || false;
     const rtmp_stable_secs = status.inpoint?.details?.rtmp_stable_secs || 0;
+    const disk_pressure = status.disk_pressure || "ok";
     const data = {
       streaming_event: status.streaming_event || null,
       chunk_stats,
       inpoint_connected,
       rtmp_stable_secs,
+      disk_pressure,
     };
     return { success: true, data, error: null };
   },

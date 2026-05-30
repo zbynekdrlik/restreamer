@@ -22,7 +22,13 @@ use crate::state::AppState;
 /// Hetzner S3 is usually responsive, but a large cleanup could exceed
 /// a reverse proxy's read timeout. Bound it so the handler doesn't
 /// hang indefinitely and the client sees a clean error.
-const S3_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+///
+/// 60s was tight under sustained Hetzner nbg1 5xx cascades (observed
+/// 2026-05-25 through 2026-05-28): 377 chunks took 9.3s when Hetzner
+/// was healthy (2026-05-23) but timed out at 60s during the cascade,
+/// because per-object DELETE round-trips inherit the upstream backoff.
+/// 180s gives 3× headroom while still bounding pathological hangs.
+const S3_OPERATION_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Concurrency for parallel `measure_prefix` calls in `get_s3_usage`.
 /// The previous sequential loop issued one round-trip per event prefix,

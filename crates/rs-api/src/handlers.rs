@@ -50,10 +50,32 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
         }),
     };
 
+    // #228: derive endpoint + delivery summary from the cached delivery status
+    // (refreshed every 2s by the broadcast loop). After an app restart
+    // mid-event the loop repopulates the cache within one poll, so the summary
+    // reflects true health instead of an empty (false-RED) Default.
+    let (endpoint, delivery) = match state.cached_delivery.read() {
+        Ok(c) => crate::status_summary::summarize_delivery(&c),
+        Err(_) => (ComponentStatus::default(), ComponentStatus::default()),
+    };
+
+    // #231: expose the local chunk-store disk-pressure level so the dashboard
+    // can show a dedicated banner (warn at 80%, critical at 90%). The disk
+    // monitor publishes the level into this shared atomic every 10s.
+    let disk_pressure = rs_endpoint::disk_pressure::DiskPressure::from_u8(
+        state
+            .disk_pressure_level
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )
+    .as_str()
+    .to_string();
+
     Ok(Json(ServiceStatus {
         inpoint,
+        endpoint,
+        delivery,
         streaming_event: event,
-        ..Default::default()
+        disk_pressure,
     }))
 }
 
@@ -527,7 +549,7 @@ pub async fn delete_event_by_id(
     // endpoint (same bound as S3_OPERATION_TIMEOUT in s3_handlers.rs).
     let event_prefix = config.event_s3_prefix(&event.name);
     let delete_future = s3_client.delete_event_chunks(&event_prefix);
-    match tokio::time::timeout(std::time::Duration::from_secs(60), delete_future).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(180), delete_future).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
             error!(

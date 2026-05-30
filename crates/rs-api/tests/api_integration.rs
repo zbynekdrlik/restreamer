@@ -4,10 +4,10 @@
 
 use std::net::SocketAddr;
 
-use rs_api::state::AppState;
+use rs_api::state::{AppState, CachedDeliveryStatus};
 use rs_core::config::Config;
 use rs_core::db;
-use rs_core::models::{InpointState, WsEvent};
+use rs_core::models::{DeliveryEndpointMetrics, EndpointLifecycle, InpointState, WsEvent};
 use tokio::sync::broadcast;
 
 /// Create a test AppState with in-memory SQLite.
@@ -49,6 +49,33 @@ async fn status_endpoint_returns_valid_json() {
     assert!(body.get("endpoint").is_some());
     assert!(body.get("delivery").is_some());
     assert!(body.get("streaming_event").is_some());
+    // #231: disk-pressure level always present, defaults to "ok".
+    assert_eq!(body["disk_pressure"], "ok");
+}
+
+/// #231: `/api/v1/status` must expose the disk-pressure level so the dashboard
+/// can render a dedicated banner (warn at 80%, critical at 90%). The disk
+/// monitor publishes the level into the shared atomic `get_status` reads.
+#[tokio::test]
+async fn status_exposes_disk_pressure_level() {
+    let state = test_state().await;
+    // Simulate the monitor having sampled a critically-full chunk disk.
+    state
+        .disk_pressure_level
+        .store(2, std::sync::atomic::Ordering::Relaxed);
+    let (base, _) = start_server(state).await;
+
+    let body: serde_json::Value = reqwest::get(format!("{base}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        body["disk_pressure"], "critical",
+        "disk_pressure must reflect the monitor's level, got: {}",
+        body["disk_pressure"]
+    );
 }
 
 #[tokio::test]
@@ -462,6 +489,102 @@ async fn status_shows_inpoint_disconnected_by_default() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["inpoint"]["state"], "disconnected");
     assert_eq!(body["inpoint"]["details"]["rtmp_connected"], false);
+}
+
+/// A fully-alive, healthy endpoint as the broadcast loop would cache it.
+fn live_metrics(alias: &str) -> DeliveryEndpointMetrics {
+    DeliveryEndpointMetrics {
+        alias: alias.to_string(),
+        alive: true,
+        current_chunk_id: 1200,
+        bytes_processed_total: 50_000_000,
+        chunks_processed: 1200,
+        chunk_delay_secs: 129.0,
+        stall_reason: None,
+        ffmpeg_restart_count: 0,
+        reconnect_count: 0,
+        last_error: None,
+        is_fast: false,
+        delivery_mode: None,
+        rescue_eta_secs: None,
+        youtube_health: None,
+        lifecycle: EndpointLifecycle::Live,
+    }
+}
+
+/// Regression for #228: after an app restart mid-event the `/api/v1/status`
+/// summary returned `endpoint.state=""` and `delivery.state=""` even though
+/// delivery was healthy, so the dashboard painted a false RED. The broadcast
+/// loop re-queries the VPS and repopulates `cached_delivery` within one poll
+/// (delivering_activated stays true in the DB). `/api/v1/status` must reflect
+/// that cache, not an empty summary.
+#[tokio::test]
+async fn status_summary_reflects_live_delivery_after_restart() {
+    let state = test_state().await;
+    let pool = state.pool.clone();
+    db::upsert_streaming_event(&pool, "evt-9292").await.unwrap();
+
+    // Simulate the cache one poll after a mid-event restart.
+    {
+        let mut c = state.cached_delivery.write().unwrap();
+        *c = CachedDeliveryStatus {
+            instance_name: "rs-delivery-evt-9292".into(),
+            status: "delivering".into(),
+            server_ip: Some("10.0.0.5".into()),
+            endpoint_count: 2,
+            endpoints: vec![live_metrics("YT NLCH 4K"), live_metrics("FB-NewLevel")],
+        };
+    }
+
+    let (base, _) = start_server(state).await;
+    let body: serde_json::Value = reqwest::get(format!("{base}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body["delivery"]["state"], "delivering",
+        "delivery.state must reflect live delivery after restart, got: {}",
+        body["delivery"]["state"]
+    );
+    assert_ne!(
+        body["endpoint"]["state"].as_str().unwrap_or(""),
+        "",
+        "endpoint.state must be non-empty for live endpoints (was empty => false-RED)"
+    );
+    assert_eq!(
+        body["endpoint"]["state"], "live",
+        "all endpoints alive+Live => endpoint.state=live, got: {}",
+        body["endpoint"]["state"]
+    );
+}
+
+/// Contract guard for #229: the `deploy-stream-lan` CI job reads
+/// `streaming_event.delivering_activated` from `/api/v1/status` to refuse an
+/// app restart during a live event. If that field is ever dropped/renamed the
+/// guard silently stops detecting live delivery and a deploy could bounce the
+/// app mid-event again (the 2026-05-20 outage). Lock the field's presence.
+#[tokio::test]
+async fn status_exposes_delivering_activated_for_deploy_guard() {
+    let state = test_state().await;
+    let pool = state.pool.clone();
+    db::upsert_streaming_event(&pool, "evt-live").await.unwrap();
+
+    let (base, _) = start_server(state).await;
+    let body: serde_json::Value = reqwest::get(format!("{base}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert!(
+        body["streaming_event"]["delivering_activated"].is_boolean(),
+        "CI deploy guard needs streaming_event.delivering_activated as a bool; got: {}",
+        body["streaming_event"]
+    );
 }
 
 #[tokio::test]

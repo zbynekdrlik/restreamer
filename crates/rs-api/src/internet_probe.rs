@@ -1,7 +1,7 @@
 //! Periodic host->internet reachability probe.
 //!
 //! Runs every 30s. Issues a HEAD request to a stable Hetzner-edge URL
-//! (`https://nbg1.your-objectstorage.com/`). After N=3 consecutive
+//! (`https://fsn1.your-objectstorage.com/`). After N=3 consecutive
 //! failures, emits a `HostInternetUnreachable` audit row. On first
 //! success after a previous unreachable, emits `HostInternetRecovered`.
 //!
@@ -9,6 +9,8 @@
 //! from healthy stream.snv but ALSO be the same path that S3 uploads +
 //! VPS HTTP polls take (so a real internet blip trips this probe before
 //! it cascades to those code paths). Hetzner's Object Storage edge fits.
+//! Track the live S3 region: probing nbg1 while S3 traffic goes to fsn1
+//! would falsely declare host internet down during an nbg1-only outage.
 //!
 //! Issue #176 follow-up.
 
@@ -17,7 +19,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 
-const PROBE_URL: &str = "https://nbg1.your-objectstorage.com/";
+const PROBE_URL: &str = "https://fsn1.your-objectstorage.com/";
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const FAIL_STREAK_TO_DECLARE_DOWN: u32 = 3;

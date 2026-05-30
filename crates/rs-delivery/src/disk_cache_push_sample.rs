@@ -62,7 +62,15 @@ pub(crate) fn emit_push_sample(
     {
         return;
     }
-    let Some(ring) = ctx.audit_ring else { return };
+    // The no-audit path is a degenerate/test configuration where this consumer
+    // does no sampling at all -- exactly the pre-#224 behavior (the old code
+    // `let Some(ring) = ctx.audit_ring else { return }` bailed here too). The
+    // VPS runtime always sets the ring, so production telemetry is unaffected.
+    // Keeping the field also anchors the regression test, which asserts the
+    // ring stays empty after a sample (no audit row, only a debug log).
+    if ctx.audit_ring.is_none() {
+        return;
+    }
     let inter_chunk_gap_ms = match prev {
         Some(t) => now.saturating_duration_since(t).as_millis() as u64,
         None => 0,
@@ -78,20 +86,46 @@ pub(crate) fn emit_push_sample(
         .saturating_duration_since(ctx.event_start_at)
         .as_millis() as i64;
     let chunk_supply_lag_ms = actual_wallclock_ms.saturating_sub(expected_wallclock_ms as i64);
-    let payload = serde_json::json!({
-        "endpoint": ctx.alias,
-        "chunk_id": chunk_id,
-        "chunk_supply_lag_ms": chunk_supply_lag_ms,
-        "inter_chunk_gap_ms": inter_chunk_gap_ms,
-        "burst_factor": burst_factor,
-        "delivery_delay_secs": ctx.delivery_delay_ms / 1000,
-        "cumulative_pushed_secs": cumulative_pushed_secs,
-    });
-    ring.push(
-        rs_core::audit::Severity::Warn,
-        rs_core::audit::Source::Vps,
-        Some(ctx.alias.to_string()),
-        rs_core::audit::Action::DiskCachePushSample,
-        payload,
+    // #224: pacing telemetry is a debug-only diagnostic, NOT an operator-facing
+    // audit row. Emitting it to the audit ring flooded the activity feed
+    // (197/200 warn rows during a live event), drowning real warn/error events.
+    // Log at debug so it stays retrievable in VPS logs without polluting the feed.
+    tracing::debug!(
+        endpoint = %ctx.alias,
+        chunk_id,
+        chunk_supply_lag_ms,
+        inter_chunk_gap_ms,
+        burst_factor,
+        delivery_delay_secs = ctx.delivery_delay_ms / 1000,
+        cumulative_pushed_secs,
+        "disk_cache_push_sample"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit_ring::AuditRing;
+
+    /// Regression for #224: the operator activity feed was flooded with
+    /// `disk_cache_push_sample severity=warn` rows (197/200 during a live
+    /// event). These carry pure pacing telemetry, not actionable warnings, so
+    /// `emit_push_sample` must NOT write an audit row -- it logs at debug
+    /// instead. Asserts the audit ring stays empty after a sample call.
+    #[test]
+    fn emit_push_sample_does_not_write_audit_row() {
+        let ring_opt: Option<Arc<AuditRing>> = Some(AuditRing::new(500));
+        let rl = rs_core::audit::RateLimiter::new();
+        let ctx = PushSampleCtx::new(&ring_opt, &rl, "YT NLCH 4K", 120_000);
+
+        // First call passes the rate limiter; the old code pushed one Warn row.
+        emit_push_sample(&ctx, 42, 6000, 252.0);
+
+        let (rows, _) = ring_opt.as_ref().unwrap().since(0);
+        assert_eq!(
+            rows.len(),
+            0,
+            "disk_cache_push_sample must not emit an audit row (telemetry -> debug log only); found: {rows:?}"
+        );
+    }
 }

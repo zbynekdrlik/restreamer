@@ -41,7 +41,7 @@ pub struct HetznerConfig {
 }
 
 fn default_hetzner_location() -> String {
-    "nbg1".to_string()
+    "fsn1".to_string()
 }
 fn default_hetzner_server_type() -> String {
     "cpx22".to_string()
@@ -421,9 +421,9 @@ impl Default for Config {
         Self {
             client_uuid: String::new(),
             s3: S3Config {
-                bucket: "restreamer-chunks".to_string(),
-                region: "nbg1".to_string(),
-                endpoint: "https://nbg1.your-objectstorage.com".to_string(),
+                bucket: "restreamer-chunks-fsn1".to_string(),
+                region: "fsn1".to_string(),
+                endpoint: "https://fsn1.your-objectstorage.com".to_string(),
                 access_key_id: String::new(),
                 secret_access_key: String::new(),
             },
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(parsed.s3.bucket, config.s3.bucket);
         assert_eq!(parsed.inpoint.rtmp_port, config.inpoint.rtmp_port);
         assert_eq!(parsed.api.port, config.api.port);
-        assert_eq!(parsed.hetzner.location, "nbg1");
+        assert_eq!(parsed.hetzner.location, "fsn1");
         assert_eq!(parsed.delivery.delivery_delay_secs, 120);
     }
 

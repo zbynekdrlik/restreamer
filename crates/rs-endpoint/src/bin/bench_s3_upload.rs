@@ -1,11 +1,12 @@
 //! Microbenchmark: measure raw S3 upload throughput from this host
 //! to the configured endpoint. Intended to be run MANUALLY from
-//! stream.lan against Hetzner nbg1 to validate the >= 20 chunks/s
-//! acceptance criterion of issue #118.
+//! stream.lan against the active Hetzner region (fsn1 after the
+//! 2026-05-30 migration) to validate the >= 20 chunks/s acceptance
+//! criterion of issue #118.
 //!
 //! Usage:
-//!   S3_BUCKET=... S3_ENDPOINT=https://nbg1.your-objectstorage.com \
-//!   S3_REGION=nbg1 S3_ACCESS_KEY=... S3_SECRET=... \
+//!   S3_BUCKET=restreamer-chunks-fsn1 S3_ENDPOINT=https://fsn1.your-objectstorage.com \
+//!   S3_REGION=fsn1 S3_ACCESS_KEY=... S3_SECRET=... \
 //!   cargo run --release -p rs-endpoint --bin bench_s3_upload -- --concurrency 16 --count 200
 
 use rs_core::config::S3Config;

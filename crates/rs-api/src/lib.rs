@@ -33,6 +33,7 @@ pub mod router;
 mod router_tests;
 pub mod s3_handlers;
 pub mod state;
+pub mod status_summary;
 pub mod stream_handlers;
 pub mod template_handlers;
 pub mod uploads_endpoints;

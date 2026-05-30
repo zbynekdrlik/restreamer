@@ -348,6 +348,10 @@ pub struct ServiceStatus {
     pub endpoint: ComponentStatus,
     pub delivery: ComponentStatus,
     pub streaming_event: Option<StreamingEvent>,
+    /// Local chunk-store disk-pressure level: "ok" | "warn" | "critical".
+    /// Drives the dashboard disk-pressure banner (#231). Defaults to "ok".
+    #[serde(default)]
+    pub disk_pressure: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

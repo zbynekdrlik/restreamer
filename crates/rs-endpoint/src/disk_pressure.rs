@@ -15,6 +15,37 @@ pub enum DiskPressure {
     Critical,
 }
 
+impl DiskPressure {
+    /// Compact level for sharing through an `AtomicU8` (the disk monitor
+    /// publishes this so `/api/v1/status` can expose the warn/critical state
+    /// to the dashboard disk-pressure banner -- #231).
+    pub fn as_u8(self) -> u8 {
+        match self {
+            DiskPressure::Ok => 0,
+            DiskPressure::Warn => 1,
+            DiskPressure::Critical => 2,
+        }
+    }
+
+    /// Inverse of [`DiskPressure::as_u8`]. Unknown values decode to `Ok`.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            2 => DiskPressure::Critical,
+            1 => DiskPressure::Warn,
+            _ => DiskPressure::Ok,
+        }
+    }
+
+    /// Lowercase operator-facing label used in the `/api/v1/status` payload.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiskPressure::Ok => "ok",
+            DiskPressure::Warn => "warn",
+            DiskPressure::Critical => "critical",
+        }
+    }
+}
+
 /// Classify by fraction of the volume USED (0.0..=1.0).
 pub fn classify_disk_pressure(used_fraction: f64) -> DiskPressure {
     if used_fraction >= 0.90 {
@@ -39,6 +70,7 @@ pub async fn run_disk_monitor(
     chunk_dir: PathBuf,
     audit_tx: Option<mpsc::Sender<AuditRow>>,
     disk_critical: Option<Arc<std::sync::atomic::AtomicBool>>,
+    disk_level: Option<Arc<std::sync::atomic::AtomicU8>>,
     mut shutdown: broadcast::Receiver<()>,
 ) {
     let rl = Arc::new(RateLimiter::new());
@@ -62,6 +94,12 @@ pub async fn run_disk_monitor(
                 pressure == DiskPressure::Critical,
                 std::sync::atomic::Ordering::Relaxed,
             );
+        }
+        // Publish the full ok/warn/critical level (#231) every sample so the
+        // dashboard banner shows the early Warn (80%) state -- not just the
+        // Critical red wall -- and self-clears when the disk recovers.
+        if let Some(l) = &disk_level {
+            l.store(pressure.as_u8(), std::sync::atomic::Ordering::Relaxed);
         }
         let (sev, class) = match pressure {
             DiskPressure::Ok => continue,
@@ -127,6 +165,24 @@ mod tests {
         assert_eq!(classify_disk_pressure(0.899), DiskPressure::Warn);
         assert_eq!(classify_disk_pressure(0.90), DiskPressure::Critical);
         assert_eq!(classify_disk_pressure(1.0), DiskPressure::Critical);
+    }
+
+    #[test]
+    fn pressure_level_encoding_round_trips() {
+        // #231: the disk monitor publishes the level via AtomicU8 and the
+        // status handler decodes it for the dashboard banner. Encoding must be
+        // stable in both directions and map to the operator-facing labels.
+        for p in [DiskPressure::Ok, DiskPressure::Warn, DiskPressure::Critical] {
+            assert_eq!(DiskPressure::from_u8(p.as_u8()), p);
+        }
+        assert_eq!(DiskPressure::Ok.as_u8(), 0);
+        assert_eq!(DiskPressure::Warn.as_u8(), 1);
+        assert_eq!(DiskPressure::Critical.as_u8(), 2);
+        assert_eq!(DiskPressure::Ok.as_str(), "ok");
+        assert_eq!(DiskPressure::Warn.as_str(), "warn");
+        assert_eq!(DiskPressure::Critical.as_str(), "critical");
+        // Unknown byte decodes to the safe default.
+        assert_eq!(DiskPressure::from_u8(99), DiskPressure::Ok);
     }
 
     #[test]
