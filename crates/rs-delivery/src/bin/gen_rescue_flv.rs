@@ -279,7 +279,7 @@ fn mode_check() -> Result<(), String> {
     }
     let committed_hash = sha256_file(&committed)?;
 
-    // Generate to a scratch path next to target/.
+    // Generate to a scratch path in the system temp dir (e.g. /tmp).
     let scratch =
         std::env::temp_dir().join(format!("gen_rescue_flv_check_{}.flv", std::process::id()));
     let _cleanup = ScratchCleanup(scratch.clone());
