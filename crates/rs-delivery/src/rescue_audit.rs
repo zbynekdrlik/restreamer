@@ -42,6 +42,45 @@ pub fn rescue_recovered_row(alias: &str, gap_secs: u64) -> RingRowParts {
     }
 }
 
+/// Row emitted when an operator-configured rescue URL is rejected because
+/// it is not a `.flv` (legacy MP4 / MOV / etc). VPS falls back to the
+/// embedded default rescue blob.
+pub fn legacy_rejected_row(alias: &str, url: &str) -> RingRowParts {
+    RingRowParts {
+        severity: Severity::Warn,
+        source: Source::Vps,
+        endpoint: Some(alias.to_string()),
+        action: Action::RescueLegacyFormatRejected,
+        detail: serde_json::json!({ "url": url }),
+    }
+}
+
+/// Row emitted when the VPS fails to fetch the operator-configured rescue
+/// FLV from S3. VPS falls back to the embedded default rescue blob.
+pub fn custom_fetch_failed_row(alias: &str, url: &str, err: &str) -> RingRowParts {
+    RingRowParts {
+        severity: Severity::Warn,
+        source: Source::Vps,
+        endpoint: Some(alias.to_string()),
+        action: Action::RescueCustomFetchFailed,
+        detail: serde_json::json!({ "url": url, "error": err }),
+    }
+}
+
+/// Push a RescueLegacyFormatRejected row if a ring is present.
+pub fn emit_legacy_rejected(ring: &Option<Arc<AuditRing>>, alias: &str, url: &str) {
+    if let Some(r) = ring {
+        r.push_parts(legacy_rejected_row(alias, url));
+    }
+}
+
+/// Push a RescueCustomFetchFailed row if a ring is present.
+pub fn emit_custom_fetch_failed(ring: &Option<Arc<AuditRing>>, alias: &str, url: &str, err: &str) {
+    if let Some(r) = ring {
+        r.push_parts(custom_fetch_failed_row(alias, url, err));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +100,25 @@ mod tests {
         assert_eq!(r.action, Action::RescueRecovered);
         assert_eq!(r.severity, Severity::Info);
         assert_eq!(r.detail["gap_secs"], 137);
+    }
+
+    #[test]
+    fn legacy_rejected_row_is_warn_with_url() {
+        let r = legacy_rejected_row("yt-main", "https://s3.example.com/rescue.mp4");
+        assert_eq!(r.action, Action::RescueLegacyFormatRejected);
+        assert_eq!(r.severity, Severity::Warn);
+        assert_eq!(r.source, Source::Vps);
+        assert_eq!(r.endpoint.as_deref(), Some("yt-main"));
+        assert_eq!(r.detail["url"], "https://s3.example.com/rescue.mp4");
+    }
+
+    #[test]
+    fn custom_fetch_failed_row_carries_url_and_error() {
+        let r = custom_fetch_failed_row("yt-main", "https://s3.example.com/rescue.flv", "HTTP 403");
+        assert_eq!(r.action, Action::RescueCustomFetchFailed);
+        assert_eq!(r.severity, Severity::Warn);
+        assert_eq!(r.source, Source::Vps);
+        assert_eq!(r.detail["url"], "https://s3.example.com/rescue.flv");
+        assert_eq!(r.detail["error"], "HTTP 403");
     }
 }

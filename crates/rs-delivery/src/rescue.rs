@@ -1,6 +1,9 @@
 //! Rescue mode: plays a looped video with countdown overlay when the
 //! delivery buffer is empty (warmup or outage recovery).
 use rs_ffmpeg::ServiceType;
+use std::borrow::Cow;
+
+use crate::rescue_default::DEFAULT_RESCUE_FLV;
 
 /// Fixed buffer refill target before resuming normal delivery (seconds).
 pub const RESCUE_REFILL_TARGET_SECS: u64 = 120;
@@ -549,6 +552,85 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
     stopped
 }
 
+/// Resolve the FLV bytes to push during rescue for this endpoint.
+///
+/// Returns `Cow::Borrowed(DEFAULT_RESCUE_FLV)` when:
+///   * no operator URL configured (None / empty)
+///   * URL is non-FLV (legacy MP4 / MOV / etc) — emits `RescueLegacyFormatRejected`
+///   * S3 fetch fails — emits `RescueCustomFetchFailed`
+///
+/// Returns `Cow::Owned(<S3 bytes>)` when a custom `.flv` URL fetches
+/// successfully.
+///
+/// Caller wraps the result in `Arc<Vec<u8>>` for cheap cloning across
+/// rust_rescue_push loop iterations.
+pub async fn resolve_rescue_bytes(
+    rescue_video_url: Option<&str>,
+    audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
+    alias: &str,
+) -> Cow<'static, [u8]> {
+    let url = match rescue_video_url {
+        Some(u) if !u.is_empty() => u,
+        _ => return Cow::Borrowed(DEFAULT_RESCUE_FLV),
+    };
+
+    if !url.to_lowercase().ends_with(".flv") {
+        tracing::warn!(alias, url, "Non-FLV rescue URL rejected; using default");
+        crate::rescue_audit::emit_legacy_rejected(audit_ring, alias, url);
+        return Cow::Borrowed(DEFAULT_RESCUE_FLV);
+    }
+
+    match fetch_flv_from_s3(url).await {
+        Ok(bytes) => Cow::Owned(bytes),
+        Err(e) => {
+            tracing::warn!(alias, url, "Rescue FLV fetch failed: {e}; using default");
+            crate::rescue_audit::emit_custom_fetch_failed(audit_ring, alias, url, &e.to_string());
+            Cow::Borrowed(DEFAULT_RESCUE_FLV)
+        }
+    }
+}
+
+async fn fetch_flv_from_s3(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()).into());
+    }
+    Ok(resp.bytes().await?.to_vec())
+}
+
 #[cfg(test)]
 #[path = "rescue_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod resolve_rescue_bytes_tests {
+    use super::*;
+    use crate::rescue_default::DEFAULT_RESCUE_FLV;
+
+    #[tokio::test]
+    async fn returns_default_when_url_none() {
+        let result = resolve_rescue_bytes(None, &None, "test-alias").await;
+        assert_eq!(result.as_ref(), DEFAULT_RESCUE_FLV);
+    }
+
+    #[tokio::test]
+    async fn returns_default_when_url_empty() {
+        let result = resolve_rescue_bytes(Some(""), &None, "test-alias").await;
+        assert_eq!(result.as_ref(), DEFAULT_RESCUE_FLV);
+    }
+
+    #[tokio::test]
+    async fn returns_default_when_url_not_flv() {
+        // Legacy MP4 URL → reject, fallback. No audit ring so no panic on emit.
+        let result = resolve_rescue_bytes(
+            Some("https://example.com/rescue-videos/abc.mp4"),
+            &None,
+            "test-alias",
+        )
+        .await;
+        assert_eq!(result.as_ref(), DEFAULT_RESCUE_FLV);
+    }
+}
