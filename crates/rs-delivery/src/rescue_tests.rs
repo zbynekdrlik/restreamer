@@ -645,3 +645,116 @@ async fn warmup_exponential_probe_clears_large_pruned_gap() {
     let s = stats.lock().await;
     assert_eq!(s.delivery_mode, "normal");
 }
+
+// ------------------------------------------------------------------
+// R1 RED — `rescue_activates_when_url_null_and_cache_drains`
+//
+// Reproduces the 2026-05-30 stream.lan crash production incident:
+// stream.lan went down, the cache on the Hetzner VPS drained, and every
+// endpoint went dark because all 5 production templates had
+// `rescue_video_url = NULL`. The consumer cache-drain branch at
+// `endpoint_task.rs:663` is gated by
+// `if let Some(ref rescue_url) = rescue_video_url { ... rescue ... }` —
+// so when the URL is None (the default), the rescue block is skipped
+// entirely and the endpoint goes silent.
+//
+// After Task 6 (the GREEN commit) the cache-drain branch will:
+//   * Drop the outer `if let Some(ref rescue_url) = rescue_video_url`
+//     guard, so rescue fires whenever the buffer is empty AND the
+//     producer is stalled — regardless of URL config.
+//   * Call `crate::rescue::run_rescue_loop(...)` with
+//     `rescue_video_url.as_deref()` (Option<&str>) rather than `&str`.
+//   * Let `resolve_rescue_bytes(None, ...)` (added in Task 4) substitute
+//     the embedded `DEFAULT_RESCUE_FLV` blob when no URL is configured.
+//
+// APPROACH (Option C — source-structure assertion):
+//
+// The runtime path (consumer_task → cache-drain branch → run_rescue_loop)
+// requires the full producer/consumer machinery: a real S3Fetcher trait
+// impl, a real RtmpPusher, a Tauri-scope BufferState + audit_ring, and a
+// minimum 60s sleep for RESCUE_STALL_THRESHOLD_SECS to elapse. Building
+// a TestHarness that exercises this end-to-end would require >300 LoC of
+// mock plumbing (mock producer, mock pusher, mock S3, mock audit) which
+// is scope creep for a single regression test AND duplicates the
+// integration coverage that Task 6's signature change will give us for
+// free at compile time.
+//
+// Instead, this test asserts the structural invariant that the bug
+// reduces to: the cache-drain branch in `endpoint_task.rs` must NOT
+// gate the rescue invocation on `rescue_video_url` being Some. Today
+// the guard is present (test FAILS). After Task 6 removes it, the test
+// PASSES. This is brittle to refactor but precise to the bug — Task 6
+// is explicitly the commit that removes the guard, so the signal is
+// 1:1 with the fix.
+//
+// Spec: docs/superpowers/specs/2026-05-31-always-on-rust-rescue-design.md
+// Plan: docs/superpowers/plans/2026-05-31-always-on-rust-rescue.md (Task 5/6)
+#[test]
+fn rescue_activates_when_url_null_and_cache_drains() {
+    // Read the source file at test time. CARGO_MANIFEST_DIR points at
+    // crates/rs-delivery so the source path is stable across local + CI.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let source_path = std::path::Path::new(manifest_dir).join("src/endpoint_task.rs");
+    let source = std::fs::read_to_string(&source_path).unwrap_or_else(|e| {
+        panic!(
+            "R1: failed to read {} — test cannot verify cache-drain branch structure: {e}",
+            source_path.display()
+        )
+    });
+
+    // Locate the cache-drain branch by its distinguishing marker — the
+    // RESCUE_STALL_THRESHOLD_SECS sleep arm of the tokio::select! macro.
+    // This is the ONE place in the consumer that handles "no chunks for
+    // N seconds → maybe rescue".
+    let marker = "tokio::time::sleep(std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS))";
+    let marker_pos = source.find(marker).unwrap_or_else(|| {
+        panic!(
+            "R1: cache-drain branch marker not found in endpoint_task.rs. \
+             The branch was probably renamed or refactored — update the R1 \
+             test marker to match. Marker searched: {marker:?}"
+        )
+    });
+
+    // Inspect the next ~80 lines after the marker — this is the full
+    // body of the cache-drain branch up to and including the
+    // `run_rescue_loop` call.
+    let after = &source[marker_pos..];
+    let branch_body: String = after.lines().take(80).collect::<Vec<_>>().join("\n");
+
+    // The BUG: the rescue invocation is gated by `if let Some(ref
+    // rescue_url) = rescue_video_url` so when URL is None the block is
+    // skipped and the endpoint goes dark.
+    //
+    // The FIX (Task 6): remove this guard so rescue fires on
+    // buffer-empty + producer-stalled regardless of URL config. The
+    // embedded DEFAULT_RESCUE_FLV (via resolve_rescue_bytes(None, ...))
+    // covers the no-URL case.
+    let buggy_guard = "if let Some(ref rescue_url) = rescue_video_url";
+    assert!(
+        !branch_body.contains(buggy_guard),
+        "R1 RED: cache-drain branch in endpoint_task.rs still gates rescue on \
+         `if let Some(ref rescue_url) = rescue_video_url`. This is the \
+         2026-05-30 production incident: when rescue_video_url=None (the \
+         default across all 5 templates), the cache-drain branch is skipped \
+         entirely and the endpoint goes dark. Task 6 must remove this guard \
+         and call run_rescue_loop with Option<&str>, letting \
+         resolve_rescue_bytes(None, ...) substitute the embedded \
+         DEFAULT_RESCUE_FLV. See \
+         docs/superpowers/specs/2026-05-31-always-on-rust-rescue-design.md. \
+         Branch body inspected:\n---\n{branch_body}\n---"
+    );
+
+    // Additional invariant: the rescue invocation must pass the URL as
+    // Option<&str> (via `rescue_video_url.as_deref()`) — proof that the
+    // wiring threads through to resolve_rescue_bytes correctly. Today
+    // the call passes `rescue_url` (a &str via the buggy guard's
+    // binding), tomorrow it passes `rescue_video_url.as_deref()`.
+    let expected_call_form = "rescue_video_url.as_deref()";
+    assert!(
+        branch_body.contains(expected_call_form),
+        "R1 RED: cache-drain branch does not pass `rescue_video_url.as_deref()` \
+         to run_rescue_loop. Task 6 must change the call to thread the Option \
+         through so resolve_rescue_bytes can substitute DEFAULT_RESCUE_FLV \
+         when URL is None. Branch body inspected:\n---\n{branch_body}\n---"
+    );
+}
