@@ -13,10 +13,88 @@ use crate::EndpointError;
 /// Concurrency for parallel S3 deletes. The previous implementation deleted
 /// objects sequentially, which caused the dashboard "Delete + Cleanup"
 /// button to time out for any event with more than ~150 chunks (one HTTP
-/// round-trip per object × ~200ms). Twenty parallel deletes is a good
-/// trade-off — fast enough to finish 1000 chunks in ~10 seconds, slow
-/// enough not to flood the S3 endpoint.
-const DELETE_CONCURRENCY: usize = 20;
+/// round-trip per object × ~200ms). Eight parallel deletes is a good
+/// trade-off — fast enough to finish 1000 chunks in ~25 seconds, slow
+/// enough not to push the bucket past Hetzner's per-bucket write rate
+/// when 8 sustained upload workers are also in flight.
+///
+///
+/// Bumped DOWN from 20 -> 8 after the 2026-05-25 -> 2026-05-29 cascade
+/// post-mortem: aws-cli sustained 800 PUTs at 3.7/s against nbg1 returns
+/// zero 5xx, but Restreamer (8 uploader workers + 20-way clear-s3 delete
+/// plus VPS LIST/GET) hit 504 floods during clear-s3 windows. 8+8 = 16
+/// in-flight stays under the bucket limit observed empirically on nbg1.
+const DELETE_CONCURRENCY: usize = 8;
+
+/// Max retries inside a single S3 op for transient 5xx / network errors.
+/// Internal retry absorbs Hetzner backend hiccups without polluting the
+/// outer uploader retry queue (which fires on every failure -> writes an
+/// audit row, schedules backoff). Three internal retries with 200ms,
+/// 400ms, 800ms backoff covers the 600ms-1.5s 504 recovery window seen
+/// on nbg1 during the 2026-05 cascade. Network errors past the budget
+/// surface to the caller, which still retries forever (continuity).
+const S3_OP_INTERNAL_RETRIES: u32 = 3;
+
+/// Returns true if the upload/delete error is a transient 5xx or network
+/// hiccup worth absorbing with an internal retry. Structural rejects
+/// (4xx) and "permanent" classes are surfaced immediately.
+fn is_transient_s3_error(err: &str) -> bool {
+    let m = err.to_ascii_lowercase();
+    m.contains(" 500")
+        || m.contains(" 502")
+        || m.contains(" 503")
+        || m.contains(" 504")
+        || m.contains("5xx")
+        || m.contains("internalerror")
+        || m.contains("serviceunavailable")
+        || m.contains("slowdown")
+        || m.contains("gateway")
+        || m.contains("timeout")
+        || m.contains("timed out")
+        || m.contains("connection")
+        || m.contains("reset")
+        || m.contains("refused")
+}
+
+/// Internal retry wrapper. Re-runs `op` up to `S3_OP_INTERNAL_RETRIES`
+/// times when the error is transient (5xx/network). Backoff schedule
+/// is 200ms, 400ms, 800ms (cumulative ~1.4s). Non-transient errors
+/// (4xx, invalid creds, etc.) return immediately.
+async fn with_internal_retry<F, Fut, T>(label: &str, mut op: F) -> Result<T, EndpointError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, EndpointError>>,
+{
+    let mut last_err: Option<EndpointError> = None;
+    for attempt in 0..=S3_OP_INTERNAL_RETRIES {
+        match op().await {
+            Ok(v) => {
+                if attempt > 0 {
+                    debug!(
+                        "{label}: succeeded on internal retry attempt {} of {S3_OP_INTERNAL_RETRIES}",
+                        attempt
+                    );
+                }
+                return Ok(v);
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if attempt < S3_OP_INTERNAL_RETRIES && is_transient_s3_error(&msg) {
+                    let backoff_ms = 200u64 * (1 << attempt);
+                    debug!(
+                        "{label}: transient error on attempt {} of {S3_OP_INTERNAL_RETRIES}, retrying in {backoff_ms}ms: {msg}",
+                        attempt + 1
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    last_err = Some(e);
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| EndpointError::S3(format!("{label}: retry budget exhausted"))))
+}
 
 /// Given a raw S3 CommonPrefix string like `"{base}event/"`, trim the
 /// base prefix and the trailing slash. Returns `None` if the resulting
@@ -134,24 +212,46 @@ impl S3Client {
             metadata.len(),
         );
 
-        // Clone bucket to add per-upload metadata without leaking headers
-        let mut upload_bucket = (*self.bucket).clone();
-        upload_bucket.add_header("x-amz-meta-duration-ms", &duration_ms.to_string());
-        for (k, v) in metadata {
-            upload_bucket.add_header(&format!("x-amz-meta-{k}"), v);
-        }
-
-        let response = upload_bucket
-            .put_object_stream(&mut file, &s3_key)
+        // Read the file ONCE into memory so internal retries don't re-read
+        // (rust-s3 put_object_stream consumes the reader; we can't rewind
+        // a tokio File across attempts without reopening). Chunks are
+        // already < 8 MB so the single-PUT path is taken by rust-s3 anyway.
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::with_capacity(file_size as usize);
+        file.read_to_end(&mut buf)
             .await
-            .map_err(|e| EndpointError::S3(format!("upload failed: {e}")))?;
+            .map_err(|e| EndpointError::Io(e.to_string()))?;
+        let buf_arc = std::sync::Arc::new(buf);
 
-        if response.status_code() >= 300 {
-            return Err(EndpointError::S3(format!(
-                "upload returned status {}",
-                response.status_code(),
-            )));
-        }
+        let label = format!("upload {s3_key}");
+        with_internal_retry(&label, || {
+            let buf_arc = std::sync::Arc::clone(&buf_arc);
+            let s3_key = s3_key.clone();
+            let bucket_template = (*self.bucket).clone();
+            let duration_ms_str = duration_ms.to_string();
+            let metadata = metadata.clone();
+            async move {
+                // Fresh bucket clone + headers per attempt so retries don't
+                // inherit a stale header state from a prior failed signing.
+                let mut upload_bucket = bucket_template;
+                upload_bucket.add_header("x-amz-meta-duration-ms", &duration_ms_str);
+                for (k, v) in metadata.iter() {
+                    upload_bucket.add_header(&format!("x-amz-meta-{k}"), v);
+                }
+                let response = upload_bucket
+                    .put_object(&s3_key, &buf_arc)
+                    .await
+                    .map_err(|e| EndpointError::S3(format!("upload failed: {e}")))?;
+                if response.status_code() >= 300 {
+                    return Err(EndpointError::S3(format!(
+                        "upload returned status {}",
+                        response.status_code(),
+                    )));
+                }
+                Ok(())
+            }
+        })
+        .await?;
 
         info!(
             "Uploaded {s3_key} ({file_size} bytes, duration_ms={duration_ms}, meta_keys={})",
@@ -204,10 +304,21 @@ impl S3Client {
         let mut total_deleted = 0u64;
 
         loop {
-            let list = bucket
-                .list(prefix.clone(), None)
-                .await
-                .map_err(|e| EndpointError::S3(format!("list failed: {e}")))?;
+            let list = {
+                let bucket = Arc::clone(&bucket);
+                let prefix = prefix.clone();
+                with_internal_retry(&format!("list {prefix}"), move || {
+                    let bucket = Arc::clone(&bucket);
+                    let prefix = prefix.clone();
+                    async move {
+                        bucket
+                            .list(prefix, None)
+                            .await
+                            .map_err(|e| EndpointError::S3(format!("list failed: {e}")))
+                    }
+                })
+                .await?
+            };
 
             let keys: Vec<String> = list
                 .iter()
@@ -222,17 +333,24 @@ impl S3Client {
                 .map(|key| {
                     let bucket = Arc::clone(&bucket);
                     async move {
-                        let response = bucket
-                            .delete_object(&key)
-                            .await
-                            .map_err(|e| EndpointError::S3(format!("delete {key} failed: {e}")))?;
-                        if response.status_code() >= 300 {
-                            return Err(EndpointError::S3(format!(
-                                "delete {key} returned status {}",
-                                response.status_code()
-                            )));
-                        }
-                        Ok(key)
+                        let key_for_retry = key.clone();
+                        with_internal_retry(&format!("delete {key}"), move || {
+                            let bucket = Arc::clone(&bucket);
+                            let key = key_for_retry.clone();
+                            async move {
+                                let response = bucket.delete_object(&key).await.map_err(|e| {
+                                    EndpointError::S3(format!("delete {key} failed: {e}"))
+                                })?;
+                                if response.status_code() >= 300 {
+                                    return Err(EndpointError::S3(format!(
+                                        "delete {key} returned status {}",
+                                        response.status_code()
+                                    )));
+                                }
+                                Ok(key)
+                            }
+                        })
+                        .await
                     }
                 })
                 .buffer_unordered(DELETE_CONCURRENCY)

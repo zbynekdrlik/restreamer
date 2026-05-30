@@ -431,11 +431,22 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
         run: |
+          # Migrated from nbg1 -> fsn1 on 2026-05-30. nbg1 was returning
+          # sustained 504s under Restreamer's concurrent PUT/DELETE/LIST
+          # load (aws-cli sequential 800 PUTs at 3.7/s hit 0 5xx; rust-s3
+          # under our actual load hit 30+ 504s per 14 min window). The
+          # bucket name change (restreamer-chunks -> restreamer-chunks-fsn1)
+          # is forced because Hetzner Object Storage buckets are
+          # region-bound -- creating restreamer-chunks in fsn1 collides
+          # with nothing in the project namespace and gives us a clean
+          # workload that has not been throttled by Hetzner's "we will be
+          # reducing the available write limitations for some existing
+          # buckets on NBG1" announcement.
           pip install awscli
           aws s3 cp target/release/rs-delivery \
-            s3://restreamer-chunks/rs-delivery \
-            --endpoint-url https://nbg1.your-objectstorage.com \
-            --region nbg1 \
+            s3://restreamer-chunks-fsn1/rs-delivery \
+            --endpoint-url https://fsn1.your-objectstorage.com \
+            --region fsn1 \
             --acl public-read
 
   file-size:
