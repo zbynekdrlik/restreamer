@@ -97,7 +97,14 @@ pub async fn rust_rescue_push(
             res = pusher.push_flv_bytes(&flv_bytes) => {
                 if let Err(e) = res {
                     tracing::warn!(alias, "rust_rescue_push: push error: {e}; backing off");
-                    tokio::time::sleep(ERROR_BACKOFF).await;
+                    // Backoff but observe stop signal so shutdown latency
+                    // stays bounded by the awaited future, not 500ms.
+                    tokio::select! {
+                        _ = tokio::time::sleep(ERROR_BACKOFF) => {}
+                        _ = stop_rx.changed() => {
+                            if *stop_rx.borrow() { return true; }
+                        }
+                    }
                 }
 
                 // After each pace-paced push (or backoff after error), update

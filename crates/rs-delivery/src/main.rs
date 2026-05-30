@@ -29,7 +29,6 @@ pub mod rescue_default;
 pub mod rtmp_push_telemetry;
 pub mod rust_rescue_push;
 mod s3_fetch;
-
 pub mod s3_fetch_profile;
 
 #[cfg(test)]
