@@ -18,6 +18,7 @@ mod disk_cache;
 mod disk_cache_fetcher;
 mod disk_cache_push_sample;
 pub mod endpoint_audit;
+pub(crate) mod endpoint_rtmp_url;
 pub mod endpoint_stats;
 pub mod endpoint_task;
 mod ffmpeg_reason;
@@ -26,7 +27,9 @@ pub mod rescue;
 pub mod rescue_audit;
 pub mod rescue_default;
 pub mod rtmp_push_telemetry;
+pub mod rust_rescue_push;
 mod s3_fetch;
+
 pub mod s3_fetch_profile;
 
 #[cfg(test)]

@@ -261,11 +261,9 @@ impl EndpointHandle {
     }
 }
 
-#[path = "endpoint_rtmp_url.rs"]
-mod endpoint_rtmp_url;
-use endpoint_rtmp_url::build_rtmp_url;
+use crate::endpoint_rtmp_url::build_rtmp_url;
 #[cfg(test)]
-pub(crate) use endpoint_rtmp_url::build_rtmp_url_pub;
+pub(crate) use crate::endpoint_rtmp_url::build_rtmp_url_pub;
 
 /// Producer task: fetches chunks from S3 and sends them into the bounded channel.
 #[allow(clippy::too_many_arguments)]
