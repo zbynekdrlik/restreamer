@@ -58,18 +58,38 @@ use crate::rescue::RESCUE_REFILL_TARGET_SECS;
 /// The pusher itself lazy-reconnects on the next call after an error.
 const ERROR_BACKOFF: Duration = Duration::from_millis(500);
 
+/// Selects whether `rust_rescue_push` owns the stats fields it would
+/// otherwise overwrite each tick. See review finding #2 (warmup race).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RescuePushMode {
+    /// Outage rescue (cache-drain or recv-None defensive). This caller
+    /// owns `stats.delivery_mode` + `stats.rescue_eta_secs` and the
+    /// pusher updates them every iteration.
+    Outage,
+    /// Warmup background push. The warmup probe loop in `run_warmup_loop`
+    /// owns `stats.delivery_mode = "warmup"` + `rescue_eta_secs`; this
+    /// mode keeps the pusher inert for stats so the two writers don't
+    /// race and make the dashboard flicker between "warmup" and
+    /// "rescue"/"recovering".
+    Warmup,
+}
+
 /// Loop a pre-encoded FLV blob through `RtmpPusher` until stop or refill.
 ///
 /// Returns `true` if stop signal received, `false` if the producer has been
 /// active for `RESCUE_REFILL_TARGET_SECS` continuous wall-seconds.
 ///
-/// `stats.delivery_mode` is updated each tick:
+/// When `mode == RescuePushMode::Outage`, `stats.delivery_mode` is updated
+/// each tick:
 /// - `"rescue"` while the producer is stalled
 /// - `"recovering"` while the producer is active but the refill window
 ///   has not yet completed
 ///
-/// `stats.rescue_eta_secs` is updated each tick with seconds remaining
+/// and `stats.rescue_eta_secs` is updated each tick with seconds remaining
 /// until refill (saturating to 0).
+///
+/// When `mode == RescuePushMode::Warmup` the pusher does NOT touch stats —
+/// the warmup probe loop owns those fields.
 #[allow(clippy::too_many_arguments)]
 pub async fn rust_rescue_push(
     alias: &str,
@@ -79,6 +99,7 @@ pub async fn rust_rescue_push(
     buffer_state: Arc<BufferState>,
     stats: Stats,
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    mode: RescuePushMode,
 ) -> bool {
     let url = build_rtmp_url(service_type, stream_key);
     tracing::info!(
@@ -124,7 +145,12 @@ pub async fn rust_rescue_push(
                 let eta = RESCUE_REFILL_TARGET_SECS
                     .saturating_sub(continuous_active_secs);
 
-                {
+                // Review finding #2: only the Outage caller owns these
+                // stats fields. Warmup's probe loop is the canonical
+                // writer during warmup; writing here too races and
+                // makes the dashboard flicker between "warmup" and
+                // "rescue"/"recovering".
+                if matches!(mode, RescuePushMode::Outage) {
                     let mut s = stats.lock().await;
                     s.delivery_mode = if active {
                         "recovering".to_string()
@@ -193,6 +219,7 @@ mod tests {
                 buffer_state,
                 stats,
                 &mut stop_rx,
+                RescuePushMode::Outage,
             ),
         )
         .await;

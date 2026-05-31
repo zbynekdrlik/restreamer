@@ -132,11 +132,195 @@ pub async fn run_rescue_loop(
         buffer_state.clone(),
         stats.clone(),
         stop_rx,
+        crate::rust_rescue_push::RescuePushMode::Outage,
     )
     .await;
 
     cleanup_countdown_file(alias);
     stopped
+}
+
+/// Result of a cache-drain rescue cycle handled by `run_outage_rescue`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutageRescueOutcome {
+    /// Stop signal fired while in rescue — consumer should return.
+    Stop,
+    /// Rescue exited (refill complete or — in current scoped fix — never).
+    /// Consumer should reset its FLV normalizer and resume normal delivery.
+    Recovered,
+}
+
+/// Cache-drain outage rescue invoked from `consumer_task` when the buffer
+/// is empty AND the producer has stalled.
+///
+/// Review-finding fixes baked in here:
+///
+/// * **#1 (duplicate-publish):** drops the existing `rust_pusher` (closing
+///   its RTMP `Session`) BEFORE entering rescue, then reconstructs a fresh
+///   pusher on the Recovered path so normal delivery resumes against a
+///   fresh `Session`. Without the drop, two `RtmpPusher` instances would
+///   race to publish on the same URL+stream_key — YouTube/FB rejects one
+///   as "publish busy" and the stream breaks.
+/// * **#5 (file-size cap):** extracting this from inline code in
+///   `consumer_task` keeps `endpoint_task.rs` under the 1000-line cap.
+///
+/// The `RescueRecovered` audit row is still emitted here (unlike
+/// `run_defensive_rescue`), because the cache-drain branch CAN recover —
+/// the producer may revive and the consumer continues normal delivery.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_outage_rescue(
+    alias: &str,
+    rescue_video_url: Option<&str>,
+    service_type: rs_ffmpeg::ServiceType,
+    stream_key: &str,
+    buffer_state: &std::sync::Arc<crate::buffer_state::BufferState>,
+    stats: &crate::endpoint_task::Stats,
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
+    last_delivered_chunk_id: i64,
+    proc: &mut Option<Box<dyn crate::endpoint_task::OutputProcess>>,
+    rust_pusher: &mut Option<rs_rtmp_push::RtmpPusher>,
+    use_rust_pusher: bool,
+) -> OutageRescueOutcome {
+    let rescue_started = std::time::Instant::now();
+    crate::rescue_audit::emit_activated(audit_ring, alias, last_delivered_chunk_id);
+
+    // Review #1: kill the legacy ffmpeg child AND drop the existing
+    // rust_pusher BEFORE entering rescue. The rescue loop constructs its
+    // own `RtmpPusher` to the SAME URL+stream_key; if our pre-existing
+    // rust_pusher still holds the original `Session` open, YouTube/FB
+    // sees two concurrent publishes and rejects/kills one of them. Both
+    // takes are no-ops when None.
+    if let Some(mut p) = proc.take() {
+        p.kill().await;
+    }
+    if let Some(p) = rust_pusher.take() {
+        drop(p);
+    }
+
+    {
+        let mut s = stats.lock().await;
+        s.delivery_mode = "rescue".to_string();
+        s.rescue_eta_secs = Some(RESCUE_REFILL_TARGET_SECS);
+    }
+
+    let should_stop = run_rescue_loop(
+        alias,
+        rescue_video_url,
+        service_type,
+        stream_key,
+        buffer_state,
+        stats,
+        stop_rx,
+        audit_ring,
+    )
+    .await;
+    if should_stop {
+        return OutageRescueOutcome::Stop;
+    }
+
+    // Review #1 (cont): reconstruct the rust_pusher so the consumer can
+    // resume normal-delivery writes against a fresh `Session`
+    // (lazy-connects on next push). Timestamps reset from zero — that's
+    // expected after a rescue gap.
+    if use_rust_pusher {
+        let url = crate::endpoint_rtmp_url::build_rtmp_url(service_type, stream_key);
+        *rust_pusher = Some(rs_rtmp_push::RtmpPusher::new(
+            url,
+            rs_rtmp_push::PusherConfig::default(),
+        ));
+    }
+    {
+        let mut s = stats.lock().await;
+        s.delivery_mode = "normal".to_string();
+        s.rescue_eta_secs = None;
+    }
+    let gap = rescue_started.elapsed().as_secs();
+    crate::rescue_audit::emit_recovered(audit_ring, alias, gap);
+    tracing::info!(alias, "Consumer: resumed normal delivery");
+    OutageRescueOutcome::Recovered
+}
+
+/// Defensive rescue when the consumer's `rx.recv()` returns `None`
+/// (producer panicked or stop_tx closed the channel).
+///
+/// Used by `consumer_task` to push DEFAULT_RESCUE_FLV (or the operator's
+/// custom URL) during the ~30s endpoint_task teardown window so viewers
+/// see rescue content instead of an immediate black screen.
+///
+/// Review-finding fixes baked in here:
+///
+/// * **#1 (duplicate-publish):** drops the existing `rust_pusher` (closing
+///   its RTMP `Session`) BEFORE entering rescue, so the fresh `RtmpPusher`
+///   spawned inside `run_rescue_loop` doesn't race the old one to publish
+///   on the same URL. YouTube/FB reject the second publish as "publish
+///   busy" otherwise.
+/// * **#4 (misleading recovery):** does NOT emit `RescueRecovered` on
+///   exit — the producer is dead and the consumer immediately breaks,
+///   so there was no actual recovery. The audit timeline shows just
+///   `RescueActivated`, which operators can correlate with the
+///   surrounding endpoint teardown rows.
+/// * **#5 (file-size cap):** lives here instead of inline in
+///   `endpoint_task.rs::consumer_task` so the consumer fn drops well
+///   below the 1000-line CI cap.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_defensive_rescue(
+    alias: &str,
+    rescue_video_url: Option<&str>,
+    service_type: rs_ffmpeg::ServiceType,
+    stream_key: &str,
+    buffer_state: &std::sync::Arc<crate::buffer_state::BufferState>,
+    stats: &crate::endpoint_task::Stats,
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
+    last_delivered_chunk_id: i64,
+    proc: &mut Option<Box<dyn crate::endpoint_task::OutputProcess>>,
+    rust_pusher: &mut Option<rs_rtmp_push::RtmpPusher>,
+) {
+    crate::rescue_audit::emit_activated(audit_ring, alias, last_delivered_chunk_id);
+
+    // Review #1: kill any orphaned ffmpeg child AND drop the existing
+    // rust_pusher so its RTMP `Session` is closed BEFORE `run_rescue_loop`
+    // constructs a fresh pusher to the same URL+stream_key. Two concurrent
+    // publishes to the same key trigger publish-busy on YouTube/FB and
+    // break the stream.
+    if let Some(mut p) = proc.take() {
+        p.kill().await;
+    }
+    if let Some(p) = rust_pusher.take() {
+        drop(p);
+    }
+
+    {
+        let mut s = stats.lock().await;
+        s.delivery_mode = "rescue".to_string();
+        s.rescue_eta_secs = Some(RESCUE_REFILL_TARGET_SECS);
+    }
+
+    // Returns when stop_rx fires (endpoint_task tearing us down via the
+    // select-loop consumer-drain timeout). No producer respawn in this
+    // scoped fix, so refill never completes and rescue runs until stop.
+    let _should_stop = run_rescue_loop(
+        alias,
+        rescue_video_url,
+        service_type,
+        stream_key,
+        buffer_state,
+        stats,
+        stop_rx,
+        audit_ring,
+    )
+    .await;
+
+    // Review #4: NO emit_recovered here. The producer is dead, the
+    // consumer breaks immediately after this returns — there is no
+    // recovery to report. A `RescueRecovered` row would mislead operators
+    // reading the audit timeline ("rescue recovered" right before the
+    // endpoint silently disappears).
+    tracing::info!(
+        alias,
+        "Consumer: defensive rescue exited; consumer will break"
+    );
 }
 
 /// Run the warmup phase: push rescue (default or operator-configured FLV)
@@ -226,6 +410,7 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
                 dummy_buffer_state,
                 stats_clone,
                 &mut warmup_stop,
+                crate::rust_rescue_push::RescuePushMode::Warmup,
             )
             .await
         }))
@@ -409,8 +594,16 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
     // Aborting the JoinHandle drops the spawned task; the RtmpPusher
     // inside is dropped, which closes its session (kill_on_drop-equivalent
     // for pure-rust). No external ffmpeg process to reap.
+    //
+    // Review finding #3: AWAIT the aborted handle so the spawned task
+    // actually unwinds (dropping the RtmpPusher's Session and closing
+    // its TCP socket) BEFORE this function returns. Without the await,
+    // consumer_task immediately constructs a new RtmpPusher to the same
+    // RTMP URL and the still-alive warmup Session would race to publish
+    // — YouTube/FB would reject one of the two as publish-busy.
     if let Some(handle) = warmup_handle {
         handle.abort();
+        let _ = handle.await;
         tracing::info!(alias, "Warmup rescue pusher stopped");
     }
     cleanup_countdown_file(alias);

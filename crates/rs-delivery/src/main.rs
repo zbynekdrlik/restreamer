@@ -18,6 +18,7 @@ mod disk_cache;
 mod disk_cache_fetcher;
 mod disk_cache_push_sample;
 pub mod endpoint_audit;
+mod endpoint_ffmpeg_impl;
 pub(crate) mod endpoint_rtmp_url;
 pub mod endpoint_stats;
 pub mod endpoint_task;

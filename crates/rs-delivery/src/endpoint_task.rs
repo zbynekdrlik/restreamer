@@ -2,7 +2,7 @@
 /// Producer -> bounded channel (~20s) -> Consumer (ffmpeg writer).
 use async_trait::async_trait;
 use rs_core::models::PusherKind;
-use rs_ffmpeg::{FfmpegProcess, ServiceType};
+use rs_ffmpeg::ServiceType;
 use rs_rtmp_push::{PusherConfig, RtmpPusher};
 use std::sync::{Arc, atomic::Ordering as AtomicOrdering};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -12,7 +12,6 @@ use crate::api::EndpointConfig;
 use crate::audit_ring::AuditRing;
 pub use crate::buffer_state::{BufferState, initial_delivery_mode};
 use crate::endpoint_audit;
-use crate::s3_fetch::S3Fetcher;
 
 #[path = "flv_normalizer.rs"]
 mod flv_normalizer;
@@ -73,57 +72,13 @@ pub trait OutputProcessFactory: Send + Sync {
     ) -> Result<Box<dyn OutputProcess>, String>;
 }
 
-impl ChunkFetcher for S3Fetcher {
-    async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
-        S3Fetcher::fetch_chunk_with_meta(self, chunk_id)
-            .await
-            .map(|opt| opt.map(|cd| (cd.data, cd.duration_ms)))
-            .map_err(|e| e.to_string())
-    }
-    async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
-        S3Fetcher::head_chunk_duration(self, chunk_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-}
-
-/// Real ffmpeg process implementing OutputProcess.
-#[async_trait]
-impl OutputProcess for FfmpegProcess {
-    fn is_alive(&mut self) -> bool {
-        self.try_exit_code().is_none()
-    }
-
-    async fn write(&mut self, data: &[u8]) -> Result<(), String> {
-        rs_ffmpeg::FfmpegProcess::write(self, data)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn kill(&mut self) {
-        rs_ffmpeg::FfmpegProcess::kill(self).await;
-    }
-
-    fn last_stderr_line(&self) -> Option<String> {
-        rs_ffmpeg::FfmpegProcess::stderr_tail(self)
-    }
-}
-
-/// Real ffmpeg process factory.
-pub struct FfmpegProcessFactory;
-
-impl OutputProcessFactory for FfmpegProcessFactory {
-    fn spawn(
-        &self,
-        service_type: ServiceType,
-        stream_key: &str,
-        alias: &str,
-    ) -> Result<Box<dyn OutputProcess>, String> {
-        FfmpegProcess::spawn(service_type, stream_key, alias)
-            .map(|p| Box::new(p) as Box<dyn OutputProcess>)
-            .map_err(|e| e.to_string())
-    }
-}
+// Trait impls for the real `S3Fetcher` (ChunkFetcher) and real
+// `FfmpegProcess` (OutputProcess) plus the `FfmpegProcessFactory` live
+// in `endpoint_ffmpeg_impl.rs` so this file stays under the 1000-line
+// CI cap (review finding #5). They are re-exported here so external
+// callers continue to import `FfmpegProcessFactory` from
+// `crate::endpoint_task`.
+pub use crate::endpoint_ffmpeg_impl::FfmpegProcessFactory;
 
 pub use crate::endpoint_audit::{
     EndpointRestartState, FfmpegRestartRecord, RESTART_HISTORY_CAP, RtmpPushAuditRecord,
@@ -656,52 +611,27 @@ async fn consumer_task<P: OutputProcessFactory>(
                     None => {
                         // R2 GREEN (Task 8 scoped, 2026-05-31): defensive
                         // rescue before teardown. Producer disappeared
-                        // (panic or stop signal closed the channel). Push
-                        // DEFAULT_RESCUE_FLV (or operator's custom URL)
-                        // until the endpoint_task select-loop tears us
-                        // down via the consumer-drain timeout (~30s) or
-                        // a stop signal arrives. Viewers see rescue
-                        // during the teardown window instead of immediate
-                        // dark.
+                        // (panic or stop signal closed the channel). The
+                        // helper pushes DEFAULT_RESCUE_FLV (or operator's
+                        // custom URL) until the endpoint_task select-loop
+                        // tears us down via the consumer-drain timeout
+                        // (~30s) or a stop signal arrives. Viewers see
+                        // rescue during the teardown window instead of
+                        // immediate dark.
                         //
-                        // SCOPED: full producer respawn (so endpoint never
-                        // dies on producer disappearance) is out of scope
-                        // — deferred to a follow-up. The 2026-05-30
-                        // stream.lan crash incident hit the cache-drain
-                        // path (fixed by Task 6), NOT this branch. This
-                        // is defensive hardening for the producer-panic
-                        // case.
+                        // Extracted to `rescue::run_defensive_rescue` so
+                        // this fn stays under the 1000-line CI cap and so
+                        // the review-finding fixes (#1 drop rust_pusher,
+                        // #4 skip emit_recovered) live in one place.
                         tracing::warn!(
                             alias = %alias,
                             "Consumer: producer gone, entering defensive rescue before teardown"
                         );
-                        let rescue_started = std::time::Instant::now();
-                        crate::rescue_audit::emit_activated(
-                            &audit_ring,
-                            &alias,
-                            last_delivered_chunk_id,
-                        );
-                        // Kill any orphaned ffmpeg child (no-op when None
-                        // or already dead on the rust-pusher path).
-                        if let Some(mut p) = proc.take() {
-                            p.kill().await;
-                        }
-                        {
-                            let mut s = stats.lock().await;
-                            s.delivery_mode = "rescue".to_string();
-                            s.rescue_eta_secs =
-                                Some(crate::rescue::RESCUE_REFILL_TARGET_SECS);
-                        }
                         let svc_type: rs_ffmpeg::ServiceType = ep_cfg
                             .service_type
                             .parse()
                             .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
-                        // run_rescue_loop returns when stop_rx fires
-                        // (endpoint_task tearing us down via the
-                        // select-loop consumer-drain timeout) — no
-                        // producer respawn in this scoped fix, so refill
-                        // never completes and rescue runs until stop.
-                        let _should_stop = crate::rescue::run_rescue_loop(
+                        crate::rescue::run_defensive_rescue(
                             &alias,
                             rescue_video_url.as_deref(),
                             svc_type,
@@ -710,15 +640,11 @@ async fn consumer_task<P: OutputProcessFactory>(
                             &stats,
                             &mut stop_rx,
                             &audit_ring,
+                            last_delivered_chunk_id,
+                            &mut proc,
+                            &mut rust_pusher,
                         )
                         .await;
-                        let gap = rescue_started.elapsed().as_secs();
-                        crate::rescue_audit::emit_recovered(&audit_ring, &alias, gap);
-                        tracing::info!(
-                            alias = %alias,
-                            gap_secs = gap,
-                            "Consumer: defensive rescue exited; breaking loop"
-                        );
                         break;
                     }
                 }
@@ -736,26 +662,14 @@ async fn consumer_task<P: OutputProcessFactory>(
                 // and consumers fell silent.
                 if !buffer_state.producer_active.load(AtomicOrdering::Relaxed) {
                     tracing::warn!(alias = %alias, "Consumer: buffer empty + producer stalled, entering rescue mode");
-
-                    let rescue_started = std::time::Instant::now();
-                    crate::rescue_audit::emit_activated(&audit_ring, &alias, last_delivered_chunk_id);
-
-                    // Kill current ffmpeg (legacy push path) before entering
-                    // rescue. The rust pusher path uses `rust_pusher`, but
-                    // ffmpeg fallback may still be live on this code path;
-                    // either way `proc.take()` is a no-op when None.
-                    if let Some(mut p) = proc.take() {
-                        p.kill().await;
-                    }
-                    // Update stats to rescue mode
-                    {
-                        let mut s = stats.lock().await;
-                        s.delivery_mode = "rescue".to_string();
-                        s.rescue_eta_secs = Some(crate::rescue::RESCUE_REFILL_TARGET_SECS);
-                    }
                     let svc_type: rs_ffmpeg::ServiceType =
                         ep_cfg.service_type.parse().unwrap_or(rs_ffmpeg::ServiceType::TestFile);
-                    let should_stop = crate::rescue::run_rescue_loop(
+                    // Extracted to `rescue::run_outage_rescue` so this fn
+                    // stays under the 1000-line CI cap and so the
+                    // review-finding #1 fix (drop+reconstruct rust_pusher
+                    // around rescue) lives in one place. See the helper's
+                    // doc comment for the full rationale.
+                    let outcome = crate::rescue::run_outage_rescue(
                         &alias,
                         rescue_video_url.as_deref(),
                         svc_type,
@@ -764,21 +678,18 @@ async fn consumer_task<P: OutputProcessFactory>(
                         &stats,
                         &mut stop_rx,
                         &audit_ring,
+                        last_delivered_chunk_id,
+                        &mut proc,
+                        &mut rust_pusher,
+                        use_rust_pusher,
                     )
                     .await;
-                    if should_stop {
-                        return;
+                    match outcome {
+                        crate::rescue::OutageRescueOutcome::Stop => return,
+                        crate::rescue::OutageRescueOutcome::Recovered => {
+                            flv_normalizer = FlvStreamNormalizer::new();
+                        }
                     }
-                    // Rescue complete — reset to normal delivery
-                    {
-                        let mut s = stats.lock().await;
-                        s.delivery_mode = "normal".to_string();
-                        s.rescue_eta_secs = None;
-                    }
-                    let gap = rescue_started.elapsed().as_secs();
-                    crate::rescue_audit::emit_recovered(&audit_ring, &alias, gap);
-                    flv_normalizer = FlvStreamNormalizer::new();
-                    tracing::info!(alias = %alias, "Consumer: resumed normal delivery");
                 }
                 continue;
             }
