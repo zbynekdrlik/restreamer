@@ -758,3 +758,110 @@ fn rescue_activates_when_url_null_and_cache_drains() {
          when URL is None. Branch body inspected:\n---\n{branch_body}\n---"
     );
 }
+
+// ------------------------------------------------------------------
+// R3 RED (Task 7) — `warmup_always_pushes_default_rescue_when_no_url`
+//
+// Warmup gap analogue of the R1 cache-drain bug. Today
+// `rescue.rs:run_warmup_loop` only spawns rescue when the operator
+// configured a custom URL:
+//
+//   if let Some(rescue_url) = rescue_video_url {
+//       if !ep_cfg.is_fast {
+//           ... tokio::process::Command::new("ffmpeg") ...
+//       }
+//   }
+//
+// All 5 production templates have `rescue_video_url = NULL`, so
+// non-fast endpoints currently show ~120s of blank screen during the
+// initial cache fill instead of the embedded DEFAULT_RESCUE_FLV.
+//
+// After Task 7 (the R3 GREEN commit) the warmup branch must:
+//   * Drop the outer `if let Some(rescue_url) = rescue_video_url`
+//     guard so non-fast warmup ALWAYS pushes rescue (fast endpoints
+//     still skip — low-latency trade-off per design).
+//   * Replace the external `tokio::process::Command::new("ffmpeg")`
+//     spawn with `crate::rust_rescue_push::rust_rescue_push` — pure
+//     rust, zero ffmpeg on the VPS at runtime.
+//   * Let `resolve_rescue_bytes(None, ...)` substitute
+//     DEFAULT_RESCUE_FLV when no URL is configured (same pattern as
+//     the cache-drain branch fix from Task 6).
+//
+// APPROACH (Option C — source-structure assertion, same as R1):
+//
+// The runtime path requires a real fetcher + audit_ring + a spawned
+// rust_rescue_push that lazy-connects to an RTMP endpoint and would
+// either hang or hit connect errors in tests. A behavioural test
+// with a capturing pusher would need >300 LoC of mock plumbing
+// (mock fetcher already exists, but a mock pusher to inspect "did
+// rescue bytes flow during warmup" does not). The structural test
+// asserts the two invariants the bug reduces to and stays 1:1 with
+// the Task 7 fix.
+//
+// Spec: docs/superpowers/specs/2026-05-31-always-on-rust-rescue-design.md
+// Plan: docs/superpowers/plans/2026-05-31-always-on-rust-rescue.md (Task 7)
+#[test]
+fn warmup_always_pushes_default_rescue_when_no_url() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let source_path = std::path::Path::new(manifest_dir).join("src/rescue.rs");
+    let source = std::fs::read_to_string(&source_path).unwrap_or_else(|e| {
+        panic!(
+            "R3: failed to read {} — test cannot verify warmup branch structure: {e}",
+            source_path.display()
+        )
+    });
+
+    // Locate run_warmup_loop and grab its body up to the next `pub `
+    // declaration (or EOF). This is the entire warmup function body
+    // we need to inspect for the buggy guard + ffmpeg spawn.
+    let warmup_start = source
+        .find("pub async fn run_warmup_loop")
+        .expect("R3: locate run_warmup_loop fn in rescue.rs");
+    let after_start = &source[warmup_start..];
+    // Skip past the signature line so "pub" doesn't match itself.
+    let body_offset = after_start
+        .find('{')
+        .expect("R3: locate opening brace of run_warmup_loop");
+    let body_search = &after_start[body_offset..];
+    let next_pub = body_search.find("\npub ").unwrap_or(body_search.len());
+    let body = &body_search[..next_pub];
+
+    // BUG 1: outer guard skips rescue entirely when URL is None.
+    assert!(
+        !body.contains("if let Some(rescue_url) = rescue_video_url"),
+        "R3 RED: warmup branch in rescue.rs still gates rescue on \
+         `if let Some(rescue_url) = rescue_video_url`. When the operator \
+         has not configured a custom URL (the default state for all 5 \
+         production templates), non-fast endpoints show a blank screen \
+         during the initial cache fill (~120s) instead of the embedded \
+         DEFAULT_RESCUE_FLV. Task 7 must drop this guard and use \
+         resolve_rescue_bytes + rust_rescue_push, mirroring the \
+         cache-drain branch fix from Task 6. See \
+         docs/superpowers/specs/2026-05-31-always-on-rust-rescue-design.md.\n\n\
+         Warmup body inspected (first 600 chars):\n---\n{}\n---",
+        &body[..body.len().min(600)]
+    );
+
+    // BUG 2: external ffmpeg process spawn must be gone.
+    // Task 7 replaces it with rust_rescue_push so the VPS does not
+    // depend on a system ffmpeg for rescue at runtime.
+    assert!(
+        !body.contains("tokio::process::Command::new(\"ffmpeg\")"),
+        "R3 RED: warmup branch still spawns external ffmpeg via \
+         `tokio::process::Command::new(\"ffmpeg\")`. Task 7 must use \
+         `crate::rust_rescue_push::rust_rescue_push` (pure-rust pusher) \
+         instead so the VPS does not depend on system ffmpeg for rescue \
+         at runtime — matches the cache-drain branch path."
+    );
+
+    // Positive assertion: the fix must call rust_rescue_push from
+    // within warmup (proves the new pusher is wired up, not just that
+    // the old ffmpeg spawn was deleted).
+    assert!(
+        body.contains("rust_rescue_push"),
+        "R3 RED: warmup branch does not call `rust_rescue_push` yet. \
+         Task 7's GREEN commit must spawn the pure-rust pusher in a \
+         background tokio::task during warmup for non-fast endpoints \
+         and abort the handle when the warmup probe loop exits."
+    );
+}
