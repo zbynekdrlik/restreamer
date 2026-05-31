@@ -222,6 +222,26 @@ impl AppState {
         self.device_flow_api_base = Some(base);
         self
     }
+
+    /// Replace the `disk_pressure_level` atomic with one provided externally.
+    /// Tauri uses this to share the same Arc with its tray-side AppState so
+    /// the IPC `get_status` command can surface the disk-pressure banner
+    /// (#234, parity with the HTTP `/api/v1/status` path).
+    pub fn with_disk_pressure_level(
+        mut self,
+        arc: Arc<std::sync::atomic::AtomicU8>,
+    ) -> Self {
+        self.disk_pressure_level = arc;
+        self
+    }
+
+    /// Replace the `rtmp_stable_since` mutex with one provided externally.
+    /// Used by the Tauri GUI to surface `rtmp_stable_secs` in the tray
+    /// `get_status` IPC alongside the HTTP path (#234).
+    pub fn with_rtmp_stable_since(mut self, arc: Arc<Mutex<Option<Instant>>>) -> Self {
+        self.rtmp_stable_since = arc;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -283,5 +303,59 @@ mod tests {
 
         assert!(state.inpoint_restart_tx.is_some());
         assert!(state.endpoint_restart_tx.is_some());
+    }
+
+    /// #234: an externally provided `disk_pressure_level` Arc replaces the
+    /// auto-created one, AND remains pointer-shared so the embedded
+    /// AppState and the GUI side see the same atomic.
+    #[tokio::test]
+    async fn with_disk_pressure_level_replaces_shared_arc() {
+        let pool = db::create_memory_pool().await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let shared = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx)
+            .with_disk_pressure_level(Arc::clone(&shared));
+
+        // Write through the GUI-side handle...
+        shared.store(2, std::sync::atomic::Ordering::Relaxed);
+
+        // ...and the embedded AppState observes the same value (would
+        // fail if the with_ method just stored a fresh Arc).
+        assert_eq!(
+            state
+                .disk_pressure_level
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "external Arc must back the embedded field, not be cloned away"
+        );
+        assert!(
+            Arc::ptr_eq(&state.disk_pressure_level, &shared),
+            "Arc identity must be preserved (no Arc::new replacement)"
+        );
+    }
+
+    /// #234: same contract for `rtmp_stable_since` — external Mutex Arc
+    /// must back the embedded field by pointer identity.
+    #[tokio::test]
+    async fn with_rtmp_stable_since_replaces_shared_arc() {
+        use std::time::Instant;
+        let pool = db::create_memory_pool().await.unwrap();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        let shared = Arc::new(Mutex::new(None));
+        let state = AppState::new_for_tests(pool, Config::for_testing(), ws_tx)
+            .with_rtmp_stable_since(Arc::clone(&shared));
+
+        let now = Instant::now();
+        *shared.lock().await = Some(now);
+
+        assert_eq!(
+            state.rtmp_stable_since.lock().await.as_ref(),
+            Some(&now),
+            "external Mutex must back the embedded field"
+        );
+        assert!(
+            Arc::ptr_eq(&state.rtmp_stable_since, &shared),
+            "Arc identity must be preserved"
+        );
     }
 }

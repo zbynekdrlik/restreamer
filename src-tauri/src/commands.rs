@@ -43,6 +43,13 @@ pub struct StatusResponse {
     pub streaming_event: Option<StreamingEvent>,
     pub chunk_stats: ChunkStats,
     pub inpoint_connected: bool,
+    /// Local chunk-store disk-pressure level (`"ok"` / `"warn"` / `"critical"`).
+    /// Mirrors `/api/v1/status.disk_pressure` so the tray webview renders
+    /// the same banner as the LAN browser dashboard (#234).
+    pub disk_pressure: String,
+    /// Seconds since the RTMP publisher has been continuously connected.
+    /// Mirrors `/api/v1/status.inpoint.details.rtmp_stable_secs` (#234).
+    pub rtmp_stable_secs: u64,
 }
 
 /// Get the current service status including streaming event and chunk stats.
@@ -61,11 +68,15 @@ pub async fn get_status(
     };
 
     let inpoint_connected = state.is_inpoint_connected();
+    let disk_pressure = state.disk_pressure();
+    let rtmp_stable_secs = state.rtmp_stable_secs().await;
 
     Ok(CommandResult::ok(StatusResponse {
         streaming_event,
         chunk_stats,
         inpoint_connected,
+        disk_pressure,
+        rtmp_stable_secs,
     }))
 }
 
