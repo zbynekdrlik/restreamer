@@ -535,6 +535,7 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 .cache-edit label { color: var(--text-label); white-space: nowrap; }
 .cache-delay-input { width: 80px; padding: var(--spacing-xs) var(--spacing-sm); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-primary); color: var(--text-primary); font-family: var(--font-mono); font-size: 13px; }
 .cache-hint { font-size: 11px; color: var(--text-secondary); font-style: italic; }
+.rescue-url-hint { flex-basis: 100%; font-size: 11px; color: var(--text-secondary); font-style: italic; margin-top: 4px; }
 .event-endpoints { margin-top: var(--spacing-sm); }
 .endpoint-tag { display: inline-flex; align-items: center; gap: var(--spacing-xs); padding: 2px 8px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px; }
 .tag-remove { background: none; border: none; color: var(--status-error); cursor: pointer; font-size: 14px; padding: 0 2px; }

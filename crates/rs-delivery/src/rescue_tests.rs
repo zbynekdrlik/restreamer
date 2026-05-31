@@ -1,129 +1,6 @@
 use super::*;
 
 #[test]
-fn build_rescue_ffmpeg_args_rtmp_endpoint() {
-    let args = build_rescue_ffmpeg_args(
-        "https://s3.example.com/rescue.mp4",
-        "rtmps://live-api-s.facebook.com:443/rtmp/key123",
-        "FB-Test",
-    );
-    assert!(args.contains(&"-stream_loop".to_string()));
-    assert!(args.contains(&"-1".to_string()));
-    assert!(args.contains(&"-re".to_string()));
-    let vf_idx = args.iter().position(|a| a == "-vf").unwrap();
-    let vf_val = &args[vf_idx + 1];
-    assert!(vf_val.contains("drawtext="));
-    assert!(vf_val.contains("reload=1"));
-    // Countdown file path is platform-dependent (std::env::temp_dir), so
-    // match only the suffix that identifies the alias.
-    assert!(
-        vf_val.contains("rescue_FB-Test.txt"),
-        "vf should reference rescue_FB-Test.txt, got: {vf_val}"
-    );
-    assert!(args.last().unwrap().contains("facebook.com"));
-}
-
-/// Rescue ffmpeg output MUST be stream-format-compatible with what OBS
-/// sends, otherwise switching between real content and rescue content
-/// confuses YouTube's ingestion. These tests pin the normalization so
-/// a regression that drops any of these flags is caught immediately.
-#[test]
-fn build_rescue_ffmpeg_args_normalizes_to_1080p30() {
-    let args = build_rescue_ffmpeg_args(
-        "https://s3.example.com/src.mp4",
-        "rtmp://a.rtmp.youtube.com/live2/key",
-        "YT",
-    );
-
-    let vf_idx = args.iter().position(|a| a == "-vf").unwrap();
-    let vf = &args[vf_idx + 1];
-    assert!(
-        vf.contains("scale=1920:1080"),
-        "-vf must scale to 1920x1080, got: {vf}"
-    );
-    assert!(vf.contains("fps=30"), "-vf must enforce 30fps, got: {vf}");
-    assert!(
-        vf.contains("format=yuv420p"),
-        "-vf must enforce yuv420p, got: {vf}"
-    );
-    assert!(
-        vf.contains("pad="),
-        "-vf must letterbox with pad, got: {vf}"
-    );
-}
-
-#[test]
-fn build_rescue_ffmpeg_args_uses_libx264_main_profile() {
-    let args = build_rescue_ffmpeg_args(
-        "https://s3.example.com/src.mp4",
-        "rtmp://a.rtmp.youtube.com/live2/key",
-        "YT",
-    );
-
-    // Find -c:v libx264 pair
-    let cv_idx = args
-        .iter()
-        .position(|a| a == "-c:v")
-        .expect("-c:v must be present");
-    assert_eq!(args[cv_idx + 1], "libx264");
-
-    let profile_idx = args
-        .iter()
-        .position(|a| a == "-profile:v")
-        .expect("-profile:v must be present");
-    assert_eq!(args[profile_idx + 1], "main");
-
-    let pix_idx = args
-        .iter()
-        .position(|a| a == "-pix_fmt")
-        .expect("-pix_fmt must be present");
-    assert_eq!(args[pix_idx + 1], "yuv420p");
-}
-
-#[test]
-fn build_rescue_ffmpeg_args_keyframe_every_2s() {
-    let args = build_rescue_ffmpeg_args(
-        "https://s3.example.com/src.mp4",
-        "rtmp://a.rtmp.youtube.com/live2/key",
-        "YT",
-    );
-
-    // -g 60 at -r 30 = 2s GOP, matches OBS / YouTube low-latency expectation
-    let g_idx = args.iter().position(|a| a == "-g").expect("-g must be set");
-    assert_eq!(args[g_idx + 1], "60");
-
-    let r_idx = args.iter().position(|a| a == "-r").expect("-r must be set");
-    assert_eq!(args[r_idx + 1], "30");
-}
-
-#[test]
-fn build_rescue_ffmpeg_args_aac_audio_48k_stereo() {
-    let args = build_rescue_ffmpeg_args(
-        "https://s3.example.com/src.mp4",
-        "rtmp://a.rtmp.youtube.com/live2/key",
-        "YT",
-    );
-
-    let ca_idx = args
-        .iter()
-        .position(|a| a == "-c:a")
-        .expect("-c:a must be set");
-    assert_eq!(args[ca_idx + 1], "aac");
-
-    let ar_idx = args
-        .iter()
-        .position(|a| a == "-ar")
-        .expect("-ar must be set");
-    assert_eq!(args[ar_idx + 1], "48000");
-
-    let ac_idx = args
-        .iter()
-        .position(|a| a == "-ac")
-        .expect("-ac must be set");
-    assert_eq!(args[ac_idx + 1], "2");
-}
-
-#[test]
 fn format_countdown_warmup() {
     let text = format_countdown_text(
         &DeliveryMode::Rescue {
@@ -169,25 +46,6 @@ fn countdown_file_path_sanitizes() {
     assert!(
         path.ends_with("rescue_FB_Test_Stream.txt"),
         "path should end with sanitized alias, got: {path}"
-    );
-}
-
-#[test]
-fn endpoint_url_facebook() {
-    let url = endpoint_url_for_service(rs_ffmpeg::ServiceType::Facebook, "fb-key");
-    assert!(url.contains("facebook.com"));
-    assert!(url.contains("fb-key"));
-}
-
-#[test]
-fn output_format_all_services_is_flv() {
-    assert_eq!(
-        output_format_for_service(rs_ffmpeg::ServiceType::Facebook),
-        "flv"
-    );
-    assert_eq!(
-        output_format_for_service(rs_ffmpeg::ServiceType::YtRtmp),
-        "flv"
     );
 }
 
@@ -644,4 +502,328 @@ async fn warmup_exponential_probe_clears_large_pruned_gap() {
 
     let s = stats.lock().await;
     assert_eq!(s.delivery_mode, "normal");
+}
+
+// ------------------------------------------------------------------
+// R1 RED — `rescue_activates_when_url_null_and_cache_drains`
+//
+// Reproduces the 2026-05-30 stream.lan crash production incident:
+// stream.lan went down, the cache on the Hetzner VPS drained, and every
+// endpoint went dark because all 5 production templates had
+// `rescue_video_url = NULL`. The consumer cache-drain branch at
+// `endpoint_task.rs:663` is gated by
+// `if let Some(ref rescue_url) = rescue_video_url { ... rescue ... }` —
+// so when the URL is None (the default), the rescue block is skipped
+// entirely and the endpoint goes silent.
+//
+// After Task 6 (the GREEN commit) the cache-drain branch will:
+//   * Drop the outer `if let Some(ref rescue_url) = rescue_video_url`
+//     guard, so rescue fires whenever the buffer is empty AND the
+//     producer is stalled — regardless of URL config.
+//   * Call `crate::rescue::run_rescue_loop(...)` with
+//     `rescue_video_url.as_deref()` (Option<&str>) rather than `&str`.
+//   * Let `resolve_rescue_bytes(None, ...)` (added in Task 4) substitute
+//     the embedded `DEFAULT_RESCUE_FLV` blob when no URL is configured.
+//
+// APPROACH (Option C — source-structure assertion):
+//
+// The runtime path (consumer_task → cache-drain branch → run_rescue_loop)
+// requires the full producer/consumer machinery: a real S3Fetcher trait
+// impl, a real RtmpPusher, a Tauri-scope BufferState + audit_ring, and a
+// minimum 60s sleep for RESCUE_STALL_THRESHOLD_SECS to elapse. Building
+// a TestHarness that exercises this end-to-end would require >300 LoC of
+// mock plumbing (mock producer, mock pusher, mock S3, mock audit) which
+// is scope creep for a single regression test AND duplicates the
+// integration coverage that Task 6's signature change will give us for
+// free at compile time.
+//
+// Instead, this test asserts the structural invariant that the bug
+// reduces to: the cache-drain branch in `endpoint_task.rs` must NOT
+// gate the rescue invocation on `rescue_video_url` being Some. Today
+// the guard is present (test FAILS). After Task 6 removes it, the test
+// PASSES. This is brittle to refactor but precise to the bug — Task 6
+// is explicitly the commit that removes the guard, so the signal is
+// 1:1 with the fix.
+//
+// Spec: docs/superpowers/specs/2026-05-31-always-on-rust-rescue-design.md
+// Plan: docs/superpowers/plans/2026-05-31-always-on-rust-rescue.md (Task 5/6)
+#[test]
+fn rescue_activates_when_url_null_and_cache_drains() {
+    // Read the source file at test time. CARGO_MANIFEST_DIR points at
+    // crates/rs-delivery so the source path is stable across local + CI.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let source_path = std::path::Path::new(manifest_dir).join("src/endpoint_task.rs");
+    let source = std::fs::read_to_string(&source_path).unwrap_or_else(|e| {
+        panic!(
+            "R1: failed to read {} — test cannot verify cache-drain branch structure: {e}",
+            source_path.display()
+        )
+    });
+
+    // Locate the cache-drain branch by its distinguishing marker — the
+    // RESCUE_STALL_THRESHOLD_SECS sleep arm of the tokio::select! macro.
+    // This is the ONE place in the consumer that handles "no chunks for
+    // N seconds → maybe rescue".
+    let marker = "tokio::time::sleep(std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS))";
+    let marker_pos = source.find(marker).unwrap_or_else(|| {
+        panic!(
+            "R1: cache-drain branch marker not found in endpoint_task.rs. \
+             The branch was probably renamed or refactored — update the R1 \
+             test marker to match. Marker searched: {marker:?}"
+        )
+    });
+
+    // Inspect the next ~80 lines after the marker — this is the full
+    // body of the cache-drain branch up to and including the
+    // `run_rescue_loop` call.
+    let after = &source[marker_pos..];
+    let branch_body: String = after.lines().take(80).collect::<Vec<_>>().join("\n");
+
+    // The BUG: the rescue invocation is gated by `if let Some(ref
+    // rescue_url) = rescue_video_url` so when URL is None the block is
+    // skipped and the endpoint goes dark.
+    //
+    // The FIX (Task 6): remove this guard so rescue fires on
+    // buffer-empty + producer-stalled regardless of URL config. The
+    // embedded DEFAULT_RESCUE_FLV (via resolve_rescue_bytes(None, ...))
+    // covers the no-URL case.
+    let buggy_guard = "if let Some(ref rescue_url) = rescue_video_url";
+    assert!(
+        !branch_body.contains(buggy_guard),
+        "R1 RED: cache-drain branch in endpoint_task.rs still gates rescue on \
+         `if let Some(ref rescue_url) = rescue_video_url`. This is the \
+         2026-05-30 production incident: when rescue_video_url=None (the \
+         default across all 5 templates), the cache-drain branch is skipped \
+         entirely and the endpoint goes dark. Task 6 must remove this guard \
+         and call run_rescue_loop with Option<&str>, letting \
+         resolve_rescue_bytes(None, ...) substitute the embedded \
+         DEFAULT_RESCUE_FLV. See \
+         docs/superpowers/specs/2026-05-31-always-on-rust-rescue-design.md. \
+         Branch body inspected:\n---\n{branch_body}\n---"
+    );
+
+    // Additional invariant: the rescue invocation must pass the URL as
+    // Option<&str> (via `rescue_video_url.as_deref()`) — proof that the
+    // wiring threads through to resolve_rescue_bytes correctly. Today
+    // the call passes `rescue_url` (a &str via the buggy guard's
+    // binding), tomorrow it passes `rescue_video_url.as_deref()`.
+    let expected_call_form = "rescue_video_url.as_deref()";
+    assert!(
+        branch_body.contains(expected_call_form),
+        "R1 RED: cache-drain branch does not pass `rescue_video_url.as_deref()` \
+         to run_rescue_loop. Task 6 must change the call to thread the Option \
+         through so resolve_rescue_bytes can substitute DEFAULT_RESCUE_FLV \
+         when URL is None. Branch body inspected:\n---\n{branch_body}\n---"
+    );
+}
+
+// ------------------------------------------------------------------
+// R3 RED (Task 7) — `warmup_always_pushes_default_rescue_when_no_url`
+//
+// Warmup gap analogue of the R1 cache-drain bug. Today
+// `rescue.rs:run_warmup_loop` only spawns rescue when the operator
+// configured a custom URL:
+//
+//   if let Some(rescue_url) = rescue_video_url {
+//       if !ep_cfg.is_fast {
+//           ... tokio::process::Command::new("ffmpeg") ...
+//       }
+//   }
+//
+// All 5 production templates have `rescue_video_url = NULL`, so
+// non-fast endpoints currently show ~120s of blank screen during the
+// initial cache fill instead of the embedded DEFAULT_RESCUE_FLV.
+//
+// After Task 7 (the R3 GREEN commit) the warmup branch must:
+//   * Drop the outer `if let Some(rescue_url) = rescue_video_url`
+//     guard so non-fast warmup ALWAYS pushes rescue (fast endpoints
+//     still skip — low-latency trade-off per design).
+//   * Replace the external `tokio::process::Command::new("ffmpeg")`
+//     spawn with `crate::rust_rescue_push::rust_rescue_push` — pure
+//     rust, zero ffmpeg on the VPS at runtime.
+//   * Let `resolve_rescue_bytes(None, ...)` substitute
+//     DEFAULT_RESCUE_FLV when no URL is configured (same pattern as
+//     the cache-drain branch fix from Task 6).
+//
+// APPROACH (Option C — source-structure assertion, same as R1):
+//
+// The runtime path requires a real fetcher + audit_ring + a spawned
+// rust_rescue_push that lazy-connects to an RTMP endpoint and would
+// either hang or hit connect errors in tests. A behavioural test
+// with a capturing pusher would need >300 LoC of mock plumbing
+// (mock fetcher already exists, but a mock pusher to inspect "did
+// rescue bytes flow during warmup" does not). The structural test
+// asserts the two invariants the bug reduces to and stays 1:1 with
+// the Task 7 fix.
+//
+// Spec: docs/superpowers/specs/2026-05-31-always-on-rust-rescue-design.md
+// Plan: docs/superpowers/plans/2026-05-31-always-on-rust-rescue.md (Task 7)
+#[test]
+fn warmup_always_pushes_default_rescue_when_no_url() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let source_path = std::path::Path::new(manifest_dir).join("src/rescue.rs");
+    let source = std::fs::read_to_string(&source_path).unwrap_or_else(|e| {
+        panic!(
+            "R3: failed to read {} — test cannot verify warmup branch structure: {e}",
+            source_path.display()
+        )
+    });
+
+    // Locate run_warmup_loop and grab its body up to the next `pub `
+    // declaration (or EOF). This is the entire warmup function body
+    // we need to inspect for the buggy guard + ffmpeg spawn.
+    let warmup_start = source
+        .find("pub async fn run_warmup_loop")
+        .expect("R3: locate run_warmup_loop fn in rescue.rs");
+    let after_start = &source[warmup_start..];
+    // Skip past the signature line so "pub" doesn't match itself.
+    let body_offset = after_start
+        .find('{')
+        .expect("R3: locate opening brace of run_warmup_loop");
+    let body_search = &after_start[body_offset..];
+    let next_pub = body_search.find("\npub ").unwrap_or(body_search.len());
+    let body = &body_search[..next_pub];
+
+    // BUG 1: outer guard skips rescue entirely when URL is None.
+    assert!(
+        !body.contains("if let Some(rescue_url) = rescue_video_url"),
+        "R3 RED: warmup branch in rescue.rs still gates rescue on \
+         `if let Some(rescue_url) = rescue_video_url`. When the operator \
+         has not configured a custom URL (the default state for all 5 \
+         production templates), non-fast endpoints show a blank screen \
+         during the initial cache fill (~120s) instead of the embedded \
+         DEFAULT_RESCUE_FLV. Task 7 must drop this guard and use \
+         resolve_rescue_bytes + rust_rescue_push, mirroring the \
+         cache-drain branch fix from Task 6. See \
+         docs/superpowers/specs/2026-05-31-always-on-rust-rescue-design.md.\n\n\
+         Warmup body inspected (first 600 chars):\n---\n{}\n---",
+        &body[..body.len().min(600)]
+    );
+
+    // BUG 2: external ffmpeg process spawn must be gone.
+    // Task 7 replaces it with rust_rescue_push so the VPS does not
+    // depend on a system ffmpeg for rescue at runtime.
+    assert!(
+        !body.contains("tokio::process::Command::new(\"ffmpeg\")"),
+        "R3 RED: warmup branch still spawns external ffmpeg via \
+         `tokio::process::Command::new(\"ffmpeg\")`. Task 7 must use \
+         `crate::rust_rescue_push::rust_rescue_push` (pure-rust pusher) \
+         instead so the VPS does not depend on system ffmpeg for rescue \
+         at runtime — matches the cache-drain branch path."
+    );
+
+    // Positive assertion: the fix must call rust_rescue_push from
+    // within warmup (proves the new pusher is wired up, not just that
+    // the old ffmpeg spawn was deleted).
+    assert!(
+        body.contains("rust_rescue_push"),
+        "R3 RED: warmup branch does not call `rust_rescue_push` yet. \
+         Task 7's GREEN commit must spawn the pure-rust pusher in a \
+         background tokio::task during warmup for non-fast endpoints \
+         and abort the handle when the warmup probe loop exits."
+    );
+}
+
+// ------------------------------------------------------------------
+// R2 RED (Task 8, SCOPED) — `rescue_activates_when_producer_gone`
+//
+// Defensive hardening for the consumer's recv-None branch in
+// `endpoint_task.rs`. Today, when the producer disappears (panic or
+// stop signal closes the mpsc channel), the consumer's `None =>`
+// arm of the `rx.recv()` match logs:
+//
+//   tracing::info!(alias = %alias, "Consumer: producer gone, stopping");
+//   break;
+//
+// and exits immediately. The endpoint goes dark for ~30s until the
+// outer `endpoint_task` select-loop's consumer-drain timeout tears
+// down the whole endpoint. Viewers see a black screen during that
+// window.
+//
+// After Task 8's fix, the recv-None branch enters a short
+// `run_rescue_loop` window before exiting, so viewers see the
+// embedded `DEFAULT_RESCUE_FLV` (or operator's custom URL) during
+// the teardown gap instead of immediate dark.
+//
+// SCOPED: this is defensive hardening for the producer-panic
+// case. The 2026-05-30 stream.lan crash production incident hit
+// the cache-drain path (fixed by Task 6), NOT this branch. Full
+// producer-respawn so the endpoint never dies on producer
+// disappearance is a follow-up — out of scope for this PR.
+//
+// APPROACH (Option C — source-structure assertion, same as R1/R3):
+//
+// The runtime path requires the full producer/consumer machinery
+// (mpsc::Receiver closure, real BufferState, real RtmpPusher,
+// audit_ring) plus a way to deterministically force the producer
+// to close the channel. A behavioural test would need >300 LoC of
+// mock plumbing. The structural test asserts the invariant the
+// scoped fix reduces to and stays 1:1 with the Task 8 commit.
+//
+// Spec: docs/superpowers/specs/2026-05-31-always-on-rust-rescue-design.md
+// Plan: docs/superpowers/plans/2026-05-31-always-on-rust-rescue.md (Task 8)
+#[test]
+fn rescue_activates_when_producer_gone() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let source_path = std::path::Path::new(manifest_dir).join("src/endpoint_task.rs");
+    let source = std::fs::read_to_string(&source_path).unwrap_or_else(|e| {
+        panic!(
+            "R2: failed to read {} — test cannot verify recv-None branch structure: {e}",
+            source_path.display()
+        )
+    });
+
+    // Locate the consumer_task fn so we can bound the search to its
+    // recv-None match arm. Multiple `None =>` arms exist elsewhere in
+    // the file (other tokio::select! matches, etc.); we want THE one
+    // inside consumer_task's `rx.recv()` handler.
+    let consumer_start = source
+        .find("async fn consumer_task")
+        .expect("R2: locate consumer_task fn in endpoint_task.rs");
+
+    // The recv-None arm is the FIRST `None =>` inside consumer_task —
+    // it sits inside the `match maybe_chunk` block that handles
+    // rx.recv() results.
+    //
+    // Bound the window precisely: starts at the recv-None arm, ends
+    // at the next tokio::select! arm (the cache-drain
+    // RESCUE_STALL_THRESHOLD_SECS sleep — also contains
+    // `run_rescue_loop`). This isolates the recv-None branch from
+    // its sibling so positive assertions about run_rescue_loop only
+    // match the recv-None invocation, not the cache-drain one.
+    let recv_none_offset = source[consumer_start..]
+        .find("None =>")
+        .expect("R2: locate None => arm in consumer_task");
+    let recv_none_pos = consumer_start + recv_none_offset;
+    let sibling_marker = "tokio::time::sleep(std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS))";
+    let sibling_offset = source[recv_none_pos..]
+        .find(sibling_marker)
+        .expect("R2: locate sibling cache-drain tokio::select arm marker");
+    let window_end = recv_none_pos + sibling_offset;
+    let recv_none_window = &source[recv_none_pos..window_end];
+
+    // BUG: the recv-None branch logs "producer gone, stopping" and
+    // breaks immediately. Task 8 must replace this with a defensive
+    // rescue invocation.
+    assert!(
+        !recv_none_window.contains("Consumer: producer gone, stopping"),
+        "R2 RED: consumer recv-None branch still logs the legacy \
+         'producer gone, stopping' message and breaks immediately. \
+         Task 8 must enter rescue mode briefly (via run_rescue_loop) \
+         before exiting so viewers see DEFAULT_RESCUE_FLV during the \
+         ~30s endpoint_task teardown window instead of immediate dark.\n\n\
+         recv-None window inspected:\n---\n{recv_none_window}\n---"
+    );
+
+    // Positive assertion: the fix must call run_rescue_loop (or use the
+    // marker phrase 'entering defensive rescue') from within the
+    // recv-None branch — proves the rescue path is wired up, not just
+    // that the old log line was deleted.
+    assert!(
+        recv_none_window.contains("run_rescue_loop")
+            || recv_none_window.contains("entering defensive rescue"),
+        "R2 RED: consumer recv-None branch must call run_rescue_loop \
+         (or contain the marker 'entering defensive rescue') so the \
+         fix is verifiable. recv-None window inspected:\n---\n{recv_none_window}\n---"
+    );
 }

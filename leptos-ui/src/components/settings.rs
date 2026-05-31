@@ -337,6 +337,21 @@ fn RescueVideoEditor(event_id: i64, initial_url: Option<String>) -> impl IntoVie
                     Some(view! { <span class="upload-status">{s}</span> })
                 }
             }}
+            {move || {
+                if url_value.get().trim().is_empty() {
+                    view! {
+                        <div class="rescue-url-hint" data-testid="rescue-default-hint">
+                            "Using built-in default (5s standby loop). Upload a video above to override."
+                        </div>
+                    }.into_any()
+                } else {
+                    view! {
+                        <div class="rescue-url-hint" data-testid="rescue-custom-hint">
+                            "Custom rescue video active"
+                        </div>
+                    }.into_any()
+                }
+            }}
         </div>
     }
 }

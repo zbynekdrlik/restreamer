@@ -74,6 +74,17 @@ pub enum Action {
     /// supply recovered. Severity::Info. Detail JSON: {gap_secs} -- how long
     /// the rescue video covered the outage.
     RescueRecovered,
+    /// Delivery VPS detected an operator-configured rescue URL that is not
+    /// a `.flv` (legacy MP4 / MOV / etc). VPS rejected the URL and fell
+    /// back to the embedded default rescue blob. Operator must re-upload
+    /// via the dashboard to restore the custom rescue.
+    /// Severity::Warn. Detail JSON: {"url"}.
+    RescueLegacyFormatRejected,
+    /// Delivery VPS failed to fetch the operator-configured rescue FLV
+    /// from S3 (network error / missing object / 403). VPS fell back to
+    /// the embedded default rescue blob for this endpoint's lifetime.
+    /// Severity::Warn. Detail JSON: {"url", "error"}.
+    RescueCustomFetchFailed,
     /// Disk cache started pre-filling for an event. Emitted on first
     /// EndpointReader registration. Issue #174.
     DiskCachePrefillStarted,
