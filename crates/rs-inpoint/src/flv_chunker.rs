@@ -600,7 +600,7 @@ mod session_ts_tests {
         let t1 = FlvChunkSink::current_session_ts(&mut inner);
         assert_eq!(t0, 0);
         assert!(
-            t1 >= 20 && t1 < 1000,
+            (20..1000).contains(&t1),
             "second stamp ({t1}) must reflect ~20ms elapsed"
         );
     }

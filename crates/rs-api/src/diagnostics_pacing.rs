@@ -136,7 +136,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(&format!(
+                    .uri(format!(
                         "/api/v1/diagnostics/pacing?event_id={event_id}&since_ms=0"
                     ))
                     .body(Body::empty())
@@ -181,7 +181,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(&format!(
+                    .uri(format!(
                         "/api/v1/diagnostics/pacing?event_id={event_id}&endpoint_alias=YT_RTMP"
                     ))
                     .body(Body::empty())

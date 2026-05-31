@@ -2,7 +2,6 @@ use super::sampler::LifecycleSampler;
 use super::timings::ChunkLifecycleTimings;
 use crate::audit_ring::AuditRing;
 use rs_core::audit::{Action, Severity};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 fn fast_chunk(seq: i64) -> ChunkLifecycleTimings {
@@ -120,7 +119,7 @@ async fn breach_rate_limit_at_most_one_emit_per_5s() {
     // 5s rate-limit window blocks the rest. Allow ≤ 2 in case the test
     // crosses a window boundary on a slow CI runner.
     assert!(
-        breaches >= 1 && breaches <= 2,
+        (1..=2).contains(&breaches),
         "expected 1-2, got {breaches}"
     );
 }

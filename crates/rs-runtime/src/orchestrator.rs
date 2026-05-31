@@ -96,10 +96,7 @@ impl ServiceCore {
     /// embedded `AppState`. Used by the Tauri GUI so the tray IPC
     /// `get_status` reads the same value the HTTP `/api/v1/status` path
     /// reads (#234).
-    pub fn with_disk_pressure_level(
-        mut self,
-        arc: Arc<std::sync::atomic::AtomicU8>,
-    ) -> Self {
+    pub fn with_disk_pressure_level(mut self, arc: Arc<std::sync::atomic::AtomicU8>) -> Self {
         self.provided_disk_pressure_level = Some(arc);
         self
     }

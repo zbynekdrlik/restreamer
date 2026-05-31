@@ -227,10 +227,7 @@ impl AppState {
     /// Tauri uses this to share the same Arc with its tray-side AppState so
     /// the IPC `get_status` command can surface the disk-pressure banner
     /// (#234, parity with the HTTP `/api/v1/status` path).
-    pub fn with_disk_pressure_level(
-        mut self,
-        arc: Arc<std::sync::atomic::AtomicU8>,
-    ) -> Self {
+    pub fn with_disk_pressure_level(mut self, arc: Arc<std::sync::atomic::AtomicU8>) -> Self {
         self.disk_pressure_level = arc;
         self
     }

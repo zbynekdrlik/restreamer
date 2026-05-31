@@ -4,8 +4,6 @@
 //! alias `"e2e fb"` so the `e2e-fb-push-stream-lan` CI job can deterministically
 //! configure the rust pusher's test target on every run.
 
-#![cfg(test)]
-
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;

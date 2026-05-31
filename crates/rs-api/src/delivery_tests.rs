@@ -216,8 +216,10 @@ async fn wipe_calls_delete_with_correct_prefix_and_returns_count() {
     let event_id = db::upsert_streaming_event(&pool, "evt-positive")
         .await
         .unwrap();
-    let mut cfg = Config::default();
-    cfg.client_uuid = "uuid-abc".into();
+    let cfg = Config {
+        client_uuid: "uuid-abc".into(),
+        ..Config::default()
+    };
     let mock = MockWiper::ok(42);
     let res = wipe_event_s3_chunks_with(&pool, &cfg, event_id, &mock).await;
     assert_eq!(res, Ok(42));

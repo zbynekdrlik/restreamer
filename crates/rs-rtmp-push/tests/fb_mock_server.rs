@@ -225,11 +225,10 @@ fn scan_amf_string_value(buf: &[u8], key: &str) -> Option<String> {
             let val_len = (val_len_hi << 8) | val_len_lo;
             let val_start = i + needle.len() + 2;
             let val_end = val_start + val_len;
-            if val_end <= buf.len() {
-                if let Ok(s) = std::str::from_utf8(&buf[val_start..val_end]) {
+            if val_end <= buf.len()
+                && let Ok(s) = std::str::from_utf8(&buf[val_start..val_end]) {
                     return Some(s.to_string());
                 }
-            }
             // Needle matched but value extends past buffer (truncated chunk) or
             // UTF-8 decode failed — advance past this occurrence and keep
             // scanning. This makes the "robust to chunked transport" doc comment
