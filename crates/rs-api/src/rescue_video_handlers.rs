@@ -298,8 +298,8 @@ mod tests {
     // Compile-time guard: output cap must stay smaller than input cap,
     // otherwise the operator can't upload anything that would transcode
     // within budget without first hitting MAX_INPUT_BYTES. Using a const
-    // assertion (not `assert!(...)` in a #[test]) because clippy folds
-    // the runtime form to `assert!(true)` and rejects it.
+    // assertion (not a runtime check in a #[test]) because clippy folds
+    // the runtime form to a trivial true and rejects it.
     const _: () = assert!(MAX_INPUT_BYTES > MAX_FLV_BYTES);
 
     #[test]
