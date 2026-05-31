@@ -94,6 +94,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
+      - name: Install ffmpeg (for gen_rescue_flv --check)
+        run: sudo apt-get install -y ffmpeg
+      - name: Verify default_rescue.flv reproducibility
+        run: cargo run --bin gen_rescue_flv --manifest-path crates/rs-delivery/Cargo.toml -- --check
 
   test:
     name: Test (${{ matrix.os }})
@@ -238,7 +242,6 @@ jobs:
             --exclude-re 'DeliveryOrchestrator::get_delivery_status' \
             --exclude-re 'delivery_logs' \
             --exclude-re 'rescue::' \
-            --exclude-re 'endpoint_url_for_service' \
             --exclude-re 'run_rescue_loop' \
             --exclude-re 'run_warmup_loop' \
             --exclude-re 'upload_rescue_video' \
@@ -255,8 +258,6 @@ jobs:
             --exclude-re 'write_countdown_file' \
             --exclude-re 'cleanup_countdown_file' \
             --exclude-re 'format_countdown_text' \
-            --exclude-re 'build_rescue_ffmpeg_args' \
-            --exclude-re 'output_format_for_service' \
             --exclude-re 'countdown_file_path' \
             --exclude-re 'FlvStreamNormalizer::normalize' \
             --exclude-re 'DeliveryOrchestrator::poll_and_init' \
