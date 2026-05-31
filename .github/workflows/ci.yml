@@ -242,7 +242,7 @@ jobs:
             --exclude-re 'run_rescue_loop' \
             --exclude-re 'run_warmup_loop' \
             --exclude-re 'upload_rescue_video' \
-            --exclude-re 'extension_from_content_type' \
+            --exclude-re 'tail_lines' \
             --exclude-re 'S3Client::upload_public_object' \
             --exclude-re 'FfmpegProcess::stderr_tail' \
             --exclude-re 'last_stderr_line' \
@@ -250,7 +250,8 @@ jobs:
             --exclude-re 'snapshot_cloud_init' \
             --exclude-re 'delivery_env_file' \
             --exclude-re 'DeliveryOrchestrator::monitor_delivery_health' \
-            --exclude-re 'MAX_RESCUE_VIDEO_BYTES' \
+            --exclude-re 'MAX_INPUT_BYTES' \
+            --exclude-re 'MAX_FLV_BYTES' \
             --exclude-re 'write_countdown_file' \
             --exclude-re 'cleanup_countdown_file' \
             --exclude-re 'format_countdown_text' \

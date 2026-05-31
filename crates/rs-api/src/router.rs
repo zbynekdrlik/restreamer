@@ -80,11 +80,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/rescue-video/upload",
             post(rescue_video_handlers::upload_rescue_video)
-                // Hard body-size limit matches the handler's MAX_RESCUE_VIDEO_BYTES
-                // (100 MiB). Without this Axum buffers the entire multipart
+                // Hard body-size limit matches the handler's MAX_INPUT_BYTES
+                // (200 MiB). Without this Axum buffers the entire multipart
                 // payload into memory before the handler sees a single byte,
                 // so a client could OOM the Tauri process by POSTing 10 GiB.
-                .layer(DefaultBodyLimit::max(104_857_600)),
+                // The handler transcodes the input down to a much smaller
+                // FLV (capped at 50 MiB via MAX_FLV_BYTES); this layer just
+                // bounds the pre-transcode raw upload.
+                .layer(DefaultBodyLimit::max(209_715_200)),
         )
         .route("/events/{id}/activate", post(handlers::activate_event))
         .route(
