@@ -723,3 +723,98 @@ fn warmup_always_pushes_default_rescue_when_no_url() {
          and abort the handle when the warmup probe loop exits."
     );
 }
+
+// ------------------------------------------------------------------
+// R2 RED (Task 8, SCOPED) — `rescue_activates_when_producer_gone`
+//
+// Defensive hardening for the consumer's recv-None branch in
+// `endpoint_task.rs`. Today, when the producer disappears (panic or
+// stop signal closes the mpsc channel), the consumer's `None =>`
+// arm of the `rx.recv()` match logs:
+//
+//   tracing::info!(alias = %alias, "Consumer: producer gone, stopping");
+//   break;
+//
+// and exits immediately. The endpoint goes dark for ~30s until the
+// outer `endpoint_task` select-loop's consumer-drain timeout tears
+// down the whole endpoint. Viewers see a black screen during that
+// window.
+//
+// After Task 8's fix, the recv-None branch enters a short
+// `run_rescue_loop` window before exiting, so viewers see the
+// embedded `DEFAULT_RESCUE_FLV` (or operator's custom URL) during
+// the teardown gap instead of immediate dark.
+//
+// SCOPED: this is defensive hardening for the producer-panic
+// case. The 2026-05-30 stream.lan crash production incident hit
+// the cache-drain path (fixed by Task 6), NOT this branch. Full
+// producer-respawn so the endpoint never dies on producer
+// disappearance is a follow-up — out of scope for this PR.
+//
+// APPROACH (Option C — source-structure assertion, same as R1/R3):
+//
+// The runtime path requires the full producer/consumer machinery
+// (mpsc::Receiver closure, real BufferState, real RtmpPusher,
+// audit_ring) plus a way to deterministically force the producer
+// to close the channel. A behavioural test would need >300 LoC of
+// mock plumbing. The structural test asserts the invariant the
+// scoped fix reduces to and stays 1:1 with the Task 8 commit.
+//
+// Spec: docs/superpowers/specs/2026-05-31-always-on-rust-rescue-design.md
+// Plan: docs/superpowers/plans/2026-05-31-always-on-rust-rescue.md (Task 8)
+#[test]
+fn rescue_activates_when_producer_gone() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let source_path = std::path::Path::new(manifest_dir).join("src/endpoint_task.rs");
+    let source = std::fs::read_to_string(&source_path).unwrap_or_else(|e| {
+        panic!(
+            "R2: failed to read {} — test cannot verify recv-None branch structure: {e}",
+            source_path.display()
+        )
+    });
+
+    // Locate the consumer_task fn so we can bound the search to its
+    // recv-None match arm. Multiple `None =>` arms exist elsewhere in
+    // the file (other tokio::select! matches, etc.); we want THE one
+    // inside consumer_task's `rx.recv()` handler.
+    let consumer_start = source
+        .find("async fn consumer_task")
+        .expect("R2: locate consumer_task fn in endpoint_task.rs");
+
+    // The recv-None arm is the FIRST `None =>` inside consumer_task —
+    // it sits inside the `match maybe_chunk` block that handles
+    // rx.recv() results. Bound the window to ~600 chars so we stay
+    // brittle in the right way (the assertion must shift if the
+    // branch body grows/changes).
+    let recv_none_offset = source[consumer_start..]
+        .find("None =>")
+        .expect("R2: locate None => arm in consumer_task");
+    let recv_none_pos = consumer_start + recv_none_offset;
+    let window_end = (recv_none_pos + 600).min(source.len());
+    let recv_none_window = &source[recv_none_pos..window_end];
+
+    // BUG: the recv-None branch logs "producer gone, stopping" and
+    // breaks immediately. Task 8 must replace this with a defensive
+    // rescue invocation.
+    assert!(
+        !recv_none_window.contains("Consumer: producer gone, stopping"),
+        "R2 RED: consumer recv-None branch still logs the legacy \
+         'producer gone, stopping' message and breaks immediately. \
+         Task 8 must enter rescue mode briefly (via run_rescue_loop) \
+         before exiting so viewers see DEFAULT_RESCUE_FLV during the \
+         ~30s endpoint_task teardown window instead of immediate dark.\n\n\
+         recv-None window inspected:\n---\n{recv_none_window}\n---"
+    );
+
+    // Positive assertion: the fix must call run_rescue_loop (or use the
+    // marker phrase 'entering defensive rescue') from within the
+    // recv-None branch — proves the rescue path is wired up, not just
+    // that the old log line was deleted.
+    assert!(
+        recv_none_window.contains("run_rescue_loop")
+            || recv_none_window.contains("entering defensive rescue"),
+        "R2 RED: consumer recv-None branch must call run_rescue_loop \
+         (or contain the marker 'entering defensive rescue') so the \
+         fix is verifiable. recv-None window inspected:\n---\n{recv_none_window}\n---"
+    );
+}
