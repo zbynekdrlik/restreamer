@@ -118,10 +118,7 @@ async fn breach_rate_limit_at_most_one_emit_per_5s() {
     // 100 breaches in <1s real time → only the first should emit; the
     // 5s rate-limit window blocks the rest. Allow ≤ 2 in case the test
     // crosses a window boundary on a slow CI runner.
-    assert!(
-        (1..=2).contains(&breaches),
-        "expected 1-2, got {breaches}"
-    );
+    assert!((1..=2).contains(&breaches), "expected 1-2, got {breaches}");
 }
 
 #[tokio::test]
