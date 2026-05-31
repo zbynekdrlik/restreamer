@@ -660,49 +660,61 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS)) => {
-                if let Some(ref rescue_url) = rescue_video_url {
-                    if !buffer_state.producer_active.load(AtomicOrdering::Relaxed) {
-                        tracing::warn!(alias = %alias, "Consumer: buffer empty + producer stalled, entering rescue mode");
+                // R1 GREEN (Task 6, 2026-05-31): rescue fires whenever the
+                // buffer is empty AND the producer is stalled — regardless
+                // of whether the operator configured a custom rescue URL.
+                // The pure-rust rescue path (run_rescue_loop →
+                // resolve_rescue_bytes → rust_rescue_push) substitutes
+                // DEFAULT_RESCUE_FLV when URL is None, so the cache-drain
+                // branch always has bytes to push instead of going dark.
+                // Closes the 2026-05-30 stream.lan crash root cause where
+                // all 5 production templates had rescue_video_url = NULL
+                // and consumers fell silent.
+                if !buffer_state.producer_active.load(AtomicOrdering::Relaxed) {
+                    tracing::warn!(alias = %alias, "Consumer: buffer empty + producer stalled, entering rescue mode");
 
-                        let rescue_started = std::time::Instant::now();
-                        crate::rescue_audit::emit_activated(&audit_ring, &alias, last_delivered_chunk_id);
+                    let rescue_started = std::time::Instant::now();
+                    crate::rescue_audit::emit_activated(&audit_ring, &alias, last_delivered_chunk_id);
 
-                        // Kill current ffmpeg before entering rescue
-                        if let Some(mut p) = proc.take() {
-                            p.kill().await;
-                        }
-                        // Update stats to rescue mode
-                        {
-                            let mut s = stats.lock().await;
-                            s.delivery_mode = "rescue".to_string();
-                            s.rescue_eta_secs = Some(crate::rescue::RESCUE_REFILL_TARGET_SECS);
-                        }
-                        let svc_type: rs_ffmpeg::ServiceType =
-                            ep_cfg.service_type.parse().unwrap_or(rs_ffmpeg::ServiceType::TestFile);
-                        let should_stop = crate::rescue::run_rescue_loop(
-                            &alias,
-                            rescue_url,
-                            svc_type,
-                            &ep_cfg.stream_key,
-                            &buffer_state,
-                            &stats,
-                            &mut stop_rx,
-                        )
-                        .await;
-                        if should_stop {
-                            return;
-                        }
-                        // Rescue complete — reset to normal delivery
-                        {
-                            let mut s = stats.lock().await;
-                            s.delivery_mode = "normal".to_string();
-                            s.rescue_eta_secs = None;
-                        }
-                        let gap = rescue_started.elapsed().as_secs();
-                        crate::rescue_audit::emit_recovered(&audit_ring, &alias, gap);
-                        flv_normalizer = FlvStreamNormalizer::new();
-                        tracing::info!(alias = %alias, "Consumer: resumed normal delivery");
+                    // Kill current ffmpeg (legacy push path) before entering
+                    // rescue. The rust pusher path uses `rust_pusher`, but
+                    // ffmpeg fallback may still be live on this code path;
+                    // either way `proc.take()` is a no-op when None.
+                    if let Some(mut p) = proc.take() {
+                        p.kill().await;
                     }
+                    // Update stats to rescue mode
+                    {
+                        let mut s = stats.lock().await;
+                        s.delivery_mode = "rescue".to_string();
+                        s.rescue_eta_secs = Some(crate::rescue::RESCUE_REFILL_TARGET_SECS);
+                    }
+                    let svc_type: rs_ffmpeg::ServiceType =
+                        ep_cfg.service_type.parse().unwrap_or(rs_ffmpeg::ServiceType::TestFile);
+                    let should_stop = crate::rescue::run_rescue_loop(
+                        &alias,
+                        rescue_video_url.as_deref(),
+                        svc_type,
+                        &ep_cfg.stream_key,
+                        &buffer_state,
+                        &stats,
+                        &mut stop_rx,
+                        &audit_ring,
+                    )
+                    .await;
+                    if should_stop {
+                        return;
+                    }
+                    // Rescue complete — reset to normal delivery
+                    {
+                        let mut s = stats.lock().await;
+                        s.delivery_mode = "normal".to_string();
+                        s.rescue_eta_secs = None;
+                    }
+                    let gap = rescue_started.elapsed().as_secs();
+                    crate::rescue_audit::emit_recovered(&audit_ring, &alias, gap);
+                    flv_normalizer = FlvStreamNormalizer::new();
+                    tracing::info!(alias = %alias, "Consumer: resumed normal delivery");
                 }
                 continue;
             }

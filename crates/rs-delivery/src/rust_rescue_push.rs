@@ -45,13 +45,13 @@ use rs_rtmp_push::{PusherConfig, RtmpPusher};
 use crate::buffer_state::BufferState;
 use crate::endpoint_rtmp_url::build_rtmp_url;
 use crate::endpoint_stats::Stats;
-
-/// Continuous seconds of producer-active that proves rescue can exit.
-///
-/// Mirrors `rescue::RESCUE_REFILL_TARGET_SECS`; defined locally so this
-/// module is self-contained for the Task 6 swap that will retire the
-/// legacy ffmpeg rescue loop.
-pub const RESCUE_REFILL_TARGET_SECS: u64 = 120;
+// Canonical home for the refill-target constant is `rescue.rs` — that's
+// the legacy public name referenced across the crate. Task 6 (the
+// run_rescue_loop GREEN commit) folded the legacy ffmpeg rescue loop's
+// body to delegate here, but the constant stays in `rescue` so existing
+// `crate::rescue::RESCUE_REFILL_TARGET_SECS` call sites keep working
+// without churn.
+use crate::rescue::RESCUE_REFILL_TARGET_SECS;
 
 /// Backoff applied after a `push_flv_bytes` error before the next attempt.
 /// Avoids tight error loops when the upstream RTMP endpoint is unreachable.

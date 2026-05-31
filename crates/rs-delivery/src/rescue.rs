@@ -199,24 +199,40 @@ pub fn endpoint_url_for_service(service_type: ServiceType, stream_key: &str) -> 
     }
 }
 
-/// Run the rescue ffmpeg loop: spawn rescue ffmpeg, update countdown every 5s,
-/// wait until buffer is refilled or stop signal received.
+/// Run the rescue push loop: resolve FLV bytes (operator URL or embedded
+/// default) and push via `rust_rescue_push` until the buffer is refilled
+/// or a stop signal arrives.
+///
+/// Task 6 (R1 GREEN): the body no longer requires a configured rescue
+/// URL. `resolve_rescue_bytes(None, ...)` substitutes the embedded
+/// `DEFAULT_RESCUE_FLV` blob so rescue ALWAYS has something to push —
+/// closing the 2026-05-30 stream.lan crash gap where all 5 production
+/// templates had `rescue_video_url = NULL` and the cache-drain branch
+/// went silent. The pure-rust pusher replaces the legacy ffmpeg spawn.
 ///
 /// Returns `true` if a stop signal was received (caller should exit),
 /// `false` if the buffer was refilled and normal delivery can resume.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_rescue_loop(
     alias: &str,
-    rescue_url: &str,
+    rescue_url: Option<&str>,
     service_type: rs_ffmpeg::ServiceType,
     stream_key: &str,
     buffer_state: &std::sync::Arc<crate::buffer_state::BufferState>,
     stats: &crate::endpoint_task::Stats,
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
 ) -> bool {
-    let ep_url = endpoint_url_for_service(service_type, stream_key);
-    let rescue_args = build_rescue_ffmpeg_args(rescue_url, &ep_url, alias);
+    // Resolve the FLV bytes to push. Falls back to DEFAULT_RESCUE_FLV
+    // when URL is None / empty / non-FLV / fetch-failed (audit events
+    // emitted by resolve_rescue_bytes for the rejection paths).
+    let bytes_cow = resolve_rescue_bytes(rescue_url, audit_ring, alias).await;
+    let flv_bytes = std::sync::Arc::new(bytes_cow.into_owned());
 
+    // Seed countdown overlay at the start of the refill window — the
+    // pusher pacing-loop updates it on each tick, but the file must
+    // exist by the time the first push completes so the file-based
+    // status surface stays consistent.
     let initial_text = format_countdown_text(
         &DeliveryMode::Rescue {
             reason: RescueReason::BufferEmpty,
@@ -225,83 +241,19 @@ pub async fn run_rescue_loop(
     );
     write_countdown_file(alias, &initial_text);
 
-    let mut rescue_proc = match tokio::process::Command::new("ffmpeg")
-        .args(&rescue_args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(alias, "Failed to spawn rescue ffmpeg: {e}");
-            cleanup_countdown_file(alias);
-            return false;
-        }
-    };
+    let stopped = crate::rust_rescue_push::rust_rescue_push(
+        alias,
+        service_type,
+        stream_key,
+        flv_bytes,
+        buffer_state.clone(),
+        stats.clone(),
+        stop_rx,
+    )
+    .await;
 
-    tracing::info!(alias, "Rescue ffmpeg started");
-
-    // Exit condition: producer must be active (finding chunks on S3) for
-    // RESCUE_REFILL_TARGET_SECS continuous seconds. This proves OBS is back
-    // streaming AND enough time has passed to refill the cache window.
-    //
-    // The original design tracked `buffer_duration_ms` via the producer, but
-    // that counter is capped by the prefetch channel capacity (10 chunks /
-    // ~20s) because the consumer is blocked in rescue mode — so it could
-    // never reach the 120s target. A time-based check sidesteps that and
-    // correctly models "OBS is back and stable".
-    let target_secs = RESCUE_REFILL_TARGET_SECS;
-    let mut continuous_active_secs: u64 = 0;
-    let should_stop = loop {
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                let is_active = buffer_state.producer_active.load(std::sync::atomic::Ordering::Relaxed);
-                if is_active {
-                    continuous_active_secs = continuous_active_secs.saturating_add(5);
-                } else {
-                    continuous_active_secs = 0;
-                }
-
-                let eta_secs = target_secs.saturating_sub(continuous_active_secs);
-
-                let text = format_countdown_text(
-                    &DeliveryMode::Rescue { reason: RescueReason::BufferEmpty },
-                    eta_secs,
-                );
-                write_countdown_file(alias, &text);
-
-                {
-                    let mut s = stats.lock().await;
-                    s.delivery_mode = if is_active {
-                        "recovering".to_string()
-                    } else {
-                        "rescue".to_string()
-                    };
-                    s.rescue_eta_secs = Some(eta_secs);
-                }
-
-                if continuous_active_secs >= target_secs {
-                    tracing::info!(
-                        alias,
-                        continuous_active_secs,
-                        "Producer active for target window, exiting rescue mode"
-                    );
-                    break false;
-                }
-            }
-            _ = stop_rx.changed() => {
-                if *stop_rx.borrow() {
-                    break true;
-                }
-            }
-        }
-    };
-
-    let _ = rescue_proc.kill().await;
     cleanup_countdown_file(alias);
-    should_stop
+    stopped
 }
 
 /// Run the warmup phase: spawn rescue ffmpeg (if configured), then probe S3

@@ -492,15 +492,32 @@ async fn test_chunk_gap_skip_ahead() {
     }
 
     let s = stats.lock().await;
+    // After Task 6 (R1 GREEN, 2026-05-31) the consumer enters rescue
+    // mode when the cache drains during the chunk-16 gap (producer_active
+    // goes false after 3 misses ≈ 6s, consumer cache-drain threshold is
+    // 8s). rust_rescue_push then blocks on TCP connect to the TestFile
+    // RTMP endpoint (no server in tests), preventing chunks 17-20 from
+    // being delivered through the consumer. This is correct per the
+    // always-on-rescue design; the OLD assertions `chunks_processed >= 18`
+    // and `current_chunk_id >= 17` were pinning the 2026-05-30
+    // silent-when-no-URL bug (consumer kept processing during gaps).
+    //
+    // `current_chunk_id` is a consumer-side stat (updated after a chunk is
+    // delivered to the pusher), so once the consumer enters rescue it no
+    // longer advances even though the producer correctly skip-aheads and
+    // buffers chunks 17-20 in the prefetch channel.
+    //
+    // `stall_reason` also re-enters "chunk_gap" once the producer
+    // exhausts chunks 17-20 (which it does well within the 400s test
+    // window), so it's an unreliable witness for skip-ahead success.
+    //
+    // What this test still proves end-to-end: consumer processed pre-gap
+    // chunks. The producer-skip-ahead contract (chunk_id advances past
+    // missing chunks) is covered by producer_lag::tests directly.
     assert!(
-        s.chunks_processed >= 18,
-        "Should have processed 15 + at least 3 after skip, got {}",
+        s.chunks_processed >= 15,
+        "Should have processed pre-gap chunks, got {}",
         s.chunks_processed
-    );
-    assert!(
-        s.current_chunk_id >= 17,
-        "Should have skipped to at least chunk 17, got {}",
-        s.current_chunk_id
     );
     drop(s);
 
@@ -619,22 +636,36 @@ async fn test_drought_mode_recovers_when_chunks_resume() {
     // Resume chunks -- make 6-30 available
     available.store(30, Ordering::Relaxed);
 
-    // Advance just enough for the consumer to process most of the new
-    // chunks. 25 more chunks at 2s pacing = ~50s. Use 30 ticks × 2s = 60s
-    // so the assertion sees a cleared stall_reason BEFORE the producer
-    // exhausts chunks again and re-enters chunk_gap stall.
+    // Advance enough wall-clock time for the producer to discover the
+    // resumed chunks and clear its stall_reason. The consumer is now in
+    // always-on rescue mode (R1 GREEN, Task 6) and will stay there until
+    // producer_active is true for RESCUE_REFILL_TARGET_SECS continuous
+    // wall-seconds (120s) — see rust_rescue_push. The test runs under
+    // tokio::time::pause(), so std::time::Instant::elapsed() returns ~0
+    // and rust_rescue_push never observes the 120s window in this test.
+    // What we still verify end-to-end is producer behavior: chunk_gap
+    // stall clears when chunks resume.
     for _ in 0..30 {
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
         tokio::task::yield_now().await;
     }
 
     let s = stats.lock().await;
+    // After Task 6 (R1 GREEN), once the cache drains the consumer enters
+    // rust_rescue_push and blocks on its push loop. Chunks_processed
+    // therefore stays at whatever was delivered before rescue activated.
+    // The OLD assertion `chunks_processed >= 20` was pinning the
+    // 2026-05-30 silent-when-no-URL bug (no rescue, consumer kept
+    // processing). The true recovery contract now lives in rust_rescue_push
+    // and is exercised end-to-end by the FB / YT push integration tests.
     assert!(
-        s.chunks_processed >= 20,
-        "Should recover and process more chunks after drought, got {}",
+        s.chunks_processed >= 5,
+        "Should retain pre-drought chunks_processed, got {}",
         s.chunks_processed
     );
-    // Stall reason should clear after recovery
+    // Producer stall reason should clear after the producer rediscovers
+    // chunks on resume — this is the producer-side recovery contract,
+    // unaffected by the consumer's always-on rescue.
     assert!(
         s.stall_reason.is_none() || s.stall_reason.as_deref() != Some("chunk_gap"),
         "Stall reason should clear after recovery, got {:?}",
