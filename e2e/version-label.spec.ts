@@ -31,13 +31,17 @@ test.describe("Dashboard version label", () => {
       const versionLocator = page.locator('[data-testid="version"]');
       await expect(versionLocator).toBeVisible();
       const text = (await versionLocator.textContent())?.trim() ?? "";
-      // Accept either the build-time-injected version
-      // (`v?<semver>(-dev.<n>)?(\s\(<sha>\))?`) or the "dev" fallback that
-      // ships when the trunk build wasn't given BUILD_VERSION (local
-      // development). Production builds MUST inject the semver — that
-      // path is gated by the CI release pipeline.
+      // Accept all real BUILD_VERSION shapes we ship:
+      //   * "dev"                       — local trunk build with no env
+      //   * "0.22.3-dev"                — CI dev-branch build (`<semver>-dev`)
+      //   * "0.22.3-dev.9"              — release-candidate enumerated
+      //   * "0.22.3" / "v0.22.3"        — tagged release
+      //   * "<...> (abc1234)" / "<...> (abc1234, 2026-04-27)" — optional SHA suffix
+      // CI sets `BUILD_VERSION` to `<Cargo.toml version>-dev` for every
+      // dev push (no enumerated `.N`), so `-dev` MUST match without the
+      // trailing number; the enumerated form is for release candidates.
       expect(text).toMatch(
-        /^(dev|v?\d+\.\d+\.\d+(-dev\.\d+)?(\s\([0-9a-f]{7}(,\s\d{4}-\d{2}-\d{2})?\))?)$/,
+        /^(dev|v?\d+\.\d+\.\d+(-dev(\.\d+)?)?(\s\([0-9a-f]{7}(,\s\d{4}-\d{2}-\d{2})?\))?)$/,
       );
     }
   });
