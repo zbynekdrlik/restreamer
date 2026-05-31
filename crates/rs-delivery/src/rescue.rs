@@ -1,6 +1,5 @@
 //! Rescue mode: plays a looped video with countdown overlay when the
 //! delivery buffer is empty (warmup or outage recovery).
-use rs_ffmpeg::ServiceType;
 use std::borrow::Cow;
 
 use crate::rescue_default::DEFAULT_RESCUE_FLV;
@@ -31,98 +30,6 @@ pub enum RescueReason {
     Warmup,
     /// Buffer drained during an outage.
     BufferEmpty,
-}
-
-/// Build ffmpeg arguments for the rescue video loop with drawtext overlay.
-/// All service types use FLV output (YT_HLS removed in #135).
-pub fn build_rescue_ffmpeg_args(
-    rescue_video_url: &str,
-    endpoint_url: &str,
-    alias: &str,
-) -> Vec<String> {
-    let countdown_path = countdown_file_path(alias);
-
-    // Normalize the source video to stable YouTube-safe parameters so
-    // switching between the real OBS stream and the rescue video doesn't
-    // confuse YouTube's ingestion (format/resolution/framerate changes
-    // cause "bad" health reports, reconnects, or outright rejection).
-    //
-    // Pipeline:
-    //   scale to 1920x1080 preserving aspect, letterbox with black bars,
-    //   set sample aspect to 1:1, force 30fps, yuv420p color.
-    //   Then overlay the countdown text read from disk (reload=1).
-    //
-    // 1080p30 is the lowest common denominator that every RTMP/HLS
-    // destination accepts without complaint. It handles source videos of
-    // any resolution or framerate.
-    let vf = format!(
-        concat!(
-            "scale=1920:1080:force_original_aspect_ratio=decrease,",
-            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,",
-            "setsar=1,fps=30,format=yuv420p,",
-            "drawtext=textfile={}:reload=1:fontsize=48:fontcolor=white:",
-            "x=(w-tw)/2:y=h-80:borderw=2:bordercolor=black"
-        ),
-        countdown_path
-    );
-
-    // Standard 1080p30 H.264 + AAC encoder settings. Keyframe every 2s
-    // (-g 60 at 30fps) matches what OBS typically sends and what YouTube
-    // expects for low-latency ingestion.
-    let mut args = vec![
-        "-stream_loop".into(),
-        "-1".into(),
-        "-re".into(),
-        "-i".into(),
-        rescue_video_url.to_string(),
-        "-vf".into(),
-        vf,
-        // Video encoder
-        "-c:v".into(),
-        "libx264".into(),
-        "-preset".into(),
-        "veryfast".into(),
-        "-profile:v".into(),
-        "main".into(),
-        "-level".into(),
-        "4.0".into(),
-        "-pix_fmt".into(),
-        "yuv420p".into(),
-        "-r".into(),
-        "30".into(),
-        "-g".into(),
-        "60".into(),
-        "-keyint_min".into(),
-        "60".into(),
-        "-sc_threshold".into(),
-        "0".into(),
-        "-b:v".into(),
-        "4500k".into(),
-        "-maxrate".into(),
-        "4500k".into(),
-        "-bufsize".into(),
-        "9000k".into(),
-        // Audio encoder
-        "-c:a".into(),
-        "aac".into(),
-        "-b:a".into(),
-        "128k".into(),
-        "-ar".into(),
-        "48000".into(),
-        "-ac".into(),
-        "2".into(),
-    ];
-
-    // All service types use FLV output (YT_HLS removed in #135).
-    args.extend_from_slice(&[
-        "-f".into(),
-        "flv".into(),
-        "-flvflags".into(),
-        "no_duration_filesize".into(),
-        endpoint_url.to_string(),
-    ]);
-
-    args
 }
 
 /// Format the countdown text for the rescue video overlay.
@@ -173,30 +80,6 @@ pub fn write_countdown_file(alias: &str, text: &str) {
 pub fn cleanup_countdown_file(alias: &str) {
     let path = countdown_file_path(alias);
     let _ = std::fs::remove_file(&path);
-}
-
-/// Determine the output format string based on service type.
-/// All supported service types use FLV output.
-pub fn output_format_for_service(_service_type: ServiceType) -> &'static str {
-    "flv"
-}
-
-/// Build the endpoint URL for a given service type and stream key.
-pub fn endpoint_url_for_service(service_type: ServiceType, stream_key: &str) -> String {
-    match service_type {
-        ServiceType::YtRtmp => format!("rtmp://a.rtmp.youtube.com/live2/{stream_key}"),
-        ServiceType::Facebook => format!("rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}"),
-        ServiceType::Vimeo => format!("rtmps://rtmp-global.cloud.vimeo.com:443/live/{stream_key}"),
-        ServiceType::Instagram => {
-            format!("rtmps://live-upload.instagram.com:443/rtmp/{stream_key}")
-        }
-        ServiceType::TestFile => {
-            let output_dir = std::env::var("RESTREAMER_TEST_OUTPUT_DIR")
-                .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
-            let safe = stream_key.replace([' ', '/'], "_");
-            format!("{output_dir}/restreamer_rescue_{safe}.flv")
-        }
-    }
 }
 
 /// Run the rescue push loop: resolve FLV bytes (operator URL or embedded
@@ -256,13 +139,22 @@ pub async fn run_rescue_loop(
     stopped
 }
 
-/// Run the warmup phase: spawn rescue ffmpeg (if configured), then probe S3
-/// for chunks until the target delay is accumulated. Returns `true` if a
-/// stop signal was received.
+/// Run the warmup phase: push rescue (default or operator-configured FLV)
+/// via the pure-rust pusher, then probe S3 for chunks until the target
+/// delay is accumulated. Returns `true` if a stop signal was received.
 ///
-/// When `rescue_video_url` is Some and the endpoint is not fast, the rescue
-/// ffmpeg runs alongside the chunk probing so viewers see the rescue video
-/// during the initial cache fill — otherwise they'd see nothing for ~120s.
+/// R3 GREEN (Task 7, 2026-05-31): non-fast endpoints ALWAYS push rescue
+/// during warmup, regardless of whether the operator configured a custom
+/// URL. `resolve_rescue_bytes(None, ...)` substitutes the embedded
+/// `DEFAULT_RESCUE_FLV` blob so viewers never see a blank screen during
+/// the initial cache fill (~120s). Fast endpoints still skip rescue per
+/// the low-latency design trade-off.
+///
+/// The pusher runs as a background `tokio::task` so it streams in
+/// parallel with the chunk-probe loop. When the probe loop exits (buffer
+/// target met, or stop signal), the handle is aborted — terminating the
+/// rescue stream cleanly. This closes the 2026-05-30 stream.lan blank-
+/// warmup gap (gap #3 of 3 in the design spec).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
     fetcher: &F,
@@ -275,62 +167,82 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     audit_ring: Option<&std::sync::Arc<crate::audit_ring::AuditRing>>,
 ) -> bool {
-    let mut warmup_proc: Option<tokio::process::Child> = None;
+    // R3 GREEN: always push rescue during warmup for non-fast endpoints.
+    // The outer `if let Some(rescue_url) = ...` guard from the pre-fix
+    // body is GONE — `resolve_rescue_bytes(None, ...)` falls back to
+    // DEFAULT_RESCUE_FLV so blank-warmup is impossible. Fast endpoints
+    // continue to skip rescue per design (low-latency trade-off).
+    let warmup_handle: Option<tokio::task::JoinHandle<bool>> = if !ep_cfg.is_fast {
+        let svc_type: rs_ffmpeg::ServiceType = ep_cfg
+            .service_type
+            .parse()
+            .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
 
-    // Spawn rescue ffmpeg if configured (non-fast endpoints only)
-    if let Some(rescue_url) = rescue_video_url {
-        if !ep_cfg.is_fast {
-            let svc_type: rs_ffmpeg::ServiceType = ep_cfg
-                .service_type
-                .parse()
-                .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
-            let ep_url = endpoint_url_for_service(svc_type, &ep_cfg.stream_key);
-            let rescue_args = build_rescue_ffmpeg_args(rescue_url, &ep_url, alias);
+        // Resolve bytes BEFORE spawning so the audit_ring borrow stays
+        // local to this function — the spawned task only owns the
+        // resolved Arc<Vec<u8>>.
+        let audit_ring_owned: Option<std::sync::Arc<crate::audit_ring::AuditRing>> =
+            audit_ring.cloned();
+        let bytes_cow = resolve_rescue_bytes(rescue_video_url, &audit_ring_owned, alias).await;
+        let flv_bytes = std::sync::Arc::new(bytes_cow.into_owned());
 
-            let initial_text = format_countdown_text(
-                &DeliveryMode::Rescue {
-                    reason: RescueReason::Warmup,
-                },
-                delivery_delay_ms / 1000,
-            );
-            write_countdown_file(alias, &initial_text);
-
-            {
-                let mut s = stats.lock().await;
-                s.delivery_mode = "warmup".to_string();
-                s.rescue_eta_secs = Some(delivery_delay_ms / 1000);
-            }
-
-            match tokio::process::Command::new("ffmpeg")
-                .args(&rescue_args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-            {
-                Ok(p) => {
-                    tracing::info!(alias, "Warmup rescue ffmpeg started");
-                    warmup_proc = Some(p);
-                }
-                Err(e) => {
-                    tracing::error!(alias, "Failed to spawn warmup rescue ffmpeg: {e}");
-                    cleanup_countdown_file(alias);
-                }
-            }
+        // Seed the countdown overlay + stats so the dashboard reflects
+        // warmup state from the first frame. The pusher pacing loop
+        // updates these on each tick.
+        let initial_text = format_countdown_text(
+            &DeliveryMode::Rescue {
+                reason: RescueReason::Warmup,
+            },
+            delivery_delay_ms / 1000,
+        );
+        write_countdown_file(alias, &initial_text);
+        {
+            let mut s = stats.lock().await;
+            s.delivery_mode = "warmup".to_string();
+            s.rescue_eta_secs = Some(delivery_delay_ms / 1000);
         }
-    }
+
+        // Construct a dummy BufferState with producer_active=false so
+        // `rust_rescue_push`'s refill-detection exit condition never
+        // fires during warmup. Warmup has its own exit logic — the
+        // probe loop below decides when to stop, and we abort this
+        // handle. The pusher here is purely a fire-and-forget "keep
+        // pushing bytes until aborted" worker.
+        let dummy_buffer_state = std::sync::Arc::new(crate::buffer_state::BufferState::new());
+        dummy_buffer_state
+            .producer_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        let alias_owned = alias.to_string();
+        let stream_key_owned = ep_cfg.stream_key.clone();
+        let stats_clone = stats.clone();
+        let mut warmup_stop = stop_rx.clone();
+        Some(tokio::spawn(async move {
+            crate::rust_rescue_push::rust_rescue_push(
+                &alias_owned,
+                svc_type,
+                &stream_key_owned,
+                flv_bytes,
+                dummy_buffer_state,
+                stats_clone,
+                &mut warmup_stop,
+            )
+            .await
+        }))
+    } else {
+        None
+    };
 
     // Warmup exits when the buffer is filled. During warmup, rescue
-    // ffmpeg plays the configured rescue video to the endpoint and the
-    // countdown overlay shows time remaining until normal delivery
-    // starts.
+    // bytes are being pushed concurrently by the background task spawned
+    // above and the countdown overlay shows time remaining until normal
+    // delivery starts.
     //
     // If chunks already exist on S3 when the VPS boots (which they
     // usually do because OBS has been streaming during the ~60-90s VPS
     // boot), accum_ms grows fast through the existing chunks and
     // warmup exits quickly — viewers see real content ASAP. If cache
-    // really is being built from zero, warmup plays rescue video
+    // really is being built from zero, the rescue stream plays
     // throughout.
     let mut accum_ms: u64 = 0;
     let mut probe_id = start_chunk_id;
@@ -359,7 +271,12 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
                 accum_ms += dur_ms.max(0) as u64;
                 probe_id += 1;
 
-                if rescue_video_url.is_some() {
+                // R3 GREEN: non-fast endpoints always have rescue pushing
+                // in the background, so the countdown overlay + warmup
+                // stats must reflect progress regardless of URL config.
+                // Fast endpoints skip rescue entirely (per design) and
+                // therefore skip the countdown/stats update too.
+                if !ep_cfg.is_fast {
                     let remaining_ms = delivery_delay_ms.saturating_sub(accum_ms);
                     let eta_secs = remaining_ms.div_ceil(1000);
 
@@ -488,10 +405,13 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
         }
     };
 
-    // Tear down warmup rescue ffmpeg and countdown file
-    if let Some(mut p) = warmup_proc.take() {
-        let _ = p.kill().await;
-        tracing::info!(alias, "Warmup rescue ffmpeg stopped");
+    // Tear down the warmup rescue pusher task and countdown file.
+    // Aborting the JoinHandle drops the spawned task; the RtmpPusher
+    // inside is dropped, which closes its session (kill_on_drop-equivalent
+    // for pure-rust). No external ffmpeg process to reap.
+    if let Some(handle) = warmup_handle {
+        handle.abort();
+        tracing::info!(alias, "Warmup rescue pusher stopped");
     }
     cleanup_countdown_file(alias);
 
