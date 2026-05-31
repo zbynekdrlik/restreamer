@@ -589,8 +589,10 @@ mod tests {
 
     #[test]
     fn event_s3_prefix_composes_client_uuid_and_event_name() {
-        let mut config = Config::default();
-        config.client_uuid = "abc-uuid".to_string();
+        let config = Config {
+            client_uuid: "abc-uuid".to_string(),
+            ..Config::default()
+        };
         assert_eq!(
             config.event_s3_prefix("sunday-service"),
             "abc-uuid/sunday-service"
@@ -599,8 +601,10 @@ mod tests {
 
     #[test]
     fn client_s3_base_is_client_uuid_slash() {
-        let mut config = Config::default();
-        config.client_uuid = "abc-uuid".to_string();
+        let config = Config {
+            client_uuid: "abc-uuid".to_string(),
+            ..Config::default()
+        };
         assert_eq!(config.client_s3_base(), "abc-uuid/");
     }
 
