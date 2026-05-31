@@ -5187,6 +5187,80 @@ jobs:
           }
           throw "FAILED: Restreamer did not restart after config update"
 
+      - name: "Pre-flight: verify no stale delivery instances"
+        # Parity with e2e-obs-youtube-test (#220). Without this, a leftover
+        # delivery instance from a prior FB run (cancelled teardown, partial
+        # stop) blocks delivery/start with "server name is already used",
+        # confuses the watchdog with stale VPS metrics, and leaks Hetzner
+        # spend across runs.
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Checking for stale delivery instances..."
+          # Step 1: Clean up via local API (uses DB state)
+          try {
+            $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+            if ($instances -and $instances.Count -gt 0) {
+              Write-Host "WARNING: Found $($instances.Count) stale delivery instance(s), stopping..."
+              foreach ($inst in $instances) {
+                Write-Host "  Stopping instance: id=$($inst.id), event_id=$($inst.event_id), status=$($inst.status)"
+                $body = @{ event_id = $inst.event_id } | ConvertTo-Json
+                try {
+                  Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/stop" `
+                    -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+                } catch {
+                  Write-Host "  Stop failed for event_id=$($inst.event_id): $_"
+                }
+              }
+              Start-Sleep -Seconds 5
+            }
+          } catch {
+            Write-Host "Could not check delivery instances via API: $_"
+          }
+
+          # Step 2: Clean up orphaned Hetzner VPS directly (scoped to this
+          # installation via client_uuid label per #137).
+          if ($env:HETZNER_API_TOKEN) {
+            $clientUuid = $null
+            try {
+              $cfg = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/config" -TimeoutSec 10
+              $clientUuid = $cfg.client_uuid
+            } catch {
+              Write-Host "  Could not read local client_uuid: $_"
+            }
+
+            if (-not $clientUuid) {
+              Write-Host "ERROR: client_uuid not available - refusing to run Hetzner cleanup (fail-closed)"
+              exit 1
+            }
+
+            Write-Host "Checking Hetzner API for orphaned rs-delivery VPS for client_uuid=$clientUuid ..."
+            try {
+              $headers = @{ Authorization = "Bearer $($env:HETZNER_API_TOKEN)" }
+              $selector = "app=restreamer,client_uuid=$clientUuid"
+              $resp = Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers?label_selector=$selector" `
+                -Headers $headers -TimeoutSec 15
+              if ($resp.servers -and $resp.servers.Count -gt 0) {
+                foreach ($srv in $resp.servers) {
+                  Write-Host "  Deleting orphaned VPS (this installation): id=$($srv.id) name=$($srv.name) status=$($srv.status) ip=$($srv.public_net.ipv4.ip)"
+                  try {
+                    Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers/$($srv.id)" `
+                      -Method DELETE -Headers $headers -TimeoutSec 15
+                    Write-Host "  Deleted VPS $($srv.id)"
+                  } catch {
+                    Write-Host "  Failed to delete VPS $($srv.id): $_"
+                  }
+                }
+                Start-Sleep -Seconds 3
+              } else {
+                Write-Host "  No orphaned VPS found for this installation"
+              }
+            } catch {
+              Write-Host "  Hetzner API check failed: $_"
+            }
+          }
+          Write-Host "Pre-flight cleanup complete"
+
       - name: Verify FB Graph API credentials
         shell: powershell
         run: |
