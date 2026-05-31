@@ -94,10 +94,11 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
-      - name: Install ffmpeg (for gen_rescue_flv --check)
-        run: sudo apt-get install -y ffmpeg
-      - name: Verify default_rescue.flv reproducibility
-        run: cargo run --bin gen_rescue_flv --manifest-path crates/rs-delivery/Cargo.toml -- --check
+      # Note: gen_rescue_flv --check is local-only. ffmpeg output is not
+      # bit-reproducible across ffmpeg versions / distros, so we cannot run
+      # the reproducibility verifier in CI without pinning a specific
+      # ffmpeg build. R4 unit test (rescue_default::tests::default_rescue_flv_blob_integrity)
+      # catches blob truncation / wrong magic on every CI run.
 
   test:
     name: Test (${{ matrix.os }})
