@@ -654,7 +654,71 @@ async fn consumer_task<P: OutputProcessFactory>(
                         c
                     }
                     None => {
-                        tracing::info!(alias = %alias, "Consumer: producer gone, stopping");
+                        // R2 GREEN (Task 8 scoped, 2026-05-31): defensive
+                        // rescue before teardown. Producer disappeared
+                        // (panic or stop signal closed the channel). Push
+                        // DEFAULT_RESCUE_FLV (or operator's custom URL)
+                        // until the endpoint_task select-loop tears us
+                        // down via the consumer-drain timeout (~30s) or
+                        // a stop signal arrives. Viewers see rescue
+                        // during the teardown window instead of immediate
+                        // dark.
+                        //
+                        // SCOPED: full producer respawn (so endpoint never
+                        // dies on producer disappearance) is out of scope
+                        // — deferred to a follow-up. The 2026-05-30
+                        // stream.lan crash incident hit the cache-drain
+                        // path (fixed by Task 6), NOT this branch. This
+                        // is defensive hardening for the producer-panic
+                        // case.
+                        tracing::warn!(
+                            alias = %alias,
+                            "Consumer: producer gone, entering defensive rescue before teardown"
+                        );
+                        let rescue_started = std::time::Instant::now();
+                        crate::rescue_audit::emit_activated(
+                            &audit_ring,
+                            &alias,
+                            last_delivered_chunk_id,
+                        );
+                        // Kill any orphaned ffmpeg child (no-op when None
+                        // or already dead on the rust-pusher path).
+                        if let Some(mut p) = proc.take() {
+                            p.kill().await;
+                        }
+                        {
+                            let mut s = stats.lock().await;
+                            s.delivery_mode = "rescue".to_string();
+                            s.rescue_eta_secs =
+                                Some(crate::rescue::RESCUE_REFILL_TARGET_SECS);
+                        }
+                        let svc_type: rs_ffmpeg::ServiceType = ep_cfg
+                            .service_type
+                            .parse()
+                            .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
+                        // run_rescue_loop returns when stop_rx fires
+                        // (endpoint_task tearing us down via the
+                        // select-loop consumer-drain timeout) — no
+                        // producer respawn in this scoped fix, so refill
+                        // never completes and rescue runs until stop.
+                        let _should_stop = crate::rescue::run_rescue_loop(
+                            &alias,
+                            rescue_video_url.as_deref(),
+                            svc_type,
+                            &ep_cfg.stream_key,
+                            &buffer_state,
+                            &stats,
+                            &mut stop_rx,
+                            &audit_ring,
+                        )
+                        .await;
+                        let gap = rescue_started.elapsed().as_secs();
+                        crate::rescue_audit::emit_recovered(&audit_ring, &alias, gap);
+                        tracing::info!(
+                            alias = %alias,
+                            gap_secs = gap,
+                            "Consumer: defensive rescue exited; breaking loop"
+                        );
                         break;
                     }
                 }

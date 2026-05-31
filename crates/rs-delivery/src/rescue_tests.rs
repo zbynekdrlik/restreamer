@@ -783,14 +783,23 @@ fn rescue_activates_when_producer_gone() {
 
     // The recv-None arm is the FIRST `None =>` inside consumer_task —
     // it sits inside the `match maybe_chunk` block that handles
-    // rx.recv() results. Bound the window to ~600 chars so we stay
-    // brittle in the right way (the assertion must shift if the
-    // branch body grows/changes).
+    // rx.recv() results.
+    //
+    // Bound the window precisely: starts at the recv-None arm, ends
+    // at the next tokio::select! arm (the cache-drain
+    // RESCUE_STALL_THRESHOLD_SECS sleep — also contains
+    // `run_rescue_loop`). This isolates the recv-None branch from
+    // its sibling so positive assertions about run_rescue_loop only
+    // match the recv-None invocation, not the cache-drain one.
     let recv_none_offset = source[consumer_start..]
         .find("None =>")
         .expect("R2: locate None => arm in consumer_task");
     let recv_none_pos = consumer_start + recv_none_offset;
-    let window_end = (recv_none_pos + 600).min(source.len());
+    let sibling_marker = "tokio::time::sleep(std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS))";
+    let sibling_offset = source[recv_none_pos..]
+        .find(sibling_marker)
+        .expect("R2: locate sibling cache-drain tokio::select arm marker");
+    let window_end = recv_none_pos + sibling_offset;
     let recv_none_window = &source[recv_none_pos..window_end];
 
     // BUG: the recv-None branch logs "producer gone, stopping" and
