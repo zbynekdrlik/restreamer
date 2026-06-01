@@ -3897,7 +3897,13 @@ jobs:
       - name: "GATE: Sustained YT health + endpoint chunk_delay (15 min observation)"
         if: success()
         shell: powershell
-        timeout-minutes: 18
+        # 30 samples × 30s = 15 min minimum, plus per-sample API latency
+        # (YT Data API + delivery/status + audit query) typically adds
+        # 5-15s per sample at p95. Main CI run 26738025583 reached sample
+        # 29/30 then hit the 18-min step timeout. Bump to 22 min so the
+        # gate budget covers the full sample loop with reasonable CI
+        # network jitter headroom.
+        timeout-minutes: 22
         run: |
           # Phase 1 (#176) sustained gate. The existing one-shot 'good' check
           # passes on the first 'good' reading. Drift-class regressions
