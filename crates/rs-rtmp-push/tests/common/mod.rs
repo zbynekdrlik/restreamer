@@ -3,6 +3,12 @@
 //! Contains server harnesses, SHA-256 helpers, and FLV generators used by
 //! the tests in `local_xiu_loopback.rs`.
 
+// Helpers in this module are shared across multiple test binaries
+// (local_xiu_loopback, local_tls_loopback, fb_mock_server). Each binary
+// only uses a subset, so unused-per-binary dead_code warnings are
+// expected and not actionable.
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -108,16 +114,16 @@ pub async fn spawn_xiu_server() -> (String, tokio::task::JoinHandle<()>) {
 /// place and no media frames are lost to a subscriber-registration race.
 ///
 /// Design:
-///   1. Spawn the xiu `RtmpServer` + hub in a background task.
-///   2. Obtain a `BroadcastEvent` receiver from the hub BEFORE `hub.run()`.
-///   3. Obtain a dedicated `event_sender` for the subscriber.
-///   4. In a second background task:
-///      a. Wait for `BroadcastEvent::Publish` (signals the publisher's publish
-///         command was accepted by xiu).
-///      b. Send a `StreamHubEvent::Subscribe` and receive the frame channel.
-///      c. Signal readiness back to the caller via a `oneshot`.
-///      d. Drain `FrameData` frames into `recorded` until the channel closes.
-///   5. Return to the caller only after the `oneshot` fires (subscriber ready).
+/// 1. Spawn the xiu `RtmpServer` + hub in a background task.
+/// 2. Obtain a `BroadcastEvent` receiver from the hub BEFORE `hub.run()`.
+/// 3. Obtain a dedicated `event_sender` for the subscriber.
+/// 4. In a second background task:
+///    - Wait for `BroadcastEvent::Publish` (signals the publisher's publish
+///      command was accepted by xiu).
+///    - Send a `StreamHubEvent::Subscribe` and receive the frame channel.
+///    - Signal readiness back to the caller via a `oneshot`.
+///    - Drain `FrameData` frames into `recorded` until the channel closes.
+/// 5. Return to the caller only after the `oneshot` fires (subscriber ready).
 ///
 /// Returns:
 /// - `url`          -- `rtmp://127.0.0.1:<port>/live/test` for the pusher

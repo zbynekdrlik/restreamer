@@ -41,7 +41,7 @@ pub fn Header() -> impl IntoView {
             }}
             <h1 class="app-title">"Restreamer"</h1>
             <span class={ws_class}>{ws_text}</span>
-            <span class="version-info">
+            <span class="version-info" data-testid="version">
                 {option_env!("BUILD_VERSION").unwrap_or("dev")}
             </span>
         </header>

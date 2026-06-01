@@ -2,9 +2,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use sqlx::SqlitePool;
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 
 use rs_core::config::Config;
 use rs_core::db;
@@ -27,6 +28,14 @@ pub struct AppState {
     shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
     /// Shared RTMP connection state
     inpoint_state: InpointState,
+    /// Shared disk-pressure level atomic (0=ok, 1=warn, 2=critical). Same
+    /// Arc the embedded `rs_api::AppState` reads in its `get_status`
+    /// handler, written by the disk monitor inside ServiceCore. #234.
+    disk_pressure_level: Arc<std::sync::atomic::AtomicU8>,
+    /// Shared "RTMP publisher stable since" timestamp. Same Arc the
+    /// embedded `rs_api::AppState` reads in its `get_status` handler.
+    /// #234.
+    rtmp_stable_since: Arc<Mutex<Option<Instant>>>,
 }
 
 impl AppState {
@@ -38,6 +47,8 @@ impl AppState {
         ws_tx: broadcast::Sender<WsEvent>,
         shutdown_tx: oneshot::Sender<()>,
         inpoint_state: InpointState,
+        disk_pressure_level: Arc<std::sync::atomic::AtomicU8>,
+        rtmp_stable_since: Arc<Mutex<Option<Instant>>>,
     ) -> Self {
         Self {
             pool,
@@ -46,7 +57,35 @@ impl AppState {
             ws_tx,
             shutdown_tx: Arc::new(RwLock::new(Some(shutdown_tx))),
             inpoint_state,
+            disk_pressure_level,
+            rtmp_stable_since,
         }
+    }
+
+    /// Read the current disk-pressure level as a UI-ready string
+    /// (`"ok"` / `"warn"` / `"critical"`). Mirrors the HTTP `/api/v1/status`
+    /// path so the tray banner renders identically to the LAN dashboard.
+    /// Mapping intentionally mirrors `rs_endpoint::disk_pressure::DiskPressure::as_str`.
+    pub fn disk_pressure(&self) -> String {
+        match self
+            .disk_pressure_level
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            2 => "critical",
+            1 => "warn",
+            _ => "ok",
+        }
+        .to_string()
+    }
+
+    /// Seconds since the RTMP publisher has been continuously stable.
+    /// Zero when no publisher is currently connected.
+    pub async fn rtmp_stable_secs(&self) -> u64 {
+        self.rtmp_stable_since
+            .lock()
+            .await
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0)
     }
 
     /// Check if RTMP publisher is connected.

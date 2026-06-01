@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn backoff_floor_handshake_failed_is_5000() {
-        let e = PushError::HandshakeFailed(io::Error::new(io::ErrorKind::Other, "x"));
+        let e = PushError::HandshakeFailed(io::Error::other("x"));
         assert_eq!(backoff_floor_ms(&e), Some(5_000));
     }
 
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn backoff_floor_io_error_is_15000() {
-        let e = PushError::IoError(io::Error::new(io::ErrorKind::Other, "x"));
+        let e = PushError::IoError(io::Error::other("x"));
         assert_eq!(backoff_floor_ms(&e), Some(15_000));
     }
 
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn is_exponential_io_error_is_false() {
-        let e = PushError::IoError(io::Error::new(io::ErrorKind::Other, "x"));
+        let e = PushError::IoError(io::Error::other("x"));
         assert!(
             !is_exponential(&e),
             "IoError uses fixed floor, not exponential"
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn is_exponential_handshake_failed_is_false() {
-        let e = PushError::HandshakeFailed(io::Error::new(io::ErrorKind::Other, "x"));
+        let e = PushError::HandshakeFailed(io::Error::other("x"));
         assert!(
             !is_exponential(&e),
             "HandshakeFailed uses fixed floor, not exponential"
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn map_read_err_io_error_stays_io_error() {
         let e = BytesIOError {
-            value: BytesIOErrorValue::IOError(io::Error::new(io::ErrorKind::Other, "x")),
+            value: BytesIOErrorValue::IOError(io::Error::other("x")),
         };
         let mapped = map_read_err(e);
         match mapped {

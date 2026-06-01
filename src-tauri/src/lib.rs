@@ -210,6 +210,16 @@ pub fn run() {
                 // Clone the pool to share with ServiceCore (avoids duplicate pool creation)
                 let pool_for_service = pool.clone();
 
+                // #234: pre-create the Arcs shared between Tauri AppState
+                // and the embedded `rs_api::AppState` so the tray IPC
+                // `get_status` reads the same atomics the HTTP path reads.
+                let disk_pressure_level = std::sync::Arc::new(
+                    std::sync::atomic::AtomicU8::new(0),
+                );
+                let rtmp_stable_since = std::sync::Arc::new(
+                    tokio::sync::Mutex::new(None),
+                );
+
                 let app_state = AppState::new(
                     pool,
                     config_clone.clone(),
@@ -217,6 +227,8 @@ pub fn run() {
                     ws_tx_clone,
                     shutdown_tx,
                     inpoint_state_clone,
+                    Arc::clone(&disk_pressure_level),
+                    Arc::clone(&rtmp_stable_since),
                 );
 
                 // Store state in Tauri
@@ -232,7 +244,9 @@ pub fn run() {
                     LogBuffer::new(1000),
                     inpoint_state,
                 )
-                .with_pool(pool_for_service);
+                .with_pool(pool_for_service)
+                .with_disk_pressure_level(disk_pressure_level)
+                .with_rtmp_stable_since(rtmp_stable_since);
 
                 if let Err(e) = core
                     .run_with_signal(async {

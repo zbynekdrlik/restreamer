@@ -2,11 +2,11 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use sqlx::SqlitePool;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing::{info, warn};
 
 use rs_api::state::AppState;
@@ -37,6 +37,14 @@ pub struct ServiceCore {
     inpoint_state: InpointState,
     /// Externally provided database pool (used in GUI mode to avoid duplicate pools)
     provided_pool: Option<SqlitePool>,
+    /// Externally provided disk-pressure level atomic. When set, the Tauri
+    /// GUI shares this Arc so its IPC `get_status` reads the same value as
+    /// the HTTP `/api/v1/status` path (#234).
+    provided_disk_pressure_level: Option<Arc<std::sync::atomic::AtomicU8>>,
+    /// Externally provided rtmp-stable-since mutex. Same rationale as
+    /// `provided_disk_pressure_level` — shared with Tauri AppState so the
+    /// IPC `get_status` exposes the same `rtmp_stable_secs` (#234).
+    provided_rtmp_stable_since: Option<Arc<Mutex<Option<Instant>>>>,
 }
 
 impl ServiceCore {
@@ -65,6 +73,8 @@ impl ServiceCore {
             log_buffer,
             inpoint_state,
             provided_pool: None,
+            provided_disk_pressure_level: None,
+            provided_rtmp_stable_since: None,
         }
     }
 
@@ -79,6 +89,22 @@ impl ServiceCore {
     /// because `run_with_signal()` skips migrations for externally provided pools.
     pub fn with_pool(mut self, pool: SqlitePool) -> Self {
         self.provided_pool = Some(pool);
+        self
+    }
+
+    /// Share an externally created `disk_pressure_level` atomic with the
+    /// embedded `AppState`. Used by the Tauri GUI so the tray IPC
+    /// `get_status` reads the same value the HTTP `/api/v1/status` path
+    /// reads (#234).
+    pub fn with_disk_pressure_level(mut self, arc: Arc<std::sync::atomic::AtomicU8>) -> Self {
+        self.provided_disk_pressure_level = Some(arc);
+        self
+    }
+
+    /// Share an externally created `rtmp_stable_since` mutex with the
+    /// embedded `AppState` (#234, mirror of `with_disk_pressure_level`).
+    pub fn with_rtmp_stable_since(mut self, arc: Arc<Mutex<Option<Instant>>>) -> Self {
+        self.provided_rtmp_stable_since = Some(arc);
         self
     }
 
@@ -170,6 +196,17 @@ impl ServiceCore {
         .with_restart_channels(inpoint_restart_tx, endpoint_restart_tx)
         .with_s3_upload_blocked(Arc::clone(&s3_upload_blocked))
         .with_upload_metrics(Arc::clone(&upload_metrics));
+
+        // #234: when Tauri provided shared `disk_pressure_level` /
+        // `rtmp_stable_since` Arcs, replace the auto-created ones BEFORE
+        // anything else clones them. This guarantees the tray IPC and the
+        // HTTP path read/write the same atomics.
+        if let Some(arc) = self.provided_disk_pressure_level.take() {
+            api_state = api_state.with_disk_pressure_level(arc);
+        }
+        if let Some(arc) = self.provided_rtmp_stable_since.take() {
+            api_state = api_state.with_rtmp_stable_since(arc);
+        }
 
         // Capture the disk-critical Arc before `api_state` is moved into
         // `rs_api::serve` below. The disk-pressure monitor (spawned later)

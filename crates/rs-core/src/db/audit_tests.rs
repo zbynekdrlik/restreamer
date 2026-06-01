@@ -509,7 +509,7 @@ fn group_audit_rows_25_in_5min_collapses_to_one() {
     for i in 0..25 {
         let t = base - chrono::Duration::seconds(i * 12); // 12 s apart
         rows.push(fake_row(
-            (25 - i) as i64,
+            25 - i,
             &t.to_rfc3339(),
             "vps",
             "endpoint_rtmp_push_died",

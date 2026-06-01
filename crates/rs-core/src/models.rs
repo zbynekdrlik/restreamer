@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn delay_excludes_fast_endpoints() {
-        let endpoints = vec![
+        let endpoints = [
             DeliveryEndpointMetrics {
                 alias: "FastEP".to_string(),
                 alive: true,

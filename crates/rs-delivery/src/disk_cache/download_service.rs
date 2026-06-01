@@ -373,11 +373,16 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{Duration, Instant};
 
+    /// Single-shot fetch result the mock backend hands back: either the
+    /// chunk payload + duration, or an error message. Wrapped in
+    /// `Mutex<Option<...>>` so tests can swap it between Ok and Err.
+    type MockResult = std::sync::Mutex<Option<Result<(Vec<u8>, i64), String>>>;
+
     /// Deterministic mock S3 backend. Counts GETs per chunk.
     #[derive(Default)]
     struct MockBackend {
         get_count: AtomicU32,
-        result: std::sync::Mutex<Option<Result<(Vec<u8>, i64), String>>>,
+        result: MockResult,
     }
 
     impl MockBackend {

@@ -912,7 +912,13 @@ mod tests {
         );
     }
 
+    // The assertions below compare named constants. Clippy fires
+    // `assertions_on_constants` because the comparison is compile-time-
+    // foldable, but the WHOLE POINT of this test is to make those
+    // constraints visible and break the build if anyone edits the
+    // constants away from the design budget. Allow it intentionally.
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn read_loop_constants_keep_writers_off_the_hot_path() {
         // Regression for the cache-growth bug found in #103 E2E run on
         // 2026-04-29: the read-loop held the io mutex for 100ms per cycle.

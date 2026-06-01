@@ -619,10 +619,12 @@ mod tests {
     /// burst is capped by the chunk-end rate cap (issue #171).
     #[test]
     fn audio_xiu_regression_re_anchors_to_last_output_plus_one() {
-        let mut state = PusherState::default();
-        state.audio_origin_xiu_ts = Some(0);
-        state.last_audio_xiu_ts = Some(600_000);
-        state.last_audio_output_ts_ms = 600_000;
+        let mut state = PusherState {
+            audio_origin_xiu_ts: Some(0),
+            last_audio_xiu_ts: Some(600_000),
+            last_audio_output_ts_ms: 600_000,
+            ..PusherState::default()
+        };
 
         let new_tag_xiu_ts = 21_u32;
         let prev = state.last_audio_xiu_ts.unwrap();

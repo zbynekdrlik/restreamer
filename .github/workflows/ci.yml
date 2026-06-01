@@ -93,7 +93,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       # Note: gen_rescue_flv --check is local-only. ffmpeg output is not
       # bit-reproducible across ffmpeg versions / distros, so we cannot run
       # the reproducibility verifier in CI without pinning a specific
@@ -5187,6 +5187,80 @@ jobs:
           }
           throw "FAILED: Restreamer did not restart after config update"
 
+      - name: "Pre-flight: verify no stale delivery instances"
+        # Parity with e2e-obs-youtube-test (#220). Without this, a leftover
+        # delivery instance from a prior FB run (cancelled teardown, partial
+        # stop) blocks delivery/start with "server name is already used",
+        # confuses the watchdog with stale VPS metrics, and leaks Hetzner
+        # spend across runs.
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Write-Host "Checking for stale delivery instances..."
+          # Step 1: Clean up via local API (uses DB state)
+          try {
+            $instances = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/instances" -TimeoutSec 10
+            if ($instances -and $instances.Count -gt 0) {
+              Write-Host "WARNING: Found $($instances.Count) stale delivery instance(s), stopping..."
+              foreach ($inst in $instances) {
+                Write-Host "  Stopping instance: id=$($inst.id), event_id=$($inst.event_id), status=$($inst.status)"
+                $body = @{ event_id = $inst.event_id } | ConvertTo-Json
+                try {
+                  Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/stop" `
+                    -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+                } catch {
+                  Write-Host "  Stop failed for event_id=$($inst.event_id): $_"
+                }
+              }
+              Start-Sleep -Seconds 5
+            }
+          } catch {
+            Write-Host "Could not check delivery instances via API: $_"
+          }
+
+          # Step 2: Clean up orphaned Hetzner VPS directly (scoped to this
+          # installation via client_uuid label per #137).
+          if ($env:HETZNER_API_TOKEN) {
+            $clientUuid = $null
+            try {
+              $cfg = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/config" -TimeoutSec 10
+              $clientUuid = $cfg.client_uuid
+            } catch {
+              Write-Host "  Could not read local client_uuid: $_"
+            }
+
+            if (-not $clientUuid) {
+              Write-Host "ERROR: client_uuid not available - refusing to run Hetzner cleanup (fail-closed)"
+              exit 1
+            }
+
+            Write-Host "Checking Hetzner API for orphaned rs-delivery VPS for client_uuid=$clientUuid ..."
+            try {
+              $headers = @{ Authorization = "Bearer $($env:HETZNER_API_TOKEN)" }
+              $selector = "app=restreamer,client_uuid=$clientUuid"
+              $resp = Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers?label_selector=$selector" `
+                -Headers $headers -TimeoutSec 15
+              if ($resp.servers -and $resp.servers.Count -gt 0) {
+                foreach ($srv in $resp.servers) {
+                  Write-Host "  Deleting orphaned VPS (this installation): id=$($srv.id) name=$($srv.name) status=$($srv.status) ip=$($srv.public_net.ipv4.ip)"
+                  try {
+                    Invoke-RestMethod -Uri "https://api.hetzner.cloud/v1/servers/$($srv.id)" `
+                      -Method DELETE -Headers $headers -TimeoutSec 15
+                    Write-Host "  Deleted VPS $($srv.id)"
+                  } catch {
+                    Write-Host "  Failed to delete VPS $($srv.id): $_"
+                  }
+                }
+                Start-Sleep -Seconds 3
+              } else {
+                Write-Host "  No orphaned VPS found for this installation"
+              }
+            } catch {
+              Write-Host "  Hetzner API check failed: $_"
+            }
+          }
+          Write-Host "Pre-flight cleanup complete"
+
       - name: Verify FB Graph API credentials
         shell: powershell
         run: |
@@ -5400,19 +5474,49 @@ jobs:
           if ($null -ne $lastErr) { throw "delivery_start failed after 3 attempts: $lastErr" }
           Write-Host "OBS streaming + delivery started for event $($ev.id)"
 
-      - name: Local watchdog (30 min sustained-soak on rust pusher)
+      - name: "GATE: e2e fb endpoint registered in delivery/status within 180s"
+        # #222: Named-step GATE pattern (mirrors e2e-obs-youtube). delivery_start
+        # returns the moment Hetzner created the server; the actual rs-delivery
+        # process takes another 30-90s to boot, pull binary from S3, POST
+        # /api/init, and populate metrics. Wait up to 3 min for the e2e fb row
+        # to register. Failure here means the VPS never came online or never
+        # posted /api/init -- DISTINCT from "VPS up but FB push stalled" below.
         shell: powershell
+        timeout-minutes: 4
         run: |
-          # Resolve the active event id (E2E-Test). delivery/status REQUIRES ?event_id=...
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10
           $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
-          if ($null -eq $ev) { throw "WATCHDOG FAIL: E2E-Test event missing for status query" }
-          $statusUri = "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($ev.id)"
-          # Anchor for Hetzner S3 5xx INFRA detection in the stagnant-fail
-          # branch below. See the OBS-YT sustained gate for the parallel
-          # detection pattern (root-caused 2026-05-25 -> 2026-05-28 nbg1
-          # cascade post-mortem).
+          if ($null -eq $ev) { throw "GATE FAIL: E2E-FB-Test event missing for status query" }
+          "FB_E2E_EVENT_ID=$($ev.id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Anchor for Hetzner S3 5xx INFRA detection (used by sustained soak
+          # below). Captured here so the audit window covers the boot wait too.
           $watchdogStartTs = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.000Z")
+          "FB_E2E_WATCHDOG_START=$watchdogStartTs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          $statusUri = "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($ev.id)"
+          $deadline = (Get-Date).AddMinutes(3)
+          while ((Get-Date) -lt $deadline) {
+            $status = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 10
+            $ep = $status.endpoint_details | Where-Object { $_.alias -eq "e2e fb" }
+            if ($null -ne $ep) {
+              Write-Host "GATE PASS: e2e fb endpoint registered (alive=$($ep.alive) mode=$($ep.delivery_mode))"
+              exit 0
+            }
+            Write-Host "waiting for VPS to register e2e fb endpoint..."
+            Start-Sleep -Seconds 10
+          }
+          throw "GATE FAIL: e2e fb endpoint never registered in delivery/status within 180s of VPS boot"
+
+      - name: "STRICT: 30-min sustained soak on rust pusher (chunks+bytes advancing, no push_died after first chunk)"
+        # #222: Renamed from generic "Local watchdog" so the failing step name
+        # pinpoints the actual fault class (sustained-delivery progress + audit
+        # cleanliness AFTER first chunk). Boot-wait happens in the GATE step
+        # above so this step's failure is unambiguously a delivery regression,
+        # not a VPS boot timeout.
+        shell: powershell
+        run: |
+          $statusUri = "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($env:FB_E2E_EVENT_ID)"
+          $watchdogStartTs = $env:FB_E2E_WATCHDOG_START
           # Audit `since` cutoff. The initial Publish.Start handshake to FB
           # typically produces 5-10 `endpoint_rtmp_push_died` rows during VPS
           # warmup as the rust pusher retries CONNECT until the AVC/AAC
@@ -5425,24 +5529,6 @@ jobs:
           # chunk indicate a real steady-state fault. Built lazily on first
           # delivery; the placeholder below is overwritten before any query.
           $auditUri = $null
-
-          # VPS boot wait. delivery_start returns the moment Hetzner has
-          # created the server; the actual rs-delivery process takes another
-          # 30-90s to boot, run cloud-init, pull the binary from S3, start,
-          # POST /api/init to the host, and populate metrics. Until then,
-          # delivery/status.endpoint_details is empty — DON'T treat that as
-          # failure; wait up to 3 min for the FB row to register.
-          $bootDeadline = (Get-Date).AddMinutes(3)
-          while ((Get-Date) -lt $bootDeadline) {
-            $status = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 10
-            $ep = $status.endpoint_details | Where-Object { $_.alias -eq "e2e fb" }
-            if ($null -ne $ep) {
-              Write-Host "watchdog: e2e fb endpoint registered (alive=$($ep.alive) mode=$($ep.delivery_mode))"
-              break
-            }
-            Write-Host "watchdog: waiting for VPS to register e2e fb endpoint..."
-            Start-Sleep -Seconds 10
-          }
 
           $deadline = (Get-Date).AddMinutes(30)
           $lastChunks = -1
@@ -5581,7 +5667,7 @@ jobs:
           }
           Write-Host "Local watchdog: 30 min sustained soak GREEN"
 
-      - name: FB-side verification (Graph API ingest_streams.stream_health)
+      - name: "GATE: FB-side ingest_streams.stream_health populated within 15min (Graph API)"
         shell: powershell
         run: |
           # GATE: Facebook MUST report a populated ingest_streams.stream_health

@@ -903,6 +903,24 @@ pub async fn obs_stop_stream(
     }
 }
 
+// --- Test hooks for CI E2E ---
+
+pub async fn test_s3_block(State(state): State<AppState>) -> StatusCode {
+    state
+        .s3_upload_blocked
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    tracing::warn!("S3 uploads BLOCKED (test hook)");
+    StatusCode::OK
+}
+
+pub async fn test_s3_unblock(State(state): State<AppState>) -> StatusCode {
+    state
+        .s3_upload_blocked
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    tracing::warn!("S3 uploads UNBLOCKED (test hook)");
+    StatusCode::OK
+}
+
 // Stream control handlers (start_stream, stop_stream, update_event) are in stream_handlers.rs
 
 #[cfg(test)]
@@ -958,22 +976,4 @@ mod tests {
         let result = merge_json(base, patch);
         assert_eq!(result, serde_json::json!({"a": "flat"}));
     }
-}
-
-// --- Test hooks for CI E2E ---
-
-pub async fn test_s3_block(State(state): State<AppState>) -> StatusCode {
-    state
-        .s3_upload_blocked
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    tracing::warn!("S3 uploads BLOCKED (test hook)");
-    StatusCode::OK
-}
-
-pub async fn test_s3_unblock(State(state): State<AppState>) -> StatusCode {
-    state
-        .s3_upload_blocked
-        .store(false, std::sync::atomic::Ordering::Relaxed);
-    tracing::warn!("S3 uploads UNBLOCKED (test hook)");
-    StatusCode::OK
 }

@@ -40,7 +40,7 @@ fn compute_rust_push_backoff(err: &PushError, consecutive: u32) -> u64 {
 
 #[test]
 fn rust_push_backoff_handshake_failed_fixed_always_5000() {
-    let e = PushError::HandshakeFailed(io::Error::new(io::ErrorKind::Other, "x"));
+    let e = PushError::HandshakeFailed(io::Error::other("x"));
     for consecutive in 1..=10 {
         assert_eq!(
             compute_rust_push_backoff(&e, consecutive),
