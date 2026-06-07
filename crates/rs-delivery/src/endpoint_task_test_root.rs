@@ -4,6 +4,8 @@
 
 #[path = "endpoint_task_backoff_tests.rs"]
 mod backoff_tests;
+#[path = "fast_self_healing_tests.rs"]
+mod fast_self_healing_tests;
 #[path = "endpoint_task_flv_tests.rs"]
 mod flv_tests;
 #[path = "endpoint_task_rescue_tests.rs"]
