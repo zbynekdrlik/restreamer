@@ -482,6 +482,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                             &alias,
                             &audit_ring,
                             &mut stop_rx,
+                            &stats,
                         )
                         .await
                         {
@@ -780,6 +781,10 @@ async fn consumer_task<P: OutputProcessFactory>(
 /// Returns the next real chunk when one arrives, or `None` on stop/closed
 /// channel. NEVER closes the connection on starvation — a push error just
 /// backs off briefly and the pusher lazy-reconnects on the next push.
+///
+/// Sets `stats.delivery_mode = "rescue"` on entry and resets it to
+/// `"normal"` on both exit paths so the dashboard correctly reflects the
+/// keepalive gap instead of showing stale `"normal"` state.
 #[allow(clippy::too_many_arguments)]
 async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     pusher: &mut P,
@@ -788,6 +793,7 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     alias: &str,
     audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    stats: &Stats,
 ) -> Option<PrefetchedChunk> {
     use crate::fast_keepalive::{KeepaliveMode, keepalive_bytes, keepalive_mode};
     // `tokio::time::Instant` (not `std::time::Instant`) so the gap clock tracks
@@ -807,6 +813,13 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
             "freeze"
         },
     );
+    // Surface keepalive gap on the dashboard: set delivery_mode to "rescue"
+    // so the UI doesn't falsely show "normal" during the starvation window.
+    // Lock is released immediately (not held across any .await).
+    {
+        let mut s = stats.lock().await;
+        s.delivery_mode = "rescue".to_string();
+    }
     loop {
         let gap = started.elapsed().as_secs();
         let mode = keepalive_mode(gap, last_chunk_bytes.is_some());
@@ -822,10 +835,19 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
                 },
             );
         }
-        let bytes = keepalive_bytes(mode, last_chunk_bytes).into_owned();
+        // Finding 2: keep the Cow (borrowing last_chunk_bytes) instead of
+        // cloning with .into_owned() — avoids a multi-MB heap allocation on
+        // every keepalive tick for the freeze window.
+        let bytes = keepalive_bytes(mode, last_chunk_bytes);
         tokio::select! {
             maybe = rx.recv() => {
                 crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
+                // Reset delivery_mode before returning so the dashboard
+                // reflects normal delivery as soon as the real chunk resumes.
+                {
+                    let mut s = stats.lock().await;
+                    s.delivery_mode = "normal".to_string();
+                }
                 return maybe;
             }
             res = pusher.push_flv_bytes(&bytes) => {
@@ -838,6 +860,11 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
             _ = stop_rx.changed() => {
                 if *stop_rx.borrow() {
                     crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
+                    // Reset delivery_mode before returning None (stop path).
+                    {
+                        let mut s = stats.lock().await;
+                        s.delivery_mode = "normal".to_string();
+                    }
                     return None;
                 }
             }

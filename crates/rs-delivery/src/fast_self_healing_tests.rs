@@ -361,6 +361,10 @@ mod fast_upload_gap_regression {
         // time around it. The pusher (moved in) records into the `pushes` Arc,
         // which the test still owns a clone of, so the recorded data stays
         // readable throughout.
+        let stats: crate::endpoint_stats::Stats = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::endpoint_stats::EndpointStats::default(),
+        ));
+        let stats_task = stats.clone();
         let task = tokio::spawn(async move {
             keepalive_until_chunk(
                 &mut pusher,
@@ -369,6 +373,7 @@ mod fast_upload_gap_regression {
                 "fast-test",
                 &audit_ring,
                 &mut stop_rx,
+                &stats_task,
             )
             .await
         });
