@@ -781,8 +781,8 @@ async fn consumer_task<P: OutputProcessFactory>(
 /// channel. NEVER closes the connection on starvation — a push error just
 /// backs off briefly and the pusher lazy-reconnects on the next push.
 #[allow(clippy::too_many_arguments)]
-async fn keepalive_until_chunk(
-    pusher: &mut rs_rtmp_push::RtmpPusher,
+async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
+    pusher: &mut P,
     rx: &mut tokio::sync::mpsc::Receiver<PrefetchedChunk>,
     last_chunk_bytes: &Option<std::sync::Arc<Vec<u8>>>,
     alias: &str,
@@ -790,7 +790,13 @@ async fn keepalive_until_chunk(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Option<PrefetchedChunk> {
     use crate::fast_keepalive::{KeepaliveMode, keepalive_bytes, keepalive_mode};
-    let started = std::time::Instant::now();
+    // `tokio::time::Instant` (not `std::time::Instant`) so the gap clock tracks
+    // the same time source as the `tokio::time::sleep` pacing in this loop.
+    // In production it reads the real clock identically to `std::Instant`; under
+    // `tokio::time::pause()`/`start_paused` (the Task-6 regression gate) it
+    // advances with `tokio::time::advance`, making the freeze→rescue transition
+    // deterministically testable without real wall-clock waits.
+    let started = tokio::time::Instant::now();
     let mut current_mode = keepalive_mode(0, last_chunk_bytes.is_some());
     crate::fast_delay_audit::emit_keepalive_started(
         audit_ring,

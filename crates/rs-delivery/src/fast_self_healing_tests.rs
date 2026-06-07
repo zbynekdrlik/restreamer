@@ -267,3 +267,190 @@ async fn test_controller_grow_makes_lag_jump_trail_edge() {
         "extra buffer = extra read-delay chunks"
     );
 }
+
+// ---------------------------------------------------------------------------
+// REGRESSION GATE (Task 6): fast endpoint survives an upload gap.
+//
+// The core guarantee that shipped CI-green with NO test: when a fast endpoint
+// starves (producer stops delivering chunks), the keepalive loop must
+//   1. NEVER close the connection (no teardown on starvation),
+//   2. keep pushing frames during the gap — first FREEZE (last chunk bytes),
+//      then RESCUE (default FLV) once the gap exceeds FAST_KEEPALIVE_RESCUE_
+//      AFTER_SECS (10s), and
+//   3. resume the real chunk the moment one arrives.
+//
+// This locks `keepalive_until_chunk`'s freeze->rescue transition and its
+// never-close contract against regression. Without this test, upload jitter
+// against a fast endpoint had zero coverage.
+// ---------------------------------------------------------------------------
+mod fast_upload_gap_regression {
+    // Reach `keepalive_until_chunk` (private fn in `endpoint_task`) and the
+    // `Pushable` trait (in `endpoint_task::consumer_helpers`). This module is
+    // nested as endpoint_task::test_root::fast_self_healing_tests::
+    // fast_upload_gap_regression, so:
+    //   super (fast_self_healing_tests) -> super (test_root) -> super (endpoint_task)
+    use super::super::super::consumer_helpers::Pushable;
+    use super::super::super::keepalive_until_chunk;
+
+    use crate::endpoint_task::PrefetchedChunk;
+    use crate::rescue_default::DEFAULT_RESCUE_FLV;
+    use rs_rtmp_push::PushError;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio::sync::{mpsc, watch};
+
+    /// Test pusher that records every push's byte-length, models ~1x pacing
+    /// with a 200ms sleep, and NEVER returns an error (so any close() would be
+    /// caused by starvation logic, not by us injecting failures).
+    struct RecordingPusher {
+        pushes: Arc<Mutex<Vec<usize>>>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl Pushable for RecordingPusher {
+        async fn push_flv_bytes(&mut self, data: &[u8]) -> Result<(), PushError> {
+            self.pushes.lock().unwrap().push(data.len());
+            // Model the real pusher's ~1x self-pacing so each keepalive tick
+            // advances virtual time by a frame interval. Deterministic under
+            // `start_paused = true` — advanced explicitly below, never waited
+            // on the wall clock.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(())
+        }
+
+        async fn close(&mut self) {
+            // Starvation must NEVER reach here. If it does, the assertion on
+            // `closed` below fails and the regression is caught.
+            self.closed.store(true, Ordering::SeqCst);
+        }
+
+        fn reconnect_count(&self) -> u32 {
+            0
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fast_endpoint_survives_upload_gap_without_closing() {
+        // Distinct freeze length (4242) so freeze pushes are identifiable and
+        // never collide with the rescue FLV length.
+        const FREEZE_LEN: usize = 4242;
+        assert_ne!(
+            FREEZE_LEN,
+            DEFAULT_RESCUE_FLV.len(),
+            "freeze length must differ from rescue length so the two are distinguishable"
+        );
+
+        let pushes = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let mut pusher = RecordingPusher {
+            pushes: Arc::clone(&pushes),
+            closed: Arc::clone(&closed),
+        };
+
+        // Producer gap: channel created, nothing sent yet.
+        let (tx, mut rx) = mpsc::channel::<PrefetchedChunk>(10);
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+
+        // A populated last-chunk → freeze is available for gap < 10s.
+        let last: Option<Arc<Vec<u8>>> = Some(Arc::new(vec![0u8; FREEZE_LEN]));
+        let audit_ring: Option<Arc<crate::audit_ring::AuditRing>> = None;
+
+        // Drive `keepalive_until_chunk` in a task so we can advance virtual
+        // time around it. The pusher (moved in) records into the `pushes` Arc,
+        // which the test still owns a clone of, so the recorded data stays
+        // readable throughout.
+        let task = tokio::spawn(async move {
+            keepalive_until_chunk(
+                &mut pusher,
+                &mut rx,
+                &last,
+                "fast-test",
+                &audit_ring,
+                &mut stop_rx,
+            )
+            .await
+        });
+
+        // Phase 1 — FREEZE window (gap < 10s). Advance ~3s in small steps,
+        // yielding between each so the spawned keepalive task makes progress
+        // (each push sleeps 200ms of virtual time). This keeps the timing
+        // deterministic with no wall-clock waits.
+        advance_in_steps(Duration::from_millis(200), 16).await; // ~3.2s
+
+        {
+            let recorded = pushes.lock().unwrap();
+            assert!(
+                !recorded.is_empty(),
+                "keepalive must emit frames during the gap; recorded none after ~3s"
+            );
+            assert!(
+                recorded.contains(&FREEZE_LEN),
+                "during the freeze window keepalive must push the last chunk bytes \
+                 (len {FREEZE_LEN}); recorded lengths: {recorded:?}"
+            );
+        }
+
+        // Phase 2 — cross the 10s rescue threshold. Advance another ~9s so the
+        // cumulative gap exceeds FAST_KEEPALIVE_RESCUE_AFTER_SECS (10s) and the
+        // content switches to the default rescue FLV.
+        advance_in_steps(Duration::from_millis(200), 50).await; // +~10s → ~13s total
+
+        {
+            let recorded = pushes.lock().unwrap();
+            let rescue_len = DEFAULT_RESCUE_FLV.len();
+            assert!(
+                recorded.contains(&rescue_len),
+                "after 10s gap keepalive must switch to the rescue FLV \
+                 (len {rescue_len}); recorded lengths: {recorded:?}"
+            );
+        }
+
+        // The connection must NEVER have been closed by starvation.
+        assert!(
+            !closed.load(Ordering::SeqCst),
+            "keepalive must NOT close the connection during a producer gap"
+        );
+
+        // Phase 3 — a real chunk arrives. keepalive must return it (resume).
+        tx.send(PrefetchedChunk {
+            chunk_id: 99,
+            data: vec![1, 2, 3],
+            duration_ms: 2000,
+        })
+        .await
+        .expect("send real chunk");
+        // Let the rx.recv() arm win.
+        advance_in_steps(Duration::from_millis(50), 4).await;
+
+        let returned = task.await.expect("keepalive task panicked");
+        let chunk = returned.expect("keepalive must return the resumed real chunk, got None");
+        assert_eq!(
+            chunk.chunk_id, 99,
+            "keepalive must resume the real chunk (id 99) once one arrives"
+        );
+
+        // Final guarantees recap:
+        // - never closed: asserted above.
+        // - frames emitted during gap: asserted above (non-empty).
+        // - freeze AND rescue both observed: asserted above.
+        // - real chunk resumed: chunk_id == 99 asserted above.
+        assert!(
+            !closed.load(Ordering::SeqCst),
+            "connection still must not be closed after the chunk resumed"
+        );
+    }
+
+    /// Advance virtual time in `count` steps of `step`, yielding to the
+    /// runtime between each so the spawned keepalive task is polled and its
+    /// internal 200ms sleeps fire deterministically. Avoids the "advance past
+    /// everything in one jump" pitfall where the task never gets scheduled
+    /// between ticks.
+    async fn advance_in_steps(step: Duration, count: u32) {
+        for _ in 0..count {
+            tokio::time::advance(step).await;
+            tokio::task::yield_now().await;
+        }
+    }
+}
