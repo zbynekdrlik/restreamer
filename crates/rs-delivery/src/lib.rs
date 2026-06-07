@@ -10,4 +10,5 @@ pub mod audit_ring;
 pub mod chunk_lifecycle;
 pub mod clock_endpoint;
 pub(crate) mod fast_delay;
+pub(crate) mod fast_delay_audit;
 pub mod ffmpeg_reason;
