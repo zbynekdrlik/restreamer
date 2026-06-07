@@ -272,6 +272,10 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut consecutive_write_failures: u32 = 0;
     // Last delivered chunk id, recorded in the rescue audit row on stall.
     let mut last_delivered_chunk_id: i64 = -1;
+    // Last full FLV chunk pushed — replayed as a freeze during keepalive.
+    // Only populated for fast endpoints (avoids a per-chunk clone on the
+    // high-bitrate normal endpoints).
+    let mut last_chunk_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
     let mut last_heartbeat = std::time::Instant::now();
     // Consecutive push errors for the Rust pusher exponential backoff ladder.
     let mut consecutive_push_errors: u32 = 0;
@@ -415,8 +419,97 @@ async fn consumer_task<P: OutputProcessFactory>(
             }
         }
 
-        // Pull next chunk from channel (rescue-mode-aware)
-        let chunk = tokio::select! {
+        // Pull next chunk from channel (rescue-mode-aware).
+        //
+        // FAST + rust pusher only: a short producer gap triggers the
+        // never-crash keepalive (freeze last chunk → default rescue) on the
+        // SAME rtmp session, so starvation never tears the connection down.
+        // EVERY other path (normal YT/FB, any ffmpeg endpoint) keeps the
+        // existing select! verbatim — the 8s `run_outage_rescue` behaviour is
+        // unchanged byte-for-byte.
+        let chunk = if ep_cfg.is_fast && use_rust_pusher {
+            tokio::select! {
+                maybe_chunk = rx.recv() => {
+                    match maybe_chunk {
+                        Some(c) => {
+                            // SAME buffer bookkeeping as the existing Some(c) arm.
+                            let dur = c.duration_ms.max(0) as u64;
+                            let current = buffer_state.buffer_duration_ms.load(AtomicOrdering::Relaxed);
+                            buffer_state.buffer_duration_ms.store(current.saturating_sub(dur), AtomicOrdering::Relaxed);
+                            last_delivered_chunk_id = c.chunk_id;
+                            c
+                        }
+                        None => {
+                            // SAME defensive-rescue None branch as the existing
+                            // path (producer gone, rescue before teardown).
+                            tracing::warn!(
+                                alias = %alias,
+                                "Consumer: producer gone, entering defensive rescue before teardown"
+                            );
+                            let svc_type: rs_ffmpeg::ServiceType = ep_cfg
+                                .service_type
+                                .parse()
+                                .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
+                            crate::rescue::run_defensive_rescue(
+                                &alias,
+                                rescue_video_url.as_deref(),
+                                svc_type,
+                                &ep_cfg.stream_key,
+                                &buffer_state,
+                                &stats,
+                                &mut stop_rx,
+                                &audit_ring,
+                                last_delivered_chunk_id,
+                                &mut proc,
+                                &mut rust_pusher,
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(crate::fast_keepalive::FAST_KEEPALIVE_TRIGGER_SECS)) => {
+                    // Producer gap exceeded the fast trigger. Feed the existing
+                    // session with keepalive frames until a real chunk arrives.
+                    // The `if let` borrow of `rust_pusher` is scoped to this
+                    // arm: it ends when the arm produces the owned chunk value,
+                    // BEFORE the write section below re-borrows `rust_pusher`.
+                    if let Some(ref mut pusher) = rust_pusher {
+                        match keepalive_until_chunk(
+                            pusher,
+                            &mut rx,
+                            &last_chunk_bytes,
+                            &alias,
+                            &audit_ring,
+                            &mut stop_rx,
+                        )
+                        .await
+                        {
+                            Some(c) => {
+                                // SAME buffer bookkeeping as the Some(c) arm.
+                                let dur = c.duration_ms.max(0) as u64;
+                                let current = buffer_state.buffer_duration_ms.load(AtomicOrdering::Relaxed);
+                                buffer_state.buffer_duration_ms.store(current.saturating_sub(dur), AtomicOrdering::Relaxed);
+                                last_delivered_chunk_id = c.chunk_id;
+                                c
+                            }
+                            None => break,
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                _ = stop_rx.changed() => {
+                    if *stop_rx.borrow() {
+                        tracing::info!(alias = %alias, "Consumer: stop signal during recv");
+                        break;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            // EXISTING chunk-pull select! — non-fast and ffmpeg paths, UNCHANGED.
+            tokio::select! {
             maybe_chunk = rx.recv() => {
                 match maybe_chunk {
                     Some(c) => {
@@ -519,6 +612,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
                 continue;
             }
+            }
         };
 
         let chunk_id = chunk.chunk_id;
@@ -565,6 +659,12 @@ async fn consumer_task<P: OutputProcessFactory>(
                         chunk_duration_ms,
                         cumulative_pushed_secs,
                     );
+                    // Fast endpoints only: remember the chunk so keepalive can
+                    // replay it as a freeze during a producer gap. Skipped on
+                    // normal endpoints to avoid the per-chunk clone.
+                    if ep_cfg.is_fast {
+                        last_chunk_bytes = Some(std::sync::Arc::new(chunk.data.clone()));
+                    }
                 }
             }
         } else if let Some(ref mut p) = proc {
@@ -674,6 +774,69 @@ async fn consumer_task<P: OutputProcessFactory>(
         pusher.close().await;
     }
     tracing::info!(alias = %alias, "Consumer task stopped");
+}
+
+/// Keep the existing rust session alive during a fast-endpoint producer gap.
+/// Returns the next real chunk when one arrives, or `None` on stop/closed
+/// channel. NEVER closes the connection on starvation — a push error just
+/// backs off briefly and the pusher lazy-reconnects on the next push.
+#[allow(clippy::too_many_arguments)]
+async fn keepalive_until_chunk(
+    pusher: &mut rs_rtmp_push::RtmpPusher,
+    rx: &mut tokio::sync::mpsc::Receiver<PrefetchedChunk>,
+    last_chunk_bytes: &Option<std::sync::Arc<Vec<u8>>>,
+    alias: &str,
+    audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+) -> Option<PrefetchedChunk> {
+    use crate::fast_keepalive::{KeepaliveMode, keepalive_bytes, keepalive_mode};
+    let started = std::time::Instant::now();
+    let mut current_mode = keepalive_mode(0, last_chunk_bytes.is_some());
+    crate::fast_delay_audit::emit_keepalive_started(
+        audit_ring,
+        alias,
+        if current_mode == KeepaliveMode::Rescue {
+            "rescue"
+        } else {
+            "freeze"
+        },
+    );
+    loop {
+        let gap = started.elapsed().as_secs();
+        let mode = keepalive_mode(gap, last_chunk_bytes.is_some());
+        if mode != current_mode {
+            current_mode = mode;
+            crate::fast_delay_audit::emit_keepalive_started(
+                audit_ring,
+                alias,
+                if mode == KeepaliveMode::Rescue {
+                    "rescue"
+                } else {
+                    "freeze"
+                },
+            );
+        }
+        let bytes = keepalive_bytes(mode, last_chunk_bytes).into_owned();
+        tokio::select! {
+            maybe = rx.recv() => {
+                crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
+                return maybe;
+            }
+            res = pusher.push_flv_bytes(&bytes) => {
+                if let Err(e) = res {
+                    tracing::warn!(alias = %alias, "keepalive push error: {e}; will reconnect on next push");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                // push_flv_bytes self-paces ~1x; loop to push the next tick.
+            }
+            _ = stop_rx.changed() => {
+                if *stop_rx.borrow() {
+                    crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
+                    return None;
+                }
+            }
+        }
+    }
 }
 
 /// Core endpoint loop -- generic over ChunkFetcher and OutputProcessFactory for testability.

@@ -25,6 +25,7 @@ pub mod endpoint_stats;
 pub mod endpoint_task;
 mod fast_delay;
 mod fast_delay_audit;
+mod fast_keepalive;
 mod ffmpeg_reason;
 mod producer_lag;
 pub mod rescue;
