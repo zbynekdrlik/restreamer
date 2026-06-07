@@ -22,6 +22,8 @@ mod endpoint_ffmpeg_impl;
 pub(crate) mod endpoint_rtmp_url;
 pub mod endpoint_stats;
 pub mod endpoint_task;
+mod fast_delay;
+mod fast_delay_audit;
 mod ffmpeg_reason;
 mod producer_lag;
 pub mod rescue;

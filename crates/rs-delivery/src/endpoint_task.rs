@@ -227,6 +227,7 @@ async fn producer_task<F: ChunkFetcher>(
     tx: mpsc::Sender<PrefetchedChunk>,
     start_chunk_id: i64,
     delivery_delay_ms: u64,
+    is_fast: bool,
     mut stop_rx: watch::Receiver<bool>,
     stats: Stats,
     alias: String,
@@ -242,6 +243,17 @@ async fn producer_task<F: ChunkFetcher>(
     // `duration_ms` so it tracks operator config without a hardcode.
     let mut typical_chunk_dur_ms: u64 = 1000;
     let mut iters_since_lag_probe: u32 = 0;
+    // Adaptive read-delay controller — fast endpoints only. Grows the
+    // read-delay on starvation (so the live-edge lag-probe leaves a buffer
+    // instead of re-pinning to the edge) and shrinks slowly when healthy.
+    // None for non-fast endpoints → byte-for-byte unchanged behaviour.
+    let mut fast_delay = if is_fast {
+        Some(crate::fast_delay::FastDelayController::new(
+            std::time::Instant::now(),
+        ))
+    } else {
+        None
+    };
 
     loop {
         if *stop_rx.borrow() {
@@ -293,14 +305,27 @@ async fn producer_task<F: ChunkFetcher>(
                     let c = (duration_ms as u64).clamp(500, 5000);
                     typical_chunk_dur_ms = (3 * typical_chunk_dur_ms + c) / 4;
                 }
-                // Fast endpoints (delay_ms==0) target the LIVE EDGE (delay_chunks=0
-                // → maybe_jump skips to the highest existing chunk); delayed keep a
-                // >=1 floor so the jump trails live by the configured delay. RTMP
-                // push stays strictly 1× — this only moves the READ pointer. (#232)
-                let delivery_delay_chunks: i64 = if delivery_delay_ms == 0 {
-                    0
-                } else {
-                    ((delivery_delay_ms / typical_chunk_dur_ms.max(1)) as i64).max(1)
+                // Fast endpoints: read-delay is ADAPTIVE via the controller. On
+                // every healthy fetch we let it opportunistically shrink one step
+                // toward the floor; `delay_chunks()` is always >= 1 so the
+                // live-edge lag-probe trails the edge and keeps a buffer (#232,
+                // adaptive controller). Non-fast endpoints keep the prior exact
+                // math: delay_ms==0 → live edge (0), else >=1 floor. RTMP push
+                // stays strictly 1× — this only moves the READ pointer.
+                let delivery_delay_chunks: i64 = match fast_delay.as_mut() {
+                    Some(ctrl) => {
+                        if let Some((from, to)) = ctrl.on_healthy(std::time::Instant::now()) {
+                            crate::fast_delay_audit::emit_delay_shrank(
+                                &audit_ring,
+                                &alias,
+                                from,
+                                to,
+                            );
+                        }
+                        ctrl.delay_chunks(typical_chunk_dur_ms)
+                    }
+                    None if delivery_delay_ms == 0 => 0,
+                    None => ((delivery_delay_ms / typical_chunk_dur_ms.max(1)) as i64).max(1),
                 };
                 maybe_jump_ahead(
                     &fetcher,
@@ -318,6 +343,10 @@ async fn producer_task<F: ChunkFetcher>(
 
                 // Chunk gap skip-ahead logic
                 if consecutive_chunk_misses >= MAX_CHUNK_MISS_COUNT {
+                    // Captured BEFORE the probe loop mutates chunk_id, so the
+                    // controller can measure how far ahead we had to skip
+                    // (the read-side deficit) when a gap was crossed.
+                    let stuck_at = chunk_id;
                     tracing::warn!(
                         alias = %alias,
                         chunk_id,
@@ -358,6 +387,34 @@ async fn producer_task<F: ChunkFetcher>(
                         );
                         // Reset counter so we probe again after another cycle
                         consecutive_chunk_misses = 0;
+                    }
+
+                    // Fast endpoints only: a starvation event fired (probe
+                    // cycle). Grow the adaptive read-delay so the live-edge
+                    // lag-probe trails the edge by enough to absorb the spike.
+                    // `deficit_secs` is the media-time gap we had to skip when
+                    // a forward chunk was found; 0 when the gap was unbounded
+                    // (no chunk found → grow by the floor margin only). Runs
+                    // ONLY on the probe cycle, never on every miss.
+                    if let Some(ctrl) = fast_delay.as_mut() {
+                        let deficit_secs = if found_ahead {
+                            ((chunk_id - stuck_at).max(0) as u64)
+                                .saturating_mul(typical_chunk_dur_ms)
+                                / 1000
+                        } else {
+                            0
+                        };
+                        if let Some((from, to)) =
+                            ctrl.on_starvation(deficit_secs, std::time::Instant::now())
+                        {
+                            crate::fast_delay_audit::emit_delay_grown(
+                                &audit_ring,
+                                &alias,
+                                from,
+                                to,
+                                deficit_secs,
+                            );
+                        }
                     }
                 } else {
                     let mut s = stats.lock().await;
@@ -907,11 +964,14 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
     let producer_alias = alias.clone();
     let producer_buffer_state = buffer_state.clone();
     let producer_audit_ring = audit_ring.clone();
+    // `is_fast` is Copy — read it before `ep_cfg` is moved into consumer_task.
+    let producer_is_fast = ep_cfg.is_fast;
     let producer = tokio::spawn(producer_task(
         fetcher,
         tx,
         start_chunk_id,
         delivery_delay_ms,
+        producer_is_fast,
         producer_stop,
         producer_stats,
         producer_alias,

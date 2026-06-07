@@ -1,5 +1,11 @@
 //! Adaptive read-delay controller for fast endpoints.
-// Items are used by other modules wired up in a later task.
+//!
+//! The sole consumer (`producer_task`) lives in the `rs-delivery` BINARY
+//! (`main.rs`), while this module is also declared `pub(crate)` in the
+//! library crate (`lib.rs`) for integration tests. In the library
+//! compilation unit there is no consumer, so every item reads as dead code;
+//! the module-level allow below suppresses that false positive. The bin
+//! build uses every item, so this does not hide a genuine dead-code bug.
 #![allow(dead_code)]
 //!
 //! A fast endpoint normally reads at the live edge (delay 0). That has zero
