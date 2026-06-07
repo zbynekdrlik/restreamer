@@ -161,6 +161,11 @@ pub enum Action {
     /// {alias, old_start_chunk_id, new_start_chunk_id}.
     EndpointStartChunkUpdated,
 
+    FastDelayGrown,
+    FastDelayShrank,
+    FastKeepaliveStarted,
+    FastKeepaliveEnded,
+
     /// Host-side: YT health probe observed `configurationIssues[0].type`
     /// change for an endpoint. Detail JSON:
     /// `{from: Option<String>, to: Option<String>}`. Bounded at most once
@@ -385,5 +390,37 @@ mod tests {
         );
         let back: Action = serde_json::from_str(r#""endpoint_lifecycle_predeath""#).unwrap();
         assert_eq!(back, Action::EndpointLifecyclePredeath);
+    }
+
+    #[test]
+    fn action_fast_delay_grown_serdes() {
+        let a = Action::FastDelayGrown;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"fast_delay_grown\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_fast_delay_shrank_serdes() {
+        let a = Action::FastDelayShrank;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"fast_delay_shrank\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_fast_keepalive_started_serdes() {
+        let a = Action::FastKeepaliveStarted;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"fast_keepalive_started\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_fast_keepalive_ended_serdes() {
+        let a = Action::FastKeepaliveEnded;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"fast_keepalive_ended\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
 }
