@@ -9,4 +9,10 @@
 pub mod audit_ring;
 pub mod chunk_lifecycle;
 pub mod clock_endpoint;
+pub(crate) mod fast_delay;
+pub(crate) mod fast_delay_audit;
+pub(crate) mod fast_keepalive;
 pub mod ffmpeg_reason;
+// `fast_keepalive` references the embedded default rescue blob; expose the
+// const-only module in the library target too so the helper compiles there.
+pub mod rescue_default;

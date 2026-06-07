@@ -89,7 +89,9 @@ impl OutputProcess for MockProcess {
     }
 }
 
-struct MockProcessFactory {
+// `pub(crate)` so the sibling `fast_self_healing_tests` module (which holds
+// the moved fast-delay / chunk-gap tests) can reuse this shared mock factory.
+pub(crate) struct MockProcessFactory {
     alive: Arc<AtomicBool>,
     writes: Arc<TokioMutex<Vec<Vec<u8>>>>,
     fail_after_writes: Option<u32>,
@@ -99,7 +101,7 @@ struct MockProcessFactory {
 }
 
 impl MockProcessFactory {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             alive: Arc::new(AtomicBool::new(true)),
             writes: Arc::new(TokioMutex::new(Vec::new())),
@@ -130,7 +132,9 @@ impl OutputProcessFactory for MockProcessFactory {
     }
 }
 
-fn test_ep_cfg() -> EndpointConfig {
+// `pub(crate)` so the sibling `fast_self_healing_tests` module can build the
+// same default endpoint config for the moved tests.
+pub(crate) fn test_ep_cfg() -> EndpointConfig {
     EndpointConfig {
         alias: "test-ep".to_string(),
         service_type: "TEST_FILE".to_string(),
@@ -773,28 +777,52 @@ async fn test_stats_struct_serializes() {
 
 // TimedMockFetcher: chunks available at configured rate.
 // 2000ms chunk duration matches buffer-fill/chunk-gap tests.
-struct TimedMockFetcher {
+// `pub(crate)` so the sibling `fast_self_healing_tests` module can reuse it
+// for the moved fast-delay / chunk-gap tests.
+pub(crate) struct TimedMockFetcher {
     chunks: Arc<TokioMutex<std::collections::HashMap<i64, Vec<u8>>>>,
     available_up_to: Arc<AtomicI64>,
     duration_ms_per_chunk: i64,
+    // Injected per-fetch latency to simulate S3 GET / HEAD slowness. Default
+    // ZERO keeps existing tests byte-for-byte identical.
+    fetch_latency: std::time::Duration,
+    // Highest chunk_id ever requested via fetch_chunk_with_meta. Lets a test
+    // observe the producer's READ position without a real consumer. Starts at
+    // i64::MIN; updated monotonically. ZERO impact when unread.
+    max_fetched_id: Arc<AtomicI64>,
 }
 
 impl TimedMockFetcher {
-    fn new(chunks: Vec<(i64, Vec<u8>)>, initially_available: i64) -> Self {
+    pub(crate) fn new(chunks: Vec<(i64, Vec<u8>)>, initially_available: i64) -> Self {
         Self {
             chunks: Arc::new(TokioMutex::new(chunks.into_iter().collect())),
             available_up_to: Arc::new(AtomicI64::new(initially_available)),
             duration_ms_per_chunk: 2000,
+            fetch_latency: std::time::Duration::ZERO,
+            max_fetched_id: Arc::new(AtomicI64::new(i64::MIN)),
         }
     }
 
-    fn available_up_to(&self) -> Arc<AtomicI64> {
+    pub(crate) fn with_latency(mut self, d: std::time::Duration) -> Self {
+        self.fetch_latency = d;
+        self
+    }
+
+    pub(crate) fn available_up_to(&self) -> Arc<AtomicI64> {
         self.available_up_to.clone()
+    }
+
+    pub(crate) fn max_fetched_id(&self) -> Arc<AtomicI64> {
+        self.max_fetched_id.clone()
     }
 }
 
 impl ChunkFetcher for TimedMockFetcher {
     async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
+        if !self.fetch_latency.is_zero() {
+            tokio::time::sleep(self.fetch_latency).await;
+        }
+        self.max_fetched_id.fetch_max(chunk_id, Ordering::Relaxed);
         let available = self.available_up_to.load(Ordering::Relaxed);
         if chunk_id > available {
             return Ok(None);
@@ -806,6 +834,9 @@ impl ChunkFetcher for TimedMockFetcher {
     }
 
     async fn chunk_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        if !self.fetch_latency.is_zero() {
+            tokio::time::sleep(self.fetch_latency).await;
+        }
         let available = self.available_up_to.load(Ordering::Relaxed);
         if chunk_id > available {
             return Ok(None);
@@ -892,108 +923,4 @@ async fn test_buffer_fill_waits_for_target_chunk() {
 
     let _ = stop_tx.send(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
-}
-#[tokio::test]
-async fn test_chunk_gap_maintained_at_delay_target() {
-    // With delivery_delay_ms=20000, start_chunk_id=1, pre-load chunks 1-30 (2000ms each):
-    // After buffer fill (chunk 11 available), VPS starts consuming from chunk 1.
-    // Elapsed-aware pacing: 1000ms per chunk (non-fast).
-    tokio::time::pause();
-
-    let all_chunks: Vec<(i64, Vec<u8>)> = (1..=30).map(|i| (i, vec![i as u8; 100])).collect();
-    // All 30 chunks available immediately
-    let fetcher = TimedMockFetcher::new(all_chunks, 30);
-    let factory = MockProcessFactory::new();
-
-    let (stop_tx, stop_rx) = watch::channel(false);
-    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
-
-    let stats_clone = stats.clone();
-    let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,     // start_chunk_id
-            20000, // delivery_delay_ms (10 chunks * 2000ms)
-            stop_rx,
-            stats_clone,
-            None,
-            Arc::new(BufferState::new()),
-            None,
-        )
-        .await;
-    });
-
-    // Buffer fill needs 10 chunks (20000ms / 2000ms) which are already
-    // available. Consumer pacing sleeps ~2000ms per chunk. 30 chunks require
-    // ~60s of wall-clock advancement for pacing. Each iteration advances
-    // 100ms, so we need at least 600 iterations; use 2000 for slack.
-    for _ in 0..2000 {
-        tokio::time::advance(std::time::Duration::from_millis(100)).await;
-        tokio::task::yield_now().await;
-    }
-
-    let s = stats.lock().await;
-    assert_eq!(
-        s.chunks_processed, 30,
-        "Should have processed all 30 chunks, got {}",
-        s.chunks_processed
-    );
-    drop(s);
-
-    let _ = stop_tx.send(true);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
-}
-#[tokio::test]
-async fn test_buffer_fill_stops_on_signal() {
-    // If stop signal is sent during buffer fill, the loop should exit
-    // without processing any chunks.
-    tokio::time::pause();
-
-    let all_chunks: Vec<(i64, Vec<u8>)> = (1..=5).map(|i| (i, vec![i as u8; 100])).collect();
-    // Only chunk 1 available, target_chunk = 1 + 10 = 11 -- will never be available
-    let fetcher = TimedMockFetcher::new(all_chunks, 1);
-    let factory = MockProcessFactory::new();
-
-    let (stop_tx, stop_rx) = watch::channel(false);
-    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
-
-    let stats_clone = stats.clone();
-    let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,
-            20000, // delivery_delay_ms (10 chunks * 2000ms)
-            stop_rx,
-            stats_clone,
-            None,
-            Arc::new(BufferState::new()),
-            None,
-        )
-        .await;
-    });
-
-    // Let it poll a few times during buffer fill
-    for _ in 0..3 {
-        tokio::time::advance(std::time::Duration::from_secs(2)).await;
-        tokio::task::yield_now().await;
-    }
-
-    // Send stop signal
-    let _ = stop_tx.send(true);
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
-    assert!(
-        result.is_ok(),
-        "Task should have stopped during buffer fill"
-    );
-
-    let s = stats.lock().await;
-    assert_eq!(
-        s.chunks_processed, 0,
-        "Should not have processed any chunks, stopped during buffer fill"
-    );
 }

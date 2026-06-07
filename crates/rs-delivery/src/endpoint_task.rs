@@ -17,26 +17,26 @@ use crate::endpoint_audit;
 mod flv_normalizer;
 pub use flv_normalizer::FlvStreamNormalizer;
 
-use crate::producer_lag::maybe_jump as maybe_jump_ahead;
-
 const MAX_FFMPEG_RESTARTS: u32 = 10;
-const MAX_CHUNK_MISS_COUNT: u32 = 40; // ~80s at 2s polls
-const SKIP_AHEAD_PROBE: i64 = 10;
+// Producer-loop consts: `pub(crate)` so the extracted `endpoint_producer`
+// module (and the producer tests in `fast_self_healing_tests`) can reach them.
+pub(crate) const MAX_CHUNK_MISS_COUNT: u32 = 40; // ~80s at 2s polls
+pub(crate) const SKIP_AHEAD_PROBE: i64 = 10;
 pub(crate) const WRITE_TIMEOUT_SECS: u64 = 30;
 const MAX_WRITE_FAILURES_PER_CHUNK: u32 = 3;
 /// Base S3 backoff (doubles per error, max 60s, resets on success).
-const S3_BACKOFF_BASE_SECS: u64 = 2;
-const S3_BACKOFF_MAX_SECS: u64 = 60;
+pub(crate) const S3_BACKOFF_BASE_SECS: u64 = 2;
+pub(crate) const S3_BACKOFF_MAX_SECS: u64 = 60;
 const ENDPOINT_HEARTBEAT_SECS: u64 = 60;
 /// Pre-fetch buffer size: 10 chunks (~20s of media). disk_cache lives on
 /// local SSD; this mpsc just smooths producer/consumer pacing. See #174.
-const PREFETCH_BUFFER_SIZE: usize = 10;
+pub(crate) const PREFETCH_BUFFER_SIZE: usize = 10;
 
 /// A chunk that has been fetched from S3 and is ready for the consumer.
-struct PrefetchedChunk {
-    chunk_id: i64,
-    data: Vec<u8>,
-    duration_ms: i64,
+pub(crate) struct PrefetchedChunk {
+    pub(crate) chunk_id: i64,
+    pub(crate) data: Vec<u8>,
+    pub(crate) duration_ms: i64,
 }
 
 /// Trait for fetching chunks (S3 or mock).
@@ -220,190 +220,9 @@ use crate::endpoint_rtmp_url::build_rtmp_url;
 #[cfg(test)]
 pub(crate) use crate::endpoint_rtmp_url::build_rtmp_url_pub;
 
-/// Producer task: fetches chunks from S3 and sends them into the bounded channel.
-#[allow(clippy::too_many_arguments)]
-async fn producer_task<F: ChunkFetcher>(
-    fetcher: F,
-    tx: mpsc::Sender<PrefetchedChunk>,
-    start_chunk_id: i64,
-    delivery_delay_ms: u64,
-    mut stop_rx: watch::Receiver<bool>,
-    stats: Stats,
-    alias: String,
-    buffer_state: Arc<BufferState>,
-    audit_ring: Option<Arc<AuditRing>>,
-) {
-    let mut chunk_id = start_chunk_id;
-    let mut consecutive_chunk_misses: u32 = 0;
-    let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
-    // Issue #173: rate-limited audit-row emitter, owned by this task.
-    let mut s3_fetch_audit = crate::endpoint_audit::S3FetchAuditLimiter::new();
-    // Lag-detect state. typical_chunk_dur_ms is updated from observed
-    // `duration_ms` so it tracks operator config without a hardcode.
-    let mut typical_chunk_dur_ms: u64 = 1000;
-    let mut iters_since_lag_probe: u32 = 0;
-
-    loop {
-        if *stop_rx.borrow() {
-            tracing::info!(alias = %alias, "Producer: stop signal received");
-            break;
-        }
-
-        // Fetch chunk with metadata in one S3 GET
-        match fetcher.fetch_chunk_with_meta(chunk_id).await {
-            Ok(Some((data, duration_ms))) => {
-                consecutive_chunk_misses = 0;
-                s3_backoff_secs = S3_BACKOFF_BASE_SECS;
-                {
-                    let mut s = stats.lock().await;
-                    s.consecutive_chunk_misses = 0;
-                    if s.stall_reason.as_deref() == Some("chunk_gap") {
-                        s.stall_reason = None;
-                    }
-                }
-
-                let chunk = PrefetchedChunk {
-                    chunk_id,
-                    data,
-                    duration_ms,
-                };
-
-                // Track buffer growth for rescue mode
-                let current_buf = buffer_state
-                    .buffer_duration_ms
-                    .load(AtomicOrdering::Relaxed);
-                buffer_state.buffer_duration_ms.store(
-                    current_buf.saturating_add(duration_ms.max(0) as u64),
-                    AtomicOrdering::Relaxed,
-                );
-                buffer_state
-                    .producer_active
-                    .store(true, AtomicOrdering::Relaxed);
-
-                // Send into channel; blocks if buffer full (backpressure).
-                // If receiver is dropped (consumer gone), stop.
-                if tx.send(chunk).await.is_err() {
-                    tracing::info!(alias = %alias, "Producer: consumer gone, stopping");
-                    break;
-                }
-
-                chunk_id += 1;
-                // EWMA + [500,5000]ms clamp guards against outlier duration_ms.
-                if duration_ms > 0 {
-                    let c = (duration_ms as u64).clamp(500, 5000);
-                    typical_chunk_dur_ms = (3 * typical_chunk_dur_ms + c) / 4;
-                }
-                // Fast endpoints (delay_ms==0) target the LIVE EDGE (delay_chunks=0
-                // → maybe_jump skips to the highest existing chunk); delayed keep a
-                // >=1 floor so the jump trails live by the configured delay. RTMP
-                // push stays strictly 1× — this only moves the READ pointer. (#232)
-                let delivery_delay_chunks: i64 = if delivery_delay_ms == 0 {
-                    0
-                } else {
-                    ((delivery_delay_ms / typical_chunk_dur_ms.max(1)) as i64).max(1)
-                };
-                maybe_jump_ahead(
-                    &fetcher,
-                    &mut chunk_id,
-                    delivery_delay_chunks,
-                    delivery_delay_ms,
-                    &mut iters_since_lag_probe,
-                    &alias,
-                )
-                .await;
-                tokio::task::yield_now().await;
-            }
-            Ok(None) => {
-                consecutive_chunk_misses += 1;
-
-                // Chunk gap skip-ahead logic
-                if consecutive_chunk_misses >= MAX_CHUNK_MISS_COUNT {
-                    tracing::warn!(
-                        alias = %alias,
-                        chunk_id,
-                        misses = consecutive_chunk_misses,
-                        "Producer: probing ahead for chunks"
-                    );
-
-                    let mut found_ahead = false;
-                    for offset in 1..=SKIP_AHEAD_PROBE {
-                        let probe_id = chunk_id + offset;
-                        // Use HEAD (duration check) instead of GET to avoid downloading data
-                        if let Ok(Some(_)) = fetcher.chunk_duration_ms(probe_id).await {
-                            tracing::info!(
-                                alias = %alias,
-                                from = chunk_id,
-                                to = probe_id,
-                                "Producer: skipping ahead to chunk"
-                            );
-                            chunk_id = probe_id;
-                            consecutive_chunk_misses = 0;
-                            let mut s = stats.lock().await;
-                            s.consecutive_chunk_misses = 0;
-                            s.stall_reason = None;
-                            found_ahead = true;
-                            break;
-                        }
-                    }
-
-                    if !found_ahead {
-                        let mut s = stats.lock().await;
-                        s.stall_reason = Some("chunk_gap".to_string());
-                        s.consecutive_chunk_misses = consecutive_chunk_misses;
-                        drop(s);
-                        tracing::warn!(
-                            alias = %alias,
-                            chunk_id,
-                            "Producer: no chunks found in probe range"
-                        );
-                        // Reset counter so we probe again after another cycle
-                        consecutive_chunk_misses = 0;
-                    }
-                } else {
-                    let mut s = stats.lock().await;
-                    s.consecutive_chunk_misses = consecutive_chunk_misses;
-                }
-
-                // Signal producer stall for rescue mode detection.
-                // Polls are 2s apart, so 3 misses = ~6s of genuinely no new
-                // chunks on S3. Triggering sooner means rescue activates
-                // faster after OBS stops, at the cost of occasional false
-                // positives on transient S3 errors (which self-heal on the
-                // next successful fetch — producer_active returns to true).
-                if consecutive_chunk_misses >= 3 {
-                    buffer_state
-                        .producer_active
-                        .store(false, AtomicOrdering::Relaxed);
-                }
-
-                tracing::debug!(alias = %alias, chunk_id, "Producer: chunk not found, waiting");
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                    _ = stop_rx.changed() => {
-                        if *stop_rx.borrow() { break; }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    alias = %alias,
-                    chunk_id,
-                    backoff_secs = s3_backoff_secs,
-                    "Producer: S3 fetch error, retrying in {s3_backoff_secs}s: {e}"
-                );
-                // Issue #173: emit audit row (rate-limited per error_class).
-                s3_fetch_audit.try_emit(&audit_ring, &alias, chunk_id, &e, s3_backoff_secs);
-                let mut s = stats.lock().await;
-                s.last_error = Some(e);
-                drop(s);
-                tokio::time::sleep(std::time::Duration::from_secs(s3_backoff_secs)).await;
-                s3_backoff_secs = (s3_backoff_secs * 2).min(S3_BACKOFF_MAX_SECS);
-            }
-        }
-    }
-
-    tracing::info!(alias = %alias, "Producer task stopped");
-}
+// `producer_task` was extracted to `crate::endpoint_producer` so this file
+// stays under the 1000-line CI cap while `consumer_task` keeps room to grow.
+// `endpoint_loop` calls it as `crate::endpoint_producer::producer_task(...)`.
 
 /// Consumer task: pulls pre-fetched chunks from the channel, normalizes FLV,
 /// writes to the configured output backend (ffmpeg subprocess or Rust RTMP
@@ -453,6 +272,10 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut consecutive_write_failures: u32 = 0;
     // Last delivered chunk id, recorded in the rescue audit row on stall.
     let mut last_delivered_chunk_id: i64 = -1;
+    // Last full FLV chunk pushed — replayed as a freeze during keepalive.
+    // Only populated for fast endpoints (avoids a per-chunk clone on the
+    // high-bitrate normal endpoints).
+    let mut last_chunk_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
     let mut last_heartbeat = std::time::Instant::now();
     // Consecutive push errors for the Rust pusher exponential backoff ladder.
     let mut consecutive_push_errors: u32 = 0;
@@ -596,8 +419,98 @@ async fn consumer_task<P: OutputProcessFactory>(
             }
         }
 
-        // Pull next chunk from channel (rescue-mode-aware)
-        let chunk = tokio::select! {
+        // Pull next chunk from channel (rescue-mode-aware).
+        //
+        // FAST + rust pusher only: a short producer gap triggers the
+        // never-crash keepalive (freeze last chunk → default rescue) on the
+        // SAME rtmp session, so starvation never tears the connection down.
+        // EVERY other path (normal YT/FB, any ffmpeg endpoint) keeps the
+        // existing select! verbatim — the 8s `run_outage_rescue` behaviour is
+        // unchanged byte-for-byte.
+        let chunk = if ep_cfg.is_fast && use_rust_pusher {
+            tokio::select! {
+                maybe_chunk = rx.recv() => {
+                    match maybe_chunk {
+                        Some(c) => {
+                            // SAME buffer bookkeeping as the existing Some(c) arm.
+                            let dur = c.duration_ms.max(0) as u64;
+                            let current = buffer_state.buffer_duration_ms.load(AtomicOrdering::Relaxed);
+                            buffer_state.buffer_duration_ms.store(current.saturating_sub(dur), AtomicOrdering::Relaxed);
+                            last_delivered_chunk_id = c.chunk_id;
+                            c
+                        }
+                        None => {
+                            // SAME defensive-rescue None branch as the existing
+                            // path (producer gone, rescue before teardown).
+                            tracing::warn!(
+                                alias = %alias,
+                                "Consumer: producer gone, entering defensive rescue before teardown"
+                            );
+                            let svc_type: rs_ffmpeg::ServiceType = ep_cfg
+                                .service_type
+                                .parse()
+                                .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
+                            crate::rescue::run_defensive_rescue(
+                                &alias,
+                                rescue_video_url.as_deref(),
+                                svc_type,
+                                &ep_cfg.stream_key,
+                                &buffer_state,
+                                &stats,
+                                &mut stop_rx,
+                                &audit_ring,
+                                last_delivered_chunk_id,
+                                &mut proc,
+                                &mut rust_pusher,
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(crate::fast_keepalive::FAST_KEEPALIVE_TRIGGER_SECS)) => {
+                    // Producer gap exceeded the fast trigger. Feed the existing
+                    // session with keepalive frames until a real chunk arrives.
+                    // The `if let` borrow of `rust_pusher` is scoped to this
+                    // arm: it ends when the arm produces the owned chunk value,
+                    // BEFORE the write section below re-borrows `rust_pusher`.
+                    if let Some(ref mut pusher) = rust_pusher {
+                        match keepalive_until_chunk(
+                            pusher,
+                            &mut rx,
+                            &last_chunk_bytes,
+                            &alias,
+                            &audit_ring,
+                            &mut stop_rx,
+                            &stats,
+                        )
+                        .await
+                        {
+                            Some(c) => {
+                                // SAME buffer bookkeeping as the Some(c) arm.
+                                let dur = c.duration_ms.max(0) as u64;
+                                let current = buffer_state.buffer_duration_ms.load(AtomicOrdering::Relaxed);
+                                buffer_state.buffer_duration_ms.store(current.saturating_sub(dur), AtomicOrdering::Relaxed);
+                                last_delivered_chunk_id = c.chunk_id;
+                                c
+                            }
+                            None => break,
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                _ = stop_rx.changed() => {
+                    if *stop_rx.borrow() {
+                        tracing::info!(alias = %alias, "Consumer: stop signal during recv");
+                        break;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            // EXISTING chunk-pull select! — non-fast and ffmpeg paths, UNCHANGED.
+            tokio::select! {
             maybe_chunk = rx.recv() => {
                 match maybe_chunk {
                     Some(c) => {
@@ -700,6 +613,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
                 continue;
             }
+            }
         };
 
         let chunk_id = chunk.chunk_id;
@@ -746,6 +660,12 @@ async fn consumer_task<P: OutputProcessFactory>(
                         chunk_duration_ms,
                         cumulative_pushed_secs,
                     );
+                    // Fast endpoints only: remember the chunk so keepalive can
+                    // replay it as a freeze during a producer gap. Skipped on
+                    // normal endpoints to avoid the per-chunk clone.
+                    if ep_cfg.is_fast {
+                        last_chunk_bytes = Some(std::sync::Arc::new(chunk.data.clone()));
+                    }
                 }
             }
         } else if let Some(ref mut p) = proc {
@@ -857,6 +777,101 @@ async fn consumer_task<P: OutputProcessFactory>(
     tracing::info!(alias = %alias, "Consumer task stopped");
 }
 
+/// Keep the existing rust session alive during a fast-endpoint producer gap.
+/// Returns the next real chunk when one arrives, or `None` on stop/closed
+/// channel. NEVER closes the connection on starvation — a push error just
+/// backs off briefly and the pusher lazy-reconnects on the next push.
+///
+/// Sets `stats.delivery_mode = "rescue"` on entry and resets it to
+/// `"normal"` on both exit paths so the dashboard correctly reflects the
+/// keepalive gap instead of showing stale `"normal"` state.
+#[allow(clippy::too_many_arguments)]
+async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
+    pusher: &mut P,
+    rx: &mut tokio::sync::mpsc::Receiver<PrefetchedChunk>,
+    last_chunk_bytes: &Option<std::sync::Arc<Vec<u8>>>,
+    alias: &str,
+    audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    stats: &Stats,
+) -> Option<PrefetchedChunk> {
+    use crate::fast_keepalive::{KeepaliveMode, keepalive_bytes, keepalive_mode};
+    // `tokio::time::Instant` (not `std::time::Instant`) so the gap clock tracks
+    // the same time source as the `tokio::time::sleep` pacing in this loop.
+    // In production it reads the real clock identically to `std::Instant`; under
+    // `tokio::time::pause()`/`start_paused` (the Task-6 regression gate) it
+    // advances with `tokio::time::advance`, making the freeze→rescue transition
+    // deterministically testable without real wall-clock waits.
+    let started = tokio::time::Instant::now();
+    let mut current_mode = keepalive_mode(0, last_chunk_bytes.is_some());
+    crate::fast_delay_audit::emit_keepalive_started(
+        audit_ring,
+        alias,
+        if current_mode == KeepaliveMode::Rescue {
+            "rescue"
+        } else {
+            "freeze"
+        },
+    );
+    // Surface keepalive gap on the dashboard: set delivery_mode to "rescue"
+    // so the UI doesn't falsely show "normal" during the starvation window.
+    // Lock is released immediately (not held across any .await).
+    {
+        let mut s = stats.lock().await;
+        s.delivery_mode = "rescue".to_string();
+    }
+    loop {
+        let gap = started.elapsed().as_secs();
+        let mode = keepalive_mode(gap, last_chunk_bytes.is_some());
+        if mode != current_mode {
+            current_mode = mode;
+            crate::fast_delay_audit::emit_keepalive_started(
+                audit_ring,
+                alias,
+                if mode == KeepaliveMode::Rescue {
+                    "rescue"
+                } else {
+                    "freeze"
+                },
+            );
+        }
+        // Finding 2: keep the Cow (borrowing last_chunk_bytes) instead of
+        // cloning with .into_owned() — avoids a multi-MB heap allocation on
+        // every keepalive tick for the freeze window.
+        let bytes = keepalive_bytes(mode, last_chunk_bytes);
+        tokio::select! {
+            maybe = rx.recv() => {
+                crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
+                // Reset delivery_mode before returning so the dashboard
+                // reflects normal delivery as soon as the real chunk resumes.
+                {
+                    let mut s = stats.lock().await;
+                    s.delivery_mode = "normal".to_string();
+                }
+                return maybe;
+            }
+            res = pusher.push_flv_bytes(&bytes) => {
+                if let Err(e) = res {
+                    tracing::warn!(alias = %alias, "keepalive push error: {e}; will reconnect on next push");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                // push_flv_bytes self-paces ~1x; loop to push the next tick.
+            }
+            _ = stop_rx.changed() => {
+                if *stop_rx.borrow() {
+                    crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
+                    // Reset delivery_mode before returning None (stop path).
+                    {
+                        let mut s = stats.lock().await;
+                        s.delivery_mode = "normal".to_string();
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 /// Core endpoint loop -- generic over ChunkFetcher and OutputProcessFactory for testability.
 /// Orchestrates buffer fill, then spawns producer-consumer pipeline.
 #[allow(clippy::too_many_arguments)]
@@ -907,11 +922,14 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
     let producer_alias = alias.clone();
     let producer_buffer_state = buffer_state.clone();
     let producer_audit_ring = audit_ring.clone();
-    let producer = tokio::spawn(producer_task(
+    // `is_fast` is Copy — read it before `ep_cfg` is moved into consumer_task.
+    let producer_is_fast = ep_cfg.is_fast;
+    let producer = tokio::spawn(crate::endpoint_producer::producer_task(
         fetcher,
         tx,
         start_chunk_id,
         delivery_delay_ms,
+        producer_is_fast,
         producer_stop,
         producer_stats,
         producer_alias,
