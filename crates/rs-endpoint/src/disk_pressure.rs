@@ -2,7 +2,7 @@
 //! buffered chunk (continuity guarantee). At critical, the endpoint
 //! lifecycle goes RED Attention (operator must act).
 
-use rs_core::audit::{Action, AuditRow, RateLimiter, Severity, Source};
+use rs_core::audit::{Action, AuditRow, Severity, Source};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,8 +57,13 @@ pub fn classify_disk_pressure(used_fraction: f64) -> DiskPressure {
     }
 }
 
+/// True when a new pressure reading should be logged (level changed).
+pub(crate) fn should_log_transition(prev: DiskPressure, now: DiskPressure) -> bool {
+    prev != now
+}
+
 /// Sample the volume containing `chunk_dir` every 10s; emit LocalDiskPressure
-/// (rate-limited 1/min per severity) on Warn/Critical. Returns when the
+/// on level transitions (Ok↔Warn↔Critical) only. Returns when the
 /// shutdown channel fires.
 ///
 /// `disk_critical`, when set, is updated every sample to reflect whether the
@@ -73,7 +78,7 @@ pub async fn run_disk_monitor(
     disk_level: Option<Arc<std::sync::atomic::AtomicU8>>,
     mut shutdown: broadcast::Receiver<()>,
 ) {
-    let rl = Arc::new(RateLimiter::new());
+    let mut last_pressure = DiskPressure::Ok;
     loop {
         tokio::select! {
             _ = shutdown.recv() => return,
@@ -101,13 +106,21 @@ pub async fn run_disk_monitor(
         if let Some(l) = &disk_level {
             l.store(pressure.as_u8(), std::sync::atomic::Ordering::Relaxed);
         }
-        let (sev, class) = match pressure {
-            DiskPressure::Ok => continue,
-            DiskPressure::Warn => (Severity::Warn, "warn"),
-            DiskPressure::Critical => (Severity::Critical, "critical"),
-        };
-        if let Some(tx) = &audit_tx {
-            if rl.allow(Action::LocalDiskPressure, class) {
+        // Emit an audit row only on a level transition (Ok↔Warn↔Critical).
+        // last_pressure is updated BEFORE the Ok-continue so that a subsequent
+        // Ok→Warn transition still logs.
+        let log_it = should_log_transition(last_pressure, pressure);
+        last_pressure = pressure;
+        if pressure == DiskPressure::Ok {
+            continue;
+        }
+        if log_it {
+            if let Some(tx) = &audit_tx {
+                let sev = match pressure {
+                    DiskPressure::Warn => Severity::Warn,
+                    DiskPressure::Critical => Severity::Critical,
+                    DiskPressure::Ok => unreachable!(),
+                };
                 rs_core::audit::record(
                     tx,
                     AuditRow {
@@ -156,6 +169,23 @@ fn volume_usage(path: &std::path::Path) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logs_only_on_transition() {
+        assert!(should_log_transition(DiskPressure::Ok, DiskPressure::Warn));
+        assert!(!should_log_transition(
+            DiskPressure::Warn,
+            DiskPressure::Warn
+        ));
+        assert!(should_log_transition(
+            DiskPressure::Warn,
+            DiskPressure::Critical
+        ));
+        assert!(should_log_transition(
+            DiskPressure::Critical,
+            DiskPressure::Warn
+        ));
+    }
 
     #[test]
     fn classify_boundaries() {
