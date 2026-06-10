@@ -197,6 +197,98 @@ async fn test_fast_endpoint_producer_trails_live_edge() {
     drain.abort();
 }
 
+#[tokio::test(start_paused = true)]
+async fn trickle_starvation_grows_fast_read_delay() {
+    // Simulate the consumer having measured a 30s keepalive gap (trickle
+    // starvation: chunks arrive late-but-arrive, so the producer's 40-miss
+    // probe cycle NEVER fires). The producer must consume that gap on its
+    // next successful fetch and GROW the adaptive read-delay by it, so the
+    // live-edge lag-probe target trails the edge by ~gap+margin (35 chunks at
+    // 1000ms chunks) instead of the 5s/5-chunk floor.
+    //
+    // RED without the fix: the producer ignores `starvation_gap_ms`, the
+    // controller stays at the floor, the lag-probe jumps to `edge - 5`, and
+    // the read position sits only ~5 chunks behind the edge → the
+    // `edge - read_pos >= 30` assertion fails. GREEN with the fix: the gap
+    // grows the controller to 35 chunks, the jump trails the edge by 35, and
+    // the read position stays >= 30 chunks behind.
+    //
+    // The edge (20_511) is the exact highest existing rung of the FLOOR-delay
+    // (5-chunk) probe ladder from current=31, so without the fix the jump
+    // lands at edge-5 (clear FAIL of `>= 30`). With the fix the GROWN-delay
+    // (35-chunk) ladder tops out at chunk 17_951 → jump target 17_916 → the
+    // read pointer trails the edge by ~2_595 (clear PASS).
+    let edge: i64 = 20_511;
+    let chunks: Vec<(i64, Vec<u8>)> = (1..=edge).map(|i| (i, vec![0u8; 1])).collect();
+    // 1000ms chunks so `typical_chunk_dur_ms` stays at 1000 (EWMA seed) and
+    // the delay→chunks maths is 1:1 (35s = 35 chunks, 5s = 5 chunks). 5ms
+    // per fetch keeps the producer reading at a bounded rate under paused time.
+    let fetcher = TimedMockFetcher::new(chunks, edge)
+        .with_chunk_duration(1000)
+        .with_latency(std::time::Duration::from_millis(5));
+    let max_fetched = fetcher.max_fetched_id();
+
+    let (tx, mut rx) = mpsc::channel::<PrefetchedChunk>(PREFETCH_BUFFER_SIZE);
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let buffer_state = Arc::new(BufferState::new());
+
+    // The consumer-side keepalive measured a 30s starvation gap (trickle).
+    buffer_state
+        .starvation_gap_ms
+        .store(30_000, Ordering::Relaxed);
+
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+    let bs = buffer_state.clone();
+    let producer = tokio::spawn(producer_task(
+        fetcher,
+        tx,
+        1,    // start_chunk_id
+        0,    // delivery_delay_ms (fast endpoints pass 0)
+        true, // is_fast → adaptive controller engaged
+        stop_rx,
+        stats.clone(),
+        "fast-ep".to_string(),
+        bs,
+        None,
+    ));
+
+    // Drive virtual time: ~30 reads at 5ms latency fire the lag-probe once,
+    // which jumps the read pointer to `edge - delay_chunks`. Stop shortly
+    // after so `max_fetched_id` reflects the post-jump position (it climbs
+    // ~1/fetch; the floor-vs-grown gap of 30 chunks is decisive long before
+    // it could close).
+    for _ in 0..400 {
+        tokio::time::advance(std::time::Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let observed = max_fetched.load(Ordering::Relaxed);
+    // The producer must have consumed the gap (swapped to 0) on its first
+    // successful fetch.
+    assert_eq!(
+        buffer_state.starvation_gap_ms.load(Ordering::Relaxed),
+        0,
+        "producer must consume the keepalive starvation gap (swap to 0)"
+    );
+    assert!(
+        observed < edge,
+        "read pointer must trail the live edge, got {observed} vs edge {edge}"
+    );
+    assert!(
+        edge - observed >= 30,
+        "trickle gap (30s) must grow the read-delay so the producer trails the \
+         live edge by >= 30 chunks; got trail {} (read_pos {observed}, edge {edge}). \
+         Floor-only behaviour trails by ~5 → this is the RED assertion.",
+        edge - observed
+    );
+
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), producer).await;
+    drain.abort();
+}
+
 #[tokio::test]
 async fn test_controller_grow_makes_lag_jump_trail_edge() {
     // Focused integration of the two pieces the producer wires together:

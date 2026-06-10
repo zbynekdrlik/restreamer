@@ -808,6 +808,15 @@ impl TimedMockFetcher {
         self
     }
 
+    /// Override the per-chunk media duration the fetcher reports (default
+    /// 2000ms). Lets a test pin `typical_chunk_dur_ms` so chunk-count maths
+    /// against the adaptive read-delay are deterministic. ZERO impact on
+    /// callers that don't use it.
+    pub(crate) fn with_chunk_duration(mut self, ms: i64) -> Self {
+        self.duration_ms_per_chunk = ms;
+        self
+    }
+
     pub(crate) fn available_up_to(&self) -> Arc<AtomicI64> {
         self.available_up_to.clone()
     }
