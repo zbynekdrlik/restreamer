@@ -203,27 +203,34 @@ async fn trickle_starvation_grows_fast_read_delay() {
     // starvation: chunks arrive late-but-arrive, so the producer's 40-miss
     // probe cycle NEVER fires). The producer must consume that gap on its
     // next successful fetch and GROW the adaptive read-delay by it, so the
-    // live-edge lag-probe target trails the edge by ~gap+margin (35 chunks at
+    // live-edge lag-probe jump trails the edge by ~gap+margin (35 chunks at
     // 1000ms chunks) instead of the 5s/5-chunk floor.
     //
-    // RED without the fix: the producer ignores `starvation_gap_ms`, the
-    // controller stays at the floor, the lag-probe jumps to `edge - 5`, and
-    // the read position sits only ~5 chunks behind the edge → the
-    // `edge - read_pos >= 30` assertion fails. GREEN with the fix: the gap
-    // grows the controller to 35 chunks, the jump trails the edge by 35, and
-    // the read position stays >= 30 chunks behind.
+    // Determinism — separating HEAD (lag-probe) from GET (read) ceilings:
+    //   * `head_edge` (HEAD) = 20_511: the live edge the lag-probe ladder
+    //     discovers. From current=31 the FLOOR-delay (5-chunk) ladder tops out
+    //     at exactly this rung; the GROWN-delay (35-chunk) ladder tops out at
+    //     chunk 17_951.
+    //   * `available_up_to` (GET) = 17_916: GET stalls here, so once the
+    //     producer jumps it CANNOT catch up and the read position freezes at
+    //     the jump target (the value under test).
     //
-    // The edge (20_511) is the exact highest existing rung of the FLOOR-delay
-    // (5-chunk) probe ladder from current=31, so without the fix the jump
-    // lands at edge-5 (clear FAIL of `>= 30`). With the fix the GROWN-delay
-    // (35-chunk) ladder tops out at chunk 17_951 → jump target 17_916 → the
-    // read pointer trails the edge by ~2_595 (clear PASS).
-    let edge: i64 = 20_511;
-    let chunks: Vec<(i64, Vec<u8>)> = (1..=edge).map(|i| (i, vec![0u8; 1])).collect();
+    // Without the fix the controller stays at the floor → jump target
+    //   17_951... no: floor ladder tops at 20_511 → jump to 20_511 - 5 = 20_506.
+    //   GET 20_506 > 17_916 → None, but `max_fetched_id` still records 20_506,
+    //   so the read pointer trails the edge by only 5 → FAILS `>= 30` (RED).
+    // With the fix the 30s gap grows the controller to 35 chunks → grown ladder
+    //   tops at 17_951 → jump to 17_951 - 35 = 17_916 → GET 17_916 succeeds,
+    //   17_917 > avail → None, `max_fetched_id` = 17_917 → trail
+    //   20_511 - 17_917 = 2_594 (>= 30) → PASS (GREEN).
+    const HEAD_EDGE: i64 = 20_511;
+    const GET_EDGE: i64 = 17_916; // grown jump target — pins the read position
+    let chunks: Vec<(i64, Vec<u8>)> = (1..=HEAD_EDGE).map(|i| (i, vec![0u8; 1])).collect();
     // 1000ms chunks so `typical_chunk_dur_ms` stays at 1000 (EWMA seed) and
     // the delay→chunks maths is 1:1 (35s = 35 chunks, 5s = 5 chunks). 5ms
     // per fetch keeps the producer reading at a bounded rate under paused time.
-    let fetcher = TimedMockFetcher::new(chunks, edge)
+    let fetcher = TimedMockFetcher::new(chunks, GET_EDGE)
+        .with_head_edge(HEAD_EDGE)
         .with_chunk_duration(1000)
         .with_latency(std::time::Duration::from_millis(5));
     let max_fetched = fetcher.max_fetched_id();
@@ -255,10 +262,9 @@ async fn trickle_starvation_grows_fast_read_delay() {
     ));
 
     // Drive virtual time: ~30 reads at 5ms latency fire the lag-probe once,
-    // which jumps the read pointer to `edge - delay_chunks`. Stop shortly
-    // after so `max_fetched_id` reflects the post-jump position (it climbs
-    // ~1/fetch; the floor-vs-grown gap of 30 chunks is decisive long before
-    // it could close).
+    // which jumps the read pointer to `head_edge - delay_chunks`. GET then
+    // stalls at GET_EDGE so the position freezes — the floor-vs-grown gap is
+    // decisive and stable for the rest of the window.
     for _ in 0..400 {
         tokio::time::advance(std::time::Duration::from_millis(5)).await;
         tokio::task::yield_now().await;
@@ -273,15 +279,15 @@ async fn trickle_starvation_grows_fast_read_delay() {
         "producer must consume the keepalive starvation gap (swap to 0)"
     );
     assert!(
-        observed < edge,
-        "read pointer must trail the live edge, got {observed} vs edge {edge}"
+        observed < HEAD_EDGE,
+        "read pointer must trail the live edge, got {observed} vs edge {HEAD_EDGE}"
     );
     assert!(
-        edge - observed >= 30,
+        HEAD_EDGE - observed >= 30,
         "trickle gap (30s) must grow the read-delay so the producer trails the \
-         live edge by >= 30 chunks; got trail {} (read_pos {observed}, edge {edge}). \
+         live edge by >= 30 chunks; got trail {} (read_pos {observed}, edge {HEAD_EDGE}). \
          Floor-only behaviour trails by ~5 → this is the RED assertion.",
-        edge - observed
+        HEAD_EDGE - observed
     );
 
     let _ = stop_tx.send(true);
@@ -457,6 +463,10 @@ mod fast_upload_gap_regression {
             crate::endpoint_stats::EndpointStats::default(),
         ));
         let stats_task = stats.clone();
+        // Shared buffer state so keepalive can record the measured starvation
+        // gap for the producer's adaptive delay controller (trickle-grow fix).
+        let buffer_state = Arc::new(crate::buffer_state::BufferState::new());
+        let buffer_state_task = buffer_state.clone();
         let task = tokio::spawn(async move {
             keepalive_until_chunk(
                 &mut pusher,
@@ -466,6 +476,7 @@ mod fast_upload_gap_regression {
                 &audit_ring,
                 &mut stop_rx,
                 &stats_task,
+                &buffer_state_task,
             )
             .await
         });
@@ -526,6 +537,17 @@ mod fast_upload_gap_regression {
         assert_eq!(
             chunk.chunk_id, 99,
             "keepalive must resume the real chunk (id 99) once one arrives"
+        );
+
+        // Trickle-grow fix: on chunk resume keepalive must record the TRUE
+        // starvation gap (~13s here) into BufferState so the producer's
+        // adaptive read-delay controller grows by it. The gap is in ms and
+        // the window above advanced well past 10s before the chunk arrived.
+        assert!(
+            buffer_state.starvation_gap_ms.load(Ordering::SeqCst) >= 10_000,
+            "keepalive must record the measured starvation gap (>= 10s) for the \
+             producer's delay controller; got {}ms",
+            buffer_state.starvation_gap_ms.load(Ordering::SeqCst)
         );
 
         // Final guarantees recap:

@@ -483,6 +483,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                             &audit_ring,
                             &mut stop_rx,
                             &stats,
+                            &buffer_state,
                         )
                         .await
                         {
@@ -794,14 +795,13 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     stats: &Stats,
+    buffer_state: &std::sync::Arc<crate::buffer_state::BufferState>,
 ) -> Option<PrefetchedChunk> {
     use crate::fast_keepalive::{KeepaliveMode, keepalive_bytes, keepalive_mode};
-    // `tokio::time::Instant` (not `std::time::Instant`) so the gap clock tracks
-    // the same time source as the `tokio::time::sleep` pacing in this loop.
-    // In production it reads the real clock identically to `std::Instant`; under
-    // `tokio::time::pause()`/`start_paused` (the Task-6 regression gate) it
-    // advances with `tokio::time::advance`, making the freeze→rescue transition
-    // deterministically testable without real wall-clock waits.
+    // `tokio::time::Instant` (not `std::time::Instant`) so the gap clock shares
+    // the loop's `tokio::time::sleep` time source: identical to the real clock
+    // in prod, but advances under `start_paused` so the freeze→rescue transition
+    // is deterministically testable without wall-clock waits.
     let started = tokio::time::Instant::now();
     let mut current_mode = keepalive_mode(0, last_chunk_bytes.is_some());
     crate::fast_delay_audit::emit_keepalive_started(
@@ -841,9 +841,11 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
         let bytes = keepalive_bytes(mode, last_chunk_bytes);
         tokio::select! {
             maybe = rx.recv() => {
-                crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
-                // Reset delivery_mode before returning so the dashboard
-                // reflects normal delivery as soon as the real chunk resumes.
+                // Trickle-grow: feed the TRUE measured gap to the producer's
+                // adaptive controller (consumed via BufferState on its next fetch).
+                let elapsed = consumer_helpers::record_starvation_gap(buffer_state, started);
+                crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, elapsed.as_secs());
+                // Reset delivery_mode so the dashboard reflects normal delivery.
                 {
                     let mut s = stats.lock().await;
                     s.delivery_mode = "normal".to_string();

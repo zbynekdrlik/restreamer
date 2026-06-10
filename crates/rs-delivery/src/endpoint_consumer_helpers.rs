@@ -14,6 +14,24 @@ use super::{
 use crate::audit_ring::AuditRing;
 use crate::{endpoint_audit, ffmpeg_reason};
 
+/// Record the consumer-measured starvation gap into shared `BufferState` so
+/// the producer's adaptive read-delay controller grows by it (trickle-grow
+/// fix). `fetch_max` keeps the largest gap seen since the producer last
+/// consumed it. Returns the elapsed gap so the caller can reuse it for the
+/// keepalive audit without re-reading the clock. Call ONLY on the
+/// chunk-resume path — never the stop path (the endpoint is shutting down).
+pub(super) fn record_starvation_gap(
+    buffer_state: &Arc<crate::buffer_state::BufferState>,
+    started: tokio::time::Instant,
+) -> tokio::time::Duration {
+    let elapsed = started.elapsed();
+    buffer_state.starvation_gap_ms.fetch_max(
+        elapsed.as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    elapsed
+}
+
 /// Return value from `handle_rust_push` telling the consumer loop whether
 /// to continue normally or break the loop.
 pub(super) enum RustPushAction {
