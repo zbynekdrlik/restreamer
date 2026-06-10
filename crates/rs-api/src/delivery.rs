@@ -326,6 +326,16 @@ impl DeliveryOrchestrator {
             self.config.s3.endpoint, self.config.s3.bucket,
         );
 
+        // Binary lockstep (2026-06-10 incident): never create a VPS that would
+        // download a stale rs-delivery. FAILS LOUDLY on unfixable drift.
+        crate::delivery_binary::ensure_bucket_binary_or_abort(
+            &self.config,
+            self.audit_tx.as_ref(),
+            event_id,
+            &binary_url,
+        )
+        .await?;
+
         let mut labels = HashMap::new();
         labels.insert("app".to_string(), "restreamer".to_string());
         labels.insert("event_id".to_string(), event_id.to_string());
@@ -512,9 +522,34 @@ impl DeliveryOrchestrator {
                         attempt,
                         "rs-delivery health check passed on {}", instance.ipv4
                     );
-                    // rs-delivery is healthy. Move to "initializing" phase
-                    // while we wait for buffer-fill and call /api/init —
-                    // operator can see this is normal startup, not a hang.
+
+                    // Post-boot version gate (2026-06-10 incident): parse the
+                    // health body BEFORE auditing VpsReady. `resp.json()` /
+                    // `resp.text()` consumes resp, so this must run in-arm.
+                    let body = resp.text().await.unwrap_or_default();
+                    let vps_version = crate::delivery_binary::parse_health_version(&body);
+                    let client_version = env!("CARGO_PKG_VERSION");
+                    if !crate::delivery_binary::versions_match(
+                        vps_version.as_deref(),
+                        client_version,
+                    ) {
+                        return Err(crate::delivery_binary::abort_on_version_mismatch(
+                            &self.hetzner,
+                            &self.pool,
+                            self.audit_tx.as_ref(),
+                            event_id,
+                            instance_id,
+                            hetzner_id,
+                            vps_version.as_deref(),
+                            client_version,
+                        )
+                        .await);
+                    }
+
+                    // rs-delivery is healthy AND version-matched. Move to
+                    // "initializing" phase while we wait for buffer-fill and
+                    // call /api/init — operator can see this is normal startup,
+                    // not a hang.
                     db::update_delivery_instance_status(&self.pool, instance_id, "initializing")
                         .await?;
                     // Audit: VPS booted + rs-delivery answered health check.
@@ -532,6 +567,7 @@ impl DeliveryOrchestrator {
                                     "hetzner_id": hetzner_id,
                                     "ipv4": instance.ipv4,
                                     "boot_secs": boot_start.elapsed().as_secs(),
+                                    "delivery_version": vps_version,
                                 }),
                                 ts_override: None,
                             },

@@ -141,6 +141,10 @@ async fn main() {
         .with(fmt_layer)
         .init();
 
+    // First meaningful log line — a stale-binary incident (2026-06-10) is now
+    // one `grep` away from diagnosis.
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "rs-delivery starting");
+
     let app = api::router(state);
 
     let addr = "0.0.0.0:8000";
