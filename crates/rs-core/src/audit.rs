@@ -174,6 +174,16 @@ pub enum Action {
     /// Operator successfully completed an OAuth 2.0 Device Code Flow grant
     /// for a YouTube channel. Detail JSON: `{label, channel_id, scopes}`.
     OAuthGranted,
+
+    /// Host-side: the client's S3 bucket rs-delivery binary did not match the
+    /// client version; the matching GitHub release asset was downloaded,
+    /// sha256-verified and uploaded (public-read) before VPS creation.
+    /// Detail JSON: {version, sha256}.
+    DeliveryBinaryEnsured,
+    /// Host-side CRITICAL: the booted VPS reported a different rs-delivery
+    /// version than the client (or none). Delivery start is aborted and the
+    /// VPS deleted. Detail JSON: {vps_version, client_version, binary_url}.
+    DeliveryBinaryVersionMismatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,6 +431,22 @@ mod tests {
         let a = Action::FastKeepaliveEnded;
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"fast_keepalive_ended\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_delivery_binary_ensured_serdes() {
+        let a = Action::DeliveryBinaryEnsured;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"delivery_binary_ensured\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_delivery_binary_version_mismatch_serdes() {
+        let a = Action::DeliveryBinaryVersionMismatch;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"delivery_binary_version_mismatch\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
 }
