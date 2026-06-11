@@ -920,6 +920,18 @@ jobs:
     name: Deploy to stream.lan
     needs: [rust-ci-gate, build-tauri]
     if: always() && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.rust-ci-gate.result == 'success' && needs.build-tauri.result == 'success'
+    # Cross-RUN serialization: every job that touches the single stream.lan
+    # box / YouTube test stream shares this group, so a main run and a dev
+    # run can never interleave deploys or E2E on the shared machine
+    # (2026-06-11 incident: concurrent main 0.22.7 + dev 0.22.8 runs raced
+    # deploys and the shared S3 binary key -- BOTH runs failed, hours lost).
+    # cancel-in-progress:false => later run QUEUES instead of racing. NB:
+    # GitHub keeps only ONE pending job per group; a 3rd stacked run would
+    # cancel the 2nd's pending job (visible red, rerun) -- still better
+    # than a silent race.
+    concurrency:
+      group: stream-lan-box
+      cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     steps:
       - name: Clean old artifacts
@@ -1334,6 +1346,10 @@ jobs:
     name: E2E Streaming Test
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # See deploy-stream-lan: cross-run serialization on the shared box.
+    concurrency:
+      group: stream-lan-box
+      cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 20
     steps:
@@ -1858,6 +1874,10 @@ jobs:
     name: E2E OBS-to-YouTube Test
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # See deploy-stream-lan: cross-run serialization on the shared box.
+    concurrency:
+      group: stream-lan-box
+      cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 60
     env:
@@ -5154,6 +5174,10 @@ jobs:
     # break the sustained YT health gate (CI run 26085993055 regression).
     needs: [deploy-stream-lan, e2e-streaming-test, e2e-obs-youtube-test]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # See deploy-stream-lan: cross-run serialization on the shared box.
+    concurrency:
+      group: stream-lan-box
+      cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 60
     env:

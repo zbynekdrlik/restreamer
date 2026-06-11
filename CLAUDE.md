@@ -226,3 +226,13 @@ Operational guides for common tasks:
 Tier 0 (default): NO local builds or test runs — dev1 has 7.5 GB RAM and rustc
 workspace builds OOM it (operator directive 2026-06-10). Lint/fmt only locally;
 compilation, clippy, and tests run on CI. Purge `target/` whenever found.
+
+## Push Discipline — ONE in-flight CI run at a time
+
+NEVER push to dev while a main run (or the release workflow) is in flight, and
+never stack a second dev push on a running dev E2E. All E2E shares ONE
+self-hosted runner, ONE stream.lan box and ONE YouTube test stream — concurrent
+runs race deploys and shared state, and historically BOTH fail (2026-06-07,
+2026-06-11). The `stream-lan-box` concurrency group in ci.yml now serializes
+those jobs platform-side, but queued runs still waste hours: hold the
+post-merge version-bump push until main + release reach terminal state.
