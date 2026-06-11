@@ -925,12 +925,14 @@ jobs:
     # run can never interleave deploys or E2E on the shared machine
     # (2026-06-11 incident: concurrent main 0.22.7 + dev 0.22.8 runs raced
     # deploys and the shared S3 binary key -- BOTH runs failed, hours lost).
-    # cancel-in-progress:false => later run QUEUES instead of racing. NB:
-    # GitHub keeps only ONE pending job per group; a 3rd stacked run would
-    # cancel the 2nd's pending job (visible red, rerun) -- still better
-    # than a silent race.
+    # queue:max + cancel-in-progress:false => later jobs QUEUE (FIFO, up to
+    # 100) instead of racing. queue:max is REQUIRED: the default queue:single
+    # keeps only ONE pending job per group and CANCELS the older pending one
+    # -- with deploy fanning out to two parallel E2E siblings, a second run's
+    # queued deploy would cancel this run's pending E2E job (red run).
     concurrency:
       group: stream-lan-box
+      queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     steps:
@@ -1349,6 +1351,7 @@ jobs:
     # See deploy-stream-lan: cross-run serialization on the shared box.
     concurrency:
       group: stream-lan-box
+      queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 20
@@ -1877,6 +1880,7 @@ jobs:
     # See deploy-stream-lan: cross-run serialization on the shared box.
     concurrency:
       group: stream-lan-box
+      queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 60
@@ -5177,6 +5181,7 @@ jobs:
     # See deploy-stream-lan: cross-run serialization on the shared box.
     concurrency:
       group: stream-lan-box
+      queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 60

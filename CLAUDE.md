@@ -233,9 +233,12 @@ NEVER push to dev while a main run (or the release workflow) is in flight, and
 never stack a second dev push on a running dev E2E. All E2E shares ONE
 self-hosted runner, ONE stream.lan box and ONE YouTube test stream — concurrent
 runs race deploys and shared state, and historically BOTH fail (2026-06-07,
-2026-06-11). The `stream-lan-box` concurrency group in ci.yml now serializes
-those jobs platform-side, but queued runs still waste hours: hold the
-post-merge version-bump push until main + release reach terminal state.
+2026-06-11). The `stream-lan-box` concurrency group (`queue: max`,
+`cancel-in-progress: false`) in ci.yml serializes those jobs platform-side
+(FIFO queue — `queue: max` is required; the default single-pending-slot
+semantics would cancel an older run's pending E2E sibling). Queued runs still
+waste hours: hold the post-merge version-bump push until main + release reach
+terminal state.
 
 **If two runs ARE ever in flight together: STOP one immediately — never let
 both proceed.** Cancel the lower-value run (usually the version-bump/dev run;
