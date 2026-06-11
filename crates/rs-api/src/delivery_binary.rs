@@ -431,8 +431,12 @@ mod tests {
 
     #[test]
     fn binary_url_joins_endpoint_bucket_versioned_key() {
-        // Config::default() → endpoint http://localhost:9000, bucket test-bucket.
-        let cfg = rs_core::config::Config::default();
+        // Set the S3 fields explicitly — asserting Config::default() values
+        // couples the test to unrelated config defaults (broke on CI when
+        // the real defaults differed from the assumption).
+        let mut cfg = rs_core::config::Config::default();
+        cfg.s3.endpoint = "http://localhost:9000".to_string();
+        cfg.s3.bucket = "test-bucket".to_string();
         assert_eq!(
             binary_url(&cfg, "0.22.8"),
             "http://localhost:9000/test-bucket/rs-delivery-0.22.8"
