@@ -126,3 +126,29 @@ controller:
 - Post-merge: next streampp event — audit log must show
   `delivery_binary_version` match row; if the bucket is ever stale again the
   event start FAILS LOUDLY instead of silently streaming a broken fast stream.
+
+## Revision 2026-06-11 — versioned immutable keys
+
+The mutable-key + sidecar design (Components 3 & 4 above) raced across
+concurrent CI runs. On 2026-06-11 `main` (building 0.22.7) and `dev` (building
+0.22.8) both uploaded to the single `rs-delivery` key + `rs-delivery.version`
+sidecar; last writer won. The deployed 0.22.7 client then read sidecar=0.22.8,
+tried to fetch the GitHub release `restreamer-v0.22.7` (which does not exist
+before the pre-release tag), and delivery start failed. A shared mutable object
+can never be made race-safe.
+
+**Fix:** the key name pins the version. Each build uploads its own immutable
+object `rs-delivery-{version}` (`delivery_binary::binary_key`); the client of a
+build requests EXACTLY `rs-delivery-{client_version}`. Disjoint keys ⇒
+concurrent builds/versions can never interfere — there is no comparison and no
+re-upload of a shared object. The pre-create check becomes a single anonymous
+HEAD of the versioned key (present → proceed; absent → download + verify +
+upload the versioned object).
+
+The mutable `rs-delivery` key and the `rs-delivery.version` sidecar are now
+written by CI **only** as a legacy-transition artifact for clients <=0.22.7
+still deployed (they still read the old path). They are removed once every box
+runs >=0.22.8 — tracked in #246. The orchestrator no longer reads them.
+
+The post-boot version gate (Component 2) is unchanged: it still parses
+`/api/health` `version` and aborts on mismatch.

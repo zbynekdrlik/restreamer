@@ -783,6 +783,16 @@ async fn consumer_task<P: OutputProcessFactory>(
 /// channel. NEVER closes the connection on starvation — a push error just
 /// backs off briefly and the pusher lazy-reconnects on the next push.
 ///
+/// FREEZE-ONLY: a keepalive tick may push ONLY the last delivered chunk
+/// (same codec as the live stream). It must NEVER push the rescue clip —
+/// the RTMP pusher de-duplicates AVC sequence headers per session, so a
+/// codec-foreign rescue blob on a LIVE session makes YouTube decode the
+/// real stream with the wrong SPS/PPS (solid green video, 2026-06-11
+/// streampp KS-PP-TEST). If no chunk has been delivered yet there is
+/// nothing codec-safe to push: this function just WAITS for the first
+/// chunk (no pushes), identical to the pre-keepalive behaviour at session
+/// start.
+///
 /// Sets `stats.delivery_mode = "rescue"` on entry and resets it to
 /// `"normal"` on both exit paths so the dashboard correctly reflects the
 /// keepalive gap instead of showing stale `"normal"` state.
@@ -797,21 +807,19 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     stats: &Stats,
     buffer_state: &std::sync::Arc<crate::buffer_state::BufferState>,
 ) -> Option<PrefetchedChunk> {
-    use crate::fast_keepalive::{KeepaliveMode, keepalive_bytes, keepalive_mode};
+    // ONLY codec-homogeneous bytes (the last real chunk). `None` => no chunk
+    // delivered yet => pure-wait, never push. Borrows `last_chunk_bytes` (an
+    // immutable `&` param) for the whole fn; nothing mutates it here.
+    let freeze: Option<&[u8]> = crate::fast_keepalive::keepalive_bytes(last_chunk_bytes);
     // `tokio::time::Instant` (not `std::time::Instant`) so the gap clock shares
     // the loop's `tokio::time::sleep` time source: identical to the real clock
-    // in prod, but advances under `start_paused` so the freeze→rescue transition
-    // is deterministically testable without wall-clock waits.
+    // in prod, but advances under `start_paused` so the gap is deterministically
+    // testable without wall-clock waits.
     let started = tokio::time::Instant::now();
-    let mut current_mode = keepalive_mode(0, last_chunk_bytes.is_some());
     crate::fast_delay_audit::emit_keepalive_started(
         audit_ring,
         alias,
-        if current_mode == KeepaliveMode::Rescue {
-            "rescue"
-        } else {
-            "freeze"
-        },
+        if freeze.is_some() { "freeze" } else { "wait" },
     );
     // Surface keepalive gap on the dashboard: set delivery_mode to "rescue"
     // so the UI doesn't falsely show "normal" during the starvation window.
@@ -820,57 +828,47 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
         let mut s = stats.lock().await;
         s.delivery_mode = "rescue".to_string();
     }
-    loop {
-        let gap = started.elapsed().as_secs();
-        let mode = keepalive_mode(gap, last_chunk_bytes.is_some());
-        if mode != current_mode {
-            current_mode = mode;
-            crate::fast_delay_audit::emit_keepalive_started(
-                audit_ring,
-                alias,
-                if mode == KeepaliveMode::Rescue {
-                    "rescue"
-                } else {
-                    "freeze"
-                },
-            );
-        }
-        // Finding 2: keep the Cow (borrowing last_chunk_bytes) instead of
-        // cloning with .into_owned() — avoids a multi-MB heap allocation on
-        // every keepalive tick for the freeze window.
-        let bytes = keepalive_bytes(mode, last_chunk_bytes);
-        tokio::select! {
-            maybe = rx.recv() => {
-                // Trickle-grow: feed the TRUE measured gap to the producer's
-                // adaptive controller (consumed via BufferState on its next fetch).
-                let elapsed = consumer_helpers::record_starvation_gap(buffer_state, started);
-                crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, elapsed.as_secs());
-                // Reset delivery_mode so the dashboard reflects normal delivery.
-                {
-                    let mut s = stats.lock().await;
-                    s.delivery_mode = "normal".to_string();
-                }
-                return maybe;
-            }
-            res = pusher.push_flv_bytes(&bytes) => {
-                if let Err(e) = res {
-                    tracing::warn!(alias = %alias, "keepalive push error: {e}; will reconnect on next push");
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-                // push_flv_bytes self-paces ~1x; loop to push the next tick.
-            }
-            _ = stop_rx.changed() => {
-                if *stop_rx.borrow() {
-                    crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
-                    // Reset delivery_mode before returning None (stop path).
-                    {
-                        let mut s = stats.lock().await;
-                        s.delivery_mode = "normal".to_string();
+    // Shared exit bookkeeping. `resume` => record the TRUE gap for the
+    // producer's adaptive controller and return the chunk; otherwise (stop) =>
+    // return None. Both emit keepalive-ended and reset delivery_mode.
+    macro_rules! finish {
+        (resume $maybe:expr) => {{
+            consumer_helpers::record_starvation_gap(buffer_state, started);
+            finish!(@end);
+            return $maybe;
+        }};
+        (stop) => {{
+            finish!(@end);
+            return None;
+        }};
+        (@end) => {{
+            crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
+            let mut s = stats.lock().await;
+            s.delivery_mode = "normal".to_string();
+        }};
+    }
+    match freeze {
+        Some(bytes) => loop {
+            tokio::select! {
+                maybe = rx.recv() => finish!(resume maybe),
+                res = pusher.push_flv_bytes(bytes) => {
+                    if let Err(e) = res {
+                        tracing::warn!(alias = %alias, "keepalive push error: {e}; will reconnect on next push");
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
-                    return None;
+                    // push_flv_bytes self-paces ~1x; loop to push the next tick.
                 }
+                _ = stop_rx.changed() => { if *stop_rx.borrow() { finish!(stop); } }
             }
-        }
+        },
+        // No chunk delivered yet: nothing codec-safe to push. Pure wait for the
+        // first real chunk (or stop) — no push arm, so no codec-foreign bytes.
+        None => loop {
+            tokio::select! {
+                maybe = rx.recv() => finish!(resume maybe),
+                _ = stop_rx.changed() => { if *stop_rx.borrow() { finish!(stop); } }
+            }
+        },
     }
 }
 

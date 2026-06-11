@@ -367,17 +367,26 @@ async fn test_controller_grow_makes_lag_jump_trail_edge() {
 }
 
 // ---------------------------------------------------------------------------
-// REGRESSION GATE (Task 6): fast endpoint survives an upload gap.
+// REGRESSION GATE: fast-endpoint keepalive is FREEZE-ONLY (codec-homogeneous).
 //
-// The core guarantee that shipped CI-green with NO test: when a fast endpoint
-// starves (producer stops delivering chunks), the keepalive loop must
+// The core guarantee: when a fast endpoint starves (producer stops delivering
+// chunks), the keepalive loop must
 //   1. NEVER close the connection (no teardown on starvation),
-//   2. keep pushing frames during the gap — first FREEZE (last chunk bytes),
-//      then RESCUE (default FLV) once the gap exceeds FAST_KEEPALIVE_RESCUE_
-//      AFTER_SECS (10s), and
+//   2. keep pushing frames during the gap — but ONLY the last delivered chunk
+//      (freeze frame), NEVER the default rescue FLV, no matter how long the
+//      gap lasts, and
 //   3. resume the real chunk the moment one arrives.
 //
-// This locks `keepalive_until_chunk`'s freeze->rescue transition and its
+// Why freeze-only: the RTMP pusher de-duplicates AVC sequence headers per
+// session. Pushing the rescue clip (different SPS/PPS) onto a LIVE session
+// makes YouTube decode the real stream with the wrong codec config -> solid
+// green video for the entire session (2026-06-11 streampp incident,
+// KS-PP-TEST). The keepalive must therefore push ONLY codec-homogeneous bytes
+// (the last real chunk). If no chunk has been delivered yet there is nothing
+// codec-safe to push: keepalive must push NOTHING and just wait (covered by
+// `keepalive_without_first_chunk_pushes_nothing` below).
+//
+// This locks `keepalive_until_chunk`'s freeze-only contract and its
 // never-close contract against regression. Without this test, upload jitter
 // against a fast endpoint had zero coverage.
 // ---------------------------------------------------------------------------
@@ -495,23 +504,39 @@ mod fast_upload_gap_regression {
             );
             assert!(
                 recorded.contains(&FREEZE_LEN),
-                "during the freeze window keepalive must push the last chunk bytes \
+                "during the gap keepalive must push the last chunk bytes \
                  (len {FREEZE_LEN}); recorded lengths: {recorded:?}"
+            );
+            // FREEZE-ONLY invariant: every push so far is the freeze chunk.
+            assert!(
+                recorded.iter().all(|&l| l == FREEZE_LEN),
+                "keepalive must push ONLY the freeze chunk (len {FREEZE_LEN}); \
+                 found foreign byte-lengths (codec-corruption regression: green \
+                 video): {recorded:?}"
             );
         }
 
-        // Phase 2 — cross the 10s rescue threshold. Advance another ~9s so the
-        // cumulative gap exceeds FAST_KEEPALIVE_RESCUE_AFTER_SECS (10s) and the
-        // content switches to the default rescue FLV.
+        // Phase 2 — keep the gap open WELL past the old 10s rescue threshold.
+        // The keepalive must STILL push only the freeze chunk: a long gap is a
+        // frozen picture, never the codec-foreign rescue clip.
         advance_in_steps(Duration::from_millis(200), 50).await; // +~10s → ~13s total
 
         {
             let recorded = pushes.lock().unwrap();
             let rescue_len = DEFAULT_RESCUE_FLV.len();
+            // RED on current code: after 10s the freeze→rescue switch pushes
+            // DEFAULT_RESCUE_FLV (rescue_len) onto the live session. Freeze-only
+            // forbids any codec-foreign bytes for the WHOLE gap.
             assert!(
-                recorded.contains(&rescue_len),
-                "after 10s gap keepalive must switch to the rescue FLV \
-                 (len {rescue_len}); recorded lengths: {recorded:?}"
+                !recorded.contains(&rescue_len),
+                "keepalive must NEVER push the rescue FLV (len {rescue_len}) on a \
+                 live session — it corrupts the codec config (green video). \
+                 recorded lengths: {recorded:?}"
+            );
+            assert!(
+                recorded.iter().all(|&l| l == FREEZE_LEN),
+                "keepalive must push ONLY the freeze chunk (len {FREEZE_LEN}) for \
+                 the entire gap, no matter how long; recorded lengths: {recorded:?}"
             );
         }
 
@@ -553,11 +578,99 @@ mod fast_upload_gap_regression {
         // Final guarantees recap:
         // - never closed: asserted above.
         // - frames emitted during gap: asserted above (non-empty).
-        // - freeze AND rescue both observed: asserted above.
+        // - ONLY freeze observed, never rescue: asserted above.
         // - real chunk resumed: chunk_id == 99 asserted above.
         assert!(
             !closed.load(Ordering::SeqCst),
             "connection still must not be closed after the chunk resumed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keepalive_without_first_chunk_pushes_nothing() {
+        // No real chunk has been delivered yet on this session
+        // (`last_chunk_bytes == None`). There is NOTHING codec-safe to push —
+        // pushing the rescue clip here is exactly the bug that locks YouTube
+        // onto the wrong SPS/PPS (green video). Keepalive must push NOTHING and
+        // simply wait for the first real chunk, then return it.
+        let pushes = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let mut pusher = RecordingPusher {
+            pushes: Arc::clone(&pushes),
+            closed: Arc::clone(&closed),
+        };
+
+        let (tx, mut rx) = mpsc::channel::<PrefetchedChunk>(10);
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+
+        // The crux: no chunk delivered yet.
+        let none: Option<Arc<Vec<u8>>> = None;
+        let audit_ring: Option<Arc<crate::audit_ring::AuditRing>> = None;
+
+        let stats: crate::endpoint_stats::Stats = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::endpoint_stats::EndpointStats::default(),
+        ));
+        let stats_task = stats.clone();
+        let buffer_state = Arc::new(crate::buffer_state::BufferState::new());
+        let buffer_state_task = buffer_state.clone();
+        let task = tokio::spawn(async move {
+            keepalive_until_chunk(
+                &mut pusher,
+                &mut rx,
+                &none,
+                "fast-test-nofirst",
+                &audit_ring,
+                &mut stop_rx,
+                &stats_task,
+                &buffer_state_task,
+            )
+            .await
+        });
+
+        // Hold the gap open well past the old 10s rescue threshold. With no
+        // first chunk, NOTHING may be pushed during this entire window.
+        advance_in_steps(Duration::from_millis(200), 80).await; // ~16s
+
+        {
+            let recorded = pushes.lock().unwrap();
+            // RED on pre-fix code: with last_chunk_bytes == None the old
+            // mode logic selected rescue from gap 0 and pushed
+            // DEFAULT_RESCUE_FLV repeatedly. Freeze-only forbids any push here.
+            assert!(
+                recorded.is_empty(),
+                "keepalive must push NOTHING before the first real chunk \
+                 (no codec-safe bytes exist yet); recorded lengths: {recorded:?}"
+            );
+        }
+
+        // First real chunk arrives — keepalive must return it.
+        tx.send(PrefetchedChunk {
+            chunk_id: 7,
+            data: vec![9, 9, 9],
+            duration_ms: 2000,
+        })
+        .await
+        .expect("send first chunk");
+        advance_in_steps(Duration::from_millis(50), 4).await;
+
+        let returned = task.await.expect("keepalive task panicked");
+        let chunk = returned.expect("keepalive must return the first real chunk, got None");
+        assert_eq!(
+            chunk.chunk_id, 7,
+            "keepalive must return the first real chunk (id 7) once one arrives"
+        );
+
+        // Still NOTHING pushed even after the chunk arrived — keepalive was a
+        // pure wait, no codec-foreign bytes on the wire.
+        assert!(
+            pushes.lock().unwrap().is_empty(),
+            "keepalive must never push when no chunk was ever delivered"
+        );
+
+        // Never closed the connection while waiting.
+        assert!(
+            !closed.load(Ordering::SeqCst),
+            "keepalive must NOT close the connection while waiting for the first chunk"
         );
     }
 

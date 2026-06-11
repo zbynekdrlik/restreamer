@@ -226,3 +226,25 @@ Operational guides for common tasks:
 Tier 0 (default): NO local builds or test runs — dev1 has 7.5 GB RAM and rustc
 workspace builds OOM it (operator directive 2026-06-10). Lint/fmt only locally;
 compilation, clippy, and tests run on CI. Purge `target/` whenever found.
+
+## Push Discipline — ONE in-flight CI run at a time
+
+NEVER push to dev while a main run (or the release workflow) is in flight, and
+never stack a second dev push on a running dev E2E. All E2E shares ONE
+self-hosted runner, ONE stream.lan box and ONE YouTube test stream — concurrent
+runs race deploys and shared state, and historically BOTH fail (2026-06-07,
+2026-06-11). The `stream-lan-box` concurrency group (`queue: max`,
+`cancel-in-progress: false`) in ci.yml serializes those jobs platform-side
+(FIFO queue — `queue: max` is required; the default single-pending-slot
+semantics would cancel an older run's pending E2E sibling). Queued runs still
+waste hours: hold the post-merge version-bump push until main + release reach
+terminal state.
+
+**If two runs ARE ever in flight together: STOP one immediately — never let
+both proceed.** Cancel the lower-value run (usually the version-bump/dev run;
+keep the release-bound main run), clean shared state if its E2E was mid-test
+(deactivate/detach the E2E event via the API, delete any orphan VPS), then let
+the surviving run continue. A deliberate cancel + 5-minute cleanup always
+beats letting two runs race (2026-06-11: letting both run cost ~3 h and
+failed BOTH). This is one decisive cancel — not the banned cancel-thrashing
+of stuck runs.

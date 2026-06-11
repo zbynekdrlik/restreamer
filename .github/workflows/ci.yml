@@ -446,15 +446,23 @@ jobs:
           # reducing the available write limitations for some existing
           # buckets on NBG1" announcement.
           pip install awscli
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          # Versioned immutable key — the ONLY source the client of this
+          # build will request. Key name pins the version: concurrent runs
+          # of different versions can never race (2026-06-11 incident).
+          aws s3 cp target/release/rs-delivery \
+            "s3://restreamer-chunks-fsn1/rs-delivery-${VERSION}" \
+            --endpoint-url https://fsn1.your-objectstorage.com \
+            --region fsn1 \
+            --acl public-read
+          # Legacy mutable key for clients <=0.22.7 still deployed during
+          # the transition (they read `rs-delivery` + sidecar). Remove once
+          # all boxes run >=0.22.8 — tracked in #246.
           aws s3 cp target/release/rs-delivery \
             s3://restreamer-chunks-fsn1/rs-delivery \
             --endpoint-url https://fsn1.your-objectstorage.com \
             --region fsn1 \
             --acl public-read
-          # Version sidecar for the binary-lockstep pre-create check
-          # (2026-06-10 incident). The orchestrator reads this to decide
-          # whether the bucket binary is current before creating a VPS.
-          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
           echo -n "$VERSION" > rs-delivery.version
           aws s3 cp rs-delivery.version \
             s3://restreamer-chunks-fsn1/rs-delivery.version \
@@ -912,6 +920,20 @@ jobs:
     name: Deploy to stream.lan
     needs: [rust-ci-gate, build-tauri]
     if: always() && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.rust-ci-gate.result == 'success' && needs.build-tauri.result == 'success'
+    # Cross-RUN serialization: every job that touches the single stream.lan
+    # box / YouTube test stream shares this group, so a main run and a dev
+    # run can never interleave deploys or E2E on the shared machine
+    # (2026-06-11 incident: concurrent main 0.22.7 + dev 0.22.8 runs raced
+    # deploys and the shared S3 binary key -- BOTH runs failed, hours lost).
+    # queue:max + cancel-in-progress:false => later jobs QUEUE (FIFO, up to
+    # 100) instead of racing. queue:max is REQUIRED: the default queue:single
+    # keeps only ONE pending job per group and CANCELS the older pending one
+    # -- with deploy fanning out to two parallel E2E siblings, a second run's
+    # queued deploy would cancel this run's pending E2E job (red run).
+    concurrency:
+      group: stream-lan-box
+      queue: max
+      cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     steps:
       - name: Clean old artifacts
@@ -1326,6 +1348,11 @@ jobs:
     name: E2E Streaming Test
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # See deploy-stream-lan: cross-run serialization on the shared box.
+    concurrency:
+      group: stream-lan-box
+      queue: max
+      cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 20
     steps:
@@ -1850,6 +1877,11 @@ jobs:
     name: E2E OBS-to-YouTube Test
     needs: [deploy-stream-lan]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # See deploy-stream-lan: cross-run serialization on the shared box.
+    concurrency:
+      group: stream-lan-box
+      queue: max
+      cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 60
     env:
@@ -5146,6 +5178,11 @@ jobs:
     # break the sustained YT health gate (CI run 26085993055 regression).
     needs: [deploy-stream-lan, e2e-streaming-test, e2e-obs-youtube-test]
     if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # See deploy-stream-lan: cross-run serialization on the shared box.
+    concurrency:
+      group: stream-lan-box
+      queue: max
+      cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
     timeout-minutes: 60
     env:
