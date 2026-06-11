@@ -321,10 +321,10 @@ impl DeliveryOrchestrator {
         let server_type = rs_cloud::select_server_type(endpoints.len());
 
         let name = format!("rs-delivery-evt{event_id}");
-        let binary_url = format!(
-            "{}/{}/rs-delivery",
-            self.config.s3.endpoint, self.config.s3.bucket,
-        );
+        // Versioned immutable key — the VPS downloads EXACTLY this build's
+        // object so concurrent CI runs never race (2026-06-11 incident).
+        let client_version = env!("CARGO_PKG_VERSION");
+        let binary_url = crate::delivery_binary::binary_url(&self.config, client_version);
 
         // Binary lockstep (2026-06-10 incident): never create a VPS that would
         // download a stale rs-delivery. FAILS LOUDLY on unfixable drift.

@@ -1,27 +1,38 @@
-//! Delivery binary version lockstep (2026-06-10 incident).
+//! Delivery binary version lockstep — versioned immutable S3 keys
+//! (2026-06-10 lockstep + 2026-06-11 race fix).
 //!
 //! The delivery VPS downloads its `rs-delivery` binary from the CLIENT'S OWN
-//! S3 bucket (`{s3.endpoint}/{s3.bucket}/rs-delivery`). CI only refreshes one
-//! client's bucket, so a production client whose bucket was never updated can
-//! silently boot a stale binary and stream a broken event — exactly what
-//! happened on streampp (a 12-day-old rs-delivery ran during a live event and
-//! nothing detected the drift).
+//! S3 bucket. The original lockstep design (PR #245) used ONE mutable key
+//! (`rs-delivery`) plus a plain-text sidecar (`rs-delivery.version`); the
+//! client compared the sidecar to its own version and re-uploaded on drift.
+//!
+//! That shared mutable object can never be made race-safe. On 2026-06-11 two
+//! concurrent CI runs — `main` building 0.22.7 and `dev` building 0.22.8 —
+//! raced on the single key: last writer won, the deployed 0.22.7 client then
+//! saw sidecar=0.22.8, tried to fetch a GitHub release that did not yet exist,
+//! and delivery start failed.
+//!
+//! The fix is to put the version IN THE KEY NAME. Each build uploads its own
+//! immutable object `rs-delivery-{version}` ([`binary_key`]); the client of
+//! that build requests EXACTLY `rs-delivery-{client_version}`. Concurrent
+//! builds/versions write disjoint keys and can never interfere. There is no
+//! sidecar, no comparison, no re-upload of a shared object.
 //!
 //! This module enforces lockstep at two points:
 //!
-//! 1. **Pre-create** ([`ensure_bucket_binary`]): a cheap sidecar version check
-//!    before every VPS create. On drift it downloads the matching GitHub
-//!    release asset for the client's OWN version, sha256-verifies it, and
-//!    uploads binary + sidecar with public-read ACL so cloud-init fetches the
-//!    correct bytes. Hard error (abort delivery) when no matching release
-//!    exists — a loud failure at start beats a silent broken event.
+//! 1. **Pre-create** ([`ensure_bucket_binary`]): an anonymous HEAD of the
+//!    versioned key. Present → nothing to do. Missing → download the matching
+//!    GitHub release asset for the client's OWN version, sha256-verify it, and
+//!    upload it under the versioned key with public-read ACL so cloud-init
+//!    fetches the correct bytes. Hard error (abort delivery) when no matching
+//!    release exists — a loud failure at start beats a silent broken event.
 //! 2. **Post-boot** ([`versions_match`]): the orchestrator parses the VPS
 //!    `/api/health` `version` field and aborts (delete VPS + Critical audit)
 //!    when it differs from the client version.
 //!
-//! Pure decision logic ([`decide_binary_action`], [`versions_match`],
-//! [`parse_sha256_file`]) is separated from the async I/O so it is unit-tested
-//! without network access.
+//! Pure logic ([`binary_key`], [`versions_match`], [`parse_sha256_file`],
+//! [`parse_health_version`]) is separated from the async I/O so it is
+//! unit-tested without network access.
 
 use std::time::Duration;
 
@@ -37,32 +48,25 @@ use tracing::{error, info, warn};
 /// GitHub repo that hosts the `rs-delivery` release assets.
 const RELEASE_BASE: &str =
     "https://github.com/zbynekdrlik/restreamer/releases/download/restreamer-v";
-/// S3 object key for the rs-delivery binary the VPS cloud-init downloads.
-const BINARY_KEY: &str = "rs-delivery";
-/// S3 object key for the plain-text sidecar carrying the binary's version.
-const SIDECAR_KEY: &str = "rs-delivery.version";
 
-/// What to do about the bucket's rs-delivery binary before creating a VPS.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BinaryAction {
-    /// Sidecar matches the client version — bucket binary is current.
-    Proceed,
-    /// Sidecar missing or different — fetch the client-version release
-    /// asset and upload it (then proceed).
-    Ensure,
+/// Versioned, immutable S3 object key for the rs-delivery binary. The key
+/// name pins the version, so concurrent builds/versions can never race on
+/// a shared mutable object (2026-06-11 incident: main 0.22.7 and dev 0.22.8
+/// CI runs overwrote each other's `rs-delivery` + sidecar).
+pub fn binary_key(version: &str) -> String {
+    format!("rs-delivery-{version}")
 }
 
-/// Decide, from the sidecar contents and the client's own version, whether the
-/// bucket binary is already current ([`BinaryAction::Proceed`]) or must be
-/// re-uploaded ([`BinaryAction::Ensure`]).
-///
-/// A missing sidecar (`None`) or any non-matching value forces `Ensure`.
-/// Trailing whitespace/newlines in the sidecar are tolerated.
-pub fn decide_binary_action(sidecar: Option<&str>, client_version: &str) -> BinaryAction {
-    match sidecar {
-        Some(s) if s.trim() == client_version => BinaryAction::Proceed,
-        _ => BinaryAction::Ensure,
-    }
+/// Public anonymous URL of this client's versioned rs-delivery object, used by
+/// cloud-init to download the binary. Keeps the `start_delivery` call site to
+/// one line (delivery.rs is at its 1000-line cap).
+pub fn binary_url(config: &rs_core::config::Config, client_version: &str) -> String {
+    format!(
+        "{}/{}/{}",
+        config.s3.endpoint,
+        config.s3.bucket,
+        binary_key(client_version)
+    )
 }
 
 /// Post-boot gate: does the VPS-reported version match the client's?
@@ -115,75 +119,68 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-/// Ensure the client bucket's rs-delivery binary matches `client_version`.
+/// Ensure the client bucket holds the immutable `rs-delivery-{client_version}`
+/// object.
 ///
-/// Cheap when current (one anonymous GET of the sidecar). On mismatch,
-/// downloads the GitHub release asset for the client's OWN version, verifies
-/// sha256, uploads binary + sidecar with public-read ACL.
+/// Cheap when present (one anonymous HEAD). When absent, downloads the GitHub
+/// release asset for the client's OWN version, verifies sha256, and uploads it
+/// under the versioned key with public-read ACL.
 ///
 /// Returns `Ok(Some(sha256))` if an upload happened (the verified digest of
-/// the uploaded binary), `Ok(None)` if the bucket was already current.
-/// `Err` means delivery start MUST abort — the caller surfaces and audits.
+/// the uploaded binary), `Ok(None)` if the versioned object was already
+/// present. `Err` means delivery start MUST abort — the caller surfaces and
+/// audits.
 pub async fn ensure_bucket_binary(
     config: &rs_core::config::Config,
     client_version: &str,
 ) -> anyhow::Result<Option<String>> {
-    let sidecar = fetch_sidecar(config).await;
-    match decide_binary_action(sidecar.as_deref(), client_version) {
-        BinaryAction::Proceed => {
-            info!(
-                version = client_version,
-                "delivery binary lockstep: bucket sidecar current, proceeding"
-            );
-            Ok(None)
-        }
-        BinaryAction::Ensure => {
-            warn!(
-                client_version,
-                sidecar = ?sidecar,
-                "delivery binary lockstep: bucket binary stale/unknown, re-uploading from release"
-            );
-            let sha = upload_release_binary(config, client_version).await?;
-            Ok(Some(sha))
-        }
+    if versioned_object_present(config, client_version).await {
+        info!(
+            version = client_version,
+            "delivery binary lockstep: rs-delivery-{client_version} present in bucket, proceeding"
+        );
+        return Ok(None);
     }
+    warn!(
+        client_version,
+        "delivery binary lockstep: rs-delivery-{client_version} absent, uploading from release"
+    );
+    let sha = upload_release_binary(config, client_version).await?;
+    Ok(Some(sha))
 }
 
-/// Anonymous GET of `{endpoint}/{bucket}/rs-delivery.version`. Any error or
-/// non-200 is treated as "no sidecar" (`None`) which forces an Ensure.
-async fn fetch_sidecar(config: &rs_core::config::Config) -> Option<String> {
+/// Anonymous HEAD of `{endpoint}/{bucket}/rs-delivery-{client_version}`.
+/// HTTP 200 → the immutable object is present (`true`). Any non-200 or
+/// network error → treat as absent (`false`), which forces an upload.
+async fn versioned_object_present(config: &rs_core::config::Config, client_version: &str) -> bool {
     let url = format!(
         "{}/{}/{}",
-        config.s3.endpoint, config.s3.bucket, SIDECAR_KEY
+        config.s3.endpoint,
+        config.s3.bucket,
+        binary_key(client_version)
     );
     let client = reqwest::Client::new();
     match client
-        .get(&url)
+        .head(&url)
         .timeout(Duration::from_secs(10))
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => match resp.text().await {
-            Ok(body) => Some(body),
-            Err(e) => {
-                warn!(%url, "sidecar body read failed (treating as missing): {e}");
-                None
-            }
-        },
+        Ok(resp) if resp.status().is_success() => true,
         Ok(resp) => {
-            info!(%url, status = %resp.status(), "sidecar not present (treating as missing)");
-            None
+            info!(%url, status = %resp.status(), "versioned binary not present (will upload)");
+            false
         }
         Err(e) => {
-            warn!(%url, "sidecar GET failed (treating as missing): {e}");
-            None
+            warn!(%url, "versioned binary HEAD failed (will upload): {e}");
+            false
         }
     }
 }
 
 /// Download the release asset for `client_version`, sha256-verify it against
-/// the `.sha256` sidecar, and upload binary + version sidecar to the client
-/// bucket with public-read ACL. Returns the verified sha256.
+/// the `.sha256` sidecar, and upload it to the client bucket under the
+/// versioned immutable key with public-read ACL. Returns the verified sha256.
 async fn upload_release_binary(
     config: &rs_core::config::Config,
     client_version: &str,
@@ -202,8 +199,8 @@ async fn upload_release_binary(
         .with_context(|| format!("GET release asset {bin_url}"))?;
     if bin_resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Err(anyhow!(
-            "no release asset for v{client_version} and bucket binary is stale/unknown \
-             — cannot guarantee VPS binary version"
+            "no release asset for v{client_version} and bucket has no \
+             rs-delivery-{client_version} — cannot guarantee VPS binary version"
         ));
     }
     if !bin_resp.status().is_success() {
@@ -256,30 +253,30 @@ async fn upload_release_binary(
         "delivery binary lockstep: sha256 verified"
     );
 
-    // Upload binary + sidecar (public-read so cloud-init fetches anonymously).
+    // Upload under the versioned immutable key (public-read so cloud-init
+    // fetches anonymously).
+    let key = binary_key(client_version);
     let s3 = rs_endpoint::s3::S3Client::new(&config.s3)
         .map_err(|e| anyhow!("S3Client::new for binary upload: {e}"))?;
-    s3.upload_public_object(BINARY_KEY, &bin_bytes, "application/octet-stream")
+    s3.upload_public_object(&key, &bin_bytes, "application/octet-stream")
         .await
-        .map_err(|e| anyhow!("upload rs-delivery binary: {e}"))?;
-    s3.upload_public_object(SIDECAR_KEY, client_version.as_bytes(), "text/plain")
-        .await
-        .map_err(|e| anyhow!("upload rs-delivery.version sidecar: {e}"))?;
+        .map_err(|e| anyhow!("upload {key}: {e}"))?;
     info!(
         version = client_version,
         sha256 = %actual,
-        "delivery binary lockstep: uploaded binary + sidecar (public-read)"
+        key = %key,
+        "delivery binary lockstep: uploaded versioned binary (public-read)"
     );
 
     Ok(actual)
 }
 
-/// Pre-create lockstep (2026-06-10 incident): ensure the client bucket's
-/// rs-delivery binary matches the client version before a VPS is created.
-/// Cheap sidecar check; uploads the matching release asset on drift; hard
-/// error (audit Critical + abort) when impossible (no release asset / sha
-/// mismatch / upload failure) so the event start fails loudly instead of
-/// silently streaming a wrong-version binary.
+/// Pre-create lockstep (2026-06-10 incident, 2026-06-11 race fix): ensure the
+/// client bucket holds the immutable `rs-delivery-{client_version}` object
+/// before a VPS is created. Cheap HEAD; uploads the matching release asset
+/// when absent; hard error (audit Critical + abort) when impossible (no
+/// release asset / sha mismatch / upload failure) so the event start fails
+/// loudly instead of silently streaming a wrong-version binary.
 pub async fn ensure_bucket_binary_or_abort(
     config: &rs_core::config::Config,
     audit_tx: Option<&mpsc::Sender<AuditRow>>,
@@ -348,7 +345,7 @@ pub async fn abort_on_version_mismatch(
     )
 }
 
-/// Info audit row: the bucket binary was re-uploaded to match the client
+/// Info audit row: the versioned binary was uploaded to match the client
 /// version before VPS creation. Keeps the `start_delivery` call site to one
 /// `record()` line (delivery.rs is at its 1000-line cap).
 pub fn ensured_audit(event_id: i64, version: &str, sha256: &str) -> AuditRow {
@@ -420,39 +417,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decide_proceed_on_exact_match() {
-        assert_eq!(
-            decide_binary_action(Some("0.22.7"), "0.22.7"),
-            BinaryAction::Proceed
-        );
+    fn binary_key_pins_version() {
+        assert_eq!(binary_key("0.22.8"), "rs-delivery-0.22.8");
+        assert_eq!(binary_key("0.22.7"), "rs-delivery-0.22.7");
     }
 
     #[test]
-    fn decide_proceed_tolerates_trailing_newline() {
-        assert_eq!(
-            decide_binary_action(Some("0.22.7\n"), "0.22.7"),
-            BinaryAction::Proceed
-        );
-        assert_eq!(
-            decide_binary_action(Some("  0.22.7  \n"), "0.22.7"),
-            BinaryAction::Proceed
-        );
+    fn binary_key_distinct_per_version() {
+        // The whole point of the 2026-06-11 race fix: different versions
+        // produce different keys, so concurrent builds never collide.
+        assert_ne!(binary_key("0.22.7"), binary_key("0.22.8"));
     }
 
     #[test]
-    fn decide_ensure_on_missing_sidecar() {
-        assert_eq!(decide_binary_action(None, "0.22.7"), BinaryAction::Ensure);
-    }
-
-    #[test]
-    fn decide_ensure_on_mismatch() {
+    fn binary_url_joins_endpoint_bucket_versioned_key() {
+        // Config::default() → endpoint http://localhost:9000, bucket test-bucket.
+        let cfg = rs_core::config::Config::default();
         assert_eq!(
-            decide_binary_action(Some("0.22.6"), "0.22.7"),
-            BinaryAction::Ensure
-        );
-        assert_eq!(
-            decide_binary_action(Some(""), "0.22.7"),
-            BinaryAction::Ensure
+            binary_url(&cfg, "0.22.8"),
+            "http://localhost:9000/test-bucket/rs-delivery-0.22.8"
         );
     }
 
@@ -557,11 +540,12 @@ mod tests {
 
     #[test]
     fn pre_create_mismatch_audit_shape() {
-        let row = pre_create_mismatch_audit(7, "0.22.7", "https://s3/x/rs-delivery", "boom");
+        let row = pre_create_mismatch_audit(7, "0.22.7", "https://s3/x/rs-delivery-0.22.7", "boom");
         assert_eq!(row.severity, Severity::Critical);
         assert_eq!(row.action, Action::DeliveryBinaryVersionMismatch);
         assert_eq!(row.detail["vps_version"], serde_json::Value::Null);
         assert_eq!(row.detail["client_version"], "0.22.7");
+        assert_eq!(row.detail["binary_url"], "https://s3/x/rs-delivery-0.22.7");
         assert_eq!(row.detail["phase"], "pre_create");
         assert_eq!(row.detail["error"], "boom");
     }

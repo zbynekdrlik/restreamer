@@ -446,15 +446,23 @@ jobs:
           # reducing the available write limitations for some existing
           # buckets on NBG1" announcement.
           pip install awscli
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          # Versioned immutable key — the ONLY source the client of this
+          # build will request. Key name pins the version: concurrent runs
+          # of different versions can never race (2026-06-11 incident).
+          aws s3 cp target/release/rs-delivery \
+            "s3://restreamer-chunks-fsn1/rs-delivery-${VERSION}" \
+            --endpoint-url https://fsn1.your-objectstorage.com \
+            --region fsn1 \
+            --acl public-read
+          # Legacy mutable key for clients <=0.22.7 still deployed during
+          # the transition (they read `rs-delivery` + sidecar). Remove once
+          # all boxes run >=0.22.8 — tracked in #246.
           aws s3 cp target/release/rs-delivery \
             s3://restreamer-chunks-fsn1/rs-delivery \
             --endpoint-url https://fsn1.your-objectstorage.com \
             --region fsn1 \
             --acl public-read
-          # Version sidecar for the binary-lockstep pre-create check
-          # (2026-06-10 incident). The orchestrator reads this to decide
-          # whether the bucket binary is current before creating a VPS.
-          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
           echo -n "$VERSION" > rs-delivery.version
           aws s3 cp rs-delivery.version \
             s3://restreamer-chunks-fsn1/rs-delivery.version \
