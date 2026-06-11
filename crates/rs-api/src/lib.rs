@@ -2,6 +2,7 @@ pub mod audit_handlers;
 pub mod clock_skew_probe;
 pub mod delivery;
 pub(crate) mod delivery_audit_mirror;
+pub mod delivery_binary;
 pub mod delivery_endpoints;
 pub mod delivery_handlers;
 pub(crate) mod delivery_helpers;

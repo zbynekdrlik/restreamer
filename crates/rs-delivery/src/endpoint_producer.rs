@@ -111,6 +111,29 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                 // stays strictly 1× — this only moves the READ pointer.
                 let delivery_delay_chunks: i64 = match fast_delay.as_mut() {
                     Some(ctrl) => {
+                        // Consumer-measured starvation gap (keepalive) — the
+                        // trickle-regime grow signal. The probe-cycle grow
+                        // below only fires after ~80s of uninterrupted misses;
+                        // this one fires after ANY real keepalive gap, so the
+                        // first freeze of an event grows the buffer and the
+                        // next spike of that size is absorbed silently.
+                        let gap_ms = buffer_state
+                            .starvation_gap_ms
+                            .swap(0, AtomicOrdering::Relaxed);
+                        if gap_ms > 0 {
+                            let gap_secs = gap_ms.div_ceil(1000);
+                            if let Some((from, to)) =
+                                ctrl.on_starvation(gap_secs, std::time::Instant::now())
+                            {
+                                crate::fast_delay_audit::emit_delay_grown(
+                                    &audit_ring,
+                                    &alias,
+                                    from,
+                                    to,
+                                    gap_secs,
+                                );
+                            }
+                        }
                         if let Some((from, to)) = ctrl.on_healthy(std::time::Instant::now()) {
                             crate::fast_delay_audit::emit_delay_shrank(
                                 &audit_ring,

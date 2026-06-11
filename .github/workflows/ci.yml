@@ -451,6 +451,17 @@ jobs:
             --endpoint-url https://fsn1.your-objectstorage.com \
             --region fsn1 \
             --acl public-read
+          # Version sidecar for the binary-lockstep pre-create check
+          # (2026-06-10 incident). The orchestrator reads this to decide
+          # whether the bucket binary is current before creating a VPS.
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo -n "$VERSION" > rs-delivery.version
+          aws s3 cp rs-delivery.version \
+            s3://restreamer-chunks-fsn1/rs-delivery.version \
+            --endpoint-url https://fsn1.your-objectstorage.com \
+            --region fsn1 \
+            --acl public-read \
+            --content-type text/plain
 
   file-size:
     name: File size check

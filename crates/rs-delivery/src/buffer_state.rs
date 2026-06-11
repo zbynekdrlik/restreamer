@@ -10,6 +10,10 @@ pub struct BufferState {
     pub buffer_duration_ms: AtomicU64,
     /// Whether the producer is actively finding new chunks (vs stalled).
     pub producer_active: AtomicBool,
+    /// Largest starvation gap (ms) observed by the consumer's keepalive since
+    /// the producer last consumed it. Written with fetch_max on keepalive end,
+    /// swapped to 0 by the producer, which grows the adaptive read-delay by it.
+    pub starvation_gap_ms: AtomicU64,
 }
 
 impl BufferState {
@@ -17,6 +21,7 @@ impl BufferState {
         Self {
             buffer_duration_ms: AtomicU64::new(0),
             producer_active: AtomicBool::new(true),
+            starvation_gap_ms: AtomicU64::new(0),
         }
     }
 }

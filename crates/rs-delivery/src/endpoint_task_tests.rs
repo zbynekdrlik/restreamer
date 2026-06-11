@@ -790,6 +790,13 @@ pub(crate) struct TimedMockFetcher {
     // observe the producer's READ position without a real consumer. Starts at
     // i64::MIN; updated monotonically. ZERO impact when unread.
     max_fetched_id: Arc<AtomicI64>,
+    // Independent ceiling for HEAD probes (chunk_duration_ms / the lag-probe
+    // ladder). `None` (default) → HEAD uses `available_up_to`, identical to
+    // before. `Some(h)` lets the ladder discover the live edge at `h` while
+    // GET stalls at `available_up_to` — modelling "HEAD sees the edge, GET
+    // trails behind it" so a test can pin the producer's read position to
+    // the lag-probe's jump target without it catching up.
+    head_available_up_to: Option<Arc<AtomicI64>>,
 }
 
 impl TimedMockFetcher {
@@ -800,11 +807,30 @@ impl TimedMockFetcher {
             duration_ms_per_chunk: 2000,
             fetch_latency: std::time::Duration::ZERO,
             max_fetched_id: Arc::new(AtomicI64::new(i64::MIN)),
+            head_available_up_to: None,
         }
+    }
+
+    /// Let HEAD probes (the lag-probe ladder) reach `head_edge` while GET
+    /// fetches still stall at `available_up_to`. Models the producer
+    /// discovering the live edge via HEAD but reading behind it. ZERO impact
+    /// on callers that don't set it (HEAD falls back to `available_up_to`).
+    pub(crate) fn with_head_edge(mut self, head_edge: i64) -> Self {
+        self.head_available_up_to = Some(Arc::new(AtomicI64::new(head_edge)));
+        self
     }
 
     pub(crate) fn with_latency(mut self, d: std::time::Duration) -> Self {
         self.fetch_latency = d;
+        self
+    }
+
+    /// Override the per-chunk media duration the fetcher reports (default
+    /// 2000ms). Lets a test pin `typical_chunk_dur_ms` so chunk-count maths
+    /// against the adaptive read-delay are deterministic. ZERO impact on
+    /// callers that don't use it.
+    pub(crate) fn with_chunk_duration(mut self, ms: i64) -> Self {
+        self.duration_ms_per_chunk = ms;
         self
     }
 
@@ -837,7 +863,11 @@ impl ChunkFetcher for TimedMockFetcher {
         if !self.fetch_latency.is_zero() {
             tokio::time::sleep(self.fetch_latency).await;
         }
-        let available = self.available_up_to.load(Ordering::Relaxed);
+        // HEAD ceiling: the dedicated head edge when set, else GET's edge.
+        let available = match &self.head_available_up_to {
+            Some(h) => h.load(Ordering::Relaxed),
+            None => self.available_up_to.load(Ordering::Relaxed),
+        };
         if chunk_id > available {
             return Ok(None);
         }
