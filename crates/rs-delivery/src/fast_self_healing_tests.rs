@@ -633,8 +633,8 @@ mod fast_upload_gap_regression {
 
         {
             let recorded = pushes.lock().unwrap();
-            // RED on current code: with last_chunk_bytes == None the old
-            // keepalive_mode returns Rescue from gap 0 and pushes
+            // RED on pre-fix code: with last_chunk_bytes == None the old
+            // mode logic selected rescue from gap 0 and pushed
             // DEFAULT_RESCUE_FLV repeatedly. Freeze-only forbids any push here.
             assert!(
                 recorded.is_empty(),
