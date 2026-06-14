@@ -49,6 +49,7 @@ pub(crate) enum ProducerFinishedDecision {
 /// exactly. Returns the decision the loop acts on. The actual consumer-drain
 /// timeout and the backoff+respawn (which touch the pinned `consumer` future
 /// and the `spawn_producer` closure) stay inline in `endpoint_loop`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn on_producer_finished(
     alias: &str,
     start_chunk_id: i64,

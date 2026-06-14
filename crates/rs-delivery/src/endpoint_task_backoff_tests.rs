@@ -11,6 +11,8 @@
 use super::super::*;
 use rs_core::models::PusherKind;
 use std::sync::Mutex as StdMutex;
+use async_trait::async_trait;
+use tokio::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
