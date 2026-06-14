@@ -44,7 +44,7 @@ use std::time::Duration;
 // `tokio::time::advance()` under `#[tokio::test(start_paused = true)]`. With
 // `std::time::Instant` the paused-time test `rescue_push_resumes_normal_when_
 // producer_recovers` reads the real wall clock (advances only microseconds),
-// so `continuous_active_secs` never reaches `RESCUE_REFILL_TARGET_SECS` (120)
+// so `continuous_active_ms` never reaches `RESCUE_REFILL_TARGET_SECS` (120)
 // and the loop never exits. Production behaviour is unchanged.
 use tokio::time::Instant;
 
@@ -143,7 +143,7 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     mode: RescuePushMode,
 ) -> bool {
-    let mut continuous_active_secs: u64 = 0;
+    let mut continuous_active_ms: u64 = 0;
     let mut last_check = Instant::now();
 
     loop {
@@ -166,17 +166,22 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                 // rather than the FLV's media duration keeps the exit
                 // condition aligned with the legacy ffmpeg rescue loop
                 // (which polled at 5-second wall-clock intervals).
-                let elapsed = last_check.elapsed().as_secs();
+                // Count elapsed in MILLISECONDS: pushes can be faster than 1s
+                // (the real pusher paces ~1x but a short clip / fast segment can
+                // return sub-second), and `as_secs()` would truncate each such
+                // push to 0 — so the counter would never grow and recovery would
+                // never complete, leaving the endpoint stuck in rescue forever.
+                let elapsed_ms = last_check.elapsed().as_millis() as u64;
                 last_check = Instant::now();
                 let active = buffer_state.producer_active.load(Ordering::Relaxed);
                 if active {
-                    continuous_active_secs =
-                        continuous_active_secs.saturating_add(elapsed);
+                    continuous_active_ms =
+                        continuous_active_ms.saturating_add(elapsed_ms);
                 } else {
-                    continuous_active_secs = 0;
+                    continuous_active_ms = 0;
                 }
                 let eta = RESCUE_REFILL_TARGET_SECS
-                    .saturating_sub(continuous_active_secs);
+                    .saturating_sub(continuous_active_ms / 1000);
 
                 // Review finding #2: only the Outage caller owns these
                 // stats fields. Warmup's probe loop is the canonical
@@ -193,10 +198,10 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                     s.rescue_eta_secs = Some(eta);
                 }
 
-                if continuous_active_secs >= RESCUE_REFILL_TARGET_SECS {
+                if continuous_active_ms >= RESCUE_REFILL_TARGET_SECS.saturating_mul(1000) {
                     tracing::info!(
                         alias,
-                        continuous_active_secs,
+                        continuous_active_ms,
                         "rust_rescue_push: producer active long enough, exiting rescue"
                     );
                     return false;

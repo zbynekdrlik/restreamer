@@ -1,8 +1,8 @@
 use super::super::*;
+use async_trait::async_trait;
 use rs_core::models::PusherKind;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use tokio::sync::Mutex as TokioMutex;
-use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 struct MockFetcher {
