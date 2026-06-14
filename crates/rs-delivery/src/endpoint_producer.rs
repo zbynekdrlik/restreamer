@@ -19,6 +19,15 @@ use crate::endpoint_task::{
 use crate::fast_delay::FastDelayController;
 use crate::producer_lag::maybe_jump as maybe_jump_ahead;
 
+/// #253: consecutive `Err(_)` S3 fetches before the producer signals stalled
+/// (`producer_active=false`). Mirrors the `Ok(None) >= 3` clean-404 logic.
+/// S3 errors back off exponentially (2s, 4s, …), so 3 consecutive errors is
+/// ~6-14s of genuinely failing fetches — long enough to be a real outage
+/// (wedged S3, connection reset) rather than a single transient blip, which
+/// self-heals on the next successful fetch (the success arm resets the
+/// counter and restores `producer_active=true`).
+pub(crate) const MAX_CONSECUTIVE_FETCH_ERRORS: u32 = 3;
+
 /// Producer task: fetches chunks from S3 and sends them into the bounded channel.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn producer_task<F: ChunkFetcher>(
@@ -35,6 +44,15 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
 ) {
     let mut chunk_id = start_chunk_id;
     let mut consecutive_chunk_misses: u32 = 0;
+    // #253: consecutive S3 fetch ERRORS (the `Err(_)` arm). Mirrors
+    // `consecutive_chunk_misses` for the `Ok(None)` arm. When errors persist
+    // past `MAX_CONSECUTIVE_FETCH_ERRORS`, the producer flips
+    // `producer_active=false` so the consumer's `run_outage_rescue` gate
+    // (which is `!producer_active`) opens on an error-shaped drain — not only
+    // on the clean-404 (`Ok(None)`) drain. Pre-#253 the Err arm never touched
+    // `producer_active`, so a wedged-S3 / connection-error outage left the
+    // gate stuck `true` and rescue never fired.
+    let mut consecutive_fetch_errors: u32 = 0;
     let mut s3_backoff_secs: u64 = S3_BACKOFF_BASE_SECS;
     // Issue #173: rate-limited audit-row emitter, owned by this task.
     let mut s3_fetch_audit = crate::endpoint_audit::S3FetchAuditLimiter::new();
@@ -62,6 +80,7 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
         match fetcher.fetch_chunk_with_meta(chunk_id).await {
             Ok(Some((data, duration_ms))) => {
                 consecutive_chunk_misses = 0;
+                consecutive_fetch_errors = 0;
                 s3_backoff_secs = S3_BACKOFF_BASE_SECS;
                 {
                     let mut s = stats.lock().await;
@@ -160,6 +179,9 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
             }
             Ok(None) => {
                 consecutive_chunk_misses += 1;
+                // A clean 404 is not a fetch error — reset the error counter
+                // so an interleaved 404/error pattern doesn't double-count.
+                consecutive_fetch_errors = 0;
 
                 // Chunk gap skip-ahead logic
                 if consecutive_chunk_misses >= MAX_CHUNK_MISS_COUNT {
@@ -262,18 +284,40 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                 }
             }
             Err(e) => {
+                consecutive_fetch_errors += 1;
                 tracing::error!(
                     alias = %alias,
                     chunk_id,
                     backoff_secs = s3_backoff_secs,
+                    consecutive_fetch_errors,
                     "Producer: S3 fetch error, retrying in {s3_backoff_secs}s: {e}"
                 );
                 // Issue #173: emit audit row (rate-limited per error_class).
                 s3_fetch_audit.try_emit(&audit_ring, &alias, chunk_id, &e, s3_backoff_secs);
-                let mut s = stats.lock().await;
-                s.last_error = Some(e);
-                drop(s);
-                tokio::time::sleep(std::time::Duration::from_secs(s3_backoff_secs)).await;
+                {
+                    let mut s = stats.lock().await;
+                    s.last_error = Some(e);
+                }
+                // #253: signal producer stall for rescue-mode detection on an
+                // ERROR-shaped drain (wedged S3, connection reset). The Ok(None)
+                // arm already flips this on >=3 clean 404s; before this fix the
+                // Err arm never touched `producer_active`, so the consumer's
+                // `run_outage_rescue` gate (`!producer_active`) stayed shut and
+                // rescue never fired when the outage manifested as fetch errors
+                // rather than 404s (the 2026-05-30 stream.lan crash class). The
+                // next successful fetch resets the counter and restores
+                // `producer_active=true` (self-heal on transient errors).
+                if consecutive_fetch_errors >= MAX_CONSECUTIVE_FETCH_ERRORS {
+                    buffer_state
+                        .producer_active
+                        .store(false, AtomicOrdering::Relaxed);
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(s3_backoff_secs)) => {}
+                    _ = stop_rx.changed() => {
+                        if *stop_rx.borrow() { break; }
+                    }
+                }
                 s3_backoff_secs = (s3_backoff_secs * 2).min(S3_BACKOFF_MAX_SECS);
             }
         }

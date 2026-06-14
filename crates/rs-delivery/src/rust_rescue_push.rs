@@ -101,6 +101,12 @@ pub async fn rust_rescue_push(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     mode: RescuePushMode,
 ) -> bool {
+    // Production path: dial the real RTMP server. The byte-pushing loop is
+    // factored into `rust_rescue_push_with_pusher` so tests can inject a
+    // recording `Pushable` and prove the rescue clip bytes are actually
+    // pushed without standing up a real RTMP server (#239). This wrapper is
+    // the ONLY place that constructs the concrete `RtmpPusher`, so the
+    // production behaviour is byte-identical to before the extraction.
     let url = build_rtmp_url(service_type, stream_key);
     tracing::info!(
         alias,
@@ -108,8 +114,26 @@ pub async fn rust_rescue_push(
         flv_len = flv_bytes.len(),
         "rust_rescue_push: starting rust rescue loop"
     );
+    let pusher = RtmpPusher::new(url, PusherConfig::default());
+    rust_rescue_push_with_pusher(pusher, alias, flv_bytes, buffer_state, stats, stop_rx, mode).await
+}
 
-    let mut pusher = RtmpPusher::new(url, PusherConfig::default());
+/// Inner rescue push loop, generic over the `Pushable` so tests can inject a
+/// recording mock. `pusher` is already constructed (and, for the real path,
+/// not yet connected — the first `push_flv_bytes` lazy-connects). Returns the
+/// same contract as `rust_rescue_push`: `true` on stop, `false` once the
+/// producer has been active for `RESCUE_REFILL_TARGET_SECS` continuous
+/// wall-seconds (refill complete).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
+    mut pusher: P,
+    alias: &str,
+    flv_bytes: Arc<Vec<u8>>,
+    buffer_state: Arc<BufferState>,
+    stats: Stats,
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    mode: RescuePushMode,
+) -> bool {
     let mut continuous_active_secs: u64 = 0;
     let mut last_check = Instant::now();
 

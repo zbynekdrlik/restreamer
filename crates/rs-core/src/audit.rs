@@ -74,6 +74,13 @@ pub enum Action {
     /// supply recovered. Severity::Info. Detail JSON: {gap_secs} -- how long
     /// the rescue video covered the outage.
     RescueRecovered,
+    /// Delivery VPS respawned an endpoint's producer task after it exited
+    /// (panic / transient consumer-gone) while the consumer was still alive
+    /// and no stop was signalled. The endpoint stays alive (rescue covers the
+    /// gap, the new producer resumes from `resume_from_chunk_id`) instead of
+    /// tearing down. Severity::Warn. Detail JSON: {resume_from_chunk_id,
+    /// respawn}. C3 / #237.
+    ProducerRespawned,
     /// Delivery VPS detected an operator-configured rescue URL that is not
     /// a `.flv` (legacy MP4 / MOV / etc). VPS rejected the URL and fell
     /// back to the embedded default rescue blob. Operator must re-upload

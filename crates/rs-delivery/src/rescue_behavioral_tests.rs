@@ -27,18 +27,22 @@
 //! real sleeps.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::sync::{Mutex, watch};
 
 use rs_core::audit::Action;
 use rs_core::models::PusherKind;
+use rs_rtmp_push::PushError;
 
 use crate::api::EndpointConfig;
 use crate::audit_ring::AuditRing;
 use crate::buffer_state::BufferState;
 use crate::endpoint_stats::{EndpointStats, Stats};
 use crate::endpoint_task::endpoint_loop;
+use crate::pushable::Pushable;
+use crate::rescue_default::DEFAULT_RESCUE_FLV;
 
 use super::tests::MockProcessFactory;
 
@@ -59,10 +63,7 @@ struct DrainingFetcher {
 }
 
 impl crate::endpoint_task::ChunkFetcher for DrainingFetcher {
-    async fn fetch_chunk_with_meta(
-        &self,
-        chunk_id: i64,
-    ) -> Result<Option<(Vec<u8>, i64)>, String> {
+    async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
         if chunk_id <= self.available_up_to {
             return Ok(Some((vec![0u8; 64], self.duration_ms)));
         }
@@ -101,6 +102,155 @@ fn ep_cfg(alias: &str, is_fast: bool, pusher: PusherKind) -> EndpointConfig {
 fn rescue_activated(ring: &Arc<AuditRing>) -> bool {
     let (rows, _) = ring.since(0);
     rows.iter().any(|r| r.action == Action::RescueActivated)
+}
+
+/// Advance virtual time in `count` steps of `step`, yielding between each so
+/// spawned tasks make progress (their internal sleeps fire deterministically).
+async fn advance_in_steps(step: Duration, count: u32) {
+    for _ in 0..count {
+        tokio::time::advance(step).await;
+        tokio::task::yield_now().await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Group A — the shared rescue push loop actually pushes the rescue clip.
+//
+// This is the assertion the source-grep R1 could never make: that real rescue
+// bytes flow on the wire. `rust_rescue_push_with_pusher` is the single loop
+// every endpoint type (fast + non-fast, after #251) funnels through, so
+// proving the bytes here proves them for all of them. A recording `Pushable`
+// captures every payload; the production path constructs the concrete
+// `RtmpPusher` in the (untested-here) thin wrapper. Standing up an in-process
+// RTMP server to observe bytes end-to-end would be >300 LoC of protocol
+// plumbing — the same scope-creep R1/R2/R3 punted to source greps; the
+// injectable `Pushable` seam (#239) is the architecture-clean alternative.
+// ---------------------------------------------------------------------------
+
+/// A recording `Pushable`: captures every pushed payload's exact bytes and
+/// never errors, so any rescue-clip push is observable. Models ~1x self-pacing
+/// (200ms virtual sleep) so it advances virtual time like the real pusher.
+struct RecordingPusher {
+    pushes: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl Pushable for RecordingPusher {
+    async fn push_flv_bytes(&mut self, data: &[u8]) -> Result<(), PushError> {
+        self.pushes.lock().await.push(data.to_vec());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        Ok(())
+    }
+    async fn close(&mut self) {}
+    fn reconnect_count(&self) -> u32 {
+        0
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn rescue_push_actually_pushes_rescue_clip_bytes() {
+    let pushes = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let pusher = RecordingPusher {
+        pushes: pushes.clone(),
+    };
+
+    // Outage: producer stalled, so the refill-exit (120s active) never fires.
+    let buffer_state = Arc::new(BufferState::new());
+    buffer_state.producer_active.store(false, Ordering::Relaxed);
+
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (stop_tx, mut stop_rx) = watch::channel(false);
+
+    let flv = Arc::new(DEFAULT_RESCUE_FLV.to_vec());
+    let stats_task = stats.clone();
+    let bs_task = buffer_state.clone();
+    let task = tokio::spawn(async move {
+        crate::rust_rescue_push::rust_rescue_push_with_pusher(
+            pusher,
+            "rescue-bytes-test",
+            flv,
+            bs_task,
+            stats_task,
+            &mut stop_rx,
+            crate::rust_rescue_push::RescuePushMode::Outage,
+        )
+        .await
+    });
+
+    // Let the loop push several rescue blobs (each ~200ms paced).
+    advance_in_steps(Duration::from_millis(200), 20).await;
+
+    {
+        let recorded = pushes.lock().await;
+        assert!(
+            !recorded.is_empty(),
+            "rescue loop must push the rescue clip during an outage; pushed nothing"
+        );
+        assert!(
+            recorded.iter().all(|p| p.as_slice() == DEFAULT_RESCUE_FLV),
+            "every rescue push must be the DEFAULT_RESCUE_FLV blob (len {}); got lengths {:?}",
+            DEFAULT_RESCUE_FLV.len(),
+            recorded.iter().map(|p| p.len()).collect::<Vec<_>>()
+        );
+    }
+    {
+        let s = stats.lock().await;
+        assert_eq!(
+            s.delivery_mode, "rescue",
+            "delivery_mode must read 'rescue' while the producer is stalled, got {:?}",
+            s.delivery_mode
+        );
+    }
+
+    let _ = stop_tx.send(true);
+    advance_in_steps(Duration::from_millis(50), 4).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn rescue_push_resumes_normal_when_producer_recovers() {
+    // Refill recovery: once the producer is active for RESCUE_REFILL_TARGET_SECS
+    // continuous wall-seconds, the loop exits with `false` (not stop) — the
+    // recovery path that lets normal delivery resume (C3 completes via the
+    // producer respawn that flips producer_active back to true).
+    let pushes = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let pusher = RecordingPusher {
+        pushes: pushes.clone(),
+    };
+
+    let buffer_state = Arc::new(BufferState::new());
+    // Producer ACTIVE from the start (source already back): the loop should
+    // count continuous-active wall-seconds and exit on refill.
+    buffer_state.producer_active.store(true, Ordering::Relaxed);
+
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (_stop_tx, mut stop_rx) = watch::channel(false);
+    let flv = Arc::new(DEFAULT_RESCUE_FLV.to_vec());
+
+    let bs_task = buffer_state.clone();
+    let task = tokio::spawn(async move {
+        crate::rust_rescue_push::rust_rescue_push_with_pusher(
+            pusher,
+            "rescue-recover-test",
+            flv,
+            bs_task,
+            stats,
+            &mut stop_rx,
+            crate::rust_rescue_push::RescuePushMode::Outage,
+        )
+        .await
+    });
+
+    // Advance well past RESCUE_REFILL_TARGET_SECS (120s) of continuous active.
+    advance_in_steps(Duration::from_millis(500), 320).await; // ~160s
+
+    let result = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("rescue loop must exit once the producer has been active long enough")
+        .expect("rescue task panicked");
+    assert!(
+        !result,
+        "rescue loop must return false (refilled, resume normal), not true (stop)"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -52,6 +52,28 @@ pub trait ChunkFetcher: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Option<i64>, String>> + Send;
 }
 
+// Blanket impl so `endpoint_loop` can wrap the incoming fetcher in an `Arc`
+// once and hand a fresh clone to each producer (re)spawn (C3 / #237). The
+// trait's methods all take `&self`, so delegating through the `Arc` is a
+// zero-cost forward. Without this the producer-respawn would need `F: Clone`
+// (which `DiskCacheFetcher` cannot derive — it owns an `AtomicBool` +
+// `RateLimiter`); `Arc<F>` sidesteps that with no behaviour change.
+impl<T: ChunkFetcher> ChunkFetcher for Arc<T> {
+    fn fetch_chunk_with_meta(
+        &self,
+        chunk_id: i64,
+    ) -> impl std::future::Future<Output = Result<Option<(Vec<u8>, i64)>, String>> + Send {
+        (**self).fetch_chunk_with_meta(chunk_id)
+    }
+
+    fn chunk_duration_ms(
+        &self,
+        chunk_id: i64,
+    ) -> impl std::future::Future<Output = Result<Option<i64>, String>> + Send {
+        (**self).chunk_duration_ms(chunk_id)
+    }
+}
+
 /// Trait for output process (ffmpeg or mock).
 /// Uses async_trait for object safety (Box<dyn OutputProcess>).
 #[async_trait]
@@ -470,12 +492,13 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_secs(crate::fast_keepalive::FAST_KEEPALIVE_TRIGGER_SECS)) => {
                     // Producer gap exceeded the fast trigger. Feed the existing
-                    // session with keepalive frames until a real chunk arrives.
-                    // The `if let` borrow of `rust_pusher` is scoped to this
-                    // arm: it ends when the arm produces the owned chunk value,
-                    // BEFORE the write section below re-borrows `rust_pusher`.
-                    if let Some(ref mut pusher) = rust_pusher {
-                        match keepalive_until_chunk(
+                    // session with keepalive frames until a real chunk arrives
+                    // OR the gap becomes a sustained outage (escalate to rescue).
+                    // The keepalive's borrow of `rust_pusher` is scoped to the
+                    // inner block so it ends BEFORE the EscalateToRescue arm
+                    // re-borrows `rust_pusher` for `run_outage_rescue`.
+                    let outcome = if let Some(ref mut pusher) = rust_pusher {
+                        keepalive_until_chunk(
                             pusher,
                             &mut rx,
                             &last_chunk_bytes,
@@ -486,19 +509,61 @@ async fn consumer_task<P: OutputProcessFactory>(
                             &buffer_state,
                         )
                         .await
-                        {
-                            Some(c) => {
-                                // SAME buffer bookkeeping as the Some(c) arm.
-                                let dur = c.duration_ms.max(0) as u64;
-                                let current = buffer_state.buffer_duration_ms.load(AtomicOrdering::Relaxed);
-                                buffer_state.buffer_duration_ms.store(current.saturating_sub(dur), AtomicOrdering::Relaxed);
-                                last_delivered_chunk_id = c.chunk_id;
-                                c
-                            }
-                            None => break,
-                        }
                     } else {
                         continue;
+                    };
+                    match outcome {
+                        KeepaliveOutcome::Chunk(c) => {
+                            // SAME buffer bookkeeping as the Some(c) arm.
+                            let dur = c.duration_ms.max(0) as u64;
+                            let current = buffer_state.buffer_duration_ms.load(AtomicOrdering::Relaxed);
+                            buffer_state.buffer_duration_ms.store(current.saturating_sub(dur), AtomicOrdering::Relaxed);
+                            last_delivered_chunk_id = c.chunk_id;
+                            c
+                        }
+                        KeepaliveOutcome::Stop => break,
+                        KeepaliveOutcome::EscalateToRescue => {
+                            // C1 (#251): sustained outage on a fast endpoint.
+                            // Keepalive could not hold the live session (frozen
+                            // or dark) — switch to the SAME fresh-session
+                            // rescue the non-fast 8s arm uses. NEVER spliced
+                            // into the live session (that is the #249 green-
+                            // video corruption); run_outage_rescue drops the
+                            // existing rust_pusher and reconnects FRESH for the
+                            // rescue clip, then reconstructs the pusher on
+                            // recovery so the fast low-latency path resumes.
+                            let svc_type: rs_ffmpeg::ServiceType = ep_cfg
+                                .service_type
+                                .parse()
+                                .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
+                            let outcome = crate::rescue::run_outage_rescue(
+                                &alias,
+                                rescue_video_url.as_deref(),
+                                svc_type,
+                                &ep_cfg.stream_key,
+                                &buffer_state,
+                                &stats,
+                                &mut stop_rx,
+                                &audit_ring,
+                                last_delivered_chunk_id,
+                                &mut proc,
+                                &mut rust_pusher,
+                                use_rust_pusher,
+                            )
+                            .await;
+                            match outcome {
+                                crate::rescue::OutageRescueOutcome::Stop => return,
+                                crate::rescue::OutageRescueOutcome::Recovered => {
+                                    flv_normalizer = FlvStreamNormalizer::new();
+                                    // The last-delivered chunk is from BEFORE the
+                                    // rescue gap; clear it so the post-rescue
+                                    // session never re-pushes a stale freeze on
+                                    // top of the fresh session.
+                                    last_chunk_bytes = None;
+                                }
+                            }
+                            continue;
+                        }
                     }
                 }
                 _ = stop_rx.changed() => {
@@ -778,10 +843,36 @@ async fn consumer_task<P: OutputProcessFactory>(
     tracing::info!(alias = %alias, "Consumer task stopped");
 }
 
+/// Outcome of a fast-endpoint keepalive window (`keepalive_until_chunk`).
+///
+/// Before #251 the keepalive only distinguished "a chunk arrived" (`Some`)
+/// from "stop / channel closed" (`None`). On a SUSTAINED outage (producer
+/// stalled, `producer_active==false`) the freeze-only keepalive would push a
+/// frozen frame forever — or push NOTHING (dark) when no chunk had been
+/// delivered yet. C1 (#251) adds escalation: once the gap exceeds
+/// `RESCUE_STALL_THRESHOLD_SECS` AND the producer has signalled stalled, the
+/// keepalive returns `EscalateToRescue` so the fast consumer enters the SAME
+/// `run_outage_rescue` (fresh RTMP session + rescue clip) the non-fast path
+/// uses. Short gaps and trickle jitter (`producer_active==true`) NEVER
+/// escalate — they stay freeze-only, preserving the #249 codec-homogeneity
+/// guarantee (rescue clip on a live session = green video).
+pub(crate) enum KeepaliveOutcome {
+    /// A real chunk arrived — resume normal/fast delivery with it.
+    Chunk(PrefetchedChunk),
+    /// Stop signal fired (or the channel closed) — consumer should break.
+    Stop,
+    /// Sustained outage detected (gap >= threshold AND producer stalled) —
+    /// consumer should escalate to `run_outage_rescue` on a fresh session.
+    EscalateToRescue,
+}
+
 /// Keep the existing rust session alive during a fast-endpoint producer gap.
-/// Returns the next real chunk when one arrives, or `None` on stop/closed
-/// channel. NEVER closes the connection on starvation — a push error just
-/// backs off briefly and the pusher lazy-reconnects on the next push.
+/// Returns `KeepaliveOutcome::Chunk` when a real chunk arrives,
+/// `KeepaliveOutcome::Stop` on stop/closed channel, or
+/// `KeepaliveOutcome::EscalateToRescue` when the gap becomes a SUSTAINED
+/// outage (gap >= `RESCUE_STALL_THRESHOLD_SECS` AND `producer_active==false`)
+/// — see C1 (#251). NEVER closes the connection on starvation — a push error
+/// just backs off briefly and the pusher lazy-reconnects on the next push.
 ///
 /// FREEZE-ONLY: a keepalive tick may push ONLY the last delivered chunk
 /// (same codec as the live stream). It must NEVER push the rescue clip —
@@ -791,11 +882,21 @@ async fn consumer_task<P: OutputProcessFactory>(
 /// streampp KS-PP-TEST). If no chunk has been delivered yet there is
 /// nothing codec-safe to push: this function just WAITS for the first
 /// chunk (no pushes), identical to the pre-keepalive behaviour at session
-/// start.
+/// start. On a sustained outage the keepalive does NOT splice rescue into
+/// the live session — it returns `EscalateToRescue` so the caller drops the
+/// session and reconnects FRESH for the rescue clip (the #249-safe path).
+///
+/// Escalation is gated on `producer_active==false`: short gaps and trickle
+/// jitter (chunks arriving late but the producer still alive) keep
+/// `producer_active==true` and stay freeze-only forever, no matter how long.
+/// Only a genuine producer stall (the producer signalled `false` after >=3
+/// 404s or >=3 fetch errors) escalates.
 ///
 /// Sets `stats.delivery_mode = "rescue"` on entry and resets it to
-/// `"normal"` on both exit paths so the dashboard correctly reflects the
-/// keepalive gap instead of showing stale `"normal"` state.
+/// `"normal"` on the chunk/stop exit paths so the dashboard correctly
+/// reflects the keepalive gap instead of showing stale `"normal"` state.
+/// On `EscalateToRescue` it leaves `delivery_mode = "rescue"` because
+/// `run_outage_rescue` owns it from there.
 #[allow(clippy::too_many_arguments)]
 async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     pusher: &mut P,
@@ -806,7 +907,7 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     stats: &Stats,
     buffer_state: &std::sync::Arc<crate::buffer_state::BufferState>,
-) -> Option<PrefetchedChunk> {
+) -> KeepaliveOutcome {
     // ONLY codec-homogeneous bytes (the last real chunk). `None` => no chunk
     // delivered yet => pure-wait, never push. Borrows `last_chunk_bytes` (an
     // immutable `&` param) for the whole fn; nothing mutates it here.
@@ -828,20 +929,46 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
         let mut s = stats.lock().await;
         s.delivery_mode = "rescue".to_string();
     }
+    // C1 (#251): is this gap now a SUSTAINED outage that must escalate to a
+    // fresh-session rescue? Gated on `producer_active==false` so trickle
+    // jitter (producer alive) stays freeze-only forever (#249 protection).
+    let should_escalate = |bs: &std::sync::Arc<crate::buffer_state::BufferState>| -> bool {
+        started.elapsed()
+            >= std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS)
+            && !bs.producer_active.load(AtomicOrdering::Relaxed)
+    };
+    // Periodic re-check tick for the escalation gate. Far below the 8s
+    // threshold so escalation fires within ~1s of the threshold being
+    // crossed, and short enough that the `wait`-mode (no freeze) branch
+    // still observes the outage promptly. Uses `tokio::time::sleep` so it
+    // advances under `start_paused`.
+    const ESCALATION_POLL: std::time::Duration = std::time::Duration::from_secs(1);
     // Shared exit bookkeeping. `resume` => record the TRUE gap for the
     // producer's adaptive controller and return the chunk; otherwise (stop) =>
-    // return None. Both emit keepalive-ended and reset delivery_mode.
+    // return Stop. Both emit keepalive-ended and reset delivery_mode.
+    // `escalate` => leave delivery_mode "rescue" (run_outage_rescue owns it).
     macro_rules! finish {
         (resume $maybe:expr) => {{
-            consumer_helpers::record_starvation_gap(buffer_state, started);
-            finish!(@end);
-            return $maybe;
+            match $maybe {
+                Some(c) => {
+                    consumer_helpers::record_starvation_gap(buffer_state, started);
+                    finish!(@end_normal);
+                    return KeepaliveOutcome::Chunk(c);
+                }
+                // Channel closed with no chunk: treat as stop (caller breaks).
+                None => { finish!(@end_normal); return KeepaliveOutcome::Stop; }
+            }
         }};
         (stop) => {{
-            finish!(@end);
-            return None;
+            finish!(@end_normal);
+            return KeepaliveOutcome::Stop;
         }};
-        (@end) => {{
+        (escalate) => {{
+            crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
+            tracing::warn!(alias = %alias, "keepalive: sustained outage (producer stalled past threshold); escalating to fresh-session rescue");
+            return KeepaliveOutcome::EscalateToRescue;
+        }};
+        (@end_normal) => {{
             crate::fast_delay_audit::emit_keepalive_ended(audit_ring, alias, started.elapsed().as_secs());
             let mut s = stats.lock().await;
             s.delivery_mode = "normal".to_string();
@@ -849,6 +976,9 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     }
     match freeze {
         Some(bytes) => loop {
+            if should_escalate(buffer_state) {
+                finish!(escalate);
+            }
             tokio::select! {
                 maybe = rx.recv() => finish!(resume maybe),
                 res = pusher.push_flv_bytes(bytes) => {
@@ -858,14 +988,25 @@ async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
                     }
                     // push_flv_bytes self-paces ~1x; loop to push the next tick.
                 }
+                _ = tokio::time::sleep(ESCALATION_POLL) => {
+                    // Re-evaluate the escalation gate at the top of the loop.
+                }
                 _ = stop_rx.changed() => { if *stop_rx.borrow() { finish!(stop); } }
             }
         },
         // No chunk delivered yet: nothing codec-safe to push. Pure wait for the
-        // first real chunk (or stop) — no push arm, so no codec-foreign bytes.
+        // first real chunk (or stop), with the same outage-escalation gate so a
+        // session that starves BEFORE its first chunk still reaches rescue
+        // instead of going dark forever — no push arm, so no codec-foreign bytes.
         None => loop {
+            if should_escalate(buffer_state) {
+                finish!(escalate);
+            }
             tokio::select! {
                 maybe = rx.recv() => finish!(resume maybe),
+                _ = tokio::time::sleep(ESCALATION_POLL) => {
+                    // Re-evaluate the escalation gate at the top of the loop.
+                }
                 _ = stop_rx.changed() => { if *stop_rx.borrow() { finish!(stop); } }
             }
         },
@@ -914,28 +1055,52 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
 
     tracing::info!(alias = %alias, "Starting producer-consumer pipeline");
 
-    // Create bounded channel for pre-fetch buffer
+    // C3 (#237): wrap the fetcher in an `Arc` so each producer (re)spawn gets
+    // a fresh clone of the SAME fetcher without requiring `F: Clone`.
+    let fetcher = Arc::new(fetcher);
+
+    // Create bounded channel for pre-fetch buffer. `tx` is held HERE in the
+    // endpoint_loop scope for the channel's whole lifetime (the producer tasks
+    // get CLONES via the spawn closure): it keeps the channel OPEN even when
+    // the active producer task exits (panic / finish), so the consumer never
+    // sees a spurious `recv() == None` (which would tear the endpoint down).
+    // Instead the consumer's keepalive / 8s-rescue arms cover the gap while
+    // `endpoint_loop` respawns the producer. Only a real stop signal or
+    // consumer exit ends the endpoint. (#237)
     let (tx, rx) = mpsc::channel::<PrefetchedChunk>(PREFETCH_BUFFER_SIZE);
 
-    let producer_stop = stop_rx.clone();
-    let producer_stats = stats.clone();
-    let producer_alias = alias.clone();
-    let producer_buffer_state = buffer_state.clone();
-    let producer_audit_ring = audit_ring.clone();
     // `is_fast` is Copy — read it before `ep_cfg` is moved into consumer_task.
     let producer_is_fast = ep_cfg.is_fast;
-    let producer = tokio::spawn(crate::endpoint_producer::producer_task(
-        fetcher,
-        tx,
-        start_chunk_id,
-        delivery_delay_ms,
-        producer_is_fast,
-        producer_stop,
-        producer_stats,
-        producer_alias,
-        producer_buffer_state,
-        producer_audit_ring,
-    ));
+
+    // Spawn a producer task starting at `from_chunk_id`. The closure OWNS its
+    // own clones of every shared handle (moved in below) and re-clones them on
+    // each call, so it never borrows the outer `stop_rx` / `stats` /
+    // `buffer_state` / … — leaving those free for the select-loop, which needs
+    // `&mut stop_rx` for `stop_rx.changed()` and `&` everything else. Without
+    // the dedicated owned clones the `Fn` closure's immutable borrow of
+    // `stop_rx` would conflict with the loop's mutable `changed()` call.
+    let p_fetcher = fetcher.clone();
+    let p_tx = tx.clone();
+    let p_stop = stop_rx.clone();
+    let p_stats = stats.clone();
+    let p_alias = alias.clone();
+    let p_buffer_state = buffer_state.clone();
+    let p_audit_ring = audit_ring.clone();
+    let spawn_producer = move |from_chunk_id: i64| {
+        tokio::spawn(crate::endpoint_producer::producer_task(
+            p_fetcher.clone(),
+            p_tx.clone(),
+            from_chunk_id,
+            delivery_delay_ms,
+            producer_is_fast,
+            p_stop.clone(),
+            p_stats.clone(),
+            p_alias.clone(),
+            p_buffer_state.clone(),
+            p_audit_ring.clone(),
+        ))
+    };
+    let mut producer = spawn_producer(start_chunk_id);
 
     let consumer_stop = stop_rx.clone();
     let consumer_stats = stats.clone();
@@ -947,15 +1112,25 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
         consumer_stop,
         consumer_stats,
         rescue_video_url,
-        buffer_state,
-        audit_ring,
+        buffer_state.clone(),
+        audit_ring.clone(),
     ));
 
     // Wait for either task to finish or stop signal.
     // Both producer and consumer already listen for stop_rx internally,
     // but we also watch here for cleanup coordination.
-    tokio::pin!(producer);
     tokio::pin!(consumer);
+
+    // C3 (#237) producer-respawn budget. Each respawn waits
+    // PRODUCER_RESPAWN_BACKOFF so a producer that keeps dying immediately
+    // (e.g. a poisoned fetcher) can't hot-loop. After MAX_PRODUCER_RESPAWNS
+    // the endpoint gives up and drains/tears down (the orchestrator restarts
+    // it from scratch). A producer that survives a healthy stretch resets the
+    // budget so a long event with several brief source losses isn't capped.
+    const MAX_PRODUCER_RESPAWNS: u32 = 1000;
+    const PRODUCER_RESPAWN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+    let mut respawns: u32 = 0;
+    let mut last_respawn_at = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -963,13 +1138,91 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
                 if let Err(e) = result {
                     tracing::error!(alias = %alias, "Producer panicked: {e}");
                 }
-                tracing::info!(alias = %alias, "Producer finished, waiting for consumer to drain");
-                // Consumer will stop when channel is drained (recv returns None)
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    &mut consumer,
-                ).await;
-                break;
+                // Stop requested? Then this is an ordinary shutdown — drain the
+                // consumer and break (unchanged teardown path).
+                if *stop_rx.borrow() {
+                    tracing::info!(alias = %alias, "Producer finished on stop; waiting for consumer to drain");
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        &mut consumer,
+                    ).await;
+                    break;
+                }
+
+                // Consumer already gone? Nothing to keep alive — break.
+                if consumer.is_finished() {
+                    tracing::info!(alias = %alias, "Producer finished and consumer already gone; tearing down");
+                    break;
+                }
+
+                // C3 (#237): producer exited while the consumer is still alive
+                // and no stop was signalled (producer panic, or it broke on a
+                // transient consumer-gone false positive). Signal the producer
+                // stall so the consumer's rescue gate opens (keeps a watchable
+                // preview during the gap), then RESPAWN the producer from the
+                // last delivered chunk + 1 so a returning source refills the
+                // buffer and rescue's 120s recovery can complete. The channel
+                // stays open via `tx_keepalive`, so the consumer never saw a
+                // spurious recv-None.
+                buffer_state.producer_active.store(false, AtomicOrdering::Relaxed);
+
+                if respawns >= MAX_PRODUCER_RESPAWNS {
+                    tracing::error!(
+                        alias = %alias,
+                        respawns,
+                        "Producer respawn budget exhausted; tearing down endpoint for orchestrator restart"
+                    );
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        &mut consumer,
+                    ).await;
+                    break;
+                }
+
+                // Reset the budget if the previous producer ran for a healthy
+                // stretch (a brief source loss during a long event must not
+                // accumulate toward the cap).
+                if last_respawn_at.elapsed() >= std::time::Duration::from_secs(60) {
+                    respawns = 0;
+                }
+                respawns += 1;
+                last_respawn_at = tokio::time::Instant::now();
+
+                // Resume from one past the last chunk the consumer delivered.
+                let resume_from = {
+                    let s = stats.lock().await;
+                    s.current_chunk_id.max(start_chunk_id - 1) + 1
+                };
+                if let Some(ring) = &audit_ring {
+                    ring.push_parts(crate::audit_ring::RingRowParts {
+                        severity: rs_core::audit::Severity::Warn,
+                        source: rs_core::audit::Source::Vps,
+                        endpoint: Some(alias.clone()),
+                        action: rs_core::audit::Action::ProducerRespawned,
+                        detail: serde_json::json!({
+                            "resume_from_chunk_id": resume_from,
+                            "respawn": respawns,
+                        }),
+                    });
+                }
+                tracing::warn!(
+                    alias = %alias,
+                    resume_from,
+                    respawn = respawns,
+                    "Producer finished while consumer alive; respawning after backoff"
+                );
+                // Backoff, but stay responsive to stop.
+                tokio::select! {
+                    _ = tokio::time::sleep(PRODUCER_RESPAWN_BACKOFF) => {}
+                    _ = stop_rx.changed() => {
+                        if *stop_rx.borrow() {
+                            tracing::info!(alias = %alias, "Stop during respawn backoff; tearing down");
+                            consumer.abort();
+                            break;
+                        }
+                    }
+                }
+                producer = spawn_producer(resume_from);
             }
             result = &mut consumer => {
                 if let Err(e) = result {
@@ -990,6 +1243,10 @@ pub async fn endpoint_loop<F: ChunkFetcher + 'static, P: OutputProcessFactory + 
         }
     }
 
+    // `tx` (the endpoint_loop-scoped keepalive sender) and the spawn closure's
+    // `p_tx` drop here as the function returns, closing the channel once the
+    // active producer is gone — lets any lingering consumer drain on teardown.
+    drop(tx);
     tracing::info!(alias = %alias, "Endpoint pipeline stopped");
 }
 
