@@ -37,7 +37,16 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// `tokio::time::Instant` (NOT `std::time::Instant`) so the refill counter's
+// `last_check.elapsed()` shares the loop's `tokio::time::sleep` / pusher
+// time source: identical to the real clock in prod, but it honors
+// `tokio::time::advance()` under `#[tokio::test(start_paused = true)]`. With
+// `std::time::Instant` the paused-time test `rescue_push_resumes_normal_when_
+// producer_recovers` reads the real wall clock (advances only microseconds),
+// so `continuous_active_secs` never reaches `RESCUE_REFILL_TARGET_SECS` (120)
+// and the loop never exits. Production behaviour is unchanged.
+use tokio::time::Instant;
 
 use rs_ffmpeg::ServiceType;
 use rs_rtmp_push::{PusherConfig, RtmpPusher};
