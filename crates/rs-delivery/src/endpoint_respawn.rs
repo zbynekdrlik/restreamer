@@ -41,7 +41,8 @@ pub(crate) enum ProducerFinishedDecision {
 /// - signal the producer stall so the consumer's rescue gate opens (keeps a
 ///   watchable preview during the gap),
 /// - apply the respawn budget (reset after a healthy stretch, then increment),
-/// - compute the resume chunk id (one past the last delivered chunk),
+/// - compute the resume chunk id (one past the highest delivered-OR-queued
+///   chunk, so already-queued chunks are never re-fetched — FIX 1/FIX 3),
 /// - emit the `ProducerRespawned` audit row.
 ///
 /// Mutates the caller's `respawns` / `last_respawn_at` budget counters in
@@ -63,13 +64,26 @@ pub(crate) async fn on_producer_finished(
     // was signalled (producer panic, or it broke on a transient consumer-gone
     // false positive). Signal the producer stall so the consumer's rescue gate
     // opens (keeps a watchable preview during the gap), then RESPAWN the
-    // producer from the last delivered chunk + 1 so a returning source refills
-    // the buffer and rescue's 120s recovery can complete. The channel stays
-    // open via the endpoint_loop-scoped `tx`, so the consumer never saw a
-    // spurious recv-None.
+    // producer from one past the highest chunk that is either DELIVERED or
+    // already QUEUED in the still-open channel (see the resume computation
+    // below — FIX 1/FIX 3) so a returning source refills the buffer without
+    // re-fetching queued chunks and rescue's 120s recovery can complete. The
+    // channel stays open via the endpoint_loop-scoped `tx`, so the consumer
+    // never saw a spurious recv-None.
     buffer_state
         .producer_active
         .store(false, AtomicOrdering::Relaxed);
+
+    // FIX 2 (#237): reset the budget FIRST, then test it. The previous order
+    // tested `respawns >= MAX` BEFORE the 60s healthy-stretch reset, so a death
+    // that arrives after a long healthy run (which SHOULD reset the budget to 0)
+    // could tear the endpoint down instead. Resetting first means a producer
+    // that survived a healthy stretch always gets a fresh budget — matching the
+    // documented intent in this file's header comment ("A producer that
+    // survives a healthy stretch resets the budget").
+    if last_respawn_at.elapsed() >= std::time::Duration::from_secs(60) {
+        *respawns = 0;
+    }
 
     if *respawns >= MAX_PRODUCER_RESPAWNS {
         tracing::error!(
@@ -80,19 +94,38 @@ pub(crate) async fn on_producer_finished(
         return ProducerFinishedDecision::TearDownBudgetExhausted;
     }
 
-    // Reset the budget if the previous producer ran for a healthy stretch (a
-    // brief source loss during a long event must not accumulate toward the
-    // cap).
-    if last_respawn_at.elapsed() >= std::time::Duration::from_secs(60) {
-        *respawns = 0;
-    }
     *respawns += 1;
     *last_respawn_at = tokio::time::Instant::now();
 
-    // Resume from one past the last chunk the consumer delivered.
+    // Resume chunk id (FIX 1 + FIX 3, #237):
+    //
+    // FIX 3 — first-death off-by-one. `current_chunk_id` is seeded to
+    // `start_chunk_id` at endpoint init (`initial_endpoint_stats`), so it cannot
+    // by itself distinguish "delivered up to start_chunk_id" from "nothing
+    // delivered yet". `chunks_processed` (0 until the first successful delivery)
+    // is the gate: with nothing delivered, treat last-delivered as
+    // `start_chunk_id - 1` so `resume_from` lands exactly on `start_chunk_id`
+    // (the old `+ 1` math skipped `start_chunk_id` itself; the `max(start - 1)`
+    // clamp was dead because the seed already made `current_chunk_id >=
+    // start - 1`).
+    //
+    // FIX 1 — duplicate chunks. Up to `PREFETCH_BUFFER_SIZE` chunks may already
+    // be `tx.send()`'d into the still-open channel but not yet delivered;
+    // resuming from last-delivered + 1 would re-fetch those queued chunks and
+    // the consumer would deliver them twice (live judder). Resume past the
+    // highest SENT id as well (`highest_sent_chunk_id`, -1 when nothing sent).
     let resume_from = {
         let s = stats.lock().await;
-        s.current_chunk_id.max(start_chunk_id - 1) + 1
+        let delivered = if s.chunks_processed == 0 {
+            start_chunk_id - 1
+        } else {
+            s.current_chunk_id
+        };
+        drop(s);
+        let queued = buffer_state
+            .highest_sent_chunk_id
+            .load(AtomicOrdering::Relaxed);
+        delivered.max(queued) + 1
     };
     if let Some(ring) = audit_ring {
         ring.push_parts(crate::audit_ring::RingRowParts {

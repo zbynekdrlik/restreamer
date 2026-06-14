@@ -1,6 +1,6 @@
 //! Shared state types between producer and consumer tasks, plus pure
 //! helpers for delivery mode decisions.
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 
 /// Shared buffer state between producer and consumer for rescue mode.
 pub struct BufferState {
@@ -14,6 +14,16 @@ pub struct BufferState {
     /// the producer last consumed it. Written with fetch_max on keepalive end,
     /// swapped to 0 by the producer, which grows the adaptive read-delay by it.
     pub starvation_gap_ms: AtomicU64,
+    /// Highest chunk_id the producer has successfully `tx.send()`'d into the
+    /// prefetch channel (C3 #237 FIX 1). Updated with `fetch_max` right after a
+    /// successful send. On a producer respawn the channel is still open and
+    /// holds up to `PREFETCH_BUFFER_SIZE` already-queued-but-not-yet-delivered
+    /// chunks; resuming from `current_chunk_id + 1` (last DELIVERED) would
+    /// re-fetch those queued chunks and the consumer would deliver them twice
+    /// (live judder). The respawn resume point takes the MAX of last-delivered
+    /// and this value so queued chunks are never re-fetched. Init to -1 so the
+    /// "nothing sent yet" case clamps correctly (see endpoint_respawn FIX 3).
+    pub highest_sent_chunk_id: AtomicI64,
 }
 
 impl BufferState {
@@ -22,6 +32,7 @@ impl BufferState {
             buffer_duration_ms: AtomicU64::new(0),
             producer_active: AtomicBool::new(true),
             starvation_gap_ms: AtomicU64::new(0),
+            highest_sent_chunk_id: AtomicI64::new(-1),
         }
     }
 }

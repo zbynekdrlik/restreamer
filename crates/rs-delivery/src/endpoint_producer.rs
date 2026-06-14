@@ -110,10 +110,20 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
 
                 // Send into channel; blocks if buffer full (backpressure).
                 // If receiver is dropped (consumer gone), stop.
+                //
+                // C3 (#237) FIX 1: capture the id BEFORE the `chunk` move so we
+                // can record the highest-SENT chunk after the send succeeds. The
+                // respawn resume computation (endpoint_respawn) uses this to
+                // avoid re-fetching chunks already queued in the still-open
+                // channel — which would otherwise be delivered twice.
+                let sent_id = chunk.chunk_id;
                 if tx.send(chunk).await.is_err() {
                     tracing::info!(alias = %alias, "Producer: consumer gone, stopping");
                     break;
                 }
+                buffer_state
+                    .highest_sent_chunk_id
+                    .fetch_max(sent_id, AtomicOrdering::Relaxed);
 
                 chunk_id += 1;
                 // EWMA + [500,5000]ms clamp guards against outlier duration_ms.
