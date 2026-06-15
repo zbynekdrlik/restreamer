@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use rs_rtmp_push::{PushError, RtmpPusher, backoff_floor_ms, is_exponential};
+use rs_rtmp_push::{PushError, backoff_floor_ms, is_exponential};
 use tokio::sync::watch;
 
 use super::{
@@ -39,37 +39,16 @@ pub(super) enum RustPushAction {
     Break,
 }
 
-/// Minimal interface `handle_rust_push` needs from a pusher. Extracted
-/// as a trait so unit tests can substitute a mock that records calls
-/// (e.g. asserts that `close()` is invoked on the Err arm). The real
-/// `rs_rtmp_push::RtmpPusher` impl is below.
+/// Minimal interface `handle_rust_push` needs from a pusher. Hoisted to
+/// `crate::pushable` (#239) so the rescue push loop (`rust_rescue_push`,
+/// outside the `endpoint_task` tree) can share it and accept a recording
+/// mock. Re-exported here so the consumer path and its tests keep reaching
+/// it via `endpoint_task::consumer_helpers::Pushable`.
 ///
 /// **Module path:** `endpoint_task::consumer_helpers::Pushable`. Tests
 /// reach it via `super::super::super::consumer_helpers::Pushable` from
-/// inside `endpoint_task_rust_push_tests::close_on_error`. If you ever
-/// move this trait, update the test imports.
-pub(super) trait Pushable {
-    fn push_flv_bytes(
-        &mut self,
-        data: &[u8],
-    ) -> impl std::future::Future<Output = Result<(), PushError>> + Send;
-    fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
-    fn reconnect_count(&self) -> u32;
-}
-
-impl Pushable for RtmpPusher {
-    async fn push_flv_bytes(&mut self, data: &[u8]) -> Result<(), PushError> {
-        RtmpPusher::push_flv_bytes(self, data).await
-    }
-
-    async fn close(&mut self) {
-        RtmpPusher::close(self).await
-    }
-
-    fn reconnect_count(&self) -> u32 {
-        RtmpPusher::reconnect_count(self)
-    }
-}
+/// inside `endpoint_task_rust_push_tests::close_on_error`.
+pub(crate) use crate::pushable::Pushable;
 
 /// Handle one Rust RTMP pusher write call (success or error path).
 /// Extracted from `consumer_task` to keep that function under 1000 lines.

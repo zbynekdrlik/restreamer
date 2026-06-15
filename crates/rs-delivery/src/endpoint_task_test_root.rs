@@ -8,6 +8,8 @@ mod backoff_tests;
 mod fast_self_healing_tests;
 #[path = "endpoint_task_flv_tests.rs"]
 mod flv_tests;
+#[path = "rescue_behavioral_tests.rs"]
+mod rescue_behavioral_tests;
 #[path = "endpoint_task_rescue_tests.rs"]
 mod rescue_tests;
 #[path = "endpoint_task_rust_push_tests.rs"]

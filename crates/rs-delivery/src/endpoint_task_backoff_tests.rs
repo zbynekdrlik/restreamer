@@ -9,10 +9,12 @@
 //! 524 restarts in a 9.5h overnight test.
 
 use super::super::*;
+use async_trait::async_trait;
 use rs_core::models::PusherKind;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::sync::Mutex as TokioMutex;
 
 // Minimal duplicated test helpers (kept small for the file-size budget).

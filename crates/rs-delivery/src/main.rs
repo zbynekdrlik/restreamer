@@ -20,6 +20,9 @@ mod disk_cache_push_sample;
 pub mod endpoint_audit;
 mod endpoint_ffmpeg_impl;
 pub(crate) mod endpoint_producer;
+// Producer-respawn decision helper (C3 #237) extracted from `endpoint_task`'s
+// `endpoint_loop` so that file stays under the 1000-line CI cap.
+pub(crate) mod endpoint_respawn;
 pub(crate) mod endpoint_rtmp_url;
 pub mod endpoint_stats;
 pub mod endpoint_task;
@@ -28,6 +31,7 @@ mod fast_delay_audit;
 mod fast_keepalive;
 mod ffmpeg_reason;
 mod producer_lag;
+pub(crate) mod pushable;
 pub mod rescue;
 pub mod rescue_audit;
 pub mod rescue_default;

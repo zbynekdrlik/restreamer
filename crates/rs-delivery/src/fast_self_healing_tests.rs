@@ -397,7 +397,7 @@ mod fast_upload_gap_regression {
     // fast_upload_gap_regression, so:
     //   super (fast_self_healing_tests) -> super (test_root) -> super (endpoint_task)
     use super::super::super::consumer_helpers::Pushable;
-    use super::super::super::keepalive_until_chunk;
+    use super::super::super::{KeepaliveOutcome, keepalive_until_chunk};
 
     use crate::endpoint_task::PrefetchedChunk;
     use crate::rescue_default::DEFAULT_RESCUE_FLV;
@@ -558,7 +558,13 @@ mod fast_upload_gap_regression {
         advance_in_steps(Duration::from_millis(50), 4).await;
 
         let returned = task.await.expect("keepalive task panicked");
-        let chunk = returned.expect("keepalive must return the resumed real chunk, got None");
+        let chunk = match returned {
+            KeepaliveOutcome::Chunk(c) => c,
+            KeepaliveOutcome::Stop => panic!("keepalive returned Stop, expected resumed chunk"),
+            KeepaliveOutcome::EscalateToRescue => panic!(
+                "keepalive must NOT escalate while producer_active=true (trickle jitter must stay freeze-only)"
+            ),
+        };
         assert_eq!(
             chunk.chunk_id, 99,
             "keepalive must resume the real chunk (id 99) once one arrives"
@@ -654,7 +660,13 @@ mod fast_upload_gap_regression {
         advance_in_steps(Duration::from_millis(50), 4).await;
 
         let returned = task.await.expect("keepalive task panicked");
-        let chunk = returned.expect("keepalive must return the first real chunk, got None");
+        let chunk = match returned {
+            KeepaliveOutcome::Chunk(c) => c,
+            KeepaliveOutcome::Stop => panic!("keepalive returned Stop, expected first chunk"),
+            KeepaliveOutcome::EscalateToRescue => panic!(
+                "keepalive must NOT escalate while producer_active=true (no-first-chunk wait must stay pure-wait)"
+            ),
+        };
         assert_eq!(
             chunk.chunk_id, 7,
             "keepalive must return the first real chunk (id 7) once one arrives"
