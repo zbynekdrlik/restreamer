@@ -384,12 +384,21 @@ async fn chunk_duration_tracks_video_wall_span_not_audio_xiu_ts() {
     );
 }
 
-/// Audio FLV tags must still carry the xiu RTMP timestamp in the FLV
-/// byte stream (PR #142 chipmunk fix preserved). This is the user-facing
-/// guarantee -- chunk_last_ts is an internal accounting variable that
-/// MUST NOT be confused with what gets written into the audio tag.
+/// Audio FLV tags carry the xiu RTMP timestamp DELTAS (chipmunk fix #142
+/// preserved) re-based onto the 0-based per-session epoch (#255). The
+/// user-facing guarantee is that audio PTS keeps the drift-free AAC cadence
+/// (inter-tag deltas), aligned with the also-0-based video epoch — NOT that
+/// the absolute xiu offset survives.
+///
+/// BEHAVIOUR CHANGE (#255): pre-fix audio carried the RAW xiu ts (first tag at
+/// xiu 42 -> tag ts 42); now audio is session-relative (first tag captures the
+/// session origin -> tag ts 0, the next tag carries its delta). This is the
+/// deliberate fix: after an OBS republish the new session's audio xiu restarts
+/// near 0 while video also restarts at 0, so audio MUST be offset-removed to
+/// stay aligned. The chipmunk fix is fully preserved because only the constant
+/// per-session offset is removed — the inter-tag deltas are byte-identical.
 #[tokio::test]
-async fn audio_flv_tag_carries_xiu_timestamp() {
+async fn audio_flv_tag_is_session_relative_and_preserves_xiu_deltas() {
     let dir = tempfile::tempdir().unwrap();
     let sink = Arc::new(FlvChunkSink::new(
         dir.path().to_path_buf(),
@@ -405,9 +414,12 @@ async fn audio_flv_tag_carries_xiu_timestamp() {
     let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
     sink.write_video(0, &keyframe).await;
 
-    // AAC payload tag with xiu timestamp 42.
-    let aac = BytesMut::from(&[0xAF, 0x01, 0xDE, 0xAD][..]);
-    sink.write_audio(42, &aac).await;
+    // Two AAC payload tags at xiu 42 and 63 (delta 21ms = one 48kHz AAC frame).
+    // Distinct body markers so each can be located independently.
+    let aac_first = BytesMut::from(&[0xAF, 0x01, 0xDE, 0xAD][..]);
+    let aac_second = BytesMut::from(&[0xAF, 0x01, 0xBE, 0xEF][..]);
+    sink.write_audio(42, &aac_first).await;
+    sink.write_audio(63, &aac_second).await;
 
     sink.flush().await;
 
@@ -418,13 +430,20 @@ async fn audio_flv_tag_carries_xiu_timestamp() {
 
     let bytes = std::fs::read(&chunk.path).unwrap();
 
-    // The audio sequence header has body 0xAF 0x00; the AAC payload tag we
-    // wrote has body 0xAF 0x01. Match on the latter to skip the seq header.
-    let ts = first_flv_audio_timestamp_with_marker(&bytes, &[0xAF, 0x01]);
+    // First real audio tag (xiu 42) captures the session origin -> ts 0.
+    let ts_first = first_flv_audio_timestamp_with_marker(&bytes, &[0xAF, 0x01, 0xDE, 0xAD]);
     assert_eq!(
-        ts,
-        Some(42),
-        "audio FLV tag must carry xiu timestamp 42 in the byte stream"
+        ts_first,
+        Some(0),
+        "first audio tag of the session must re-zero to the session epoch"
+    );
+
+    // Second tag (xiu 63) keeps the xiu delta (63 - 42 = 21) -> chipmunk fix.
+    let ts_second = first_flv_audio_timestamp_with_marker(&bytes, &[0xAF, 0x01, 0xBE, 0xEF]);
+    assert_eq!(
+        ts_second,
+        Some(21),
+        "audio FLV tag must preserve the xiu inter-tag delta (chipmunk fix #142)"
     );
 }
 
