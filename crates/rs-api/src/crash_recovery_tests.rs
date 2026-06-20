@@ -14,9 +14,13 @@
 //! `DeliveryOrchestrator::reconcile_delivery_on_boot` — the boot path invoked
 //! from `ServiceCore::run_with_signal` alongside `resume_pending_grants`.
 
+use std::sync::Arc;
+
 use rs_core::config::Config;
 use rs_core::db;
+use rs_core::models::WsEvent;
 use sqlx::SqlitePool;
+use tokio::sync::broadcast;
 
 use crate::delivery::DeliveryOrchestrator;
 
@@ -26,14 +30,24 @@ async fn setup_pool() -> SqlitePool {
     pool
 }
 
-fn orch_with_unreachable_vps(pool: SqlitePool) -> DeliveryOrchestrator {
+fn orch_with_unreachable_vps(pool: SqlitePool) -> Arc<DeliveryOrchestrator> {
     let mut config = Config::for_testing();
     config.hetzner.api_token = "test-token".to_string();
     // Point the Hetzner client at an unroutable base URL: the boot path spawns
     // poll_and_init as a background task that WILL fail to reach the VPS, but
     // the synchronous reconciliation effects (poll_handles insert, fast-cache,
     // resume_positions) fire BEFORE that background task awaits the network.
-    DeliveryOrchestrator::with_base_url(pool, config, "http://127.0.0.1:1")
+    Arc::new(DeliveryOrchestrator::with_base_url(
+        pool,
+        config,
+        "http://127.0.0.1:1",
+    ))
+}
+
+/// Throwaway WS broadcast sender for the boot path (the health monitor takes
+/// one to surface unreachable warnings; the test ignores the receiver).
+fn test_ws_tx() -> broadcast::Sender<WsEvent> {
+    broadcast::channel::<WsEvent>(16).0
 }
 
 /// Build a "was actively delivering at crash time" fixture:
@@ -101,7 +115,7 @@ async fn boot_reconcile_reinits_delivering_event() {
     );
 
     // The boot reconciliation that ServiceCore must perform.
-    orch.reconcile_delivery_on_boot()
+    orch.reconcile_delivery_on_boot(test_ws_tx())
         .await
         .expect("boot reconciliation should succeed");
 
@@ -158,7 +172,7 @@ async fn boot_reconcile_skips_event_not_delivering() {
         .unwrap();
 
     let orch = orch_with_unreachable_vps(pool);
-    orch.reconcile_delivery_on_boot()
+    orch.reconcile_delivery_on_boot(test_ws_tx())
         .await
         .expect("reconciliation is a no-op success when nothing was delivering");
 
@@ -191,7 +205,7 @@ async fn boot_reconcile_skips_dead_instance() {
         .unwrap();
 
     let orch = orch_with_unreachable_vps(pool);
-    orch.reconcile_delivery_on_boot()
+    orch.reconcile_delivery_on_boot(test_ws_tx())
         .await
         .expect("reconciliation is a no-op success when the instance is dead");
 

@@ -13,6 +13,7 @@ pub(crate) mod delivery_monitor;
 pub(crate) mod delivery_recovery;
 #[cfg(test)]
 mod delivery_reset_tests;
+pub(crate) mod delivery_s3_wipe;
 pub(crate) mod delivery_status;
 #[cfg(test)]
 mod delivery_tests;
