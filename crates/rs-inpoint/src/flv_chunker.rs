@@ -662,6 +662,8 @@ impl FlvChunkSinkInner {
             chunk_first_wall_clock_ms: 0,
             session_start_wall_clock_ms: 0,
             last_session_ts: 0,
+            audio_session_origin_xiu: None,
+            last_audio_xiu_ts: None,
         }
     }
 }
