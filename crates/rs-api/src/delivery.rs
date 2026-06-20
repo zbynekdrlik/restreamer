@@ -184,31 +184,17 @@ impl DeliveryOrchestrator {
         self.endpoint_fast_cache.lock().await
     }
 
-    /// Read-only clone of the seeded resume positions for an event. Used by the
+    /// Read-only clone of the resume positions for an event. Used by the
     /// boot-recovery module (`delivery_recovery.rs`) — which lives outside
     /// `delivery.rs` and can't touch the private `resume_positions` field — to
-    /// expose a snapshot for tests/diagnostics. Returns `None` when no positions
-    /// are seeded for the event.
+    /// assert in tests that boot recovery resumes at the live edge (no backlog
+    /// replay), i.e. that it does NOT seed this map. Returns `None` when no
+    /// positions are seeded for the event.
     pub(crate) async fn resume_positions_for_event(
         &self,
         event_id: i64,
     ) -> Option<HashMap<String, i64>> {
         self.resume_positions.lock().await.get(&event_id).cloned()
-    }
-
-    /// Seed per-endpoint resume positions for an event. The boot-recovery path
-    /// fills this from persisted `delivery_endpoint_status.current_chunk_id` so
-    /// `poll_and_init` resumes each endpoint at its last-delivered chunk instead
-    /// of recomputing a fresh live edge.
-    pub(crate) async fn seed_resume_positions(
-        &self,
-        event_id: i64,
-        positions: HashMap<String, i64>,
-    ) {
-        self.resume_positions
-            .lock()
-            .await
-            .insert(event_id, positions);
     }
 
     /// Update fast cache for a single endpoint (used by mid-stream add).

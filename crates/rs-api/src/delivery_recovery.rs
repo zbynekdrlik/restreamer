@@ -11,7 +11,12 @@
 //!   - `streaming_events.delivering_activated` — was an event delivering?
 //!   - `delivery_instances` — the live VPS row (hetzner_id / ipv4 / auth_token)
 //!   - `endpoint_configs` (via `get_event_endpoints`) — per-endpoint is_fast
-//!   - `delivery_endpoint_status.current_chunk_id` — per-endpoint resume position
+//!
+//! Recovery resumes at the LIVE EDGE (current OBS position), NOT by replaying the
+//! persisted per-endpoint backlog: re-pushing hours-old chunks would violate the
+//! hard strict-1x rule (feedback_rtmp_push_always_1x) and get the stream killed
+//! by YouTube/FB. It therefore leaves `resume_positions` empty and lets
+//! `poll_and_init` take its tested live-edge branch for every endpoint.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,10 +44,12 @@ impl DeliveryOrchestrator {
     ///      Delivering will recreate it). We do NOT spawn a task against a dead
     ///      VPS.
     ///   3. Event delivering AND a live instance → repopulate
-    ///      `endpoint_fast_cache`, seed `resume_positions` from persisted
-    ///      per-endpoint progress, then spawn the same `poll_and_init` →
-    ///      `monitor_delivery_health` task the operator path spawns, tracking
-    ///      its `JoinHandle` in `poll_handles`.
+    ///      `endpoint_fast_cache`, then (unless an operator Start Delivering
+    ///      already won the race and tracked a handle for this instance) spawn
+    ///      the same `poll_and_init` → `monitor_delivery_health` task the
+    ///      operator path spawns, tracking its `JoinHandle` in `poll_handles`.
+    ///      Resumes at the live edge — does NOT seed `resume_positions` (no
+    ///      backlog replay; strict 1x).
     pub async fn reconcile_delivery_on_boot(
         self: &Arc<Self>,
         ws_tx: broadcast::Sender<WsEvent>,
@@ -124,40 +131,51 @@ impl DeliveryOrchestrator {
             "Boot delivery reconcile: repopulated endpoint_fast_cache"
         );
 
-        // Branch 3b: seed resume_positions from persisted per-endpoint progress
-        // (delivery_endpoint_status.current_chunk_id). poll_and_init drains this
-        // map and resumes each endpoint at its last-delivered chunk instead of
-        // recomputing a fresh live edge (delivery.rs:634-687). Only positions
-        // for endpoints still attached to the event are seeded.
-        let statuses = db::get_delivery_endpoint_statuses(self.pool(), instance_id).await?;
-        let attached: std::collections::HashSet<&str> =
-            endpoints.iter().map(|e| e.alias.as_str()).collect();
-        let mut resume: HashMap<String, i64> = HashMap::new();
-        for st in &statuses {
-            if attached.contains(st.alias.as_str()) && st.current_chunk_id > 0 {
-                resume.insert(st.alias.clone(), st.current_chunk_id);
-            }
-        }
-        if resume.is_empty() {
-            info!(
-                event_id,
-                instance_id,
-                "Boot delivery reconcile: no persisted resume positions (>0) — \
-                 poll_and_init will compute a fresh live edge"
-            );
-        } else {
-            info!(
-                event_id,
-                instance_id,
-                positions = resume.len(),
-                "Boot delivery reconcile: seeded resume_positions from persisted progress"
-            );
-            self.seed_resume_positions(event_id, resume).await;
-        }
+        // Branch 3b: resume at the LIVE EDGE — deliberately do NOT seed
+        // resume_positions. The crash-recovered VPS must resume near the current
+        // OBS position, NOT replay the persisted backlog:
+        //   * Re-pushing hours-old chunks violates the hard strict-1x rule
+        //     (feedback_rtmp_push_always_1x) — YouTube/FB kill a stream that
+        //     floods historical chunks.
+        //   * poll_and_init's resume branch (delivery.rs ~636) starts at
+        //     MIN(sequence_number) for any endpoint missing a seeded position
+        //     (its current_chunk_id was still 0 at crash — a fast endpoint that
+        //     had not yet fetched, or one momentarily reading 0,
+        //     delivery_status.rs:319), so a PARTIAL seed makes those endpoints
+        //     replay the whole event from chunk 1.
+        //   * That resume branch also lacks the find_first_chunk_id_at_or_after
+        //     S3-existence guard (#174) the live-edge branch has, so it hangs the
+        //     producer on chunks cleared during the outage.
+        // Leaving resume_positions empty makes poll_and_init take the tested
+        // live-edge branch (compute_target_start_chunk + S3-existence advance)
+        // for EVERY endpoint — the same path the operator Start Delivering uses.
+        info!(
+            event_id,
+            instance_id,
+            "Boot delivery reconcile: resuming at live edge (no backlog replay — strict 1x)"
+        );
 
         // Branch 3c: re-arm poll_and_init -> monitor_delivery_health, exactly as
         // the operator delivery_start handler does (delivery_handlers.rs:160-190).
         // The JoinHandle is tracked in poll_handles so stop_delivery can abort it.
+        //
+        // Guard against a double-spawn race: if an operator pressed Start
+        // Delivering after boot began (start_delivery reuses this same live
+        // instance_id and inserts its own handle), a handle already exists for
+        // instance_id. Overwriting it would DETACH (not abort) the operator's
+        // task, leaving two poll_and_init -> monitor loops + two /api/init POSTs
+        // for one VPS. If a handle is already present, the operator path owns it
+        // — skip boot re-arm.
+        if self.poll_handles().lock().await.contains_key(&instance_id) {
+            info!(
+                event_id,
+                instance_id,
+                "Boot delivery reconcile: a delivery task is already tracked for this \
+                 instance (operator Start Delivering won the race) — not re-arming"
+            );
+            return Ok(());
+        }
+
         let event_name = event.name.clone();
         let auth_token = instance.auth_token.clone();
         let orch = Arc::clone(self);

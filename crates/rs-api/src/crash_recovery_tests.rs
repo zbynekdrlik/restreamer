@@ -3,9 +3,10 @@
 //! After a stream.lan host/app crash, restarting Restreamer.exe must resume an
 //! actively-delivering event WITHOUT any operator POST: re-establish delivery
 //! management against the persisted VPS row, re-arm the health monitor, and
-//! repopulate the in-memory `endpoint_fast_cache` / `resume_positions` from
-//! persisted DB state so `is_fast` resolves correctly and each endpoint resumes
-//! at its last-delivered chunk.
+//! repopulate the in-memory `endpoint_fast_cache` from persisted DB state so
+//! `is_fast` resolves correctly. Recovery resumes at the LIVE EDGE (it does NOT
+//! seed `resume_positions` / replay the backlog — strict 1x, see
+//! feedback_rtmp_push_always_1x).
 //!
 //! Before the fix, `ServiceCore` only re-spawned RTMP ingest + S3 upload and the
 //! sole boot-time delivery task was the read-only `delivery_broadcast_loop`; the
@@ -35,8 +36,8 @@ fn orch_with_unreachable_vps(pool: SqlitePool) -> Arc<DeliveryOrchestrator> {
     config.hetzner.api_token = "test-token".to_string();
     // Point the Hetzner client at an unroutable base URL: the boot path spawns
     // poll_and_init as a background task that WILL fail to reach the VPS, but
-    // the synchronous reconciliation effects (poll_handles insert, fast-cache,
-    // resume_positions) fire BEFORE that background task awaits the network.
+    // the synchronous reconciliation effects (poll_handles insert, fast-cache
+    // repopulation) fire BEFORE that background task awaits the network.
     Arc::new(DeliveryOrchestrator::with_base_url(
         pool,
         config,
@@ -54,7 +55,8 @@ fn test_ws_tx() -> broadcast::Sender<WsEvent> {
 /// - one streaming_event with delivering_activated = 1
 /// - a delivery_instances row in a live state ("delivering")
 /// - two endpoints attached (one fast, one non-fast)
-/// - per-endpoint delivery_endpoint_status rows recording last-delivered chunk
+/// - per-endpoint delivery_endpoint_status rows (used only to prove recovery
+///   IGNORES them — it resumes at the live edge, not from these positions)
 async fn seed_delivering_fixture(pool: &SqlitePool) -> (i64, i64) {
     let event_id = db::create_streaming_event(pool, "crash-evt").await.unwrap();
     db::set_delivering_activated(pool, event_id, true)
@@ -90,7 +92,10 @@ async fn seed_delivering_fixture(pool: &SqlitePool) -> (i64, i64) {
         .await
         .unwrap();
 
-    // Persisted per-endpoint progress (the resume positions).
+    // Persisted per-endpoint progress. Boot recovery deliberately does NOT use
+    // these for resume (it resumes at the live edge — see the assertion in
+    // boot_reconcile_reinits_delivering_event); they are seeded only to prove
+    // recovery ignores them rather than replaying from them.
     db::upsert_delivery_endpoint_status(pool, instance_id, "yt-fast", true, 50, 1500, 99)
         .await
         .unwrap();
@@ -145,20 +150,17 @@ async fn boot_reconcile_reinits_delivering_event() {
     );
     drop(fast_cache);
 
-    // 3. resume_positions re-seeded from the persisted per-endpoint
-    //    current_chunk_id so each endpoint resumes at its last-delivered chunk
-    //    instead of recomputing a fresh live edge.
-    let resume = orch.resume_positions_snapshot(event_id).await;
-    let resume = resume.expect("resume positions must be seeded for the recovered event");
-    assert_eq!(
-        resume.get("yt-fast").copied(),
-        Some(1500),
-        "fast endpoint must resume at its persisted current_chunk_id"
-    );
-    assert_eq!(
-        resume.get("fb-slow").copied(),
-        Some(1480),
-        "non-fast endpoint must resume at its persisted current_chunk_id"
+    // 3. resume_positions is NOT seeded: boot recovery resumes at the LIVE EDGE,
+    //    not by replaying the persisted backlog. poll_and_init's resume branch
+    //    starts a missing-position endpoint at MIN(sequence_number) (oldest
+    //    chunk) and lacks the S3-existence guard — re-pushing hours of stale
+    //    chunks violates the strict-1x rule and gets the stream killed by YT/FB.
+    //    Leaving the map empty makes every endpoint take the tested live-edge
+    //    path (compute_target_start_chunk + S3 advance), same as operator Start.
+    assert!(
+        orch.resume_positions_snapshot(event_id).await.is_none(),
+        "boot recovery must resume at live edge — resume_positions must stay empty \
+         (no backlog replay)"
     );
 }
 
@@ -220,4 +222,59 @@ async fn boot_reconcile_skips_dead_instance() {
             .is_none(),
         "fast cache must stay empty when the instance is dead"
     );
+}
+
+#[tokio::test]
+async fn boot_reconcile_does_not_overwrite_existing_poll_handle() {
+    // Double-spawn race guard: if the operator pressed Start Delivering after
+    // boot began, start_delivery reuses the same live instance_id and inserts
+    // its own poll handle. Boot recovery must NOT overwrite it — overwriting
+    // drops (detaches, does NOT abort) the operator's JoinHandle, leaving two
+    // concurrent poll_and_init -> monitor loops + two /api/init POSTs for one
+    // VPS, only one of which stop_delivery can later abort.
+    let pool = setup_pool().await;
+    let (_event_id, instance_id) = seed_delivering_fixture(&pool).await;
+    let orch = orch_with_unreachable_vps(pool);
+
+    // Simulate the operator path already owning a tracked task for this instance.
+    let sentinel = tokio::spawn(async {
+        // Long-lived; only aborted explicitly below.
+        std::future::pending::<()>().await;
+    });
+    orch.poll_handles()
+        .lock()
+        .await
+        .insert(instance_id, sentinel);
+
+    orch.reconcile_delivery_on_boot(test_ws_tx())
+        .await
+        .expect("reconciliation is a no-op success when a handle already exists");
+
+    // Exactly one handle for the instance, and it must NOT have been finished
+    // (a spawned-then-overwritten replacement would leave the sentinel detached;
+    // a replacement task against the unreachable VPS would still be the tracked
+    // one). The guard returns BEFORE spawning, so the sentinel survives.
+    let poll_handles = orch.poll_handles();
+    {
+        let handles = poll_handles.lock().await;
+        assert_eq!(
+            handles.len(),
+            1,
+            "boot recovery must not add a second handle for the same instance"
+        );
+        let h = handles
+            .get(&instance_id)
+            .expect("sentinel handle preserved");
+        assert!(
+            !h.is_finished(),
+            "the operator's tracked task must be left running, not replaced/detached"
+        );
+    }
+
+    poll_handles
+        .lock()
+        .await
+        .remove(&instance_id)
+        .unwrap()
+        .abort();
 }
