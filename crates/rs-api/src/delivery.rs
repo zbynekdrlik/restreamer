@@ -72,72 +72,14 @@ pub struct StartDeliveryResult {
     pub auth_token: String,
 }
 
-/// Trait abstracting "delete all chunks under a prefix".
-///
-/// Contract: `event_prefix` is the **bare** event prefix without trailing
-/// slash, e.g. `"<client_uuid>/<event_name>"`. Implementations are
-/// responsible for whatever path-building they need internally
-/// (`S3Client::delete_event_chunks` appends the trailing slash).
-/// This decouples mock fidelity from the concrete client and is
-/// asserted in `delivery_tests::wipe_calls_delete_with_correct_prefix`.
-#[async_trait::async_trait]
-pub trait EventChunkWiper: Send + Sync {
-    async fn delete_event_chunks(&self, event_prefix: &str) -> Result<u64, String>;
-}
-
-#[async_trait::async_trait]
-impl EventChunkWiper for rs_endpoint::s3::S3Client {
-    async fn delete_event_chunks(&self, event_prefix: &str) -> Result<u64, String> {
-        rs_endpoint::s3::S3Client::delete_event_chunks(self, event_prefix)
-            .await
-            .map_err(|e| e.to_string())
-    }
-}
-
-/// Delete all S3 chunks under this event's prefix. Bounded by a 60s
-/// timeout. Returns `Ok(deleted_count)` on success, `Err(reason)` on
-/// failure. Caller is `start_delivery`, which logs the result and
-/// proceeds even on failure (the strict-live-edge `compute_target_start_chunk`
-/// is the primary correctness barrier; the wipe is belt-and-suspenders).
-///
-/// Returning `Result` (instead of swallowing errors) gives observability
-/// for orphaned-chunk billing tracking (#174 review v2 finding 7).
-pub async fn wipe_event_s3_chunks(
-    pool: &SqlitePool,
-    config: &Config,
-    event_id: i64,
-) -> Result<u64, String> {
-    let s3 = rs_endpoint::s3::S3Client::new(&config.s3).map_err(|e| format!("init: {e}"))?;
-    wipe_event_s3_chunks_with(pool, config, event_id, &s3).await
-}
-
-/// Test seam: same as `wipe_event_s3_chunks` but takes any `EventChunkWiper`.
-pub async fn wipe_event_s3_chunks_with(
-    pool: &SqlitePool,
-    config: &Config,
-    event_id: i64,
-    wiper: &dyn EventChunkWiper,
-) -> Result<u64, String> {
-    let event = db::get_streaming_event_by_id(pool, event_id)
-        .await
-        .map_err(|e| format!("db lookup: {e}"))?
-        .ok_or_else(|| format!("no streaming event with id {event_id}"))?;
-    let event_prefix = config.event_s3_prefix(&event.name);
-    let fut = wiper.delete_event_chunks(&event_prefix);
-    match tokio::time::timeout(Duration::from_secs(60), fut).await {
-        Ok(Ok(n)) => {
-            info!(
-                event_id,
-                deleted = n,
-                prefix = %event_prefix,
-                "Wiped S3 chunks before starting delivery"
-            );
-            Ok(n)
-        }
-        Ok(Err(e)) => Err(format!("delete failed: {e}")),
-        Err(_) => Err("timed out after 60s".into()),
-    }
-}
+// `EventChunkWiper`, `wipe_event_s3_chunks`, and `wipe_event_s3_chunks_with`
+// were extracted into `delivery_s3_wipe.rs` to keep this file under the
+// 1000-line CI cap (#252). Re-exported here so existing call sites
+// (`crate::delivery::wipe_event_s3_chunks`, the trait, the test seam) and the
+// internal `start_delivery` caller below keep resolving unchanged.
+pub use crate::delivery_s3_wipe::{
+    EventChunkWiper, wipe_event_s3_chunks, wipe_event_s3_chunks_with,
+};
 
 /// Reset `streaming_events.received_bytes` to 0 for a specific event.
 ///
@@ -240,6 +182,19 @@ impl DeliveryOrchestrator {
         &self,
     ) -> MutexGuard<'_, HashMap<i64, HashMap<String, bool>>> {
         self.endpoint_fast_cache.lock().await
+    }
+
+    /// Read-only clone of the resume positions for an event. Used by the
+    /// boot-recovery module (`delivery_recovery.rs`) — which lives outside
+    /// `delivery.rs` and can't touch the private `resume_positions` field — to
+    /// assert in tests that boot recovery resumes at the live edge (no backlog
+    /// replay), i.e. that it does NOT seed this map. Returns `None` when no
+    /// positions are seeded for the event.
+    pub(crate) async fn resume_positions_for_event(
+        &self,
+        event_id: i64,
+    ) -> Option<HashMap<String, i64>> {
+        self.resume_positions.lock().await.get(&event_id).cloned()
     }
 
     /// Update fast cache for a single endpoint (used by mid-stream add).

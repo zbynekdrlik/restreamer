@@ -1,5 +1,7 @@
 pub mod audit_handlers;
 pub mod clock_skew_probe;
+#[cfg(test)]
+mod crash_recovery_tests;
 pub mod delivery;
 pub(crate) mod delivery_audit_mirror;
 pub mod delivery_binary;
@@ -8,8 +10,10 @@ pub mod delivery_handlers;
 pub(crate) mod delivery_helpers;
 pub mod delivery_live_edge;
 pub(crate) mod delivery_monitor;
+pub(crate) mod delivery_recovery;
 #[cfg(test)]
 mod delivery_reset_tests;
+pub(crate) mod delivery_s3_wipe;
 pub(crate) mod delivery_status;
 #[cfg(test)]
 mod delivery_tests;

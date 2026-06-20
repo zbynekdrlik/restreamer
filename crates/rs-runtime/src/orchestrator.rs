@@ -280,6 +280,10 @@ impl ServiceCore {
                 }
             }
         }
+        // Capture the delivery orchestrator + ws sender BEFORE `api_state` is
+        // moved into `serve`, so boot reconciliation (below) can re-establish
+        // delivery management after a crash. `serve` consumes `api_state`.
+        let boot_delivery_orch = api_state.delivery_orchestrator.clone();
         let (actual_addr, api_handle) = rs_api::serve(api_state, api_addr).await?;
         info!("API server running on {actual_addr}");
 
@@ -295,6 +299,20 @@ impl ServiceCore {
             .await
             {
                 tracing::warn!("resume_pending_grants failed: {e}");
+            }
+        }
+
+        // #252: Resume an actively-delivering event after a stream.lan host/app
+        // crash. Without this, restarting Restreamer.exe re-spawns RTMP ingest +
+        // S3 upload but never reconciles "an event was delivering" against the
+        // persisted VPS/endpoint state — no delivery re-init, no health-monitor
+        // re-arm, empty endpoint_fast_cache (so is_fast resolves false), and the
+        // resume positions are lost. This runs the same poll_and_init ->
+        // monitor_delivery_health path the operator Start Delivering handler
+        // runs, but driven entirely from durable DB state with no operator POST.
+        if let Some(orch) = &boot_delivery_orch {
+            if let Err(e) = orch.reconcile_delivery_on_boot(ws_tx.clone()).await {
+                tracing::warn!("reconcile_delivery_on_boot failed: {e}");
             }
         }
 
