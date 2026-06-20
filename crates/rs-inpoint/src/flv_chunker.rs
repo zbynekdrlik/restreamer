@@ -322,6 +322,16 @@ impl FlvChunkSink {
         }
     }
 
+    /// Start a new ingest session at an OBS mid-stream republish boundary.
+    ///
+    /// RED placeholder (#255): currently only flushes the partial chunk —
+    /// this reproduces the production republish behaviour (UnPublish calls
+    /// `flush()`, nothing re-anchors). The GREEN commit re-zeros the shared
+    /// per-session epoch here.
+    pub async fn start_new_session(&self) {
+        self.flush().await;
+    }
+
     /// Reset the chunker state.
     ///
     /// Resets the session wall-clock anchor so timestamps restart from 0

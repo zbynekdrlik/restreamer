@@ -37,6 +37,36 @@ fn first_flv_audio_timestamp_with_marker(bytes: &[u8], marker: &[u8]) -> Option<
     None
 }
 
+/// Find the first FLV tag of `tag_type` whose body begins with `marker` and
+/// return its 32-bit timestamp. Generalises
+/// `first_flv_audio_timestamp_with_marker` to any tag type so tests can read
+/// the video-tag timestamp written into the actual FLV byte stream.
+fn first_flv_tag_timestamp(bytes: &[u8], tag_type: u8, marker: &[u8]) -> Option<u32> {
+    // FLV header is 9 bytes + 4 bytes "previous tag size 0" trailer.
+    let mut offset = 9 + 4;
+    while offset + 11 <= bytes.len() {
+        let this_type = bytes[offset];
+        let data_size = ((bytes[offset + 1] as u32) << 16)
+            | ((bytes[offset + 2] as u32) << 8)
+            | (bytes[offset + 3] as u32);
+        let ts_low = ((bytes[offset + 4] as u32) << 16)
+            | ((bytes[offset + 5] as u32) << 8)
+            | (bytes[offset + 6] as u32);
+        let ts_high = bytes[offset + 7] as u32;
+        let ts = (ts_high << 24) | ts_low;
+        let body_start = offset + 11;
+        let body_end = body_start + data_size as usize;
+        if this_type == tag_type
+            && body_end <= bytes.len()
+            && bytes[body_start..].starts_with(marker)
+        {
+            return Some(ts);
+        }
+        offset = body_end + 4; // skip body + 4-byte previous-tag-size trailer
+    }
+    None
+}
+
 #[tokio::test]
 async fn null_sink_discards_data() {
     let sink = FlvChunkSink::new_null();
@@ -396,4 +426,146 @@ async fn audio_flv_tag_carries_xiu_timestamp() {
         Some(42),
         "audio FLV tag must carry xiu timestamp 42 in the byte stream"
     );
+}
+
+/// REGRESSION (#255): On an OBS mid-stream unpublish->republish the FLV
+/// chunker must re-anchor BOTH audio and video onto a single 0-based session
+/// epoch. Pre-fix, video kept counting on its never-reset wall-clock anchor
+/// (~600ms into session 1) while audio restarted from raw xiu ts ~0 on the
+/// fresh session -> ~600ms (in production ~25.5s) audio-behind-video skew
+/// baked into the session-2 chunk bytes.
+///
+/// Session 1: write seq headers + keyframe, then interleave audio while
+/// ~600ms of wall-clock elapses (video `current_session_ts` advances). flush.
+/// `start_new_session()` (the republish boundary).
+/// Session 2: keyframe + audio at xiu ts 0/21/43. Read the session-2 chunk
+/// and assert the first real video tag and first real audio tag are within
+/// 100ms of each other. RED pre-fix (skew ~600ms); GREEN after re-anchor.
+#[tokio::test]
+async fn republish_keeps_audio_and_video_aligned() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(FlvChunkSink::new(
+        dir.path().to_path_buf(),
+        Duration::from_secs(60),
+    ));
+    let mut rx = sink.subscribe();
+
+    // --- Session 1 ---
+    let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
+    sink.write_video(0, &video_seq).await;
+    let audio_seq = BytesMut::from(&[0xAF, 0x00, 0x12, 0x10][..]);
+    sink.write_audio(0, &audio_seq).await;
+
+    // First keyframe anchors the session wall-clock and starts chunk #0.
+    let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
+    sink.write_video(0, &keyframe).await;
+
+    // Interleave audio (xiu cadence) while ~600ms of wall-clock passes so the
+    // video session timestamp advances well past 100ms.
+    let aac_s1 = BytesMut::from(&[0xAF, 0x01, 0x11, 0x11][..]);
+    for i in 0..6u32 {
+        sink.write_audio(i * 21, &aac_s1).await;
+        let interframe = BytesMut::from(&[0x27, 0x01, 0x00, 0x00, 0x00, 0xBB][..]);
+        sink.write_video(0, &interframe).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    sink.flush().await;
+
+    // Drain the session-1 chunk so the next recv() is the session-2 chunk.
+    let _ = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        .await
+        .expect("session-1 chunk should flush")
+        .expect("recv should succeed");
+
+    // --- Republish boundary ---
+    sink.start_new_session().await;
+
+    // --- Session 2 --- fresh xiu epoch (audio restarts near 0).
+    // First keyframe of the new session, with a recognizable marker so the
+    // tag finder can locate the first REAL video tag (not the seq header).
+    let keyframe2 = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xCC, 0xDD][..]);
+    sink.write_video(0, &keyframe2).await;
+
+    // Audio frames on the fresh session at xiu ts 0, 21, 43.
+    let aac_s2 = BytesMut::from(&[0xAF, 0x01, 0x22, 0x22][..]);
+    sink.write_audio(0, &aac_s2).await;
+    sink.write_audio(21, &aac_s2).await;
+    sink.write_audio(43, &aac_s2).await;
+
+    sink.flush().await;
+
+    let chunk = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        .await
+        .expect("session-2 chunk should flush")
+        .expect("recv should succeed");
+
+    let bytes = std::fs::read(&chunk.path).unwrap();
+
+    // First REAL video tag (the 0xCC,0xDD keyframe) and first REAL audio tag
+    // (0x22,0x22 payload) of session 2.
+    let video_ts = first_flv_tag_timestamp(
+        &bytes,
+        FLV_TAG_VIDEO,
+        &[0x17, 0x01, 0x00, 0x00, 0x00, 0xCC, 0xDD],
+    )
+    .expect("session-2 video tag must be present");
+    let audio_ts = first_flv_audio_timestamp_with_marker(&bytes, &[0xAF, 0x01, 0x22, 0x22])
+        .expect("session-2 audio tag must be present");
+
+    let skew = (video_ts as i64 - audio_ts as i64).abs();
+    assert!(
+        skew < 100,
+        "after republish, A/V skew must be <100ms; got video_ts={video_ts} audio_ts={audio_ts} skew={skew}ms"
+    );
+}
+
+/// `start_new_session()` re-anchors the per-session epoch but MUST preserve
+/// the running chunk numbering and the saved codec sequence headers, so the
+/// next chunk stays independently playable and chunk indices never reset.
+#[tokio::test]
+async fn start_new_session_preserves_chunk_index_and_sequence_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(FlvChunkSink::new(
+        dir.path().to_path_buf(),
+        Duration::from_secs(60),
+    ));
+
+    // Seed sequence headers + a keyframe + flush to advance chunk_index to 1.
+    let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
+    sink.write_video(0, &video_seq).await;
+    let audio_seq = BytesMut::from(&[0xAF, 0x00, 0x12, 0x10][..]);
+    sink.write_audio(0, &audio_seq).await;
+    let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
+    sink.write_video(0, &keyframe).await;
+    sink.flush().await;
+
+    let index_before = sink.chunk_count().await;
+    assert_eq!(index_before, 1, "one chunk should have been produced");
+
+    sink.start_new_session().await;
+
+    // chunk_index preserved (NOT reset to 0).
+    assert_eq!(
+        sink.chunk_count().await,
+        index_before,
+        "start_new_session() must not reset chunk_index"
+    );
+
+    // Saved sequence headers preserved (so next chunk is independently playable).
+    {
+        let inner = sink.inner.lock().await;
+        assert!(
+            inner.video_sequence_header.is_some(),
+            "start_new_session() must keep the saved video sequence header"
+        );
+        assert!(
+            inner.audio_sequence_header.is_some(),
+            "start_new_session() must keep the saved audio sequence header"
+        );
+        // But the per-session epoch IS re-zeroed.
+        assert_eq!(
+            inner.session_start_wall_clock_ms, 0,
+            "start_new_session() must re-zero the wall-clock anchor"
+        );
+    }
 }
