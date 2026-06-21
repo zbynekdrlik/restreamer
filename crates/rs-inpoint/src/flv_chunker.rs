@@ -66,6 +66,18 @@ struct FlvChunkSinkInner {
     /// Highest output timestamp emitted in the current session. Enforces
     /// monotonic stamping under OS clock skew or wall-clock anomalies.
     last_session_ts: u32,
+    /// xiu RTMP timestamp of the first audio tag of the current session.
+    /// Audio output ts = `xiu_ts - audio_session_origin_xiu`, putting audio on
+    /// the SAME 0-based per-session epoch as video (which restarts at 0 via
+    /// `current_session_ts`). `None` until the first audio tag of a session;
+    /// re-captured on `start_new_session()` or a backward-jump self-heal (#255).
+    /// Preserves the #142 chipmunk fix: the inter-tag deltas (xiu cadence) are
+    /// untouched, only the per-session offset is removed.
+    audio_session_origin_xiu: Option<u32>,
+    /// Last raw xiu audio ts seen — used to detect a backward jump (a missed
+    /// republish) so the audio epoch can self-heal even if `start_new_session()`
+    /// was never called (#255).
+    last_audio_xiu_ts: Option<u32>,
 }
 
 /// Data extracted from the buffer, ready to be written to disk outside the lock.
@@ -98,6 +110,8 @@ impl FlvChunkSink {
                 chunk_first_wall_clock_ms: 0,
                 session_start_wall_clock_ms: 0,
                 last_session_ts: 0,
+                audio_session_origin_xiu: None,
+                last_audio_xiu_ts: None,
             }),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
@@ -122,6 +136,8 @@ impl FlvChunkSink {
                 chunk_first_wall_clock_ms: 0,
                 session_start_wall_clock_ms: 0,
                 last_session_ts: 0,
+                audio_session_origin_xiu: None,
+                last_audio_xiu_ts: None,
             }),
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
@@ -250,14 +266,17 @@ impl FlvChunkSink {
     /// Process an audio frame from xiu's FrameData::Audio.
     ///
     /// `timestamp` is the xiu-forwarded RTMP timestamp (in milliseconds).
-    /// Audio uses xiu timestamps directly — unlike video, which is rewritten
-    /// to wall-clock to fix #135 cache drift. AAC frames are 1024 samples;
-    /// cadence = 1024 / sample_rate seconds (e.g. 21.3 ms at 48 kHz, 23.2 ms
-    /// at 44.1 kHz), so the producer cannot drift. Wall-clock stamping would
-    /// inject RTMP delivery jitter into PTS, causing decoder resampling
-    /// artefacts (chipmunk pitch + glitches).
+    /// Audio is stamped on the SAME 0-based per-session epoch as video
+    /// (`audio_out = xiu_ts - audio_session_origin_xiu`) — unlike video, which
+    /// derives its session ts from wall-clock to fix #135 cache drift. Audio
+    /// keeps the xiu inter-tag DELTAS (AAC cadence: 1024 samples => 21.3 ms at
+    /// 48 kHz, 23.2 ms at 44.1 kHz, drift-free) and only removes the constant
+    /// per-session offset. This preserves the #142 chipmunk fix (no wall-clock
+    /// jitter in PTS, no resampling artefacts) while keeping audio aligned with
+    /// video across an OBS mid-stream republish (#255) — both restart at 0 on
+    /// each new session.
     ///
-    /// Internally, this function writes the xiu timestamp into the FLV tag
+    /// Internally, this function writes the re-based timestamp into the FLV tag
     /// only — it must NOT touch `chunk_last_ts`, which is an accounting
     /// field owned by `write_video` for tracking wall-clock chunk duration.
     /// Mixing the two domains causes `duration_ms` to underflow and produce
@@ -284,14 +303,44 @@ impl FlvChunkSink {
                 return;
             }
 
-            // Audio FLV tags carry the xiu RTMP timestamp directly so the
-            // decoder gets correct PTS (chipmunk fix from #142). The
-            // chunk_last_ts field is owned by write_video — it tracks the
-            // wall-clock span used for chunk-duration accounting. The two
-            // timestamp domains MUST NOT cross: writing the xiu value into
-            // chunk_last_ts here corrupts the duration computation
-            // (#146 follow-up regression).
-            Self::write_tag(&mut inner, FLV_TAG_AUDIO, timestamp, data);
+            // Defensive self-heal (#255): if the incoming xiu ts jumps backward
+            // vs the last audio ts we saw, an OBS republish happened without a
+            // start_new_session() re-anchor reaching us. Re-capture the audio
+            // origin so audio re-zeroes with the (also-restarting) video epoch
+            // instead of baking the dead-air gap into the A/V skew. Mirrors the
+            // pusher-side guard (pusher.rs).
+            if let Some(prev) = inner.last_audio_xiu_ts {
+                if timestamp < prev {
+                    let old_origin = inner.audio_session_origin_xiu;
+                    inner.audio_session_origin_xiu = Some(timestamp);
+                    tracing::warn!(
+                        prev_xiu_ts = prev,
+                        new_xiu_ts = timestamp,
+                        old_origin = ?old_origin,
+                        "flv_chunker: AUDIO xiu ts jumped backward -- self-healing audio session origin to new ts (#255)"
+                    );
+                }
+            }
+            inner.last_audio_xiu_ts = Some(timestamp);
+
+            // Capture the per-session audio origin on the first real audio tag
+            // of the session (set to None by new()/start_new_session()).
+            let origin = *inner.audio_session_origin_xiu.get_or_insert(timestamp);
+
+            // Re-base audio onto the shared 0-based session epoch:
+            //   audio_out = xiu_ts - origin
+            // Video already restarts at 0 each session via current_session_ts,
+            // so both tracks share one 0-based epoch and stay aligned across an
+            // OBS republish (#255). This PRESERVES the #142 chipmunk fix: only
+            // the constant per-session offset is removed, the inter-tag deltas
+            // (xiu AAC cadence) are untouched, so PTS still carries correct
+            // sample timing (no wall-clock jitter, no resampling artefacts).
+            //
+            // chunk_last_ts is owned by write_video (wall-clock span for
+            // chunk-duration accounting) and MUST NOT be touched here — mixing
+            // the domains underflows duration_ms (#146).
+            let audio_out = timestamp.saturating_sub(origin);
+            Self::write_tag(&mut inner, FLV_TAG_AUDIO, audio_out, data);
             None
         };
 
@@ -322,6 +371,46 @@ impl FlvChunkSink {
         }
     }
 
+    /// Start a new ingest session at an OBS mid-stream republish boundary.
+    ///
+    /// Flushes the partial chunk FIRST, then re-zeros the shared per-session
+    /// epoch for BOTH tracks so the next session restarts video and audio at a
+    /// common 0 — fixing the ~25.5s A/V skew that was baked into the chunk bytes
+    /// after each OBS restart at live event 9315 (#255). Video re-zeroes via
+    /// `session_start_wall_clock_ms = 0` (next `current_session_ts` returns 0);
+    /// audio re-zeroes via `audio_session_origin_xiu = None` (next audio tag
+    /// captures the new origin).
+    ///
+    /// Deliberately does NOT clear `chunk_index` (chunk numbering must stay
+    /// monotonic across republishes) or the saved `video_sequence_header` /
+    /// `audio_sequence_header` (the next chunk must remain independently
+    /// playable). This is distinct from `reset()`, which is the full-disconnect
+    /// teardown.
+    pub async fn start_new_session(&self) {
+        // Flush the partial chunk on the OLD epoch before re-anchoring.
+        self.flush().await;
+
+        let mut inner = self.inner.lock().await;
+        let old_anchor = inner.session_start_wall_clock_ms;
+        let old_audio_origin = inner.audio_session_origin_xiu;
+        // Re-zero the per-session epoch fields for both domains. Keep
+        // chunk_index and the saved sequence headers.
+        inner.chunk_start = None;
+        inner.chunk_first_ts = 0;
+        inner.chunk_last_ts = 0;
+        inner.chunk_first_wall_clock_ms = 0;
+        inner.session_start_wall_clock_ms = 0;
+        inner.last_session_ts = 0;
+        inner.audio_session_origin_xiu = None;
+        inner.last_audio_xiu_ts = None;
+        info!(
+            chunk_index = inner.chunk_index,
+            old_video_anchor_ms = old_anchor,
+            old_audio_origin_xiu = ?old_audio_origin,
+            "flv_chunker: start_new_session -- re-anchored audio+video to a shared 0 epoch on republish (#255)"
+        );
+    }
+
     /// Reset the chunker state.
     ///
     /// Resets the session wall-clock anchor so timestamps restart from 0
@@ -336,6 +425,8 @@ impl FlvChunkSink {
         inner.chunk_first_wall_clock_ms = 0;
         inner.session_start_wall_clock_ms = 0;
         inner.last_session_ts = 0;
+        inner.audio_session_origin_xiu = None;
+        inner.last_audio_xiu_ts = None;
     }
 
     /// Get the total number of chunks produced.
@@ -571,6 +662,8 @@ impl FlvChunkSinkInner {
             chunk_first_wall_clock_ms: 0,
             session_start_wall_clock_ms: 0,
             last_session_ts: 0,
+            audio_session_origin_xiu: None,
+            last_audio_xiu_ts: None,
         }
     }
 }

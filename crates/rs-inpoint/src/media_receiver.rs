@@ -71,6 +71,14 @@ impl MediaReceiver {
                     BroadcastEvent::Publish { identifier } => {
                         info!("Stream published: {identifier}");
                         self.inpoint_state.mark_connected().await;
+                        // Re-anchor audio+video onto a fresh shared 0-based
+                        // session epoch on every (re)publish. The xiu server
+                        // stays up across an OBS mid-stream restart, so Publish
+                        // is the reliable per-session boundary; without this the
+                        // video wall-clock keeps counting the dead-air gap while
+                        // audio xiu restarts ~0, baking A/V skew into the chunks
+                        // (#255 — event 9315 had ~25.5s audio-behind-video).
+                        self.flv_chunk_sink.start_new_session().await;
                         // Audit: RtmpConnected.
                         if let Some(tx) = self.inpoint_state.audit_tx() {
                             rs_core::audit::record(
