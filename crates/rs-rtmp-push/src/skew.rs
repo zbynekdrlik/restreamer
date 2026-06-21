@@ -71,10 +71,18 @@ pub struct SkewTracker {
     /// First input timestamp seen on EITHER track this session — the shared
     /// epoch reference. Both tracks measure absolute progress from here.
     shared_origin: Option<u32>,
-    /// Largest absolute AUDIO input ts (relative to `shared_origin`) seen.
-    audio_max_abs: i64,
-    /// Largest absolute VIDEO input ts (relative to `shared_origin`) seen.
-    video_max_abs: i64,
+    /// Largest AUDIO input ts (relative to `shared_origin`) seen, or `None`
+    /// until the first audio tag. MUST allow NEGATIVE values: when the shared
+    /// origin is pinned by the OTHER track's first tag, this track's relative
+    /// position can be negative (it started before the shared origin). The
+    /// first observed value SEEDS the max — a default of 0 would wrongly clamp
+    /// a genuinely-negative position to 0 and silently zero the inter-track
+    /// offset (the bug that made `raw_skew_ms` read 0 for a real offset).
+    audio_max_abs: Option<i64>,
+    /// Largest VIDEO input ts (relative to `shared_origin`) seen, or `None`
+    /// until the first video tag. Allows negatives for the same reason as
+    /// `audio_max_abs`.
+    video_max_abs: Option<i64>,
     /// Whether at least one AUDIO tag has been observed this session.
     audio_seen: bool,
     /// Whether at least one VIDEO tag has been observed this session.
@@ -120,18 +128,22 @@ impl SkewTracker {
     pub fn observe_audio(&mut self, input_ts: u32) {
         self.audio_seen = true;
         let rel = self.rel(input_ts);
-        if rel > self.audio_max_abs {
-            self.audio_max_abs = rel;
-        }
+        // Seed on the first tag (even if negative), then keep the running max.
+        self.audio_max_abs = Some(match self.audio_max_abs {
+            Some(cur) => cur.max(rel),
+            None => rel,
+        });
     }
 
     /// Observe one input VIDEO tag timestamp (pre-re-anchor, content PTS).
     pub fn observe_video(&mut self, input_ts: u32) {
         self.video_seen = true;
         let rel = self.rel(input_ts);
-        if rel > self.video_max_abs {
-            self.video_max_abs = rel;
-        }
+        // Seed on the first tag (even if negative), then keep the running max.
+        self.video_max_abs = Some(match self.video_max_abs {
+            Some(cur) => cur.max(rel),
+            None => rel,
+        });
     }
 
     /// Reset BOTH tracks' progress on a fresh RTMP session / symmetric
@@ -139,8 +151,8 @@ impl SkewTracker {
     /// counter is also cleared — a re-anchor establishes a clean baseline.
     pub fn reset_tracks(&mut self) {
         self.shared_origin = None;
-        self.audio_max_abs = 0;
-        self.video_max_abs = 0;
+        self.audio_max_abs = None;
+        self.video_max_abs = None;
         self.audio_seen = false;
         self.video_seen = false;
         self.consecutive_over = 0;
@@ -166,7 +178,11 @@ impl SkewTracker {
     /// (`current_skew_ms`) instead, so a benign constant startup domain gap
     /// doesn't read as a desync.
     pub fn raw_skew_ms(&self) -> i64 {
-        self.video_max_abs - self.audio_max_abs
+        // A track not yet seen contributes 0 (no position). Once seen, use its
+        // true relative max (which may be negative when the shared origin was
+        // pinned by the other track). The difference is the absolute
+        // content-PTS offset between the two tracks on the shared epoch.
+        self.video_max_abs.unwrap_or(0) - self.audio_max_abs.unwrap_or(0)
     }
 
     /// Baseline-relative content-PTS skew: the DEVIATION of the current raw
