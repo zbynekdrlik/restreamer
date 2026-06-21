@@ -43,13 +43,12 @@ use tokio::sync::broadcast;
 /// result code precisely rather than string-matching, so it can't
 /// false-positive on an unrelated "busy" substring.
 fn is_sqlite_busy(e: &rs_core::error::CoreError) -> bool {
-    if let rs_core::error::CoreError::Database(sqlx::Error::Database(db_err)) = e {
-        if let Some(code) = db_err.code() {
-            // 5 = SQLITE_BUSY, 517 = SQLITE_BUSY_SNAPSHOT (0x205).
-            if code == "5" || code == "517" {
-                return true;
-            }
-        }
+    // 5 = SQLITE_BUSY, 517 = SQLITE_BUSY_SNAPSHOT (0x205). Match the SQLite
+    // extended result code precisely via a let-chain.
+    if let rs_core::error::CoreError::Database(sqlx::Error::Database(db_err)) = e
+        && let Some(code) = db_err.code()
+    {
+        return code == "5" || code == "517";
     }
     // Fallback: surface the storm even if the code isn't populated.
     let s = e.to_string().to_ascii_lowercase();
@@ -202,8 +201,8 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     let total_claims: u32 = map.values().copied().sum();
     let double_claims: Vec<(i64, u32)> = map
         .iter()
-        .filter(|(_, &c)| c > 1)
-        .map(|(&id, &c)| (id, c))
+        .filter(|(_, count)| **count > 1)
+        .map(|(id, count)| (*id, *count))
         .collect();
     assert!(
         double_claims.is_empty(),
