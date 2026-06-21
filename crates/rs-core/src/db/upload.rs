@@ -114,28 +114,27 @@ pub async fn mark_upload_permanently_failed(pool: &SqlitePool, chunk_id: i64) ->
 ///
 /// Implemented as a SINGLE atomic statement on the pool — `UPDATE ... SET
 /// in_process = 1 WHERE id = (SELECT ... LIMIT 1) RETURNING <cols>` — with NO
-/// `BEGIN`/commit transaction. This is the #256 fix:
+/// `BEGIN`/commit transaction. This is the #256 fix.
 ///
-///   - The old picker opened `pool.begin()` (sqlx default = BEGIN DEFERRED),
-///     SELECTed the hot `ORDER BY id ASC LIMIT 1` row, then UPDATEd it in the
-///     same tx. The deferred read took a read snapshot; the subsequent UPDATE
-///     had to UPGRADE that snapshot to a write lock. When any concurrent
-///     committer (chunk INSERT / audit batch / `update_received_bytes`)
-///     committed between the SELECT-snapshot and the UPDATE, SQLite returned
-///     `SQLITE_BUSY_SNAPSHOT` (code 517) IMMEDIATELY — `busy_timeout` never
-///     retries 517 — plus `SQLITE_BUSY` (code 5) under writer-writer
-///     contention. With 2-8 workers on a 5-connection pool this produced the
-///     30+ minute "database is locked" storm that starved the live-event
-///     upload pipeline (2026-06-19 outage).
+/// The OLD picker opened `pool.begin()` (sqlx default = BEGIN DEFERRED),
+/// SELECTed the hot `ORDER BY id ASC LIMIT 1` row, then UPDATEd it in the same
+/// tx. The deferred read took a read snapshot; the subsequent UPDATE had to
+/// UPGRADE that snapshot to a write lock. When any concurrent committer (chunk
+/// INSERT / audit batch / `update_received_bytes`) committed between the
+/// SELECT-snapshot and the UPDATE, SQLite returned `SQLITE_BUSY_SNAPSHOT`
+/// (code 517) IMMEDIATELY — `busy_timeout` never retries 517 — plus
+/// `SQLITE_BUSY` (code 5) under writer-writer contention. With 2-8 workers on a
+/// 5-connection pool this produced the 30+ minute "database is locked" storm
+/// that starved the live-event upload pipeline (2026-06-19 outage).
 ///
-///   - The single statement takes the SQLite write lock on its FIRST (and
-///     only) statement: there is no read snapshot to invalidate (kills 517)
-///     and no read->write upgrade window (kills the storm). `busy_timeout`
-///     now fully covers the only remaining failure mode (plain writer-writer
-///     code 5, which it retries). It does NOT serialise the workers (the
-///     reason the #120 single-claimer coordinator was reverted) — each worker
-///     still issues its own independent claim; the `WHERE in_process = 0`
-///     guard guarantees exactly one winner per row.
+/// The single statement takes the SQLite write lock on its FIRST (and only)
+/// statement: there is no read snapshot to invalidate (kills 517) and no
+/// read->write upgrade window (kills the storm). `busy_timeout` now fully
+/// covers the only remaining failure mode (plain writer-writer code 5, which it
+/// retries). It does NOT serialise the workers (the reason the #120
+/// single-claimer coordinator was reverted) — each worker still issues its own
+/// independent claim; the `WHERE in_process = 0` guard guarantees exactly one
+/// winner per row.
 ///
 /// The inner `SELECT` chooses the oldest eligible row; the outer `UPDATE`
 /// flips only that row to `in_process = 1` (re-checking eligibility so two

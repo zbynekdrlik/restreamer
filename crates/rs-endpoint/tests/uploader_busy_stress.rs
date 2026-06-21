@@ -6,9 +6,9 @@
 //! deferred-`BEGIN` read-then-write-upgrade transaction. 2-8 uploader workers
 //! sharing one 5-connection pool all raced the `ORDER BY id ASC LIMIT 1` hot
 //! row against frequent committers (chunk INSERT ~every 2s, audit batch,
-//! `update_received_bytes`). SQLite then returned, repeatedly:
-//!   - code 5   = SQLITE_BUSY          (writer-writer lock contention)
-//!   - code 517 = SQLITE_BUSY_SNAPSHOT (deferred read->write upgrade conflict)
+//! `update_received_bytes`). SQLite then returned, repeatedly, code 5
+//! (SQLITE_BUSY — writer-writer lock contention) and code 517
+//! (SQLITE_BUSY_SNAPSHOT — deferred read->write upgrade conflict).
 //! `busy_timeout` does NOT rescue 517 (it is returned immediately, never
 //! retried), so the error escaped to the app layer as
 //! `ERROR Failed to pick next uploadable chunk: ... database is locked`
