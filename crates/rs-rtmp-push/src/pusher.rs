@@ -639,6 +639,56 @@ mod tests {
         );
     }
 
+    /// Issue #257 symmetric re-anchor RED→GREEN. When the two tracks have
+    /// drifted to UNEQUAL `last_*_output_ts_ms` (independent reconnect /
+    /// rescue→resume / republish boundaries) and ONE track trips a backward
+    /// jump, the per-track re-anchor froze the inter-track offset. The
+    /// symmetric re-anchor must collapse the offset to ~0 by re-anchoring BOTH
+    /// tracks to a single shared base at the re-anchor instant.
+    ///
+    /// RED: `reanchor(Track::Audio)` moves only `audio_base_ms`, leaving
+    /// `video_base_ms` on its old value → the next coincident A/V tags produce
+    /// a non-zero `(a_out − v_out)` offset. GREEN: both bases move to the
+    /// shared base → coincident tags produce a ~0 offset.
+    #[test]
+    fn symmetric_reanchor_collapses_drifted_offset_to_zero() {
+        use crate::Track;
+        // Audio track is 30_000 ms AHEAD of video on the wire (drift from an
+        // earlier independent reconnect). This is the pre-jump steady offset
+        // that a per-track re-anchor would freeze.
+        let mut state = PusherState {
+            last_audio_output_ts_ms: 630_000,
+            last_video_output_ts_ms: 600_000,
+            audio_base_ms: 630_000,
+            video_base_ms: 600_000,
+            audio_origin_xiu_ts: Some(630_000),
+            video_origin_xiu_ts: Some(600_000),
+            last_audio_xiu_ts: Some(630_000),
+            last_video_xiu_ts: Some(600_000),
+            ..PusherState::default()
+        };
+
+        // Audio trips a backward regression (chunker reset → xiu_ts ~0).
+        state.reanchor(Track::Audio);
+
+        // After the re-anchor, the FIRST coincident audio+video tag of the new
+        // chunk both arrive at the SAME chunker input ts (the chunker flushed
+        // both on the same boundary → they are content-coincident). Their wire
+        // output_ts must therefore be (nearly) equal.
+        let new_input_ts = 0_u32;
+        let a_origin = *state.audio_origin_xiu_ts.get_or_insert(new_input_ts);
+        let v_origin = *state.video_origin_xiu_ts.get_or_insert(new_input_ts);
+        let a_out = state.audio_base_ms + (new_input_ts.saturating_sub(a_origin)) as u64;
+        let v_out = state.video_base_ms + (new_input_ts.saturating_sub(v_origin)) as u64;
+
+        let offset = a_out as i64 - v_out as i64;
+        assert_eq!(
+            offset, 0,
+            "symmetric re-anchor must collapse the drifted A/V offset to ~0; \
+             per-track re-anchor would leave it frozen at +30_000 ms (a_out={a_out} v_out={v_out})"
+        );
+    }
+
     /// On reconnect, per-track BASE = `last_output_ts + 1`. Output
     /// starts behind wall after a gap → per-tag pacing skips sleep →
     /// burst push, then chunk-end rate cap caps overall rate at

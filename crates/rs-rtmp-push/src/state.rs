@@ -86,6 +86,37 @@ pub struct PusherState {
     pub last_video_xiu_ts: Option<u32>,
 }
 
+/// Which track tripped a backward / large-forward timestamp jump and is
+/// requesting a re-anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Track {
+    Audio,
+    Video,
+}
+
+impl PusherState {
+    /// Re-anchor on a chunker-side timestamp anomaly (backward regression or a
+    /// large forward jump) detected on `tripped`.
+    ///
+    /// RED state (issue #257): re-anchors ONLY the tripping track — the
+    /// historical per-track behavior. When the two tracks have drifted to
+    /// unequal `last_*_output_ts_ms`, this FREEZES the inter-track offset into
+    /// the wire timeline (the bug #257 fixes with a symmetric re-anchor).
+    pub fn reanchor(&mut self, tripped: Track) {
+        match tripped {
+            Track::Audio => {
+                self.audio_base_ms = self.last_audio_output_ts_ms.saturating_add(1);
+                self.audio_origin_xiu_ts = None;
+            }
+            Track::Video => {
+                self.video_base_ms = self.last_video_output_ts_ms.saturating_add(1);
+                self.video_origin_xiu_ts = None;
+            }
+        }
+        self.regression_reanchor_count = self.regression_reanchor_count.saturating_add(1);
+    }
+}
+
 #[derive(Clone)]
 pub struct PusherConfig {
     /// Per-call socket-write timeout in ms. Default 30_000 (matches today's
