@@ -112,6 +112,9 @@ pub(super) async fn handle_rust_push(
             s.reconnect_count = pusher.reconnect_count();
             // #257: surface the live content-PTS A/V skew so the dashboard can
             // alarm on a desync and the #258 E2E gate can assert it stays ~0.
+            // Updated on the SUCCESS path only — last-success semantics; on an
+            // error chunk the error fields below dominate the dashboard and
+            // this keeps its last-known-good value.
             s.av_skew_ms = pusher.av_skew_ms();
             // Clear sticky error markers: prior timeout / push-error states
             // shouldn't keep showing on the dashboard once writes resume.

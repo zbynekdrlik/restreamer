@@ -82,8 +82,21 @@ pub struct SkewTracker {
     /// Consecutive chunks whose end-of-chunk `|av_skew_ms|` exceeded the
     /// threshold. Reset to 0 the moment a chunk comes back under threshold.
     consecutive_over: u32,
-    /// Last computed signed skew (video_progress − audio_progress), surfaced
-    /// to telemetry.
+    /// Steady-state A/V offset captured on the first chunk where BOTH tracks
+    /// are present. The skew that matters for recovery is the DEVIATION from
+    /// this baseline, not the absolute offset: the chunker's audio (xiu-ts) and
+    /// video (wall-clock) live in different time domains whose per-chunk RATE
+    /// matches but whose absolute zero points can differ by a benign,
+    /// CONSTANT startup gap (device/encoder init lag, silent pre-roll —
+    /// `feedback_chunker_time_domains`). A guard on the ABSOLUTE offset would
+    /// false-trip and kill a working stream's session on that benign gap. The
+    /// 2026-06-19 incident skew, by contrast, APPEARED mid-stream (grew by
+    /// ~25.5 s relative to a near-zero baseline on an OBS republish / reconnect)
+    /// — a CHANGE, which is exactly what the baseline-relative metric detects.
+    /// `None` until both tracks seen; cleared on `reset_tracks`.
+    baseline_skew_ms: Option<i64>,
+    /// Last computed baseline-relative skew (deviation from `baseline_skew_ms`),
+    /// surfaced to telemetry. 0 until both tracks seen / baseline captured.
     last_skew_ms: i64,
     /// Number of times this tracker has tripped recovery (for telemetry /
     /// alerting + the reconnect-thrash rate limit).
@@ -131,6 +144,10 @@ impl SkewTracker {
         self.audio_seen = false;
         self.video_seen = false;
         self.consecutive_over = 0;
+        // The baseline must re-establish from the post-reconnect / post-reanchor
+        // first chunk — a stale baseline that survived the re-anchor would
+        // measure deviation against the OLD steady state.
+        self.baseline_skew_ms = None;
     }
 
     /// `true` once BOTH tracks have produced at least one tag this session.
@@ -142,14 +159,31 @@ impl SkewTracker {
         self.audio_seen && self.video_seen
     }
 
-    /// Signed content-PTS skew on the shared epoch:
+    /// Raw signed content-PTS offset on the shared epoch:
     /// `video_max_abs − audio_max_abs`. Positive means audio is BEHIND video
-    /// (the 2026-06-19 incident direction).
-    pub fn current_skew_ms(&self) -> i64 {
+    /// (the 2026-06-19 incident direction). This is the ABSOLUTE offset; the
+    /// guard and telemetry use the baseline-RELATIVE deviation
+    /// (`current_skew_ms`) instead, so a benign constant startup domain gap
+    /// doesn't read as a desync.
+    pub fn raw_skew_ms(&self) -> i64 {
         self.video_max_abs - self.audio_max_abs
     }
 
-    /// Last skew computed at a `chunk_done` boundary (telemetry surface).
+    /// Baseline-relative content-PTS skew: the DEVIATION of the current raw
+    /// offset from the steady-state baseline. 0 until both tracks are seen and
+    /// the baseline is captured. This is what the guard trips on and what
+    /// telemetry surfaces — a benign constant domain offset folds into the
+    /// baseline and reads ~0; only a desync that APPEARS mid-stream (the
+    /// incident signature) produces a non-zero deviation.
+    pub fn current_skew_ms(&self) -> i64 {
+        match self.baseline_skew_ms {
+            Some(baseline) => self.raw_skew_ms() - baseline,
+            None => 0,
+        }
+    }
+
+    /// Last baseline-relative skew computed at a `chunk_done` boundary
+    /// (telemetry surface). 0 until both tracks seen / baseline captured.
     pub fn last_skew_ms(&self) -> i64 {
         self.last_skew_ms
     }
@@ -164,11 +198,19 @@ impl SkewTracker {
     /// `now_ms` is a monotonic wall-clock in ms (the pusher passes
     /// `anchor.elapsed()`); it gates the reconnect-thrash rate limit.
     pub fn evaluate_chunk(&mut self, now_ms: u64) -> SkewDecision {
+        // Capture the steady-state baseline on the first chunk where BOTH
+        // tracks are present. Any benign constant domain offset present from
+        // session start folds into this baseline, so the guard measures only
+        // SUBSEQUENT deviation (the desync-appeared signature).
+        if self.both_tracks_seen() && self.baseline_skew_ms.is_none() {
+            self.baseline_skew_ms = Some(self.raw_skew_ms());
+        }
         let skew = self.current_skew_ms();
         self.last_skew_ms = skew;
         // Only a stream with BOTH tracks present can have a meaningful A/V
-        // skew. For a one-track stream, keep the debounce at 0 so it can never
-        // trip (and surface skew=last_skew_ms for telemetry continuity).
+        // skew. For a one-track stream the baseline is never captured and
+        // current_skew_ms() returns 0, so the debounce stays at 0 and it can
+        // never trip.
         if self.both_tracks_seen() && skew.abs() > MAX_AV_SKEW_MS {
             self.consecutive_over = self.consecutive_over.saturating_add(1);
         } else {
@@ -226,158 +268,231 @@ impl SkewTracker {
 mod tests {
     use super::*;
 
-    /// Build the per-track input-PTS sequences for ONE chunk where audio lags
-    /// video by `audio_lag_ms` on the chunker's shared epoch.
-    ///
-    /// Video frames advance at ~33 ms (30 fps); audio at ~21 ms (AAC). Both
-    /// start from the same wall reference EXCEPT audio's PTS is offset earlier
-    /// by `audio_lag_ms`, exactly the 2026-06-19 incident shape (audio behind
-    /// video). The pusher's per-track output re-anchor would mask this on the
-    /// wire, but the INPUT PTS deltas carry the true content skew.
+    /// Build the per-track input-PTS sequences for ONE chunk, given each
+    /// track's start ts on the chunker's shared epoch. Video frames advance at
+    /// ~33 ms (30 fps), audio at ~21 ms (AAC). The pusher's per-track output
+    /// re-anchor would mask any offset on the wire, but the INPUT PTS deltas
+    /// carry the true content skew.
     fn chunk_input_pts(video_start: u32, audio_start: u32, span_ms: u32) -> (Vec<u32>, Vec<u32>) {
         let video: Vec<u32> = (0..=span_ms / 33).map(|i| video_start + i * 33).collect();
         let audio: Vec<u32> = (0..=span_ms / 21).map(|i| audio_start + i * 21).collect();
         (video, audio)
     }
 
-    /// Issue #257 detection RED→GREEN. Two synthetic chunks where audio lags
-    /// video by 25,500 ms (the incident skew). The content-PTS skew metric
-    /// reproduces that 25,500 ms wire skew; the guard MUST trip recovery once
-    /// the debounce is satisfied.
+    /// Feed one chunk (video_start/audio_start on the shared epoch) and return
+    /// the decision at its boundary.
+    fn feed_chunk(
+        t: &mut SkewTracker,
+        video_start: u32,
+        audio_start: u32,
+        now_ms: u64,
+    ) -> SkewDecision {
+        let (video, audio) = chunk_input_pts(video_start, audio_start, 2_000);
+        for v in &video {
+            t.observe_video(*v);
+        }
+        for a in &audio {
+            t.observe_audio(*a);
+        }
+        t.evaluate_chunk(now_ms)
+    }
+
+    /// Issue #257 detection RED→GREEN. The 2026-06-19 incident desync APPEARED
+    /// mid-stream (audio fell ~25.5 s behind video on an OBS republish /
+    /// reconnect), it was NOT present from t=0. So the stream starts ALIGNED
+    /// (baseline ~0), then audio falls 25,500 ms behind — the baseline-relative
+    /// skew jumps to ~25,500 ms and MUST trip recovery after the debounce.
     ///
     /// RED (no guard wired): `evaluate_chunk` returns `Continue` forever — the
-    /// pusher propagates the desync silently, exactly the 2026-06-19 behavior.
-    /// GREEN: after `SKEW_DEBOUNCE_CHUNKS` consecutive over-threshold chunks
-    /// the tracker returns `TripRecovery`.
+    /// pusher propagates the desync silently. GREEN: after `SKEW_DEBOUNCE_CHUNKS`
+    /// consecutive over-threshold chunks the tracker returns `TripRecovery`.
     #[test]
-    fn audio_lagging_video_by_25500ms_trips_recovery_after_debounce() {
+    fn audio_falling_behind_video_mid_stream_trips_recovery_after_debounce() {
         let mut tracker = SkewTracker::default();
-        // Video runs from PTS 0; audio runs 25_500 ms BEHIND (its content for
-        // the same wall instant is stamped 25_500 ms earlier).
         const LAG_MS: u32 = 25_500;
 
-        let mut last_decision = SkewDecision::Continue;
-        // Feed several chunks. Video PTS keeps climbing; audio PTS climbs the
-        // same way but starts 25_500 ms behind, so the per-track progress
-        // delta stays ~25_500 ms every chunk.
-        for chunk in 0..SKEW_DEBOUNCE_CHUNKS as u32 {
-            let video_start = chunk * 2_000;
-            // audio_start mirrors video_start but the audio ORIGIN was pinned
-            // 25_500 ms earlier, so its progress lags by LAG_MS.
+        // Phase 1: a few ALIGNED chunks establish a near-zero baseline.
+        for chunk in 0..3u32 {
+            let start = chunk * 2_000;
+            assert_eq!(
+                feed_chunk(&mut tracker, start, start, (chunk as u64 + 1) * 2_000),
+                SkewDecision::Continue,
+                "aligned warm-up must not trip"
+            );
+        }
+        assert!(
+            tracker.current_skew_ms().abs() <= 66,
+            "baseline-relative skew must be ~0 while aligned, got {}",
+            tracker.current_skew_ms()
+        );
+
+        // Phase 2: a republish makes video's epoch leap 25,500 ms AHEAD of
+        // audio's (equivalently, audio falls 25,500 ms behind video). Audio
+        // keeps advancing normally; video's PTS now runs LAG_MS ahead, so
+        // video_max_abs pulls away from audio_max_abs by ~LAG_MS each chunk.
+        // (Modelled as a video lead so both tracks' monotonic max keeps
+        // growing — the GAP, not a downward step, is what the metric detects.)
+        let mut last = SkewDecision::Continue;
+        for chunk in 3..(3 + SKEW_DEBOUNCE_CHUNKS) {
+            let video_start = chunk * 2_000 + LAG_MS;
             let audio_start = chunk * 2_000;
-            let (video, audio) = chunk_input_pts(video_start + LAG_MS, audio_start, 2_000);
-            for v in &video {
-                tracker.observe_video(*v);
-            }
-            for a in &audio {
-                tracker.observe_audio(*a);
-            }
-            // The content-PTS skew the tracker computes must reproduce the
-            // 25,500 ms wire skew (within one inter-frame interval).
+            last = feed_chunk(
+                &mut tracker,
+                video_start,
+                audio_start,
+                (chunk as u64 + 1) * 2_000,
+            );
             let skew = tracker.current_skew_ms();
             assert!(
                 (skew - LAG_MS as i64).abs() <= 66,
-                "content-PTS skew must reproduce the {LAG_MS} ms incident skew, got {skew}"
+                "baseline-relative skew must reproduce the {LAG_MS} ms desync, got {skew}"
             );
-            last_decision = tracker.evaluate_chunk((chunk as u64 + 1) * 2_000);
         }
 
         assert_eq!(
-            last_decision,
+            last,
             SkewDecision::TripRecovery,
-            "sustained 25,500 ms audio-behind-video skew MUST trip bounded recovery \
-             after {SKEW_DEBOUNCE_CHUNKS} consecutive over-threshold chunks"
+            "a desync that APPEARS mid-stream and persists must trip bounded \
+             recovery after {SKEW_DEBOUNCE_CHUNKS} consecutive over-threshold chunks"
         );
         assert!(
             tracker.last_skew_ms().abs() > MAX_AV_SKEW_MS,
-            "last_skew_ms must record the over-threshold value for telemetry"
+            "last_skew_ms must record the over-threshold deviation for telemetry"
         );
         assert_eq!(tracker.trip_count(), 1, "exactly one recovery tripped");
     }
 
-    /// A healthy shared-epoch source (audio and video advance together) must
-    /// NEVER trip — the guard is silent in steady state.
+    /// THE false-positive guard (#257 review 🟡): a benign CONSTANT A/V domain
+    /// offset present from session start (audio xiu-ts vs video wall-clock have
+    /// different absolute zero points — startup/device init lag) must NEVER
+    /// trip. The constant offset folds into the baseline; only a CHANGE trips.
     #[test]
-    fn aligned_av_never_trips() {
+    fn constant_startup_domain_offset_never_trips() {
         let mut tracker = SkewTracker::default();
-        for chunk in 0..10u32 {
-            let start = chunk * 2_000;
-            let (video, audio) = chunk_input_pts(start, start, 2_000);
-            for v in &video {
-                tracker.observe_video(*v);
-            }
-            for a in &audio {
-                tracker.observe_audio(*a);
-            }
-            let skew = tracker.current_skew_ms();
-            assert!(
-                skew.abs() <= MAX_AV_SKEW_MS,
-                "aligned A/V must stay under threshold, got {skew}"
-            );
+        // Video's epoch sits 20,000 ms (>> threshold) AHEAD of audio's from the
+        // very first chunk (a benign constant domain gap) and stays exactly
+        // there for the whole stream. Audio runs from 0; video from CONST_OFFSET.
+        const CONST_OFFSET: u32 = 20_000;
+        for chunk in 0..15u32 {
+            let video_start = chunk * 2_000 + CONST_OFFSET;
+            let audio_start = chunk * 2_000;
             assert_eq!(
-                tracker.evaluate_chunk((chunk as u64 + 1) * 2_000),
+                feed_chunk(
+                    &mut tracker,
+                    video_start,
+                    audio_start,
+                    (chunk as u64 + 1) * 2_000
+                ),
                 SkewDecision::Continue,
-                "aligned A/V must never trip recovery"
+                "a CONSTANT startup domain offset is benign and must never trip \
+                 (it folds into the baseline)"
+            );
+            assert!(
+                tracker.current_skew_ms().abs() <= 66,
+                "baseline-relative skew must stay ~0 for a constant offset, got {}",
+                tracker.current_skew_ms()
             );
         }
         assert_eq!(tracker.trip_count(), 0);
     }
 
-    /// A transient single-chunk over-threshold spike must NOT trip — only a
-    /// skew sustained across the debounce window does.
+    /// A healthy shared-epoch source (audio and video advance together from 0)
+    /// must NEVER trip — the guard is silent in steady state.
+    #[test]
+    fn aligned_av_never_trips() {
+        let mut tracker = SkewTracker::default();
+        for chunk in 0..10u32 {
+            let start = chunk * 2_000;
+            assert_eq!(
+                feed_chunk(&mut tracker, start, start, (chunk as u64 + 1) * 2_000),
+                SkewDecision::Continue,
+                "aligned A/V must never trip recovery"
+            );
+            assert!(tracker.current_skew_ms().abs() <= MAX_AV_SKEW_MS);
+        }
+        assert_eq!(tracker.trip_count(), 0);
+    }
+
+    /// A transient single-chunk over-threshold deviation must NOT trip — only a
+    /// deviation sustained across the debounce window does.
     #[test]
     fn single_chunk_spike_does_not_trip_below_debounce() {
         let mut tracker = SkewTracker::default();
-        // One over-threshold chunk only.
-        tracker.observe_video(10_000);
-        tracker.observe_audio(0);
+        // Chunk 0 aligned → baseline ~0.
         assert_eq!(
-            tracker.evaluate_chunk(2_000),
+            feed_chunk(&mut tracker, 0, 0, 2_000),
+            SkewDecision::Continue
+        );
+        // Chunk 1: one over-threshold deviation only.
+        assert_eq!(
+            feed_chunk(&mut tracker, 12_000, 2_000, 4_000),
             SkewDecision::Continue,
             "a single over-threshold chunk must not trip (debounce = {SKEW_DEBOUNCE_CHUNKS})"
         );
     }
 
-    /// Reset clears both tracks AND the debounce so skew is re-measured from a
-    /// fresh common origin after a reconnect / symmetric re-anchor.
+    /// Reset clears both tracks, the debounce, AND the baseline so skew is
+    /// re-measured from a fresh common origin after a reconnect / symmetric
+    /// re-anchor.
     #[test]
-    fn reset_tracks_clears_progress_and_debounce() {
+    fn reset_tracks_clears_progress_baseline_and_debounce() {
         let mut tracker = SkewTracker::default();
-        tracker.observe_video(30_000);
-        tracker.observe_audio(0);
-        let _ = tracker.evaluate_chunk(1_000);
-        assert!(tracker.current_skew_ms() > MAX_AV_SKEW_MS);
+        // Establish a baseline, then deviate.
+        feed_chunk(&mut tracker, 0, 0, 2_000);
+        feed_chunk(&mut tracker, 30_000, 2_000, 4_000);
+        assert!(tracker.current_skew_ms().abs() > MAX_AV_SKEW_MS);
         tracker.reset_tracks();
+        assert_eq!(
+            tracker.raw_skew_ms(),
+            0,
+            "reset must clear both tracks' progress"
+        );
         assert_eq!(
             tracker.current_skew_ms(),
             0,
-            "reset must clear both tracks' progress to a fresh common origin"
+            "reset must clear the baseline so deviation re-measures from 0"
         );
     }
 
-    /// Recovery is rate-limited: a skew that survives the reconnect must NOT
-    /// thrash. After one trip, a second trip within
+    /// Recovery is rate-limited: a deviation that survives the reconnect must
+    /// NOT thrash. After one trip, a second trip within
     /// `SKEW_RECOVERY_MIN_INTERVAL_MS` is suppressed.
     #[test]
     fn recovery_is_rate_limited_to_avoid_reconnect_thrash() {
         let mut tracker = SkewTracker::default();
-        // Drive a persistent over-threshold skew to the first trip.
-        for chunk in 0..SKEW_DEBOUNCE_CHUNKS as u32 {
-            tracker.observe_video(30_000 + chunk * 2_000);
-            tracker.observe_audio(chunk * 2_000);
-            let _ = tracker.evaluate_chunk((chunk as u64 + 1) * 1_000);
+        // Aligned baseline.
+        feed_chunk(&mut tracker, 0, 0, 1_000);
+        // Sustained deviation → first trip.
+        let mut tripped_at = 0u32;
+        for chunk in 1.. {
+            let d = feed_chunk(
+                &mut tracker,
+                30_000 + chunk * 2_000,
+                chunk * 2_000,
+                (chunk as u64 + 1) * 1_000,
+            );
+            if d == SkewDecision::TripRecovery {
+                tripped_at = chunk;
+                break;
+            }
+            assert!(chunk < 10, "should have tripped by now");
         }
-        assert_eq!(tracker.trip_count(), 1, "first sustained skew trips once");
+        assert_eq!(
+            tracker.trip_count(),
+            1,
+            "first sustained deviation trips once"
+        );
 
-        // Immediately after the trip the tracker would normally reset on the
-        // reconnect, but if the skew SURVIVES (reset not called) a second
-        // over-threshold window within the min interval must be suppressed.
-        for chunk in SKEW_DEBOUNCE_CHUNKS as u32..(2 * SKEW_DEBOUNCE_CHUNKS as u32) {
-            tracker.observe_video(30_000 + chunk * 2_000);
-            tracker.observe_audio(chunk * 2_000);
-            let decision = tracker.evaluate_chunk((chunk as u64 + 1) * 1_000);
+        // A second over-threshold window within the min interval is suppressed.
+        for chunk in (tripped_at + 1)..(tripped_at + 1 + 2 * SKEW_DEBOUNCE_CHUNKS) {
+            let d = feed_chunk(
+                &mut tracker,
+                30_000 + chunk * 2_000,
+                chunk * 2_000,
+                (chunk as u64 + 1) * 1_000,
+            );
             assert_eq!(
-                decision,
+                d,
                 SkewDecision::Continue,
                 "a second trip within the min recovery interval must be rate-limited"
             );
@@ -389,46 +504,58 @@ mod tests {
         );
     }
 
-    /// After the min recovery interval has elapsed, a still-present skew is
+    /// After the min recovery interval has elapsed, a still-present deviation is
     /// allowed to trip again (the rate limit is a floor, not a permanent
     /// silence).
     #[test]
     fn recovery_allowed_again_after_min_interval() {
         let mut tracker = SkewTracker::default();
-        for chunk in 0..SKEW_DEBOUNCE_CHUNKS as u32 {
-            tracker.observe_video(30_000 + chunk * 2_000);
-            tracker.observe_audio(chunk * 2_000);
-            let _ = tracker.evaluate_chunk(1_000);
+        feed_chunk(&mut tracker, 0, 0, 1_000);
+        let mut tripped_at = 0u32;
+        for chunk in 1.. {
+            if feed_chunk(&mut tracker, 30_000 + chunk * 2_000, chunk * 2_000, 1_000)
+                == SkewDecision::TripRecovery
+            {
+                tripped_at = chunk;
+                break;
+            }
+            assert!(chunk < 10);
         }
         assert_eq!(tracker.trip_count(), 1);
 
         // Re-accumulate the debounce, now PAST the min interval.
         let base = SKEW_RECOVERY_MIN_INTERVAL_MS + 10_000;
-        for chunk in SKEW_DEBOUNCE_CHUNKS as u32..(2 * SKEW_DEBOUNCE_CHUNKS as u32) {
-            tracker.observe_video(30_000 + chunk * 2_000);
-            tracker.observe_audio(chunk * 2_000);
-            let _ = tracker.evaluate_chunk(base);
+        let mut tripped_again = false;
+        for chunk in (tripped_at + 1)..(tripped_at + 1 + 2 * SKEW_DEBOUNCE_CHUNKS) {
+            if feed_chunk(&mut tracker, 30_000 + chunk * 2_000, chunk * 2_000, base)
+                == SkewDecision::TripRecovery
+            {
+                tripped_again = true;
+            }
         }
-        assert_eq!(
-            tracker.trip_count(),
-            2,
-            "a still-present skew may trip again once the min interval has passed"
+        assert!(
+            tripped_again,
+            "a still-present deviation may trip again once the min interval has passed"
         );
+        assert_eq!(tracker.trip_count(), 2);
     }
 
-    /// An audio-ONLY stream (no video tags) must NEVER trip — there is no
-    /// second track to compare against, so the growing audio progress must not
-    /// read as a huge spurious skew.
+    /// An audio-ONLY stream (no video tags) must NEVER trip — the baseline is
+    /// never captured (both_tracks_seen false), so current_skew_ms() stays 0.
     #[test]
     fn audio_only_stream_never_trips() {
         let mut tracker = SkewTracker::default();
         for chunk in 0..10u32 {
-            // Audio runs far past the threshold in absolute terms.
             tracker.observe_audio(chunk * 10_000);
             assert_eq!(
                 tracker.evaluate_chunk((chunk as u64 + 1) * 1_000),
                 SkewDecision::Continue,
                 "audio-only stream has no A/V skew and must never trip"
+            );
+            assert_eq!(
+                tracker.current_skew_ms(),
+                0,
+                "one-track skew must read 0 (no baseline) for telemetry sanity"
             );
         }
         assert_eq!(tracker.trip_count(), 0);
@@ -445,33 +572,57 @@ mod tests {
                 SkewDecision::Continue,
                 "video-only stream has no A/V skew and must never trip"
             );
+            assert_eq!(tracker.current_skew_ms(), 0);
         }
         assert_eq!(tracker.trip_count(), 0);
     }
 
-    /// The skew sign convention: audio behind video => POSITIVE skew. A
-    /// reversed offset (video behind audio) is also detected (its absolute
-    /// value crosses the threshold) but reads NEGATIVE for operator triage.
+    /// Sign convention on the baseline-relative deviation: audio falling behind
+    /// video (vs baseline) reads POSITIVE; video falling behind reads NEGATIVE.
     #[test]
-    fn skew_sign_audio_behind_is_positive_video_behind_is_negative() {
-        // Audio behind video by 10 s.
+    fn deviation_sign_audio_behind_is_positive_video_behind_is_negative() {
+        // Establish aligned baseline, then audio falls behind → positive.
         let mut t = SkewTracker::default();
+        t.observe_video(0);
+        t.observe_audio(0);
+        t.evaluate_chunk(1_000); // baseline = 0
         t.observe_video(10_000);
         t.observe_audio(0);
+        t.evaluate_chunk(2_000);
         assert!(
             t.current_skew_ms() > 0,
-            "audio behind video must read positive, got {}",
+            "audio falling behind video must read positive, got {}",
             t.current_skew_ms()
         );
 
-        // Video behind audio by 10 s.
+        // Aligned baseline, then video falls behind → negative.
         let mut t2 = SkewTracker::default();
+        t2.observe_video(0);
+        t2.observe_audio(0);
+        t2.evaluate_chunk(1_000); // baseline = 0
         t2.observe_audio(10_000);
         t2.observe_video(0);
+        t2.evaluate_chunk(2_000);
         assert!(
             t2.current_skew_ms() < 0,
-            "video behind audio must read negative, got {}",
+            "video falling behind audio must read negative, got {}",
             t2.current_skew_ms()
         );
+    }
+
+    /// The RAW absolute offset is still exposed for diagnostics even though the
+    /// guard uses the baseline-relative deviation.
+    #[test]
+    fn raw_skew_exposes_absolute_offset() {
+        let mut t = SkewTracker::default();
+        t.observe_video(10_000);
+        t.observe_audio(0);
+        assert_eq!(
+            t.raw_skew_ms(),
+            10_000,
+            "raw_skew_ms is the absolute video-minus-audio offset"
+        );
+        // current_skew_ms is 0 until a baseline exists.
+        assert_eq!(t.current_skew_ms(), 0);
     }
 }
