@@ -110,6 +110,9 @@ pub(super) async fn handle_rust_push(
             s.current_chunk_id = chunk_id;
             s.chunks_processed += 1;
             s.reconnect_count = pusher.reconnect_count();
+            // #257: surface the live content-PTS A/V skew so the dashboard can
+            // alarm on a desync and the #258 E2E gate can assert it stays ~0.
+            s.av_skew_ms = pusher.av_skew_ms();
             // Clear sticky error markers: prior timeout / push-error states
             // shouldn't keep showing on the dashboard once writes resume.
             s.stall_reason = None;

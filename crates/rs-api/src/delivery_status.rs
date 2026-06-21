@@ -127,6 +127,13 @@ pub struct EndpointDeliveryStatus {
     /// Issue #172.
     #[serde(default)]
     pub reconnect_count: u32,
+    /// Current signed content-PTS A/V skew in ms (positive = audio behind
+    /// video) for rust-pusher endpoints. Read from VPS `/api/status` JSON
+    /// (defaults to 0 if the VPS rs-delivery is older than this field). The
+    /// operator dashboard alarms on a sustained non-zero value; the #258 E2E
+    /// gate asserts it stays ~0 (issue #257).
+    #[serde(default)]
+    pub av_skew_ms: i64,
     pub last_error: Option<String>,
     pub ffmpeg_last_stderr: Option<String>,
     pub is_fast: bool,
@@ -251,6 +258,10 @@ impl DeliveryOrchestrator {
                                 entry["ffmpeg_restart_count"].as_u64().unwrap_or(0) as u32;
                             let reconnect_count =
                                 entry["reconnect_count"].as_u64().unwrap_or(0) as u32;
+                            // #257: content-PTS A/V skew (signed; positive =
+                            // audio behind video). 0 when the VPS rs-delivery
+                            // predates this field.
+                            let av_skew_ms = entry["av_skew_ms"].as_i64().unwrap_or(0);
                             let last_error = entry["last_error"].as_str().map(|s| s.to_string());
                             let ffmpeg_last_stderr =
                                 entry["ffmpeg_last_stderr"].as_str().map(|s| s.to_string());
@@ -354,6 +365,7 @@ impl DeliveryOrchestrator {
                                 stall_reason,
                                 ffmpeg_restart_count,
                                 reconnect_count,
+                                av_skew_ms,
                                 last_error,
                                 ffmpeg_last_stderr,
                                 is_fast,
@@ -438,6 +450,7 @@ impl DeliveryOrchestrator {
                 stall_reason: ep.stall_reason,
                 ffmpeg_restart_count: ep.ffmpeg_restart_count,
                 reconnect_count: ep.reconnect_count,
+                av_skew_ms: ep.av_skew_ms,
                 last_error: ep.last_error,
                 is_fast: ep.is_fast,
                 delivery_mode: ep.delivery_mode,

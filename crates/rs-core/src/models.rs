@@ -325,6 +325,12 @@ pub struct DeliveryEndpointMetrics {
     /// older payloads / ffmpeg-path endpoints.
     #[serde(default)]
     pub reconnect_count: u32,
+    /// Content-PTS A/V skew in ms (positive = audio behind video) for
+    /// rust-pusher endpoints. The dashboard alarms on a sustained non-zero
+    /// value; the #258 E2E gate asserts it stays ~0. Defaults to 0 for older
+    /// payloads / ffmpeg-path endpoints (issue #257).
+    #[serde(default)]
+    pub av_skew_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -554,6 +560,7 @@ mod tests {
                     ffmpeg_restart_count: 0,
 
                     reconnect_count: 0,
+                    av_skew_ms: 0,
                     last_error: None,
                     is_fast: false,
                     delivery_mode: None,
@@ -681,6 +688,7 @@ mod tests {
             ffmpeg_restart_count: 5,
 
             reconnect_count: 0,
+            av_skew_ms: 0,
             last_error: Some("S3 timeout".to_string()),
             is_fast: true,
             delivery_mode: None,
@@ -730,6 +738,7 @@ mod tests {
                 ffmpeg_restart_count: 10,
 
                 reconnect_count: 0,
+                av_skew_ms: 0,
                 last_error: Some("Connection refused".to_string()),
                 is_fast: false,
                 delivery_mode: None,
@@ -758,6 +767,7 @@ mod tests {
                 ffmpeg_restart_count: 0,
 
                 reconnect_count: 0,
+                av_skew_ms: 0,
                 last_error: None,
                 is_fast: true,
                 delivery_mode: None,
@@ -776,6 +786,7 @@ mod tests {
                 ffmpeg_restart_count: 0,
 
                 reconnect_count: 0,
+                av_skew_ms: 0,
                 last_error: None,
                 is_fast: false,
                 delivery_mode: None,
@@ -806,6 +817,7 @@ mod tests {
             ffmpeg_restart_count: 0,
 
             reconnect_count: 0,
+            av_skew_ms: 0,
             last_error: None,
             is_fast: true,
             delivery_mode: None,

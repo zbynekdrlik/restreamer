@@ -36,6 +36,15 @@ pub enum PushError {
 
     #[error("malformed FLV input at offset {offset}: {reason}")]
     MalformedInput { offset: usize, reason: String },
+
+    /// Issue #257: the cross-track content-PTS A/V skew exceeded
+    /// `MAX_AV_SKEW_MS` for the debounce window. Returned by `push_flv_bytes`
+    /// to force a CLEAN reconnect so both tracks re-anchor from a common
+    /// session start. This is a deliberate recovery signal, not a transport
+    /// fault — the consumer's error arm already force-closes + reconnects,
+    /// which is exactly the bounded recovery this variant requests.
+    #[error("A/V skew exceeded: {skew_ms} ms (video ahead of audio)")]
+    AvSkewExceeded { skew_ms: i64 },
 }
 
 /// Backoff floor in milliseconds for a given error variant. Mirrors today's
@@ -61,6 +70,13 @@ pub fn backoff_floor_ms(err: &PushError) -> Option<u64> {
         PushError::Timeout => Some(10_000),
         PushError::IoError(_) => Some(15_000),
         PushError::MalformedInput { .. } => Some(15_000),
+        // AvSkewExceeded (#257) is a deliberate recovery reconnect, not a
+        // fault. A short 3 s floor reconnects almost immediately so the
+        // desync clears fast; the reconnect-thrash protection lives in
+        // SkewTracker's debounce + min-interval rate limit, NOT in a punishing
+        // backoff. Same floor as RemoteClosed for the same reason (the reset
+        // is wanted, not penalised).
+        PushError::AvSkewExceeded { .. } => Some(3_000),
         PushError::LocalCancel => None,
     }
 }
@@ -110,6 +126,11 @@ pub fn is_exponential(err: &PushError) -> bool {
             // cache time we just got.
             | PushError::RemoteClosed(_)
             | PushError::MalformedInput { .. }
+            // AvSkewExceeded (#257) = deliberate recovery reconnect. The
+            // SkewTracker rate limit (min 60 s between trips) already prevents
+            // thrash; escalating the backoff exponentially would only waste
+            // delivery time we want back. Fixed floor.
+            | PushError::AvSkewExceeded { .. }
             | PushError::LocalCancel
     )
 }
@@ -183,6 +204,32 @@ mod tests {
     #[test]
     fn backoff_floor_local_cancel_is_none() {
         assert_eq!(backoff_floor_ms(&PushError::LocalCancel), None);
+    }
+
+    #[test]
+    fn backoff_floor_av_skew_exceeded_is_3000() {
+        // #257: skew recovery reconnects fast; rate limit lives in SkewTracker,
+        // not in a punishing backoff.
+        let e = PushError::AvSkewExceeded { skew_ms: 25_500 };
+        assert_eq!(backoff_floor_ms(&e), Some(3_000));
+    }
+
+    #[test]
+    fn is_exponential_av_skew_exceeded_is_false() {
+        let e = PushError::AvSkewExceeded { skew_ms: 25_500 };
+        assert!(
+            !is_exponential(&e),
+            "AvSkewExceeded is a deliberate recovery reconnect; never escalate"
+        );
+    }
+
+    #[test]
+    fn av_skew_exceeded_display_contains_skew() {
+        let e = PushError::AvSkewExceeded { skew_ms: 25_500 };
+        assert!(
+            e.to_string().contains("25500"),
+            "Display must carry the skew value for operator triage, got {e}"
+        );
     }
 
     // --- is_exponential ---

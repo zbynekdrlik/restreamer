@@ -34,6 +34,12 @@ pub struct EndpointStats {
     /// `ffmpeg_restart_count` so the dashboard can use either uniformly.
     #[serde(default)]
     pub reconnect_count: u32,
+    /// Current signed content-PTS A/V skew in ms for `PusherKind::Rust`
+    /// endpoints (positive = audio behind video). Read from the pusher on
+    /// every successful chunk push. The dashboard alarms on a sustained
+    /// non-zero value and the #258 E2E gate asserts it stays ~0 (issue #257).
+    #[serde(default)]
+    pub av_skew_ms: i64,
     /// Per-endpoint ring buffer of recent Rust RTMP pusher reconnects.
     #[serde(default)]
     pub rtmp_push_history: std::collections::VecDeque<RtmpPushAuditRecord>,
@@ -79,6 +85,7 @@ impl Default for EndpointStats {
             delivery_mode: "normal".to_string(),
             rescue_eta_secs: None,
             reconnect_count: 0,
+            av_skew_ms: 0,
             rtmp_push_history: std::collections::VecDeque::new(),
             prefetch_fill: None,
             last_lifecycle_worst_stage: None,

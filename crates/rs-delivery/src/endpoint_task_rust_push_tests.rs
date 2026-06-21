@@ -329,6 +329,10 @@ mod close_on_error {
         fn reconnect_count(&self) -> u32 {
             self.reconnects
         }
+
+        fn av_skew_ms(&self) -> i64 {
+            0
+        }
     }
 
     fn fresh_state() -> (

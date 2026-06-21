@@ -741,6 +741,11 @@ pub struct DeliveryEndpointDetail {
     /// Defaults to 0 if VPS rs-delivery is older than this field.
     #[serde(default)]
     pub reconnect_count: u32,
+    /// Content-PTS A/V skew in ms (positive = audio behind video) for
+    /// rust-pusher endpoints. Defaults to 0 if the host predates the field
+    /// (issue #257).
+    #[serde(default)]
+    pub av_skew_ms: i64,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -782,6 +787,9 @@ pub struct CachedDeliveryEndpoint {
     pub stall_reason: Option<String>,
     #[serde(default)]
     pub ffmpeg_restart_count: u32,
+    /// Content-PTS A/V skew in ms (positive = audio behind video). Issue #257.
+    #[serde(default)]
+    pub av_skew_ms: i64,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]

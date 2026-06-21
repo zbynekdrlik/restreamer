@@ -25,6 +25,9 @@ pub(crate) trait Pushable {
     ) -> impl std::future::Future<Output = Result<(), PushError>> + Send;
     fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
     fn reconnect_count(&self) -> u32;
+    /// Current signed content-PTS A/V skew in ms (positive = audio behind
+    /// video). Surfaced to per-endpoint telemetry (issue #257).
+    fn av_skew_ms(&self) -> i64;
 }
 
 impl Pushable for RtmpPusher {
@@ -38,5 +41,9 @@ impl Pushable for RtmpPusher {
 
     fn reconnect_count(&self) -> u32 {
         RtmpPusher::reconnect_count(self)
+    }
+
+    fn av_skew_ms(&self) -> i64 {
+        RtmpPusher::av_skew_ms(self)
     }
 }
