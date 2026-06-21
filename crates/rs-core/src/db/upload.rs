@@ -111,51 +111,65 @@ pub async fn mark_upload_permanently_failed(pool: &SqlitePool, chunk_id: i64) ->
 ///   - in_process = 0
 ///   - upload_failed_permanently = 0
 ///   - upload_next_retry_at IS NULL OR upload_next_retry_at <= now_ms
+///
+/// Implemented as a SINGLE atomic statement on the pool — `UPDATE ... SET
+/// in_process = 1 WHERE id = (SELECT ... LIMIT 1) RETURNING <cols>` — with NO
+/// `BEGIN`/commit transaction. This is the #256 fix:
+///
+///   - The old picker opened `pool.begin()` (sqlx default = BEGIN DEFERRED),
+///     SELECTed the hot `ORDER BY id ASC LIMIT 1` row, then UPDATEd it in the
+///     same tx. The deferred read took a read snapshot; the subsequent UPDATE
+///     had to UPGRADE that snapshot to a write lock. When any concurrent
+///     committer (chunk INSERT / audit batch / `update_received_bytes`)
+///     committed between the SELECT-snapshot and the UPDATE, SQLite returned
+///     `SQLITE_BUSY_SNAPSHOT` (code 517) IMMEDIATELY — `busy_timeout` never
+///     retries 517 — plus `SQLITE_BUSY` (code 5) under writer-writer
+///     contention. With 2-8 workers on a 5-connection pool this produced the
+///     30+ minute "database is locked" storm that starved the live-event
+///     upload pipeline (2026-06-19 outage).
+///
+///   - The single statement takes the SQLite write lock on its FIRST (and
+///     only) statement: there is no read snapshot to invalidate (kills 517)
+///     and no read->write upgrade window (kills the storm). `busy_timeout`
+///     now fully covers the only remaining failure mode (plain writer-writer
+///     code 5, which it retries). It does NOT serialise the workers (the
+///     reason the #120 single-claimer coordinator was reverted) — each worker
+///     still issues its own independent claim; the `WHERE in_process = 0`
+///     guard guarantees exactly one winner per row.
+///
+/// The inner `SELECT` chooses the oldest eligible row; the outer `UPDATE`
+/// flips only that row to `in_process = 1` (re-checking eligibility so two
+/// near-simultaneous claims can't both win), and `RETURNING` hands back the
+/// full row so callers keep the same `Option<ChunkRecord>` contract.
 pub async fn pick_next_uploadable_chunk(
     pool: &SqlitePool,
     now_ms: i64,
 ) -> Result<Option<ChunkRecord>> {
-    let mut tx = pool.begin().await?;
-
     let row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
-        "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-                in_process, sent, sequence_number, duration_ms,
-                upload_attempts, upload_first_attempt_at, upload_completed_at,
-                upload_duration_ms, upload_last_error, upload_next_retry_at,
-                upload_failed_permanently
-         FROM chunk_records
-         WHERE sent = 0
-           AND in_process = 0
-           AND upload_failed_permanently = 0
-           AND (upload_next_retry_at IS NULL OR upload_next_retry_at <= ?1)
-         ORDER BY id ASC
-         LIMIT 1",
+        "UPDATE chunk_records
+            SET in_process = 1
+          WHERE id = (
+                SELECT id FROM chunk_records
+                 WHERE sent = 0
+                   AND in_process = 0
+                   AND upload_failed_permanently = 0
+                   AND (upload_next_retry_at IS NULL OR upload_next_retry_at <= ?1)
+                 ORDER BY id ASC
+                 LIMIT 1
+          )
+            AND in_process = 0
+            AND sent = 0
+        RETURNING id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
+                  in_process, sent, sequence_number, duration_ms,
+                  upload_attempts, upload_first_attempt_at, upload_completed_at,
+                  upload_duration_ms, upload_last_error, upload_next_retry_at,
+                  upload_failed_permanently",
     )
     .bind(now_ms)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(pool)
     .await?;
 
-    let Some(row) = row else {
-        return Ok(None);
-    };
-
-    let chunk = row_to_chunk_record(row);
-
-    // Atomic claim — if another worker grabbed it, our UPDATE affects 0 rows.
-    let result = sqlx::query(
-        "UPDATE chunk_records SET in_process = 1
-         WHERE id = ?1 AND in_process = 0 AND sent = 0",
-    )
-    .bind(chunk.id)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-
-    if result.rows_affected() == 0 {
-        return Ok(None);
-    }
-    Ok(Some(chunk))
+    Ok(row.map(row_to_chunk_record))
 }
 
 /// Claim-batch version: returns up to `limit` chunks that are unsent,

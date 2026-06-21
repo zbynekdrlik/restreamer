@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use sqlx::SqlitePool;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 
 use rs_core::audit::{Action, AuditRow, RateLimiter, Severity, Source};
 use rs_core::db;
@@ -353,6 +353,7 @@ async fn run_worker(idx: usize, ctx: WorkerCtx, shutdown: &mut broadcast::Receiv
         let now_ms = chrono::Utc::now().timestamp_millis();
         match db::pick_next_uploadable_chunk(&ctx.pool, now_ms).await {
             Ok(None) => {
+                trace!(worker = idx, "picker: no eligible chunk");
                 tokio::select! {
                     _ = shutdown.recv() => return,
                     _ = tokio::time::sleep(Duration::from_millis(200)) => {}
@@ -360,7 +361,12 @@ async fn run_worker(idx: usize, ctx: WorkerCtx, shutdown: &mut broadcast::Receiv
                 continue;
             }
             Err(e) => {
-                error!("Failed to pick next uploadable chunk: {e}");
+                // The #256 SQLITE_BUSY storm surfaced exactly here. The picker
+                // is now a single atomic UPDATE...RETURNING (no read->write
+                // upgrade, no 517), so a BUSY here should be rare; log the
+                // raw error (which carries the SQLite code) so any recurrence
+                // is diagnosable from the live-event log without a redeploy.
+                error!(worker = idx, "Failed to pick next uploadable chunk: {e}");
                 tokio::select! {
                     _ = shutdown.recv() => return,
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -368,6 +374,7 @@ async fn run_worker(idx: usize, ctx: WorkerCtx, shutdown: &mut broadcast::Receiv
                 continue;
             }
             Ok(Some(chunk)) => {
+                debug!(worker = idx, chunk_id = chunk.id, "picker: claimed chunk");
                 upload_one(&ctx, chunk).await;
             }
         }
