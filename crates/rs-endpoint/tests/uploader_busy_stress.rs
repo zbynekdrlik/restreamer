@@ -31,7 +31,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use rs_core::audit::{Action, AuditRow, Severity, Source};
 use rs_core::db;
@@ -84,7 +84,6 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     let (ws_tx, _ws_rx) = broadcast::channel(1024);
 
     let busy_hits = Arc::new(AtomicU32::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
     // Records every chunk id each claimer won, to detect double-claims.
     let claims: Arc<Mutex<HashMap<i64, u32>>> = Arc::new(Mutex::new(HashMap::new()));
 
@@ -99,9 +98,8 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         let pool = pool.clone();
         let busy_hits = Arc::clone(&busy_hits);
         let claims = Arc::clone(&claims);
-        let stop = Arc::clone(&stop);
         handles.push(tokio::spawn(async move {
-            while std::time::Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+            while std::time::Instant::now() < deadline {
                 let now_ms = chrono::Utc::now().timestamp_millis();
                 match db::pick_next_uploadable_chunk(&pool, now_ms).await {
                     Ok(Some(chunk)) => {
@@ -111,14 +109,22 @@ async fn picker_no_busy_storm_under_production_write_mix() {
                             let mut map = claims.lock().await;
                             *map.entry(chunk.id).or_insert(0) += 1;
                         }
-                        // Mark sent so the row leaves the eligible set.
-                        let _ = db::record_upload_success(
+                        // Mark sent so the row leaves the eligible set. This is
+                        // a real production write (execute(pool) UPDATE), so a
+                        // BUSY here is ALSO part of the storm the fix must
+                        // eliminate — count it into busy_hits, don't swallow it.
+                        if let Err(e) = db::record_upload_success(
                             &pool,
                             chunk.id,
                             chrono::Utc::now().timestamp_millis(),
                             1,
                         )
-                        .await;
+                        .await
+                        {
+                            if is_sqlite_busy(&e) {
+                                busy_hits.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
                     }
                     Ok(None) => {
                         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -141,10 +147,9 @@ async fn picker_no_busy_storm_under_production_write_mix() {
     for w in 0..2 {
         let pool = pool.clone();
         let ws_tx = ws_tx.clone();
-        let stop = Arc::clone(&stop);
         handles.push(tokio::spawn(async move {
             let mut n = 0i64;
-            while std::time::Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+            while std::time::Instant::now() < deadline {
                 // 1) chunk INSERT — same statement the inpoint chunker runs.
                 let _ = db::insert_chunk(
                     &pool,
@@ -208,10 +213,18 @@ async fn picker_no_busy_storm_under_production_write_mix() {
         double_claims.is_empty(),
         "chunks claimed more than once (double-upload): {double_claims:?}"
     );
-    // Throughput sanity: the workers must have actually drained rows, proving
-    // the atomic claim isn't deadlocking or serialising to a crawl.
+    // Throughput + real-contention guard: the 8 workers race over 800 seeded
+    // chunks (plus committer-inserted ones) for 4s, so a correct atomic picker
+    // drains hundreds. A bound of >= 100 proves substantial concurrent draining
+    // actually happened — so the zero-double-claim result above reflects a real
+    // claim race, not a vacuous under-contended run — while staying well clear
+    // of the ~800 ceiling so a slow/loaded CI runner can't flake it. The old
+    // `>= 1` bound would let a picker that throttles to a crawl (the #120
+    // backlog failure) pass; this catches that regression.
     assert!(
-        total_claims >= 1,
-        "uploader throughput regressed: ZERO claims in 4s (deadlock?)"
+        total_claims >= 100,
+        "uploader throughput regressed: only {total_claims} claims in 4s with \
+         8 workers on 800 seeded chunks — atomic claim deadlocking or \
+         serialising to a crawl?"
     );
 }

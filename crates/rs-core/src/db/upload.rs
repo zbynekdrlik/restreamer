@@ -171,52 +171,6 @@ pub async fn pick_next_uploadable_chunk(
     Ok(row.map(row_to_chunk_record))
 }
 
-/// Claim-batch version: returns up to `limit` chunks that are unsent,
-/// not-in-process, not permanently-failed, past their retry-time. Does
-/// NOT mark them `in_process` — the caller must do that per chunk via
-/// [`mark_chunk_in_process`].
-///
-/// Used by the claim-coordinator (single SELECT every ~200ms) instead
-/// of the old per-worker picker that caused SQLite BUSY thrash when N
-/// workers raced the same SELECT/UPDATE transaction (issue #120).
-pub async fn pick_next_uploadable_chunks(
-    pool: &SqlitePool,
-    now_ms: i64,
-    limit: i64,
-) -> Result<Vec<ChunkRecord>> {
-    let rows = sqlx::query(
-        "SELECT id, streaming_event_id, chunk_file_path, data_size, created_at, md5,
-                in_process, sent, sequence_number, duration_ms,
-                upload_attempts, upload_first_attempt_at, upload_completed_at,
-                upload_duration_ms, upload_last_error, upload_next_retry_at,
-                upload_failed_permanently
-         FROM chunk_records
-         WHERE sent = 0 AND in_process = 0 AND upload_failed_permanently = 0
-           AND (upload_next_retry_at IS NULL OR upload_next_retry_at <= ?1)
-         ORDER BY upload_next_retry_at ASC, id ASC
-         LIMIT ?2",
-    )
-    .bind(now_ms)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().map(row_to_chunk_record).collect())
-}
-
-/// Conditional claim — flips `in_process` 0→1 for a chunk. Returns
-/// `true` if we won the claim, `false` if some other actor already
-/// claimed or the row no longer exists.
-pub async fn mark_chunk_in_process(pool: &SqlitePool, id: i64) -> Result<bool> {
-    let result = sqlx::query(
-        "UPDATE chunk_records SET in_process = 1
-         WHERE id = ?1 AND in_process = 0 AND sent = 0",
-    )
-    .bind(id)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() == 1)
-}
-
 /// Record a successful upload.
 pub async fn record_upload_success(
     pool: &SqlitePool,
