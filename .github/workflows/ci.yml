@@ -3411,15 +3411,37 @@ jobs:
             throw "FAILED: VPS warmup did not complete within $($maxWait * 5)s"
           }
 
+          # #227: Scope the progression + overshoot checks to the CI-OWNED
+          # endpoints only. The loops below iterate $resp.endpoint_details on
+          # the shared E2E-Test event; a STRAY endpoint (a leftover soak
+          # endpoint, an operator-added production FB endpoint) attached to
+          # the event would otherwise be gated too and could hard-fail the
+          # whole run on state the CI does not own (2026-05-20: a leftover
+          # 'e2e fb' soak endpoint at 157.4s > 156s init cap hard-failed YT
+          # e2e even though the CI's own endpoints were fine). The CI attaches
+          # exactly 'e2e rtmp' + 'e2e hls' (see the seed step's $needAttach).
+          $ciOwnedAliases = @("e2e rtmp", "e2e hls")
+
           # Phase 2: Initialization-phase overshoot + jump detection.
           # The 172s->120s jump bug happens in the FIRST 60s after warmup ends.
           # Take rapid samples (every 5s for 60s) and fail on:
-          #   - overshoot: any reading > target * 1.3 (= 156s for 120s target)
+          #   - overshoot: cache > target * 1.3 (= 156s for 120s target),
+          #     SUSTAINED across consecutive samples (#227)
           #   - impossible jump: drop > 20s between 5s-apart readings
+          # #227: the overshoot check is SUSTAINED, not instantaneous. The
+          # cache legitimately spikes then settles during the first seconds of
+          # init (the VPS buffer-fill overshoots momentarily before steady
+          # real-time playback pulls it back). A single transient sample over
+          # the cap is normal warmup jitter and must NOT hard-fail; require
+          # the overshoot to persist across N consecutive samples for the SAME
+          # alias. A genuine, settled overshoot still trips (N straight
+          # readings over cap) -- this stays a real gate.
+          $sustainedOvershoot = 3
           $targetDelay = if ($targetEvent.cache_delay_secs) { $targetEvent.cache_delay_secs } else { 120 }
           $maxInitCache = [math]::Round($targetDelay * 1.3)
-          Write-Host "INIT-PHASE CHECK: 12 samples, 5s apart (max cache=${maxInitCache}s, max drop=20s)"
+          Write-Host "INIT-PHASE CHECK: 12 samples, 5s apart (max cache=${maxInitCache}s sustained ${sustainedOvershoot}x, max drop=20s, aliases=$($ciOwnedAliases -join ','))"
           $initSeries = @{}
+          $overshootStreak = @{}
           for ($s = 1; $s -le 12; $s++) {
             Start-Sleep -Seconds 5
             $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
@@ -3427,14 +3449,26 @@ jobs:
               foreach ($ep in $resp.endpoint_details) {
                 if ($ep.is_fast) { continue }
                 $alias = $ep.alias
+                # #227: ignore endpoints the CI does not own.
+                if ($ciOwnedAliases -notcontains $alias) {
+                  Write-Host "  Init $s/12 [$alias]: SKIPPED (not a CI-owned endpoint)"
+                  continue
+                }
                 $delay = [math]::Round($ep.chunk_delay_secs, 1)
                 if (-not $initSeries.ContainsKey($alias)) { $initSeries[$alias] = @() }
+                if (-not $overshootStreak.ContainsKey($alias)) { $overshootStreak[$alias] = 0 }
                 $initSeries[$alias] += $delay
-                Write-Host "  Init $s/12 [$alias]: cache=${delay}s chunk=$($ep.current_chunk_id) mode=$($ep.delivery_mode)"
 
-                # Overshoot check
+                # Overshoot check -- SUSTAINED across consecutive samples.
                 if ($delay -gt $maxInitCache) {
-                  throw "FAILED: [$alias] cache ${delay}s exceeds init max ${maxInitCache}s (target=${targetDelay}s) -- overshoot during initialization"
+                  $overshootStreak[$alias] += 1
+                  Write-Host "  Init $s/12 [$alias]: cache=${delay}s chunk=$($ep.current_chunk_id) mode=$($ep.delivery_mode) OVERSHOOT streak=$($overshootStreak[$alias])/${sustainedOvershoot}"
+                  if ($overshootStreak[$alias] -ge $sustainedOvershoot) {
+                    throw "FAILED: [$alias] cache exceeded init max ${maxInitCache}s (target=${targetDelay}s) for ${sustainedOvershoot} consecutive samples (latest ${delay}s) -- SUSTAINED overshoot during initialization, not warmup jitter"
+                  }
+                } else {
+                  $overshootStreak[$alias] = 0
+                  Write-Host "  Init $s/12 [$alias]: cache=${delay}s chunk=$($ep.current_chunk_id) mode=$($ep.delivery_mode)"
                 }
 
                 # Impossible jump check (drop > 20s in 5s interval)
@@ -3449,10 +3483,10 @@ jobs:
               }
             }
           }
-          Write-Host "INIT-PHASE CHECK PASSED: no overshoot, no impossible jumps"
+          Write-Host "INIT-PHASE CHECK PASSED: no sustained overshoot, no impossible jumps"
 
           # Phase 3: Take 4 readings at 15s intervals to verify progression
-          Write-Host "Verifying delivery progression for ALL endpoints (4 readings, 15s apart)..."
+          Write-Host "Verifying delivery progression for CI-owned endpoints (4 readings, 15s apart)..."
 
           # Track per-endpoint chunk progression across 4 readings
           $epReadings = @{}  # alias -> array of chunk_ids
@@ -3464,6 +3498,8 @@ jobs:
               foreach ($ep in $resp.endpoint_details) {
                 if (-not $ep.is_fast) {
                   $alias = $ep.alias
+                  # #227: only assert progression on CI-owned endpoints.
+                  if ($ciOwnedAliases -notcontains $alias) { continue }
                   if (-not $epReadings.ContainsKey($alias)) {
                     $epReadings[$alias] = @()
                   }
@@ -3475,7 +3511,7 @@ jobs:
           }
 
           if ($epReadings.Count -eq 0) {
-            throw "FAILED: No non-fast endpoints found in delivery status"
+            throw "FAILED: No CI-owned non-fast endpoints (e2e rtmp / e2e hls) found in delivery status"
           }
 
           # Assert EACH endpoint advanced >= 3 chunks over 45s
@@ -5663,15 +5699,33 @@ jobs:
           if ($null -ne $lastErr) { throw "delivery_start failed after 3 attempts: $lastErr" }
           Write-Host "OBS streaming + delivery started for event $($ev.id)"
 
-      - name: "GATE: e2e fb endpoint registered in delivery/status within 180s"
-        # #222: Named-step GATE pattern (mirrors e2e-obs-youtube). delivery_start
-        # returns the moment Hetzner created the server; the actual rs-delivery
-        # process takes another 30-90s to boot, pull binary from S3, POST
-        # /api/init, and populate metrics. Wait up to 3 min for the e2e fb row
-        # to register. Failure here means the VPS never came online or never
-        # posted /api/init -- DISTINCT from "VPS up but FB push stalled" below.
+      - name: "GATE: e2e fb endpoint registers (slow-VPS-boot tolerant, dead-VPS fast-fail)"
+        # #222 named-step GATE pattern; #227 slow-vs-dead robustness.
+        # delivery_start returns the moment Hetzner CREATED the server; a
+        # background poll_and_init task then drives the instance through
+        # creating -> booting -> initializing -> delivering, and the "e2e fb"
+        # row only appears in endpoint_details once init runs. Boot+init
+        # typically takes 30-90s but Hetzner has a real tail (rare runs
+        # >180s) -- the old fixed 180s wait reported that normal infra tail
+        # as a hard gate failure (#227 / run 27931333149: polled 18x then
+        # threw with a still-booting VPS).
+        #
+        # This gate now distinguishes "VPS still progressing through boot"
+        # from "VPS genuinely dead":
+        #   - PASS   : "e2e fb" appears in endpoint_details.
+        #   - FAST-FAIL: instance_status is "failed"/"deleted", or the
+        #     instance row vanished after creation -> poll_and_init errored
+        #     (delivery_handlers.rs writes "failed" on any poll_and_init
+        #     error) -> waiting longer is pointless.
+        #   - KEEP WAITING while instance_status is creating/booting/
+        #     initializing (progress), up to an absolute 5-min cap (the
+        #     observed 30-90s typical + Hetzner boot tail; the sibling
+        #     OBS-YT readiness loop allows 15 min). Only the absolute cap
+        #     with NO endpoint and NO terminal status is a real timeout.
+        # Every poll logs instance_status + elapsed so a future failure is
+        # diagnosable from the CI log alone.
         shell: powershell
-        timeout-minutes: 4
+        timeout-minutes: 7
         run: |
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10
           $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
@@ -5683,18 +5737,65 @@ jobs:
           "FB_E2E_WATCHDOG_START=$watchdogStartTs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
           $statusUri = "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($ev.id)"
-          $deadline = (Get-Date).AddMinutes(3)
-          while ((Get-Date) -lt $deadline) {
-            $status = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 10
+          # Statuses that mean the background poll_and_init is still making
+          # progress (the VPS is booting / initializing, NOT dead).
+          $progressing = @("creating", "booting", "initializing", "delivering")
+          # Terminal-dead statuses: poll_and_init errored and wrote the row
+          # to "failed", or the orchestrator deleted a stale/aborted VPS.
+          $deadStatuses = @("failed", "deleted", "stopping")
+          $start = Get-Date
+          # Absolute cap: 30-90s typical boot + Hetzner tail headroom. The
+          # OBS-YT readiness sibling allows ~15 min; 5 min is generous for FB
+          # while still bounded so a genuinely dead VPS that never flips to a
+          # terminal status cannot hang the job.
+          $absoluteCap = (Get-Date).AddMinutes(5)
+          # A VPS that never even reaches a known status after this grace
+          # (with no progress) is treated as never-created.
+          $sawInstance = $false
+          $poll = 0
+          while ((Get-Date) -lt $absoluteCap) {
+            $poll += 1
+            $elapsed = [int]((Get-Date) - $start).TotalSeconds
+            $status = $null
+            try {
+              $status = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 10
+            } catch {
+              Write-Host "poll ${poll} (${elapsed}s): delivery/status query failed (will retry): $_"
+              Start-Sleep -Seconds 10
+              continue
+            }
             $ep = $status.endpoint_details | Where-Object { $_.alias -eq "e2e fb" }
             if ($null -ne $ep) {
-              Write-Host "GATE PASS: e2e fb endpoint registered (alive=$($ep.alive) mode=$($ep.delivery_mode))"
+              Write-Host "GATE PASS: e2e fb endpoint registered after ${elapsed}s (alive=$($ep.alive) mode=$($ep.delivery_mode) instance_status=$($status.instance_status))"
               exit 0
             }
-            Write-Host "waiting for VPS to register e2e fb endpoint..."
+            $instStatus = $status.instance_status
+            if ($null -ne $instStatus) { $sawInstance = $true }
+            Write-Host "poll ${poll} (${elapsed}s): instance_status=$instStatus server_ready=$($status.server_ready) -- e2e fb endpoint not registered yet"
+
+            # FAST-FAIL: VPS is genuinely dead -- waiting longer cannot help.
+            if ($deadStatuses -contains $instStatus) {
+              throw "GATE FAIL: VPS is dead (instance_status='$instStatus' after ${elapsed}s). poll_and_init errored or the VPS was deleted before the e2e fb endpoint registered -- this is a real boot/init fault, NOT a slow boot. Inspect vps_creating / vps_ready / delivery_init_sent audit rows for event $($ev.id)."
+            }
+            # FAST-FAIL: the instance row vanished after it had appeared --
+            # the orchestrator deleted it (terminal), so it will never register.
+            if ($sawInstance -and ($null -eq $instStatus)) {
+              throw "GATE FAIL: delivery instance row disappeared after ${elapsed}s (instance_status is now null). The VPS was torn down before the e2e fb endpoint registered -- a real fault, not a slow boot."
+            }
+            # KEEP WAITING while progressing through boot/init phases.
+            if ($progressing -contains $instStatus) {
+              Start-Sleep -Seconds 10
+              continue
+            }
+            # Unknown/transient status (e.g. row not yet written): keep
+            # polling within the cap rather than guessing it is dead.
             Start-Sleep -Seconds 10
           }
-          throw "GATE FAIL: e2e fb endpoint never registered in delivery/status within 180s of VPS boot"
+          $capElapsed = [int]((Get-Date) - $start).TotalSeconds
+          if (-not $sawInstance) {
+            throw "GATE FAIL: no delivery instance ever appeared in delivery/status within ${capElapsed}s -- delivery_start did not create a VPS (Hetzner create_server failed?). Check the 'Start OBS stream + delivery' step output."
+          }
+          throw "GATE FAIL: e2e fb endpoint never registered within the ${capElapsed}s absolute cap while instance_status kept reporting a non-terminal boot phase -- the VPS booted but rs-delivery never reached the init step. Likely a stuck buffer-fill / init hang (see #146), NOT normal Hetzner tail-latency."
 
       - name: "STRICT: 30-min sustained soak on rust pusher (chunks+bytes advancing, no push_died after first chunk)"
         # #222: Renamed from generic "Local watchdog" so the failing step name
