@@ -4239,6 +4239,141 @@ jobs:
           }
           Write-Host "=== OBS Disconnect/Reconnect Test PASSED ==="
 
+      - name: OBS republish A/V-alignment gate (av_skew_ms)
+        if: success()
+        shell: powershell
+        timeout-minutes: 8
+        run: |
+          # Issue #258: after a mid-stream OBS unpublish/republish, assert the
+          # delivered stream stays audio/video aligned (av_skew_ms ~0) and that
+          # no endpoint dies. Regression gate for the chunker shared-epoch fix
+          # (#255) and the av_skew_ms exposure (#257). Without this, the
+          # 2026-06-19 mid-stream-republish desync (av_skew ~25500ms) is
+          # untested.
+          #
+          # SKEW_LIMIT is set well below the pusher's own MAX_AV_SKEW_MS (4000)
+          # so this gate fails BEFORE the pusher's auto-recovery would mask the
+          # regression.
+          $SKEW_LIMIT = 1500
+          Write-Host "=== OBS Republish A/V-Alignment Gate (SKEW_LIMIT=${SKEW_LIMIT}ms) ==="
+
+          $appStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          $eventId = $appStatus.streaming_event.id
+          Write-Host "Active event ID: $eventId"
+
+          # Helper: open an authenticated OBS WebSocket and return the socket +
+          # a shared buffer/segment for request/response round-trips.
+          function Connect-ObsWs {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $ws.Options.KeepAliveInterval = [TimeSpan]::FromSeconds(5)
+            $cts = New-Object System.Threading.CancellationTokenSource(30000)
+            $ws.ConnectAsync("ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)", $cts.Token).Wait()
+            $buf = [byte[]]::new(8192)
+            $seg = [ArraySegment[byte]]$buf
+            $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+            $hello = [System.Text.Encoding]::UTF8.GetString($buf, 0, $recv.Count) | ConvertFrom-Json
+            if ($hello.d.authentication) {
+              $salt = $hello.d.authentication.salt
+              $challenge = $hello.d.authentication.challenge
+              $sha = [System.Security.Cryptography.SHA256]::Create()
+              $b64secret = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($env:OBS_WS_PASSWORD)$salt")))
+              $auth = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$b64secret$challenge")))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $auth } } | ConvertTo-Json -Depth 5
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($identify)
+              $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
+              $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+            }
+            return @{ Ws = $ws; Cts = $cts; Seg = $seg }
+          }
+
+          function Send-ObsRequest($conn, $requestType, $requestId) {
+            $req = @{ op = 6; d = @{ requestType = $requestType; requestId = $requestId } } | ConvertTo-Json -Depth 5
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($req)
+            $conn.Ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $conn.Cts.Token).Wait()
+            $null = $conn.Ws.ReceiveAsync($conn.Seg, $conn.Cts.Token).Result
+          }
+
+          # One or more republish cycles (issue asks "one or more times").
+          # Each cycle: StopStream -> dead-air gap -> StartStream, the same
+          # session churn a real OBS restart produces.
+          $cycles = 2
+          $deadAirSecs = 8
+          for ($c = 1; $c -le $cycles; $c++) {
+            Write-Host "--- Republish cycle $c of $cycles ---"
+            $conn = Connect-ObsWs
+            Write-Host "Stopping OBS stream (cycle $c)..."
+            Send-ObsRequest $conn "StopStream" "av-align-stop-$c"
+            Write-Host "Dead-air gap: ${deadAirSecs}s..."
+            Start-Sleep -Seconds $deadAirSecs
+            Write-Host "Restarting OBS stream (cycle $c)..."
+            Send-ObsRequest $conn "StartStream" "av-align-start-$c"
+            $conn.Ws.CloseAsync('NormalClosure', '', [System.Threading.CancellationToken]::None).Wait()
+
+            # Wait for RTMP to reconnect after this cycle.
+            $reconnected = $false
+            for ($i = 0; $i -lt 15; $i++) {
+              Start-Sleep -Seconds 2
+              $s = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+              if ($s.inpoint.details.rtmp_connected) {
+                Write-Host "RTMP reconnected after $($i * 2)s (cycle $c)"
+                $reconnected = $true
+                break
+              }
+            }
+            if (-not $reconnected) {
+              throw "FAILED: RTMP did not reconnect within 30s after republish cycle $c"
+            }
+          }
+
+          # Stabilize the chunk pipeline before sampling skew.
+          Write-Host "Stabilizing chunk pipeline for 30s before A/V soak..."
+          Start-Sleep -Seconds 30
+
+          # Baseline restart counts AFTER the republish + stabilize. Any
+          # increase during the soak below counts as an endpoint death.
+          $baseline = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+          # CRITICAL: iterate endpoint_details (the field the host API
+          # serializes); $.endpoints is empty on this endpoint and would make
+          # the gate pass vacuously.
+          if (-not $baseline.endpoint_details -or $baseline.endpoint_details.Count -eq 0) {
+            throw "FAILED: no endpoint_details in delivery status after republish -- cannot assert A/V alignment (vacuous gate guard)"
+          }
+          $restartsBaseline = @{}
+          foreach ($ep in $baseline.endpoint_details) {
+            $restartsBaseline[$ep.alias] = [int]$ep.ffmpeg_restart_count
+            Write-Host "BASELINE: [$($ep.alias)] av_skew_ms=$($ep.av_skew_ms) alive=$($ep.alive) restarts=$($ep.ffmpeg_restart_count)"
+          }
+
+          # Soak: sample every 10s for ~90s, asserting on every endpoint each
+          # sample. Logs each sample so a failure is debuggable from CI alone.
+          $soakSamples = 9
+          $soakIntervalSecs = 10
+          for ($n = 1; $n -le $soakSamples; $n++) {
+            Start-Sleep -Seconds $soakIntervalSecs
+            $st = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+            if (-not $st.endpoint_details -or $st.endpoint_details.Count -eq 0) {
+              throw "FAILED: endpoint_details empty at soak sample $n -- delivery status lost all endpoints"
+            }
+            foreach ($ep in $st.endpoint_details) {
+              $skew = [int]$ep.av_skew_ms
+              $absSkew = [math]::Abs($skew)
+              $restarts = [int]$ep.ffmpeg_restart_count
+              Write-Host "SAMPLE $n/$soakSamples [$($ep.alias)] av_skew_ms=$skew alive=$($ep.alive) restarts=$restarts"
+              if (-not $ep.alive) {
+                throw "FAILED: endpoint '$($ep.alias)' is not alive at soak sample $n (endpoint death after OBS republish)"
+              }
+              if ($absSkew -ge $SKEW_LIMIT) {
+                throw "FAILED: endpoint '$($ep.alias)' av_skew_ms=$skew (|skew|=$absSkew) exceeds limit ${SKEW_LIMIT}ms after OBS republish -- A/V desync regression (chunker shared-epoch / pusher skew safety net)"
+              }
+              $base = if ($restartsBaseline.ContainsKey($ep.alias)) { $restartsBaseline[$ep.alias] } else { 0 }
+              if ($restarts -gt $base) {
+                $tail = if ($ep.ffmpeg_last_stderr) { $ep.ffmpeg_last_stderr } else { '<empty>' }
+                throw "FAILED: endpoint '$($ep.alias)' ffmpeg_restart_count rose from $base to $restarts during A/V soak (endpoint restart after OBS republish). stderr_tail:`n$tail"
+              }
+            }
+          }
+          Write-Host "=== OBS Republish A/V-Alignment Gate PASSED ==="
+
       - name: Simulated network disconnect - cache drain and recovery
         if: success()
         shell: powershell
