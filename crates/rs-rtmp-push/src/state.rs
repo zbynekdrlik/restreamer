@@ -86,6 +86,51 @@ pub struct PusherState {
     pub last_video_xiu_ts: Option<u32>,
 }
 
+/// Which track tripped a backward / large-forward timestamp jump and is
+/// requesting a re-anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Track {
+    Audio,
+    Video,
+}
+
+impl PusherState {
+    /// Re-anchor on a chunker-side timestamp anomaly (backward regression or a
+    /// large forward jump) detected on `tripped`.
+    ///
+    /// **Symmetric re-anchor (issue #257):** when EITHER track trips, BOTH
+    /// tracks re-anchor to a single shared base on the same tag instant
+    /// (`max(last_audio_output, last_video_output) + 1`) and BOTH origins are
+    /// cleared so the next tag on each track re-pins from the new common base.
+    ///
+    /// Why symmetric: the previous per-track re-anchor bumped only the tripping
+    /// track's base, leaving the other track on its old base. If the two tracks
+    /// had drifted to unequal `last_*_output_ts_ms` (independent reconnect /
+    /// rescue→resume / republish boundaries — see #255 / #249), re-anchoring one
+    /// track FROZE that inter-track offset into the wire timeline. Re-anchoring
+    /// both to the shared base collapses the offset to zero at the re-anchor
+    /// instant, which is the only point where audio and video content are known
+    /// to be coincident (the chunker flushes both on the same boundary).
+    ///
+    /// The shared base is `max + 1` (not `min + 1`) so the wire timeline stays
+    /// strictly monotonic on BOTH tracks — neither can step backward past a
+    /// timestamp already sent.
+    pub fn reanchor(&mut self, tripped: Track) {
+        let shared_base = self
+            .last_audio_output_ts_ms
+            .max(self.last_video_output_ts_ms)
+            .saturating_add(1);
+        self.audio_base_ms = shared_base;
+        self.video_base_ms = shared_base;
+        self.audio_origin_xiu_ts = None;
+        self.video_origin_xiu_ts = None;
+        self.regression_reanchor_count = self.regression_reanchor_count.saturating_add(1);
+        // `tripped` retained in the signature for call-site clarity / logging;
+        // both tracks re-anchor regardless of which one detected the anomaly.
+        let _ = tripped;
+    }
+}
+
 #[derive(Clone)]
 pub struct PusherConfig {
     /// Per-call socket-write timeout in ms. Default 30_000 (matches today's
@@ -96,5 +141,69 @@ pub struct PusherConfig {
 impl Default for PusherConfig {
     fn default() -> Self {
         Self { timeout_ms: 30_000 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Symmetric re-anchor (#257): when AUDIO trips, BOTH bases move to the
+    /// shared `max(last_audio_output, last_video_output) + 1` and BOTH origins
+    /// clear — so a drifted inter-track offset collapses instead of freezing.
+    #[test]
+    fn reanchor_audio_moves_both_bases_to_shared_max_plus_one() {
+        let mut state = PusherState {
+            last_audio_output_ts_ms: 630_000,
+            last_video_output_ts_ms: 600_000,
+            audio_base_ms: 630_000,
+            video_base_ms: 600_000,
+            audio_origin_xiu_ts: Some(1),
+            video_origin_xiu_ts: Some(2),
+            ..PusherState::default()
+        };
+        state.reanchor(Track::Audio);
+        assert_eq!(state.audio_base_ms, 630_001, "audio base = max+1");
+        assert_eq!(
+            state.video_base_ms, 630_001,
+            "video base must ALSO move to the shared max+1 (symmetric)"
+        );
+        assert!(state.audio_origin_xiu_ts.is_none());
+        assert!(state.video_origin_xiu_ts.is_none());
+        assert_eq!(state.regression_reanchor_count, 1);
+    }
+
+    /// Symmetric re-anchor when VIDEO trips: same shared base for both tracks.
+    /// Here video is the higher track, so max+1 derives from it.
+    #[test]
+    fn reanchor_video_moves_both_bases_to_shared_max_plus_one() {
+        let mut state = PusherState {
+            last_audio_output_ts_ms: 500_000,
+            last_video_output_ts_ms: 800_000,
+            audio_base_ms: 500_000,
+            video_base_ms: 800_000,
+            ..PusherState::default()
+        };
+        state.reanchor(Track::Video);
+        assert_eq!(state.audio_base_ms, 800_001);
+        assert_eq!(state.video_base_ms, 800_001);
+        assert_eq!(state.regression_reanchor_count, 1);
+    }
+
+    /// The shared base is `max + 1` (NOT `min + 1`) so neither track's wire
+    /// timeline can step backward past a timestamp already sent.
+    #[test]
+    fn reanchor_uses_max_not_min_for_monotonicity() {
+        let mut state = PusherState {
+            last_audio_output_ts_ms: 100,
+            last_video_output_ts_ms: 999_999,
+            ..PusherState::default()
+        };
+        state.reanchor(Track::Audio);
+        assert_eq!(
+            state.audio_base_ms, 1_000_000,
+            "must use the LARGER of the two last-outputs + 1, never the smaller"
+        );
+        assert_eq!(state.video_base_ms, 1_000_000);
     }
 }

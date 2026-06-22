@@ -225,6 +225,10 @@ pub struct DeliveryEndpointEntry {
     /// Rust-pusher reconnect counter (issue #172). Companion to
     /// `ffmpeg_restart_count` for endpoints on the rust pusher path.
     pub reconnect_count: u32,
+    /// Content-PTS A/V skew in ms (positive = audio behind video) for
+    /// rust-pusher endpoints. The dashboard alarms on a sustained non-zero
+    /// value; the #258 E2E gate asserts it stays ~0 (issue #257).
+    pub av_skew_ms: i64,
     pub ffmpeg_last_stderr: Option<String>,
     pub last_error: Option<String>,
     pub is_fast: bool,
@@ -266,6 +270,7 @@ pub async fn delivery_status(
             stall_reason: ep.stall_reason,
             ffmpeg_restart_count: ep.ffmpeg_restart_count,
             reconnect_count: ep.reconnect_count,
+            av_skew_ms: ep.av_skew_ms,
             ffmpeg_last_stderr: ep.ffmpeg_last_stderr,
             last_error: ep.last_error,
             is_fast: ep.is_fast,

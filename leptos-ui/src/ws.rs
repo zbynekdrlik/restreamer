@@ -126,6 +126,9 @@ struct WsDeliveryEndpoint {
     /// Issue #172.
     #[serde(default)]
     reconnect_count: u32,
+    /// Content-PTS A/V skew in ms (positive = audio behind video). Issue #257.
+    #[serde(default)]
+    av_skew_ms: i64,
     #[serde(default)]
     last_error: Option<String>,
     #[serde(default)]
@@ -184,6 +187,7 @@ async fn load_initial_state(store: DashboardStore) {
                     stall_reason: ep.stall_reason,
                     ffmpeg_restart_count: ep.ffmpeg_restart_count,
                     reconnect_count: 0,
+                    av_skew_ms: ep.av_skew_ms,
                     last_error: ep.last_error,
                     is_fast: ep.is_fast,
                     delivery_mode: ep.delivery_mode.clone(),
@@ -329,6 +333,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                             stall_reason: ep.stall_reason.clone(),
                             ffmpeg_restart_count: ep.ffmpeg_restart_count,
                             reconnect_count: ep.reconnect_count,
+                            av_skew_ms: ep.av_skew_ms,
                             last_error: ep.last_error.clone(),
                             is_fast: ep.is_fast,
                             delivery_mode: ep.delivery_mode.clone(),

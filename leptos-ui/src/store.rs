@@ -139,6 +139,10 @@ pub struct DeliveryEndpointState {
     /// the dashboard can show "reconn xN" badges on YT/FB upstream
     /// rotation events.
     pub reconnect_count: u32,
+    /// Content-PTS A/V skew in ms (positive = audio behind video) for
+    /// rust-pusher endpoints. The dashboard alarms on a sustained non-zero
+    /// value (issue #257).
+    pub av_skew_ms: i64,
     pub last_error: Option<String>,
     pub is_fast: bool,
     pub delivery_mode: Option<String>,

@@ -436,6 +436,10 @@ mod fast_upload_gap_regression {
         fn reconnect_count(&self) -> u32 {
             0
         }
+
+        fn av_skew_ms(&self) -> i64 {
+            0
+        }
     }
 
     #[tokio::test(start_paused = true)]

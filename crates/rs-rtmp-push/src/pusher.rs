@@ -5,6 +5,8 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::session::Session;
+use crate::skew::{SkewDecision, SkewTracker};
+use crate::state::Track;
 use crate::{PushError, PusherConfig, PusherState};
 
 pub struct RtmpPusher {
@@ -12,6 +14,9 @@ pub struct RtmpPusher {
     config: PusherConfig,
     state: PusherState,
     session: Option<Session>,
+    /// Cross-track A/V-skew detector (issue #257). Reset on each fresh RTMP
+    /// session so skew is measured from the new common epoch.
+    skew: SkewTracker,
 }
 
 /// Catch-up factor expressed as percent of real-time. 120 = at most 1.2×
@@ -62,6 +67,7 @@ impl RtmpPusher {
             config,
             state: PusherState::default(),
             session: None,
+            skew: SkewTracker::default(),
         }
     }
 
@@ -71,6 +77,19 @@ impl RtmpPusher {
 
     pub fn reconnect_count(&self) -> u32 {
         self.state.reconnect_count
+    }
+
+    /// Current signed content-PTS A/V skew in ms (positive = audio behind
+    /// video). Surfaced to per-endpoint telemetry so the dashboard and the
+    /// #258 E2E gate can read it and alarm on a desync (issue #257).
+    pub fn av_skew_ms(&self) -> i64 {
+        self.skew.last_skew_ms()
+    }
+
+    /// Times this pusher has tripped the A/V-skew guard and forced a recovery
+    /// reconnect (issue #257). Companion to `reconnect_count` for alerting.
+    pub fn av_skew_trip_count(&self) -> u32 {
+        self.skew.trip_count()
     }
 
     pub fn url(&self) -> &str {
@@ -138,6 +157,12 @@ impl RtmpPusher {
             // origin will anchor on the first tag we see).
             self.state.last_audio_xiu_ts = None;
             self.state.last_video_xiu_ts = None;
+            // A fresh RTMP session re-anchors BOTH tracks from a common
+            // start, so the A/V-skew detector must measure from the new
+            // shared epoch (issue #257). This is also how the bounded
+            // recovery converges: after the AvSkewExceeded reconnect, the
+            // skew baseline resets and a transient desync clears.
+            self.skew.reset_tracks();
         }
 
         // Empty slice -> handshake verified, nothing to send.
@@ -225,20 +250,26 @@ impl RtmpPusher {
                             let forward_jump =
                                 tag.timestamp_ms.saturating_sub(prev) > MAX_TAG_TS_JUMP_MS;
                             if backward || forward_jump {
-                                self.state.audio_base_ms =
-                                    self.state.last_audio_output_ts_ms.saturating_add(1);
-                                self.state.audio_origin_xiu_ts = None;
-                                self.state.regression_reanchor_count =
-                                    self.state.regression_reanchor_count.saturating_add(1);
+                                // Symmetric re-anchor (#257): re-anchor BOTH
+                                // tracks to a shared base so a republish /
+                                // reconnect boundary can't freeze an
+                                // inter-track offset into the wire timeline.
+                                self.state.reanchor(Track::Audio);
+                                self.skew.reset_tracks();
                                 tracing::warn!(
                                     prev_xiu_ts = prev,
                                     new_xiu_ts = tag.timestamp_ms,
                                     direction = if backward { "backward" } else { "forward" },
-                                    "rtmp_push: AUDIO tag.timestamp_ms anomaly -- re-anchoring origin to last_audio_output+1"
+                                    shared_base = self.state.audio_base_ms,
+                                    "rtmp_push: AUDIO tag.timestamp_ms anomaly -- symmetric re-anchor of BOTH tracks to shared base"
                                 );
                             }
                         }
                         self.state.last_audio_xiu_ts = Some(tag.timestamp_ms);
+                        // Feed the cross-track skew detector with the INPUT
+                        // (chunker-stamped) PTS, before the per-track output
+                        // re-anchor rewrites it (#257).
+                        self.skew.observe_audio(tag.timestamp_ms);
                     }
                     let origin = if is_seq_header {
                         // Don't anchor on the seq header (its ts=0 would
@@ -265,20 +296,23 @@ impl RtmpPusher {
                             let forward_jump =
                                 tag.timestamp_ms.saturating_sub(prev) > MAX_TAG_TS_JUMP_MS;
                             if backward || forward_jump {
-                                self.state.video_base_ms =
-                                    self.state.last_video_output_ts_ms.saturating_add(1);
-                                self.state.video_origin_xiu_ts = None;
-                                self.state.regression_reanchor_count =
-                                    self.state.regression_reanchor_count.saturating_add(1);
+                                // Symmetric re-anchor (#257): see matching
+                                // audio block above.
+                                self.state.reanchor(Track::Video);
+                                self.skew.reset_tracks();
                                 tracing::warn!(
                                     prev_xiu_ts = prev,
                                     new_xiu_ts = tag.timestamp_ms,
                                     direction = if backward { "backward" } else { "forward" },
-                                    "rtmp_push: VIDEO tag.timestamp_ms anomaly -- re-anchoring origin to last_video_output+1"
+                                    shared_base = self.state.video_base_ms,
+                                    "rtmp_push: VIDEO tag.timestamp_ms anomaly -- symmetric re-anchor of BOTH tracks to shared base"
                                 );
                             }
                         }
                         self.state.last_video_xiu_ts = Some(tag.timestamp_ms);
+                        // Feed the cross-track skew detector with the INPUT PTS
+                        // (#257), pre per-track output re-anchor.
+                        self.skew.observe_video(tag.timestamp_ms);
                     }
                     let origin = if is_seq_header {
                         self.state.video_origin_xiu_ts.unwrap_or(tag.timestamp_ms)
@@ -421,6 +455,33 @@ impl RtmpPusher {
         let pacing_residual_ms = target_ms.saturating_sub(actual_ms);
         let regression_reanchor_count = self.state.regression_reanchor_count;
 
+        // Issue #257 — cross-track A/V-skew guard. Evaluate the content-PTS
+        // skew at the chunk boundary. A sustained over-threshold skew (the
+        // 2026-06-19 audio-behind-video desync, which the per-track output
+        // re-anchor would otherwise hide on the wire) trips a CLEAN
+        // reconnect: drop the session and return AvSkewExceeded so the
+        // consumer force-closes and the next push re-anchors BOTH tracks from
+        // a common session start. Strict 1× — recovery is ONLY a reconnect +
+        // re-anchor, never a speed-up. Debounced + rate-limited inside
+        // SkewTracker so a persistent upstream skew cannot thrash reconnects.
+        let skew_decision = self.skew.evaluate_chunk(actual_ms);
+        let av_skew_ms = self.skew.last_skew_ms();
+        if skew_decision == SkewDecision::TripRecovery {
+            tracing::error!(
+                av_skew_ms,
+                max_av_skew_ms = crate::skew::MAX_AV_SKEW_MS,
+                a_out = max_audio_output_ts,
+                v_out = max_video_output_ts,
+                trip_count = self.skew.trip_count(),
+                "rtmp_push: A/V SKEW EXCEEDED -- forcing clean reconnect to re-anchor both tracks (#257)"
+            );
+            self.state.connected = false;
+            self.session = None;
+            return Err(PushError::AvSkewExceeded {
+                skew_ms: av_skew_ms,
+            });
+        }
+
         // Issue #171 — chunk-end rate cap. Caps push rate at
         // CATCHUP_FACTOR_PCT/100 × real-time so a post-RemoteClosed
         // burst drains buffered chunks GENTLY without overrunning
@@ -437,7 +498,7 @@ impl RtmpPusher {
         }
 
         tracing::info!(
-            "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} a_out={max_audio_output_ts} v_out={max_video_output_ts} send_elapsed_ms={send_elapsed_ms} pacing_residual_ms={pacing_residual_ms} target_ms={target_ms} actual_ms={actual_ms} reanchor={regression_reanchor_count}"
+            "rtmp_push: chunk done tags_sent={tags_sent} tags_skipped={tags_skipped} bytes_sent={bytes_sent} a_out={max_audio_output_ts} v_out={max_video_output_ts} av_skew_ms={av_skew_ms} send_elapsed_ms={send_elapsed_ms} pacing_residual_ms={pacing_residual_ms} target_ms={target_ms} actual_ms={actual_ms} reanchor={regression_reanchor_count}"
         );
 
         Ok(())
@@ -636,6 +697,56 @@ mod tests {
         assert_eq!(
             state.audio_base_ms, 600_001,
             "base anchors on wire timeline; chunk-end rate cap bounds the catch-up burst"
+        );
+    }
+
+    /// Issue #257 symmetric re-anchor RED→GREEN. When the two tracks have
+    /// drifted to UNEQUAL `last_*_output_ts_ms` (independent reconnect /
+    /// rescue→resume / republish boundaries) and ONE track trips a backward
+    /// jump, the per-track re-anchor froze the inter-track offset. The
+    /// symmetric re-anchor must collapse the offset to ~0 by re-anchoring BOTH
+    /// tracks to a single shared base at the re-anchor instant.
+    ///
+    /// RED: `reanchor(Track::Audio)` moves only `audio_base_ms`, leaving
+    /// `video_base_ms` on its old value → the next coincident A/V tags produce
+    /// a non-zero `(a_out − v_out)` offset. GREEN: both bases move to the
+    /// shared base → coincident tags produce a ~0 offset.
+    #[test]
+    fn symmetric_reanchor_collapses_drifted_offset_to_zero() {
+        // `Track` is in scope via `use super::*`.
+        // Audio track is 30_000 ms AHEAD of video on the wire (drift from an
+        // earlier independent reconnect). This is the pre-jump steady offset
+        // that a per-track re-anchor would freeze.
+        let mut state = PusherState {
+            last_audio_output_ts_ms: 630_000,
+            last_video_output_ts_ms: 600_000,
+            audio_base_ms: 630_000,
+            video_base_ms: 600_000,
+            audio_origin_xiu_ts: Some(630_000),
+            video_origin_xiu_ts: Some(600_000),
+            last_audio_xiu_ts: Some(630_000),
+            last_video_xiu_ts: Some(600_000),
+            ..PusherState::default()
+        };
+
+        // Audio trips a backward regression (chunker reset → xiu_ts ~0).
+        state.reanchor(Track::Audio);
+
+        // After the re-anchor, the FIRST coincident audio+video tag of the new
+        // chunk both arrive at the SAME chunker input ts (the chunker flushed
+        // both on the same boundary → they are content-coincident). Their wire
+        // output_ts must therefore be (nearly) equal.
+        let new_input_ts = 0_u32;
+        let a_origin = *state.audio_origin_xiu_ts.get_or_insert(new_input_ts);
+        let v_origin = *state.video_origin_xiu_ts.get_or_insert(new_input_ts);
+        let a_out = state.audio_base_ms + (new_input_ts.saturating_sub(a_origin)) as u64;
+        let v_out = state.video_base_ms + (new_input_ts.saturating_sub(v_origin)) as u64;
+
+        let offset = a_out as i64 - v_out as i64;
+        assert_eq!(
+            offset, 0,
+            "symmetric re-anchor must collapse the drifted A/V offset to ~0; \
+             per-track re-anchor would leave it frozen at +30_000 ms (a_out={a_out} v_out={v_out})"
         );
     }
 

@@ -282,6 +282,10 @@ struct EndpointStatusEntry {
     /// dashboard so operators can correlate audit `endpoint_rtmp_push_died`
     /// events with this counter (issue #172).
     reconnect_count: u32,
+    /// Current signed content-PTS A/V skew in ms (positive = audio behind
+    /// video) for rust-pusher endpoints. The dashboard alarms on a sustained
+    /// non-zero value; the #258 E2E gate asserts it stays ~0 (issue #257).
+    av_skew_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -318,6 +322,7 @@ async fn endpoint_status(
             stall_reason: stats.stall_reason,
             ffmpeg_restart_count: stats.ffmpeg_restart_count,
             reconnect_count: stats.reconnect_count,
+            av_skew_ms: stats.av_skew_ms,
             last_error: stats.last_error,
             ffmpeg_last_stderr: stats.ffmpeg_last_stderr,
             consecutive_chunk_misses: stats.consecutive_chunk_misses,
