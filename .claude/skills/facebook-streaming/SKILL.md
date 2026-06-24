@@ -85,7 +85,7 @@ ffmpeg -y -i "$dash" -frames:v 1 -q:v 2 frame.jpg
 
 **FB App**: `restreamer-fb-ci` / App display name `New Level Church`
 - App ID: `355685179541516` (GitHub secret: `FB_APP_ID`)
-- App Secret: `dde1f03a6ac90094082a99db480178ae` (GitHub secret: `FB_APP_SECRET`)
+- App Secret: `<FB App Secret — GitHub secret FB_APP_SECRET, NOT committed>` (GitHub secret: `FB_APP_SECRET`)
 
 **FB Page**: "New level church"
 - Page ID: `163104934022649` (GitHub secret: `FB_PAGE_ID`)
