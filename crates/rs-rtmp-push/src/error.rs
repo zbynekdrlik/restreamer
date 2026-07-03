@@ -397,4 +397,29 @@ mod tests {
         let mapped = map_read_err(e);
         assert_eq!(backoff_floor_ms(&mapped), Some(3_000));
     }
+
+    #[test]
+    fn remote_closed_display_carries_ci_gate_rotation_marker() {
+        // Contract lock for the FB/YT 30-min soak gate in ci.yml. That gate
+        // classifies an `endpoint_rtmp_push_died` audit row as an UPSTREAM
+        // ROTATION (tolerated -- FB/YT reset our ingest ~every 5-15 min and the
+        // pusher reconnects in ~3 s) vs a LOCAL/pusher fault (fails the soak)
+        // by substring-matching the audit `detail.error` against the literal
+        // "upstream closed connection mid-stream". That string is THIS
+        // variant's Display. If a refactor changes it, the gate would
+        // misclassify every FB/YT rotation as a pusher regression and the
+        // 30-min soak would flake on the first upstream reset again -- the exact
+        // #227 fragility this test guards. Keep the marker and the ci.yml
+        // classifier in sync.
+        let e = PushError::RemoteClosed(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "connection reset",
+        ));
+        assert!(
+            e.to_string()
+                .contains("upstream closed connection mid-stream"),
+            "RemoteClosed Display must contain the ci.yml soak-gate rotation marker \
+             'upstream closed connection mid-stream', got: {e}"
+        );
+    }
 }

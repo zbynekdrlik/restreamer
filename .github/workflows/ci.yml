@@ -5802,7 +5802,7 @@ jobs:
           }
           throw "GATE FAIL: e2e fb endpoint never registered within the ${capElapsed}s absolute cap while instance_status kept reporting a non-terminal boot phase -- the VPS booted but rs-delivery never reached the init step. Likely a stuck buffer-fill / init hang (see #146), NOT normal Hetzner tail-latency."
 
-      - name: "STRICT: 30-min sustained soak on rust pusher (chunks+bytes advancing, no push_died after first chunk)"
+      - name: "STRICT: 30-min sustained soak on rust pusher (chunks+bytes advancing, no LOCAL-fault push_died after first chunk; upstream FB/YT rotations tolerated)"
         # #222: Renamed from generic "Local watchdog" so the failing step name
         # pinpoints the actual fault class (sustained-delivery progress + audit
         # cleanliness AFTER first chunk). Boot-wait happens in the GATE step
@@ -5946,12 +5946,50 @@ jobs:
               # the first chunk count as a soak fault.
               $everDelivered = $true
               $firstChunkIso = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-              $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&since=$firstChunkIso&limit=10"
+              $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&since=$firstChunkIso&limit=200"
             }
 
+            # #227 (further hardening): an endpoint_rtmp_push_died is NOT
+            # automatically a soak fault. Classify by its error:
+            #
+            #   * UPSTREAM ROTATION -- error "upstream closed connection
+            #     mid-stream" (= PushError::RemoteClosed). FB/YT periodically
+            #     reset our ingest (~5-15 min); the rust pusher is DESIGNED to
+            #     reconnect from this in ~3 s, non-exponential (see
+            #     crates/rs-rtmp-push/src/error.rs backoff_floor_ms /
+            #     is_exponential). Run 28683647366 failed here: FB reset the
+            #     connection once at ~5 min / 702 MB (reconnect_count=0,
+            #     backoff_ms=3000) and the old throw-on-first-die killed the
+            #     soak 3 s BEFORE the designed reconnect could prove recovery.
+            #     Throwing on this asserts "FB never rotates", which is false
+            #     and non-deterministic. TOLERATE it: recovery is independently
+            #     guaranteed by the 90 s no-progress stagnation check above (a
+            #     die that is NOT recovered stops chunks+bytes and trips that
+            #     throw), so a tolerated rotation that did NOT recover still
+            #     fails the soak -- just via the stagnation arm, not here.
+            #
+            #   * LOCAL / PUSHER FAULT -- everything else (handshake failed,
+            #     Connect/Publish rejected, timeout, I/O, TLS, malformed input,
+            #     A/V skew). These indicate a genuine rust-pusher regression
+            #     and FAIL the soak immediately.
+            #
+            # A generous local thrash cap catches a reset STORM the pusher
+            # itself causes (FB/YT rotate <=~6x in 30 min); the sibling
+            # >50-deaths/15min death-rate gate is the second guard.
             $audit = Invoke-RestMethod -Uri $auditUri -Method GET -TimeoutSec 10
             if ($audit.rows.Count -gt 0) {
-              throw "WATCHDOG FAIL: endpoint_rtmp_push_died audit row(s) for 'e2e fb' after first chunk (count: $($audit.rows.Count))"
+              $rotationDies = @($audit.rows | Where-Object { "$($_.detail.error)" -match "upstream closed connection mid-stream" })
+              $localFaultDies = @($audit.rows | Where-Object { "$($_.detail.error)" -notmatch "upstream closed connection mid-stream" })
+              if ($localFaultDies.Count -gt 0) {
+                $f = $localFaultDies[0]
+                throw "WATCHDOG FAIL: endpoint_rtmp_push_died with LOCAL/pusher fault for 'e2e fb' after first chunk (count: $($localFaultDies.Count), first error: '$($f.detail.error)' at $($f.ts)). This is a genuine rust-pusher regression, NOT an upstream FB/YT rotation."
+              }
+              if ($rotationDies.Count -ge 15) {
+                throw "WATCHDOG FAIL: $($rotationDies.Count) upstream-rotation endpoint_rtmp_push_died rows for 'e2e fb' in the soak (>= 15). Delivery kept progressing, but this reset rate is abnormal (FB/YT rotate ~every 5-15 min => <=6 expected). Investigate reconnect thrash."
+              }
+              if ($rotationDies.Count -gt 0) {
+                Write-Host "watchdog: tolerated $($rotationDies.Count) FB-side upstream-rotation reset(s) (RemoteClosed) -- pusher reconnects in ~3s, delivery sustained; latest error: '$($rotationDies[0].detail.error)'"
+              }
             }
 
             Write-Host "watchdog OK: alive=$($ep.alive) chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total)"
