@@ -316,8 +316,13 @@ jobs:
         run: cargo install cargo-audit
       - name: Run audit
         run: |
+          # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml DoS) are transitive via
+          # rust-s3 0.37.1 -> aws-creds, pinned to quick-xml ^0.38 (0.38.4 is the ceiling;
+          # the patch is not reachable without a rust-s3 major bump, tracked in #207).
+          # quick-xml here only parses XML from our own trusted Hetzner S3 bucket, so the
+          # crafted-XML DoS is out of threat model. Ignore until #207 removes rust-s3.
           for i in 1 2 3; do
-            cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0049 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 && exit 0
+            cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0049 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 && exit 0
             echo "Attempt $i failed, retrying in 10s..."
             sleep 10
           done
