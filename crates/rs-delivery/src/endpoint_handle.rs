@@ -154,3 +154,24 @@ impl EndpointHandle {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn producer_active_reflects_shared_buffer_state() {
+        let h = EndpointHandle::stub_for_test(1);
+        assert!(
+            h.producer_active(),
+            "fresh BufferState defaults to producer_active=true"
+        );
+        h.buffer_state
+            .producer_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            !h.producer_active(),
+            "accessor must reflect the shared rescue-gate flag (#284)"
+        );
+    }
+}

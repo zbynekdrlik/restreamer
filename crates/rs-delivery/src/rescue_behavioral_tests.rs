@@ -204,6 +204,11 @@ async fn rescue_push_actually_pushes_rescue_clip_bytes() {
             "delivery_mode must read 'rescue' while the producer is stalled, got {:?}",
             s.delivery_mode
         );
+        assert!(
+            s.last_push_ok_unix_ms.is_some(),
+            "rescue pushes must stamp last_push_ok_unix_ms — the #238 crash \
+             gate asserts 'rescue is LIVE' via last_push_ok_age_ms"
+        );
     }
 
     let _ = stop_tx.send(true);

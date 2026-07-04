@@ -337,7 +337,7 @@ async fn endpoint_status(
             reconnect_count: stats.reconnect_count,
             av_skew_ms: stats.av_skew_ms,
             producer_active: handle.producer_active(),
-            last_push_ok_age_ms: stats.last_push_ok_unix_ms.map(|t| (now_ms - t).max(0)),
+            last_push_ok_age_ms: crate::endpoint_stats::age_ms(now_ms, stats.last_push_ok_unix_ms),
             last_error: stats.last_error,
             ffmpeg_last_stderr: stats.ffmpeg_last_stderr,
             consecutive_chunk_misses: stats.consecutive_chunk_misses,

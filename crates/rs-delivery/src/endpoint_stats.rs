@@ -114,6 +114,14 @@ pub fn unix_ms_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Age in ms of an optional unix-ms timestamp relative to `now_ms`,
+/// clamped at 0 (a small negative from cross-thread clock reads must not
+/// surface as a bogus huge age). Used by `/api/status` for
+/// `last_push_ok_age_ms` (#284).
+pub fn age_ms(now_ms: i64, t_unix_ms: Option<i64>) -> Option<i64> {
+    t_unix_ms.map(|t| (now_ms - t).max(0))
+}
+
 pub type Stats = Arc<Mutex<EndpointStats>>;
 
 /// Initial EndpointStats: Default + per-endpoint overrides.
@@ -124,4 +132,29 @@ pub fn initial_endpoint_stats(start_chunk_id: i64, initial_mode: String) -> Endp
     s.current_chunk_id = start_chunk_id;
     s.delivery_mode = initial_mode;
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_ms_now_is_a_real_epoch_timestamp() {
+        // 2020-09-13 in unix-ms — any real clock is far past this; a
+        // mutant returning 0/1 dies here.
+        assert!(unix_ms_now() > 1_600_000_000_000);
+    }
+
+    #[test]
+    fn age_ms_computes_now_minus_timestamp() {
+        assert_eq!(age_ms(10_000, Some(7_500)), Some(2_500));
+        assert_eq!(age_ms(10_000, None), None);
+    }
+
+    #[test]
+    fn age_ms_clamps_negative_to_zero() {
+        // Timestamp slightly in the future (clock read race) => 0, never
+        // negative.
+        assert_eq!(age_ms(10_000, Some(10_050)), Some(0));
+    }
 }
