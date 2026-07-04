@@ -4663,11 +4663,24 @@ jobs:
             const b = await chromium.launch({ headless: true });
             const p = await b.newPage();
             await p.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
-            await p.waitForTimeout(3000);
-            const banner = await p.locator('.banner--recovering').count();
+            // The calm recovering banner is driven by the dashboard's periodic
+            // status poll -> store update -> render. After a cold WASM load a
+            // single post-3s snapshot races that pipeline and intermittently
+            // reads 0 even though the banner appears a moment later (#288).
+            // S3 stays blocked for the whole 300s outage, so endpoints remain
+            // in Rescue and the banner, once rendered, stays; poll until it
+            // appears within a bounded window.
+            let banner = 0;
+            for (let i = 0; i < 30; i++) {
+              banner = await p.locator('.banner--recovering').count();
+              if (banner >= 1) break;
+              await p.waitForTimeout(1000);
+            }
+            // Assert "no red attention node" on the SAME settled frame, after
+            // the banner has rendered (not on a pre-render snapshot).
             const attention = await p.locator('.endpoint-node.attention').count();
             await b.close();
-            if (banner < 1) { console.error('FAILED: NO calm recovering banner'); process.exit(1); }
+            if (banner < 1) { console.error('FAILED: NO calm recovering banner (polled 30s)'); process.exit(1); }
             if (attention > 0) { console.error('FAILED: endpoint shown RED during survivable outage'); process.exit(1); }
             console.log('OK: calm blue banner shown, no red');
           })().catch(e => { console.error(e); process.exit(1); });
