@@ -5830,6 +5830,9 @@ jobs:
           $lastBytes = -1
           $stagnantPolls = 0
           $missingPolls = 0
+          # #282: consecutive no-live-progress polls that coincide with an active
+          # rescue (source-supply gap). Reset whenever live delivery resumes.
+          $rescueStallPolls = 0
           # Track whether the endpoint EVER delivered a real chunk. Without
           # this, an endpoint stuck at chunks_processed=0 for the whole soak
           # (push dies before first chunk, repeatedly) would hit the `continue`
@@ -5932,10 +5935,44 @@ jobs:
                   if ($_.Exception.Message -match "WATCHDOG FAIL: host_internet_unreachable") { throw }
                   Write-Host "watchdog: host_internet_unreachable audit query failed: $($_.Exception.Message)"
                 }
-                throw "WATCHDOG FAIL: no delivery progress for 90s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
+                # #282: source-supply stall covered by rescue. rescue_activated
+                # fires ONLY on a PRODUCER stall (the VPS cannot FETCH fresh
+                # chunks from S3: producer_active=false after 3x no-chunk), i.e.
+                # a SOURCE-supply gap (local uploader / ingest / test-source) --
+                # NOT a pusher-push fault. The pusher is correctly pushing the
+                # rescue clip while live chunks_processed is frozen. A real
+                # pusher stall keeps producer_active=true (NO rescue) and still
+                # trips the generic throw below; a pusher fault still surfaces as
+                # a LOCAL-fault push_died (checked every poll after this block) --
+                # so tolerating a rescue-covered gap cannot mask a pusher
+                # regression. Give the source a bounded ~5 min window to recover
+                # (rescue deactivates, live delivery resumes) before failing with
+                # a source-supply attribution. Query only recent rescue (last
+                # 150s) so a long-ago rescue that already recovered never matches.
+                $rescueActive = $false
+                try {
+                  $rescSince = (Get-Date).AddSeconds(-150).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+                  $resc = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=rescue_activated&since=$rescSince&limit=50" -TimeoutSec 10
+                  $rescRows = if ($resc.rows) { $resc.rows } elseif ($resc.items) { $resc.items } else { @() }
+                  if ($rescRows.Count -gt 0) {
+                    $rescueActive = $true
+                    $rescueStallPolls += 1
+                    if ($rescueStallPolls -ge 30) {
+                      throw "WATCHDOG FAIL: source-supply stall -- rescue active (rescue_activated x$($rescRows.Count) in last 150s, latest stalled_at_chunk_id=$($rescRows[0].detail.stalled_at_chunk_id)) with NO live chunk progress for ~5 min. The VPS ran out of fresh S3 chunks (local uploader / ingest / test-source gap), so the pusher is pushing the rescue clip and live delivery has not resumed. This is a SOURCE-supply outage, NOT a rust-pusher regression. Re-run when the local ingest/upload chain is healthy."
+                    }
+                    Write-Host "watchdog: source-supply stall tolerated -- rescue active (rescue_activated x$($rescRows.Count) in last 150s); pusher pushing rescue clip, waiting up to ~5 min for source to recover ($rescueStallPolls/30)"
+                  }
+                } catch {
+                  if ($_.Exception.Message -match "WATCHDOG FAIL: source-supply") { throw }
+                  Write-Host "watchdog: rescue_activated audit query failed: $($_.Exception.Message)"
+                }
+                if (-not $rescueActive) {
+                  throw "WATCHDOG FAIL: no delivery progress for 90s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
+                }
               }
             } else {
               $stagnantPolls = 0
+              $rescueStallPolls = 0
             }
             $lastChunks = $ep.chunks_processed
             $lastBytes = $ep.bytes_processed_total
