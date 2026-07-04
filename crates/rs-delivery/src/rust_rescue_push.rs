@@ -149,6 +149,7 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
     loop {
         tokio::select! {
             res = pusher.push_flv_bytes(&flv_bytes) => {
+                let push_ok = res.is_ok();
                 if let Err(e) = res {
                     tracing::warn!(alias, "rust_rescue_push: push error: {e}; backing off");
                     // Backoff but observe stop signal so shutdown latency
@@ -196,6 +197,14 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                         "rescue".to_string()
                     };
                     s.rescue_eta_secs = Some(eta);
+                    // #284/#238: a rescue-clip push IS a successful push —
+                    // last_push_ok_age_ms keeps advancing during an outage,
+                    // which is exactly what the crash-exhaustion E2E gate
+                    // asserts ("rescue is live", not just "rescue flagged").
+                    if push_ok {
+                        s.last_push_ok_unix_ms =
+                            Some(crate::endpoint_stats::unix_ms_now());
+                    }
                 }
 
                 if continuous_active_ms >= RESCUE_REFILL_TARGET_SECS.saturating_mul(1000) {

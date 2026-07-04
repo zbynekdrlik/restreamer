@@ -72,7 +72,9 @@ impl S3Backend for ErroringBackend {
     }
     async fn head_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
         // The skip-ahead / lag probe cannot escape the outage either.
-        Err(format!("forced persistent S3 HEAD error on chunk {chunk_id}"))
+        Err(format!(
+            "forced persistent S3 HEAD error on chunk {chunk_id}"
+        ))
     }
 }
 
@@ -99,7 +101,9 @@ impl S3Backend for ServeThenErrorBackend {
         if chunk_id <= self.available_up_to {
             return Ok(Some(1000));
         }
-        Err(format!("forced persistent S3 HEAD error on chunk {chunk_id}"))
+        Err(format!(
+            "forced persistent S3 HEAD error on chunk {chunk_id}"
+        ))
     }
 }
 
@@ -146,7 +150,7 @@ async fn real_fetcher(
     let cfg = DiskCacheConfig {
         cache_dir: tmp.path().to_path_buf(),
         window_chunks: 4,
-        s3_ingress_cap_mbit: 10_000, // never bandwidth-limited in tests
+        s3_ingress_cap_mbit: 10_000,  // never bandwidth-limited in tests
         eviction_interval_secs: 3600, // keep the sweeper quiet under virtual time
         read_stall_timeout_secs: STALL_TIMEOUT_SECS,
         download_queue_capacity: 50,
@@ -178,7 +182,10 @@ fn rescue_activated(ring: &Arc<AuditRing>) -> bool {
 
 /// Drive `endpoint_loop` over the REAL disk-cache path until rescue activates
 /// or a generous virtual-time budget elapses.
-async fn run_real_cache_until_rescue(backend: Arc<dyn S3Backend>, alias: &str) -> (Arc<AuditRing>, Stats) {
+async fn run_real_cache_until_rescue(
+    backend: Arc<dyn S3Backend>,
+    alias: &str,
+) -> (Arc<AuditRing>, Stats) {
     tokio::time::pause();
     let tmp = tempfile::tempdir().expect("tempdir");
     let fetcher = real_fetcher(backend, &tmp, alias).await;
@@ -317,8 +324,11 @@ async fn erroring_s3_activates_rescue_through_real_disk_cache_path() {
     // errors persistently. Rescue MUST activate through the REAL
     // DiskCacheFetcher path (the mock-fetcher Group B equivalent passed
     // while prod was broken — the wedge is below the mock).
-    let (ring, stats) =
-        run_real_cache_until_rescue(Arc::new(ServeThenErrorBackend { available_up_to: 3 }), "real-cache-err").await;
+    let (ring, stats) = run_real_cache_until_rescue(
+        Arc::new(ServeThenErrorBackend { available_up_to: 3 }),
+        "real-cache-err",
+    )
+    .await;
 
     assert!(
         rescue_activated(&ring),
@@ -343,8 +353,11 @@ async fn genuine_exhaustion_404_activates_rescue_through_real_disk_cache_path() 
     // The #280 operator scenario shape: source dies, uploads stop, S3 is
     // healthy and clean-404s past the last chunk. The VPS must exhaust and
     // rescue — through the REAL DiskCacheFetcher + DownloadService path.
-    let (ring, stats) =
-        run_real_cache_until_rescue(Arc::new(ExhaustingBackend { available_up_to: 3 }), "real-cache-404").await;
+    let (ring, stats) = run_real_cache_until_rescue(
+        Arc::new(ExhaustingBackend { available_up_to: 3 }),
+        "real-cache-404",
+    )
+    .await;
 
     assert!(
         rescue_activated(&ring),

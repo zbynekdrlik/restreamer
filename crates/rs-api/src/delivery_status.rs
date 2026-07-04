@@ -134,6 +134,15 @@ pub struct EndpointDeliveryStatus {
     /// gate asserts it stays ~0 (issue #257).
     #[serde(default)]
     pub av_skew_ms: i64,
+    /// #284: producer liveness on the VPS — `Some(false)` while the
+    /// producer is stalled (the state that opens the rescue gate). `None`
+    /// when the VPS rs-delivery predates this field.
+    #[serde(default)]
+    pub producer_active: Option<bool>,
+    /// #284/#238: ms since the endpoint's last SUCCESSFUL push (live chunk
+    /// or rescue clip) as reported by the VPS. `None` when unavailable.
+    #[serde(default)]
+    pub last_push_ok_age_ms: Option<i64>,
     pub last_error: Option<String>,
     pub ffmpeg_last_stderr: Option<String>,
     pub is_fast: bool,
@@ -262,6 +271,10 @@ impl DeliveryOrchestrator {
                             // audio behind video). 0 when the VPS rs-delivery
                             // predates this field.
                             let av_skew_ms = entry["av_skew_ms"].as_i64().unwrap_or(0);
+                            // #284 disambiguation telemetry (None when the
+                            // VPS rs-delivery predates these fields).
+                            let producer_active = entry["producer_active"].as_bool();
+                            let last_push_ok_age_ms = entry["last_push_ok_age_ms"].as_i64();
                             let last_error = entry["last_error"].as_str().map(|s| s.to_string());
                             let ffmpeg_last_stderr =
                                 entry["ffmpeg_last_stderr"].as_str().map(|s| s.to_string());
@@ -366,6 +379,8 @@ impl DeliveryOrchestrator {
                                 ffmpeg_restart_count,
                                 reconnect_count,
                                 av_skew_ms,
+                                producer_active,
+                                last_push_ok_age_ms,
                                 last_error,
                                 ffmpeg_last_stderr,
                                 is_fast,

@@ -86,6 +86,36 @@ impl DiskCacheFetcher {
     }
 }
 
+impl DiskCacheFetcher {
+    /// Shared stall bookkeeping (#284): record the stall for the paired
+    /// `DiskCacheReaderRecovered` bracket, emit the rate-limited
+    /// `DiskCacheStallTimeout` audit row, and build the Err string the
+    /// producer's backoff loop expects.
+    fn note_stall(&self, chunk_id: i64, detail: &str) -> String {
+        self.was_stalled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(ring) = &self.audit_ring {
+            if self
+                .stall_rl
+                .allow(rs_core::audit::Action::DiskCacheStallTimeout, &self.alias)
+            {
+                ring.push_parts(crate::audit_ring::RingRowParts {
+                    severity: rs_core::audit::Severity::Error,
+                    source: rs_core::audit::Source::Vps,
+                    endpoint: Some(self.alias.clone()),
+                    action: rs_core::audit::Action::DiskCacheStallTimeout,
+                    detail: serde_json::json!({
+                        "chunk_id": chunk_id,
+                        "timeout_secs": self.stall_timeout_secs,
+                        "detail": detail,
+                    }),
+                });
+            }
+        }
+        format!("disk_cache stall on chunk {chunk_id}: {detail}")
+    }
+}
+
 impl ChunkFetcher for DiskCacheFetcher {
     async fn fetch_chunk_with_meta(&self, chunk_id: i64) -> Result<Option<(Vec<u8>, i64)>, String> {
         // Prefetch the upcoming window in ONE spawned task that loops
@@ -104,43 +134,42 @@ impl ChunkFetcher for DiskCacheFetcher {
         // Update position registry so eviction protects this endpoint's window.
         self.cache.position_registry.advance(&self.alias, chunk_id);
 
-        // Trigger the targeted fetch and wait for terminal state.
-        self.cache.download_service.request_chunk(chunk_id).await;
-        let state = match self
-            .cache
-            .registry
-            .wait_for_chunk_with_timeout(chunk_id, Duration::from_secs(self.stall_timeout_secs))
+        // Trigger the targeted fetch and wait for a terminal state — BOTH
+        // under ONE stall_timeout deadline (#284). `request_chunk()` itself
+        // blocks until the download task reaches a terminal state, and
+        // pre-#284 it was awaited UNBOUNDED: a wedged/erroring fetch (the
+        // registry slot stuck InFlight while fetch_with_retry retried
+        // transient S3 errors forever) parked the producer BEFORE the
+        // timeout-guarded registry wait below ever started. producer_active
+        // never flipped, the consumer's rescue gate (!producer_active)
+        // stayed shut, and every endpoint went dark with no audit row — the
+        // #280 operator incident. With the deadline spanning request+wait,
+        // EVERY stall shape surfaces as Err to the producer's
+        // consecutive-error counter within a bounded budget.
+        //
+        // The stall arms are audit-only forensics — do NOT abort; the
+        // producer's outer backoff retries and rescue covers the gap. The
+        // next successful Available fetch emits the paired
+        // DiskCacheReaderRecovered to bracket the outage window.
+        let state =
+            match tokio::time::timeout(Duration::from_secs(self.stall_timeout_secs), async {
+                self.cache.download_service.request_chunk(chunk_id).await;
+                self.cache.registry.wait_for_chunk(chunk_id).await
+            })
             .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                // Outage forensics: the cache window emptied (S3 outage
-                // longer than the window). Audit-only — do NOT abort; the
-                // producer's outer backoff retries and rescue covers the
-                // gap. The next successful Available fetch emits the paired
-                // DiskCacheReaderRecovered to bracket the outage window.
-                self.was_stalled
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                if let Some(ring) = &self.audit_ring {
-                    if self
-                        .stall_rl
-                        .allow(rs_core::audit::Action::DiskCacheStallTimeout, &self.alias)
-                    {
-                        ring.push_parts(crate::audit_ring::RingRowParts {
-                            severity: rs_core::audit::Severity::Error,
-                            source: rs_core::audit::Source::Vps,
-                            endpoint: Some(self.alias.clone()),
-                            action: rs_core::audit::Action::DiskCacheStallTimeout,
-                            detail: serde_json::json!({
-                                "chunk_id": chunk_id,
-                                "timeout_secs": self.stall_timeout_secs,
-                            }),
-                        });
-                    }
+            {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => return Err(self.note_stall(chunk_id, &e.to_string())),
+                Err(_elapsed) => {
+                    return Err(self.note_stall(
+                        chunk_id,
+                        &format!(
+                            "request+wait exceeded stall_timeout {}s",
+                            self.stall_timeout_secs
+                        ),
+                    ));
                 }
-                return Err(format!("disk_cache stall on chunk {chunk_id}: {e}"));
-            }
-        };
+            };
 
         match state {
             ChunkAvailability::Available { .. } => {
@@ -170,16 +199,21 @@ impl ChunkFetcher for DiskCacheFetcher {
                 let data = match tokio::fs::read(&path).await {
                     Ok(d) => d,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        self.cache.download_service.request_chunk(chunk_id).await;
-                        let _ = self
-                            .cache
-                            .registry
-                            .wait_for_chunk_with_timeout(
-                                chunk_id,
-                                Duration::from_secs(self.stall_timeout_secs),
+                        // Same single-deadline bound as the main path (#284):
+                        // an unbounded request_chunk().await here would park
+                        // the producer identically.
+                        tokio::time::timeout(Duration::from_secs(self.stall_timeout_secs), async {
+                            self.cache.download_service.request_chunk(chunk_id).await;
+                            self.cache.registry.wait_for_chunk(chunk_id).await
+                        })
+                        .await
+                        .map_err(|_| {
+                            format!(
+                                "disk_cache enoent retry stall on chunk {chunk_id}: \
+                                 request+wait exceeded stall_timeout"
                             )
-                            .await
-                            .map_err(|e| format!("disk_cache enoent retry stall: {e}"))?;
+                        })?
+                        .map_err(|e| format!("disk_cache enoent retry stall: {e}"))?;
                         tokio::fs::read(&path)
                             .await
                             .map_err(|e| format!("disk read {} (retry): {e}", path.display()))?
@@ -202,6 +236,16 @@ impl ChunkFetcher for DiskCacheFetcher {
                 // because eviction only happens for chunks outside any
                 // endpoint's window.
                 Ok(None)
+            }
+            ChunkAvailability::Failed { error } => {
+                // #284: the download task exhausted its bounded attempts
+                // (persistently-erroring S3). Surface as Err so the
+                // producer's consecutive-error counter advances toward the
+                // rescue flip; the producer's backoff loop re-requests, so
+                // retrying never stops system-wide (#184).
+                Err(format!(
+                    "disk_cache: chunk {chunk_id} fetch failed after bounded attempts: {error}"
+                ))
             }
             ChunkAvailability::InFlight => Err(format!(
                 "disk_cache: chunk {chunk_id} stuck InFlight after timeout"

@@ -52,6 +52,16 @@ pub struct EndpointStats {
     /// Surfaced on the dashboard as a small badge (#184).
     #[serde(default)]
     pub last_lifecycle_worst_stage: Option<LifecycleSummary>,
+    /// Unix epoch ms of the last SUCCESSFUL push on this endpoint — a live
+    /// chunk via the rust pusher, or a rescue-clip push during an outage.
+    /// #284 disambiguation telemetry: together with `producer_active` on
+    /// `/api/status` this classifies a live stall (producer starved vs
+    /// pusher stalled) without log access, and the #238 crash-exhaustion
+    /// E2E gate asserts it keeps advancing while rescue is active. `None`
+    /// until the first successful push (and on the ffmpeg pusher path,
+    /// which has no per-push success signal).
+    #[serde(default)]
+    pub last_push_ok_unix_ms: Option<i64>,
 }
 
 /// Snapshot of a per-endpoint PrefetchQueue.
@@ -89,8 +99,19 @@ impl Default for EndpointStats {
             rtmp_push_history: std::collections::VecDeque::new(),
             prefetch_fill: None,
             last_lifecycle_worst_stage: None,
+            last_push_ok_unix_ms: None,
         }
     }
+}
+
+/// Current Unix epoch time in milliseconds. Shared by the push-success
+/// bookkeeping (`last_push_ok_unix_ms`) and the `/api/status` age math so
+/// both sides use the same clock.
+pub fn unix_ms_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 pub type Stats = Arc<Mutex<EndpointStats>>;

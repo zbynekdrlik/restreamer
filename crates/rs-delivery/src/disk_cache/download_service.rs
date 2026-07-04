@@ -19,6 +19,16 @@ use tokio::sync::Mutex;
 
 use super::registry::ChunkRegistry;
 
+/// #284: bounded consecutive S3 errors per fetch task before it marks the
+/// chunk `Failed` and returns (waking waiters). 3 attempts = 2 backoff
+/// sleeps (1s + 2s) + 3 request round-trips, so an error-shaped drain
+/// surfaces to the producer's rescue counter within seconds — the same
+/// order as the clean-404 drain — instead of parking it forever. The outer
+/// loops re-request (which resets the slot to InFlight), so system-wide
+/// retrying never stops (#184); only the single in-flight attempt is
+/// bounded.
+const MAX_FETCH_ATTEMPTS: u64 = 3;
+
 /// Trait abstracting the S3 fetch operation. The real implementation
 /// is `crate::s3_fetch::S3Fetcher`; tests use `MockBackend`.
 ///
@@ -285,12 +295,31 @@ impl DownloadService {
                     tracing::warn!(chunk_id, attempt, "disk_cache S3 fetch failed: {e}");
                     let class = crate::endpoint_audit::classify_s3_fetch_error(&e.to_string());
                     self.profile.record_failure(class);
+                    if attempt >= MAX_FETCH_ATTEMPTS {
+                        // #284: give up THIS ATTEMPT (not the chunk). Pre-fix
+                        // this loop retried forever with the registry slot
+                        // stuck InFlight, so a producer awaiting the slot
+                        // parked indefinitely: producer_active never flipped,
+                        // the rescue gate (!producer_active) stayed shut, and
+                        // every endpoint went dark (#280). Marking Failed
+                        // wakes waiters within seconds; the producer surfaces
+                        // it as an Err to its consecutive-error rescue
+                        // counter and RE-REQUESTS on its backoff cadence
+                        // (mark_in_flight resets the slot), so retrying never
+                        // stops system-wide (#184) — only this in-flight
+                        // attempt is bounded.
+                        tracing::error!(
+                            chunk_id,
+                            attempt,
+                            "disk_cache: bounded fetch attempts exhausted; \
+                             surfacing Failed to waiters: {e}"
+                        );
+                        self.registry.mark_failed(chunk_id, e);
+                        return;
+                    }
                     drop(_permit);
                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(60);
-                    // No max_attempts check. Loop until success, 404, or
-                    // disk-write hard fail. Per user rule (#184): never
-                    // give up on transient errors; only slow down.
                 }
             }
         }
@@ -412,6 +441,54 @@ mod tests {
                 None => Ok(None),
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_attempts_mark_failed_and_wake_waiters() {
+        // #284: a persistently-erroring backend must NOT wedge
+        // request_chunk() forever (the pre-fix loop retried with the
+        // registry slot stuck InFlight, parking the producer and keeping
+        // rescue shut — #280). After MAX_FETCH_ATTEMPTS the chunk is
+        // marked Failed and every waiter wakes.
+        let backend = Arc::new(MockBackend::default());
+        backend.set_err("forced persistent error");
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = ChunkRegistry::new();
+        let svc = DownloadService::new(
+            backend.clone(),
+            registry.clone(),
+            tmp.path().to_path_buf(),
+            "evt".into(),
+            10_000,
+            8,
+            None,
+        );
+        // 60 virtual seconds: far above the bounded budget (2 backoff
+        // sleeps between 3 tries), far below "forever".
+        tokio::time::timeout(Duration::from_secs(60), svc.request_chunk(7))
+            .await
+            .expect("#284: request_chunk must return once bounded attempts are exhausted");
+        assert_eq!(
+            backend.count(),
+            3,
+            "exactly MAX_FETCH_ATTEMPTS (3) GETs per in-flight fetch"
+        );
+        match registry.peek(7) {
+            Some(ChunkAvailability::Failed { error }) => {
+                assert!(error.contains("forced persistent error"));
+            }
+            other => panic!("expected Failed after bounded attempts, got {other:?}"),
+        }
+        // The outer retry path resets the slot: a re-request must observe a
+        // fresh InFlight fetch, never the stale Failed (#184 semantics).
+        backend.set_ok(vec![1u8; 16], 1000);
+        tokio::time::timeout(Duration::from_secs(60), svc.request_chunk(7))
+            .await
+            .expect("re-request after Failed must run a fresh fetch");
+        assert!(
+            matches!(registry.peek(7), Some(ChunkAvailability::Available { .. })),
+            "recovered backend must yield Available on the re-request"
+        );
     }
 
     #[tokio::test]
@@ -630,7 +707,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn fetch_5xx_no_longer_exhausts_retries_loops_forever() {
+    async fn fetch_5xx_transient_errors_never_mark_not_found() {
+        // #184's protection, re-specified under the #284 bounded-attempt
+        // amendment: a transient 5xx must NEVER surface as NotFound (the
+        // pre-#184 cap marked NotFound, which made readers SKIP the chunk —
+        // data loss). Since #284 the inner attempt loop is bounded and ends
+        // in `Failed` — an ERROR the caller retries — never in NotFound.
+        // (Paused-time is fine again: the bounded loop has only 2 short
+        // virtual sleeps, unlike the retry-forever loop that exhausted
+        // tarpaulin's per-test budget.)
         let backend = Arc::new(MockBackend::default());
         backend.set_err("S3 fetch error: status 503");
         let tmp = tempfile::tempdir().unwrap();
@@ -644,31 +729,28 @@ mod tests {
             8,
             None,
         );
-        let svc2 = Arc::clone(&svc);
-        let task = tokio::spawn(async move { svc2.request_chunk(503).await });
-        // Real-time, modest budget. See `fetch_with_retry_never_caps_attempts`
-        // for why paused-time was rejected (tarpaulin instrumentation
-        // overhead).
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        svc.request_chunk(503).await;
         let state = registry.peek(503);
         assert!(
             !matches!(state, Some(ChunkAvailability::NotFound)),
-            "retry-forever must not give up, got state={state:?}"
+            "transient errors must never mark NotFound (reader would skip \
+             the chunk — the pre-#184 data-loss bug), got state={state:?}"
         );
-        assert!(backend.count() >= 4);
-        task.abort();
+        assert!(
+            matches!(state, Some(ChunkAvailability::Failed { .. })),
+            "bounded attempts must end in Failed (#284), got state={state:?}"
+        );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn fetch_with_retry_never_caps_attempts() {
-        // Real-time test: backend always 503. After ~8s real time the
-        // registry must NOT be NotFound — the retry loop must still
-        // be running. The old 5-attempt cap would mark NotFound after
-        // ~7.5s (0.5+1+2+4=7.5s of backoffs); retry-forever does NOT.
-        //
-        // start_paused was rejected because tarpaulin's instrumentation
-        // is slow enough that paused-time tests with many virtual
-        // sleep wake-ups exhaust tarpaulin's per-test 5-min timeout.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn fetch_retry_bounded_per_attempt_but_rerequest_never_gives_up() {
+        // The #184 intent ("never give up on transient errors") re-specified
+        // under #284: each IN-FLIGHT fetch is bounded (exactly
+        // MAX_FETCH_ATTEMPTS GETs, then Failed — so a waiter can never park
+        // forever, the #280 all-endpoints-dark wedge), while the SYSTEM
+        // keeps retrying through re-requests: every re-request resets the
+        // slot and runs a fresh bounded cycle, and a recovered backend
+        // yields Available.
         let backend = Arc::new(MockBackend::default());
         backend.set_err("S3 fetch error: status 503");
         let tmp = tempfile::tempdir().unwrap();
@@ -682,20 +764,39 @@ mod tests {
             8,
             None,
         );
-        let svc2 = Arc::clone(&svc);
-        let req = tokio::spawn(async move { svc2.request_chunk(503).await });
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        let st = registry.peek(503);
-        assert!(
-            !matches!(st, Some(ChunkAvailability::NotFound)),
-            "retry-forever must NOT mark NotFound on transient errors, got {st:?}"
+        // First request: bounded cycle, Failed, exactly 3 GETs.
+        svc.request_chunk(503).await;
+        assert_eq!(
+            backend.count(),
+            3,
+            "first cycle: exactly MAX_FETCH_ATTEMPTS GETs"
+        );
+        assert!(matches!(
+            registry.peek(503),
+            Some(ChunkAvailability::Failed { .. })
+        ));
+        // Second request (the outer loops' retry): a FRESH bounded cycle —
+        // the system did not give up on the chunk.
+        svc.request_chunk(503).await;
+        assert_eq!(
+            backend.count(),
+            6,
+            "re-request must run a fresh attempt cycle"
         );
         assert!(
-            backend.count() >= 4,
-            "expected >=4 attempts in 10s real time (proving no max_attempts cap), got {}",
-            backend.count()
+            !matches!(registry.peek(503), Some(ChunkAvailability::NotFound)),
+            "transient errors must never surface as NotFound"
         );
-        req.abort();
+        // Backend recovers: the next re-request succeeds.
+        backend.set_ok(vec![7u8; 32], 1500);
+        svc.request_chunk(503).await;
+        assert!(
+            matches!(
+                registry.peek(503),
+                Some(ChunkAvailability::Available { .. })
+            ),
+            "recovered backend must yield Available on a later re-request"
+        );
     }
 
     #[test]

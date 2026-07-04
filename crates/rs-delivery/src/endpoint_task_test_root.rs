@@ -2,10 +2,10 @@
 //! `#[cfg(test)]` declaration at the end of `endpoint_task.rs` (file-size
 //! gate) while still splitting tests across focused files.
 
-#[path = "disk_cache_stall_tests.rs"]
-mod disk_cache_stall_tests;
 #[path = "endpoint_task_backoff_tests.rs"]
 mod backoff_tests;
+#[path = "disk_cache_stall_tests.rs"]
+mod disk_cache_stall_tests;
 #[path = "fast_self_healing_tests.rs"]
 mod fast_self_healing_tests;
 #[path = "endpoint_task_flv_tests.rs"]
