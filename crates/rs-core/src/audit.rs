@@ -336,6 +336,21 @@ mod tests {
             serde_json::to_string(&Action::RtmpConnected).unwrap(),
             r#""rtmp_connected""#
         );
+        // Contract lock for the FB/YT soak gate in ci.yml. The gate queries
+        // /api/v1/audit?action=<string> and classifies delivery stalls by these
+        // exact action strings: `endpoint_rtmp_push_died` (upstream rotation vs
+        // local pusher fault, cf087d59) and `rescue_activated` (source-supply
+        // stall the pusher covered with the rescue clip, #282). If a rename
+        // changed either serialization, the gate would silently mis-classify and
+        // re-introduce the #227 soak fragility -- keep these in sync with ci.yml.
+        assert_eq!(
+            serde_json::to_string(&Action::EndpointRtmpPushDied).unwrap(),
+            r#""endpoint_rtmp_push_died""#
+        );
+        assert_eq!(
+            serde_json::to_string(&Action::RescueActivated).unwrap(),
+            r#""rescue_activated""#
+        );
     }
 
     #[test]

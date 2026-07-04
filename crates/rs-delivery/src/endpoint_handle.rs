@@ -26,6 +26,10 @@ pub struct EndpointHandle {
     stats: Stats,
     start_chunk_id: i64,
     cfg: crate::api::EndpointConfig,
+    /// Shared producer/consumer buffer state. Retained so `/api/status` can
+    /// surface `producer_active` per endpoint (#284 disambiguation
+    /// telemetry: rescue-gate state visible without log access).
+    buffer_state: Arc<BufferState>,
 }
 
 impl EndpointHandle {
@@ -78,7 +82,7 @@ impl EndpointHandle {
             stop_rx,
             stats.clone(),
             rescue_video_url,
-            buffer_state,
+            Arc::clone(&buffer_state),
             audit_ring,
         ));
         Self {
@@ -87,7 +91,17 @@ impl EndpointHandle {
             stats,
             start_chunk_id,
             cfg,
+            buffer_state,
         }
+    }
+
+    /// #284: whether the producer is actively finding new chunks. `false`
+    /// while the producer is stalled — the exact state that opens the
+    /// consumer's rescue gate (`!producer_active`).
+    pub fn producer_active(&self) -> bool {
+        self.buffer_state
+            .producer_active
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn start_chunk_id(&self) -> i64 {
@@ -136,6 +150,28 @@ impl EndpointHandle {
             stats,
             start_chunk_id,
             cfg,
+            buffer_state: Arc::new(BufferState::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn producer_active_reflects_shared_buffer_state() {
+        let h = EndpointHandle::stub_for_test(1);
+        assert!(
+            h.producer_active(),
+            "fresh BufferState defaults to producer_active=true"
+        );
+        h.buffer_state
+            .producer_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            !h.producer_active(),
+            "accessor must reflect the shared rescue-gate flag (#284)"
+        );
     }
 }

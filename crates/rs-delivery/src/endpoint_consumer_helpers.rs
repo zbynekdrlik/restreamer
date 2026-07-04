@@ -116,6 +116,11 @@ pub(super) async fn handle_rust_push(
             // error chunk the error fields below dominate the dashboard and
             // this keeps its last-known-good value.
             s.av_skew_ms = pusher.av_skew_ms();
+            // #284 disambiguation telemetry: timestamp of the last
+            // successful push, surfaced as last_push_ok_age_ms on
+            // /api/status so a live stall self-classifies (producer starved
+            // vs pusher stalled).
+            s.last_push_ok_unix_ms = Some(crate::endpoint_stats::unix_ms_now());
             // Clear sticky error markers: prior timeout / push-error states
             // shouldn't keep showing on the dashboard once writes resume.
             s.stall_reason = None;

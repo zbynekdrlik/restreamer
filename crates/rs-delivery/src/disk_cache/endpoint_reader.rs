@@ -126,6 +126,16 @@ impl EndpointReader {
                     // recovering by skipping is preferable to blocking.
                     chunk_id += 1;
                 }
+                ChunkAvailability::Failed { .. } => {
+                    // #284: the download task exhausted its bounded attempts
+                    // (persistently-erroring S3). Surface as stall so the
+                    // caller's retry/rescue logic reacts instead of the
+                    // reader silently skipping an outage.
+                    return Err(ReaderError::StallTimeout {
+                        chunk_id,
+                        timeout_secs: cfg.stall_timeout_secs,
+                    });
+                }
                 ChunkAvailability::InFlight => {
                     // wait_for_chunk only returns terminal states; reaching
                     // InFlight here means the timeout elapsed without

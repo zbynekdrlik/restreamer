@@ -286,6 +286,18 @@ struct EndpointStatusEntry {
     /// video) for rust-pusher endpoints. The dashboard alarms on a sustained
     /// non-zero value; the #258 E2E gate asserts it stays ~0 (issue #257).
     av_skew_ms: i64,
+    /// #284: whether the producer is actively finding new chunks. `false`
+    /// while the producer is stalled — the exact state that opens the
+    /// consumer's rescue gate (`!producer_active`). Disambiguates a live
+    /// stall (producer starved vs pusher stalled) from status alone.
+    producer_active: bool,
+    /// #284/#238: ms since the last SUCCESSFUL push (live chunk via the
+    /// rust pusher, or a rescue-clip push during an outage). Stays small
+    /// while bytes actually flow — the crash-exhaustion E2E gate asserts
+    /// this keeps advancing while rescue is active. `None` until the first
+    /// successful push (and on the ffmpeg pusher path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_push_ok_age_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,6 +323,7 @@ async fn endpoint_status(
     let endpoints = state.endpoints.read().await;
     let mut entries = Vec::new();
 
+    let now_ms = crate::endpoint_stats::unix_ms_now();
     for (alias, handle) in endpoints.iter() {
         let stats = handle.stats().await;
         entries.push(EndpointStatusEntry {
@@ -323,6 +336,8 @@ async fn endpoint_status(
             ffmpeg_restart_count: stats.ffmpeg_restart_count,
             reconnect_count: stats.reconnect_count,
             av_skew_ms: stats.av_skew_ms,
+            producer_active: handle.producer_active(),
+            last_push_ok_age_ms: crate::endpoint_stats::age_ms(now_ms, stats.last_push_ok_unix_ms),
             last_error: stats.last_error,
             ffmpeg_last_stderr: stats.ffmpeg_last_stderr,
             consecutive_chunk_misses: stats.consecutive_chunk_misses,

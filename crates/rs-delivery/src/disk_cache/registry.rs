@@ -11,14 +11,27 @@ use tokio::sync::Notify;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChunkAvailability {
-    Available { size_bytes: u64 },
+    Available {
+        size_bytes: u64,
+    },
     NotFound,
     InFlight,
     Evicted,
+    /// Terminal failure: the download task gave up this ATTEMPT after a
+    /// bounded number of consecutive S3 errors (#284). Waiters wake
+    /// immediately instead of blocking on an InFlight slot forever; the
+    /// OUTER retry loops (producer backoff, prefetch re-request) own any
+    /// further retries — `mark_in_flight` resets this state on the next
+    /// request, so the system as a whole never gives up on transient
+    /// errors (#184), while no single fetch can park its caller.
+    Failed {
+        error: String,
+    },
 }
 
 /// Per-chunk slot. The Notify wakes any pending `wait_for_chunk` once
-/// `state` transitions to a terminal value (Available / NotFound / Evicted).
+/// `state` transitions to a terminal value (Available / NotFound /
+/// Evicted / Failed).
 struct Slot {
     state: ChunkAvailability,
     notify: Arc<Notify>,
@@ -58,6 +71,22 @@ impl ChunkRegistry {
                 notify: Arc::new(Notify::new()),
             });
             slot.state = ChunkAvailability::NotFound;
+            Arc::clone(&slot.notify)
+        };
+        notify.notify_waiters();
+    }
+
+    /// Mark a chunk's CURRENT fetch attempt as failed after bounded retries
+    /// (#284). Wakes all pending waiters so callers surface the error to
+    /// their own retry/rescue logic instead of blocking indefinitely.
+    pub fn mark_failed(self: &Arc<Self>, chunk_id: i64, error: String) {
+        let notify = {
+            let mut g = self.inner.lock().unwrap();
+            let slot = g.entry(chunk_id).or_insert_with(|| Slot {
+                state: ChunkAvailability::InFlight,
+                notify: Arc::new(Notify::new()),
+            });
+            slot.state = ChunkAvailability::Failed { error };
             Arc::clone(&slot.notify)
         };
         notify.notify_waiters();
@@ -213,6 +242,36 @@ mod tests {
             got,
             Ok(ChunkAvailability::Available { size_bytes: 2048 })
         ));
+    }
+
+    #[tokio::test]
+    async fn mark_failed_wakes_waiters_and_returns_failed() {
+        // #284: bounded-attempt exhaustion must WAKE waiters (pre-fix the
+        // slot stayed InFlight forever and waiters parked indefinitely).
+        let r = ChunkRegistry::new();
+        let r2 = r.clone();
+        let waiter = tokio::spawn(async move { r2.wait_for_chunk(9).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished(), "must block while InFlight");
+        r.mark_failed(9, "s3 exploded".to_string());
+        let got = tokio::time::timeout(Duration::from_millis(100), waiter)
+            .await
+            .expect("mark_failed must wake waiters")
+            .expect("task panicked");
+        match got {
+            Ok(ChunkAvailability::Failed { error }) => assert_eq!(error, "s3 exploded"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_in_flight_resets_failed_state() {
+        // #184/#284: a retry against a previously-Failed chunk must block
+        // on the NEW fetch, not observe the stale Failed terminal state.
+        let r = ChunkRegistry::new();
+        r.mark_failed(5, "first attempt failed".to_string());
+        r.mark_in_flight(5);
+        assert_eq!(r.peek(5), Some(ChunkAvailability::InFlight));
     }
 
     #[tokio::test]

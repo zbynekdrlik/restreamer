@@ -242,9 +242,6 @@ jobs:
             --exclude-re 'DeliveryOrchestrator::stop_delivery' \
             --exclude-re 'DeliveryOrchestrator::get_delivery_status' \
             --exclude-re 'delivery_logs' \
-            --exclude-re 'rescue::' \
-            --exclude-re 'run_rescue_loop' \
-            --exclude-re 'run_warmup_loop' \
             --exclude-re 'upload_rescue_video' \
             --exclude-re 'tail_lines' \
             --exclude-re 'S3Client::upload_public_object' \
@@ -316,8 +313,13 @@ jobs:
         run: cargo install cargo-audit
       - name: Run audit
         run: |
+          # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml DoS) are transitive via
+          # rust-s3 0.37.1 -> aws-creds, pinned to quick-xml ^0.38 (0.38.4 is the ceiling;
+          # the patch is not reachable without a rust-s3 major bump, tracked in #207).
+          # quick-xml here only parses XML from our own trusted Hetzner S3 bucket, so the
+          # crafted-XML DoS is out of threat model. Ignore until #207 removes rust-s3.
           for i in 1 2 3; do
-            cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0049 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 && exit 0
+            cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0049 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 && exit 0
             echo "Attempt $i failed, retrying in 10s..."
             sleep 10
           done
@@ -1883,7 +1885,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 60
+    timeout-minutes: 75 # 42min typical + crash-exhaustion gate (#238) ~10min
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -2720,6 +2722,53 @@ jobs:
           }
           Write-Host "Pre-flight cleanup complete"
 
+      - name: "Pre-flight: E2E S3 prefix must be empty (#285 fossil guard)"
+        shell: powershell
+        timeout-minutes: 20
+        run: |
+          # #285: the VPS live-edge lag probe trusts any chunk object in the
+          # event's S3 prefix. Fossils left by a previous run (the in-app
+          # wipe-on-start is capped at 60s and can time out on a large pile)
+          # make the probe jump onto STALE chunks and stall at the fossil
+          # high-water -- invalidating the E2E (stale replay) and producing
+          # the #283 soak failures. Delivery E2E therefore REQUIRES an empty
+          # prefix before it starts: clear leftovers via the app's own
+          # clear-s3 API and verify via /s3/usage. Normally a fast no-op
+          # (one empty-prefix check); only a fossil pile takes passes.
+          $ErrorActionPreference = 'Stop'
+          $base = "http://127.0.0.1:8910"
+          $events = Invoke-RestMethod -Uri "$base/api/v1/events" -TimeoutSec 15
+          $evt = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          if (-not $evt) {
+            Write-Host "No '$($env:EVENT_NAME)' event exists yet - nothing to clear"
+            exit 0
+          }
+          for ($i = 1; $i -le 10; $i++) {
+            try {
+              $resp = Invoke-RestMethod -Method Post -Uri "$base/api/v1/events/$($evt.id)/clear-s3" -TimeoutSec 200
+              Write-Host "clear-s3 pass ${i}: deleted=$($resp.deleted)"
+            } catch {
+              # 504 = the handler's 180s cap hit mid-pile; progress was
+              # made server-side, so loop and re-check usage.
+              Write-Host "clear-s3 pass ${i}: $($_.Exception.Message) (retrying)"
+            }
+            $objects = -1
+            try {
+              $usage = Invoke-RestMethod -Uri "$base/api/v1/s3/usage" -TimeoutSec 170
+              $mine = $usage.by_event | Where-Object { $_.event_name -eq $env:EVENT_NAME }
+              $objects = if ($mine) { [int64]$mine.objects } else { 0 }
+            } catch {
+              Write-Host "s3/usage check failed (retrying): $($_.Exception.Message)"
+            }
+            Write-Host "prefix objects remaining: $objects"
+            if ($objects -eq 0) {
+              Write-Host "OK: S3 prefix for '$($env:EVENT_NAME)' is empty"
+              exit 0
+            }
+            Start-Sleep -Seconds 3
+          }
+          throw "FAILED: could not empty the S3 prefix for '$($env:EVENT_NAME)' - fossils would make the VPS replay stale video and stall (#285)"
+
       - name: Start stream (activate + delivery VPS)
         shell: powershell
         run: |
@@ -3411,15 +3460,37 @@ jobs:
             throw "FAILED: VPS warmup did not complete within $($maxWait * 5)s"
           }
 
+          # #227: Scope the progression + overshoot checks to the CI-OWNED
+          # endpoints only. The loops below iterate $resp.endpoint_details on
+          # the shared E2E-Test event; a STRAY endpoint (a leftover soak
+          # endpoint, an operator-added production FB endpoint) attached to
+          # the event would otherwise be gated too and could hard-fail the
+          # whole run on state the CI does not own (2026-05-20: a leftover
+          # 'e2e fb' soak endpoint at 157.4s > 156s init cap hard-failed YT
+          # e2e even though the CI's own endpoints were fine). The CI attaches
+          # exactly 'e2e rtmp' + 'e2e hls' (see the seed step's $needAttach).
+          $ciOwnedAliases = @("e2e rtmp", "e2e hls")
+
           # Phase 2: Initialization-phase overshoot + jump detection.
           # The 172s->120s jump bug happens in the FIRST 60s after warmup ends.
           # Take rapid samples (every 5s for 60s) and fail on:
-          #   - overshoot: any reading > target * 1.3 (= 156s for 120s target)
+          #   - overshoot: cache > target * 1.3 (= 156s for 120s target),
+          #     SUSTAINED across consecutive samples (#227)
           #   - impossible jump: drop > 20s between 5s-apart readings
+          # #227: the overshoot check is SUSTAINED, not instantaneous. The
+          # cache legitimately spikes then settles during the first seconds of
+          # init (the VPS buffer-fill overshoots momentarily before steady
+          # real-time playback pulls it back). A single transient sample over
+          # the cap is normal warmup jitter and must NOT hard-fail; require
+          # the overshoot to persist across N consecutive samples for the SAME
+          # alias. A genuine, settled overshoot still trips (N straight
+          # readings over cap) -- this stays a real gate.
+          $sustainedOvershoot = 3
           $targetDelay = if ($targetEvent.cache_delay_secs) { $targetEvent.cache_delay_secs } else { 120 }
           $maxInitCache = [math]::Round($targetDelay * 1.3)
-          Write-Host "INIT-PHASE CHECK: 12 samples, 5s apart (max cache=${maxInitCache}s, max drop=20s)"
+          Write-Host "INIT-PHASE CHECK: 12 samples, 5s apart (max cache=${maxInitCache}s sustained ${sustainedOvershoot}x, max drop=20s, aliases=$($ciOwnedAliases -join ','))"
           $initSeries = @{}
+          $overshootStreak = @{}
           for ($s = 1; $s -le 12; $s++) {
             Start-Sleep -Seconds 5
             $resp = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
@@ -3427,14 +3498,26 @@ jobs:
               foreach ($ep in $resp.endpoint_details) {
                 if ($ep.is_fast) { continue }
                 $alias = $ep.alias
+                # #227: ignore endpoints the CI does not own.
+                if ($ciOwnedAliases -notcontains $alias) {
+                  Write-Host "  Init $s/12 [$alias]: SKIPPED (not a CI-owned endpoint)"
+                  continue
+                }
                 $delay = [math]::Round($ep.chunk_delay_secs, 1)
                 if (-not $initSeries.ContainsKey($alias)) { $initSeries[$alias] = @() }
+                if (-not $overshootStreak.ContainsKey($alias)) { $overshootStreak[$alias] = 0 }
                 $initSeries[$alias] += $delay
-                Write-Host "  Init $s/12 [$alias]: cache=${delay}s chunk=$($ep.current_chunk_id) mode=$($ep.delivery_mode)"
 
-                # Overshoot check
+                # Overshoot check -- SUSTAINED across consecutive samples.
                 if ($delay -gt $maxInitCache) {
-                  throw "FAILED: [$alias] cache ${delay}s exceeds init max ${maxInitCache}s (target=${targetDelay}s) -- overshoot during initialization"
+                  $overshootStreak[$alias] += 1
+                  Write-Host "  Init $s/12 [$alias]: cache=${delay}s chunk=$($ep.current_chunk_id) mode=$($ep.delivery_mode) OVERSHOOT streak=$($overshootStreak[$alias])/${sustainedOvershoot}"
+                  if ($overshootStreak[$alias] -ge $sustainedOvershoot) {
+                    throw "FAILED: [$alias] cache exceeded init max ${maxInitCache}s (target=${targetDelay}s) for ${sustainedOvershoot} consecutive samples (latest ${delay}s) -- SUSTAINED overshoot during initialization, not warmup jitter"
+                  }
+                } else {
+                  $overshootStreak[$alias] = 0
+                  Write-Host "  Init $s/12 [$alias]: cache=${delay}s chunk=$($ep.current_chunk_id) mode=$($ep.delivery_mode)"
                 }
 
                 # Impossible jump check (drop > 20s in 5s interval)
@@ -3449,10 +3532,10 @@ jobs:
               }
             }
           }
-          Write-Host "INIT-PHASE CHECK PASSED: no overshoot, no impossible jumps"
+          Write-Host "INIT-PHASE CHECK PASSED: no sustained overshoot, no impossible jumps"
 
           # Phase 3: Take 4 readings at 15s intervals to verify progression
-          Write-Host "Verifying delivery progression for ALL endpoints (4 readings, 15s apart)..."
+          Write-Host "Verifying delivery progression for CI-owned endpoints (4 readings, 15s apart)..."
 
           # Track per-endpoint chunk progression across 4 readings
           $epReadings = @{}  # alias -> array of chunk_ids
@@ -3464,6 +3547,8 @@ jobs:
               foreach ($ep in $resp.endpoint_details) {
                 if (-not $ep.is_fast) {
                   $alias = $ep.alias
+                  # #227: only assert progression on CI-owned endpoints.
+                  if ($ciOwnedAliases -notcontains $alias) { continue }
                   if (-not $epReadings.ContainsKey($alias)) {
                     $epReadings[$alias] = @()
                   }
@@ -3475,7 +3560,7 @@ jobs:
           }
 
           if ($epReadings.Count -eq 0) {
-            throw "FAILED: No non-fast endpoints found in delivery status"
+            throw "FAILED: No CI-owned non-fast endpoints (e2e rtmp / e2e hls) found in delivery status"
           }
 
           # Assert EACH endpoint advanced >= 3 chunks over 45s
@@ -4239,6 +4324,141 @@ jobs:
           }
           Write-Host "=== OBS Disconnect/Reconnect Test PASSED ==="
 
+      - name: OBS republish A/V-alignment gate (av_skew_ms)
+        if: success()
+        shell: powershell
+        timeout-minutes: 8
+        run: |
+          # Issue #258: after a mid-stream OBS unpublish/republish, assert the
+          # delivered stream stays audio/video aligned (av_skew_ms ~0) and that
+          # no endpoint dies. Regression gate for the chunker shared-epoch fix
+          # (#255) and the av_skew_ms exposure (#257). Without this, the
+          # 2026-06-19 mid-stream-republish desync (av_skew ~25500ms) is
+          # untested.
+          #
+          # SKEW_LIMIT is set well below the pusher's own MAX_AV_SKEW_MS (4000)
+          # so this gate fails BEFORE the pusher's auto-recovery would mask the
+          # regression.
+          $SKEW_LIMIT = 1500
+          Write-Host "=== OBS Republish A/V-Alignment Gate (SKEW_LIMIT=${SKEW_LIMIT}ms) ==="
+
+          $appStatus = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+          $eventId = $appStatus.streaming_event.id
+          Write-Host "Active event ID: $eventId"
+
+          # Helper: open an authenticated OBS WebSocket and return the socket +
+          # a shared buffer/segment for request/response round-trips.
+          function Connect-ObsWs {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $ws.Options.KeepAliveInterval = [TimeSpan]::FromSeconds(5)
+            $cts = New-Object System.Threading.CancellationTokenSource(30000)
+            $ws.ConnectAsync("ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)", $cts.Token).Wait()
+            $buf = [byte[]]::new(8192)
+            $seg = [ArraySegment[byte]]$buf
+            $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+            $hello = [System.Text.Encoding]::UTF8.GetString($buf, 0, $recv.Count) | ConvertFrom-Json
+            if ($hello.d.authentication) {
+              $salt = $hello.d.authentication.salt
+              $challenge = $hello.d.authentication.challenge
+              $sha = [System.Security.Cryptography.SHA256]::Create()
+              $b64secret = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($env:OBS_WS_PASSWORD)$salt")))
+              $auth = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$b64secret$challenge")))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $auth } } | ConvertTo-Json -Depth 5
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($identify)
+              $ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $cts.Token).Wait()
+              $recv = $ws.ReceiveAsync($seg, $cts.Token).Result
+            }
+            return @{ Ws = $ws; Cts = $cts; Seg = $seg }
+          }
+
+          function Send-ObsRequest($conn, $requestType, $requestId) {
+            $req = @{ op = 6; d = @{ requestType = $requestType; requestId = $requestId } } | ConvertTo-Json -Depth 5
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($req)
+            $conn.Ws.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $conn.Cts.Token).Wait()
+            $null = $conn.Ws.ReceiveAsync($conn.Seg, $conn.Cts.Token).Result
+          }
+
+          # One or more republish cycles (issue asks "one or more times").
+          # Each cycle: StopStream -> dead-air gap -> StartStream, the same
+          # session churn a real OBS restart produces.
+          $cycles = 2
+          $deadAirSecs = 8
+          for ($c = 1; $c -le $cycles; $c++) {
+            Write-Host "--- Republish cycle $c of $cycles ---"
+            $conn = Connect-ObsWs
+            Write-Host "Stopping OBS stream (cycle $c)..."
+            Send-ObsRequest $conn "StopStream" "av-align-stop-$c"
+            Write-Host "Dead-air gap: ${deadAirSecs}s..."
+            Start-Sleep -Seconds $deadAirSecs
+            Write-Host "Restarting OBS stream (cycle $c)..."
+            Send-ObsRequest $conn "StartStream" "av-align-start-$c"
+            $conn.Ws.CloseAsync('NormalClosure', '', [System.Threading.CancellationToken]::None).Wait()
+
+            # Wait for RTMP to reconnect after this cycle.
+            $reconnected = $false
+            for ($i = 0; $i -lt 15; $i++) {
+              Start-Sleep -Seconds 2
+              $s = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status"
+              if ($s.inpoint.details.rtmp_connected) {
+                Write-Host "RTMP reconnected after $($i * 2)s (cycle $c)"
+                $reconnected = $true
+                break
+              }
+            }
+            if (-not $reconnected) {
+              throw "FAILED: RTMP did not reconnect within 30s after republish cycle $c"
+            }
+          }
+
+          # Stabilize the chunk pipeline before sampling skew.
+          Write-Host "Stabilizing chunk pipeline for 30s before A/V soak..."
+          Start-Sleep -Seconds 30
+
+          # Baseline restart counts AFTER the republish + stabilize. Any
+          # increase during the soak below counts as an endpoint death.
+          $baseline = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+          # CRITICAL: iterate endpoint_details (the field the host API
+          # serializes); $.endpoints is empty on this endpoint and would make
+          # the gate pass vacuously.
+          if (-not $baseline.endpoint_details -or $baseline.endpoint_details.Count -eq 0) {
+            throw "FAILED: no endpoint_details in delivery status after republish -- cannot assert A/V alignment (vacuous gate guard)"
+          }
+          $restartsBaseline = @{}
+          foreach ($ep in $baseline.endpoint_details) {
+            $restartsBaseline[$ep.alias] = [int]$ep.ffmpeg_restart_count
+            Write-Host "BASELINE: [$($ep.alias)] av_skew_ms=$($ep.av_skew_ms) alive=$($ep.alive) restarts=$($ep.ffmpeg_restart_count)"
+          }
+
+          # Soak: sample every 10s for ~90s, asserting on every endpoint each
+          # sample. Logs each sample so a failure is debuggable from CI alone.
+          $soakSamples = 9
+          $soakIntervalSecs = 10
+          for ($n = 1; $n -le $soakSamples; $n++) {
+            Start-Sleep -Seconds $soakIntervalSecs
+            $st = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+            if (-not $st.endpoint_details -or $st.endpoint_details.Count -eq 0) {
+              throw "FAILED: endpoint_details empty at soak sample $n -- delivery status lost all endpoints"
+            }
+            foreach ($ep in $st.endpoint_details) {
+              $skew = [int]$ep.av_skew_ms
+              $absSkew = [math]::Abs($skew)
+              $restarts = [int]$ep.ffmpeg_restart_count
+              Write-Host "SAMPLE $n/$soakSamples [$($ep.alias)] av_skew_ms=$skew alive=$($ep.alive) restarts=$restarts"
+              if (-not $ep.alive) {
+                throw "FAILED: endpoint '$($ep.alias)' is not alive at soak sample $n (endpoint death after OBS republish)"
+              }
+              if ($absSkew -ge $SKEW_LIMIT) {
+                throw "FAILED: endpoint '$($ep.alias)' av_skew_ms=$skew (|skew|=$absSkew) exceeds limit ${SKEW_LIMIT}ms after OBS republish -- A/V desync regression (chunker shared-epoch / pusher skew safety net)"
+              }
+              $base = if ($restartsBaseline.ContainsKey($ep.alias)) { $restartsBaseline[$ep.alias] } else { 0 }
+              if ($restarts -gt $base) {
+                $tail = if ($ep.ffmpeg_last_stderr) { $ep.ffmpeg_last_stderr } else { '<empty>' }
+                throw "FAILED: endpoint '$($ep.alias)' ffmpeg_restart_count rose from $base to $restarts during A/V soak (endpoint restart after OBS republish). stderr_tail:`n$tail"
+              }
+            }
+          }
+          Write-Host "=== OBS Republish A/V-Alignment Gate PASSED ==="
+
       - name: Simulated network disconnect - cache drain and recovery
         if: success()
         shell: powershell
@@ -4595,6 +4815,156 @@ jobs:
           }
 
           Write-Host "=== Restreamer Crash Recovery Test PASSED ==="
+
+      - name: "GATE: crash-exhaustion -> rescue on EVERY endpoint (#238/#280)"
+        if: success()
+        shell: powershell
+        timeout-minutes: 25
+        run: |
+          # #238/#280: THE core church-stream guarantee. Kill Restreamer
+          # mid-stream (source + uploads stop instantly), hold the host DOWN
+          # until the delivery VPS genuinely EXHAUSTS its chunk supply, and
+          # assert EVERY endpoint switches to the rescue clip with a LIVE
+          # push. (Restart-recovery-to-live is a SEPARATE guarantee tracked
+          # in #252; see the restart note below.) The earlier crash-recovery
+          # step restarts within ~13s
+          # (before the cache drains), so it never exercises this path; the
+          # long-outage step blocks uploads WHILE the host runs. This gate
+          # is the exact #280 operator scenario in which all endpoints went
+          # dark with no rescue and no preview.
+          # Polls go DIRECTLY to the VPS API (:8000) because the host API
+          # dies with the kill; the bearer token comes from the host DB
+          # (deliberately serde-skipped on the host HTTP API).
+          $ErrorActionPreference = 'Stop'
+          $base = "http://127.0.0.1:8910"
+
+          $appStatus = Invoke-RestMethod -Uri "$base/api/v1/status"
+          $eventId = $appStatus.streaming_event.id
+
+          $instances = Invoke-RestMethod -Uri "$base/api/v1/delivery/instances"
+          if (-not $instances -or @($instances).Count -lt 1) { throw "no delivery instance" }
+          $vpsIp = $instances[0].ipv4
+          $vpsBase = "http://${vpsIp}:8000"
+
+          $sqlite = "C:\ProgramData\Restreamer\sqlite3.exe"
+          $token = (& $sqlite -readonly "C:\ProgramData\Restreamer\restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
+          if (-not $token) { throw "could not read VPS auth_token from host DB" }
+          $vpsHeaders = @{ Authorization = "Bearer $token" }
+
+          # Endpoint classes come from the host view (is_fast is host-side).
+          $hostSt = Invoke-RestMethod -Uri "$base/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          $fastAliases = @($hostSt.endpoint_details | Where-Object { $_.is_fast } | ForEach-Object { $_.alias })
+          $nonFastAliases = @($hostSt.endpoint_details | Where-Object { -not $_.is_fast } | ForEach-Object { $_.alias })
+          if ($nonFastAliases.Count -lt 1) { throw "gate needs >=1 non-fast endpoint attached" }
+          if ($fastAliases.Count -lt 1) {
+            Write-Host "NOTE: no fast endpoint attached to this event; fast-path rescue is locked by the rs-delivery behavioral tests -- this gate asserts ALL attached endpoints"
+          }
+          Write-Host "endpoints: fast=[$($fastAliases -join ', ')] nonfast=[$($nonFastAliases -join ', ')]"
+
+          # Direct VPS API sanity BEFORE the kill.
+          $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
+          $aliases = @($st.endpoints | ForEach-Object { $_.alias })
+          if ($aliases.Count -lt 1) { throw "no endpoints on VPS status" }
+
+          # Exhaustion budget: the deepest cache window keeps non-fast
+          # endpoints fed for ~chunk_delay_secs after the kill; add margin
+          # for the bounded fetch surfacing (#284) + the 3x miss counter +
+          # the 8s rescue threshold + rescue session establishment.
+          $maxDelay = ($hostSt.endpoint_details | Measure-Object -Property chunk_delay_secs -Maximum).Maximum
+          if (-not $maxDelay -or $maxDelay -lt 0) { $maxDelay = 0 }
+          $budget = [int][math]::Ceiling($maxDelay) + 240
+          Write-Host "kill -> all-rescue budget: ${budget}s (max chunk_delay_secs=$maxDelay)"
+
+          Write-Host "KILLING Restreamer mid-stream (uploads stop; VPS must exhaust and rescue)..."
+          cmd /c "taskkill /F /IM Restreamer.exe 2>nul" | Out-Null
+          Start-Sleep -Seconds 3
+          if (Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue) { throw "Restreamer still running after taskkill" }
+
+          # PHASE 1: EVERY endpoint reaches rescue/recovering within budget.
+          $inRescue = @{}
+          $deadline = (Get-Date).AddSeconds($budget)
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 5
+            try {
+              $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
+            } catch {
+              Write-Host "VPS poll error (retrying): $($_.Exception.Message)"
+              continue
+            }
+            $line = @()
+            foreach ($ep in $st.endpoints) {
+              $line += "$($ep.alias): mode=$($ep.delivery_mode) prod_active=$($ep.producer_active) push_age_ms=$($ep.last_push_ok_age_ms)"
+              if ($ep.delivery_mode -eq "rescue" -or $ep.delivery_mode -eq "recovering") { $inRescue[$ep.alias] = $true }
+            }
+            Write-Host ("poll: " + ($line -join " | "))
+            $missing = @($aliases | Where-Object { -not $inRescue[$_] })
+            if ($missing.Count -eq 0) { break }
+          }
+          $missing = @($aliases | Where-Object { -not $inRescue[$_] })
+          if ($missing.Count -gt 0) {
+            throw "FAILED (#280): endpoints never switched to rescue after genuine chunk exhaustion: $($missing -join ', ')"
+          }
+          Write-Host "OK: every endpoint entered rescue"
+
+          # PHASE 2: rescue must be LIVE on every endpoint -- pushes flowing
+          # (viewers see the rescue clip, not dark air). last_push_ok_age_ms
+          # is stamped by the rescue push loop on every successful push
+          # (#284 telemetry).
+          for ($smp = 1; $smp -le 3; $smp++) {
+            Start-Sleep -Seconds 10
+            $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
+            foreach ($ep in $st.endpoints) {
+              $age = $ep.last_push_ok_age_ms
+              if ($null -eq $age) { throw "FAILED: $($ep.alias) has NO successful push during rescue (sample $smp) - endpoint is dark" }
+              if ([int64]$age -gt 15000) { throw "FAILED: $($ep.alias) rescue push stalled (last_push_ok_age_ms=$age, sample $smp) - endpoint is dark" }
+              Write-Host "sample ${smp}: $($ep.alias) pushing (age=${age}ms, mode=$($ep.delivery_mode))"
+            }
+          }
+          Write-Host "OK: rescue clip is actively pushing on every endpoint"
+
+          # Restart the host so downstream steps have Restreamer up again.
+          # Restart-recovery-to-live (boot-reconcile) is a SEPARATE guarantee
+          # asserted under #252 -- this gate EXPOSED that it does not hold for
+          # a non-fast RTMP endpoint (the endpoint did not return to live
+          # after a full host restart). That recovery assertion + its fix live
+          # in #252, not here. This gate proves the #280 core: genuine
+          # chunk exhaustion -> rescue LIVE on every endpoint.
+          Write-Host "Restarting Restreamer via scheduled task..."
+          Start-ScheduledTask -TaskName "RestreamerGUI"
+          $apiUp = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 3
+            try {
+              Invoke-RestMethod -Uri "$base/api/v1/status" -TimeoutSec 5 | Out-Null
+              $apiUp = $true; break
+            } catch {}
+          }
+          if (-not $apiUp) { throw "FAILED: Restreamer API not responding after restart" }
+          Write-Host "Host API back up"
+          Write-Host "=== Crash-exhaustion -> rescue gate PASSED (#280); restart-recovery tracked in #252 ==="
+
+      - name: "Ensure Restreamer is running after crash-exhaustion gate"
+        if: always()
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          # The gate above kills Restreamer mid-step; if an assertion threw
+          # while the host was down, the remaining steps (second YT health
+          # check, deactivate event, VPS teardown) need the host API back.
+          # Idempotent: no-op when the gate already restarted it.
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if (-not $proc) {
+            Write-Host "Restreamer not running - starting via scheduled task"
+            Start-ScheduledTask -TaskName "RestreamerGUI"
+          }
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5 | Out-Null
+              Write-Host "Host API is up"
+              exit 0
+            } catch { Start-Sleep -Seconds 3 }
+          }
+          throw "Restreamer API did not come back - subsequent cleanup will fail"
 
       - name: "GATE: Second YouTube health check after resilience tests"
         if: success()
@@ -5315,6 +5685,53 @@ jobs:
           }
           Write-Host "Pre-flight cleanup complete"
 
+      - name: "Pre-flight: E2E S3 prefix must be empty (#285 fossil guard)"
+        shell: powershell
+        timeout-minutes: 20
+        run: |
+          # #285: the VPS live-edge lag probe trusts any chunk object in the
+          # event's S3 prefix. Fossils left by a previous run (the in-app
+          # wipe-on-start is capped at 60s and can time out on a large pile)
+          # make the probe jump onto STALE chunks and stall at the fossil
+          # high-water -- invalidating the E2E (stale replay) and producing
+          # the #283 soak failures. Delivery E2E therefore REQUIRES an empty
+          # prefix before it starts: clear leftovers via the app's own
+          # clear-s3 API and verify via /s3/usage. Normally a fast no-op
+          # (one empty-prefix check); only a fossil pile takes passes.
+          $ErrorActionPreference = 'Stop'
+          $base = "http://127.0.0.1:8910"
+          $events = Invoke-RestMethod -Uri "$base/api/v1/events" -TimeoutSec 15
+          $evt = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          if (-not $evt) {
+            Write-Host "No '$($env:EVENT_NAME)' event exists yet - nothing to clear"
+            exit 0
+          }
+          for ($i = 1; $i -le 10; $i++) {
+            try {
+              $resp = Invoke-RestMethod -Method Post -Uri "$base/api/v1/events/$($evt.id)/clear-s3" -TimeoutSec 200
+              Write-Host "clear-s3 pass ${i}: deleted=$($resp.deleted)"
+            } catch {
+              # 504 = the handler's 180s cap hit mid-pile; progress was
+              # made server-side, so loop and re-check usage.
+              Write-Host "clear-s3 pass ${i}: $($_.Exception.Message) (retrying)"
+            }
+            $objects = -1
+            try {
+              $usage = Invoke-RestMethod -Uri "$base/api/v1/s3/usage" -TimeoutSec 170
+              $mine = $usage.by_event | Where-Object { $_.event_name -eq $env:EVENT_NAME }
+              $objects = if ($mine) { [int64]$mine.objects } else { 0 }
+            } catch {
+              Write-Host "s3/usage check failed (retrying): $($_.Exception.Message)"
+            }
+            Write-Host "prefix objects remaining: $objects"
+            if ($objects -eq 0) {
+              Write-Host "OK: S3 prefix for '$($env:EVENT_NAME)' is empty"
+              exit 0
+            }
+            Start-Sleep -Seconds 3
+          }
+          throw "FAILED: could not empty the S3 prefix for '$($env:EVENT_NAME)' - fossils would make the VPS replay stale video and stall (#285)"
+
       - name: Verify FB Graph API credentials
         shell: powershell
         run: |
@@ -5528,15 +5945,33 @@ jobs:
           if ($null -ne $lastErr) { throw "delivery_start failed after 3 attempts: $lastErr" }
           Write-Host "OBS streaming + delivery started for event $($ev.id)"
 
-      - name: "GATE: e2e fb endpoint registered in delivery/status within 180s"
-        # #222: Named-step GATE pattern (mirrors e2e-obs-youtube). delivery_start
-        # returns the moment Hetzner created the server; the actual rs-delivery
-        # process takes another 30-90s to boot, pull binary from S3, POST
-        # /api/init, and populate metrics. Wait up to 3 min for the e2e fb row
-        # to register. Failure here means the VPS never came online or never
-        # posted /api/init -- DISTINCT from "VPS up but FB push stalled" below.
+      - name: "GATE: e2e fb endpoint registers (slow-VPS-boot tolerant, dead-VPS fast-fail)"
+        # #222 named-step GATE pattern; #227 slow-vs-dead robustness.
+        # delivery_start returns the moment Hetzner CREATED the server; a
+        # background poll_and_init task then drives the instance through
+        # creating -> booting -> initializing -> delivering, and the "e2e fb"
+        # row only appears in endpoint_details once init runs. Boot+init
+        # typically takes 30-90s but Hetzner has a real tail (rare runs
+        # >180s) -- the old fixed 180s wait reported that normal infra tail
+        # as a hard gate failure (#227 / run 27931333149: polled 18x then
+        # threw with a still-booting VPS).
+        #
+        # This gate now distinguishes "VPS still progressing through boot"
+        # from "VPS genuinely dead":
+        #   - PASS   : "e2e fb" appears in endpoint_details.
+        #   - FAST-FAIL: instance_status is "failed"/"deleted", or the
+        #     instance row vanished after creation -> poll_and_init errored
+        #     (delivery_handlers.rs writes "failed" on any poll_and_init
+        #     error) -> waiting longer is pointless.
+        #   - KEEP WAITING while instance_status is creating/booting/
+        #     initializing (progress), up to an absolute 5-min cap (the
+        #     observed 30-90s typical + Hetzner boot tail; the sibling
+        #     OBS-YT readiness loop allows 15 min). Only the absolute cap
+        #     with NO endpoint and NO terminal status is a real timeout.
+        # Every poll logs instance_status + elapsed so a future failure is
+        # diagnosable from the CI log alone.
         shell: powershell
-        timeout-minutes: 4
+        timeout-minutes: 7
         run: |
           $events = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/events" -Method GET -TimeoutSec 10
           $ev = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
@@ -5548,20 +5983,67 @@ jobs:
           "FB_E2E_WATCHDOG_START=$watchdogStartTs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
           $statusUri = "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$($ev.id)"
-          $deadline = (Get-Date).AddMinutes(3)
-          while ((Get-Date) -lt $deadline) {
-            $status = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 10
+          # Statuses that mean the background poll_and_init is still making
+          # progress (the VPS is booting / initializing, NOT dead).
+          $progressing = @("creating", "booting", "initializing", "delivering")
+          # Terminal-dead statuses: poll_and_init errored and wrote the row
+          # to "failed", or the orchestrator deleted a stale/aborted VPS.
+          $deadStatuses = @("failed", "deleted", "stopping")
+          $start = Get-Date
+          # Absolute cap: 30-90s typical boot + Hetzner tail headroom. The
+          # OBS-YT readiness sibling allows ~15 min; 5 min is generous for FB
+          # while still bounded so a genuinely dead VPS that never flips to a
+          # terminal status cannot hang the job.
+          $absoluteCap = (Get-Date).AddMinutes(5)
+          # A VPS that never even reaches a known status after this grace
+          # (with no progress) is treated as never-created.
+          $sawInstance = $false
+          $poll = 0
+          while ((Get-Date) -lt $absoluteCap) {
+            $poll += 1
+            $elapsed = [int]((Get-Date) - $start).TotalSeconds
+            $status = $null
+            try {
+              $status = Invoke-RestMethod -Uri $statusUri -Method GET -TimeoutSec 10
+            } catch {
+              Write-Host "poll ${poll} (${elapsed}s): delivery/status query failed (will retry): $_"
+              Start-Sleep -Seconds 10
+              continue
+            }
             $ep = $status.endpoint_details | Where-Object { $_.alias -eq "e2e fb" }
             if ($null -ne $ep) {
-              Write-Host "GATE PASS: e2e fb endpoint registered (alive=$($ep.alive) mode=$($ep.delivery_mode))"
+              Write-Host "GATE PASS: e2e fb endpoint registered after ${elapsed}s (alive=$($ep.alive) mode=$($ep.delivery_mode) instance_status=$($status.instance_status))"
               exit 0
             }
-            Write-Host "waiting for VPS to register e2e fb endpoint..."
+            $instStatus = $status.instance_status
+            if ($null -ne $instStatus) { $sawInstance = $true }
+            Write-Host "poll ${poll} (${elapsed}s): instance_status=$instStatus server_ready=$($status.server_ready) -- e2e fb endpoint not registered yet"
+
+            # FAST-FAIL: VPS is genuinely dead -- waiting longer cannot help.
+            if ($deadStatuses -contains $instStatus) {
+              throw "GATE FAIL: VPS is dead (instance_status='$instStatus' after ${elapsed}s). poll_and_init errored or the VPS was deleted before the e2e fb endpoint registered -- this is a real boot/init fault, NOT a slow boot. Inspect vps_creating / vps_ready / delivery_init_sent audit rows for event $($ev.id)."
+            }
+            # FAST-FAIL: the instance row vanished after it had appeared --
+            # the orchestrator deleted it (terminal), so it will never register.
+            if ($sawInstance -and ($null -eq $instStatus)) {
+              throw "GATE FAIL: delivery instance row disappeared after ${elapsed}s (instance_status is now null). The VPS was torn down before the e2e fb endpoint registered -- a real fault, not a slow boot."
+            }
+            # KEEP WAITING while progressing through boot/init phases.
+            if ($progressing -contains $instStatus) {
+              Start-Sleep -Seconds 10
+              continue
+            }
+            # Unknown/transient status (e.g. row not yet written): keep
+            # polling within the cap rather than guessing it is dead.
             Start-Sleep -Seconds 10
           }
-          throw "GATE FAIL: e2e fb endpoint never registered in delivery/status within 180s of VPS boot"
+          $capElapsed = [int]((Get-Date) - $start).TotalSeconds
+          if (-not $sawInstance) {
+            throw "GATE FAIL: no delivery instance ever appeared in delivery/status within ${capElapsed}s -- delivery_start did not create a VPS (Hetzner create_server failed?). Check the 'Start OBS stream + delivery' step output."
+          }
+          throw "GATE FAIL: e2e fb endpoint never registered within the ${capElapsed}s absolute cap while instance_status kept reporting a non-terminal boot phase -- the VPS booted but rs-delivery never reached the init step. Likely a stuck buffer-fill / init hang (see #146), NOT normal Hetzner tail-latency."
 
-      - name: "STRICT: 30-min sustained soak on rust pusher (chunks+bytes advancing, no push_died after first chunk)"
+      - name: "STRICT: 30-min sustained soak on rust pusher (chunks+bytes advancing, no LOCAL-fault push_died after first chunk; upstream FB/YT rotations tolerated)"
         # #222: Renamed from generic "Local watchdog" so the failing step name
         # pinpoints the actual fault class (sustained-delivery progress + audit
         # cleanliness AFTER first chunk). Boot-wait happens in the GATE step
@@ -5589,6 +6071,9 @@ jobs:
           $lastBytes = -1
           $stagnantPolls = 0
           $missingPolls = 0
+          # #282: consecutive no-live-progress polls that coincide with an active
+          # rescue (source-supply gap). Reset whenever live delivery resumes.
+          $rescueStallPolls = 0
           # Track whether the endpoint EVER delivered a real chunk. Without
           # this, an endpoint stuck at chunks_processed=0 for the whole soak
           # (push dies before first chunk, repeatedly) would hit the `continue`
@@ -5691,10 +6176,64 @@ jobs:
                   if ($_.Exception.Message -match "WATCHDOG FAIL: host_internet_unreachable") { throw }
                   Write-Host "watchdog: host_internet_unreachable audit query failed: $($_.Exception.Message)"
                 }
-                throw "WATCHDOG FAIL: no delivery progress for 90s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
+                # #282: source-supply stall covered by rescue. rescue_activated
+                # fires ONLY on a PRODUCER stall (the VPS cannot FETCH fresh
+                # chunks from S3: producer_active=false after 3x no-chunk), i.e.
+                # a SOURCE-supply gap (local uploader / ingest / test-source) --
+                # NOT a pusher-push fault. The pusher is correctly pushing the
+                # rescue clip while live chunks_processed is frozen. A real
+                # pusher stall keeps producer_active=true (NO rescue) and still
+                # trips the generic throw below; a pusher fault still surfaces as
+                # a LOCAL-fault push_died (checked every poll after this block) --
+                # so tolerating a rescue-covered gap cannot mask a pusher
+                # regression. Give the source a bounded ~5 min window to recover
+                # (rescue deactivates, live delivery resumes) before failing with
+                # a source-supply attribution. Query only recent rescue (last
+                # 150s) so a long-ago rescue that already recovered never matches.
+                # #283: the PRIMARY rescue signal is the LIVE per-poll
+                # delivery_mode on $ep (the same object the warmup check above
+                # reads), NOT the audit mirror. The host audit mirror the
+                # fallback query hits can lag >=90s: run 28690282977 froze in
+                # rescue at chunks=387 but the rescue_activated row landed in the
+                # mirror ~90s late, so the audit-only check found 0 rows and the
+                # generic throw fired even though the pusher was correctly in
+                # rescue. delivery_mode is "rescue"/"recovering" the instant the
+                # VPS switches to the rescue clip. Keep the audit query as a
+                # secondary source for the stalled_at_chunk_id detail only.
+                $rescueActive = ($ep.delivery_mode -eq "rescue" -or $ep.delivery_mode -eq "recovering")
+                $rescDetail = "delivery_mode=$($ep.delivery_mode)"
+                try {
+                  $rescSince = (Get-Date).AddSeconds(-150).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+                  $resc = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=rescue_activated&since=$rescSince&limit=50" -TimeoutSec 10
+                  $rescRows = if ($resc.rows) { $resc.rows } elseif ($resc.items) { $resc.items } else { @() }
+                  if ($rescRows.Count -gt 0) {
+                    $rescueActive = $true
+                    $rescDetail = "$rescDetail, rescue_activated x$($rescRows.Count), latest stalled_at_chunk_id=$($rescRows[0].detail.stalled_at_chunk_id)"
+                  }
+                } catch {
+                  Write-Host "watchdog: rescue_activated audit query failed (delivery_mode still authoritative): $($_.Exception.Message)"
+                }
+                if ($rescueActive) {
+                  # Source-supply gap the pusher is covering with the rescue clip.
+                  # Bounded ~5 min recovery window (rescue deactivates, live
+                  # delivery resumes) before failing with a source-supply
+                  # attribution. Cannot mask a pusher regression: a pusher stall
+                  # keeps producer_active=true (NO rescue, delivery_mode=normal)
+                  # and still trips the generic throw below; a pusher fault still
+                  # surfaces as a LOCAL-fault push_died (checked every poll).
+                  $rescueStallPolls += 1
+                  if ($rescueStallPolls -ge 30) {
+                    throw "WATCHDOG FAIL: source-supply stall -- rescue active ($rescDetail) with NO live chunk progress for ~5 min. The VPS ran out of fresh S3 chunks (local uploader / ingest / test-source gap), so the pusher is pushing the rescue clip and live delivery has not resumed. This is a SOURCE-supply outage, NOT a rust-pusher regression. Re-run when the local ingest/upload chain is healthy."
+                  }
+                  Write-Host "watchdog: source-supply stall tolerated -- rescue active ($rescDetail); pusher pushing rescue clip, waiting up to ~5 min for source to recover ($rescueStallPolls/30)"
+                }
+                if (-not $rescueActive) {
+                  throw "WATCHDOG FAIL: no delivery progress for 90s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
+                }
               }
             } else {
               $stagnantPolls = 0
+              $rescueStallPolls = 0
             }
             $lastChunks = $ep.chunks_processed
             $lastBytes = $ep.bytes_processed_total
@@ -5705,12 +6244,50 @@ jobs:
               # the first chunk count as a soak fault.
               $everDelivered = $true
               $firstChunkIso = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-              $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&since=$firstChunkIso&limit=10"
+              $auditUri = "http://127.0.0.1:8910/api/v1/audit?action=endpoint_rtmp_push_died&endpoint=" + [uri]::EscapeDataString("e2e fb") + "&since=$firstChunkIso&limit=200"
             }
 
+            # #227 (further hardening): an endpoint_rtmp_push_died is NOT
+            # automatically a soak fault. Classify by its error:
+            #
+            #   * UPSTREAM ROTATION -- error "upstream closed connection
+            #     mid-stream" (= PushError::RemoteClosed). FB/YT periodically
+            #     reset our ingest (~5-15 min); the rust pusher is DESIGNED to
+            #     reconnect from this in ~3 s, non-exponential (see
+            #     crates/rs-rtmp-push/src/error.rs backoff_floor_ms /
+            #     is_exponential). Run 28683647366 failed here: FB reset the
+            #     connection once at ~5 min / 702 MB (reconnect_count=0,
+            #     backoff_ms=3000) and the old throw-on-first-die killed the
+            #     soak 3 s BEFORE the designed reconnect could prove recovery.
+            #     Throwing on this asserts "FB never rotates", which is false
+            #     and non-deterministic. TOLERATE it: recovery is independently
+            #     guaranteed by the 90 s no-progress stagnation check above (a
+            #     die that is NOT recovered stops chunks+bytes and trips that
+            #     throw), so a tolerated rotation that did NOT recover still
+            #     fails the soak -- just via the stagnation arm, not here.
+            #
+            #   * LOCAL / PUSHER FAULT -- everything else (handshake failed,
+            #     Connect/Publish rejected, timeout, I/O, TLS, malformed input,
+            #     A/V skew). These indicate a genuine rust-pusher regression
+            #     and FAIL the soak immediately.
+            #
+            # A generous local thrash cap catches a reset STORM the pusher
+            # itself causes (FB/YT rotate <=~6x in 30 min); the sibling
+            # >50-deaths/15min death-rate gate is the second guard.
             $audit = Invoke-RestMethod -Uri $auditUri -Method GET -TimeoutSec 10
             if ($audit.rows.Count -gt 0) {
-              throw "WATCHDOG FAIL: endpoint_rtmp_push_died audit row(s) for 'e2e fb' after first chunk (count: $($audit.rows.Count))"
+              $rotationDies = @($audit.rows | Where-Object { "$($_.detail.error)" -match "upstream closed connection mid-stream" })
+              $localFaultDies = @($audit.rows | Where-Object { "$($_.detail.error)" -notmatch "upstream closed connection mid-stream" })
+              if ($localFaultDies.Count -gt 0) {
+                $f = $localFaultDies[0]
+                throw "WATCHDOG FAIL: endpoint_rtmp_push_died with LOCAL/pusher fault for 'e2e fb' after first chunk (count: $($localFaultDies.Count), first error: '$($f.detail.error)' at $($f.ts)). This is a genuine rust-pusher regression, NOT an upstream FB/YT rotation."
+              }
+              if ($rotationDies.Count -ge 15) {
+                throw "WATCHDOG FAIL: $($rotationDies.Count) upstream-rotation endpoint_rtmp_push_died rows for 'e2e fb' in the soak (>= 15). Delivery kept progressing, but this reset rate is abnormal (FB/YT rotate ~every 5-15 min => <=6 expected). Investigate reconnect thrash."
+              }
+              if ($rotationDies.Count -gt 0) {
+                Write-Host "watchdog: tolerated $($rotationDies.Count) FB-side upstream-rotation reset(s) (RemoteClosed) -- pusher reconnects in ~3s, delivery sustained; latest error: '$($rotationDies[0].detail.error)'"
+              }
             }
 
             Write-Host "watchdog OK: alive=$($ep.alive) chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total)"

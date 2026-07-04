@@ -454,6 +454,10 @@ mod close_on_error {
             s.last_error
         );
         assert!(
+            s.last_push_ok_unix_ms.is_some(),
+            "Ok path must stamp last_push_ok_unix_ms (#284 telemetry)"
+        );
+        assert!(
             s.stall_reason.is_none(),
             "Ok path must clear stall_reason; got {:?}",
             s.stall_reason

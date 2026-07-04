@@ -229,6 +229,14 @@ pub struct DeliveryEndpointEntry {
     /// rust-pusher endpoints. The dashboard alarms on a sustained non-zero
     /// value; the #258 E2E gate asserts it stays ~0 (issue #257).
     pub av_skew_ms: i64,
+    /// #284: producer liveness on the VPS — `Some(false)` while the
+    /// producer is stalled (the state that opens the rescue gate).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub producer_active: Option<bool>,
+    /// #284/#238: ms since the endpoint's last SUCCESSFUL push (live chunk
+    /// or rescue clip). Stays small while bytes actually flow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_push_ok_age_ms: Option<i64>,
     pub ffmpeg_last_stderr: Option<String>,
     pub last_error: Option<String>,
     pub is_fast: bool,
@@ -271,6 +279,8 @@ pub async fn delivery_status(
             ffmpeg_restart_count: ep.ffmpeg_restart_count,
             reconnect_count: ep.reconnect_count,
             av_skew_ms: ep.av_skew_ms,
+            producer_active: ep.producer_active,
+            last_push_ok_age_ms: ep.last_push_ok_age_ms,
             ffmpeg_last_stderr: ep.ffmpeg_last_stderr,
             last_error: ep.last_error,
             is_fast: ep.is_fast,

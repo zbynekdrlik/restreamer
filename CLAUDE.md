@@ -5,17 +5,29 @@
 
 You are "Claude Autonomous Windows Engineer" (CAWE) — a senior Rust developer with CI/CD expertise working on the Restreamer project — a church live-streaming infrastructure built entirely in Rust.
 
+## Playbook Router
+
+Load the relevant skill BEFORE working on these areas:
+
+- stream.lan / streampp operations, deployment, OBS, MCP → `.claude/skills/stream-lan-operations`
+- Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
+- Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
+- OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`
+- Outage survival, rescue clip, keepalive, notification UX → `.claude/skills/outage-rescue`
+
 ## Project Structure
 
 Pure Rust monorepo with Cargo workspace at the root.
 
 | Directory    | Purpose                                      |
 | ------------ | -------------------------------------------- |
-| `crates/`    | 11 workspace crates (see Architecture below) |
+| `crates/`    | 11 workspace crates                          |
 | `src-tauri/` | Tauri desktop app (Windows tray + WebView2)  |
 | `leptos-ui/` | Leptos CSR frontend (WASM, all-Rust)         |
 | `e2e/`       | Playwright E2E tests (frontend + YouTube)    |
 | `scripts/`   | Windows install/deploy PowerShell scripts    |
+
+**Architecture**: 10 workspace crates (`rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `rs-cloud`, `rs-delivery`, `rs-ffmpeg`, `rs-youtube`) + `rs-ts-normalize`. `src-tauri` and `leptos-ui` excluded from workspace. Single unified binary `Restreamer.exe` (Tauri + embedded service + Leptos/WASM UI). SQLite via sqlx, Axum on `:8910`, RTMP in pure Rust. Rust edition 2024 (requires `unsafe` for `set_var`/`remove_var`), min Rust 1.85. Use `log` crate (not `tracing`) — xiu RTMP stack uses `log`; use `env_logger` in tests.
 
 ## Strict Rules
 
@@ -28,223 +40,81 @@ The global version-bumping rule applies. For this project, bump ALL of these fil
 - `src-tauri/tauri.conf.json`
 - `leptos-ui/Cargo.toml`
 
-Check current vs main:
-
 ```bash
 grep '^version' Cargo.toml | head -1
 git show origin/main:Cargo.toml | grep '^version' | head -1
 ```
 
-### PR Delivery — Dashboard URL
+### Completion Report — Dashboard URL
 
-When providing a completion report, always include the dashboard URL:
+Always include in the completion report:
 
 ```
-PR: <url> | CI: green | Deploy: verified | Dashboard: http://10.77.9.204:8910/
+Dashboard: http://10.77.9.204:8910/
 ```
 
-### CI Monitoring — Post-Deploy Verification
+### Post-Deploy Verification (stream.lan)
 
-After the `deploy-stream-lan` CI job completes, verify the deployment on stream.lan:
+After `deploy-stream-lan` CI job completes:
 
-- Use `mcp__win-stream-snv__ListProcesses` with filter "Restreamer" to verify the process is running.
-- Use `mcp__win-stream-snv__Shell` with command `Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/status` to verify the API responds.
+```powershell
+mcp__win-stream-snv__ListProcesses filter="Restreamer"
+mcp__win-stream-snv__Shell command="Invoke-RestMethod -Uri http://127.0.0.1:8910/api/v1/status"
+```
 
-**NEVER CLAIM DONE** until CI is fully green AND deployment is verified working on stream.lan.
+**NEVER CLAIM DONE** until CI is fully green AND deployment verified on stream.lan.
 
 ### Tray App Deployment (CRITICAL)
 
-**The Restreamer app MUST run as a tray application in the user's desktop session, NOT as a background service or headless process.**
-
-The global `windows-desktop-session` module defines the schtasks pattern. For this project:
-
-- **App**: `Restreamer.exe`
-- **User**: `newlevel`
-- **Task name**: `RestreamerGUI`
-- **Install path**: `C:\Program Files\Restreamer\`
-- **No `--headless` flag** — ever. No fallback to headless mode.
-
-Project-specific verification after deploy:
-
-```powershell
-# Stop existing
-taskkill /F /IM "Restreamer.exe"
-
-# Register and start in user session (see windows-desktop-session module for full pattern)
-Register-ScheduledTask -TaskName "RestreamerGUI" ...
-Start-ScheduledTask -TaskName "RestreamerGUI"
-
-# Verify correct session
-$proc = Get-Process -Name "Restreamer"
-if ($proc.SessionId -eq 0) { throw "Must run in user session, not SYSTEM" }
-```
-
-stream.lan always has user "newlevel" logged in. The scheduled task runs in their interactive session. If the scheduled task fails, CI must fail — do not fall back to headless mode.
+Restreamer.exe MUST run as a tray app in the user's desktop session — NEVER as background service or headless. Task name: `RestreamerGUI`, user: `newlevel`, install path: `C:\Program Files\Restreamer\`. No `--headless` flag ever. If the scheduled task fails, CI must fail.
 
 ### Testing — PRIMARY GOAL
 
-**The main goal is complete, full E2E tests that cover ALL flows in the app and the web frontend.** Every functionality must be covered by an E2E test flow. All tests MUST be part of GitHub CI workflows.
+Full E2E test coverage is the primary goal. Every feature ships with E2E tests covering the full user flow. All tests run in GitHub CI — never skipped.
 
-The global `test-strictness` and `no-continue-on-error` modules apply. Additional project-specific rules:
+- CI `test-integrity` job scans for `#[ignore]`, `assert!(true)`, empty test bodies — MUST pass
+- `deploy-stream-lan` job MUST run on every push (use `always()` in complex `if` conditions)
+- E2E gate requires both frontend and YouTube E2E to pass — condition uses `!= 'failure'`
+- Every CSS class referenced in UI components MUST be defined in the stylesheet
 
-- **CI hardening job** — The workflow includes a dedicated `test-integrity` job that scans source code for `#[ignore]`, `assert!(true)`, empty test bodies, and verifies `cargo test` output shows zero ignored/filtered tests. This job MUST pass for the CI gate to be green.
-- **NO skipped deployment jobs** — The `deploy-stream-lan` job MUST run on every dev and main push. Always use `always()` in complex `if` conditions.
-- **E2E tests run on EVERY push to dev/main** — Never skipped. The E2E job condition uses `!= 'failure'` (not `== 'success'`). The `e2e-gate` job requires both E2E tests to succeed on every push.
+### Local Build Policy — Tier 0 (dev1 OOM)
 
-#### E2E Coverage Gate (MANDATORY)
+NO local `cargo build`, `cargo test`, `cargo check`, or `cargo clippy` on dev1 — it has 7.5 GB RAM and OOMs (target/ hit 23 GB; 2026-06-10 operator directive). **`cargo fmt --all -- --check` only** locally. Purge `target/` whenever found. All compilation, clippy, and tests run on CI.
 
-- **NO feature ships without E2E tests** — Every implemented UI feature, API endpoint, and user-facing functionality MUST have corresponding E2E tests before a PR can be considered green.
-- **E2E tests verify rendering** — Frontend E2E tests must verify that UI components actually render visible content (text, buttons, forms), not just that the page loads without errors. Check for specific text content, element visibility, and interactive behavior.
-- **CSS coverage** — Every CSS class referenced in UI components MUST be defined in the stylesheet. Missing CSS = invisible UI = broken feature = red CI.
+Never pipe a pre-push gate through `tail`/`grep` then `&& echo OK` — it swallows the real exit code; use `$?` or `${PIPESTATUS[0]}`.
 
-#### Web/Frontend E2E (Playwright)
+### Push Discipline — ONE In-Flight CI Run at a Time
 
-- Use Playwright to test every frontend functionality — dashboard, config editor, status display, WebSocket updates.
-- Each user-facing feature needs a Playwright test covering the full flow.
-- Playwright tests run in CI on every push/PR, not just locally.
+NEVER push to dev while a main run (or the release workflow) is in flight, and never stack a second dev push on a running dev E2E. All E2E shares ONE self-hosted runner, ONE stream.lan box, and ONE YouTube test stream — concurrent runs race deploys and shared state; historically BOTH fail.
 
-#### Backend/Service E2E (Rust)
+The `stream-lan-box` concurrency group (`queue: max`, `cancel-in-progress: false`) in ci.yml serializes E2E jobs platform-side (FIFO). Hold the post-merge version-bump push until main + release reach terminal state.
 
-- Write real end-to-end tests that exercise actual code paths — RTMP ingest, chunk storage, S3 upload, API endpoints, WebSocket events.
-- Not mocked, not hidden, not stubbed. Real code, real assertions.
-- Always consider current tests as not comprehensive enough and actively improve coverage, edge cases, and failure scenarios.
-
-## Rust Development
-
-### Build Commands
-
-```bash
-cargo build                          # Debug build (workspace crates)
-cargo build --release -p rs-service  # Release build (standalone service binary)
-cargo test --workspace               # Run all tests
-cargo fmt --all -- --check           # Check formatting
-cargo clippy --workspace -- -D warnings  # Lint
-
-# Leptos frontend (WASM)
-cd leptos-ui && trunk build --release  # Production WASM build
-
-# Tauri unified app
-cargo tauri build                    # Production Tauri build (NSIS installer)
-```
-
-### Code Quality Standards
-
-- `cargo fmt` — enforced in CI
-- `cargo clippy -- -D warnings` — no warnings allowed
-- `cargo audit` — no known vulnerabilities
-- Max 1000 lines per `.rs` file
-- 60% minimum test coverage target
-- `SQLX_OFFLINE=true` — CI uses offline mode (no live DB during build)
-- ffmpeg required for E2E tests — CI installs it; tests panic if missing
-- `log` crate (not `tracing`) — xiu RTMP stack uses `log`; use `env_logger` in tests
-
-### Architecture
-
-- **Workspace** with 10 crates (under `crates/`): `rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `rs-cloud`, `rs-delivery`, `rs-ffmpeg`, `rs-youtube`
-- **Excluded from workspace**: `src-tauri` (needs built frontend), `leptos-ui` (WASM target)
-- **Rust edition**: 2024 — requires `unsafe` for `std::env::set_var`/`remove_var`
-- **Minimum Rust**: 1.85
-- **Single unified binary**: `Restreamer.exe` (Tauri app with embedded service + Leptos/WASM UI)
-- **rs-runtime**: Contains `ServiceCore` for reusable service orchestration
-- **Database**: SQLite via `sqlx` with compile-time checked queries
-- **RTMP server**: Pure Rust (no ffmpeg dependency)
-- **S3 uploads**: `rust-s3` crate
-- **API**: Axum on `http://127.0.0.1:8910` (embedded in Tauri app)
-- **Frontend**: Leptos CSR WASM (all-Rust, no React/npm)
-
-### Tauri Development
-
-```bash
-# No npm/package.json — Tauri builds Leptos frontend via trunk internally
-cargo tauri build                    # Production build with NSIS installer
-# Note: src-tauri and leptos-ui are excluded from workspace and built separately
-```
-
-## Versioning
-
-- **Cargo.toml** workspace version at repo root (e.g., `0.3.0`)
-- **Release tags**: `restreamer-v{X.Y.Z}` (auto-created on merge to main)
-- Always bump version before merging
+**If two runs ARE ever in flight**: cancel the lower-value run immediately (keep the release-bound main run), clean shared state (deactivate/detach the E2E event via API, delete any orphan VPS), then let the surviving run continue. One decisive cancel beats letting both race.
 
 ## CI/CD Pipelines
 
-| Workflow      | Trigger                     | Purpose                                       |
-| ------------- | --------------------------- | --------------------------------------------- |
-| `ci.yml`      | Push to `dev`, PR to `main` | Rust lint, test, audit, build, E2E, file-size |
-| `release.yml` | `restreamer-v*` tag         | Windows release (Tauri NSIS + delivery)       |
+| Workflow     | Trigger                     | Purpose                                        |
+|---|---|---|
+| `ci.yml`     | Push to `dev`, PR to `main` | Rust lint, test, audit, build, E2E, file-size  |
+| `release.yml`| `restreamer-v*` tag         | Windows release (Tauri NSIS + delivery binary) |
 
-### Auto-Release Flow
-
-```
-dev → PR to main → merge → auto-tag (restreamer-vX.Y.Z) → release.yml → GitHub Release with NSIS installer
-```
+Auto-release flow: `dev → PR to main → merge → auto-tag (restreamer-vX.Y.Z) → release.yml → GitHub Release`
 
 ## Deployment Targets
 
-### stream.lan (Local Client)
+**stream.lan**: Windows 11 IoT Enterprise LTSC, `10.77.9.204:8910`, install path `C:\Program Files\Restreamer\`, config `C:\ProgramData\Restreamer\config.json`, credentials in `~/.restreamer-secrets/stream-lan.env`. Self-hosted CI runner (runs as SYSTEM). MCP: `win-stream-snv`.
 
-- **Host**: `stream.lan` (Windows 11 IoT Enterprise LTSC)
-- **Install Path**: `C:\Program Files\Restreamer\`
-- **Config**: `C:\ProgramData\Restreamer\config.json`
-- **Credentials**: See `~/.restreamer-secrets/stream-lan.env` (not tracked by git)
-- **Install**: `irm https://raw.githubusercontent.com/zbynekdrlik/restreamer/main/scripts/install.ps1 | iex`
-- **Self-hosted runner**: GitHub Actions runner for CI deployment (runs as SYSTEM)
-- **Binary**: `Restreamer.exe` (Tauri GUI with embedded service + tray icon)
+**Hetzner VPS (Delivery)**: `rs-delivery` binary deployed to ad-hoc VPS instances. `DeliveryOrchestrator` in `rs-api` manages lifecycle (create → cloud-init → poll → init → stop → delete). E2E orchestration via local Rust API at `http://127.0.0.1:8910/api/v1/delivery/*` and `/api/v1/youtube/*`. No external manager or SSH needed.
 
-### Delivery (Hetzner VPS)
+## Code Quality
 
-- **Provider**: Hetzner Cloud
-- **Binary**: `rs-delivery` — standalone Rust binary deployed to ad-hoc VPS instances
-- **Orchestration**: `DeliveryOrchestrator` in `rs-api` manages Hetzner server lifecycle
-- **Flow**: Create Hetzner server with cloud-init → download rs-delivery from S3 → POST `/api/init` → stream via ffmpeg
+- `cargo fmt` — enforced in CI; `cargo clippy -- -D warnings` — no warnings
+- `cargo audit` — no known vulnerabilities; `SQLX_OFFLINE=true` in CI
+- Max 1000 lines per `.rs` file; 60% minimum test coverage
+- ffmpeg required for E2E tests — CI installs it; tests panic if missing
 
-#### E2E Testing API (Local Rust)
+## Versioning
 
-CI uses these local Rust API endpoints at `http://127.0.0.1:8910`:
-
-| Endpoint                     | Method | Purpose                                        |
-| ---------------------------- | ------ | ---------------------------------------------- |
-| `/api/v1/delivery/start`     | POST   | Create Hetzner VPS, deploy rs-delivery, init   |
-| `/api/v1/delivery/status`    | GET    | Check delivery server health + endpoint status |
-| `/api/v1/delivery/stop`      | POST   | Stop delivery, delete Hetzner server           |
-| `/api/v1/delivery/instances` | GET    | List active delivery instances                 |
-| `/api/v1/youtube/status`     | GET    | Query YouTube Data API for stream reception    |
-| `/api/v1/youtube/oauth/seed` | POST   | Seed YouTube OAuth tokens from CI secrets      |
-
-No external manager server or SSH needed. All E2E orchestration is local.
-
-## Developer Tools
-
-### Skills (`.claude/skills/`)
-
-Operational guides for common tasks:
-
-- `stream-lan-operations.md` — MCP tools, OBS WebSocket, client config
-
-## Local Build Policy
-
-Tier 0 (default): NO local builds or test runs — dev1 has 7.5 GB RAM and rustc
-workspace builds OOM it (operator directive 2026-06-10). Lint/fmt only locally;
-compilation, clippy, and tests run on CI. Purge `target/` whenever found.
-
-## Push Discipline — ONE in-flight CI run at a time
-
-NEVER push to dev while a main run (or the release workflow) is in flight, and
-never stack a second dev push on a running dev E2E. All E2E shares ONE
-self-hosted runner, ONE stream.lan box and ONE YouTube test stream — concurrent
-runs race deploys and shared state, and historically BOTH fail (2026-06-07,
-2026-06-11). The `stream-lan-box` concurrency group (`queue: max`,
-`cancel-in-progress: false`) in ci.yml serializes those jobs platform-side
-(FIFO queue — `queue: max` is required; the default single-pending-slot
-semantics would cancel an older run's pending E2E sibling). Queued runs still
-waste hours: hold the post-merge version-bump push until main + release reach
-terminal state.
-
-**If two runs ARE ever in flight together: STOP one immediately — never let
-both proceed.** Cancel the lower-value run (usually the version-bump/dev run;
-keep the release-bound main run), clean shared state if its E2E was mid-test
-(deactivate/detach the E2E event via the API, delete any orphan VPS), then let
-the surviving run continue. A deliberate cancel + 5-minute cleanup always
-beats letting two runs race (2026-06-11: letting both run cost ~3 h and
-failed BOTH). This is one decisive cancel — not the banned cancel-thrashing
-of stuck runs.
+- Workspace version in `Cargo.toml` at repo root
+- Release tags: `restreamer-v{X.Y.Z}` (auto-created on merge to main)
+- Always bump version before merging
