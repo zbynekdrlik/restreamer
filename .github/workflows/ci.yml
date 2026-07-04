@@ -242,9 +242,6 @@ jobs:
             --exclude-re 'DeliveryOrchestrator::stop_delivery' \
             --exclude-re 'DeliveryOrchestrator::get_delivery_status' \
             --exclude-re 'delivery_logs' \
-            --exclude-re 'rescue::' \
-            --exclude-re 'run_rescue_loop' \
-            --exclude-re 'run_warmup_loop' \
             --exclude-re 'upload_rescue_video' \
             --exclude-re 'tail_lines' \
             --exclude-re 'S3Client::upload_public_object' \
@@ -1888,7 +1885,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 60
+    timeout-minutes: 75 # 42min typical + crash-exhaustion gate (#238) ~10min
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -2724,6 +2721,53 @@ jobs:
             }
           }
           Write-Host "Pre-flight cleanup complete"
+
+      - name: "Pre-flight: E2E S3 prefix must be empty (#285 fossil guard)"
+        shell: powershell
+        timeout-minutes: 20
+        run: |
+          # #285: the VPS live-edge lag probe trusts any chunk object in the
+          # event's S3 prefix. Fossils left by a previous run (the in-app
+          # wipe-on-start is capped at 60s and can time out on a large pile)
+          # make the probe jump onto STALE chunks and stall at the fossil
+          # high-water -- invalidating the E2E (stale replay) and producing
+          # the #283 soak failures. Delivery E2E therefore REQUIRES an empty
+          # prefix before it starts: clear leftovers via the app's own
+          # clear-s3 API and verify via /s3/usage. Normally a fast no-op
+          # (one empty-prefix check); only a fossil pile takes passes.
+          $ErrorActionPreference = 'Stop'
+          $base = "http://127.0.0.1:8910"
+          $events = Invoke-RestMethod -Uri "$base/api/v1/events" -TimeoutSec 15
+          $evt = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          if (-not $evt) {
+            Write-Host "No '$($env:EVENT_NAME)' event exists yet - nothing to clear"
+            exit 0
+          }
+          for ($i = 1; $i -le 10; $i++) {
+            try {
+              $resp = Invoke-RestMethod -Method Post -Uri "$base/api/v1/events/$($evt.id)/clear-s3" -TimeoutSec 200
+              Write-Host "clear-s3 pass ${i}: deleted=$($resp.deleted)"
+            } catch {
+              # 504 = the handler's 180s cap hit mid-pile; progress was
+              # made server-side, so loop and re-check usage.
+              Write-Host "clear-s3 pass ${i}: $($_.Exception.Message) (retrying)"
+            }
+            $objects = -1
+            try {
+              $usage = Invoke-RestMethod -Uri "$base/api/v1/s3/usage" -TimeoutSec 170
+              $mine = $usage.by_event | Where-Object { $_.event_name -eq $env:EVENT_NAME }
+              $objects = if ($mine) { [int64]$mine.objects } else { 0 }
+            } catch {
+              Write-Host "s3/usage check failed (retrying): $($_.Exception.Message)"
+            }
+            Write-Host "prefix objects remaining: $objects"
+            if ($objects -eq 0) {
+              Write-Host "OK: S3 prefix for '$($env:EVENT_NAME)' is empty"
+              exit 0
+            }
+            Start-Sleep -Seconds 3
+          }
+          throw "FAILED: could not empty the S3 prefix for '$($env:EVENT_NAME)' - fossils would make the VPS replay stale video and stall (#285)"
 
       - name: Start stream (activate + delivery VPS)
         shell: powershell
@@ -4772,6 +4816,195 @@ jobs:
 
           Write-Host "=== Restreamer Crash Recovery Test PASSED ==="
 
+      - name: "GATE: crash-exhaustion -> rescue on EVERY endpoint (#238/#280)"
+        if: success()
+        shell: powershell
+        timeout-minutes: 25
+        run: |
+          # #238/#280: THE core church-stream guarantee. Kill Restreamer
+          # mid-stream (source + uploads stop instantly), hold the host DOWN
+          # until the delivery VPS genuinely EXHAUSTS its chunk supply, and
+          # assert EVERY endpoint switches to the rescue clip with a LIVE
+          # push -- then restart the host and assert full recovery to live
+          # delivery. The earlier crash-recovery step restarts within ~13s
+          # (before the cache drains), so it never exercises this path; the
+          # long-outage step blocks uploads WHILE the host runs. This gate
+          # is the exact #280 operator scenario in which all endpoints went
+          # dark with no rescue and no preview.
+          # Polls go DIRECTLY to the VPS API (:8000) because the host API
+          # dies with the kill; the bearer token comes from the host DB
+          # (deliberately serde-skipped on the host HTTP API).
+          $ErrorActionPreference = 'Stop'
+          $base = "http://127.0.0.1:8910"
+
+          $appStatus = Invoke-RestMethod -Uri "$base/api/v1/status"
+          $eventId = $appStatus.streaming_event.id
+
+          $instances = Invoke-RestMethod -Uri "$base/api/v1/delivery/instances"
+          if (-not $instances -or @($instances).Count -lt 1) { throw "no delivery instance" }
+          $vpsIp = $instances[0].ipv4
+          $vpsBase = "http://${vpsIp}:8000"
+
+          $sqlite = "C:\ProgramData\Restreamer\sqlite3.exe"
+          $token = (& $sqlite -readonly "C:\ProgramData\Restreamer\restreamer.db" "SELECT auth_token FROM delivery_instances ORDER BY id DESC LIMIT 1;") | Select-Object -First 1
+          if (-not $token) { throw "could not read VPS auth_token from host DB" }
+          $vpsHeaders = @{ Authorization = "Bearer $token" }
+
+          # Endpoint classes come from the host view (is_fast is host-side).
+          $hostSt = Invoke-RestMethod -Uri "$base/api/v1/delivery/status?event_id=$eventId" -TimeoutSec 30
+          $fastAliases = @($hostSt.endpoint_details | Where-Object { $_.is_fast } | ForEach-Object { $_.alias })
+          $nonFastAliases = @($hostSt.endpoint_details | Where-Object { -not $_.is_fast } | ForEach-Object { $_.alias })
+          if ($nonFastAliases.Count -lt 1) { throw "gate needs >=1 non-fast endpoint attached" }
+          if ($fastAliases.Count -lt 1) {
+            Write-Host "NOTE: no fast endpoint attached to this event; fast-path rescue is locked by the rs-delivery behavioral tests -- this gate asserts ALL attached endpoints"
+          }
+          Write-Host "endpoints: fast=[$($fastAliases -join ', ')] nonfast=[$($nonFastAliases -join ', ')]"
+
+          # Direct VPS API sanity BEFORE the kill.
+          $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
+          $aliases = @($st.endpoints | ForEach-Object { $_.alias })
+          if ($aliases.Count -lt 1) { throw "no endpoints on VPS status" }
+
+          # Exhaustion budget: the deepest cache window keeps non-fast
+          # endpoints fed for ~chunk_delay_secs after the kill; add margin
+          # for the bounded fetch surfacing (#284) + the 3x miss counter +
+          # the 8s rescue threshold + rescue session establishment.
+          $maxDelay = ($hostSt.endpoint_details | Measure-Object -Property chunk_delay_secs -Maximum).Maximum
+          if (-not $maxDelay -or $maxDelay -lt 0) { $maxDelay = 0 }
+          $budget = [int][math]::Ceiling($maxDelay) + 240
+          Write-Host "kill -> all-rescue budget: ${budget}s (max chunk_delay_secs=$maxDelay)"
+
+          Write-Host "KILLING Restreamer mid-stream (uploads stop; VPS must exhaust and rescue)..."
+          cmd /c "taskkill /F /IM Restreamer.exe 2>nul" | Out-Null
+          Start-Sleep -Seconds 3
+          if (Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue) { throw "Restreamer still running after taskkill" }
+
+          # PHASE 1: EVERY endpoint reaches rescue/recovering within budget.
+          $inRescue = @{}
+          $deadline = (Get-Date).AddSeconds($budget)
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 5
+            try {
+              $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
+            } catch {
+              Write-Host "VPS poll error (retrying): $($_.Exception.Message)"
+              continue
+            }
+            $line = @()
+            foreach ($ep in $st.endpoints) {
+              $line += "$($ep.alias): mode=$($ep.delivery_mode) prod_active=$($ep.producer_active) push_age_ms=$($ep.last_push_ok_age_ms)"
+              if ($ep.delivery_mode -eq "rescue" -or $ep.delivery_mode -eq "recovering") { $inRescue[$ep.alias] = $true }
+            }
+            Write-Host ("poll: " + ($line -join " | "))
+            $missing = @($aliases | Where-Object { -not $inRescue[$_] })
+            if ($missing.Count -eq 0) { break }
+          }
+          $missing = @($aliases | Where-Object { -not $inRescue[$_] })
+          if ($missing.Count -gt 0) {
+            throw "FAILED (#280): endpoints never switched to rescue after genuine chunk exhaustion: $($missing -join ', ')"
+          }
+          Write-Host "OK: every endpoint entered rescue"
+
+          # PHASE 2: rescue must be LIVE on every endpoint -- pushes flowing
+          # (viewers see the rescue clip, not dark air). last_push_ok_age_ms
+          # is stamped by the rescue push loop on every successful push
+          # (#284 telemetry).
+          for ($smp = 1; $smp -le 3; $smp++) {
+            Start-Sleep -Seconds 10
+            $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
+            foreach ($ep in $st.endpoints) {
+              $age = $ep.last_push_ok_age_ms
+              if ($null -eq $age) { throw "FAILED: $($ep.alias) has NO successful push during rescue (sample $smp) - endpoint is dark" }
+              if ([int64]$age -gt 15000) { throw "FAILED: $($ep.alias) rescue push stalled (last_push_ok_age_ms=$age, sample $smp) - endpoint is dark" }
+              Write-Host "sample ${smp}: $($ep.alias) pushing (age=${age}ms, mode=$($ep.delivery_mode))"
+            }
+          }
+          Write-Host "OK: rescue clip is actively pushing on every endpoint"
+
+          # PHASE 3: restart the host; boot-reconcile (#252) resumes
+          # delivery; every endpoint must return to live ('normal').
+          Write-Host "Restarting Restreamer via scheduled task..."
+          Start-ScheduledTask -TaskName "RestreamerGUI"
+          $apiUp = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 3
+            try {
+              Invoke-RestMethod -Uri "$base/api/v1/status" -TimeoutSec 5 | Out-Null
+              $apiUp = $true; break
+            } catch {}
+          }
+          if (-not $apiUp) { throw "FAILED: Restreamer API not responding after restart" }
+          Write-Host "Host API back up"
+
+          # OBS auto-reconnects, chunks flow, the VPS refills for
+          # RESCUE_REFILL_TARGET_SECS (120s of continuous producer
+          # activity), then exits rescue. Budget: reconnect + refill +
+          # margin.
+          $recovered = @{}
+          $deadline2 = (Get-Date).AddSeconds(420)
+          while ((Get-Date) -lt $deadline2) {
+            Start-Sleep -Seconds 10
+            try {
+              $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
+            } catch {
+              Write-Host "VPS poll error (retrying): $($_.Exception.Message)"
+              continue
+            }
+            $line = @()
+            foreach ($ep in $st.endpoints) {
+              $line += "$($ep.alias): mode=$($ep.delivery_mode) prod_active=$($ep.producer_active)"
+              $recovered[$ep.alias] = ($ep.delivery_mode -eq "normal")
+            }
+            Write-Host ("recovery poll: " + ($line -join " | "))
+            $notBack = @($aliases | Where-Object { -not $recovered[$_] })
+            if ($notBack.Count -eq 0) { break }
+          }
+          $notBack = @($aliases | Where-Object { -not $recovered[$_] })
+          if ($notBack.Count -gt 0) {
+            throw "FAILED: endpoints did not return to live delivery after host restart: $($notBack -join ', ')"
+          }
+          Write-Host "OK: every endpoint recovered to live delivery"
+
+          # rescue_recovered audit rows land on the host mirror (mirror lag
+          # tolerated -- poll up to 180s).
+          $sinceIso = (Get-Date).AddMinutes(-30).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+          $sawRecovered = $false
+          for ($i = 0; $i -lt 36; $i++) {
+            try {
+              $rec = Invoke-RestMethod -Uri "$base/api/v1/audit?action=rescue_recovered&since=$sinceIso&limit=100" -TimeoutSec 10
+              $recRows = if ($rec.rows) { $rec.rows } elseif ($rec.items) { $rec.items } else { @() }
+              if (@($recRows).Count -ge 1) { $sawRecovered = $true; break }
+            } catch {
+              Write-Host "audit poll error (retrying): $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $sawRecovered) { throw "FAILED: no rescue_recovered audit row after recovery" }
+          Write-Host "=== Crash-exhaustion rescue gate PASSED ==="
+
+      - name: "Ensure Restreamer is running after crash-exhaustion gate"
+        if: always()
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          # The gate above kills Restreamer mid-step; if an assertion threw
+          # while the host was down, the remaining steps (second YT health
+          # check, deactivate event, VPS teardown) need the host API back.
+          # Idempotent: no-op when the gate already restarted it.
+          $proc = Get-Process -Name "Restreamer" -ErrorAction SilentlyContinue
+          if (-not $proc) {
+            Write-Host "Restreamer not running - starting via scheduled task"
+            Start-ScheduledTask -TaskName "RestreamerGUI"
+          }
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/status" -TimeoutSec 5 | Out-Null
+              Write-Host "Host API is up"
+              exit 0
+            } catch { Start-Sleep -Seconds 3 }
+          }
+          throw "Restreamer API did not come back - subsequent cleanup will fail"
+
       - name: "GATE: Second YouTube health check after resilience tests"
         if: success()
         shell: powershell
@@ -5490,6 +5723,53 @@ jobs:
             }
           }
           Write-Host "Pre-flight cleanup complete"
+
+      - name: "Pre-flight: E2E S3 prefix must be empty (#285 fossil guard)"
+        shell: powershell
+        timeout-minutes: 20
+        run: |
+          # #285: the VPS live-edge lag probe trusts any chunk object in the
+          # event's S3 prefix. Fossils left by a previous run (the in-app
+          # wipe-on-start is capped at 60s and can time out on a large pile)
+          # make the probe jump onto STALE chunks and stall at the fossil
+          # high-water -- invalidating the E2E (stale replay) and producing
+          # the #283 soak failures. Delivery E2E therefore REQUIRES an empty
+          # prefix before it starts: clear leftovers via the app's own
+          # clear-s3 API and verify via /s3/usage. Normally a fast no-op
+          # (one empty-prefix check); only a fossil pile takes passes.
+          $ErrorActionPreference = 'Stop'
+          $base = "http://127.0.0.1:8910"
+          $events = Invoke-RestMethod -Uri "$base/api/v1/events" -TimeoutSec 15
+          $evt = $events | Where-Object { $_.name -eq $env:EVENT_NAME }
+          if (-not $evt) {
+            Write-Host "No '$($env:EVENT_NAME)' event exists yet - nothing to clear"
+            exit 0
+          }
+          for ($i = 1; $i -le 10; $i++) {
+            try {
+              $resp = Invoke-RestMethod -Method Post -Uri "$base/api/v1/events/$($evt.id)/clear-s3" -TimeoutSec 200
+              Write-Host "clear-s3 pass ${i}: deleted=$($resp.deleted)"
+            } catch {
+              # 504 = the handler's 180s cap hit mid-pile; progress was
+              # made server-side, so loop and re-check usage.
+              Write-Host "clear-s3 pass ${i}: $($_.Exception.Message) (retrying)"
+            }
+            $objects = -1
+            try {
+              $usage = Invoke-RestMethod -Uri "$base/api/v1/s3/usage" -TimeoutSec 170
+              $mine = $usage.by_event | Where-Object { $_.event_name -eq $env:EVENT_NAME }
+              $objects = if ($mine) { [int64]$mine.objects } else { 0 }
+            } catch {
+              Write-Host "s3/usage check failed (retrying): $($_.Exception.Message)"
+            }
+            Write-Host "prefix objects remaining: $objects"
+            if ($objects -eq 0) {
+              Write-Host "OK: S3 prefix for '$($env:EVENT_NAME)' is empty"
+              exit 0
+            }
+            Start-Sleep -Seconds 3
+          }
+          throw "FAILED: could not empty the S3 prefix for '$($env:EVENT_NAME)' - fossils would make the VPS replay stale video and stall (#285)"
 
       - name: Verify FB Graph API credentials
         shell: powershell
