@@ -217,6 +217,66 @@ async fn rescue_push_actually_pushes_rescue_clip_bytes() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn rescue_push_errors_do_not_stamp_last_push_ok() {
+    // #284 telemetry honesty: a FAILING rescue push must NOT advance
+    // last_push_ok_unix_ms. The #238 crash-exhaustion gate reads that field
+    // as proof the rescue clip is actually FLOWING; stamping it on errors
+    // would mask a dark endpoint as "rescue live".
+    struct ErroringPusher;
+    impl Pushable for ErroringPusher {
+        async fn push_flv_bytes(&mut self, _data: &[u8]) -> Result<(), PushError> {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Err(PushError::Timeout)
+        }
+        async fn close(&mut self) {}
+        fn reconnect_count(&self) -> u32 {
+            0
+        }
+        fn av_skew_ms(&self) -> i64 {
+            0
+        }
+    }
+
+    let buffer_state = Arc::new(BufferState::new());
+    buffer_state.producer_active.store(false, Ordering::Relaxed);
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (stop_tx, mut stop_rx) = watch::channel(false);
+    let flv = Arc::new(DEFAULT_RESCUE_FLV.to_vec());
+
+    let stats_task = stats.clone();
+    let bs_task = buffer_state.clone();
+    let task = tokio::spawn(async move {
+        crate::rust_rescue_push::rust_rescue_push_with_pusher(
+            ErroringPusher,
+            "rescue-err-test",
+            flv,
+            bs_task,
+            stats_task,
+            &mut stop_rx,
+            crate::rust_rescue_push::RescuePushMode::Outage,
+        )
+        .await
+    });
+
+    // Several push+backoff cycles (200ms push + 500ms ERROR_BACKOFF).
+    advance_in_steps(Duration::from_millis(200), 30).await;
+
+    {
+        let s = stats.lock().await;
+        assert!(
+            s.last_push_ok_unix_ms.is_none(),
+            "failed rescue pushes must NOT stamp last_push_ok_unix_ms, got {:?}",
+            s.last_push_ok_unix_ms
+        );
+        assert_eq!(s.delivery_mode, "rescue");
+    }
+
+    let _ = stop_tx.send(true);
+    advance_in_steps(Duration::from_millis(100), 10).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn rescue_push_resumes_normal_when_producer_recovers() {
     // Refill recovery: once the producer is active for RESCUE_REFILL_TARGET_SECS
     // continuous wall-seconds, the loop exits with `false` (not stop) — the
