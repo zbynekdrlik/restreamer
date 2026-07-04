@@ -4663,13 +4663,16 @@ jobs:
             const b = await chromium.launch({ headless: true });
             const p = await b.newPage();
             await p.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
-            // The calm recovering banner is driven by the dashboard's periodic
-            // status poll -> store update -> render. After a cold WASM load a
-            // single post-3s snapshot races that pipeline and intermittently
-            // reads 0 even though the banner appears a moment later (#288).
-            // S3 stays blocked for the whole 300s outage, so endpoints remain
-            // in Rescue and the banner, once rendered, stays; poll until it
-            // appears within a bounded window.
+            // The calm recovering banner needs an endpoint with lifecycle in
+            // {Buffering,Rescue,Recovering}. The real cause of it going missing
+            // was host-side (#288): during the outage the VPS /api/status hiccups
+            // for ~40s stretches, and the host used to turn that failed poll into
+            // gray Pending placeholders, dropping the banner. That is fixed in
+            // poll_delivery_metrics (preserve last-known on a failed poll). This
+            // poll-until-present loop is belt-and-suspenders for the frontend's
+            // cold-WASM status-poll -> store -> render lag; S3 stays blocked the
+            // whole 300s outage so endpoints stay in Rescue and, once rendered,
+            // the banner stays.
             let banner = 0;
             for (let i = 0; i < 30; i++) {
               banner = await p.locator('.banner--recovering').count();
