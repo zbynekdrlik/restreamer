@@ -5949,22 +5949,42 @@ jobs:
                 # (rescue deactivates, live delivery resumes) before failing with
                 # a source-supply attribution. Query only recent rescue (last
                 # 150s) so a long-ago rescue that already recovered never matches.
-                $rescueActive = $false
+                # #283: the PRIMARY rescue signal is the LIVE per-poll
+                # delivery_mode on $ep (the same object the warmup check above
+                # reads), NOT the audit mirror. The host audit mirror the
+                # fallback query hits can lag >=90s: run 28690282977 froze in
+                # rescue at chunks=387 but the rescue_activated row landed in the
+                # mirror ~90s late, so the audit-only check found 0 rows and the
+                # generic throw fired even though the pusher was correctly in
+                # rescue. delivery_mode is "rescue"/"recovering" the instant the
+                # VPS switches to the rescue clip. Keep the audit query as a
+                # secondary source for the stalled_at_chunk_id detail only.
+                $rescueActive = ($ep.delivery_mode -eq "rescue" -or $ep.delivery_mode -eq "recovering")
+                $rescDetail = "delivery_mode=$($ep.delivery_mode)"
                 try {
                   $rescSince = (Get-Date).AddSeconds(-150).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
                   $resc = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/audit?action=rescue_activated&since=$rescSince&limit=50" -TimeoutSec 10
                   $rescRows = if ($resc.rows) { $resc.rows } elseif ($resc.items) { $resc.items } else { @() }
                   if ($rescRows.Count -gt 0) {
                     $rescueActive = $true
-                    $rescueStallPolls += 1
-                    if ($rescueStallPolls -ge 30) {
-                      throw "WATCHDOG FAIL: source-supply stall -- rescue active (rescue_activated x$($rescRows.Count) in last 150s, latest stalled_at_chunk_id=$($rescRows[0].detail.stalled_at_chunk_id)) with NO live chunk progress for ~5 min. The VPS ran out of fresh S3 chunks (local uploader / ingest / test-source gap), so the pusher is pushing the rescue clip and live delivery has not resumed. This is a SOURCE-supply outage, NOT a rust-pusher regression. Re-run when the local ingest/upload chain is healthy."
-                    }
-                    Write-Host "watchdog: source-supply stall tolerated -- rescue active (rescue_activated x$($rescRows.Count) in last 150s); pusher pushing rescue clip, waiting up to ~5 min for source to recover ($rescueStallPolls/30)"
+                    $rescDetail = "$rescDetail, rescue_activated x$($rescRows.Count), latest stalled_at_chunk_id=$($rescRows[0].detail.stalled_at_chunk_id)"
                   }
                 } catch {
-                  if ($_.Exception.Message -match "WATCHDOG FAIL: source-supply") { throw }
-                  Write-Host "watchdog: rescue_activated audit query failed: $($_.Exception.Message)"
+                  Write-Host "watchdog: rescue_activated audit query failed (delivery_mode still authoritative): $($_.Exception.Message)"
+                }
+                if ($rescueActive) {
+                  # Source-supply gap the pusher is covering with the rescue clip.
+                  # Bounded ~5 min recovery window (rescue deactivates, live
+                  # delivery resumes) before failing with a source-supply
+                  # attribution. Cannot mask a pusher regression: a pusher stall
+                  # keeps producer_active=true (NO rescue, delivery_mode=normal)
+                  # and still trips the generic throw below; a pusher fault still
+                  # surfaces as a LOCAL-fault push_died (checked every poll).
+                  $rescueStallPolls += 1
+                  if ($rescueStallPolls -ge 30) {
+                    throw "WATCHDOG FAIL: source-supply stall -- rescue active ($rescDetail) with NO live chunk progress for ~5 min. The VPS ran out of fresh S3 chunks (local uploader / ingest / test-source gap), so the pusher is pushing the rescue clip and live delivery has not resumed. This is a SOURCE-supply outage, NOT a rust-pusher regression. Re-run when the local ingest/upload chain is healthy."
+                  }
+                  Write-Host "watchdog: source-supply stall tolerated -- rescue active ($rescDetail); pusher pushing rescue clip, waiting up to ~5 min for source to recover ($rescueStallPolls/30)"
                 }
                 if (-not $rescueActive) {
                   throw "WATCHDOG FAIL: no delivery progress for 90s (chunks=$($ep.chunks_processed) bytes=$($ep.bytes_processed_total))"
