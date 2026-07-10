@@ -97,3 +97,11 @@ Wired in PR #232 (v0.20.0) — these events must fire for correct forensic recon
 - `RtmpHandshakeFailed`
 
 "Working" = cache ~120s GREEN + 0 deaths + 0 crashes + 0 errors over full soak — NOT just "chunks advancing".
+
+## Rescue EXIT Criterion — `producer_active` Alone Is Not Enough (#289, v0.29.1)
+
+`producer_active` is a **transient per-tick flag** — it flaps `true` on respawn churn / stale-tail re-fetch even when NO new chunks are actually flowing. Gating rescue-exit on `producer_active` alone (as `rust_rescue_push_with_pusher` originally did) lets rescue exit onto a stuttering/trickle uplink, snapping the viewer back to a sekajúci stream before real recovery.
+
+**Fix:** rescue exits only when `producer_active` is continuously true for `RESCUE_REFILL_TARGET_SECS` **AND** `highest_sent_chunk_id` has advanced during that window. `highest_sent_chunk_id` is a `fetch_max` capped at the pre-outage live edge, so respawn churn that merely flaps `producer_active` true never advances it — rescue stays latched through a sustained/trickle outage. `delivery_mode` reports `"recovering"` only once fresh chunks are genuinely flowing, else `"rescue"`.
+
+Rescue **ENTRY** (chunk-exhaustion driven, #280/#284) is untouched — do not confuse entry and exit criteria; they use different discriminators for a reason (entry only needs to detect starvation, exit must prove genuine recovery).
