@@ -4926,14 +4926,27 @@ jobs:
           # (viewers see the rescue clip, not dark air). last_push_ok_age_ms
           # is stamped by the rescue push loop on every successful push
           # (#284 telemetry).
+          #
+          # #287: guard against a VACUOUS pass. Iterate the PRE-KILL $aliases
+          # set (the authoritative "every endpoint" list, exactly as Phase 1
+          # does) and require the VPS status to still list them all. A bare
+          # foreach ($ep in $st.endpoints) asserts NOTHING and still prints OK
+          # when $st.endpoints comes back empty or short (a dropped endpoint
+          # would silently slip the "every endpoint" rescue claim). Phase 1
+          # already guards its own fetch this way (line ~4883).
           for ($smp = 1; $smp -le 3; $smp++) {
             Start-Sleep -Seconds 10
             $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
-            foreach ($ep in $st.endpoints) {
+            if (-not $st.endpoints -or @($st.endpoints).Count -lt $aliases.Count) {
+              throw "FAILED (#287): VPS status lists $(@($st.endpoints).Count) endpoint(s), expected $($aliases.Count) (sample $smp) - a dropped endpoint must not slip the 'every endpoint' rescue claim"
+            }
+            foreach ($alias in $aliases) {
+              $ep = $st.endpoints | Where-Object { $_.alias -eq $alias } | Select-Object -First 1
+              if ($null -eq $ep) { throw "FAILED (#287): endpoint '$alias' missing from VPS status during rescue (sample $smp)" }
               $age = $ep.last_push_ok_age_ms
-              if ($null -eq $age) { throw "FAILED: $($ep.alias) has NO successful push during rescue (sample $smp) - endpoint is dark" }
-              if ([int64]$age -gt 15000) { throw "FAILED: $($ep.alias) rescue push stalled (last_push_ok_age_ms=$age, sample $smp) - endpoint is dark" }
-              Write-Host "sample ${smp}: $($ep.alias) pushing (age=${age}ms, mode=$($ep.delivery_mode))"
+              if ($null -eq $age) { throw "FAILED: $alias has NO successful push during rescue (sample $smp) - endpoint is dark" }
+              if ([int64]$age -gt 15000) { throw "FAILED: $alias rescue push stalled (last_push_ok_age_ms=$age, sample $smp) - endpoint is dark" }
+              Write-Host "sample ${smp}: $alias pushing (age=${age}ms, mode=$($ep.delivery_mode))"
             }
           }
           Write-Host "OK: rescue clip is actively pushing on every endpoint"
