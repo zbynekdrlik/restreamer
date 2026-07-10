@@ -440,6 +440,35 @@ impl DeliveryOrchestrator {
     )> {
         let status = self.get_delivery_status(event_id).await?;
 
+        // A FAILED VPS status poll (unreachable / non-2xx / timeout) is returned
+        // by get_delivery_status as Ok(server_ready=false, endpoints=[]) — which
+        // is indistinguishable from "genuinely zero endpoints". If that empty set
+        // is let through, lib.rs substitutes gray Pending placeholders and CACHES
+        // them, so the operator's calm "rescue live" outage banner vanishes at
+        // exactly the moment it matters: during an outage the VPS is busy running
+        // rescue + ffmpeg, so its /api/status hiccups for ~40s stretches (#288).
+        // When the instance is still ACTIVE but the poll got no live data, treat
+        // it as a transient poll failure and bail — the caller's Err arm skips the
+        // DeliveryStatus broadcast, so the dashboard PRESERVES the last-known
+        // rescuing endpoints and the cache is not overwritten with Pending. A
+        // genuinely dead VPS eventually leaves the active state -> not-active arm
+        // -> Ok(empty) -> placeholders, so this does not mask real death.
+        let instance_active = status
+            .instance
+            .as_ref()
+            .map(|i| is_delivery_active(&i.status))
+            .unwrap_or(false);
+        if instance_active && !status.server_ready {
+            warn!(
+                event_id,
+                "VPS status poll returned no live data for an active instance; \
+                 preserving last-known dashboard endpoints (transient VPS /api/status failure, #288)"
+            );
+            anyhow::bail!(
+                "VPS status poll failed for active event {event_id}; preserving last-known endpoints"
+            );
+        }
+
         let (name, inst_status, server_ip) = match &status.instance {
             Some(inst) => (
                 inst.name.clone(),

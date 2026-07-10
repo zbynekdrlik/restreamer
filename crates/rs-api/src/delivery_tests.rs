@@ -67,6 +67,52 @@ async fn get_delivery_status_no_instance() {
     assert!(status.endpoints.is_empty());
 }
 
+/// Regression for #288: when the delivery instance is ACTIVE but the VPS
+/// `/api/status` poll fails (unreachable / non-2xx / timeout), `poll_delivery_metrics`
+/// must return Err so the status loop's Err arm PRESERVES the last-known
+/// dashboard endpoints. Before the fix it returned Ok with an empty endpoint
+/// list — which `lib.rs` turns into gray `Pending` placeholders (and caches
+/// them), dropping the calm "rescue live" outage banner at exactly the moment
+/// the VPS is busy running rescue and its status endpoint hiccups.
+#[tokio::test]
+async fn poll_delivery_metrics_errs_when_active_instance_vps_poll_fails() {
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+
+    let event_id = db::create_streaming_event(&pool, "rescue-evt")
+        .await
+        .unwrap();
+    // 127.0.0.1:8000 with nothing listening => connection refused (fast fail),
+    // exactly the "VPS /api/status unreachable during an outage" case (#288).
+    let inst_id = db::create_delivery_instance(
+        &pool,
+        1,
+        "rescue-inst",
+        "127.0.0.1",
+        "cx22",
+        Some(event_id),
+        "tok",
+    )
+    .await
+    .unwrap();
+    // The VPS is up and rescuing; only its status endpoint is transiently down.
+    db::update_delivery_instance_status(&pool, inst_id, "delivering")
+        .await
+        .unwrap();
+
+    let mut config = Config::for_testing();
+    config.hetzner.api_token = "test-token".to_string();
+    let orch = DeliveryOrchestrator::new(pool, config).unwrap();
+
+    // A failed poll for an ACTIVE instance must surface as Err (preserve
+    // last-known), NOT Ok(empty) which would gray the dashboard to Pending.
+    let result = orch.poll_delivery_metrics(event_id).await;
+    assert!(
+        result.is_err(),
+        "active instance + failed VPS poll must Err (preserve last-known), got Ok"
+    );
+}
+
 // compute_start_chunk_id tests removed — function reverted (broke VPS creation
 // when chunks are cleared on restart). Cache init fix needs proper redesign.
 

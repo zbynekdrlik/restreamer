@@ -4663,11 +4663,27 @@ jobs:
             const b = await chromium.launch({ headless: true });
             const p = await b.newPage();
             await p.goto('http://127.0.0.1:8910/', { waitUntil: 'networkidle', timeout: 30000 });
-            await p.waitForTimeout(3000);
-            const banner = await p.locator('.banner--recovering').count();
+            // The calm recovering banner needs an endpoint with lifecycle in
+            // {Buffering,Rescue,Recovering}. The real cause of it going missing
+            // was host-side (#288): during the outage the VPS /api/status hiccups
+            // for ~40s stretches, and the host used to turn that failed poll into
+            // gray Pending placeholders, dropping the banner. That is fixed in
+            // poll_delivery_metrics (preserve last-known on a failed poll). This
+            // poll-until-present loop is belt-and-suspenders for the frontend's
+            // cold-WASM status-poll -> store -> render lag; S3 stays blocked the
+            // whole 300s outage so endpoints stay in Rescue and, once rendered,
+            // the banner stays.
+            let banner = 0;
+            for (let i = 0; i < 30; i++) {
+              banner = await p.locator('.banner--recovering').count();
+              if (banner >= 1) break;
+              await p.waitForTimeout(1000);
+            }
+            // Assert "no red attention node" on the SAME settled frame, after
+            // the banner has rendered (not on a pre-render snapshot).
             const attention = await p.locator('.endpoint-node.attention').count();
             await b.close();
-            if (banner < 1) { console.error('FAILED: NO calm recovering banner'); process.exit(1); }
+            if (banner < 1) { console.error('FAILED: NO calm recovering banner (polled 30s)'); process.exit(1); }
             if (attention > 0) { console.error('FAILED: endpoint shown RED during survivable outage'); process.exit(1); }
             console.log('OK: calm blue banner shown, no red');
           })().catch(e => { console.error(e); process.exit(1); });
@@ -4910,14 +4926,27 @@ jobs:
           # (viewers see the rescue clip, not dark air). last_push_ok_age_ms
           # is stamped by the rescue push loop on every successful push
           # (#284 telemetry).
+          #
+          # #287: guard against a VACUOUS pass. Iterate the PRE-KILL $aliases
+          # set (the authoritative "every endpoint" list, exactly as Phase 1
+          # does) and require the VPS status to still list them all. A bare
+          # foreach ($ep in $st.endpoints) asserts NOTHING and still prints OK
+          # when $st.endpoints comes back empty or short (a dropped endpoint
+          # would silently slip the "every endpoint" rescue claim). Phase 1
+          # already guards its own fetch this way (line ~4883).
           for ($smp = 1; $smp -le 3; $smp++) {
             Start-Sleep -Seconds 10
             $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
-            foreach ($ep in $st.endpoints) {
+            if (-not $st.endpoints -or @($st.endpoints).Count -lt $aliases.Count) {
+              throw "FAILED (#287): VPS status lists $(@($st.endpoints).Count) endpoint(s), expected $($aliases.Count) (sample $smp) - a dropped endpoint must not slip the 'every endpoint' rescue claim"
+            }
+            foreach ($alias in $aliases) {
+              $ep = $st.endpoints | Where-Object { $_.alias -eq $alias } | Select-Object -First 1
+              if ($null -eq $ep) { throw "FAILED (#287): endpoint '$alias' missing from VPS status during rescue (sample $smp)" }
               $age = $ep.last_push_ok_age_ms
-              if ($null -eq $age) { throw "FAILED: $($ep.alias) has NO successful push during rescue (sample $smp) - endpoint is dark" }
-              if ([int64]$age -gt 15000) { throw "FAILED: $($ep.alias) rescue push stalled (last_push_ok_age_ms=$age, sample $smp) - endpoint is dark" }
-              Write-Host "sample ${smp}: $($ep.alias) pushing (age=${age}ms, mode=$($ep.delivery_mode))"
+              if ($null -eq $age) { throw "FAILED: $alias has NO successful push during rescue (sample $smp) - endpoint is dark" }
+              if ([int64]$age -gt 15000) { throw "FAILED: $alias rescue push stalled (last_push_ok_age_ms=$age, sample $smp) - endpoint is dark" }
+              Write-Host "sample ${smp}: $alias pushing (age=${age}ms, mode=$($ep.delivery_mode))"
             }
           }
           Write-Host "OK: rescue clip is actively pushing on every endpoint"

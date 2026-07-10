@@ -5,8 +5,9 @@
 //! pushes pre-encoded FLV bytes — typically the `DEFAULT_RESCUE_FLV` blob
 //! produced by `rescue_default`, or a custom S3-fetched FLV — through
 //! `rs_rtmp_push::RtmpPusher::push_flv_bytes` until either the buffer
-//! refills (producer-active for `RESCUE_REFILL_TARGET_SECS` continuous
-//! seconds) or a stop signal arrives.
+//! genuinely refills (producer-active AND fresh chunks queued for
+//! `RESCUE_REFILL_TARGET_SECS` continuous seconds — #289) or a stop signal
+//! arrives.
 //!
 //! ## Pacing
 //!
@@ -31,9 +32,10 @@
 //!
 //! Returns `true` when a stop signal arrives (caller should exit the
 //! whole endpoint task), or `false` when `producer_active` has stayed
-//! `true` for `RESCUE_REFILL_TARGET_SECS` continuous wall-seconds —
-//! proving OBS is back and the cache window has refilled. This mirrors
-//! the time-based exit condition used by `rescue::run_rescue_loop`.
+//! `true` AND `highest_sent_chunk_id` has advanced (genuinely fresh chunks
+//! queued) for `RESCUE_REFILL_TARGET_SECS` continuous wall-seconds — proving
+//! OBS is back and the cache window is really refilling, not merely that the
+//! producer_active flag flapped true over a stalled producer (#289).
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -85,14 +87,16 @@ pub enum RescuePushMode {
 
 /// Loop a pre-encoded FLV blob through `RtmpPusher` until stop or refill.
 ///
-/// Returns `true` if stop signal received, `false` if the producer has been
-/// active for `RESCUE_REFILL_TARGET_SECS` continuous wall-seconds.
+/// Returns `true` if stop signal received, `false` once the producer has been
+/// active AND queuing genuinely fresh chunks for `RESCUE_REFILL_TARGET_SECS`
+/// continuous wall-seconds (#289).
 ///
 /// When `mode == RescuePushMode::Outage`, `stats.delivery_mode` is updated
 /// each tick:
-/// - `"rescue"` while the producer is stalled
-/// - `"recovering"` while the producer is active but the refill window
-///   has not yet completed
+/// - `"rescue"` while the producer is stalled OR flapping active without
+///   queuing fresh chunks (a bare flag flap — #289)
+/// - `"recovering"` while the producer is active AND fresh chunks are being
+///   queued but the refill window has not yet completed
 ///
 /// and `stats.rescue_eta_secs` is updated each tick with seconds remaining
 /// until refill (saturating to 0).
@@ -131,8 +135,8 @@ pub async fn rust_rescue_push(
 /// recording mock. `pusher` is already constructed (and, for the real path,
 /// not yet connected — the first `push_flv_bytes` lazy-connects). Returns the
 /// same contract as `rust_rescue_push`: `true` on stop, `false` once the
-/// producer has been active for `RESCUE_REFILL_TARGET_SECS` continuous
-/// wall-seconds (refill complete).
+/// producer has been active AND queuing genuinely fresh chunks for
+/// `RESCUE_REFILL_TARGET_SECS` continuous wall-seconds (refill complete — #289).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
     mut pusher: P,
@@ -145,6 +149,20 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
 ) -> bool {
     let mut continuous_active_ms: u64 = 0;
     let mut last_check = Instant::now();
+    // #289: the high-water mark of chunks the producer had SENT into the
+    // prefetch channel at the start of the current continuous-active window.
+    // Outage rescue must exit only on GENUINE resumed live delivery, never on
+    // a bare `producer_active` flag flip. During a sustained/trickle outage the
+    // #237 producer-respawn churn (and a stale-tail re-fetch) can hold
+    // `producer_active` true for the whole refill window WITHOUT any fresh
+    // content: the respawn resumes PAST the live edge, finds nothing, and
+    // `highest_sent_chunk_id` (a `fetch_max`, capped at the pre-outage edge)
+    // never advances. Keying the exit on the flag alone therefore dropped
+    // rescue back to "normal" onto a dark/stuttering stream (issue #289).
+    // Requiring `highest_sent_chunk_id` to have ADVANCED during the active
+    // window proves genuinely new chunks were queued — the cache is really
+    // refilling — before we resume normal delivery.
+    let mut active_window_start_sent = buffer_state.highest_sent_chunk_id.load(Ordering::Relaxed);
 
     loop {
         tokio::select! {
@@ -175,12 +193,24 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                 let elapsed_ms = last_check.elapsed().as_millis() as u64;
                 last_check = Instant::now();
                 let active = buffer_state.producer_active.load(Ordering::Relaxed);
+                let sent = buffer_state.highest_sent_chunk_id.load(Ordering::Relaxed);
                 if active {
                     continuous_active_ms =
                         continuous_active_ms.saturating_add(elapsed_ms);
                 } else {
+                    // Producer stalled again: reset BOTH the refill timer and
+                    // the fresh-chunk baseline, so the NEXT active window is
+                    // measured from the current (frozen) high-water mark.
                     continuous_active_ms = 0;
+                    active_window_start_sent = sent;
                 }
+                // #289: fresh chunks the producer has queued since the current
+                // continuous-active window began. > 0 iff genuinely new content
+                // appeared past the pre-window live edge (real recovery); stays
+                // 0 while `producer_active` merely flaps true over a stalled
+                // producer (respawn churn / stale-tail re-fetch).
+                let fresh_chunks = sent.saturating_sub(active_window_start_sent);
+                let refilling = active && fresh_chunks > 0;
                 let eta = RESCUE_REFILL_TARGET_SECS
                     .saturating_sub(continuous_active_ms / 1000);
 
@@ -191,7 +221,13 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                 // "rescue"/"recovering".
                 if matches!(mode, RescuePushMode::Outage) {
                     let mut s = stats.lock().await;
-                    s.delivery_mode = if active {
+                    // #289: "recovering" only when REAL fresh delivery is
+                    // resuming (producer active AND fresh chunks queued);
+                    // otherwise stay "rescue". Both are banner-worthy
+                    // (#263/#288), so the calm outage UI never drops
+                    // mid-outage — but the dashboard no longer claims
+                    // "recovering" on a bare `producer_active` flag flap.
+                    s.delivery_mode = if refilling {
                         "recovering".to_string()
                     } else {
                         "rescue".to_string()
@@ -207,11 +243,18 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                     }
                 }
 
-                if continuous_active_ms >= RESCUE_REFILL_TARGET_SECS.saturating_mul(1000) {
+                // #289: exit rescue ONLY on a full continuous-active window
+                // WITH genuinely fresh delivery — never on `producer_active`
+                // alone. A stuck flag with no fresh chunks (fresh_chunks == 0)
+                // keeps rescue latched so the stream never resumes dark.
+                if continuous_active_ms >= RESCUE_REFILL_TARGET_SECS.saturating_mul(1000)
+                    && fresh_chunks > 0
+                {
                     tracing::info!(
                         alias,
                         continuous_active_ms,
-                        "rust_rescue_push: producer active long enough, exiting rescue"
+                        fresh_chunks,
+                        "rust_rescue_push: producer active + fresh chunks flowing, exiting rescue"
                     );
                     return false;
                 }

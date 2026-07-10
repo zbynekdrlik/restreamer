@@ -278,23 +278,46 @@ async fn rescue_push_errors_do_not_stamp_last_push_ok() {
 
 #[tokio::test(start_paused = true)]
 async fn rescue_push_resumes_normal_when_producer_recovers() {
-    // Refill recovery: once the producer is active for RESCUE_REFILL_TARGET_SECS
-    // continuous wall-seconds, the loop exits with `false` (not stop) — the
-    // recovery path that lets normal delivery resume (C3 completes via the
-    // producer respawn that flips producer_active back to true).
+    // Refill recovery: once the producer is active AND queuing genuinely fresh
+    // chunks for RESCUE_REFILL_TARGET_SECS continuous wall-seconds, the loop
+    // exits with `false` (not stop) — the recovery path that lets normal
+    // delivery resume.
+    //
+    // #289: "recovery" now requires BOTH producer_active AND fresh chunks
+    // actually flowing (highest_sent_chunk_id advancing). Modelling recovery as
+    // producer_active alone (the pre-#289 assumption this test encoded) is
+    // exactly the bug — a bare flag flap must NOT resume normal delivery. So
+    // this test now drives a background "producer" that queues a fresh chunk
+    // every 500ms of virtual time, proving the cache is genuinely refilling.
     let pushes = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let pusher = RecordingPusher {
         pushes: pushes.clone(),
     };
 
     let buffer_state = Arc::new(BufferState::new());
-    // Producer ACTIVE from the start (source already back): the loop should
-    // count continuous-active wall-seconds and exit on refill.
+    // Producer ACTIVE from the start (source already back) ...
     buffer_state.producer_active.store(true, Ordering::Relaxed);
+    // ... and starting from a concrete live-edge high-water mark.
+    buffer_state
+        .highest_sent_chunk_id
+        .store(0, Ordering::Relaxed);
 
     let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
     let (_stop_tx, mut stop_rx) = watch::channel(false);
     let flv = Arc::new(DEFAULT_RESCUE_FLV.to_vec());
+
+    // Background "producer": queues a fresh chunk every 500ms of virtual time,
+    // so highest_sent_chunk_id keeps advancing — the cache is genuinely
+    // refilling with new live content, not a producer_active flag flap.
+    let bs_producer = buffer_state.clone();
+    let producer = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            bs_producer
+                .highest_sent_chunk_id
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    });
 
     let bs_task = buffer_state.clone();
     let task = tokio::spawn(async move {
@@ -310,17 +333,95 @@ async fn rescue_push_resumes_normal_when_producer_recovers() {
         .await
     });
 
-    // Advance well past RESCUE_REFILL_TARGET_SECS (120s) of continuous active.
+    // Advance well past RESCUE_REFILL_TARGET_SECS (120s) of continuous active
+    // WITH fresh chunks flowing.
     advance_in_steps(Duration::from_millis(500), 320).await; // ~160s
 
     let result = tokio::time::timeout(Duration::from_secs(1), task)
         .await
-        .expect("rescue loop must exit once the producer has been active long enough")
+        .expect(
+            "rescue loop must exit once the producer has been active + queuing fresh chunks long enough",
+        )
         .expect("rescue task panicked");
+    producer.abort();
     assert!(
         !result,
         "rescue loop must return false (refilled, resume normal), not true (stop)"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn outage_rescue_persists_when_producer_active_flaps_without_fresh_chunks() {
+    // #289 regression (RED before the fix). Under a sustained / trickle outage
+    // the #237 producer-respawn churn holds `producer_active` = true for well
+    // past RESCUE_REFILL_TARGET_SECS, but NO genuinely fresh chunks are queued:
+    // the respawn resumes PAST the live edge, finds nothing, and
+    // `highest_sent_chunk_id` (a `fetch_max`, capped at the pre-outage edge)
+    // stays frozen. Pre-#289 the exit keyed on `producer_active` ALONE, so the
+    // loop exited (returned false = "resume normal") and dropped rescue onto a
+    // dark/stuttering stream. Post-#289 the loop must STAY in rescue: it must
+    // NOT exit, and `delivery_mode` must stay banner-worthy the whole time.
+    let pushes = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let pusher = RecordingPusher {
+        pushes: pushes.clone(),
+    };
+
+    let buffer_state = Arc::new(BufferState::new());
+    // Producer flag stuck TRUE the whole outage (respawn churn) ...
+    buffer_state.producer_active.store(true, Ordering::Relaxed);
+    // ... but the high-water mark of SENT chunks never advances (no fresh
+    // content past the pre-outage live edge). Freeze it at a realistic edge.
+    buffer_state
+        .highest_sent_chunk_id
+        .store(500, Ordering::Relaxed);
+
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (stop_tx, mut stop_rx) = watch::channel(false);
+    let flv = Arc::new(DEFAULT_RESCUE_FLV.to_vec());
+
+    let bs_task = buffer_state.clone();
+    let stats_task = stats.clone();
+    let task = tokio::spawn(async move {
+        crate::rust_rescue_push::rust_rescue_push_with_pusher(
+            pusher,
+            "rescue-flap-test",
+            flv,
+            bs_task,
+            stats_task,
+            &mut stop_rx,
+            crate::rust_rescue_push::RescuePushMode::Outage,
+        )
+        .await
+    });
+
+    // Advance ~200s — well past RESCUE_REFILL_TARGET_SECS (120s). Pre-fix the
+    // loop would already have exited on producer_active alone by ~120s.
+    advance_in_steps(Duration::from_millis(500), 400).await;
+
+    // The discriminating assertion: the loop must STILL be running (has NOT
+    // exited to resume normal delivery). RED pre-fix (task finished ~120s in),
+    // GREEN post-fix (fresh_chunks == 0 keeps rescue latched).
+    assert!(
+        !task.is_finished(),
+        "#289: rescue must NOT exit on producer_active alone — it exited without \
+         any genuinely fresh chunks (highest_sent frozen), which drops rescue onto \
+         a dark/stuttering stream"
+    );
+
+    // And the dashboard must still show a banner-worthy rescue mode.
+    {
+        let s = stats.lock().await;
+        assert!(
+            s.delivery_mode == "rescue" || s.delivery_mode == "recovering",
+            "#289: delivery_mode must stay banner-worthy during the outage, got {:?}",
+            s.delivery_mode
+        );
+    }
+
+    // Cleanup: stop the loop and let the spawned task unwind.
+    let _ = stop_tx.send(true);
+    advance_in_steps(Duration::from_millis(50), 10).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
 }
 
 // ---------------------------------------------------------------------------
