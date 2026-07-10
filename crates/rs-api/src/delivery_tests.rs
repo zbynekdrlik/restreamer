@@ -113,6 +113,52 @@ async fn poll_delivery_metrics_errs_when_active_instance_vps_poll_fails() {
     );
 }
 
+#[tokio::test]
+async fn poll_delivery_metrics_ok_when_booting_instance_not_yet_reachable() {
+    // Review finding on #288 (v0.29.1 batch): `is_delivery_active` also
+    // covers "booting"/"initializing" -- the normal first 60+ seconds of
+    // EVERY delivery start, during which the VPS's HTTP server on :8000
+    // legitimately isn't answering yet. There is no "last-known" endpoint
+    // data to preserve at this point (no poll has ever succeeded for this
+    // instance) -- bailing here froze the dashboard on stale/none data for
+    // every routine delivery start, not just a rare mid-outage hiccup.
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+
+    let event_id = db::create_streaming_event(&pool, "boot-evt").await.unwrap();
+    let inst_id = db::create_delivery_instance(
+        &pool,
+        1,
+        "boot-inst",
+        "127.0.0.1",
+        "cx22",
+        Some(event_id),
+        "tok",
+    )
+    .await
+    .unwrap();
+    // Instance is still booting -- the VPS's :8000 HTTP server is not up
+    // yet, so 127.0.0.1:8000 (nothing listening) fails exactly like it
+    // would against a real not-yet-ready VPS.
+    db::update_delivery_instance_status(&pool, inst_id, "booting")
+        .await
+        .unwrap();
+
+    let mut config = Config::for_testing();
+    config.hetzner.api_token = "test-token".to_string();
+    let orch = DeliveryOrchestrator::new(pool, config).unwrap();
+
+    // A failed poll during the normal boot window must NOT bail -- there is
+    // nothing "last-known" to preserve yet, so the old Ok(empty) -> Pending
+    // placeholder behavior is correct here.
+    let result = orch.poll_delivery_metrics(event_id).await;
+    assert!(
+        result.is_ok(),
+        "booting instance + unreachable VPS must Ok(empty) (no last-known data yet), got Err: {:?}",
+        result.err()
+    );
+}
+
 // compute_start_chunk_id tests removed — function reverted (broke VPS creation
 // when chunks are cleared on restart). Cache init fix needs proper redesign.
 

@@ -424,6 +424,76 @@ async fn outage_rescue_persists_when_producer_active_flaps_without_fresh_chunks(
     let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn outage_rescue_persists_when_only_one_stray_chunk_lands_early() {
+    // Review finding on #289 (v0.29.1 batch, RED before the recency fix).
+    // `fresh_chunks` was a cumulative delta since the active window STARTED,
+    // so a single stray/early chunk (e.g. a stale-tail re-fetch landing one
+    // queued-but-not-yet-delivered chunk before finding nothing further)
+    // satisfied `fresh_chunks > 0` for the REST OF THE WINDOW even though no
+    // more content ever arrived. Pre-fix this let rescue exit at the 120s
+    // mark onto a stream that had actually been dark for ~119s of that
+    // window — reproducing the exact failure #289 fixed, just requiring one
+    // coincidental extra chunk instead of zero.
+    let pushes = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let pusher = RecordingPusher {
+        pushes: pushes.clone(),
+    };
+
+    let buffer_state = Arc::new(BufferState::new());
+    // Producer flag stuck TRUE the whole outage (respawn churn) ...
+    buffer_state.producer_active.store(true, Ordering::Relaxed);
+    buffer_state
+        .highest_sent_chunk_id
+        .store(500, Ordering::Relaxed);
+
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (stop_tx, mut stop_rx) = watch::channel(false);
+    let flv = Arc::new(DEFAULT_RESCUE_FLV.to_vec());
+
+    let bs_task = buffer_state.clone();
+    let task = tokio::spawn(async move {
+        crate::rust_rescue_push::rust_rescue_push_with_pusher(
+            pusher,
+            "rescue-stray-chunk-test",
+            flv,
+            bs_task,
+            stats,
+            &mut stop_rx,
+            crate::rust_rescue_push::RescuePushMode::Outage,
+        )
+        .await
+    });
+
+    // Let the loop observe the frozen baseline for a couple of ticks, then
+    // land ONE stray chunk early in the window (a stale-tail re-fetch
+    // finding one queued chunk before the respawn resumes past the live
+    // edge and finds nothing further) -- then never touch it again.
+    advance_in_steps(Duration::from_millis(500), 6).await; // ~3s in
+    buffer_state
+        .highest_sent_chunk_id
+        .fetch_add(1, Ordering::Relaxed);
+
+    // Advance ~200s total -- well past RESCUE_REFILL_TARGET_SECS (120s) AND
+    // past RESCUE_STALE_GRACE_SECS (15s) since the one stray chunk. Pre-fix
+    // the loop would have exited at ~120s (fresh_chunks stuck at 1 > 0 the
+    // whole time); post-fix the stray advance ages out after 15s and the
+    // loop must stay latched in rescue.
+    advance_in_steps(Duration::from_millis(500), 394).await; // ~197s more
+
+    assert!(
+        !task.is_finished(),
+        "#289: rescue must NOT exit on a single stale early chunk advance -- \
+         the stream went dark again for the rest of the window, so exiting \
+         resumes normal delivery onto silence"
+    );
+
+    // Cleanup: stop the loop and let the spawned task unwind.
+    let _ = stop_tx.send(true);
+    advance_in_steps(Duration::from_millis(50), 10).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+}
+
 // ---------------------------------------------------------------------------
 // Group B — end-to-end drain activates rescue through the real endpoint_loop.
 // ---------------------------------------------------------------------------
