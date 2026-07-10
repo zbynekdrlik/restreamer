@@ -12,6 +12,8 @@ mod fast_self_healing_tests;
 mod flv_tests;
 #[path = "rescue_behavioral_tests.rs"]
 mod rescue_behavioral_tests;
+#[path = "rescue_endpoint_loop_tests.rs"]
+mod rescue_endpoint_loop_tests;
 #[path = "endpoint_task_rescue_tests.rs"]
 mod rescue_tests;
 #[path = "endpoint_task_rust_push_tests.rs"]
