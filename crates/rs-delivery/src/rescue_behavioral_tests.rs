@@ -356,6 +356,79 @@ async fn outage_rescue_persists_when_producer_active_flaps_without_fresh_chunks(
 }
 
 #[tokio::test(start_paused = true)]
+async fn rescue_exits_after_recovery_even_when_channel_backpressure_plateaus_sent() {
+    // Regression for the 2026-07-15 overnight E2E failure ("RescueRecovered
+    // not recorded - never returned to live"). During GENUINE recovery the
+    // producer refills the prefetch channel, but the consumer is still busy
+    // pushing the rescue clip and consumes nothing — so after
+    // PREFETCH_BUFFER_SIZE (10) sends the channel is full, the producer
+    // blocks, and `highest_sent_chunk_id` PLATEAUS. The review-driven
+    // recency gate (RESCUE_STALE_GRACE_SECS) treated that plateau as "stale
+    // advance" and refused to ever exit rescue — a deadlock strictly worse
+    // than the bug it hardened against. The exit discriminator must accept
+    // a plateaued-but-substantial refill (fresh_chunks >= half the channel)
+    // as genuine recovery.
+    let pushes = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let pusher = RecordingPusher {
+        pushes: pushes.clone(),
+    };
+
+    let buffer_state = Arc::new(BufferState::new());
+    // Producer active (source is back) ...
+    buffer_state.producer_active.store(true, Ordering::Relaxed);
+    buffer_state
+        .highest_sent_chunk_id
+        .store(500, Ordering::Relaxed);
+
+    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
+    let (_stop_tx, mut stop_rx) = watch::channel(false);
+    let flv = Arc::new(DEFAULT_RESCUE_FLV.to_vec());
+
+    let bs_task = buffer_state.clone();
+    let task = tokio::spawn(async move {
+        crate::rust_rescue_push::rust_rescue_push_with_pusher(
+            pusher,
+            "rescue-plateau-test",
+            flv,
+            bs_task,
+            stats,
+            &mut stop_rx,
+            crate::rust_rescue_push::RescuePushMode::Outage,
+        )
+        .await
+    });
+
+    // Genuine recovery burst: the producer refills the prefetch channel —
+    // 10 fresh chunks (PREFETCH_BUFFER_SIZE) over ~5s — then BLOCKS on the
+    // full channel and `highest_sent_chunk_id` plateaus for the rest of
+    // the window (the consumer is pushing rescue, not consuming).
+    for _ in 0..10 {
+        advance_in_steps(Duration::from_millis(500), 1).await;
+        buffer_state
+            .highest_sent_chunk_id
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Advance well past RESCUE_REFILL_TARGET_SECS (120s) with the plateau
+    // in place. The loop MUST exit (return false = resume normal delivery):
+    // producer continuously active + a substantial refill queued.
+    advance_in_steps(Duration::from_millis(500), 320).await; // ~160s
+
+    let result = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect(
+            "rescue must exit after a genuine recovery even though channel \
+             backpressure plateaued highest_sent_chunk_id (the 2026-07-15 \
+             E2E deadlock: RescueRecovered never recorded)",
+        )
+        .expect("rescue task panicked");
+    assert!(
+        !result,
+        "rescue loop must return false (refilled, resume normal), not true (stop)"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn outage_rescue_persists_when_only_one_stray_chunk_lands_early() {
     // Review finding on #289 (v0.29.1 batch, RED before the recency fix).
     // `fresh_chunks` was a cumulative delta since the active window STARTED,
