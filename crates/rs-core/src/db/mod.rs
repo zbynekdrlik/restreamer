@@ -605,8 +605,25 @@ pub async fn get_endpoint_lag_secs(
 /// durations (700-2000 ms in production), so a constant divisor would
 /// undershoot or overshoot the buffer.
 ///
-/// Returns 1 if no sent chunks exist (fresh start), or if the entire
-/// sent range is shorter than `target_delay_ms`.
+/// #279: the walk is CLAMPED to the current delivery session. sent=1 rows
+/// from PREVIOUS delivery cycles survive in chunk_records (the S3 wipe on
+/// Start Delivering deletes objects, never DB rows, and a timed-out wipe —
+/// the 2026-06-24 incident — leaves their S3 objects too), so an unclamped
+/// walk could cross the session boundary and resolve a start position
+/// inside old, already-aired content, replaying it to viewers on the newly
+/// added endpoint. The session boundary is the newest delivery_instances
+/// row's created_at for this event: chunks with sent_at at/after it were
+/// uploaded post-wipe and genuinely belong to the running session. With no
+/// instance row (unit tests, no delivery running) the walk is unclamped —
+/// the pre-#279 behavior, correct for a single continuous session.
+///
+/// Returns:
+/// - the stepback chunk when the session holds >= `target_delay_ms`;
+/// - the earliest SESSION chunk when the session is shorter than the delay
+///   (replay everything this session has — continuity policy);
+/// - the strict live edge (`MAX(seq)+1`, per #174 never-replay-historical)
+///   when the session has no sent chunks at all yet;
+/// - 1 on a completely fresh event with no chunks and no instance.
 pub async fn compute_live_stepback_start_chunk(
     pool: &SqlitePool,
     event_id: i64,
@@ -616,14 +633,43 @@ pub async fn compute_live_stepback_start_chunk(
         // No stepback requested -- caller wants live edge.
         return compute_target_start_chunk(pool, event_id).await;
     }
-    let rows = sqlx::query(
-        "SELECT sequence_number, duration_ms FROM chunk_records
-         WHERE streaming_event_id = ?1 AND sent = 1
-         ORDER BY sequence_number DESC",
+    // Newest instance row = current delivery session (the Add Endpoint
+    // caller guarantees an ACTIVE instance exists; ordering by id keeps
+    // this correct even with stale failed/deleted rows before it).
+    let session_floor: Option<String> = sqlx::query(
+        "SELECT created_at FROM delivery_instances
+         WHERE event_id = ?1 ORDER BY id DESC LIMIT 1",
     )
     .bind(event_id)
-    .fetch_all(pool)
-    .await?;
+    .fetch_optional(pool)
+    .await?
+    .map(|r| r.get("created_at"));
+
+    // NULL sent_at (legacy pre-migration rows) never satisfies `>=`, so
+    // legacy rows are treated as previous-cycle — the safe direction.
+    let rows = match &session_floor {
+        Some(floor) => {
+            sqlx::query(
+                "SELECT sequence_number, duration_ms FROM chunk_records
+                 WHERE streaming_event_id = ?1 AND sent = 1 AND sent_at >= ?2
+                 ORDER BY sequence_number DESC",
+            )
+            .bind(event_id)
+            .bind(floor)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query(
+                "SELECT sequence_number, duration_ms FROM chunk_records
+                 WHERE streaming_event_id = ?1 AND sent = 1
+                 ORDER BY sequence_number DESC",
+            )
+            .bind(event_id)
+            .fetch_all(pool)
+            .await?
+        }
+    };
     let mut accum_ms: u64 = 0;
     let target = target_delay_ms;
     for row in &rows {
@@ -635,12 +681,14 @@ pub async fn compute_live_stepback_start_chunk(
             return Ok(row.get::<i64, _>("sequence_number"));
         }
     }
-    // Not enough sent content to cover the delay -- start from the
-    // earliest sent chunk (or 1 if nothing sent yet).
-    Ok(rows
-        .last()
-        .map(|r| r.get::<i64, _>("sequence_number"))
-        .unwrap_or(1))
+    // Not enough session content to cover the delay -- start from the
+    // earliest session chunk. No session chunks at all -> strict live
+    // edge (never a fossil; MAX+1 over ALL rows is safe because sequence
+    // numbers are monotonic per event and never reset across cycles).
+    match rows.last() {
+        Some(r) => Ok(r.get::<i64, _>("sequence_number")),
+        None => compute_target_start_chunk(pool, event_id).await,
+    }
 }
 
 /// Total content duration of chunks uploaded to S3 for an event.

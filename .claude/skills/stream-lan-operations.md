@@ -273,6 +273,24 @@ mcp__win-stream-snv__Shell command="Copy-Item 'C:\Users\newlevel\AppData\Roaming
 
 ## Troubleshooting
 
+### `gh run view --log-failed` returns empty on self-hosted E2E jobs
+
+**Symptoms:** `gh run view <id> --log-failed` returns 0 bytes / no output for a failed self-hosted-runner job (E2E Streaming/OBS-YouTube/FB Push), even though the run genuinely failed.
+
+**Fix:** fetch the specific job's log directly via the REST API instead:
+
+```bash
+gh api repos/zbynekdrlik/restreamer/actions/jobs/<jobId>/logs
+```
+
+Get `<jobId>` from `gh run view <id> --json jobs --jq '.jobs[] | select(.conclusion=="failure") | .databaseId'`.
+
+### One-in-flight-push discipline vs required-check bookkeeping
+
+When a second push lands while a prior push-triggered run is still active (violates the "ONE in-flight CI run" rule — see project CLAUDE.md), the correct recovery is `gh run cancel <old-run-id>`. But a **cancelled** run still records `failure` conclusions on required-check contexts (`Rust CI Gate`, `E2E Gate`, `Version check`) for jobs that had already started — and GitHub's PR merge-gate looks at the check-run history for the head SHA across ALL runs, not just the latest. A cancelled run's stale `failure` entries can block merge (`mergeStateStatus: BLOCKED`) even when a later authoritative run (e.g. a `workflow_dispatch` re-run of the same SHA) is fully green.
+
+**Fix:** once the authoritative green run exists for the same commit, `gh run delete <cancelled-run-id>` to remove its stale failure entries from the check-run history, then the PR mergeable state clears. Document the bookkeeping on the PR (a comment explaining which run is authoritative) so the audit trail isn't lost. Do not `--admin` merge — deleting the misleading cancelled-run artifacts is the honest fix, not a bypass.
+
 ### CRITICAL: Old Python Client Blocking RTMP Port
 
 **Symptoms:** Chunks stop being created, old timestamps, OBS connected but no new data.

@@ -50,12 +50,47 @@ Dashboard reachable from dev1 (returns 200).
 | User | `interkom` |
 | MCP | `win-streampp` |
 | S3 region | `nbg1` |
-| Disk | ~82% full → "warn" disk_pressure (source of upload-jitter issues) |
-| Subnet | 10.77.8.x — NOT reachable from dev1 (10.77.9.x) |
+| Disk | disk_pressure="ok" as of 2026-07-12 (was ~82%/"warn" on 2026-06-07 — check live via `/api/v1/status`, don't trust either snapshot) |
+| Subnet | 10.77.8.x — LAN IP `10.77.8.204` NOT reachable from dev1 (10.77.9.x) |
+| Tailscale | streampp has its OWN tailscale IP (`tailscale ip -4` via `win-streampp` Shell) — reachable from dev1/Playwright even though the LAN IP isn't. Don't assume unreachable; check tailscale first. |
 
-**Access streampp dashboard**: via `win-streampp` MCP locally OR from dev2 (10.77.8.134, same subnet).
+**Access streampp dashboard**: via `win-streampp` MCP locally, from dev2 (10.77.8.134, same LAN subnet), OR via streampp's own tailscale IP (works from anywhere on the tailnet, incl. Playwright on dev1 for DOM version verification).
 
-No ffmpeg, OBS installed but no headless task. As of 2026-06-07 running v0.22.6 (manually deployed via NSIS for the fast-stream fix; leave it unless explicitly asked to update).
+No ffmpeg, OBS installed but no headless task. Version drifts independently of stream.lan (manual NSIS deploys, not CI-driven) — always read the LIVE version via MCP (`(Get-Item 'C:\Program Files\Restreamer\Restreamer.exe').VersionInfo.ProductVersion`) before assuming any note here is current; it was v0.22.6 on 2026-06-07, v0.27.0 by 2026-07-12 (upgraded outside this doc's tracking), v0.29.1 after 2026-07-12's manual upgrade.
+
+### Manual upgrade procedure (cross-subnet, no shared filesystem)
+
+streampp can't be `scp`'d to directly from dev1 and has no shared drive — transfer via the airuleset file-drop server over tailscale (works even though the LAN IP doesn't):
+
+```bash
+# On dev1: get the installer + the matching www bundle for the SAME commit
+gh release download restreamer-vX.Y.Z -R zbynekdrlik/restreamer --pattern "*.exe" --dir .
+# Find the main-branch CI run for that release's merge commit, download its www artifact:
+gh run list --workflow ci.yml -b main -L 5 --json databaseId,headSha,conclusion
+gh run download <run-id> -R zbynekdrlik/restreamer --name restreamer-www --dir ./www
+zip -qr www.zip www   # bundle for one-shot transfer
+
+# Host both via the file-drop server, then have streampp pull them over tailscale:
+python3 ~/devel/airuleset/airuleset.py share Restreamer_X.Y.Z_x64-setup.exe
+python3 ~/devel/airuleset/airuleset.py share www.zip
+```
+
+On streampp (`win-streampp` Shell), download via the printed tailscale URL, install silently, then swap `www\` (NSIS never ships it — see below):
+
+```powershell
+Invoke-WebRequest -Uri "http://<dev1-tailscale-ip>:8788/<token>/Restreamer_X.Y.Z_x64-setup.exe" -OutFile "$env:TEMP\setup.exe"
+Invoke-WebRequest -Uri "http://<dev1-tailscale-ip>:8788/<token>/www.zip" -OutFile "$env:TEMP\www.zip"
+& "$env:TEMP\setup.exe" /S
+Start-Sleep -Seconds 15   # let the silent install finish before touching www\
+
+Remove-Item -Recurse -Force 'C:\Program Files\Restreamer\www'
+Expand-Archive -Path "$env:TEMP\www.zip" -DestinationPath "$env:TEMP\www_extract" -Force
+Move-Item "$env:TEMP\www_extract\www" 'C:\Program Files\Restreamer\www'
+```
+
+**Gotcha: the NSIS silent installer STOPS the `RestreamerGUI` scheduled task and does not restart it** — after `/S` completes, the task is left in `Ready` (not `Running`) state and the API stops answering. Always follow with `Start-ScheduledTask -TaskName RestreamerGUI` and re-verify `/api/v1/status` responds before declaring the upgrade done. Streaming-event state (DB) survives the upgrade untouched (confirmed 2026-07-12: same event id/name/received_bytes before and after).
+
+Verify the new version from the LIVE DOM (not just the exe's `ProductVersion`) via streampp's tailscale IP — the `www\` swap is a separate step from the exe upgrade and can silently fail independently.
 
 ## Fast Endpoints (is_fast=1)
 

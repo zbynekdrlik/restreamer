@@ -69,6 +69,33 @@ use crate::rescue::RESCUE_REFILL_TARGET_SECS;
 /// The pusher itself lazy-reconnects on the next call after an error.
 const ERROR_BACKOFF: Duration = Duration::from_millis(500);
 
+/// Review finding on #289 (v0.29.1 batch): `fresh_chunks > 0` alone let a
+/// single stray/early chunk (a stale-tail re-fetch landing one queued
+/// chunk before finding nothing further) satisfy the exit condition for
+/// the whole window -- rescue could exit onto a still-dark stream.
+///
+/// The first hardening attempt (a 15s recency gate on the last advance)
+/// DEADLOCKED genuine recovery (2026-07-15 E2E: "RescueRecovered not
+/// recorded"): during recovery the producer refills the prefetch channel,
+/// but the consumer is still pushing the rescue clip and consumes nothing,
+/// so after `PREFETCH_BUFFER_SIZE` sends the channel is full, the producer
+/// blocks, and `highest_sent_chunk_id` PLATEAUS -- the recency window then
+/// expires and the exit never fires. `highest_sent_chunk_id` is cumulative
+/// BY DESIGN precisely because of this backpressure plateau.
+///
+/// The correct discriminator is the COUNT of fresh chunks queued since the
+/// active window began: a stray tail is 1-2 chunks; genuine recovery fills
+/// the channel to `PREFETCH_BUFFER_SIZE` (10) and plateaus there. Half the
+/// channel is comfortably above any realistic stray tail and comfortably
+/// below the plateau, so recovery always reaches it and strays never do.
+/// Worst case if a long stray tail ever meets the threshold: rescue exits,
+/// drains those few stale chunks, the producer stalls again, and rescue
+/// re-latches within ~18s -- bounded and self-healing, unlike a deadlock.
+const RESCUE_EXIT_MIN_FRESH_CHUNKS: i64 = {
+    let half = crate::endpoint_task::PREFETCH_BUFFER_SIZE as i64 / 2;
+    if half < 1 { 1 } else { half }
+};
+
 /// Selects whether `rust_rescue_push` owns the stats fields it would
 /// otherwise overwrite each tick. See review finding #2 (warmup race).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,9 +237,20 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                 // 0 while `producer_active` merely flaps true over a stalled
                 // producer (respawn churn / stale-tail re-fetch).
                 let fresh_chunks = sent.saturating_sub(active_window_start_sent);
-                let refilling = active && fresh_chunks > 0;
-                let eta = RESCUE_REFILL_TARGET_SECS
-                    .saturating_sub(continuous_active_ms / 1000);
+                // A stray tail re-fetch lands 1-2 chunks; genuine recovery
+                // fills the prefetch channel and plateaus at
+                // PREFETCH_BUFFER_SIZE. The COUNT separates them — recency
+                // cannot (the plateau made a recency gate deadlock recovery,
+                // 2026-07-15 E2E). See RESCUE_EXIT_MIN_FRESH_CHUNKS.
+                let refilling = active && fresh_chunks >= RESCUE_EXIT_MIN_FRESH_CHUNKS;
+                // Only count down once genuinely refilling — otherwise report
+                // the full target so the dashboard never shows a false "about
+                // to recover" ~0s while durably stuck (no real refill queued).
+                let eta = if refilling {
+                    RESCUE_REFILL_TARGET_SECS.saturating_sub(continuous_active_ms / 1000)
+                } else {
+                    RESCUE_REFILL_TARGET_SECS
+                };
 
                 // Review finding #2: only the Outage caller owns these
                 // stats fields. Warmup's probe loop is the canonical
@@ -244,19 +282,31 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                 }
 
                 // #289: exit rescue ONLY on a full continuous-active window
-                // WITH genuinely fresh delivery — never on `producer_active`
-                // alone. A stuck flag with no fresh chunks (fresh_chunks == 0)
-                // keeps rescue latched so the stream never resumes dark.
-                if continuous_active_ms >= RESCUE_REFILL_TARGET_SECS.saturating_mul(1000)
-                    && fresh_chunks > 0
-                {
-                    tracing::info!(
+                // WITH a genuinely substantial refill queued — never on
+                // `producer_active` alone, and never on a 1-2 chunk stray
+                // tail (below RESCUE_EXIT_MIN_FRESH_CHUNKS).
+                if continuous_active_ms >= RESCUE_REFILL_TARGET_SECS.saturating_mul(1000) {
+                    if refilling {
+                        tracing::info!(
+                            alias,
+                            continuous_active_ms,
+                            fresh_chunks,
+                            "rust_rescue_push: producer active + fresh chunks queued, exiting rescue"
+                        );
+                        return false;
+                    }
+                    // Target duration reached but no substantial refill
+                    // (fresh_chunks below threshold) — log so a "rescue
+                    // never exited" report is diagnosable from logs alone
+                    // (comprehensive-logging.md), without needing a live
+                    // dashboard open at the time.
+                    tracing::debug!(
                         alias,
                         continuous_active_ms,
                         fresh_chunks,
-                        "rust_rescue_push: producer active + fresh chunks flowing, exiting rescue"
+                        min_fresh = RESCUE_EXIT_MIN_FRESH_CHUNKS,
+                        "rust_rescue_push: refill window elapsed but no substantial refill queued, staying in rescue"
                     );
-                    return false;
                 }
             }
             _ = stop_rx.changed() => {

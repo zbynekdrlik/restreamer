@@ -406,6 +406,131 @@ mod tests {
         assert_eq!(start, 42);
     }
 
+    /// Seed the fossil scenario from the 2026-06-24 incident (#279): a long
+    /// PREVIOUS delivery cycle's chunk history survives in chunk_records
+    /// (sent_at backdated), then a NEW delivery session starts (instance row
+    /// created), and only a short run of fresh session chunks exists so far.
+    /// Returns (pool, event_id, first_session_seq, live_edge_plus_one).
+    async fn pool_with_fossil_history(
+        event_name: &str,
+        n_old: i64,
+        n_new: i64,
+        duration_ms: i64,
+    ) -> (SqlitePool, i64, i64, i64) {
+        let pool = create_memory_pool().await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let event_id = upsert_streaming_event(&pool, event_name).await.unwrap();
+
+        // Previous cycle: n_old chunks, sent an hour ago.
+        for i in 1..=n_old {
+            let cid = insert_chunk(
+                &pool,
+                event_id,
+                &format!("/tmp/old{i}.bin"),
+                100,
+                &format!("md5_old_{i}"),
+                duration_ms,
+            )
+            .await
+            .unwrap();
+            set_chunk_sent(&pool, cid).await.unwrap();
+        }
+        sqlx::query(
+            "UPDATE chunk_records SET sent_at = datetime('now','-1 hour')
+             WHERE streaming_event_id = ?1",
+        )
+        .bind(event_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Current session starts: delivery instance created 30 min ago
+        // (i.e. AFTER every old chunk, BEFORE every new chunk).
+        rs_core::db::create_delivery_instance(
+            &pool,
+            424242,
+            "evt-fossil-test",
+            "192.0.2.9",
+            "cpx22",
+            Some(event_id),
+            "tok",
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE delivery_instances SET created_at = datetime('now','-30 minutes')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Fresh session chunks, sent now.
+        for i in 1..=n_new {
+            let cid = insert_chunk(
+                &pool,
+                event_id,
+                &format!("/tmp/new{i}.bin"),
+                100,
+                &format!("md5_new_{i}"),
+                duration_ms,
+            )
+            .await
+            .unwrap();
+            set_chunk_sent(&pool, cid).await.unwrap();
+        }
+        (pool, event_id, n_old + 1, n_old + n_new + 1)
+    }
+
+    #[tokio::test]
+    async fn live_stepback_never_crosses_into_previous_cycle() {
+        // #279 regression (the 2026-06-24 event-23 replay incident, RED
+        // before the session-clamp fix). 100 fossil chunks from a previous
+        // cycle + only 10 fresh session chunks (10s of content) with a 30s
+        // delay: the stepback walk cannot cover the delay inside the
+        // session, and pre-fix it kept walking INTO the previous cycle's
+        // history (returning ~seq 81) — the newly added endpoint then
+        // replayed old, already-aired content to viewers. Post-fix the walk
+        // is clamped to the current delivery session: not enough session
+        // content -> start at the EARLIEST SESSION chunk, never a fossil.
+        let (pool, event_id, first_session_seq, _) =
+            pool_with_fossil_history("fossil-clamp-test", 100, 10, 1000).await;
+
+        let start = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 30_000)
+            .await
+            .unwrap();
+        assert!(
+            start >= first_session_seq,
+            "#279: Live stepback must never resolve into a previous delivery \
+             cycle's chunks (fossils) — got start={start}, session begins at \
+             {first_session_seq}"
+        );
+        assert_eq!(
+            start, first_session_seq,
+            "with insufficient session content the stepback should fall back \
+             to the earliest chunk of the CURRENT session"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_stepback_with_no_session_chunks_returns_live_edge() {
+        // #279 companion: endpoint added seconds after Start Delivering,
+        // before ANY chunk of the new session has uploaded. Pre-fix the walk
+        // ran over the fossil history alone (100s of old content >= 30s
+        // target) and returned a fossil (~seq 71). Post-fix: zero session
+        // chunks -> strict live edge (MAX(seq)+1), matching the #174
+        // "never replay historical chunks" policy; the S3-existence guard
+        // in add_endpoint_to_delivery then advances to the first real chunk.
+        let (pool, event_id, _, live_edge_plus_one) =
+            pool_with_fossil_history("fossil-empty-session-test", 100, 0, 1000).await;
+
+        let start = resolve_start_chunk_id(&pool, event_id, &StartPosition::Live, 30_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            start, live_edge_plus_one,
+            "#279: with no session chunks yet, Live must resolve to the live \
+             edge (MAX+1), never to a previous cycle's chunk"
+        );
+    }
+
     #[test]
     fn start_position_serde_roundtrip() {
         let positions = vec![

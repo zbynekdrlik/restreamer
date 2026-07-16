@@ -218,6 +218,17 @@ pub(crate) fn cap_endpoint_delay_secs(raw: f64, is_fast: bool, target_delay_secs
 
 impl DeliveryOrchestrator {
     /// Get delivery status for an event.
+    ///
+    /// Contract callers MUST honor: `server_ready == false` means the VPS
+    /// status poll itself failed (unreachable / non-2xx / timeout) -- NOT
+    /// that the event genuinely has zero endpoints. Check `server_ready`
+    /// before treating an empty `endpoints` Vec as ground truth. This
+    /// function has no cache to fall back on (unlike `poll_delivery_metrics`,
+    /// which bails on a failed poll for an established instance so the
+    /// dashboard preserves last-known state, #288) -- a direct caller (e.g.
+    /// the `/api/v1/delivery/status` REST handler) gets the raw poll result
+    /// every time and must make its own "poll failed vs. genuinely empty"
+    /// decision from `server_ready`.
     pub async fn get_delivery_status(&self, event_id: i64) -> anyhow::Result<DeliveryStatus> {
         let instance = db::get_delivery_instance_by_event(self.pool(), event_id).await?;
 
@@ -447,18 +458,28 @@ impl DeliveryOrchestrator {
         // them, so the operator's calm "rescue live" outage banner vanishes at
         // exactly the moment it matters: during an outage the VPS is busy running
         // rescue + ffmpeg, so its /api/status hiccups for ~40s stretches (#288).
-        // When the instance is still ACTIVE but the poll got no live data, treat
-        // it as a transient poll failure and bail — the caller's Err arm skips the
-        // DeliveryStatus broadcast, so the dashboard PRESERVES the last-known
-        // rescuing endpoints and the cache is not overwritten with Pending. A
-        // genuinely dead VPS eventually leaves the active state -> not-active arm
-        // -> Ok(empty) -> placeholders, so this does not mask real death.
-        let instance_active = status
+        // When the instance is ESTABLISHED (was already reachable) but the poll
+        // got no live data, treat it as a transient poll failure and bail — the
+        // caller's Err arm skips the DeliveryStatus broadcast, so the dashboard
+        // PRESERVES the last-known rescuing endpoints and the cache is not
+        // overwritten with Pending. A genuinely dead VPS eventually leaves the
+        // active state -> not-active arm -> Ok(empty) -> placeholders, so this
+        // does not mask real death.
+        //
+        // Deliberately NARROWER than `is_delivery_active` (which also covers
+        // "booting"/"initializing"): a fresh delivery start spends its first
+        // 60+ seconds in those pre-boot states, during which the VPS's HTTP
+        // server on :8000 legitimately isn't answering yet — there is no
+        // "last-known" data to preserve because no poll has ever succeeded for
+        // this instance. Bailing there froze the dashboard on stale/none data
+        // for EVERY normal delivery start, not just the rare outage hiccup
+        // this was written for (review finding on #288, v0.29.1).
+        let instance_established = status
             .instance
             .as_ref()
-            .map(|i| is_delivery_active(&i.status))
+            .map(|i| matches!(i.status.as_str(), "delivering" | "running"))
             .unwrap_or(false);
-        if instance_active && !status.server_ready {
+        if instance_established && !status.server_ready {
             warn!(
                 event_id,
                 "VPS status poll returned no live data for an active instance; \
