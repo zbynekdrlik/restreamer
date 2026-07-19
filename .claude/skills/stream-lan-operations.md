@@ -433,6 +433,18 @@ mcp__win-stream-snv__PortCheck host="127.0.0.1" port=4455
 mcp__win-stream-snv__Snapshot
 ```
 
+## No-CI hotfix of the delivery VPS binary (rs-delivery) — S3-object swap
+
+The fast-endpoint / delivery logic runs in **`rs-delivery`** (Linux binary on the Hetzner VPS), NOT in the Windows `Restreamer.exe`. To hotfix it during a live event **without CI** (a CI push auto-deploys to the live stream.lan box — forbidden mid-event) and **without touching the running stream**:
+
+1. **Fix on `dev`** (RED→GREEN + double review). Do NOT push to origin.
+2. **Build the Linux binary off dev1** (dev1 is Tier-0 / OOMs): `git bundle` the commits → scp to **dev2** → `cargo build --release -p rs-delivery` there (`# airuleset:build-ok`, rustup user-local). Run `cargo clippy -p rs-delivery --all-targets -- -D warnings` + `cargo test -p rs-delivery --lib` there too.
+3. **glibc MUST match the VPS**: VPS image is `ubuntu-24.04` (glibc 2.39) — see `delivery.rs` `create_server("ubuntu-24.04")`. dev2 (24.04) build → `objdump -T rs-delivery | grep GLIBC` max must be ≤ 2.39. A newer-glibc binary crashes on VPS boot.
+4. **Transfer the binary to stream.lan.** The box often CANNOT reach dev1 (no tailscale on the box; LAN subnets drift to 10.77.9 vs dev1's fallback 10.77.10 — file-drop `airuleset.py share` fails box→dev1). But **dev1 CAN reach the box** (asymmetric routing) and the box runs **OpenSSH sshd on :22**. So `scp` dev1→box: `sshpass -e scp rs-delivery 'newlevel@10.77.9.204:C:/Users/newlevel/<name>'` (SSHPASS env, box login user `newlevel`). **Always re-verify sha256 on the box** — an internet blip truncated a transfer silently to 1 MB with `scp` exit 0; re-scp and re-check until the box sha matches the dev2 sha.
+5. **Upload to S3 FROM the box** (creds stay local, never echoed): read `C:\ProgramData\Restreamer\config.json` `.s3` (endpoint `fsn1.your-objectstorage.com`, bucket `restreamer-chunks-fsn1`, access/secret key), set `AWS_*` env, `aws --endpoint-url <ep>` is present on the box. **Back up first**: `aws s3 cp s3://<b>/rs-delivery-<ver> s3://<b>/rs-delivery-<ver>.release-backup-preNNN`. Then overwrite the versioned key the client requests: `aws s3api put-object --key rs-delivery-<ver> --body <file> --acl public-read --content-type application/octet-stream` (public-read = cloud-init fetches anonymously).
+6. **Verify via anonymous GET** (exactly cloud-init's path): `Invoke-WebRequest <ep>/<b>/rs-delivery-<ver>` → sha256 must equal the built binary.
+7. **Effect + caveats**: takes effect on the NEXT `Start Delivering` (fresh VPS); the running stream + stream.lan exe are untouched. Keep the patched binary reporting the SAME version (don't bump) so the post-boot lockstep gate (`delivery_binary.rs versions_match`) passes. This DEVIATES from the immutable-versioned-object design — track it and replace with a proper CI-built `+1` release; then the backup key can be deleted. Full functional proof only comes when the next round spins a VPS.
+
 ## Important Notes
 
 - **NEVER** give manual instructions when these automated MCP tools exist
