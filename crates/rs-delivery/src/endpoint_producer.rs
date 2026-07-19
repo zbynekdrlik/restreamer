@@ -65,8 +65,17 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
     // instead of re-pinning to the edge) and HOLDS it for the session
     // (#294 ratchet-up only — no healthy-shrink).
     // None for non-fast endpoints → byte-for-byte unchanged behaviour.
+    // Seeded from the target persisted on the shared BufferState so a #237
+    // producer RESPAWN resumes at the already-ratcheted level instead of
+    // resetting to the floor and re-starving (#294 respawn survival).
     let mut fast_delay = if is_fast {
-        Some(FastDelayController::new(std::time::Instant::now()))
+        let seed = buffer_state
+            .fast_delay_target_secs
+            .load(AtomicOrdering::Relaxed);
+        Some(FastDelayController::new_seeded(
+            seed,
+            std::time::Instant::now(),
+        ))
     } else {
         None
     };
@@ -174,6 +183,12 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                                 to,
                             );
                         }
+                        // #294 respawn survival: persist the (ratcheted)
+                        // target to the shared BufferState so a producer
+                        // respawn re-seeds at this level, not the floor.
+                        buffer_state
+                            .fast_delay_target_secs
+                            .store(ctrl.target_secs(), AtomicOrdering::Relaxed);
                         ctrl.delay_chunks(typical_chunk_dur_ms)
                     }
                     None if delivery_delay_ms == 0 => 0,
@@ -270,6 +285,12 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                                 deficit_secs,
                             );
                         }
+                        // #294 respawn survival: persist the ratcheted target
+                        // from the probe-cycle grow path too (mirrors the
+                        // keepalive-gap path above).
+                        buffer_state
+                            .fast_delay_target_secs
+                            .store(ctrl.target_secs(), AtomicOrdering::Relaxed);
                     }
                 } else {
                     let mut s = stats.lock().await;

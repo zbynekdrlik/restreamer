@@ -74,6 +74,18 @@ impl FastDelayController {
         )
     }
 
+    /// Production constructor seeded from a previously-ratcheted target
+    /// (#294 respawn survival). `seed_secs` is the last persisted target
+    /// (0 = none) — a #237 producer respawn passes the value persisted on
+    /// the shared `BufferState` so the ratcheted buffer is NOT discarded
+    /// mid-session. The seed is clamped into `[floor, ceiling]`; a 0/low
+    /// seed simply yields the floor (identical to `new`).
+    pub fn new_seeded(seed_secs: u64, now: Instant) -> Self {
+        let mut c = Self::new(now);
+        c.target_secs = seed_secs.clamp(c.floor, c.ceiling);
+        c
+    }
+
     /// Test/explicit constructor.
     pub fn with_params(
         floor: u64,
@@ -154,6 +166,32 @@ mod tests {
     fn starts_at_floor() {
         let now = Instant::now();
         assert_eq!(ctrl(now).target_secs(), 5);
+    }
+
+    #[test]
+    fn seeded_resumes_at_persisted_target_respawn_survival() {
+        // #294 respawn survival: a producer respawn re-seeds the controller
+        // from the target persisted on the shared BufferState so the
+        // ratcheted buffer is NOT reset to the floor mid-session (which would
+        // re-starve and reintroduce the repeated stuttering the hotfix
+        // eliminates).
+        let now = Instant::now();
+        // Session climbed to 34s; respawn re-seeds there, not at the 5s floor.
+        assert_eq!(FastDelayController::new_seeded(34, now).target_secs(), 34);
+        // Unset / no prior ratchet (0) yields the floor — identical to `new`.
+        assert_eq!(FastDelayController::new_seeded(0, now).target_secs(), 5);
+        // A seed below the floor clamps up to the floor.
+        assert_eq!(FastDelayController::new_seeded(2, now).target_secs(), 5);
+        // A seed above the ceiling clamps down to the ceiling.
+        assert_eq!(
+            FastDelayController::new_seeded(9999, now).target_secs(),
+            120
+        );
+        // After re-seeding, the ratchet-up invariant still holds: a smaller
+        // later drain cannot lower it.
+        let mut c = FastDelayController::new_seeded(34, now);
+        assert_eq!(c.on_starvation(10, now), None);
+        assert_eq!(c.target_secs(), 34);
     }
 
     #[test]

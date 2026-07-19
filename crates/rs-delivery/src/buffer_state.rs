@@ -24,6 +24,15 @@ pub struct BufferState {
     /// and this value so queued chunks are never re-fetched. Init to -1 so the
     /// "nothing sent yet" case clamps correctly (see endpoint_respawn FIX 3).
     pub highest_sent_chunk_id: AtomicI64,
+    /// #294: the fast endpoint's ratcheted read-delay target (seconds).
+    /// Persisted here — outside the per-producer-task `FastDelayController` —
+    /// so a #237 producer RESPAWN resumes at the level the session's real
+    /// drains already climbed to, instead of resetting to the floor and
+    /// re-starving (which would reintroduce the repeated stuttering #294
+    /// exists to eliminate). 0 = unset → the controller starts at its floor.
+    /// Only the fast producer writes it; monotonic within a session (grows
+    /// with the target, never lowered — the ratchet-up-only invariant).
+    pub fast_delay_target_secs: AtomicU64,
 }
 
 impl BufferState {
@@ -33,6 +42,7 @@ impl BufferState {
             producer_active: AtomicBool::new(true),
             starvation_gap_ms: AtomicU64::new(0),
             highest_sent_chunk_id: AtomicI64::new(-1),
+            fast_delay_target_secs: AtomicU64::new(0),
         }
     }
 }
