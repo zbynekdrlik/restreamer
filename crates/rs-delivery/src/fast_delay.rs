@@ -56,7 +56,8 @@ pub struct FastDelayController {
     margin: u64,
     shrink_step: u64,
     healthy_shrink_secs: u64,
-    /// Wall-clock of the last grow OR shrink; gates the next shrink.
+    /// Wall-clock of the last change. Retained for controller
+    /// introspection; no longer gates anything (#294 removed the shrink).
     last_change: Instant,
 }
 
@@ -165,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn grow_is_monotonic_until_shrink() {
+    fn grow_is_monotonic() {
         let now = Instant::now();
         let mut c = ctrl(now);
         c.on_starvation(20, now); // -> 25
