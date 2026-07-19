@@ -15,9 +15,25 @@
 //! This controller makes the fast endpoint's read-delay ADAPTIVE: it grows
 //! when the producer starves (so the live-edge lag-probe jumps to
 //! `live_edge - delay` and leaves a buffer instead of yanking back to the
-//! edge) and shrinks slowly when healthy (chasing the lowest working
-//! latency). It NEVER speeds up the push — it only changes which chunk the
+//! edge). It NEVER speeds up the push — it only changes which chunk the
 //! producer reads next. See the design doc for the full rationale.
+//!
+//! ## RATCHET-UP ONLY — no shrink within a session (#294, operator decision
+//! 2026-07-17)
+//!
+//! The controller previously ALSO shrank slowly back toward the floor while
+//! healthy. On a live event that caused the exact failure the operator
+//! reported: after a drain grew the buffer, the periodic shrink pulled it
+//! back toward the fragile live edge, which re-starved, which grew it again
+//! — the buffer bounced up and down for hours and the fast stream stuttered
+//! REPEATEDLY (visible YouTube buffering). Bouncing the delay itself hurts
+//! smoothness. The operator's model: a fast endpoint starts at the lowest
+//! buffer; a single/occasional stutter is fine; on a real drain it raises
+//! the buffer and then **HOLDS** it — a few early stutters while it climbs to
+//! the size this event's jitter needs, then smooth for the rest of the round.
+//! No shrink-back, no oscillation. The near-live minimum is re-established on
+//! the NEXT session (a fresh event / VPS spin-up constructs a fresh
+//! controller starting at the floor), not by ratcheting down mid-session.
 
 use std::time::Instant;
 
@@ -101,21 +117,18 @@ impl FastDelayController {
         }
     }
 
-    /// Called while chunks are flowing normally. After `healthy_shrink_secs`
-    /// with no change, shrink one step toward the floor. Returns
-    /// `Some((from, to))` when the target changed.
-    pub fn on_healthy(&mut self, now: Instant) -> Option<(u64, u64)> {
-        if self.target_secs <= self.floor {
-            return None;
-        }
-        if now.duration_since(self.last_change).as_secs() < self.healthy_shrink_secs {
-            return None;
-        }
-        let from = self.target_secs;
-        let next = from.saturating_sub(self.shrink_step).max(self.floor);
-        self.target_secs = next;
-        self.last_change = now;
-        Some((from, next))
+    /// Called while chunks are flowing normally.
+    ///
+    /// RATCHET-UP ONLY (#294): this is now a NO-OP and never shrinks. Shrinking
+    /// back toward the floor mid-session pulled the fast endpoint to the
+    /// fragile live edge and re-starved it, producing the repeated stuttering
+    /// / buffer-bouncing the operator observed on 2026-07-17. The buffer is
+    /// held at whatever level a real drain required for this session; the
+    /// near-live minimum is re-established only by a fresh session (new
+    /// controller at the floor). Kept as a method so the call site is
+    /// unchanged; always returns `None`.
+    pub fn on_healthy(&mut self, _now: Instant) -> Option<(u64, u64)> {
+        None
     }
 
     /// Current target expressed in chunks, for the live-edge lag-probe.

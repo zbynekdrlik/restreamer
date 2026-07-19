@@ -132,11 +132,13 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     typical_chunk_dur_ms = (3 * typical_chunk_dur_ms + c) / 4;
                 }
                 // Fast endpoints: read-delay is ADAPTIVE via the controller. On
-                // every healthy fetch we let it opportunistically shrink one step
-                // toward the floor; `delay_chunks()` is always >= 1 so the
-                // live-edge lag-probe trails the edge and keeps a buffer (#232,
-                // adaptive controller). Non-fast endpoints keep the prior exact
-                // math: delay_ms==0 → live edge (0), else >=1 floor. RTMP push
+                // the delay RATCHETS UP on real drains and then HOLDS for the
+                // whole session (#294 — no healthy-shrink: pulling back toward
+                // the edge re-starved and caused repeated stuttering);
+                // `delay_chunks()` is always >= 1 so the live-edge lag-probe
+                // trails the edge and keeps a buffer (#232, adaptive
+                // controller). Non-fast endpoints keep the prior exact math:
+                // delay_ms==0 → live edge (0), else >=1 floor. RTMP push
                 // stays strictly 1× — this only moves the READ pointer.
                 let delivery_delay_chunks: i64 = match fast_delay.as_mut() {
                     Some(ctrl) => {
