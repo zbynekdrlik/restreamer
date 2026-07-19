@@ -183,30 +183,39 @@ mod tests {
     }
 
     #[test]
-    fn shrink_only_after_healthy_window() {
+    fn healthy_never_shrinks_ratchet_holds_for_whole_session() {
+        // #294 regression (live event 2026-07-17): after a drain grew the
+        // buffer, the periodic healthy-shrink pulled it back toward the
+        // fragile live edge, which re-starved and re-grew it — the buffer
+        // bounced up/down for hours and the fast stream stuttered
+        // REPEATEDLY. Operator decision: ratchet UP only; once raised, HOLD
+        // for the rest of the session, no matter how long it stays healthy.
         let base = Instant::now();
         let mut c = ctrl(base);
         c.on_starvation(40, base); // -> 45 at t=0
-        // before window: no shrink
-        assert_eq!(c.on_healthy(base + Duration::from_secs(179)), None);
-        // at window: one step down (45 -> 40)
-        assert_eq!(
-            c.on_healthy(base + Duration::from_secs(180)),
-            Some((45, 40))
-        );
-        assert_eq!(c.target_secs(), 40);
+        // No shrink at any horizon: 3 min, 30 min, 3 hours.
+        assert_eq!(c.on_healthy(base + Duration::from_secs(180)), None);
+        assert_eq!(c.on_healthy(base + Duration::from_secs(1800)), None);
+        assert_eq!(c.on_healthy(base + Duration::from_secs(10800)), None);
+        assert_eq!(c.target_secs(), 45, "raised buffer must HOLD, never bounce");
     }
 
     #[test]
-    fn shrink_floors_at_floor() {
+    fn ratchet_climbs_across_repeated_drains_and_holds() {
+        // The expected session shape: a few early stutters climb the buffer
+        // to what this event's jitter needs, then it holds there — later
+        // healthy periods and smaller drains never move it. (Deficits mirror
+        // the real 2026-07-17 freeze gaps: 4s, 18s, 29s.)
         let base = Instant::now();
         let mut c = ctrl(base);
-        c.on_starvation(2, base); // deficit2+margin5=7 -> 7
-        assert_eq!(c.target_secs(), 7);
-        let t = base + Duration::from_secs(180);
-        assert_eq!(c.on_healthy(t), Some((7, 5))); // 7-5=2 -> max(floor)=5
-        // already at floor -> no further shrink
-        assert_eq!(c.on_healthy(t + Duration::from_secs(180)), None);
+        assert_eq!(c.on_starvation(4, base), Some((5, 9))); // 4 + margin 5
+        assert_eq!(c.on_starvation(18, base), Some((9, 23)));
+        assert_eq!(c.on_starvation(29, base), Some((23, 34)));
+        // long healthy stretch: holds
+        assert_eq!(c.on_healthy(base + Duration::from_secs(3600)), None);
+        // a smaller later drain does not lower it
+        assert_eq!(c.on_starvation(10, base + Duration::from_secs(3700)), None);
+        assert_eq!(c.target_secs(), 34);
     }
 
     #[test]
