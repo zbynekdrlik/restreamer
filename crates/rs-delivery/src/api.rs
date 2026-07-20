@@ -291,6 +291,13 @@ struct EndpointStatusEntry {
     /// consumer's rescue gate (`!producer_active`). Disambiguates a live
     /// stall (producer starved vs pusher stalled) from status alone.
     producer_active: bool,
+    /// #295: the fast endpoint's current ratcheted read-delay target
+    /// (seconds) from the #294 adaptive controller. `None` for a non-fast
+    /// endpoint, or before the fast producer's first fetch. The dashboard
+    /// colours the fast buffer bar RELATIVE to this instead of a stale
+    /// absolute ceiling, so a correctly HELD ratcheted buffer reads healthy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fast_delay_target_secs: Option<u64>,
     /// #284/#238: ms since the last SUCCESSFUL push (live chunk via the
     /// rust pusher, or a rescue-clip push during an outage). Stays small
     /// while bytes actually flow — the crash-exhaustion E2E gate asserts
@@ -337,6 +344,7 @@ async fn endpoint_status(
             reconnect_count: stats.reconnect_count,
             av_skew_ms: stats.av_skew_ms,
             producer_active: handle.producer_active(),
+            fast_delay_target_secs: handle.fast_delay_target_secs(),
             last_push_ok_age_ms: crate::endpoint_stats::age_ms(now_ms, stats.last_push_ok_unix_ms),
             last_error: stats.last_error,
             ffmpeg_last_stderr: stats.ffmpeg_last_stderr,

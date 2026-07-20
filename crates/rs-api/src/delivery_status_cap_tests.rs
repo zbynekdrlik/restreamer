@@ -24,8 +24,18 @@ fn delayed_endpoint_passes_value_below_cap_unchanged() {
 #[test]
 fn fast_endpoint_caps_at_small_constant() {
     // Fast endpoint (delivery_delay == 0): a 7800s raw value is meaningless.
-    // Must clamp to the 30s fast cap, NOT to 1.5*0 = 0.
-    assert_eq!(cap_endpoint_delay_secs(7800.0, true, 0), 30.0);
+    // Must clamp to the fast cap, NOT to 1.5*0 = 0.
+    //
+    // #295: the cap was 30.0, set when a fast endpoint was assumed to sit at
+    // 2-5s near-live. The #294 controller ratchets the read-delay up and HOLDS
+    // it, legitimately reaching the 120s ceiling, so a 30s cap silently clipped
+    // real values and hid from the operator what the endpoint was holding. The
+    // cap now matches the controller ceiling — still bounded, still ghost-proof.
+    assert_eq!(cap_endpoint_delay_secs(7800.0, true, 0), 120.0);
+    // A legitimately ratcheted value that the old 30s cap would have clipped
+    // now passes through intact — the whole point of #295.
+    assert_eq!(cap_endpoint_delay_secs(45.0, true, 0), 45.0);
+    assert_eq!(cap_endpoint_delay_secs(120.0, true, 0), 120.0);
 }
 
 #[test]
@@ -39,7 +49,7 @@ fn zero_target_falls_back_to_fast_cap_even_when_not_flagged_fast() {
     // Defensive: a garbage/zero target on a non-fast endpoint must not yield a
     // 1.5*0 = 0 cap that would zero out a real value. Fall back to the fast cap
     // so the number is bounded but never collapses to 0.
-    assert_eq!(cap_endpoint_delay_secs(7800.0, false, 0), 30.0);
+    assert_eq!(cap_endpoint_delay_secs(7800.0, false, 0), 120.0);
     // Below the fast cap → unchanged.
     assert_eq!(cap_endpoint_delay_secs(12.0, false, 0), 12.0);
 }

@@ -39,25 +39,59 @@ pub fn cache_threshold_for_service(service_type: &str) -> f64 {
     }
 }
 
+/// Observed-delay / ratcheted-target ratio above which a fast endpoint is
+/// WARNING: it is drifting above the buffer the controller settled on rather
+/// than tracking it. Small overshoot is normal jitter, not a fault.
+pub const FAST_DRIFT_WARN_RATIO: f64 = 1.25;
+
+/// Ratio above which a fast endpoint is CRITICAL. 2x the target is exactly the
+/// worst case of the pre-#294 lag-ladder blind band (the ladder could not see
+/// drift below `2 * delay`, so latency could park anywhere in [1x, 2x) with no
+/// correction), so anything beyond it is genuine starvation/drift.
+pub const FAST_DRIFT_CRITICAL_RATIO: f64 = 2.0;
+
 /// Buffer-bar severity class for a FAST (near-live) endpoint.
 ///
 /// `secs` is the endpoint's observed `chunk_delay_secs`; `target_secs` is the
 /// adaptive controller's current ratcheted read-delay target, when the VPS
 /// reports one.
 ///
-/// Extracted VERBATIM from `operator_dashboard`'s inline fast-bar branch so the
-/// classification is testable. Behaviour is unchanged by the extraction — the
-/// target is accepted but not yet consulted, which is exactly the #295 bug: the
-/// absolute 8s ceiling predates the #294 ratchet and paints a correctly-held
-/// buffer permanently red.
+/// The classification is RELATIVE TO THE TARGET (#295), not an absolute
+/// ceiling. Under the #294 ratchet model the controller raises the buffer on a
+/// real drain and then HOLDS it for the session, anywhere in 5..=120s — so a
+/// held 30s buffer is the design working, not a fault. What matters is whether
+/// the endpoint TRACKS the buffer it settled on:
+///
+/// - at or below the target (plus a jitter band) → healthy, at ANY target the
+///   ratchet legitimately reached;
+/// - drifting above it → warning, then critical.
+///
+/// Being closer to the live edge than the target is healthy: the target is the
+/// buffer the endpoint works toward, not a minimum it must exceed.
+///
+/// When the VPS reports no target (an rs-delivery older than #295), fall back
+/// to the pre-#295 absolute bands, which are correct for an UNRATCHETED fast
+/// endpoint sitting near the 5s floor.
 pub fn fast_buffer_class(secs: f64, target_secs: Option<f64>) -> &'static str {
-    let _ = target_secs;
-    if secs > 8.0 {
-        "critical"
-    } else if secs <= 5.0 {
-        "healthy"
-    } else {
-        "warning"
+    match target_secs {
+        Some(target) if target > 0.0 => {
+            if secs > target * FAST_DRIFT_CRITICAL_RATIO {
+                "critical"
+            } else if secs > target * FAST_DRIFT_WARN_RATIO {
+                "warning"
+            } else {
+                "healthy"
+            }
+        }
+        _ => {
+            if secs > 8.0 {
+                "critical"
+            } else if secs <= 5.0 {
+                "healthy"
+            } else {
+                "warning"
+            }
+        }
     }
 }
 

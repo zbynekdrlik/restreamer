@@ -139,6 +139,11 @@ pub struct EndpointDeliveryStatus {
     /// when the VPS rs-delivery predates this field.
     #[serde(default)]
     pub producer_active: Option<bool>,
+    /// #295: the fast endpoint's current ratcheted read-delay target
+    /// (seconds) from the #294 adaptive controller. `None` for a non-fast
+    /// endpoint, or when the VPS rs-delivery predates this field.
+    #[serde(default)]
+    pub fast_delay_target_secs: Option<u64>,
     /// #284/#238: ms since the endpoint's last SUCCESSFUL push (live chunk
     /// or rescue clip) as reported by the VPS. `None` when unavailable.
     #[serde(default)]
@@ -178,13 +183,18 @@ pub struct YouTubeStatus {
 }
 
 /// Display cap (seconds) for a FAST endpoint's per-endpoint delay number.
-/// Fast endpoints (`delivery_delay == 0`) are meant to be near-live and, after
-/// an outage, jump back to the live edge (see `producer_lag`). Their "buffer
-/// above the consumer" can momentarily spike (a burst of fresh chunks lands
-/// before the next poll reads `current_chunk_id`), so the raw value is
-/// meaningless as a steady-state number. Cap it at a small constant so the
-/// dashboard shows a bounded, sane figure instead of a 7800s ghost.
-const FAST_ENDPOINT_DELAY_CAP_SECS: f64 = 30.0;
+/// A fast endpoint's "buffer above the consumer" can momentarily spike (a burst
+/// of fresh chunks lands before the next poll reads `current_chunk_id`), so the
+/// raw value needs bounding to keep a 7800s ghost off the dashboard.
+///
+/// #295: this was 30.0, chosen when a fast endpoint was assumed to sit at 2-5s
+/// near-live. The #294 adaptive controller now RATCHETS the read-delay up on a
+/// real drain and HOLDS it for the session, legitimately reaching up to
+/// `FAST_DELAY_CEILING_SECS` (120s) — so a 30s cap silently clipped the real
+/// value and the operator could not even see what the endpoint was holding.
+/// The cap now matches the controller's ceiling: still bounded and ghost-proof,
+/// but never hides a value the controller can legitimately reach.
+const FAST_ENDPOINT_DELAY_CAP_SECS: f64 = 120.0;
 
 /// Multiplier for the DELAYED-endpoint per-endpoint delay cap. Mirrors the
 /// global pipeline cap at `lib.rs` (`target_delay * 1.5`): 1.5× leaves room to
@@ -285,6 +295,10 @@ impl DeliveryOrchestrator {
                             // #284 disambiguation telemetry (None when the
                             // VPS rs-delivery predates these fields).
                             let producer_active = entry["producer_active"].as_bool();
+                            // #295: the fast endpoint's ratcheted read-delay
+                            // target, so the dashboard can colour the fast bar
+                            // relative to it. None on an older VPS binary.
+                            let fast_delay_target_secs = entry["fast_delay_target_secs"].as_u64();
                             let last_push_ok_age_ms = entry["last_push_ok_age_ms"].as_i64();
                             let last_error = entry["last_error"].as_str().map(|s| s.to_string());
                             let ffmpeg_last_stderr =
@@ -391,6 +405,7 @@ impl DeliveryOrchestrator {
                                 reconnect_count,
                                 av_skew_ms,
                                 producer_active,
+                                fast_delay_target_secs,
                                 last_push_ok_age_ms,
                                 last_error,
                                 ffmpeg_last_stderr,
@@ -516,6 +531,7 @@ impl DeliveryOrchestrator {
                 ffmpeg_restart_count: ep.ffmpeg_restart_count,
                 reconnect_count: ep.reconnect_count,
                 av_skew_ms: ep.av_skew_ms,
+                fast_delay_target_secs: ep.fast_delay_target_secs,
                 last_error: ep.last_error,
                 is_fast: ep.is_fast,
                 delivery_mode: ep.delivery_mode,

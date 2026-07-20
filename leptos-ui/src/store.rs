@@ -143,6 +143,12 @@ pub struct DeliveryEndpointState {
     /// rust-pusher endpoints. The dashboard alarms on a sustained non-zero
     /// value (issue #257).
     pub av_skew_ms: i64,
+    /// #295: the fast endpoint's ratcheted read-delay target (seconds) from
+    /// the #294 adaptive controller. The fast buffer bar is coloured RELATIVE
+    /// to this, so a correctly HELD ratcheted buffer reads healthy instead of
+    /// tripping a stale absolute 8s ceiling. `None` for non-fast endpoints or
+    /// a VPS binary predating the field.
+    pub fast_delay_target_secs: Option<u64>,
     pub last_error: Option<String>,
     pub is_fast: bool,
     pub delivery_mode: Option<String>,

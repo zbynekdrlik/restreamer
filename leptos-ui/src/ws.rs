@@ -129,6 +129,9 @@ struct WsDeliveryEndpoint {
     /// Content-PTS A/V skew in ms (positive = audio behind video). Issue #257.
     #[serde(default)]
     av_skew_ms: i64,
+    /// #295: fast endpoint's ratcheted read-delay target (seconds).
+    #[serde(default)]
+    fast_delay_target_secs: Option<u64>,
     #[serde(default)]
     last_error: Option<String>,
     #[serde(default)]
@@ -188,6 +191,7 @@ async fn load_initial_state(store: DashboardStore) {
                     ffmpeg_restart_count: ep.ffmpeg_restart_count,
                     reconnect_count: 0,
                     av_skew_ms: ep.av_skew_ms,
+            fast_delay_target_secs: ep.fast_delay_target_secs,
                     last_error: ep.last_error,
                     is_fast: ep.is_fast,
                     delivery_mode: ep.delivery_mode.clone(),
@@ -334,6 +338,7 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                             ffmpeg_restart_count: ep.ffmpeg_restart_count,
                             reconnect_count: ep.reconnect_count,
                             av_skew_ms: ep.av_skew_ms,
+            fast_delay_target_secs: ep.fast_delay_target_secs,
                             last_error: ep.last_error.clone(),
                             is_fast: ep.is_fast,
                             delivery_mode: ep.delivery_mode.clone(),
