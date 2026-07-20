@@ -201,6 +201,7 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     delivery_delay_ms,
                     &mut iters_since_lag_probe,
                     &alias,
+                    is_fast,
                 )
                 .await;
                 tokio::task::yield_now().await;

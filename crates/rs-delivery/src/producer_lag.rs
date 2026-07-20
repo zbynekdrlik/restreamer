@@ -7,13 +7,20 @@
 //! forever — producer reads at 1x and never catches up.
 //!
 //! Two endpoint classes, two jump targets (operator-locked behavior):
-//! - **Fast endpoints** (`delivery_delay_ms == 0`, e.g. the control/monitor
-//!   stream): jump target is the LIVE EDGE itself (`delivery_delay_chunks == 0`
-//!   → `latest_known`). After an outage they MUST skip the gap to stay
-//!   near-live; falling behind unbounded is what killed them repeatedly.
+//! - **Fast endpoints** (`is_fast`, e.g. the control/monitor stream): jump
+//!   target is `latest_known - delivery_delay_chunks`, where the delay is the
+//!   adaptive controller's RATCHETED target rather than a configured constant
+//!   (#232/#294). After an outage they MUST skip the gap to stay near-live;
+//!   falling behind unbounded is what killed them repeatedly. Because the
+//!   ratcheted delay can grow large, the ladder starts at a small constant
+//!   first rung so it stays armed at any target (#294 — see
+//!   `LAG_PROBE_FAST_FIRST_RUNG`), and a binary refine pins the edge exactly.
+//!   Pre-#232 a fast endpoint had `delivery_delay_chunks == 0` and jumped to
+//!   the live edge itself; it now always trails by its ratcheted buffer.
 //! - **Delayed endpoints** (`delivery_delay_ms > 0`, main YT/FB): jump target
 //!   is `latest_known - delivery_delay_chunks`, holding a constant gap behind
-//!   live equal to the configured delay. Unchanged behavior.
+//!   live equal to the configured delay. Unchanged behavior — deliberately so:
+//!   correcting their drift would mean skipping content on the main outputs.
 //!
 //! RTMP push itself is always strictly 1× — this only moves the READ pointer
 //! (which chunk to fetch next); it never speeds up delivery.
@@ -34,6 +41,67 @@ pub(crate) const LAG_PROBE_INTERVAL_ITERS: u32 = 30;
 /// search window. Each rung is HEAD-only (no body download).
 const LAG_PROBE_LADDER_MAX: u32 = 12;
 
+/// First ladder rung (chunks ahead) for FAST endpoints (#294).
+///
+/// Delayed endpoints start the ladder at `2 * delivery_delay_chunks`, which
+/// makes any drift smaller than `2 *` the delay invisible — the first probe
+/// lands past the live edge and the ladder breaks. That blind band used to be
+/// harmless for fast endpoints because the adaptive controller's healthy-shrink
+/// continuously walked `delivery_delay_chunks` back toward the floor, shrinking
+/// the first rung until it re-entered the existing chunks. #294 removed the
+/// shrink (it re-starved the endpoint and caused the repeated stuttering), so
+/// the ladder lost its only re-arm mechanism and a ratcheted fast endpoint
+/// could drift up to 2× its held target with no correction.
+///
+/// Fast endpoints therefore start at a small constant rung instead, so the
+/// ladder is ALWAYS armed regardless of how large the ratcheted target grew.
+const LAG_PROBE_FAST_FIRST_RUNG: i64 = 2;
+
+/// Ladder steps for FAST endpoints (#294).
+///
+/// Reach is `first_rung * 2^(steps - 1)`. The delayed-endpoint ladder starts at
+/// `2 * delivery_delay_chunks`, so its reach SCALES with the configured delay;
+/// pinning the fast first rung to a small constant would otherwise shrink a
+/// ratcheted fast endpoint's reach dramatically (at a 32-chunk target, from
+/// 131072 chunks down to 4096). More steps restore it: `2 * 2^15` = 65536
+/// chunks ≈ 36 h at 2 s chunks — far beyond any real outage (the worst observed
+/// in prod was ~70 min ≈ 2100 chunks) while staying HEAD-only and running at
+/// most once per `LAG_PROBE_INTERVAL_ITERS` fetches.
+const LAG_PROBE_FAST_LADDER_MAX: u32 = 16;
+
+/// Safety cap on the binary-refine loop (see `pin_live_edge`). The bracket it
+/// narrows is at most `LAG_PROBE_LADDER_MAX` doublings wide, so it converges in
+/// well under this many probes; the cap only bounds a pathological fetcher.
+const LAG_REFINE_MAX_PROBES: u32 = 16;
+
+/// Binary-refine the live edge inside the bracket `(lo, hi)`, where `lo` is a
+/// chunk PROVEN to exist and `hi` a chunk PROVEN to be missing. Returns the
+/// highest chunk proven to exist.
+///
+/// The exponential ladder alone only locates the edge to within a factor of 2
+/// (it reports the last power-of-two rung that hit), which for a ratcheted fast
+/// endpoint means a drift correction of as little as one chunk per probe cycle
+/// — far too slow to matter. Pinning the edge exactly makes the correction land
+/// the endpoint precisely at its ratcheted target in a single cycle.
+///
+/// A probe error stops the refine and keeps the last proven-existing value:
+/// under-estimating the edge is always the SAFE direction (it leaves the
+/// endpoint further behind live, never closer).
+async fn pin_live_edge<F: ChunkFetcher>(fetcher: &F, lo: i64, hi: i64) -> i64 {
+    let (mut lo, mut hi) = (lo, hi);
+    let mut probes = 0;
+    while hi - lo > 1 && probes < LAG_REFINE_MAX_PROBES {
+        probes += 1;
+        let mid = lo + (hi - lo) / 2;
+        match fetcher.chunk_duration_ms(mid).await {
+            Ok(Some(_)) => lo = mid,
+            Ok(None) => hi = mid,
+            Err(_) => break,
+        }
+    }
+    lo
+}
+
 /// Exponential-probe ladder for the highest known-existing chunk_id ahead
 /// of `current`. Returns `Some(new_id)` to jump to, or `None` if no skip
 /// needed. Cost: O(log lag) probes when lag is large, 1 probe when not.
@@ -41,30 +109,76 @@ const LAG_PROBE_LADDER_MAX: u32 = 12;
 /// `delivery_delay_chunks == 0` means "jump target = live edge" (fast
 /// endpoints). `> 0` means "jump target = live edge - delay" (delayed
 /// endpoints). Negative is nonsensical → `None`.
+///
+/// `is_fast` selects the fast-endpoint behaviour (#294): a small constant first
+/// rung so the ladder is always armed, plus a binary refine that pins the live
+/// edge exactly. Delayed endpoints are deliberately left byte-for-byte
+/// unchanged — correcting their drift would mean SKIPPING content on the main
+/// YouTube/Facebook outputs (a visible jump-cut) to shave latency the operator
+/// has already chosen to buy. Skipping to stay near-live is the fast endpoint's
+/// whole documented purpose; it is not the delayed endpoints'.
+///
+/// ## Buffer invariant (#294 — operator-locked)
+///
+/// The returned target is `max_id - delivery_delay_chunks`, where `max_id` is a
+/// chunk PROVEN to exist. The true live edge `E` is therefore `>= max_id`, so
+/// after the jump the endpoint sits `E - (max_id - delay) >= delay` chunks
+/// behind live. **A jump can never leave the endpoint closer to the live edge
+/// than the ratcheted target** — it only removes accidental drift ABOVE it. And
+/// when no forward progress is available the answer is `None`, never a
+/// one-chunk nudge: nudging would shave the buffer every probe cycle and walk
+/// the endpoint back to the fragile live edge, which is precisely the shrink
+/// behaviour #294 removed.
 pub(crate) async fn detect_lag_and_jump<F: ChunkFetcher>(
     fetcher: &F,
     current: i64,
     delivery_delay_chunks: i64,
+    is_fast: bool,
 ) -> Option<i64> {
     if delivery_delay_chunks < 0 {
         return None;
     }
-    // The ladder must always step strictly forward. For fast endpoints the
-    // natural start `delivery_delay_chunks * 2` is 0, which would probe
-    // `current` forever and never advance — clamp the first rung to +2.
-    let mut probe_offset: i64 = delivery_delay_chunks.saturating_mul(2).max(2);
+    // The ladder must always step strictly forward. For a delayed endpoint with
+    // a zero delay the natural start `delivery_delay_chunks * 2` is 0, which
+    // would probe `current` forever and never advance — clamp to +2.
+    let mut probe_offset: i64 = if is_fast {
+        LAG_PROBE_FAST_FIRST_RUNG
+    } else {
+        delivery_delay_chunks.saturating_mul(2).max(2)
+    };
+    let ladder_max = if is_fast {
+        LAG_PROBE_FAST_LADDER_MAX
+    } else {
+        LAG_PROBE_LADDER_MAX
+    };
     let mut last_existing: Option<i64> = None;
-    for _ in 0..LAG_PROBE_LADDER_MAX {
+    let mut first_missing: Option<i64> = None;
+    for _ in 0..ladder_max {
         let probe_id = current + probe_offset;
         match fetcher.chunk_duration_ms(probe_id).await {
             Ok(Some(_)) => {
                 last_existing = Some(probe_id);
                 probe_offset = probe_offset.saturating_mul(2);
             }
-            Ok(None) | Err(_) => break,
+            Ok(None) => {
+                first_missing = Some(probe_id);
+                break;
+            }
+            Err(_) => break,
         }
     }
-    last_existing.map(|max_id| (max_id - delivery_delay_chunks).max(current + 1))
+    let mut max_id = last_existing?;
+    // Fast endpoints: pin the edge exactly so the correction lands ON the
+    // ratcheted target rather than crawling toward it one chunk per cycle.
+    if is_fast && let Some(miss) = first_missing {
+        max_id = pin_live_edge(fetcher, max_id, miss).await;
+    }
+    let target = max_id - delivery_delay_chunks;
+    // Only a genuine forward catch-up counts. For delayed endpoints this is
+    // unconditionally true whenever the ladder hit at all (their first rung is
+    // `2 * delay`, so `max_id >= current + 2*delay` ⇒ `target >= current +
+    // delay > current`), which is why their behaviour is unchanged.
+    (target > current).then_some(target)
 }
 
 /// Convenience wrapper called once per successful fetch in producer_task.
@@ -82,13 +196,16 @@ pub(crate) async fn maybe_jump<F: ChunkFetcher>(
     _delivery_delay_ms: u64,
     iters: &mut u32,
     alias: &str,
+    is_fast: bool,
 ) {
     *iters += 1;
     if *iters < LAG_PROBE_INTERVAL_ITERS {
         return;
     }
     *iters = 0;
-    if let Some(new_id) = detect_lag_and_jump(fetcher, *chunk_id, delivery_delay_chunks).await {
+    if let Some(new_id) =
+        detect_lag_and_jump(fetcher, *chunk_id, delivery_delay_chunks, is_fast).await
+    {
         tracing::warn!(
             alias = %alias,
             from = *chunk_id,
@@ -137,7 +254,7 @@ mod tests {
             highest_existing: 100,
             probe_count: AtomicU32::new(0),
         };
-        let r = detect_lag_and_jump(&f, 100, 60).await;
+        let r = detect_lag_and_jump(&f, 100, 60, false).await;
         assert_eq!(r, None);
         // First probe at current+120=220 returns None → break immediately.
         assert_eq!(f.probe_count.load(Ordering::SeqCst), 1);
@@ -152,35 +269,44 @@ mod tests {
             highest_existing: 5000,
             probe_count: AtomicU32::new(0),
         };
-        let r = detect_lag_and_jump(&f, 100, 60).await;
+        let r = detect_lag_and_jump(&f, 100, 60, false).await;
         assert_eq!(r, Some(3880));
     }
 
     #[tokio::test]
-    async fn detect_floors_jump_target_to_current_plus_one() {
-        // Edge case: max_id is barely ahead, so max-delay would land BELOW current.
-        // current=100, delay=60. highest=130 (just past first probe at 220 → None).
-        // First probe at 220 returns None → ladder breaks → returns None.
-        // We need a case where probe HITS but max-delay < current+1.
-        // current=200, delay=180. probe_offset starts at 360 → probe at 560.
-        // If highest=560 (exact), last_existing=560. Result = max(560-180, 201) = 380.
-        // Make it land below: highest=200 → probe at 560 misses → None. No good.
-        // Construct: current=200, delay=300, highest=400.
-        // probe_offset=600 → probe at 800 (>400) → None → break, last=None → returns None.
-        // The floor only matters when last_existing is set AND max_id - delay < current+1.
-        // E.g. current=100, delay=300, highest=320. probe_offset=600 → 700 > 320 → None.
-        // Try current=0, delay=10, highest=15. probe_offset=20 → 20>15 → None.
-        // The floor activates only when current=0 and max-delay <= 0:
-        // current=0, delay=100, highest=120. probe_offset=200 → 200>120 → None → returns None.
-        // Real-world: current is always non-zero on a running stream. The floor exists as
-        // a defensive clamp; the math says: if probe finds chunks and max-delay < current+1,
-        // returning current+1 (a forward step of 1) is safer than going backwards.
-        // Verify the clamp expression directly:
-        let max_id = 50_i64;
-        let delay = 100_i64;
-        let current = 100_i64;
-        let result = (max_id - delay).max(current + 1);
-        assert_eq!(result, 101, "max_id-delay (-50) clamped to current+1 (101)");
+    async fn detect_returns_none_instead_of_nudging_forward_one_chunk() {
+        // REPLACES `detect_floors_jump_target_to_current_plus_one`, which
+        // asserted the old `.max(current + 1)` clamp — behaviour deliberately
+        // removed by #294.
+        //
+        // The old clamp forced a jump of at least one chunk whenever ANY probe
+        // hit, even when the computed target was at or behind the read pointer.
+        // That was unreachable for delayed endpoints (their first rung is
+        // `2 * delay`, so a hit always implies a genuinely forward target), and
+        // the old test could only assert the clamp's arithmetic inline rather
+        // than drive the function at all.
+        //
+        // Re-arming the fast-endpoint ladder makes the case REACHABLE: a
+        // healthy fast endpoint now probes chunks that do exist just ahead. A
+        // one-chunk nudge per probe cycle would shave the ratcheted buffer down
+        // toward the fragile live edge — the exact shrink behaviour #294
+        // removed. So the guard is now "jump only when it is genuinely
+        // forward", and no-progress returns None.
+        //
+        // current=100, delay=15, live edge at 110 (10 chunks behind = INSIDE
+        // the ratcheted target). Ladder hits at +2/+4/+8, misses at +16; the
+        // refine pins the edge at 110; target = 110-15 = 95, which is behind
+        // the read pointer ⇒ no jump at all.
+        let f = MockFetcher {
+            highest_existing: 110,
+            probe_count: AtomicU32::new(0),
+        };
+        assert_eq!(
+            detect_lag_and_jump(&f, 100, 15, true).await,
+            None,
+            "a target at/behind the read pointer must yield NO jump, never a \
+             one-chunk nudge that nibbles the ratcheted buffer"
+        );
     }
 
     #[tokio::test]
@@ -191,7 +317,7 @@ mod tests {
             highest_existing: i64::MAX,
             probe_count: AtomicU32::new(0),
         };
-        let _ = detect_lag_and_jump(&f, 0, 1).await;
+        let _ = detect_lag_and_jump(&f, 0, 1, false).await;
         assert_eq!(
             f.probe_count.load(Ordering::SeqCst),
             LAG_PROBE_LADDER_MAX,
@@ -206,7 +332,7 @@ mod tests {
             highest_existing: 1_000_000,
             probe_count: AtomicU32::new(0),
         };
-        assert_eq!(detect_lag_and_jump(&f, 100, -1).await, None);
+        assert_eq!(detect_lag_and_jump(&f, 100, -1, false).await, None);
         // Early-return guard: no probes issued.
         assert_eq!(f.probe_count.load(Ordering::SeqCst), 0);
     }
@@ -214,24 +340,27 @@ mod tests {
     #[tokio::test]
     async fn detect_fast_endpoint_jumps_to_live_edge() {
         // Fast endpoint (delivery_delay_chunks=0) behind a live edge.
-        // current=100, highest=5000. probe_id = current + probe_offset where
-        // probe_offset starts at max(0*2, 2) = 2 and DOUBLES each rung (the
-        // offset doubles; `current` is fixed). Probe ids:
-        //   100+2=102, 100+4=104, 100+8=108, 100+16=116, 100+32=132,
-        //   100+64=164, 100+128=228, 100+256=356, 100+512=612, 100+1024=1124,
-        //   100+2048=2148, 100+4096=4196  (12th rung = LAG_PROBE_LADDER_MAX).
-        // All <= 5000 → all exist. Last existing = 4196.
-        // delay_chunks=0 → target = max(4196-0, 101) = 4196.
-        // Asserts it jumps FORWARD toward the live edge, not stays at 100.
+        // current=100, highest=5000. probe_offset starts at
+        // LAG_PROBE_FAST_FIRST_RUNG (2) and DOUBLES each rung, so the probe ids
+        // are 102, 104, 108, 116, 132, 164, 228, 356, 612, 1124, 2148, 4196,
+        // 8292(miss). The ladder brackets the edge in (4196, 8292], then the
+        // #294 binary refine pins it EXACTLY at 5000.
+        // delay_chunks=0 → target = 5000, which is > current → jump.
+        //
+        // Before #294 this asserted Some(4196) — the last power-of-two rung the
+        // ladder happened to hit under a 12-rung cap. That was an artifact of
+        // the probe geometry, not the live edge; the endpoint was left ~800
+        // chunks short of live with no further correction until the next cycle.
+        // Pinning the true edge is strictly more correct.
         let f = MockFetcher {
             highest_existing: 5000,
             probe_count: AtomicU32::new(0),
         };
-        let r = detect_lag_and_jump(&f, 100, 0).await;
+        let r = detect_lag_and_jump(&f, 100, 0, true).await;
         assert_eq!(
             r,
-            Some(4196),
-            "fast endpoint must jump forward to highest-found chunk (live edge)"
+            Some(5000),
+            "fast endpoint must jump forward to the ACTUAL live edge"
         );
     }
 
@@ -244,7 +373,7 @@ mod tests {
             highest_existing: 100,
             probe_count: AtomicU32::new(0),
         };
-        assert_eq!(detect_lag_and_jump(&f, 100, 0).await, None);
+        assert_eq!(detect_lag_and_jump(&f, 100, 0, true).await, None);
         // Only the first probe (at 102) was issued before the ladder broke.
         assert_eq!(f.probe_count.load(Ordering::SeqCst), 1);
     }
@@ -278,7 +407,7 @@ mod tests {
                 highest_existing: live_edge,
                 probe_count: AtomicU32::new(0),
             };
-            let jumped = detect_lag_and_jump(&f, 100, delay)
+            let jumped = detect_lag_and_jump(&f, 100, delay, true)
                 .await
                 .unwrap_or_else(|| panic!("drift of {lag} chunks (blind band) was not corrected"));
             assert!(
@@ -310,7 +439,7 @@ mod tests {
                 probe_count: AtomicU32::new(0),
             };
             assert_eq!(
-                detect_lag_and_jump(&f, 100, delay).await,
+                detect_lag_and_jump(&f, 100, delay, true).await,
                 None,
                 "a fast endpoint {lag} chunks behind live with a {delay}-chunk target \
                  must NOT jump — the buffer is never nibbled"
@@ -328,11 +457,11 @@ mod tests {
         let mut iters = 0u32;
         // Call < LAG_PROBE_INTERVAL_ITERS times: no probe.
         for _ in 0..(LAG_PROBE_INTERVAL_ITERS - 1) {
-            maybe_jump(&f, &mut chunk_id, 60, 120_000, &mut iters, "test").await;
+            maybe_jump(&f, &mut chunk_id, 60, 120_000, &mut iters, "test", false).await;
         }
         assert_eq!(f.probe_count.load(Ordering::SeqCst), 0);
         // Hit the threshold: ladder runs.
-        maybe_jump(&f, &mut chunk_id, 60, 120_000, &mut iters, "test").await;
+        maybe_jump(&f, &mut chunk_id, 60, 120_000, &mut iters, "test", false).await;
         assert!(f.probe_count.load(Ordering::SeqCst) > 0);
         // Counter resets to 0 after firing.
         assert_eq!(iters, 0);
@@ -351,7 +480,7 @@ mod tests {
         let mut chunk_id = 100;
         // One call short of the interval: this call fires the probe.
         let mut iters = LAG_PROBE_INTERVAL_ITERS - 1;
-        maybe_jump(&f, &mut chunk_id, 0, 0, &mut iters, "test").await;
+        maybe_jump(&f, &mut chunk_id, 0, 0, &mut iters, "test", true).await;
         assert!(
             f.probe_count.load(Ordering::SeqCst) > 0,
             "fast endpoint must probe for the live edge"
@@ -373,7 +502,7 @@ mod tests {
         };
         let mut chunk_id = 100;
         let mut iters = LAG_PROBE_INTERVAL_ITERS - 1;
-        maybe_jump(&f, &mut chunk_id, 0, 0, &mut iters, "test").await;
+        maybe_jump(&f, &mut chunk_id, 0, 0, &mut iters, "test", true).await;
         // Probe issued (interval reached), but no forward jump.
         assert!(f.probe_count.load(Ordering::SeqCst) > 0);
         assert_eq!(chunk_id, 100, "fast endpoint at live edge stays put");

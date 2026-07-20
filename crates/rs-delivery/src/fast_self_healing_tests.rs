@@ -138,15 +138,30 @@ async fn test_fast_endpoint_producer_trails_live_edge() {
     // and asserts the producer's highest requested chunk_id stays strictly
     // below the live edge after the lag-probe fires (a buffer was built) and
     // that it JUMPED forward (did not replay the whole backlog one-by-one).
+    //
+    // #294 note on the setup: this test used to let GET reach the live edge
+    // too, and its margin came purely from the ladder's COARSENESS — the old
+    // exponential ladder reported the last power-of-two rung it hit (~8292),
+    // which happened to sit far below the frozen 30_000 edge, so the producer
+    // could not read that far within the window. That was an accident of the
+    // probe geometry, not evidence of a buffer. #294 pins the live edge
+    // EXACTLY (binary refine), so the jump now lands on `edge - delay_chunks`
+    // — the real invariant — and the accidental margin is gone. The setup
+    // below therefore uses the purpose-built `with_head_edge`: HEAD (the
+    // lag-probe ladder) sees the live edge at 30_000 while GET stalls below
+    // it, which PINS the producer's read position to the lag-probe's jump
+    // target so the buffer can be observed directly instead of inferred.
     let live_edge: i64 = 30_000;
-    // All chunks exist and are available from t=0; the producer is "behind"
-    // the live edge purely because it reads at 1x + the injected latency.
+    // GET stalls here — below the jump target — so the producer parks on the
+    // lag-probe's target instead of draining the frozen backlog past it.
+    let get_available_up_to: i64 = 29_000;
     let chunks: Vec<(i64, Vec<u8>)> = (1..=live_edge).map(|i| (i, vec![0u8; 4])).collect();
     // 50ms per fetch simulates real S3 GET/HEAD latency. Each fetch advances
     // virtual time, so the producer reads at a bounded rate well below the
     // far-ahead live edge.
-    let fetcher =
-        TimedMockFetcher::new(chunks, live_edge).with_latency(std::time::Duration::from_millis(50));
+    let fetcher = TimedMockFetcher::new(chunks, get_available_up_to)
+        .with_head_edge(live_edge)
+        .with_latency(std::time::Duration::from_millis(50));
     let max_fetched = fetcher.max_fetched_id();
 
     let (tx, mut rx) = mpsc::channel::<PrefetchedChunk>(PREFETCH_BUFFER_SIZE);
@@ -172,10 +187,9 @@ async fn test_fast_endpoint_producer_trails_live_edge() {
     ));
 
     // Drive virtual time. With 50ms/fetch latency, ~12s of advance lets the
-    // producer read > LAG_PROBE_INTERVAL_ITERS (30) chunks, fire the lag-probe
-    // once, jump forward by the ladder window (~8k chunks), and keep reading.
-    // It stays far below the 30_000 live edge so the trailing assertion holds
-    // deterministically (it cannot collapse onto the edge in this window).
+    // producer read > LAG_PROBE_INTERVAL_ITERS (30) chunks, fire the lag-probe,
+    // and jump to `live_edge - delay_chunks`. GET stalls below that target, so
+    // the read position parks there for the rest of the window.
     for _ in 0..1200 {
         tokio::time::advance(std::time::Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
@@ -183,13 +197,20 @@ async fn test_fast_endpoint_producer_trails_live_edge() {
 
     let observed = max_fetched.load(Ordering::Relaxed);
     assert!(
-        observed > 1,
+        observed > 1_000,
         "fast endpoint must JUMP forward toward live (skip backlog), got {observed}"
     );
+    // The core invariant, now asserted directly rather than inferred from the
+    // ladder's coarseness: the read pointer trails the live edge by AT LEAST
+    // the controller's floor delay (5s / 2s chunks = 2 chunks). A larger gap is
+    // fine and expected — starving here ratchets the controller UP, which only
+    // moves the jump target FURTHER behind the edge (#294 ratchet-up-only).
+    const FLOOR_DELAY_CHUNKS: i64 = 2;
     assert!(
-        observed < live_edge,
-        "fast endpoint must read BEHIND the live edge (built a buffer); \
-         observed read position {observed} reached the edge {live_edge}"
+        live_edge - observed >= FLOOR_DELAY_CHUNKS,
+        "fast endpoint must read BEHIND the live edge by at least the \
+         controller floor ({FLOOR_DELAY_CHUNKS} chunks); observed read position \
+         {observed} vs edge {live_edge}"
     );
 
     let _ = stop_tx.send(true);
@@ -311,12 +332,13 @@ async fn test_controller_grow_makes_lag_jump_trail_edge() {
     let mut ctrl = crate::fast_delay::FastDelayController::new(now);
 
     let current: i64 = 100;
-    // Edge chosen so BOTH the floor-delay and grown-delay probe ladders land
-    // their highest existing rung on exactly the same chunk (8292), isolating
-    // the delay's effect on the gap. The exponential ladder breaks at the
-    // first missing probe, so the block must be contiguous up to the edge.
-    //   floor (offset seed 4):  104,108,116,132,164,228,356,612,1124,2148,4196,8292 → last=8292 (12-rung cap)
-    //   grown (offset seed 64): 164,228,356,612,1124,2148,4196,8292,16484(miss)      → last=8292
+    // Contiguous chunk block up to the edge. Since #294 a FAST endpoint's
+    // ladder starts at a small constant rung and then BINARY-REFINES between
+    // the last hit and the first miss, so it pins the true edge (8292) exactly
+    // — independent of the delay. Both the floor and grown probes therefore
+    // resolve the same edge, isolating the delay's effect on the gap.
+    //   offsets 2,4,8,...,8192 → 102,104,...,8292 all hit; 16484 misses;
+    //   refine narrows (8292, 16484] → last existing = 8292.
     let edge: i64 = 8292;
     let chunks: Vec<(i64, Vec<u8>)> = (1..=edge).map(|i| (i, vec![0u8; 1])).collect();
     let fetcher = TimedMockFetcher::new(chunks, edge); // 2000ms chunks
@@ -325,9 +347,10 @@ async fn test_controller_grow_makes_lag_jump_trail_edge() {
     // highest-found chunk (the live edge) by exactly 2.
     let floor_chunks = ctrl.delay_chunks(2000);
     assert_eq!(floor_chunks, 2, "floor 5s / 2s chunks = 2 chunks");
-    let floor_target = crate::producer_lag::detect_lag_and_jump(&fetcher, current, floor_chunks)
-        .await
-        .expect("chunks exist far ahead → a jump target");
+    let floor_target =
+        crate::producer_lag::detect_lag_and_jump(&fetcher, current, floor_chunks, true)
+            .await
+            .expect("chunks exist far ahead → a jump target");
     assert_eq!(floor_target, edge - 2, "floor target trails the edge by 2");
 
     // Starvation: a 60s deficit grows the controller to 65s (deficit + margin).
@@ -336,9 +359,10 @@ async fn test_controller_grow_makes_lag_jump_trail_edge() {
     let grown_chunks = ctrl.delay_chunks(2000); // 65000 / 2000 = 32 chunks
     assert_eq!(grown_chunks, 32);
 
-    let grown_target = crate::producer_lag::detect_lag_and_jump(&fetcher, current, grown_chunks)
-        .await
-        .expect("chunks exist far ahead → a jump target");
+    let grown_target =
+        crate::producer_lag::detect_lag_and_jump(&fetcher, current, grown_chunks, true)
+            .await
+            .expect("chunks exist far ahead → a jump target");
     assert_eq!(
         grown_target,
         edge - 32,
