@@ -185,15 +185,14 @@ pub(crate) async fn detect_lag_and_jump<F: ChunkFetcher>(
 /// Bumps the counter; every `LAG_PROBE_INTERVAL_ITERS` invocations it
 /// runs the ladder probe and (if lag detected) updates `chunk_id`.
 ///
-/// `delivery_delay_ms` is no longer a short-circuit: fast endpoints
-/// (`delivery_delay_ms == 0`) probe too, so they can jump to the live edge
-/// after an outage. The parameter is kept only for tracing context / future
-/// use; the jump target is fully determined by `delivery_delay_chunks`.
+/// Fast endpoints probe too (they must jump to the live edge after an outage),
+/// so there is no short-circuit here; the jump target is fully determined by
+/// `delivery_delay_chunks` and `is_fast`. The former `delivery_delay_ms`
+/// parameter was already unused and is dropped (#294).
 pub(crate) async fn maybe_jump<F: ChunkFetcher>(
     fetcher: &F,
     chunk_id: &mut i64,
     delivery_delay_chunks: i64,
-    _delivery_delay_ms: u64,
     iters: &mut u32,
     alias: &str,
     is_fast: bool,
@@ -457,11 +456,11 @@ mod tests {
         let mut iters = 0u32;
         // Call < LAG_PROBE_INTERVAL_ITERS times: no probe.
         for _ in 0..(LAG_PROBE_INTERVAL_ITERS - 1) {
-            maybe_jump(&f, &mut chunk_id, 60, 120_000, &mut iters, "test", false).await;
+            maybe_jump(&f, &mut chunk_id, 60, &mut iters, "test", false).await;
         }
         assert_eq!(f.probe_count.load(Ordering::SeqCst), 0);
         // Hit the threshold: ladder runs.
-        maybe_jump(&f, &mut chunk_id, 60, 120_000, &mut iters, "test", false).await;
+        maybe_jump(&f, &mut chunk_id, 60, &mut iters, "test", false).await;
         assert!(f.probe_count.load(Ordering::SeqCst) > 0);
         // Counter resets to 0 after firing.
         assert_eq!(iters, 0);
@@ -480,7 +479,7 @@ mod tests {
         let mut chunk_id = 100;
         // One call short of the interval: this call fires the probe.
         let mut iters = LAG_PROBE_INTERVAL_ITERS - 1;
-        maybe_jump(&f, &mut chunk_id, 0, 0, &mut iters, "test", true).await;
+        maybe_jump(&f, &mut chunk_id, 0, &mut iters, "test", true).await;
         assert!(
             f.probe_count.load(Ordering::SeqCst) > 0,
             "fast endpoint must probe for the live edge"
@@ -502,7 +501,7 @@ mod tests {
         };
         let mut chunk_id = 100;
         let mut iters = LAG_PROBE_INTERVAL_ITERS - 1;
-        maybe_jump(&f, &mut chunk_id, 0, 0, &mut iters, "test", true).await;
+        maybe_jump(&f, &mut chunk_id, 0, &mut iters, "test", true).await;
         // Probe issued (interval reached), but no forward jump.
         assert!(f.probe_count.load(Ordering::SeqCst) > 0);
         assert_eq!(chunk_id, 100, "fast endpoint at live edge stays put");

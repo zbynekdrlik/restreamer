@@ -198,7 +198,6 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     &fetcher,
                     &mut chunk_id,
                     delivery_delay_chunks,
-                    delivery_delay_ms,
                     &mut iters_since_lag_probe,
                     &alias,
                     is_fast,
