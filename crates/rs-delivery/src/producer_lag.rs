@@ -250,6 +250,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fast_endpoint_corrects_blind_band_drift_without_lowering_the_buffer() {
+        // #294 review finding 3 — RED repro of the LADDER BLIND BAND.
+        //
+        // The ladder's first rung sits at `2 * delivery_delay_chunks` ahead of
+        // the read pointer. So a drift of between 1x and 2x the delay is
+        // invisible: the first probe lands PAST the live edge, misses, and the
+        // ladder breaks without ever detecting that we are behind.
+        //
+        // Before #294 this was masked: the healthy-shrink kept walking
+        // `delivery_delay_chunks` back down toward the floor, which shrank the
+        // first rung until it re-entered the existing chunks and re-armed the
+        // ladder. #294 removed the shrink (it was the cause of the repeated
+        // stuttering), so for a ratcheted fast endpoint the ladder now NEVER
+        // re-arms and the delivered latency can sit anywhere in [1x, 2x) of the
+        // held target indefinitely.
+        //
+        // A fast endpoint ratcheted to 15 chunks (~30s at 2s chunks) that has
+        // drifted 16..29 chunks behind the live edge must be pulled back to its
+        // target — and, per the operator's hard constraint ("nemozes skakat s
+        // buffrom hore dole"), the correction must NEVER leave it closer to the
+        // live edge than the ratcheted target.
+        let delay = 15_i64;
+        for lag in [16_i64, 20, 22, 29] {
+            let live_edge = 100 + lag;
+            let f = MockFetcher {
+                highest_existing: live_edge,
+                probe_count: AtomicU32::new(0),
+            };
+            let jumped = detect_lag_and_jump(&f, 100, delay)
+                .await
+                .unwrap_or_else(|| panic!("drift of {lag} chunks (blind band) was not corrected"));
+            assert!(
+                jumped > 100,
+                "correction must move the read pointer FORWARD (lag {lag}, got {jumped})"
+            );
+            assert!(
+                live_edge - jumped >= delay,
+                "must never land closer to the live edge than the ratcheted target \
+                 (lag {lag}: jumped to {jumped}, live edge {live_edge}, target {delay})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_endpoint_at_its_target_does_not_nibble_the_buffer() {
+        // Safety guard for the blind-band fix: a HEALTHY fast endpoint sitting
+        // exactly at its ratcheted target must not jump at all. Re-arming the
+        // ladder means it now probes chunks that DO exist just ahead, so a
+        // naive "always step forward at least one chunk" clamp would shave a
+        // chunk off the buffer on every probe cycle and walk the endpoint back
+        // to the fragile live edge — exactly the shrink behaviour #294 removed.
+        let delay = 15_i64;
+        // `lag` = how far the read pointer trails the live edge. At or inside
+        // the ratcheted target (lag <= delay) there is nothing to correct.
+        for lag in [0_i64, 1, 8, 14, 15] {
+            let f = MockFetcher {
+                highest_existing: 100 + lag,
+                probe_count: AtomicU32::new(0),
+            };
+            assert_eq!(
+                detect_lag_and_jump(&f, 100, delay).await,
+                None,
+                "a fast endpoint {lag} chunks behind live with a {delay}-chunk target \
+                 must NOT jump — the buffer is never nibbled"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn maybe_jump_does_not_probe_until_interval_reached() {
         let f = MockFetcher {
             highest_existing: 1_000_000,
