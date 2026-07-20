@@ -14,6 +14,7 @@ Load the relevant skill BEFORE working on these areas:
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
 - OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`
 - Outage survival, rescue clip, keepalive, notification UX → `.claude/skills/outage-rescue`
+- Compile / test / clippy / frontend-E2E (dev1 Tier-0 → build on dev2) → `.claude/skills/dev2-build-verify`
 
 ## Project Structure
 

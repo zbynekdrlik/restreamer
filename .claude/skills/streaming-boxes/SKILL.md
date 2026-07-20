@@ -151,3 +151,36 @@ DELETE /api/v1/events/{id}
 | `obs_media` | SaveScreenshot, StartVirtualCamera, StopVirtualCamera |
 
 Use these OBS MCP tools instead of python obsws_python hacks via win-stream-snv Shell.
+
+## Adding a status field to the delivery-status wire (rs-delivery → dashboard)
+
+An endpoint status field the operator dashboard shows travels a specific
+ADDITIVE chain. To add one, copy `av_skew_ms` — NOT `producer_active`
+(`producer_active` DEAD-ENDS in rs-api and never reaches the frontend). Touch
+points, source → UI:
+
+1. `rs-delivery` `BufferState`/`EndpointStats` → add an accessor on
+   `EndpointHandle` (mirror `producer_active()`), then the field to
+   `EndpointStatusEntry` (`crates/rs-delivery/src/api.rs`) + populate it in the
+   `/api/status` construction. Use `#[serde(skip_serializing_if =
+   "Option::is_none")]` for optional fields so an older host tolerates absence.
+2. `rs-api` `EndpointDeliveryStatus` (`crates/rs-api/src/delivery_status.rs`):
+   the struct is NOT `#[derive(Deserialize)]` — it's parsed field-by-field from
+   a `serde_json::Value` (`entry["name"].as_…()`). Add the field, the parse
+   line, the struct-literal push, AND the map into `DeliveryEndpointMetrics`
+   (the same function's `poll_delivery_metrics`) — that last step is the one
+   `producer_active` skips, and is REQUIRED to reach the frontend.
+3. `rs-core` `DeliveryEndpointMetrics` (`crates/rs-core/src/models.rs`): add the
+   field. **No `Default` derive** — EVERY struct literal must list it. There are
+   ~13 across `rs-api` (lib.rs ×2, stream_handlers, status_summary, the test
+   helpers, tests/api_integration) and `rs-core` (6 in-file test literals);
+   placeholders use `None`. `grep -rn "DeliveryEndpointMetrics {"` to find them.
+4. `leptos-ui`: add to `WsDeliveryEndpoint` (ws.rs), `CachedDeliveryEndpoint`
+   (api.rs) — both `#[derive(Deserialize)]` with `#[serde(default)]` —
+   `DeliveryEndpointState` (store.rs), and BOTH hand-mapping sites in ws.rs
+   (`load_initial_state` + the `DeliveryStatus` WS arm).
+
+Per-endpoint display numbers are capped in `delivery_status.rs`
+(`cap_endpoint_delay_secs`) — a fast endpoint's delay is capped at
+`FAST_ENDPOINT_DELAY_CAP_SECS` (120s since #295, was 30s). If a legitimate value
+"can't show above N", that cap is why.

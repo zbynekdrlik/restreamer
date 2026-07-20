@@ -52,3 +52,14 @@ Terse per-issue record of autonomous autopilot work (decisions, SHAs, RED→GREE
 - **#287 (no label) — CI gate:** `fix(ci)` `aa73d4cc`. Phase 2 of the crash-exhaustion gate iterated `foreach ($ep in $st.endpoints)` with no non-empty guard → vacuous pass on empty endpoints. Now iterates pre-kill `$aliases` with a count guard on `$st.endpoints`. ASCII-only PowerShell. `[no-test]` (CI YAML gate = the test).
 - **Version:** dev already 0.29.1 (all 4 files) > main 0.29.0 — no bump.
 - **PR:** dev->main batch, body Closes #289 #288 #287. (SHAs above; log commit + PR/CI ids appended in the completion evidence.)
+
+## 2026-07-20 — #294 + #295 (fast-delay CI round, v0.29.3)
+
+- **Version:** bumped 0.29.2 → 0.29.3 (all 4 files) + Cargo.lock caught up from stale 0.29.0. `b7d70ae1`.
+- **#294 (bug) — lag-ladder re-arm:** RED `b47b17f6` (`fast_endpoint_corrects_blind_band_drift_without_lowering_the_buffer`) → GREEN `f3231f5b`. The ladder's first rung was `2*delay`, so drift in [1x,2x) of the ratcheted target was invisible; the removed healthy-shrink used to re-arm it. Fix: fast endpoints start the ladder at a small constant rung (`LAG_PROBE_FAST_FIRST_RUNG=2`), run more rungs (`LAG_PROBE_FAST_LADDER_MAX=16`) to keep reach, and binary-refine (`pin_live_edge`) to pin the exact edge. Buffer never lowered (`target = max_id - delay`, max_id proven to exist ⇒ ≥ delay behind live). Delayed endpoints unchanged (skipping their content would be a jump-cut). Param cleanup `390b749f` (drop dead `delivery_delay_ms` to clear clippy too_many_arguments).
+- **#294 respawn integration test:** `587068b2` — drives a FAST endpoint through a real #237 producer panic via `endpoint_loop`/`PanicOnceFetcher`, asserts `fast_delay_target_secs` survives. Mutation-verified on dev2: drop seed `.load()` → 5s FAIL; drop grow `.store()` → 0s FAIL.
+- **#294 review finding 2 (bounded gentle decay): NOT implemented** — operator explicitly forbade any downward buffer movement (issue comment 2026-07-20). Decay = the `on_healthy` shrink that caused the original bug.
+- **#295 (bug) — dashboard RED for a held ratchet:** RED `45d4685f` → GREEN `3434f0c7`. Fast bar was `secs>8 ⇒ critical` (assumed 2-5s near-live) while #294 ratchets 5-120s. New `fast_buffer_class(secs, target)` colours RELATIVE to the reported target (≤ target×1.25 healthy, >×2 critical), falls back to old absolute bands when no target. Threaded `fast_delay_target_secs` additively rs-delivery→rs-api→leptos (av_skew_ms path, NOT producer_active). Display cap raised 30→120s. Browser E2E `5517acd8` (2 specs, dev2 frontend suite 102/102).
+- **Filed:** #297 (leptos-ui unused pub-use warnings on wasm build — pre-existing, out of diff).
+- **Playbook:** new `.claude/skills/dev2-build-verify` (dev2 build/test/clippy/frontend-E2E procedure); wire-path gotcha added to `streaming-boxes`.
+- **PR:** dev→main, body Closes #294 #295. (CI run-id + merge SHA appended by supervisor.)
