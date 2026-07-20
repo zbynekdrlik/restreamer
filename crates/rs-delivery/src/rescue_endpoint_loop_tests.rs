@@ -579,6 +579,123 @@ async fn producer_panic_respawns_resumes_and_never_duplicates() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn fast_endpoint_respawn_resumes_at_the_ratcheted_target_not_the_floor() {
+    // #294 — INTEGRATION cover for the respawn wiring in `producer_task`.
+    //
+    // The unit test `fast_delay::seeded_resumes_at_persisted_target_respawn_
+    // survival` drives `FastDelayController::new_seeded` in isolation and never
+    // touches `producer_task` or `BufferState`. So the ACTUAL wiring — the seed
+    // `.load()` at endpoint_producer.rs and the grow-path `.store()`s — was
+    // exercised by no test at all: deleting either would silently restore the
+    // "respawn resets the buffer to the floor and re-starves" regression with
+    // CI green. This test drives a FAST endpoint through a real #237 producer
+    // panic + respawn and closes that gap.
+    //
+    // Why asserting the persisted value is sufficient (and sharp): the store
+    // runs on EVERY successful fetch. So if the respawned producer had started
+    // at the 5s floor instead of seeding from the persisted target, its first
+    // successful fetch would CLOBBER `fast_delay_target_secs` back down to 5.
+    // Observing the ratcheted value SURVIVE a respawn that then fetched more
+    // chunks therefore proves the seed path ran. Both regressions are caught:
+    // drop the `.load()` seed -> value clobbered to the floor; drop the
+    // `.store()` -> value never set (0).
+    let cfg = ep_cfg("fast-respawn", true, PusherKind::Ffmpeg);
+
+    let start_chunk_id: i64 = 1;
+    let stats: Stats = Arc::new(Mutex::new(initial_endpoint_stats(
+        start_chunk_id,
+        "normal".to_string(),
+    )));
+    let buffer_state = Arc::new(BufferState::new());
+    let ring = AuditRing::new(500);
+    let (stop_tx, stop_rx) = watch::channel(false);
+
+    // Ratchet the controller UP before the panic, via the same signal the
+    // consumer's keepalive uses: a measured starvation gap the producer picks
+    // up (swap-to-0) on its next successful fetch. A 40s drain grows the target
+    // to 40 + FAST_DELAY_MARGIN_SECS(5) = 45s, well above the 5s floor.
+    const DRAIN_GAP_MS: u64 = 40_000;
+    const EXPECTED_TARGET_SECS: u64 = 45;
+    buffer_state
+        .starvation_gap_ms
+        .store(DRAIN_GAP_MS, Ordering::Relaxed);
+
+    let panic_at: i64 = 25;
+    let resume_seen = Arc::new(AtomicI64::new(i64::MIN));
+    let delivered_at_panic = Arc::new(AtomicI64::new(i64::MIN));
+    let sent_at_panic = Arc::new(AtomicI64::new(i64::MIN));
+    let fetcher = PanicOnceFetcher {
+        available_up_to: 60,
+        duration_ms: 2000,
+        panic_at,
+        panicked: Arc::new(AtomicBool::new(false)),
+        resume_seen: resume_seen.clone(),
+        delivered_at_panic: delivered_at_panic.clone(),
+        sent_at_panic: sent_at_panic.clone(),
+        stats: stats.clone(),
+        buffer_state: buffer_state.clone(),
+    };
+
+    let delivered = Arc::new(Mutex::new(Vec::<i64>::new()));
+    let factory = RecordingProcessFactory {
+        delivered: delivered.clone(),
+    };
+
+    let stats_task = stats.clone();
+    let bs_task = buffer_state.clone();
+    let ring_task = ring.clone();
+    let handle = tokio::spawn(async move {
+        endpoint_loop(
+            fetcher,
+            factory,
+            cfg,
+            start_chunk_id,
+            0, // no warmup
+            stop_rx,
+            stats_task,
+            None,
+            bs_task,
+            Some(ring_task),
+        )
+        .await;
+    });
+
+    for _ in 0..2000 {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        if stats.lock().await.current_chunk_id >= panic_at + 5 {
+            break;
+        }
+    }
+
+    let _ = stop_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    // The respawn arm actually ran — otherwise the assertion below is vacuous.
+    assert!(
+        producer_respawned(&ring),
+        "#294: the fast producer panic must reach the respawn arm"
+    );
+    // And the respawned producer fetched past the panic point, so it DID run
+    // its grow-path store at least once after respawning.
+    assert!(
+        stats.lock().await.current_chunk_id >= panic_at,
+        "#294: delivery must resume past the panic point so the respawned \
+         producer's store path actually runs"
+    );
+
+    let persisted = buffer_state.fast_delay_target_secs.load(Ordering::Relaxed);
+    assert_eq!(
+        persisted, EXPECTED_TARGET_SECS,
+        "#294: the ratcheted read-delay target must SURVIVE a producer respawn. \
+         Got {persisted}s, expected {EXPECTED_TARGET_SECS}s. A value of 5 means \
+         the respawned controller reset to the floor (the seed `.load()` is \
+         gone) and would re-starve mid-event; 0 means the grow-path `.store()` \
+         is gone."
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn producer_panic_before_any_delivery_resumes_at_start() {
     // FIX 3 — first-death off-by-one. Panic on the VERY FIRST fetch
     // (panic_at == start_chunk_id), before any chunk is delivered. `stats` is
