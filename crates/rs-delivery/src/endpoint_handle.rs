@@ -104,6 +104,22 @@ impl EndpointHandle {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// #294/#295: the fast endpoint's current ratcheted read-delay target
+    /// (seconds), or `None` for a non-fast endpoint / before the first
+    /// producer fetch. Surfaced on the dashboard so a HELD ratcheted buffer
+    /// renders healthy relative to its own target instead of tripping a stale
+    /// absolute 8s ceiling (#295). 0 = unset -> `None`.
+    pub fn fast_delay_target_secs(&self) -> Option<u64> {
+        match self
+            .buffer_state
+            .fast_delay_target_secs
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => None,
+            v => Some(v),
+        }
+    }
+
     pub fn start_chunk_id(&self) -> i64 {
         self.start_chunk_id
     }

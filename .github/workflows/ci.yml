@@ -337,7 +337,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install trunk and wasm-bindgen-cli
         run: |
-          cargo install trunk wasm-bindgen-cli
+          # --locked: build each tool with ITS committed Cargo.lock. Without it,
+          # cargo install resolves transitive deps fresh at install time — a new
+          # incompatible release (lightningcss vs cssparser, run 29764745978,
+          # 61 compile errors) breaks EVERY push with no change on our side.
+          cargo install trunk wasm-bindgen-cli --locked
       - name: Install binaryen (wasm-opt)
         shell: pwsh
         run: |
@@ -783,8 +787,10 @@ jobs:
           key: trunk-wasm-bindgen-${{ runner.os }}
       - name: Install trunk and wasm-bindgen-cli
         run: |
-          command -v trunk || cargo install trunk
-          command -v wasm-bindgen || cargo install wasm-bindgen-cli
+          # --locked: see the Tauri job's install step — unpinned transitive
+          # deps broke trunk's own compile (lightningcss, run 29764745978).
+          command -v trunk || cargo install trunk --locked
+          command -v wasm-bindgen || cargo install wasm-bindgen-cli --locked
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: leptos-ui

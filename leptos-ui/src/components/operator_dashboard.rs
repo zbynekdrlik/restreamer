@@ -17,7 +17,7 @@ use super::upload_strip::UploadStrip;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
 use crate::store::{DashboardStore, EndpointLifecycle};
-use crate::utils::cache_threshold_for_service;
+use crate::utils::{cache_threshold_for_service, fast_buffer_class};
 
 /// Minimum seconds the RTMP publisher must be connected before the
 /// operator can start delivery. Mirrors
@@ -875,20 +875,35 @@ fn EndpointTree() -> impl IntoView {
                                     // endpoints want the bar to fill to the target buffer (~120s).
                                     // See spec docs/superpowers/specs/2026-05-11-cache-metric-and-start-reset-design.md.
                                     let (cache_secs, target_label, progress, bar_class) = if ep.is_fast {
-                                        // Fast endpoint UX: "Xs / live cache". Bar fill proportional
-                                        // to lag / 8s ceiling (so a healthy 2s reads as a thin green
-                                        // sliver, not an empty bar). Threshold: healthy <=5s, critical
-                                        // >8s, warning otherwise.
+                                        // Fast endpoint UX (#295): the #294 controller RATCHETS the
+                                        // read-delay up on a real drain and then HOLDS it for the
+                                        // session, anywhere in 5..=120s. So the bar is measured
+                                        // against the endpoint's OWN ratcheted target, not the stale
+                                        // absolute 8s ceiling that assumed a 2-5s near-live buffer
+                                        // and painted a correctly-held 30s buffer permanently red.
+                                        // Full green bar = tracking its target = working as designed.
+                                        // Falls back to the old absolute bands when the VPS binary
+                                        // is too old to report a target.
                                         let secs = ep.chunk_delay_secs;
-                                        let prog = (secs / 8.0).clamp(0.0, 1.0);
-                                        let class_ = if secs > 8.0 {
-                                            "buffer-bar-fill critical"
-                                        } else if secs <= 5.0 {
-                                            "buffer-bar-fill healthy"
-                                        } else {
-                                            "buffer-bar-fill warning"
+                                        let target = ep.fast_delay_target_secs
+                                            .filter(|t| *t > 0)
+                                            .map(|t| t as f64);
+                                        let prog = match target {
+                                            Some(t) => (secs / t).clamp(0.0, 1.0),
+                                            None => (secs / 8.0).clamp(0.0, 1.0),
                                         };
-                                        (secs, "live".to_string(), prog, class_)
+                                        let class_ = match fast_buffer_class(secs, target) {
+                                            "critical" => "buffer-bar-fill critical",
+                                            "warning" => "buffer-bar-fill warning",
+                                            _ => "buffer-bar-fill healthy",
+                                        };
+                                        // Surface the target so a held buffer reads as
+                                        // healthy-by-design rather than an unexplained number.
+                                        let label = match target {
+                                            Some(t) => format!("{}s target", t as u64),
+                                            None => "live".to_string(),
+                                        };
+                                        (secs, label, prog, class_)
                                     } else {
                                         // Non-fast: prefer per-endpoint chunk_delay_secs so each
                                         // endpoint's bar shows ITS own buffer depth (regression

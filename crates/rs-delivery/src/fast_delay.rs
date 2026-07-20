@@ -15,9 +15,25 @@
 //! This controller makes the fast endpoint's read-delay ADAPTIVE: it grows
 //! when the producer starves (so the live-edge lag-probe jumps to
 //! `live_edge - delay` and leaves a buffer instead of yanking back to the
-//! edge) and shrinks slowly when healthy (chasing the lowest working
-//! latency). It NEVER speeds up the push — it only changes which chunk the
+//! edge). It NEVER speeds up the push — it only changes which chunk the
 //! producer reads next. See the design doc for the full rationale.
+//!
+//! ## RATCHET-UP ONLY — no shrink within a session (#294, operator decision
+//! 2026-07-17)
+//!
+//! The controller previously ALSO shrank slowly back toward the floor while
+//! healthy. On a live event that caused the exact failure the operator
+//! reported: after a drain grew the buffer, the periodic shrink pulled it
+//! back toward the fragile live edge, which re-starved, which grew it again
+//! — the buffer bounced up and down for hours and the fast stream stuttered
+//! REPEATEDLY (visible YouTube buffering). Bouncing the delay itself hurts
+//! smoothness. The operator's model: a fast endpoint starts at the lowest
+//! buffer; a single/occasional stutter is fine; on a real drain it raises
+//! the buffer and then **HOLDS** it — a few early stutters while it climbs to
+//! the size this event's jitter needs, then smooth for the rest of the round.
+//! No shrink-back, no oscillation. The near-live minimum is re-established on
+//! the NEXT session (a fresh event / VPS spin-up constructs a fresh
+//! controller starting at the floor), not by ratcheting down mid-session.
 
 use std::time::Instant;
 
@@ -40,7 +56,8 @@ pub struct FastDelayController {
     margin: u64,
     shrink_step: u64,
     healthy_shrink_secs: u64,
-    /// Wall-clock of the last grow OR shrink; gates the next shrink.
+    /// Wall-clock of the last change. Retained for controller
+    /// introspection; no longer gates anything (#294 removed the shrink).
     last_change: Instant,
 }
 
@@ -55,6 +72,18 @@ impl FastDelayController {
             FAST_HEALTHY_SHRINK_SECS,
             now,
         )
+    }
+
+    /// Production constructor seeded from a previously-ratcheted target
+    /// (#294 respawn survival). `seed_secs` is the last persisted target
+    /// (0 = none) — a #237 producer respawn passes the value persisted on
+    /// the shared `BufferState` so the ratcheted buffer is NOT discarded
+    /// mid-session. The seed is clamped into `[floor, ceiling]`; a 0/low
+    /// seed simply yields the floor (identical to `new`).
+    pub fn new_seeded(seed_secs: u64, now: Instant) -> Self {
+        let mut c = Self::new(now);
+        c.target_secs = seed_secs.clamp(c.floor, c.ceiling);
+        c
     }
 
     /// Test/explicit constructor.
@@ -101,21 +130,18 @@ impl FastDelayController {
         }
     }
 
-    /// Called while chunks are flowing normally. After `healthy_shrink_secs`
-    /// with no change, shrink one step toward the floor. Returns
-    /// `Some((from, to))` when the target changed.
-    pub fn on_healthy(&mut self, now: Instant) -> Option<(u64, u64)> {
-        if self.target_secs <= self.floor {
-            return None;
-        }
-        if now.duration_since(self.last_change).as_secs() < self.healthy_shrink_secs {
-            return None;
-        }
-        let from = self.target_secs;
-        let next = from.saturating_sub(self.shrink_step).max(self.floor);
-        self.target_secs = next;
-        self.last_change = now;
-        Some((from, next))
+    /// Called while chunks are flowing normally.
+    ///
+    /// RATCHET-UP ONLY (#294): this is now a NO-OP and never shrinks. Shrinking
+    /// back toward the floor mid-session pulled the fast endpoint to the
+    /// fragile live edge and re-starved it, producing the repeated stuttering
+    /// / buffer-bouncing the operator observed on 2026-07-17. The buffer is
+    /// held at whatever level a real drain required for this session; the
+    /// near-live minimum is re-established only by a fresh session (new
+    /// controller at the floor). Kept as a method so the call site is
+    /// unchanged; always returns `None`.
+    pub fn on_healthy(&mut self, _now: Instant) -> Option<(u64, u64)> {
+        None
     }
 
     /// Current target expressed in chunks, for the live-edge lag-probe.
@@ -143,6 +169,32 @@ mod tests {
     }
 
     #[test]
+    fn seeded_resumes_at_persisted_target_respawn_survival() {
+        // #294 respawn survival: a producer respawn re-seeds the controller
+        // from the target persisted on the shared BufferState so the
+        // ratcheted buffer is NOT reset to the floor mid-session (which would
+        // re-starve and reintroduce the repeated stuttering the hotfix
+        // eliminates).
+        let now = Instant::now();
+        // Session climbed to 34s; respawn re-seeds there, not at the 5s floor.
+        assert_eq!(FastDelayController::new_seeded(34, now).target_secs(), 34);
+        // Unset / no prior ratchet (0) yields the floor — identical to `new`.
+        assert_eq!(FastDelayController::new_seeded(0, now).target_secs(), 5);
+        // A seed below the floor clamps up to the floor.
+        assert_eq!(FastDelayController::new_seeded(2, now).target_secs(), 5);
+        // A seed above the ceiling clamps down to the ceiling.
+        assert_eq!(
+            FastDelayController::new_seeded(9999, now).target_secs(),
+            120
+        );
+        // After re-seeding, the ratchet-up invariant still holds: a smaller
+        // later drain cannot lower it.
+        let mut c = FastDelayController::new_seeded(34, now);
+        assert_eq!(c.on_starvation(10, now), None);
+        assert_eq!(c.target_secs(), 34);
+    }
+
+    #[test]
     fn grows_to_deficit_plus_margin() {
         let now = Instant::now();
         let mut c = ctrl(now);
@@ -152,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn grow_is_monotonic_until_shrink() {
+    fn grow_is_monotonic() {
         let now = Instant::now();
         let mut c = ctrl(now);
         c.on_starvation(20, now); // -> 25
@@ -183,30 +235,39 @@ mod tests {
     }
 
     #[test]
-    fn shrink_only_after_healthy_window() {
+    fn healthy_never_shrinks_ratchet_holds_for_whole_session() {
+        // #294 regression (live event 2026-07-17): after a drain grew the
+        // buffer, the periodic healthy-shrink pulled it back toward the
+        // fragile live edge, which re-starved and re-grew it — the buffer
+        // bounced up/down for hours and the fast stream stuttered
+        // REPEATEDLY. Operator decision: ratchet UP only; once raised, HOLD
+        // for the rest of the session, no matter how long it stays healthy.
         let base = Instant::now();
         let mut c = ctrl(base);
         c.on_starvation(40, base); // -> 45 at t=0
-        // before window: no shrink
-        assert_eq!(c.on_healthy(base + Duration::from_secs(179)), None);
-        // at window: one step down (45 -> 40)
-        assert_eq!(
-            c.on_healthy(base + Duration::from_secs(180)),
-            Some((45, 40))
-        );
-        assert_eq!(c.target_secs(), 40);
+        // No shrink at any horizon: 3 min, 30 min, 3 hours.
+        assert_eq!(c.on_healthy(base + Duration::from_secs(180)), None);
+        assert_eq!(c.on_healthy(base + Duration::from_secs(1800)), None);
+        assert_eq!(c.on_healthy(base + Duration::from_secs(10800)), None);
+        assert_eq!(c.target_secs(), 45, "raised buffer must HOLD, never bounce");
     }
 
     #[test]
-    fn shrink_floors_at_floor() {
+    fn ratchet_climbs_across_repeated_drains_and_holds() {
+        // The expected session shape: a few early stutters climb the buffer
+        // to what this event's jitter needs, then it holds there — later
+        // healthy periods and smaller drains never move it. (Deficits mirror
+        // the real 2026-07-17 freeze gaps: 4s, 18s, 29s.)
         let base = Instant::now();
         let mut c = ctrl(base);
-        c.on_starvation(2, base); // deficit2+margin5=7 -> 7
-        assert_eq!(c.target_secs(), 7);
-        let t = base + Duration::from_secs(180);
-        assert_eq!(c.on_healthy(t), Some((7, 5))); // 7-5=2 -> max(floor)=5
-        // already at floor -> no further shrink
-        assert_eq!(c.on_healthy(t + Duration::from_secs(180)), None);
+        assert_eq!(c.on_starvation(4, base), Some((5, 9))); // 4 + margin 5
+        assert_eq!(c.on_starvation(18, base), Some((9, 23)));
+        assert_eq!(c.on_starvation(29, base), Some((23, 34)));
+        // long healthy stretch: holds
+        assert_eq!(c.on_healthy(base + Duration::from_secs(3600)), None);
+        // a smaller later drain does not lower it
+        assert_eq!(c.on_starvation(10, base + Duration::from_secs(3700)), None);
+        assert_eq!(c.target_secs(), 34);
     }
 
     #[test]

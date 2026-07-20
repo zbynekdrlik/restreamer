@@ -62,10 +62,20 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
     let mut iters_since_lag_probe: u32 = 0;
     // Adaptive read-delay controller — fast endpoints only. Grows the
     // read-delay on starvation (so the live-edge lag-probe leaves a buffer
-    // instead of re-pinning to the edge) and shrinks slowly when healthy.
+    // instead of re-pinning to the edge) and HOLDS it for the session
+    // (#294 ratchet-up only — no healthy-shrink).
     // None for non-fast endpoints → byte-for-byte unchanged behaviour.
+    // Seeded from the target persisted on the shared BufferState so a #237
+    // producer RESPAWN resumes at the already-ratcheted level instead of
+    // resetting to the floor and re-starving (#294 respawn survival).
     let mut fast_delay = if is_fast {
-        Some(FastDelayController::new(std::time::Instant::now()))
+        let seed = buffer_state
+            .fast_delay_target_secs
+            .load(AtomicOrdering::Relaxed);
+        Some(FastDelayController::new_seeded(
+            seed,
+            std::time::Instant::now(),
+        ))
     } else {
         None
     };
@@ -131,12 +141,14 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     let c = (duration_ms as u64).clamp(500, 5000);
                     typical_chunk_dur_ms = (3 * typical_chunk_dur_ms + c) / 4;
                 }
-                // Fast endpoints: read-delay is ADAPTIVE via the controller. On
-                // every healthy fetch we let it opportunistically shrink one step
-                // toward the floor; `delay_chunks()` is always >= 1 so the
-                // live-edge lag-probe trails the edge and keeps a buffer (#232,
-                // adaptive controller). Non-fast endpoints keep the prior exact
-                // math: delay_ms==0 → live edge (0), else >=1 floor. RTMP push
+                // Fast endpoints: read-delay is ADAPTIVE via the controller:
+                // the delay RATCHETS UP on real drains and then HOLDS for the
+                // whole session (#294 — no healthy-shrink: pulling back toward
+                // the edge re-starved and caused repeated stuttering);
+                // `delay_chunks()` is always >= 1 so the live-edge lag-probe
+                // trails the edge and keeps a buffer (#232, adaptive
+                // controller). Non-fast endpoints keep the prior exact math:
+                // delay_ms==0 → live edge (0), else >=1 floor. RTMP push
                 // stays strictly 1× — this only moves the READ pointer.
                 let delivery_delay_chunks: i64 = match fast_delay.as_mut() {
                     Some(ctrl) => {
@@ -171,6 +183,12 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                                 to,
                             );
                         }
+                        // #294 respawn survival: persist the (ratcheted)
+                        // target to the shared BufferState so a producer
+                        // respawn re-seeds at this level, not the floor.
+                        buffer_state
+                            .fast_delay_target_secs
+                            .store(ctrl.target_secs(), AtomicOrdering::Relaxed);
                         ctrl.delay_chunks(typical_chunk_dur_ms)
                     }
                     None if delivery_delay_ms == 0 => 0,
@@ -180,9 +198,9 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     &fetcher,
                     &mut chunk_id,
                     delivery_delay_chunks,
-                    delivery_delay_ms,
                     &mut iters_since_lag_probe,
                     &alias,
+                    is_fast,
                 )
                 .await;
                 tokio::task::yield_now().await;
@@ -267,6 +285,12 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                                 deficit_secs,
                             );
                         }
+                        // #294 respawn survival: persist the ratcheted target
+                        // from the probe-cycle grow path too (mirrors the
+                        // keepalive-gap path above).
+                        buffer_state
+                            .fast_delay_target_secs
+                            .store(ctrl.target_secs(), AtomicOrdering::Relaxed);
                     }
                 } else {
                     let mut s = stats.lock().await;

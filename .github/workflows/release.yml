@@ -83,9 +83,12 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Install Trunk
-        run: cargo install trunk
+        # --locked: unpinned transitive deps broke trunk's compile on CI
+        # (lightningcss vs cssparser, ci run 29764745978) — build with the
+        # tool's committed Cargo.lock instead of fresh resolution.
+        run: cargo install trunk --locked
       - name: Install Tauri CLI
-        run: cargo install tauri-cli
+        run: cargo install tauri-cli --locked
       - name: Set build version and timestamp
         id: build-info
         shell: pwsh

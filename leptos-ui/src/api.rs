@@ -746,6 +746,9 @@ pub struct DeliveryEndpointDetail {
     /// (issue #257).
     #[serde(default)]
     pub av_skew_ms: i64,
+    /// #295: fast endpoint's ratcheted read-delay target (seconds).
+    #[serde(default)]
+    pub fast_delay_target_secs: Option<u64>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -790,6 +793,9 @@ pub struct CachedDeliveryEndpoint {
     /// Content-PTS A/V skew in ms (positive = audio behind video). Issue #257.
     #[serde(default)]
     pub av_skew_ms: i64,
+    /// #295: fast endpoint's ratcheted read-delay target (seconds).
+    #[serde(default)]
+    pub fast_delay_target_secs: Option<u64>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]

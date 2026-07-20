@@ -84,6 +84,7 @@ mod tests {
             ffmpeg_restart_count: 0,
             reconnect_count: 0,
             av_skew_ms: 0,
+            fast_delay_target_secs: None,
             last_error: None,
             is_fast: false,
             delivery_mode: None,

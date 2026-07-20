@@ -2353,6 +2353,158 @@ test.describe("YT health gate (assertYtHealthGood)", () => {
     );
   });
 
+  // #295 regression: a fast endpoint HOLDING its ratcheted read-delay target
+  // must render HEALTHY, not critical.
+  //
+  // Live evidence (event 9333, 2026-07-19): `Control stream Kiko` held a
+  // stable 30s buffer for hours — exactly the #294 design (ratchet up on a
+  // real drain, then HOLD; zero stutters, fast_delay_shrank = 0). The
+  // dashboard painted it permanently RED because the fast-bar thresholds
+  // still assumed a 2-5s near-live buffer (`secs > 8.0 => critical`), while
+  // the controller legitimately ratchets across 5-120s. The operator read RED
+  // as "broken" while the stream was perfect.
+  //
+  // Asserted through the real browser (not just the Rust unit test on
+  // fast_buffer_class) because the operator-visible signal IS the rendered
+  // bar class + label.
+  test("held ratcheted fast buffer renders healthy, not critical", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "PipelineState",
+          data: {
+            state: "streaming",
+            event_id: 1,
+            event_name: "Test Event",
+            target_delay_secs: 120,
+            session_start: null,
+            local_buffer_chunks: 0,
+            s3_queue_chunks: 0,
+            cache_duration_secs: 0.0,
+          },
+        },
+      },
+    );
+
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "e2e-vps",
+            status: "delivering",
+            server_ip: "1.2.3.4",
+            endpoint_count: 1,
+            endpoints: [
+              {
+                alias: "Kiko Fast",
+                alive: true,
+                current_chunk_id: 100,
+                bytes_processed_total: 0,
+                chunks_processed: 10,
+                // Tracking a ratcheted 30s target: the #294 design working.
+                chunk_delay_secs: 30.0,
+                fast_delay_target_secs: 30,
+                stall_reason: null,
+                ffmpeg_restart_count: 0,
+                last_error: null,
+                is_fast: true,
+              },
+            ],
+          },
+        },
+      },
+    );
+
+    const fastCard = page.locator(
+      '[data-testid="endpoint-card"][data-is-fast="true"]',
+    );
+    await expect(fastCard).toHaveCount(1, { timeout: 5000 });
+    // The bug: this bar was `critical` for any held buffer above 8s.
+    await expect(fastCard.locator(".buffer-bar-fill.healthy")).toHaveCount(1, {
+      timeout: 5000,
+    });
+    await expect(fastCard.locator(".buffer-bar-fill.critical")).toHaveCount(0);
+    // The target is surfaced so a held buffer reads as healthy-by-design.
+    await expect(fastCard.locator(".endpoint-cache-label")).toContainText(
+      /^30s \/ 30s target cache$/,
+    );
+  });
+
+  // #295 other half: a fast endpoint genuinely DRIFTING above its target must
+  // still surface as critical — the fix must not blanket-green the bar.
+  test("fast endpoint drifting far above its target still renders critical", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "PipelineState",
+          data: {
+            state: "streaming",
+            event_id: 1,
+            event_name: "Test Event",
+            target_delay_secs: 120,
+            session_start: null,
+            local_buffer_chunks: 0,
+            s3_queue_chunks: 0,
+            cache_duration_secs: 0.0,
+          },
+        },
+      },
+    );
+
+    await page.request.post(
+      "http://127.0.0.1:8910/api/v1/_test/ws-broadcast",
+      {
+        data: {
+          type: "DeliveryStatus",
+          data: {
+            instance_name: "e2e-vps",
+            status: "delivering",
+            server_ip: "1.2.3.4",
+            endpoint_count: 1,
+            endpoints: [
+              {
+                alias: "Kiko Fast",
+                alive: true,
+                current_chunk_id: 100,
+                bytes_processed_total: 0,
+                chunks_processed: 10,
+                // 3x its 10s target = genuine starvation/drift.
+                chunk_delay_secs: 30.0,
+                fast_delay_target_secs: 10,
+                stall_reason: null,
+                ffmpeg_restart_count: 0,
+                last_error: null,
+                is_fast: true,
+              },
+            ],
+          },
+        },
+      },
+    );
+
+    const fastCard = page.locator(
+      '[data-testid="endpoint-card"][data-is-fast="true"]',
+    );
+    await expect(fastCard).toHaveCount(1, { timeout: 5000 });
+    await expect(fastCard.locator(".buffer-bar-fill.critical")).toHaveCount(1, {
+      timeout: 5000,
+    });
+  });
+
   test.describe("YT health badge", () => {
     test("endpoint card renders YT health badge for ytbb-style payload", async ({ page }) => {
       // The module-level beforeEach already wires `consoleMessages` and the

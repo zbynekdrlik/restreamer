@@ -116,6 +116,23 @@ Without the correct working directory, OBS starts in a broken state (~37 MB memo
 
 **OBS uses Advanced mode, Stream_Obs profile. Bitrate is in `streamEncoder.json`, NOT `basic.ini`.**
 
+## "OBS Studio Crash Detected" dialog blocks E2E (dismiss via MCP click)
+
+If OBS was force-killed or crashed, the next launch shows a modal **"OBS Studio Crash Detected"** dialog asking Safe Mode vs Normal Mode. It hangs OBS at ~70-97 MB working set (WebSocket NOT listening) until dismissed, so `Ensure OBS is running` in CI fails with `OBS did not start` / `schtasks.exe failed to start`.
+
+**Dismiss it — click "Run in Normal Mode" (NOT Safe Mode: Safe Mode disables the WebSocket server CI needs):**
+
+```
+mcp__win-stream-snv__FocusWindow title="OBS Studio Crash Detected"
+mcp__win-stream-snv__Snapshot quality=40 max_width=700     # read the button's on-screen rect
+# CLICK — but SCALE the coordinates first (see gotcha below)
+mcp__win-stream-snv__Click x=<scaled_x> y=<scaled_y>
+```
+
+**CRITICAL coordinate-scaling gotcha:** `Snapshot`/`AnnotatedSnapshot` return an image scaled DOWN to `max_width` (e.g. 700 or 1280), but `Click` uses REAL desktop pixels (1920×1080). A coordinate read off the scaled screenshot lands in the wrong place. **Multiply the screenshot coordinate by `desktop_width / screenshot_width`** before clicking (e.g. button at x=572 on a 1280-wide shot → real x = 572 × 1920/1280 = 858; on a 700-wide shot → ×1920/700). Getting this wrong wastes several minutes per click (observed 2026-07-16). Verify success: `Get-Process obs64 | WorkingSet64` should jump to **>500 MB** and `Test-NetConnection 127.0.0.1 -Port 4455` → `TcpTestSucceeded: True`, then `gh run rerun <id> --failed`.
+
+The autonomous-recovery authorization at the top of this skill covers this (operator away / not in a live event). The dialog is the ONE case where killing/relaunching OBS makes it worse — dismiss it, don't re-kill.
+
 ## Runner Offline Detection
 
 When a CI deploy/E2E job stays "queued" with `startedAt` set, the runner is likely offline. Alert user within first poll (within 5 minutes of detecting the queue condition) — do NOT wait hours.
@@ -126,3 +143,5 @@ If OBS is in a bad state with visible recovery dialogs AND it cannot be cleared 
 - Ask operator to manually close OBS and dismiss dialogs
 - Then start fresh using the MCP shell command above
 - This is the ONLY case where operator assistance is needed for OBS state
+
+## Crash-

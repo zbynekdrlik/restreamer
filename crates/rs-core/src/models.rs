@@ -331,6 +331,13 @@ pub struct DeliveryEndpointMetrics {
     /// payloads / ffmpeg-path endpoints (issue #257).
     #[serde(default)]
     pub av_skew_ms: i64,
+    /// #295: the fast endpoint's current ratcheted read-delay target
+    /// (seconds) from the #294 adaptive controller. The dashboard colours the
+    /// fast buffer bar RELATIVE to this, so a correctly HELD ratcheted buffer
+    /// reads healthy instead of tripping a stale absolute 8s ceiling. `None`
+    /// for a non-fast endpoint or a VPS binary predating the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_delay_target_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -561,6 +568,7 @@ mod tests {
 
                     reconnect_count: 0,
                     av_skew_ms: 0,
+                    fast_delay_target_secs: None,
                     last_error: None,
                     is_fast: false,
                     delivery_mode: None,
@@ -689,6 +697,7 @@ mod tests {
 
             reconnect_count: 0,
             av_skew_ms: 0,
+            fast_delay_target_secs: None,
             last_error: Some("S3 timeout".to_string()),
             is_fast: true,
             delivery_mode: None,
@@ -739,6 +748,7 @@ mod tests {
 
                 reconnect_count: 0,
                 av_skew_ms: 0,
+                fast_delay_target_secs: None,
                 last_error: Some("Connection refused".to_string()),
                 is_fast: false,
                 delivery_mode: None,
@@ -768,6 +778,7 @@ mod tests {
 
                 reconnect_count: 0,
                 av_skew_ms: 0,
+                fast_delay_target_secs: None,
                 last_error: None,
                 is_fast: true,
                 delivery_mode: None,
@@ -787,6 +798,7 @@ mod tests {
 
                 reconnect_count: 0,
                 av_skew_ms: 0,
+                fast_delay_target_secs: None,
                 last_error: None,
                 is_fast: false,
                 delivery_mode: None,
@@ -818,6 +830,7 @@ mod tests {
 
             reconnect_count: 0,
             av_skew_ms: 0,
+            fast_delay_target_secs: None,
             last_error: None,
             is_fast: true,
             delivery_mode: None,
