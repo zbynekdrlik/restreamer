@@ -173,6 +173,17 @@ pub enum Action {
     FastKeepaliveStarted,
     FastKeepaliveEnded,
 
+    /// VPS-side (#296): a BUFFERED endpoint's delivered cushion fell below its
+    /// configured target (after a source gap) and the slow-refill throttle
+    /// began delivering marginally slower than realtime to rebuild it. Detail
+    /// JSON: `{alias, deficit_secs}`. Severity::Warn (protection is degraded
+    /// until it climbs back).
+    BufferRefillStarted,
+    /// VPS-side (#296): the slow refill ended — the cushion reached target
+    /// again (or the endpoint stalled into rescue). Detail JSON: `{alias}`.
+    /// Severity::Info.
+    BufferRefillEnded,
+
     /// Host-side: YT health probe observed `configurationIssues[0].type`
     /// change for an endpoint. Detail JSON:
     /// `{from: Option<String>, to: Option<String>}`. Bounded at most once
@@ -437,6 +448,22 @@ mod tests {
         let a = Action::FastDelayShrank;
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"fast_delay_shrank\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_buffer_refill_started_serdes() {
+        let a = Action::BufferRefillStarted;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"buffer_refill_started\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_buffer_refill_ended_serdes() {
+        let a = Action::BufferRefillEnded;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"buffer_refill_ended\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
 

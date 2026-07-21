@@ -26,7 +26,9 @@ pub struct EndpointStats {
     /// Per-endpoint ring buffer of recent ffmpeg restarts. Capped at
     /// RESTART_HISTORY_CAP — oldest dropped first.
     pub restart_history: std::collections::VecDeque<FfmpegRestartRecord>,
-    /// Current delivery mode: "normal", "warmup", "rescue", "recovering".
+    /// Current delivery mode: "normal", "warmup", "rescue", "recovering",
+    /// or "refilling" (#296 — buffered endpoint delivering slightly slower
+    /// than realtime to rebuild a below-target cushion after a source gap).
     pub delivery_mode: String,
     /// ETA in seconds until rescue mode ends (warmup or buffer refill).
     pub rescue_eta_secs: Option<u64>,

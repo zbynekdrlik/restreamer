@@ -755,6 +755,12 @@ fn EndpointTree() -> impl IntoView {
                                             "recovering" => {
                                                 ("endpoint-mode-recovering", "RECOVERING")
                                             }
+                                            // #296: buffered endpoint rebuilding a
+                                            // below-target cushion — protection is
+                                            // degraded but actively recovering.
+                                            "refilling" => {
+                                                ("endpoint-mode-refilling", "REFILLING")
+                                            }
                                             _ => return None,
                                         };
                                         let eta = ep

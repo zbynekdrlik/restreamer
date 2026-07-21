@@ -33,6 +33,20 @@ pub struct BufferState {
     /// Only the fast producer writes it; monotonic within a session (grows
     /// with the target, never lowered — the ratchet-up-only invariant).
     pub fast_delay_target_secs: AtomicU64,
+    /// #296: how far (seconds) a BUFFERED (non-fast) endpoint's delivered
+    /// cushion currently sits BELOW its configured target. 0 = at/above
+    /// target (nothing to refill) — the steady state. Written by the
+    /// producer's periodic live-edge HEAD-probe (`producer_lag`), read by the
+    /// consumer to decide whether to deliver marginally slower than realtime
+    /// (0.98x) and rebuild the cushion after a source gap (`refill` module).
+    /// Mirrors `fast_delay_target_secs` in shape (an AtomicU64 on the shared
+    /// state) but the opposite direction: fast endpoints RAISE a read-delay
+    /// target; buffered endpoints REFILL a drained delivery cushion. Fast
+    /// endpoints never write it (they use the #294 ratchet instead), so it
+    /// stays 0 for them and the consumer's throttle is gated `!is_fast`.
+    /// Cleared to 0 by the producer when it goes stalled (outage) so no
+    /// throttle fires while there is no source to rebuild from.
+    pub refill_deficit_secs: AtomicU64,
 }
 
 impl BufferState {
@@ -43,6 +57,7 @@ impl BufferState {
             starvation_gap_ms: AtomicU64::new(0),
             highest_sent_chunk_id: AtomicI64::new(-1),
             fast_delay_target_secs: AtomicU64::new(0),
+            refill_deficit_secs: AtomicU64::new(0),
         }
     }
 }

@@ -55,7 +55,9 @@ pub use crate::endpoint_audit::{
 #[path = "endpoint_consumer_helpers.rs"]
 mod consumer_helpers;
 use crate::disk_cache_push_sample::{PushSampleCtx, emit_push_sample};
-use consumer_helpers::{FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, handle_rust_push};
+use consumer_helpers::{
+    FfmpegDeathAction, RustPushAction, handle_ffmpeg_death, handle_rust_push, maybe_refill_throttle,
+};
 
 // Fast-endpoint keepalive + outage escalation (C1 #251) extracted to keep this
 // file under the 1000-line CI cap. The module is a `#[path]` submodule of
@@ -677,6 +679,18 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
             }
         }
+
+        // #296: after delivering a chunk on the buffered (non-fast) path, apply
+        // the slow-refill throttle if the producer has flagged the cushion
+        // below target. No-op for fast endpoints and when no deficit exists.
+        maybe_refill_throttle(
+            ep_cfg.is_fast,
+            &buffer_state,
+            chunk_duration_ms,
+            &stats,
+            &mut stop_rx,
+        )
+        .await;
     }
 
     // Cleanup

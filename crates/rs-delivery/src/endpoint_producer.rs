@@ -60,6 +60,19 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
     // `duration_ms` so it tracks operator config without a hardcode.
     let mut typical_chunk_dur_ms: u64 = 1000;
     let mut iters_since_lag_probe: u32 = 0;
+    // #296 buffered-endpoint slow-refill: cadence counter + open-refill edge
+    // tracker for the below-target cushion deficit. Fast endpoints never use
+    // this (they ratchet the read-delay via #294 instead) — the update calls
+    // below are gated `!is_fast`. Start each (re)spawn with the deficit clear
+    // so a fresh producer never inherits a stale throttle; the first probe
+    // re-establishes it ~`LAG_PROBE_INTERVAL_ITERS` fetches later.
+    let mut iters_since_refill_probe: u32 = 0;
+    let mut refilling = false;
+    if !is_fast {
+        buffer_state
+            .refill_deficit_secs
+            .store(0, AtomicOrdering::Relaxed);
+    }
     // Adaptive read-delay controller — fast endpoints only. Grows the
     // read-delay on starvation (so the live-edge lag-probe leaves a buffer
     // instead of re-pinning to the edge) and HOLDS it for the session
@@ -203,6 +216,25 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     is_fast,
                 )
                 .await;
+                // #296: buffered endpoints re-measure their below-target cushion
+                // deficit on the same cadence and publish it for the consumer's
+                // slow-refill throttle. Uses the post-jump `chunk_id` (read
+                // pointer) so the deficit is consistent with any excess-lag
+                // correction just applied. Fast endpoints are excluded.
+                if !is_fast {
+                    crate::producer_lag::maybe_update_refill_deficit(
+                        &fetcher,
+                        chunk_id,
+                        delivery_delay_chunks,
+                        typical_chunk_dur_ms,
+                        &mut iters_since_refill_probe,
+                        &buffer_state,
+                        &mut refilling,
+                        &alias,
+                        &audit_ring,
+                    )
+                    .await;
+                }
                 tokio::task::yield_now().await;
             }
             Ok(None) => {
@@ -307,6 +339,17 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     buffer_state
                         .producer_active
                         .store(false, AtomicOrdering::Relaxed);
+                    // #296: source gap → stop the slow-refill throttle. There
+                    // is nothing to rebuild from while stalled, and rescue owns
+                    // the drain from here.
+                    if !is_fast {
+                        crate::producer_lag::clear_refill_deficit(
+                            &buffer_state,
+                            &mut refilling,
+                            &alias,
+                            &audit_ring,
+                        );
+                    }
                 }
 
                 tracing::debug!(alias = %alias, chunk_id, "Producer: chunk not found, waiting");
@@ -345,6 +388,16 @@ pub(crate) async fn producer_task<F: ChunkFetcher>(
                     buffer_state
                         .producer_active
                         .store(false, AtomicOrdering::Relaxed);
+                    // #296: error-shaped outage → stop the slow-refill throttle
+                    // (mirrors the clean-404 stall arm above).
+                    if !is_fast {
+                        crate::producer_lag::clear_refill_deficit(
+                            &buffer_state,
+                            &mut refilling,
+                            &alias,
+                            &audit_ring,
+                        );
+                    }
                 }
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(s3_backoff_secs)) => {}

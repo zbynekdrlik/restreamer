@@ -32,6 +32,73 @@ pub(super) fn record_starvation_gap(
     elapsed
 }
 
+/// #296 buffered-endpoint slow-refill throttle. Called after a successful
+/// chunk delivery on the NON-fast path. When the producer has published a
+/// below-target cushion deficit (`BufferState::refill_deficit_secs > 0`), add
+/// the small per-chunk sleep from `refill::refill_throttle_ms` so the endpoint
+/// delivers marginally slower than realtime (0.98x) and the cushion rebuilds.
+///
+/// Gating (all must hold to throttle):
+/// - `!is_fast` — fast endpoints use the #294 read-delay ratchet instead.
+/// - `deficit > 0` — cleared by the producer whenever it stalls (outage), so
+///   the throttle never fires while there is no source to rebuild from.
+/// - delivery mode is not rescue/warmup/recovering — those own their own
+///   pacing; refill must not interact with the rescue refill state machine.
+///
+/// Also surfaces the state to the operator dashboard by setting
+/// `delivery_mode = "refilling"` while active (and restoring it to "normal"
+/// when the cushion is back at target), reusing the existing VPS→host→UI
+/// `delivery_mode` pipeline — no new cross-crate plumbing. The sleep is
+/// interruptible by the stop signal and capped far below the rescue-stall /
+/// write-timeout thresholds (`refill::REFILL_MAX_THROTTLE_MS`).
+pub(super) async fn maybe_refill_throttle(
+    is_fast: bool,
+    buffer_state: &Arc<crate::buffer_state::BufferState>,
+    chunk_duration_ms: i64,
+    stats: &Stats,
+    stop_rx: &mut watch::Receiver<bool>,
+) {
+    if is_fast {
+        return;
+    }
+    let deficit = buffer_state
+        .refill_deficit_secs
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    // Update the dashboard-visible mode under the stats lock, and decide
+    // whether to throttle. Never stomp an active rescue-family mode.
+    let should_throttle = {
+        let mut s = stats.lock().await;
+        let in_rescue_family =
+            matches!(s.delivery_mode.as_str(), "rescue" | "warmup" | "recovering");
+        if deficit > 0 && !in_rescue_family {
+            if s.delivery_mode != "refilling" {
+                s.delivery_mode = "refilling".to_string();
+            }
+            true
+        } else {
+            // deficit cleared (or a rescue-family mode is active): drop the
+            // "refilling" badge back to "normal" without touching rescue modes.
+            if s.delivery_mode == "refilling" {
+                s.delivery_mode = "normal".to_string();
+            }
+            false
+        }
+    };
+    if !should_throttle {
+        return;
+    }
+
+    let throttle_ms = crate::refill::refill_throttle_ms(deficit, chunk_duration_ms);
+    if throttle_ms == 0 {
+        return;
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(std::time::Duration::from_millis(throttle_ms)) => {}
+        _ = stop_rx.changed() => {}
+    }
+}
+
 /// Return value from `handle_rust_push` telling the consumer loop whether
 /// to continue normally or break the loop.
 pub(super) enum RustPushAction {
