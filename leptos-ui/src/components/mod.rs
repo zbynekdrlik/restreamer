@@ -3,6 +3,7 @@
 pub mod add_endpoint_modal;
 pub mod oauth_authorize;
 pub mod audit_panel;
+pub mod change_key_modal;
 mod confirm_modal;
 pub mod disk_pressure_banner;
 pub mod endpoint_history;

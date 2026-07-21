@@ -321,6 +321,20 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 }
 .modal-position label { color: var(--text-secondary); font-size: 13px; }
 .modal-actions { display: flex; gap: var(--spacing-sm); justify-content: flex-end; }
+/* #68: guided Change Key modal + dashboard button + live-edit warning */
+.change-key-modal {
+    background: var(--bg-card); border: var(--border-w) solid var(--border);
+    border-radius: var(--radius); padding: var(--spacing-lg);
+    min-width: 320px; max-width: 90vw;
+}
+.change-key-modal h3 { margin: 0 0 var(--spacing-md) 0; color: var(--text-primary); font-size: 16px; font-weight: 600; }
+.change-key-endpoint { margin: 0 0 4px 0; color: var(--text-primary); font-weight: 600; }
+.change-key-hint { margin: 0 0 var(--spacing-md) 0; color: var(--text-secondary); font-size: 12px; }
+.change-key-input { width: 100%; box-sizing: border-box; padding: 8px 10px; margin-bottom: var(--spacing-md); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-primary); color: var(--text-primary); }
+.change-key-error { color: var(--status-error); font-size: 12px; margin-bottom: var(--spacing-md); }
+.btn-change-key { background: none; border: 1px solid var(--border); color: #8ab4f8; border-radius: var(--radius); font-size: 10px; padding: 1px 6px; cursor: pointer; opacity: 0.85; }
+.btn-change-key:hover { opacity: 1; border-color: var(--border-active); }
+.edit-live-warning { background: rgba(232,197,71,0.12); border: 1px solid #e8c547; border-radius: var(--radius); padding: 6px 10px; margin-bottom: var(--spacing-md); color: #e8c547; font-size: 12px; }
 .modal-cancel-btn {
     padding: var(--spacing-xs) var(--spacing-sm); border: 1px solid var(--border);
     border-radius: var(--radius); background: transparent; color: var(--text-secondary);

@@ -7,6 +7,7 @@ use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use super::change_key_modal::ChangeKeyModal;
 use super::confirm_modal::ConfirmModal;
 use super::endpoint_history::EndpointHistory;
 use super::endpoint_remove_confirm_modal::EndpointRemoveConfirmModal;
@@ -22,6 +23,11 @@ pub fn EndpointTree() -> impl IntoView {
     // Confirm modal state for endpoint removal
     let confirm_remove_alias: RwSignal<Option<String>> = RwSignal::new(None);
     let show_remove_confirm = RwSignal::new(false);
+
+    // #68: guided "Change Key" modal state. The alias is set by the per-endpoint
+    // button; the modal runs remove -> update_endpoint -> re-add(Live).
+    let change_key_alias: RwSignal<Option<String>> = RwSignal::new(None);
+    let show_change_key = RwSignal::new(false);
 
     // Last-endpoint confirm modal (type-to-confirm). Separate from the
     // generic confirm modal because it requires the operator to type the
@@ -129,6 +135,7 @@ pub fn EndpointTree() -> impl IntoView {
                     let store = use_context::<DashboardStore>().expect("DashboardStore");
                     let alias = ep.alias.clone();
                     let remove_alias = alias.clone();
+                    let ck_alias = alias.clone();
                     let ep_alias_key = alias.clone();
                     // Per-card toggle for the EndpointHistory sparkline.
                     let show_history = RwSignal::new(false);
@@ -347,6 +354,28 @@ pub fn EndpointTree() -> impl IntoView {
                                     })
                                 }}
                                 {move || {
+                                    // #68: guided "Change Key" — only meaningful
+                                    // while the endpoint is attached to a live
+                                    // delivery (an in-place key edit is inert then).
+                                    let ck_alias = ck_alias.clone();
+                                    is_running_memo.get().then(move || {
+                                        let ck_alias = ck_alias.clone();
+                                        view! {
+                                            <button
+                                                class="btn-change-key"
+                                                data-testid="btn-change-key"
+                                                title="Change stream key (remove, update, re-add at live edge)"
+                                                on:click=move |_| {
+                                                    change_key_alias.set(Some(ck_alias.clone()));
+                                                    show_change_key.set(true);
+                                                }
+                                            >
+                                                "Key"
+                                            </button>
+                                        }
+                                    })
+                                }}
+                                {move || {
                                     let ep = ep_data.get();
                                     let ps = store.pipeline_state.get();
                                     let target = ps.target_delay_secs;
@@ -480,6 +509,7 @@ pub fn EndpointTree() -> impl IntoView {
                 on_cancel=on_last_cancel
                 on_confirm=on_last_confirm
             />
+            <ChangeKeyModal show=show_change_key alias=change_key_alias />
         </div>
     }
 }
