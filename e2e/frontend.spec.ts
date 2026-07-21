@@ -806,8 +806,28 @@ test.describe("Settings page", () => {
     await expect(backLink).toBeVisible({ timeout: 10000 });
   });
 
+  test("tabs are ordered Events, Templates, Config and Events is the default landing tab (#113)", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    const tabs = page.locator(".settings-tabs button");
+    await expect(tabs).toHaveCount(3);
+    await expect(tabs.nth(0)).toHaveText("Events");
+    await expect(tabs.nth(1)).toHaveText("Templates");
+    await expect(tabs.nth(2)).toHaveText("Config");
+
+    // Default landing tab is Events (most-used) — no click needed.
+    await expect(tabs.nth(0)).toHaveClass(/active/);
+    await expect(page.locator(".events-management-tab")).toBeVisible({
+      timeout: 5000,
+    });
+  });
+
   test("endpoints section renders with create form", async ({ page }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await expect(page.locator(".endpoints-tab")).toBeVisible({
       timeout: 10000,
     });
@@ -818,6 +838,9 @@ test.describe("Settings page", () => {
     page,
   }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await page.waitForTimeout(1000);
     const section = page.locator(".endpoints-tab");
     const cards = section.locator(".endpoint-card");
@@ -844,6 +867,9 @@ test.describe("Endpoint Editing", () => {
     page,
   }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await page.waitForTimeout(1000);
     const section = page.locator(".endpoints-tab");
     // Click Edit on the first endpoint
@@ -872,6 +898,9 @@ test.describe("Endpoint Editing", () => {
     page,
   }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await page.waitForTimeout(1000);
     const section = page.locator(".endpoints-tab");
     // Click Edit on the SECOND endpoint (Facebook Page, type=FB)
@@ -894,6 +923,9 @@ test.describe("Endpoint Editing", () => {
     page,
   }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await page.waitForTimeout(1000);
     const section = page.locator(".endpoints-tab");
     // Edit second endpoint (FB type) — only change alias, don't touch type
@@ -923,6 +955,9 @@ test.describe("Endpoint Editing", () => {
 
   test("endpoint edit saves changes", async ({ page }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await page.waitForTimeout(1000);
     const section = page.locator(".endpoints-tab");
     // Click Edit on the first endpoint

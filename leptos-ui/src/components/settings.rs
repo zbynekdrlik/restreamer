@@ -16,17 +16,20 @@ fn format_bytes(bytes: u64) -> String {
 /// Settings page with tab navigation: Config, Templates, Events.
 #[component]
 pub fn SettingsView() -> impl IntoView {
-    let (settings_tab, set_settings_tab) = signal("config".to_string());
+    // Events is the most-used tab in daily operation, so it's both the
+    // default landing tab and the leftmost button (#113 — was
+    // Config/Templates/Events, requested Events/Templates/Config).
+    let (settings_tab, set_settings_tab) = signal("events".to_string());
 
     view! {
         <div class="settings-page">
             <h2>"Settings"</h2>
             <div class="settings-tabs">
                 <button
-                    class=move || if settings_tab.get() == "config" { "tab active" } else { "tab" }
-                    on:click=move |_| set_settings_tab.set("config".to_string())
+                    class=move || if settings_tab.get() == "events" { "tab active" } else { "tab" }
+                    on:click=move |_| set_settings_tab.set("events".to_string())
                 >
-                    "Config"
+                    "Events"
                 </button>
                 <button
                     class=move || {
@@ -37,10 +40,10 @@ pub fn SettingsView() -> impl IntoView {
                     "Templates"
                 </button>
                 <button
-                    class=move || if settings_tab.get() == "events" { "tab active" } else { "tab" }
-                    on:click=move |_| set_settings_tab.set("events".to_string())
+                    class=move || if settings_tab.get() == "config" { "tab active" } else { "tab" }
+                    on:click=move |_| set_settings_tab.set("config".to_string())
                 >
-                    "Events"
+                    "Config"
                 </button>
             </div>
             {move || match settings_tab.get().as_str() {
