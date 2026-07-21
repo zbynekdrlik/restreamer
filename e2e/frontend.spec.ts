@@ -1733,6 +1733,22 @@ test.describe("Pipeline Node Data", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
     await page.locator(".event-selector").selectOption({ index: 1 });
+
+    // The mock's default WS-connect payload reports an active delivery
+    // (status="running") for other tests' convenience -- force idle so the
+    // "" | "none" branch under test is actually reached.
+    await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "",
+          status: "none",
+          server_ip: null,
+          endpoint_count: 0,
+          endpoints: [],
+        },
+      },
+    });
     await page.waitForTimeout(500);
 
     await request.post("http://127.0.0.1:8910/api/v1/_test/set-last-destroy", {
@@ -1754,6 +1770,20 @@ test.describe("Pipeline Node Data", () => {
     await page.goto("/");
     await page.waitForTimeout(1000);
     await page.locator(".event-selector").selectOption({ index: 1 });
+
+    // Force idle -- see the previous test for why.
+    await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "",
+          status: "none",
+          server_ip: null,
+          endpoint_count: 0,
+          endpoints: [],
+        },
+      },
+    });
     await page.waitForTimeout(500);
 
     await request.post("http://127.0.0.1:8910/api/v1/_test/set-last-destroy", {
