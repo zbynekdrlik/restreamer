@@ -40,7 +40,9 @@ async fn start_delivery_deletes_orphaned_stale_vps() {
 
     let pool = db::create_memory_pool().await.unwrap();
     db::run_migrations(&pool).await.unwrap();
-    let event_id = db::create_streaming_event(&pool, "orphan-evt").await.unwrap();
+    let event_id = db::create_streaming_event(&pool, "orphan-evt")
+        .await
+        .unwrap();
     let stale_id = db::create_delivery_instance(
         &pool,
         4242,

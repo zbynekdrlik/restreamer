@@ -172,11 +172,12 @@ pub async fn delivery_start(
             .await
         {
             tracing::error!("Background poll_and_init failed for instance {instance_id}: {e}");
-            if let Err(e) =
-                db::update_delivery_instance_status(orch.pool(), instance_id, "failed").await
-            {
-                tracing::error!("Failed to mark instance {instance_id} as failed: {e}");
-            }
+            // #244: a failed start used to leave the VPS running and billing
+            // (marked "failed", handle dropped, no delete_server). Delete the
+            // orphaned VPS now; cleanup marks the row deleted + audits a
+            // vps_deleted row (reason "start_failed") for the operator surface.
+            orch.cleanup_orphan_delivery_vps(instance_id, event_id, "start_failed")
+                .await;
             orch.poll_handles().lock().await.remove(&instance_id);
             return;
         }
