@@ -60,7 +60,9 @@ pub fn ChangeKeyModal(
             .find(|e| e.alias == alias_val)
             .map(|e| e.id);
         let Some(ep_id) = ep_id else {
-            error.set(Some(format!("No endpoint config found for \"{alias_val}\"")));
+            error.set(Some(format!(
+                "No endpoint config found for \"{alias_val}\""
+            )));
             return;
         };
         // Prefer the live delivery's event_id (same source the sibling

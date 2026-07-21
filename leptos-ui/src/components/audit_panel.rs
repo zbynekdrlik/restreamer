@@ -24,7 +24,7 @@ use leptos::prelude::*;
 
 /// A run of consecutive same-`(source, action, endpoint)` rows collapsed into
 /// one. `count == 1` renders identically to an ungrouped row.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct GroupedRow {
     /// The newest row in the run — carries identity, severity, and the detail
     /// shown on drill-down.
@@ -75,9 +75,7 @@ fn group_entries(rows: Vec<AuditEntry>, window_secs: i64) -> Vec<GroupedRow> {
     for r in rows {
         if window_secs > 0 {
             if let Some(g) = out.iter_mut().rev().find(|g| {
-                g.rep.source == r.source
-                    && g.rep.action == r.action
-                    && g.rep.endpoint == r.endpoint
+                g.rep.source == r.source && g.rep.action == r.action && g.rep.endpoint == r.endpoint
             }) {
                 if let (Some(oldest), Some(rt)) = (ts_millis(&g.first_ts), ts_millis(&r.ts)) {
                     if ((oldest - rt).abs() / 1000.0) <= window_secs as f64 {
