@@ -154,10 +154,12 @@ Local user → https://streamsnv.newlevel.media (or http://10.77.9.204:8910)
    ```
 5. Install as Windows service: `cloudflared service install` + `cloudflared service start`
 
-**Cloudflare credentials** (same account as reaperiem):
-- API Token: `Nyw0JCox1ft-bmPK3mZAuvUbE_02K4aT1XO9RrxE`
-- Account ID: `8f3efbc0edbe05bd6fdcab10cd63876a`
-- Zone ID: `b9019ca528e573e62c2a110a45f45c74`
+**Cloudflare credentials** (same account as reaperiem): historical values were
+committed here and are now scrubbed. Security sweep (2026-07-21, #292/#274)
+confirmed the committed API Token is DEAD (`api.cloudflare.com/client/v4/user/tokens/verify`
+returns `{"success":false,"errors":[{"code":1000,"message":"Invalid API Token"}]}`)
+— no rotation needed. Live credentials, if this tunnel is still in use, live in
+the Cloudflare dashboard / the operator's password manager, never in this repo.
 
 ### TLS Certificates (Let's Encrypt)
 

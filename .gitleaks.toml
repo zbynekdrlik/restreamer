@@ -1,0 +1,22 @@
+title = "gitleaks config for restreamer"
+
+# Extend gitleaks' default rule set (do not replace it).
+[extend]
+useDefault = true
+
+# The `secret-scan` CI job runs `gitleaks detect --no-git` against the
+# checked-out TREE only (never git history) -- see .github/workflows/ci.yml.
+# History is intentionally left unscanned: the two known historical leaks
+# (commit 2d241ff5 FB App Secret, commit 96733dc5 OBS WS password + S3 keys)
+# are scrubbed from the tree and confirmed dead/rotated (#274, #292); history
+# is not rewritten per operator precedent. This allowlist exists only for
+# known-safe, non-secret fixture values that still live in the TREE and would
+# otherwise false-positive the tree scan.
+[allowlist]
+description = "Known-safe test fixtures -- not real credentials"
+regexes = [
+  # Stable, human-readable placeholder FB stream key used across the
+  # Facebook e2e test fixtures (crates/rs-api/src/facebook_tests.rs and the
+  # design doc that documents it). Never a real Facebook API credential.
+  '''FB-PERSISTENT-KEY-001''',
+]
