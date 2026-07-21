@@ -483,6 +483,92 @@ mod audit_tests {
         assert_eq!(rows.len(), 1, "action filter must return exactly 1 row");
         assert_eq!(rows[0]["action"], "endpoint_rtmp_push_died");
     }
+
+    /// #169: `?group=true` collapses a same-`(source, action, endpoint)` burst
+    /// within the window into ONE grouped row carrying `count` + first→last
+    /// span, via the tested `audit::group_audit_rows` pure fn. Before this the
+    /// pure fn had ZERO production callers.
+    #[tokio::test]
+    async fn audit_list_group_collapses_burst() {
+        let state = test_state().await;
+        // Three identical FB-Zbynek push-died rows 30s apart (within the 60s
+        // default window) + one unrelated row that must stay separate.
+        sqlx::query(
+            "INSERT INTO audit_log (ts, severity, source, endpoint, action, detail)
+             VALUES
+               ('2026-01-15T08:00:00.000Z','warn','vps','FB-Zbynek','endpoint_rtmp_push_died','{}'),
+               ('2026-01-15T08:00:30.000Z','warn','vps','FB-Zbynek','endpoint_rtmp_push_died','{}'),
+               ('2026-01-15T08:01:00.000Z','warn','vps','FB-Zbynek','endpoint_rtmp_push_died','{}'),
+               ('2026-01-15T08:02:00.000Z','info','operator',NULL,'event_started','{}')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit?group=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["rows"].is_null(), "grouped response omits `rows`");
+        let grouped = json["grouped"].as_array().unwrap();
+        // The 3-row burst collapses to 1 grouped row; the unrelated row stays.
+        assert_eq!(
+            grouped.len(),
+            2,
+            "burst of 3 + 1 unrelated => 2 grouped rows"
+        );
+        let burst = grouped
+            .iter()
+            .find(|g| g["action"] == "endpoint_rtmp_push_died")
+            .expect("burst group present");
+        assert_eq!(burst["count"], 3, "the 3 push-died rows collapse into one");
+        assert_eq!(burst["endpoint"], "FB-Zbynek");
+    }
+
+    #[tokio::test]
+    async fn audit_list_without_group_is_unchanged() {
+        let state = test_state().await;
+        sqlx::query(
+            "INSERT INTO audit_log (ts, severity, source, endpoint, action, detail)
+             VALUES
+               ('2026-01-15T08:00:00.000Z','warn','vps','FB-Zbynek','endpoint_rtmp_push_died','{}'),
+               ('2026-01-15T08:00:30.000Z','warn','vps','FB-Zbynek','endpoint_rtmp_push_died','{}')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["grouped"].is_null(),
+            "ungrouped response omits `grouped`"
+        );
+        assert_eq!(
+            json["rows"].as_array().unwrap().len(),
+            2,
+            "raw rows preserved"
+        );
+    }
 }
 
 #[cfg(test)]
