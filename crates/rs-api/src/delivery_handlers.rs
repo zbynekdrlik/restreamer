@@ -409,6 +409,62 @@ pub async fn list_delivery_instances(
     Ok(Json(instances))
 }
 
+#[derive(Deserialize)]
+pub struct LastDestroyQuery {
+    pub event_id: i64,
+}
+
+/// A confirmation of the most recent VPS teardown for an event, surfaced
+/// from the `vps_deleted` audit trail rather than the live delivery-instance
+/// query (`get_delivery_instance_by_event` excludes `status = 'deleted'`
+/// rows, so once torn down an instance is otherwise invisible to the
+/// dashboard). `reason` distinguishes a clean operator-triggered teardown
+/// (`"operator_stop"`) from a Hetzner `delete_server()` call that itself
+/// FAILED (`"delete_error"`) — the latter means the VPS may still be
+/// running and billing even though the local row reads "deleted" (#75).
+#[derive(Serialize)]
+pub struct LastDestroyInfo {
+    pub ts: String,
+    pub hetzner_id: i64,
+    pub reason: String,
+}
+
+pub async fn delivery_last_destroy(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<LastDestroyQuery>,
+) -> Result<Json<Option<LastDestroyInfo>>, StatusCode> {
+    let rows = db::audit::query(
+        &state.pool,
+        db::audit::Filter {
+            event_id: Some(query.event_id),
+            action: Some("vps_deleted".to_string()),
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to query vps_deleted audit trail: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let info = rows.into_iter().next().map(|r| LastDestroyInfo {
+        ts: r.ts,
+        hetzner_id: r
+            .detail
+            .get("hetzner_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        reason: r
+            .detail
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+    });
+    Ok(Json(info))
+}
+
 // --- Mid-stream endpoint add/remove handlers ---
 
 #[derive(Deserialize)]

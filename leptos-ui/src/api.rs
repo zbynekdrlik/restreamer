@@ -844,6 +844,26 @@ pub async fn get_youtube_health() -> Option<YouTubeStatusResponse> {
         .ok()
 }
 
+/// The most recent VPS teardown confirmation for an event, surfaced from the
+/// `vps_deleted` audit trail (#75) — see `delivery_handlers::LastDestroyInfo`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LastVpsDestroy {
+    #[allow(dead_code)]
+    pub ts: String,
+    #[allow(dead_code)]
+    pub hetzner_id: i64,
+    /// "operator_stop" (clean) | "delete_error" (Hetzner delete_server()
+    /// itself failed -- the VPS may still be running and billing).
+    pub reason: String,
+}
+
+/// Fetch the most recent VPS-destroy confirmation for `event_id`. Returns
+/// `Ok(None)` when the event never had a delivery instance torn down.
+/// Non-critical polling -- callers should treat an `Err` the same as `None`.
+pub async fn get_last_vps_destroy(event_id: i64) -> Result<Option<LastVpsDestroy>, String> {
+    http_get(&format!("/delivery/last-destroy?event_id={event_id}")).await
+}
+
 // OBS API
 
 /// OBS status response from the HTTP API.

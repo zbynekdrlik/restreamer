@@ -764,6 +764,27 @@ test.describe("Operator Dashboard", () => {
     const selectedValue = await page.locator(".event-selector").inputValue();
     expect(selectedValue).not.toBe("");
   });
+
+  test("auto-selects an activated-but-not-yet-delivering event on page load", async ({
+    page,
+    request,
+  }) => {
+    // #151: activate_event only sets receiving_activated=true. The old
+    // auto-select Effect only matched events_list.delivering_activated, so
+    // an event that is receiving but not yet delivering was never
+    // auto-selected — the pacing panel showed "No event selected" even
+    // though the backend correctly reports an active streaming_event.
+    await request.post("http://127.0.0.1:8910/api/v1/events/1/activate");
+    await page.goto("/");
+    await page.waitForTimeout(1500);
+
+    const selectedValue = await page.locator(".event-selector").inputValue();
+    expect(selectedValue).toBe("1");
+
+    await expect(page.locator(".pacing-panel")).not.toContainText(
+      "No event selected",
+    );
+  });
 });
 
 // --- Settings Page (/settings) ---
@@ -785,8 +806,28 @@ test.describe("Settings page", () => {
     await expect(backLink).toBeVisible({ timeout: 10000 });
   });
 
+  test("tabs are ordered Events, Templates, Config and Events is the default landing tab (#113)", async ({
+    page,
+  }) => {
+    await page.goto("/settings");
+    const tabs = page.locator(".settings-tabs button");
+    await expect(tabs).toHaveCount(3);
+    await expect(tabs.nth(0)).toHaveText("Events");
+    await expect(tabs.nth(1)).toHaveText("Templates");
+    await expect(tabs.nth(2)).toHaveText("Config");
+
+    // Default landing tab is Events (most-used) — no click needed.
+    await expect(tabs.nth(0)).toHaveClass(/active/);
+    await expect(page.locator(".events-management-tab")).toBeVisible({
+      timeout: 5000,
+    });
+  });
+
   test("endpoints section renders with create form", async ({ page }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await expect(page.locator(".endpoints-tab")).toBeVisible({
       timeout: 10000,
     });
@@ -797,6 +838,9 @@ test.describe("Settings page", () => {
     page,
   }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await page.waitForTimeout(1000);
     const section = page.locator(".endpoints-tab");
     const cards = section.locator(".endpoint-card");
@@ -823,6 +867,9 @@ test.describe("Endpoint Editing", () => {
     page,
   }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await page.waitForTimeout(1000);
     const section = page.locator(".endpoints-tab");
     // Click Edit on the first endpoint
@@ -851,6 +898,9 @@ test.describe("Endpoint Editing", () => {
     page,
   }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await page.waitForTimeout(1000);
     const section = page.locator(".endpoints-tab");
     // Click Edit on the SECOND endpoint (Facebook Page, type=FB)
@@ -873,6 +923,9 @@ test.describe("Endpoint Editing", () => {
     page,
   }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await page.waitForTimeout(1000);
     const section = page.locator(".endpoints-tab");
     // Edit second endpoint (FB type) — only change alias, don't touch type
@@ -902,6 +955,9 @@ test.describe("Endpoint Editing", () => {
 
   test("endpoint edit saves changes", async ({ page }) => {
     await page.goto("/settings");
+    // #113: Events is now the default landing tab; Config holds the
+    // endpoints section.
+    await page.locator(".settings-tabs button:has-text('Config')").click();
     await page.waitForTimeout(1000);
     const section = page.locator(".endpoints-tab");
     // Click Edit on the first endpoint
@@ -1663,6 +1719,86 @@ test.describe("Pipeline Node Data", () => {
 
     const vpsDot = page.locator(".pipeline-node .status-dot").nth(3);
     await expect(vpsDot).toHaveClass(/active/, { timeout: 5000 });
+  });
+
+  test("VPS destroy failure surfaces a still-billing warning, not silent idle", async ({
+    page,
+    request,
+  }) => {
+    // #75: delivery.rs writes status="deleted" even when Hetzner's
+    // delete_server() call ITSELF fails -- a still-billing VPS was
+    // indistinguishable from a cleanly destroyed one anywhere the operator
+    // could see it. Once delivery goes idle, the dashboard must warn
+    // instead of silently reverting to a blank "0 on S3".
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+
+    // Seed the fixture BEFORE the idle transition -- the dashboard's fetch
+    // Effect only re-runs when delivery status or the selected event
+    // changes, so seeding it after that transition would be too late.
+    await request.post("http://127.0.0.1:8910/api/v1/_test/set-last-destroy", {
+      data: { event_id: 1, reason: "delete_error" },
+    });
+
+    // The mock's default WS-connect payload reports an active delivery
+    // (status="running") for other tests' convenience -- force idle so the
+    // "" | "none" branch under test is actually reached.
+    await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "",
+          status: "none",
+          server_ip: null,
+          endpoint_count: 0,
+          endpoints: [],
+        },
+      },
+    });
+    await page.waitForTimeout(1000);
+
+    const s3Node = page.locator(".pipeline-node", { hasText: "S3" });
+    await expect(s3Node.locator(".pipeline-node-metric")).toContainText(
+      "may still be billing",
+    );
+    await expect(s3Node.locator(".status-dot")).toHaveClass(/error/);
+  });
+
+  test("clean VPS destroy shows a calm confirmation, not a warning", async ({
+    page,
+    request,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+
+    // Seed BEFORE the idle transition -- see the previous test for why.
+    await request.post("http://127.0.0.1:8910/api/v1/_test/set-last-destroy", {
+      data: { event_id: 1, reason: "operator_stop" },
+    });
+
+    // Force idle -- see the previous test for why.
+    await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "DeliveryStatus",
+        data: {
+          instance_name: "",
+          status: "none",
+          server_ip: null,
+          endpoint_count: 0,
+          endpoints: [],
+        },
+      },
+    });
+    await page.waitForTimeout(1000);
+
+    const s3Node = page.locator(".pipeline-node", { hasText: "S3" });
+    await expect(s3Node.locator(".pipeline-node-metric")).toHaveText(
+      "VPS destroyed",
+    );
+    const dotClass = await s3Node.locator(".status-dot").getAttribute("class");
+    expect(dotClass).not.toContain("error");
   });
 });
 

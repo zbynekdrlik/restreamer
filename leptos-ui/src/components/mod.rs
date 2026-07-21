@@ -7,6 +7,7 @@ mod confirm_modal;
 pub mod disk_pressure_banner;
 pub mod endpoint_history;
 pub mod endpoint_remove_confirm_modal;
+mod endpoint_tree;
 mod endpoints;
 mod header;
 mod operator_dashboard;
