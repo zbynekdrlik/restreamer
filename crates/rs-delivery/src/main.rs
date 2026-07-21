@@ -33,6 +33,7 @@ mod ffmpeg_reason;
 mod producer_lag;
 pub(crate) mod pushable;
 pub mod refill;
+pub mod refill_audit;
 pub mod rescue;
 pub mod rescue_audit;
 pub mod rescue_default;

@@ -29,6 +29,11 @@
 //! min behind live edge, OBS-stop didn't drain cache because fresh
 //! chunks kept arriving faster than reader consumed.
 
+use std::sync::Arc;
+use std::sync::atomic::Ordering as AtomicOrdering;
+
+use crate::audit_ring::AuditRing;
+use crate::buffer_state::BufferState;
 use crate::endpoint_task::ChunkFetcher;
 
 /// Trigger lag-probe every N successful fetches.
@@ -204,14 +209,117 @@ const REFILL_PROBE_FIRST_RUNG: i64 = 1;
 /// cushion >= target → `None`), `O(log cushion)` probes only when genuinely
 /// below target.
 pub(crate) async fn detect_refill_deficit<F: ChunkFetcher>(
-    _fetcher: &F,
-    _current: i64,
-    _target_chunks: i64,
+    fetcher: &F,
+    current: i64,
+    target_chunks: i64,
 ) -> Option<u64> {
-    // RED stub — real body lands in the GREEN commit. Always-None means "never
-    // below target", so the below-target detection tests FAIL until the fix
-    // exists.
-    None
+    if target_chunks <= 0 {
+        return None;
+    }
+    // Steady-state fast path: if the chunk at the target depth already exists,
+    // the cushion is at or above target — nothing to refill (1 HEAD probe).
+    // A probe error is the SAFE answer "don't throttle".
+    match fetcher.chunk_duration_ms(current + target_chunks).await {
+        Ok(Some(_)) => return None,
+        Err(_) => return None,
+        Ok(None) => {} // below target — locate the live edge to size the deficit
+    }
+    // Ascending small-rung ladder to bracket the live edge, strictly BELOW the
+    // target depth (we already proved `current + target` is missing). Each rung
+    // is HEAD-only. `first_missing` seeds to the proven-missing target chunk so
+    // the refine has an upper bound even if the ladder breaks on its first rung.
+    let mut probe_offset: i64 = REFILL_PROBE_FIRST_RUNG;
+    let mut last_existing: Option<i64> = None;
+    let mut first_missing: i64 = current + target_chunks;
+    while probe_offset < target_chunks {
+        let probe_id = current + probe_offset;
+        match fetcher.chunk_duration_ms(probe_id).await {
+            Ok(Some(_)) => {
+                last_existing = Some(probe_id);
+                probe_offset = probe_offset.saturating_mul(2);
+            }
+            Ok(None) => {
+                first_missing = probe_id;
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    // No existing chunk found ahead of `current` (producer sitting at the live
+    // edge with no headroom to measure) → cannot size the deficit → don't
+    // throttle. Rebuild starts as soon as the source is >= 1 chunk ahead.
+    let max_id = pin_live_edge(fetcher, last_existing?, first_missing).await;
+    let deficit = crate::refill::refill_deficit_chunks(max_id, current, target_chunks);
+    (deficit > 0).then_some(deficit)
+}
+
+/// Non-fast producer wrapper (#296): every `LAG_PROBE_INTERVAL_ITERS` fetches,
+/// re-measure the below-target cushion deficit and publish it on the shared
+/// `BufferState` so the consumer can throttle (or stop throttling). Emits the
+/// refill-started / refill-ended audit transition. `refilling` is the
+/// producer-local edge tracker for that transition. No-op for fast endpoints
+/// (they use the #294 read-delay ratchet, not this) — the caller gates on
+/// `!is_fast`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn maybe_update_refill_deficit<F: ChunkFetcher>(
+    fetcher: &F,
+    current: i64,
+    target_chunks: i64,
+    typical_chunk_dur_ms: u64,
+    iters: &mut u32,
+    buffer_state: &Arc<BufferState>,
+    refilling: &mut bool,
+    alias: &str,
+    audit_ring: &Option<Arc<AuditRing>>,
+) {
+    *iters += 1;
+    if *iters < LAG_PROBE_INTERVAL_ITERS {
+        return;
+    }
+    *iters = 0;
+
+    let deficit_secs = match detect_refill_deficit(fetcher, current, target_chunks).await {
+        // A genuine sub-target deficit: convert chunks → seconds, flooring to 1
+        // so a small-but-real deficit still signals the consumer to throttle.
+        Some(chunks) if chunks > 0 => (chunks.saturating_mul(typical_chunk_dur_ms) / 1000).max(1),
+        _ => 0,
+    };
+    buffer_state
+        .refill_deficit_secs
+        .store(deficit_secs, AtomicOrdering::Relaxed);
+
+    if deficit_secs > 0 && !*refilling {
+        *refilling = true;
+        crate::refill_audit::emit_refill_started(audit_ring, alias, deficit_secs);
+        tracing::info!(
+            alias = %alias,
+            deficit_secs,
+            "Refill: cushion below target, delivering slower to rebuild"
+        );
+    } else if deficit_secs == 0 && *refilling {
+        *refilling = false;
+        crate::refill_audit::emit_refill_ended(audit_ring, alias);
+        tracing::info!(alias = %alias, "Refill: cushion back at target, resuming 1x");
+    }
+}
+
+/// Clear the refill deficit when the producer goes stalled (outage) so the
+/// consumer stops throttling — there is no source to rebuild from, and the
+/// rescue machinery owns the drain from here. Closes the refill-audit pair if
+/// one was open. No-op if not currently refilling and already clear.
+pub(crate) fn clear_refill_deficit(
+    buffer_state: &Arc<BufferState>,
+    refilling: &mut bool,
+    alias: &str,
+    audit_ring: &Option<Arc<AuditRing>>,
+) {
+    buffer_state
+        .refill_deficit_secs
+        .store(0, AtomicOrdering::Relaxed);
+    if *refilling {
+        *refilling = false;
+        crate::refill_audit::emit_refill_ended(audit_ring, alias);
+    }
 }
 
 /// Convenience wrapper called once per successful fetch in producer_task.

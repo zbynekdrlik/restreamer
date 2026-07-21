@@ -63,10 +63,19 @@ pub const REFILL_MAX_THROTTLE_MS: u64 = 500;
 /// chunks that falls SHORT of the target. Returns 0 when the cushion is at or
 /// above target (the steady state — nothing to refill) or when the inputs are
 /// nonsensical (negative target, pointer ahead of the live edge).
-pub fn refill_deficit_chunks(_max_id: i64, _current: i64, _target_chunks: i64) -> u64 {
-    // RED stub — real body lands in the GREEN commit. Always-0 means "never
-    // below target", so the below-target tests FAIL until the fix exists.
-    0
+pub fn refill_deficit_chunks(max_id: i64, current: i64, target_chunks: i64) -> u64 {
+    if target_chunks <= 0 {
+        return 0;
+    }
+    // Live edge behind the read pointer is a nonsensical / transient
+    // (clock-race) reading — treat it as "cannot determine a deficit", never
+    // as a full deficit that would wrongly throttle. `max_id == current` (fully
+    // drained AT the live edge) is legitimate and DOES yield the full deficit.
+    if max_id < current {
+        return 0;
+    }
+    let cushion = max_id - current;
+    (target_chunks - cushion).max(0) as u64
 }
 
 /// Extra wall-clock sleep (ms) to add after delivering one chunk of
@@ -76,11 +85,15 @@ pub fn refill_deficit_chunks(_max_id: i64, _current: i64, _target_chunks: i64) -
 /// rate is flat. The result is clamped to `REFILL_MAX_THROTTLE_MS` and the
 /// chunk duration is clamped to a sane `[500, 5000]ms` window first so an
 /// outlier duration can never produce a stall-sized sleep.
-pub fn refill_throttle_ms(_deficit_secs: u64, _chunk_duration_ms: i64) -> u64 {
-    // RED stub — real body lands in the GREEN commit. Always-0 means "never
-    // throttle", so the cushion never climbs and the behavioural test FAILS
-    // until the fix exists.
-    0
+pub fn refill_throttle_ms(deficit_secs: u64, chunk_duration_ms: i64) -> u64 {
+    if deficit_secs == 0 {
+        return 0;
+    }
+    let dur = (chunk_duration_ms.max(0) as u64).clamp(500, 5000) as f64;
+    // deliver `dur` ms of media over `dur / factor` ms of wall time → the extra
+    // wall time per chunk is `dur * (1/factor - 1)`.
+    let extra = (dur * (1.0 / REFILL_SPEED_FACTOR - 1.0)).round() as u64;
+    extra.min(REFILL_MAX_THROTTLE_MS)
 }
 
 #[cfg(test)]
@@ -142,7 +155,7 @@ mod tests {
         // A huge chunk duration must never produce a stall-sized sleep.
         assert!(refill_throttle_ms(50, 5_000_000) <= REFILL_MAX_THROTTLE_MS);
         // And the cap is far below the 8s rescue-stall / 30s write-timeout gates.
-        assert!(REFILL_MAX_THROTTLE_MS < 8_000);
+        const { assert!(REFILL_MAX_THROTTLE_MS < 8_000) };
     }
 
     /// The core feedback loop: a buffered endpoint drained below target must
@@ -161,7 +174,10 @@ mod tests {
         let mut reached = false;
 
         for _ in 0..100_000 {
-            let deficit = (target_secs - cushion).max(0.0) as u64;
+            // `ceil` mirrors the real chunk-quantized deficit: any positive
+            // shortfall is still a deficit, so the refill runs until the
+            // cushion actually reaches target (0 shortfall), then stops.
+            let deficit = (target_secs - cushion).max(0.0).ceil() as u64;
             let throttle_ms = refill_throttle_ms(deficit, chunk_ms);
             // Never a stall-sized throttle.
             assert!(
