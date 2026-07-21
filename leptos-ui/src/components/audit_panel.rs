@@ -103,15 +103,32 @@ pub fn AuditPanel() -> impl IntoView {
                     key=|e| e.id
                     children=move |e: AuditEntry| {
                         let sev_class = format!("audit-row audit-row--{}", e.severity);
-                        let time = e
-                            .ts
-                            .split('T')
-                            .nth(1)
-                            .unwrap_or(&e.ts)
-                            .split('.')
-                            .next()
-                            .unwrap_or("")
-                            .to_string();
+                        // Parse the ISO-8601 UTC `ts` through js_sys::Date so the
+                        // row renders in the browser's LOCAL timezone (matches
+                        // operator_dashboard.rs's session-timer / the #50 fix).
+                        // The previous `ts.split('T')` substring rendered raw
+                        // UTC — a #50 regression reintroduced when AuditPanel
+                        // replaced ActivityFeed (#153).
+                        let time = {
+                            let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(&e.ts));
+                            if date.get_time().is_nan() {
+                                e.ts
+                                    .split('T')
+                                    .nth(1)
+                                    .unwrap_or(&e.ts)
+                                    .split('.')
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_string()
+                            } else {
+                                format!(
+                                    "{:02}:{:02}:{:02}",
+                                    date.get_hours(),
+                                    date.get_minutes(),
+                                    date.get_seconds()
+                                )
+                            }
+                        };
                         let endpoint = e.endpoint.clone().unwrap_or_default();
                         let has_endpoint = !endpoint.is_empty();
                         view! {
