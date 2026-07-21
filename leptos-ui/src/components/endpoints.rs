@@ -148,6 +148,8 @@ pub fn EndpointsView() -> impl IntoView {
                     let enabled = ep.enabled;
                     let is_fast = ep.is_fast;
                     let alias = ep.alias.clone();
+                    // #68: alias used by the live-delivery warning banner below.
+                    let warn_alias = ep.alias.clone();
                     let service_type = ep.service_type.clone();
                     let ep_for_edit = ep.clone();
 
@@ -194,6 +196,24 @@ pub fn EndpointsView() -> impl IntoView {
                                                     </button>
                                                 </div>
                                             </div>
+                                            {
+                                                // #68: an in-place key edit is inert while the
+                                                // endpoint is attached to a live delivery (the
+                                                // live task snapshots its config at spawn). Warn
+                                                // and point to the guided "Change Key" flow.
+                                                let warn_alias = warn_alias.clone();
+                                                move || {
+                                                    let d = store.delivery.get();
+                                                    let is_live = (d.status == "running"
+                                                        || d.status == "delivering")
+                                                        && d.endpoints.iter().any(|e| e.alias == warn_alias);
+                                                    is_live.then(|| view! {
+                                                        <div class="edit-live-warning" data-testid="edit-live-warning">
+                                                            "This endpoint is live. Saving a new key here only takes effect after remove + re-add \u{2014} use the \"Key\" button on the dashboard endpoint for a guided one-click change."
+                                                        </div>
+                                                    })
+                                                }
+                                            }
                                             <div class="edit-row checkboxes">
                                                 <label class="checkbox-label">
                                                     <input

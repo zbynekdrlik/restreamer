@@ -113,3 +113,71 @@ test("audit panel shows timestamps in browser-local time, not raw UTC", async ({
   );
   expect(real).toEqual([]);
 });
+
+test("audit panel groups a repeat burst and un-groups when toggled off", async ({
+  page,
+  request,
+}) => {
+  // #169: a wall of near-identical endpoint_rtmp_push_died rows during a
+  // mass-death should collapse into ONE grouped row (count + first->last span)
+  // when "Group bursts" is on (default), and expand back to the raw rows when
+  // the operator toggles it off.
+  const consoleMessages: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error" || msg.type() === "warning") {
+      consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
+    }
+  });
+
+  await page.addInitScript(tauriMockScript);
+  await request.post("http://127.0.0.1:8910/api/v1/__reset");
+  await page.goto("/");
+  await expect(page.locator(".audit-panel")).toBeVisible();
+
+  // Three FB-Zbynek push-died rows 20s apart — inside the 60s grouping window.
+  const burst = [
+    "2026-01-15T08:00:00.000Z",
+    "2026-01-15T08:00:20.000Z",
+    "2026-01-15T08:00:40.000Z",
+  ];
+  for (let i = 0; i < burst.length; i++) {
+    await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
+      data: {
+        type: "AuditAppended",
+        data: {
+          id: 770001 + i,
+          ts: burst[i],
+          source: "vps",
+          severity: "warn",
+          event_id: null,
+          instance_id: null,
+          endpoint: "FB-Zbynek",
+          action: "endpoint_rtmp_push_died",
+          detail: { lifetime_secs: 30 },
+        },
+      },
+    });
+  }
+
+  const deadRows = page.locator(".audit-panel .audit-row", {
+    hasText: "endpoint_rtmp_push_died",
+  });
+
+  // Group bursts ON (default): the 3 rows collapse into 1 row with a "3" count.
+  await expect(deadRows).toHaveCount(1, { timeout: 5000 });
+  await expect(deadRows.first().locator(".audit-row__count")).toContainText(
+    "3",
+  );
+
+  // Toggle Group bursts OFF -> the raw 3 rows reappear, no count badge.
+  await page
+    .locator(".audit-panel__group-toggle input[type=checkbox]")
+    .uncheck();
+  await expect(deadRows).toHaveCount(3, { timeout: 5000 });
+  await expect(page.locator(".audit-panel .audit-row__count")).toHaveCount(0);
+
+  const real = consoleMessages.filter(
+    (m) => !ALLOWED_CONSOLE.some((r) => r.test(m)),
+  );
+  expect(real).toEqual([]);
+});

@@ -517,7 +517,12 @@ app.put("/api/v1/endpoints/:id", (req, res) => {
   if (req.body.alias !== undefined) ep.alias = req.body.alias;
   if (req.body.service_type !== undefined)
     ep.service_type = req.body.service_type;
-  if (req.body.stream_key !== undefined) ep.stream_key = req.body.stream_key;
+  if (req.body.stream_key !== undefined) {
+    ep.stream_key = req.body.stream_key;
+    // #68: record key updates so the guided Change Key E2E can assert the
+    // remove -> update -> re-add sequence fired with the new key.
+    changeKeyOps.push({ op: "update", id: ep.id, stream_key: req.body.stream_key });
+  }
   if (req.body.enabled !== undefined) ep.enabled = req.body.enabled;
   if (req.body.is_fast !== undefined) ep.is_fast = req.body.is_fast;
   res.json({ status: "ok" });
@@ -533,11 +538,28 @@ app.delete("/api/v1/endpoints/:id", (req, res) => {
 // (200) so frontend tests that fire these requests don't get a 404
 // response which the browser would log as a console error and trip the
 // global afterEach console-clean assertion.
-app.post("/api/v1/delivery/endpoints/add", (_req, res) => {
+// #68: the guided Change Key flow drives remove -> update -> add. Record the
+// mid-delivery add/remove calls (alongside the PUT update above) so the E2E can
+// assert the full guided sequence.
+let changeKeyOps = [];
+app.post("/api/v1/delivery/endpoints/add", (req, res) => {
+  changeKeyOps.push({
+    op: "add",
+    endpoint_id: req.body && req.body.endpoint_id,
+    start_position: req.body && req.body.start_position,
+  });
   res.json({ status: "ok" });
 });
-app.post("/api/v1/delivery/endpoints/remove", (_req, res) => {
+app.post("/api/v1/delivery/endpoints/remove", (req, res) => {
+  changeKeyOps.push({
+    op: "remove",
+    alias: req.body && req.body.alias,
+    event_id: req.body && req.body.event_id,
+  });
   res.json({ status: "ok" });
+});
+app.get("/api/v1/_test/change-key-ops", (_req, res) => {
+  res.json(changeKeyOps);
 });
 
 // S3 usage + per-event clear stubs for the new Settings tab UI. Both
@@ -814,6 +836,7 @@ app.post("/api/v1/__reset", (_req, res) => {
   oauthGrants = {};
   oauthRows = [];
   lastDestroyByEvent = {};
+  changeKeyOps = [];
   res.json({ reset: true });
 });
 

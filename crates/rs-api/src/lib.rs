@@ -10,6 +10,9 @@ pub mod delivery_handlers;
 pub(crate) mod delivery_helpers;
 pub mod delivery_live_edge;
 pub(crate) mod delivery_monitor;
+pub(crate) mod delivery_orphan;
+#[cfg(test)]
+mod delivery_orphan_tests;
 pub(crate) mod delivery_recovery;
 #[cfg(test)]
 mod delivery_reset_tests;

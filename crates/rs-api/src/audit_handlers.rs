@@ -35,6 +35,16 @@ pub struct ListQuery {
     pub limit: Option<i64>,
     #[serde(default)]
     pub offset: Option<i64>,
+    /// #169: when true, collapse consecutive same-`(source, action, endpoint)`
+    /// bursts into one row (count + first→last span) via
+    /// [`audit::group_audit_rows`]. Response then carries `grouped` instead of
+    /// `rows`. The live dashboard groups client-side (so live WS rows collapse
+    /// too); this server surface is for API consumers / non-live queries.
+    #[serde(default)]
+    pub group: Option<bool>,
+    /// Grouping window in seconds (default 60). Ignored unless `group=true`.
+    #[serde(default)]
+    pub group_window_secs: Option<i64>,
 }
 
 pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> impl IntoResponse {
@@ -68,13 +78,21 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
         offset: q.offset,
     };
 
+    let want_group = q.group.unwrap_or(false);
+    let group_window = q.group_window_secs.unwrap_or(60);
+
     match audit::query(&state.pool, filter).await {
         Ok(rows) => {
             let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
                 .fetch_one(&state.pool)
                 .await
                 .unwrap_or(0);
-            Json(serde_json::json!({ "rows": rows, "total": total })).into_response()
+            if want_group {
+                let grouped = audit::group_audit_rows(rows, group_window);
+                Json(serde_json::json!({ "grouped": grouped, "total": total })).into_response()
+            } else {
+                Json(serde_json::json!({ "rows": rows, "total": total })).into_response()
+            }
         }
         Err(e) => {
             tracing::error!("audit list failed: {e}");

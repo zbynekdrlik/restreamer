@@ -109,6 +109,12 @@ impl DeliveryOrchestrator {
         &self.pool
     }
 
+    /// Access the Hetzner client (for sibling-module impl blocks, e.g.
+    /// `delivery_orphan.rs` — struct fields are private to this module).
+    pub(crate) fn hetzner(&self) -> &HetznerClient {
+        &self.hetzner
+    }
+
     /// Read the live local-disk-critical flag (written by the disk-pressure
     /// monitor). True when the chunk-store volume is critically full. Used by
     /// `poll_delivery_metrics` to drive endpoints RED Attention.
@@ -238,21 +244,19 @@ impl DeliveryOrchestrator {
                     auth_token: existing.auth_token,
                 });
             }
-            // Stale row: mark deleted, fall through to spawn fresh.
-            // Stop-race-safe: stop_delivery owns its captured hetzner_id
-            // so the old VPS is always deleted regardless of rewrites.
+            // Stale row: the old VPS may still be running and billing. #244:
+            // this path previously only relabelled the row "deleted" WITHOUT
+            // calling delete_server, so the orphaned VPS vanished from the
+            // dashboard (deleted rows are filtered) while still billing. Delete
+            // the VPS, mark the row deleted, and audit before spawning fresh.
             tracing::warn!(
                 event_id,
                 instance_id = existing.id,
                 status = %existing.status,
-                "Marking stale delivery_instance row as deleted before spawning new VPS"
+                "Cleaning up stale delivery_instance row (deleting orphaned VPS) before spawning new VPS"
             );
-            if let Err(e) =
-                db::update_delivery_instance_status(&self.pool, existing.id, "deleted").await
-            {
-                // Worst case: two non-deleted rows; ORDER BY id DESC picks the new one.
-                tracing::error!(instance_id = existing.id, "stale-row delete failed: {e}");
-            }
+            self.cleanup_orphan_delivery_vps(existing.id, event_id, "stale_row")
+                .await;
         }
 
         // Wipe S3 chunks for this event before spawning VPS (#174 operator

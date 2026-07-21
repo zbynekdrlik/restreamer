@@ -4,6 +4,19 @@ Terse per-issue record of autonomous autopilot work (decisions, SHAs, RED→GREE
 
 ---
 
+## 2026-07-21 — Batch #68 + #169 + #244 (one PR, v0.29.7)
+
+Bundled batch on `dev`, version bump `9001e33f` (0.29.6→0.29.7, 4 files).
+
+- **#244 (bug) — orphaned Hetzner VPS never deleted:** RED `107d307a` (`delivery_orphan_tests::start_delivery_deletes_orphaned_stale_vps`, wiremock DELETE `.expect(1)`) → GREEN `7ef3a79a`. New `DeliveryOrchestrator::cleanup_orphan_delivery_vps(instance_id, event_id, trigger)` deletes the VPS + marks row `deleted` + audits `vps_deleted` (reason `start_failed`/`stale_row`/`delete_error`). Wired at BOTH leak sites: poll_and_init failure handler (delivery_handlers.rs) AND start_delivery #165 stale-row cleanup (delivery.rs). Decision: immediate-delete + audit over a TTL/failed-list (audit trail carries post-mortem, per #75). RED proven on dev2 (Verifications failed pre-fix).
+- **#169 (feature) — activity-log burst grouping:** `575b61fb` (+ `bfb194f0` GroupedRow PartialEq for the leptos Memo bound). Decision: CLIENT-SIDE grouping in audit_panel.rs (covers LIVE WS rows; a server-only group misses them) — a documented wasm-side mirror of `rs_core::db::audit::group_audit_rows` (leptos can't dep on native rs-core); ALSO wired that pure fn as its first production caller via `?group=true` in audit_handlers.rs. "Group bursts" toggle default ON (window 0 = ungrouped). rs-api grouping tests + Playwright toggle E2E.
+- **#68 (feature) — guided "Change Key" flow:** `ebdc635f`. "Key" button on each live endpoint node → `ChangeKeyModal` runs remove→update_endpoint→add(Live) in one click (re-add re-reads fresh DB config incl. new key). endpoints.rs edit-form live-delivery warning banner. New mock `_test/change-key-ops` recorder + Playwright E2E asserting the ordered sequence.
+- **Cargo.lock:** left stale workspace-member versions (0.29.5) — cargo tolerates for path deps; matches the green 0.29.6 release (workspace build not `--locked`).
+- **dev2 verify:** clippy `--workspace --all-targets -D warnings` clean; full `cargo test --workspace` green (3 new tests named-confirmed); leptos wasm compile clean; frontend E2E change-key + audit-panel-grouping + remove-last-endpoint all pass.
+- **PR:** dev→main, body Closes #68 #169 #244. (CI run-id + merge SHA appended by supervisor.)
+
+---
+
 ## 2026-06-20 — #252 Crash-recovery: resume actively-delivering event on boot
 
 - **Issue:** #252 (bug, P0) — restarting Restreamer.exe after a stream.lan crash did ZERO delivery resume (no delivery re-init / health-monitor re-arm / fast-cache repopulation). Operator's #1 production failure.
