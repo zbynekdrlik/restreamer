@@ -12,7 +12,7 @@ This skill documents ALL operations for the stream.lan Windows PC. **USE THIS SK
 | Service         | URL/Port                            | Credentials                                      |
 | --------------- | ----------------------------------- | ------------------------------------------------ |
 | MCP Server      | `win-stream-snv` (stream.lan:8090)  | Bearer token (configured in ~/.claude.json)      |
-| OBS WebSocket   | `ws://stream.lan:4455`              | password: `JhRfqdTmuifYq60y` (auth not required) |
+| OBS WebSocket   | `ws://stream.lan:4455`              | password: `<OBS WS password — live value lives in OBS on stream.lan (obs-websocket settings), owned by the camera-box project; the value historically committed here was stale and is dead>` (auth not required) |
 | Restreamer API  | `http://127.0.0.1:8910`             | (local only)                                     |
 | Restreamer RTMP | `rtmp://stream.lan:1234/live/{app}` | (no auth)                                        |
 
@@ -70,7 +70,7 @@ mcp__win-stream-snv__Shell command="@{ type = 'rtmp_custom'; settings = @{ serve
 ```python
 # Python example using obs-websocket-py (run from Linux)
 import obsws
-ws = obsws.obsws("stream.lan", 4455, "JhRfqdTmuifYq60y")
+ws = obsws.obsws("stream.lan", 4455, "<OBS WS password — see Quick Reference table above>")
 ws.connect()
 
 # Set stream settings to Restreamer
@@ -123,6 +123,12 @@ mcp__win-stream-snv__Shell command="Invoke-RestMethod -Uri 'http://127.0.0.1:891
 
 Location: `C:\ProgramData\Restreamer\config.json`
 
+Note: the block below is illustrative only — the `endpoint`/region shown is the
+retired Linode setup (prod migrated to Hetzner fsn1 per #38). The real live
+values (bucket, endpoint, credentials) are read from
+`C:\ProgramData\Restreamer\config.json` on stream.lan itself — never hardcode
+them here.
+
 ```json
 {
   "client_uuid": "95da874e-6b06-41e5-99db-6f47a459c48b",
@@ -131,8 +137,8 @@ Location: `C:\ProgramData\Restreamer\config.json`
     "bucket": "restreamer-chunks",
     "region": "eu-central-1",
     "endpoint": "https://eu-central-1.linodeobjects.com",
-    "access_key_id": "WKSJVWJXD0BI5Z3BOMQ5",
-    "secret_access_key": "1CYGMD7LUfBA8weK5GheAi3ZJVUTjne999I53BCe"
+    "access_key_id": "<S3 access key — live value in C:\\ProgramData\\Restreamer\\config.json on stream.lan; the value historically committed here was a stale, dead Linode-era key>",
+    "secret_access_key": "<S3 secret key — same as above>"
   },
   "inpoint": {
     "chunk_duration_ms": 1000,

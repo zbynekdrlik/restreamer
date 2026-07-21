@@ -492,6 +492,32 @@ jobs:
           fi
           echo "OK: All Rust files are within the 1000-line limit."
 
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install gitleaks
+        run: |
+          GITLEAKS_VERSION="8.21.2"
+          curl -sSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+          ./gitleaks version
+      - name: Scan working tree for committed secrets
+        run: |
+          # Tree-only scan (--no-git): checks the checked-out tree exactly as
+          # it exists on this ref/PR. Deliberately does NOT scan git history --
+          # the two known historical leaks (commit 2d241ff5 FB App Secret,
+          # commit 96733dc5 OBS WS password + S3 keys) are scrubbed from the
+          # tree and confirmed dead/rotated (#274, #292); history is not
+          # rewritten per operator precedent (rotation/staleness neutralizes
+          # a historical leak; rewrite only on explicit operator instruction).
+          # A NEW secret added anywhere in the tree -- including one added in
+          # a PR diff, since checkout gives the PR's merged tree -- fails
+          # this job with no allowlist needed.
+          ./gitleaks detect --no-git --source . --redact -v
+
   test-integrity:
     name: Test integrity check
     runs-on: ubuntu-latest
@@ -848,6 +874,7 @@ jobs:
         build-tauri,
         build-delivery,
         file-size,
+        secret-scan,
         test-integrity,
         frontend-e2e,
         mutation-testing,
@@ -864,6 +891,7 @@ jobs:
           echo "build-tauri:    ${{ needs.build-tauri.result }}"
           echo "build-delivery: ${{ needs.build-delivery.result }}"
           echo "file-size:      ${{ needs.file-size.result }}"
+          echo "secret-scan:    ${{ needs.secret-scan.result }}"
           echo "test-integrity: ${{ needs.test-integrity.result }}"
           echo "frontend-e2e:   ${{ needs.frontend-e2e.result }}"
           echo "mutation-testing: ${{ needs.mutation-testing.result }}"
@@ -908,6 +936,7 @@ jobs:
             "build-tauri:${{ needs.build-tauri.result }}" \
             "build-delivery:${{ needs.build-delivery.result }}" \
             "file-size:${{ needs.file-size.result }}" \
+            "secret-scan:${{ needs.secret-scan.result }}" \
             "test-integrity:${{ needs.test-integrity.result }}" \
             "frontend-e2e:${{ needs.frontend-e2e.result }}"; do
             name="${job_result%%:*}"
@@ -1901,6 +1930,7 @@ jobs:
       YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
       YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
       YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+      YOUTUBE_STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -2399,7 +2429,7 @@ jobs:
                 streamServiceType = "rtmp_custom"
                 streamServiceSettings = @{
                   server = "rtmp://a.rtmp.youtube.com/live2"
-                  key = "5jya-pz2d-51x5-mbx4-ddvs"
+                  key = "$env:YOUTUBE_STREAM_KEY"
                 }
               }
             }
