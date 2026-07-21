@@ -95,9 +95,38 @@ pub fn fast_buffer_class(secs: f64, target_secs: Option<f64>) -> &'static str {
     }
 }
 
+/// Friendly label for the "S3 -> Delivery" pipeline node once delivery has
+/// gone idle and a `vps_deleted` audit record exists for the selected event.
+///
+/// `reason` mirrors delivery.rs's `delete_reason` audit field:
+/// `"operator_stop"` (clean teardown) vs `"delete_error"` (the Hetzner
+/// `delete_server()` call itself failed — the VPS may still be running and
+/// BILLING even though the local row was marked "deleted"). Without this
+/// distinction a failed delete looked identical to a clean one everywhere
+/// the operator could see it (#75).
+pub fn vps_destroy_label(reason: &str) -> &'static str {
+    if reason == "delete_error" {
+        "VPS destroy FAILED \u{2014} may still be billing!"
+    } else {
+        "VPS destroyed"
+    }
+}
+
+/// Status-dot CSS class companion to [`vps_destroy_label`] — red/error only
+/// for the unconfirmed-teardown case, otherwise the calm idle dot.
+pub fn vps_destroy_dot_class(reason: &str) -> &'static str {
+    if reason == "delete_error" {
+        "status-dot error"
+    } else {
+        "status-dot"
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cache_threshold_for_service, fast_buffer_class};
+    use super::{
+        cache_threshold_for_service, fast_buffer_class, vps_destroy_dot_class, vps_destroy_label,
+    };
 
     #[test]
     fn held_ratcheted_buffer_renders_healthy_not_critical() {
@@ -176,5 +205,34 @@ mod tests {
         assert_eq!(cache_threshold_for_service("YT_HLS"), 1.1);
         assert_eq!(cache_threshold_for_service(""), 1.1);
         assert_eq!(cache_threshold_for_service("Twitch"), 1.1);
+    }
+
+    #[test]
+    fn vps_destroy_clean_teardown_renders_calm() {
+        // #75: a clean operator-triggered teardown is a confirmation, not a
+        // warning — must render the calm idle dot, not error-red.
+        assert_eq!(vps_destroy_label("operator_stop"), "VPS destroyed");
+        assert_eq!(vps_destroy_dot_class("operator_stop"), "status-dot");
+    }
+
+    #[test]
+    fn vps_destroy_error_renders_as_warning() {
+        // #75: delivery.rs writes status="deleted" even when Hetzner's
+        // delete_server() call FAILED — a still-billing VPS must not look
+        // identical to a cleanly destroyed one.
+        assert_eq!(
+            vps_destroy_label("delete_error"),
+            "VPS destroy FAILED \u{2014} may still be billing!"
+        );
+        assert_eq!(vps_destroy_dot_class("delete_error"), "status-dot error");
+    }
+
+    #[test]
+    fn vps_destroy_unknown_reason_defaults_to_calm_label() {
+        // An unrecognized reason string (e.g. a future addition to
+        // delivery.rs) must default to the non-alarming label rather than
+        // silently matching the error arm.
+        assert_eq!(vps_destroy_label("unknown"), "VPS destroyed");
+        assert_eq!(vps_destroy_dot_class("unknown"), "status-dot");
     }
 }

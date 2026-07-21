@@ -16,6 +16,7 @@ use super::upload_strip::UploadStrip;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
 use crate::store::DashboardStore;
+use crate::utils::{vps_destroy_dot_class, vps_destroy_label};
 
 /// Minimum seconds the RTMP publisher must be connected before the
 /// operator can start delivery. Mirrors
@@ -405,6 +406,27 @@ fn Pipeline() -> impl IntoView {
         }
     };
 
+    // Persistent "VPS destroyed" confirmation (#75). Once delivery goes
+    // idle for the selected event, fetch the most recent vps_deleted audit
+    // record so the operator gets confirmation the VPS is actually gone —
+    // and a warning if the Hetzner delete call itself failed — instead of
+    // the node silently reverting to a blank "0 on S3" with no signal
+    // either way. Scoped to the selected event so it never shows stale
+    // teardown info for an event the operator has since switched away from.
+    let last_destroy: RwSignal<Option<api::LastVpsDestroy>> = RwSignal::new(None);
+    Effect::new(move |_| {
+        let status = delivery_status();
+        let event_id = store.selected_event_id.get();
+        match (status.is_empty() || status == "none", event_id) {
+            (true, Some(id)) => {
+                spawn_local(async move {
+                    last_destroy.set(api::get_last_vps_destroy(id).await.ok().flatten());
+                });
+            }
+            _ => last_destroy.set(None),
+        }
+    });
+
     // S3 → Delivery node — chunks on S3 + delivered by VPS
     let delivered_chunks = move || {
         store
@@ -431,9 +453,12 @@ fn Pipeline() -> impl IntoView {
             // operator can distinguish them from idle (gray) and from
             // delivering (green). Each phase is normal but takes time.
             "creating" | "booting" | "initializing" => "status-dot warning",
+            "stopping" => "status-dot warning",
             _ => {
                 if is_delivering() {
                     "status-dot warning"
+                } else if let Some(d) = last_destroy.get() {
+                    vps_destroy_dot_class(&d.reason)
                 } else {
                     "status-dot"
                 }
@@ -448,13 +473,20 @@ fn Pipeline() -> impl IntoView {
                 s3_chunks(),
                 delivered_chunks()
             ),
-            "" | "none" => format!("{} on S3", s3_chunks()),
+            "" | "none" => match last_destroy.get() {
+                // #75: confirm the teardown instead of a blank "0 on S3" —
+                // and distinguish a clean destroy from one where Hetzner's
+                // delete_server() call itself failed (still-billing risk).
+                Some(d) => vps_destroy_label(&d.reason).to_string(),
+                None => format!("{} on S3", s3_chunks()),
+            },
             // Map orchestrator phases to operator-friendly text. Without
             // this, the dashboard would show the raw enum value (e.g.
             // "booting") which doesn't tell the user what's happening.
             "creating" => "Creating VPS \u{2026}".to_string(),
             "booting" => "VPS booting \u{2026}".to_string(),
             "initializing" => "Starting endpoints \u{2026}".to_string(),
+            "stopping" => "Stopping \u{2026}".to_string(),
             other => other.to_string(),
         }
     };

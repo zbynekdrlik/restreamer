@@ -157,6 +157,10 @@ pub fn build_router(state: AppState) -> Router {
             get(delivery_handlers::list_delivery_instances),
         )
         .route(
+            "/delivery/last-destroy",
+            get(delivery_handlers::delivery_last_destroy),
+        )
+        .route(
             "/delivery/endpoints/add",
             post(delivery_handlers::delivery_add_endpoint),
         )
