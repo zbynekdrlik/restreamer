@@ -486,6 +486,151 @@ mod audit_tests {
 }
 
 #[cfg(test)]
+mod delivery_last_destroy_tests {
+    use crate::router::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rs_core::config::Config;
+    use rs_core::db;
+    use rs_core::models::WsEvent;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let pool = db::create_memory_pool().await.unwrap();
+        db::run_migrations(&pool).await.unwrap();
+        let config = Config::for_testing();
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        AppState::new_for_tests(pool, config, ws_tx)
+    }
+
+    async fn body_to_bytes(body: Body) -> Vec<u8> {
+        axum::body::to_bytes(body, 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    /// #75: a Hetzner delete_server() failure during stop_delivery() still
+    /// writes status="deleted" on the instance row (delivery.rs), so a
+    /// still-billing VPS was indistinguishable from a cleanly destroyed one
+    /// everywhere the operator could see it. The vps_deleted audit row DOES
+    /// carry the real delete_reason ("delete_error" vs "operator_stop") —
+    /// this endpoint must surface it so the dashboard can warn instead of
+    /// silently going idle.
+    #[tokio::test]
+    async fn surfaces_delete_error_reason_from_audit_trail() {
+        let state = test_state().await;
+        sqlx::query(
+            "INSERT INTO audit_log (severity, source, event_id, instance_id, action, detail)
+             VALUES ('info', 'delivery', 1, 42, 'vps_deleted',
+               '{\"hetzner_id\":99,\"ipv4\":\"1.2.3.4\",\"reason\":\"delete_error\"}')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/last-destroy?event_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["reason"], "delete_error");
+        assert_eq!(json["hetzner_id"], 99);
+    }
+
+    #[tokio::test]
+    async fn clean_teardown_reports_operator_stop_reason() {
+        let state = test_state().await;
+        sqlx::query(
+            "INSERT INTO audit_log (severity, source, event_id, instance_id, action, detail)
+             VALUES ('info', 'delivery', 1, 42, 'vps_deleted',
+               '{\"hetzner_id\":99,\"ipv4\":\"1.2.3.4\",\"reason\":\"operator_stop\"}')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/last-destroy?event_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["reason"], "operator_stop");
+    }
+
+    #[tokio::test]
+    async fn returns_null_when_no_destroy_history_exists() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/last-destroy?event_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_null());
+    }
+
+    #[tokio::test]
+    async fn scoped_to_the_requested_event_only() {
+        // A vps_deleted row for a DIFFERENT event must never leak into this
+        // event's answer -- each event's teardown history is independent.
+        let state = test_state().await;
+        sqlx::query(
+            "INSERT INTO audit_log (severity, source, event_id, instance_id, action, detail)
+             VALUES ('info', 'delivery', 2, 7, 'vps_deleted',
+               '{\"hetzner_id\":5,\"ipv4\":\"9.9.9.9\",\"reason\":\"delete_error\"}')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/delivery/last-destroy?event_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_to_bytes(resp.into_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_null());
+    }
+}
+
+#[cfg(test)]
 mod metrics_tests {
     use crate::router::build_router;
     use crate::state::AppState;
