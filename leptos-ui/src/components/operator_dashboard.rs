@@ -89,12 +89,20 @@ fn ControlBar() -> impl IntoView {
     // Lock event selector when pipeline is active
     let is_delivering_active = move || is_active();
 
-    // Auto-select the active event on mount
+    // Auto-select the active event on mount. Keyed off `streaming_event`
+    // (WS-synced, backend-canonical receiving-preferred current event —
+    // see rs-core::db::get_streaming_event) rather than re-scanning
+    // events_list for `delivering_activated` only: an event that is
+    // activated (receiving) but not yet delivering was never matched by
+    // the old condition, leaving the pacing panel stuck on "No event
+    // selected" even though the backend correctly reports an active
+    // event (#151).
     Effect::new(move |_| {
-        let events = store.events_list.get();
         if store.selected_event_id.get_untracked().is_none() {
-            if let Some(active) = events.iter().find(|e| e.delivering_activated) {
-                store.selected_event_id.set(Some(active.id));
+            if let Some(active) = store.streaming_event.get() {
+                if active.receiving_activated || active.delivering_activated {
+                    store.selected_event_id.set(Some(active.id));
+                }
             }
         }
     });
