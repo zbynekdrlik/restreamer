@@ -1734,6 +1734,13 @@ test.describe("Pipeline Node Data", () => {
     await page.waitForTimeout(1000);
     await page.locator(".event-selector").selectOption({ index: 1 });
 
+    // Seed the fixture BEFORE the idle transition -- the dashboard's fetch
+    // Effect only re-runs when delivery status or the selected event
+    // changes, so seeding it after that transition would be too late.
+    await request.post("http://127.0.0.1:8910/api/v1/_test/set-last-destroy", {
+      data: { event_id: 1, reason: "delete_error" },
+    });
+
     // The mock's default WS-connect payload reports an active delivery
     // (status="running") for other tests' convenience -- force idle so the
     // "" | "none" branch under test is actually reached.
@@ -1748,11 +1755,6 @@ test.describe("Pipeline Node Data", () => {
           endpoints: [],
         },
       },
-    });
-    await page.waitForTimeout(500);
-
-    await request.post("http://127.0.0.1:8910/api/v1/_test/set-last-destroy", {
-      data: { event_id: 1, reason: "delete_error" },
     });
     await page.waitForTimeout(1000);
 
@@ -1771,6 +1773,11 @@ test.describe("Pipeline Node Data", () => {
     await page.waitForTimeout(1000);
     await page.locator(".event-selector").selectOption({ index: 1 });
 
+    // Seed BEFORE the idle transition -- see the previous test for why.
+    await request.post("http://127.0.0.1:8910/api/v1/_test/set-last-destroy", {
+      data: { event_id: 1, reason: "operator_stop" },
+    });
+
     // Force idle -- see the previous test for why.
     await request.post("http://127.0.0.1:8910/api/v1/_test/ws-broadcast", {
       data: {
@@ -1783,11 +1790,6 @@ test.describe("Pipeline Node Data", () => {
           endpoints: [],
         },
       },
-    });
-    await page.waitForTimeout(500);
-
-    await request.post("http://127.0.0.1:8910/api/v1/_test/set-last-destroy", {
-      data: { event_id: 1, reason: "operator_stop" },
     });
     await page.waitForTimeout(1000);
 
