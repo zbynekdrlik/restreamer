@@ -15,19 +15,26 @@ one command.
 
 ## One-time-per-session setup
 
-A warm checkout lives at `~/hotfix294/repo` on dev2 (keeps `target/` warm — a
-cold build is ~40 min, a warm incremental is seconds-to-minutes). Sync your dev1
-working tree to it (source only; never ship `target/`):
+The warm checkout on dev2 is **`~/restreamer-buildcheck`** (keeps `target/`
+warm — a cold build is ~40 min, a warm incremental is seconds-to-minutes). It's
+a plain source copy (no `.git`) with a warm `target/`; run all the dev2 commands
+below from there. (The old `~/hotfix294/repo` path is GONE — 2026-07-21; if
+`restreamer-buildcheck` is ever missing, `find ~ -maxdepth 3 -name Cargo.toml
+-path '*restreamer*'` on dev2 finds the current warm checkout.) Sync your dev1
+working tree into it (source only; never ship `target/`):
 
 ```bash
+# airuleset:deploy-dirty-ok   # build-verify sync, NOT a deploy (clean-tree hook)
 rsync -a --delete \
   --exclude 'target/' --exclude '.git/' --exclude 'node_modules/' \
   --exclude 'e2e/test-results/' --exclude '*.png' \
   /home/newlevel/devel/restreamer/ \
-  newlevel@dev2:/home/newlevel/hotfix294/repo/
+  newlevel@dev2:/home/newlevel/restreamer-buildcheck/
 ```
 
-Re-run the rsync after EVERY local edit before building on dev2.
+The `# airuleset:deploy-dirty-ok` marker is REQUIRED — the clean-tree hook
+blocks any rsync/scp from a dirty tree, and you sync UNCOMMITTED work here on
+purpose (you verify BEFORE committing). Re-run the rsync after EVERY local edit.
 
 ## Compile / test / clippy
 
@@ -59,9 +66,9 @@ session ends** — start it and run the tests in the SAME ssh command (one
 heredoc), never as separate ssh calls:
 
 ```bash
-ssh newlevel@dev2 'cd ~/hotfix294/repo/leptos-ui && \
+ssh newlevel@dev2 'cd ~/restreamer-buildcheck/leptos-ui && \
   export BUILD_VERSION=0.29.3-dev BUILD_TIMESTAMP="x" && trunk build --release'
-ssh newlevel@dev2 'cd ~/hotfix294/repo/e2e && npm install >/dev/null 2>&1
+ssh newlevel@dev2 'cd ~/restreamer-buildcheck/e2e && npm install >/dev/null 2>&1
   RESTREAMER_TEST_HOOKS=1 node mock-api.js > /tmp/mockapi.log 2>&1 &
   MOCK=$!; sleep 4
   npx playwright test --config playwright-frontend.config.ts
