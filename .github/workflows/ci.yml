@@ -2016,6 +2016,20 @@ jobs:
           Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($ep.id)/link-oauth" -Method POST -Body $body -ContentType 'application/json'
           Write-Host "Linked endpoint $($ep.id) ('e2e rtmp') to oauth $($oauth.id)"
 
+          # Sync the endpoint's stream key from the YOUTUBE_STREAM_KEY secret.
+          # The endpoint row on the box carries its own key in the DB; after a
+          # key rotation in YouTube Studio the row silently keeps the DEAD key
+          # and the VPS push dies with "upstream closed connection mid-stream"
+          # while the OBS-direct baseline (which reads the secret) passes
+          # (run 29833571518, #299). The secret is the single source of truth.
+          if ($ep.stream_key -ne $env:YOUTUBE_STREAM_KEY) {
+            $keyBody = @{ stream_key = $env:YOUTUBE_STREAM_KEY } | ConvertTo-Json
+            Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/endpoints/$($ep.id)" -Method PUT -Body $keyBody -ContentType 'application/json'
+            Write-Host "Endpoint $($ep.id) stream_key synced from YOUTUBE_STREAM_KEY secret (was stale)"
+          } else {
+            Write-Host "Endpoint $($ep.id) stream_key already matches secret"
+          }
+
       - name: Ensure OBS is running
         shell: powershell
         run: |
