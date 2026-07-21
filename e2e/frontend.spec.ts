@@ -1720,6 +1720,54 @@ test.describe("Pipeline Node Data", () => {
     const vpsDot = page.locator(".pipeline-node .status-dot").nth(3);
     await expect(vpsDot).toHaveClass(/active/, { timeout: 5000 });
   });
+
+  test("VPS destroy failure surfaces a still-billing warning, not silent idle", async ({
+    page,
+    request,
+  }) => {
+    // #75: delivery.rs writes status="deleted" even when Hetzner's
+    // delete_server() call ITSELF fails -- a still-billing VPS was
+    // indistinguishable from a cleanly destroyed one anywhere the operator
+    // could see it. Once delivery goes idle, the dashboard must warn
+    // instead of silently reverting to a blank "0 on S3".
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.waitForTimeout(500);
+
+    await request.post("http://127.0.0.1:8910/api/v1/_test/set-last-destroy", {
+      data: { event_id: 1, reason: "delete_error" },
+    });
+    await page.waitForTimeout(1000);
+
+    const s3Node = page.locator(".pipeline-node", { hasText: "S3" });
+    await expect(s3Node.locator(".pipeline-node-metric")).toContainText(
+      "may still be billing",
+    );
+    await expect(s3Node.locator(".status-dot")).toHaveClass(/error/);
+  });
+
+  test("clean VPS destroy shows a calm confirmation, not a warning", async ({
+    page,
+    request,
+  }) => {
+    await page.goto("/");
+    await page.waitForTimeout(1000);
+    await page.locator(".event-selector").selectOption({ index: 1 });
+    await page.waitForTimeout(500);
+
+    await request.post("http://127.0.0.1:8910/api/v1/_test/set-last-destroy", {
+      data: { event_id: 1, reason: "operator_stop" },
+    });
+    await page.waitForTimeout(1000);
+
+    const s3Node = page.locator(".pipeline-node", { hasText: "S3" });
+    await expect(s3Node.locator(".pipeline-node-metric")).toHaveText(
+      "VPS destroyed",
+    );
+    const dotClass = await s3Node.locator(".status-dot").getAttribute("class");
+    expect(dotClass).not.toContain("error");
+  });
 });
 
 // --- Navigation ---

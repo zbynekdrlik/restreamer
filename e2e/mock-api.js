@@ -596,6 +596,28 @@ app.get("/api/v1/delivery/status/cached", (_req, res) => {
   res.json(cachedDelivery);
 });
 
+// --- Last VPS destroy confirmation (#75) ---
+// Keyed by event_id -> { ts, hetzner_id, reason }. Mirrors the real
+// vps_deleted-audit-trail-backed GET /api/v1/delivery/last-destroy.
+let lastDestroyByEvent = {};
+
+app.get("/api/v1/delivery/last-destroy", (req, res) => {
+  const eventId = parseInt(req.query.event_id, 10);
+  res.json(lastDestroyByEvent[eventId] || null);
+});
+
+// Test-only: seed a VPS-destroy confirmation for an event.
+// Body: { event_id, reason: "operator_stop" | "delete_error" }
+app.post("/api/v1/_test/set-last-destroy", (req, res) => {
+  const eventId = parseInt(req.body.event_id, 10);
+  lastDestroyByEvent[eventId] = {
+    ts: new Date().toISOString(),
+    hetzner_id: 99,
+    reason: req.body.reason || "operator_stop",
+  };
+  res.json({ status: "ok" });
+});
+
 // Build the DeliveryStatus payload for the outage-survival UX scenarios
 // (Task T19). Used for BOTH the HTTP cached-status response and the
 // WebSocket DeliveryStatus broadcast on connect, so the dashboard's initial
@@ -791,6 +813,7 @@ app.post("/api/v1/__reset", (_req, res) => {
   auditIdCounter = 0;
   oauthGrants = {};
   oauthRows = [];
+  lastDestroyByEvent = {};
   res.json({ reset: true });
 });
 
