@@ -764,6 +764,27 @@ test.describe("Operator Dashboard", () => {
     const selectedValue = await page.locator(".event-selector").inputValue();
     expect(selectedValue).not.toBe("");
   });
+
+  test("auto-selects an activated-but-not-yet-delivering event on page load", async ({
+    page,
+    request,
+  }) => {
+    // #151: activate_event only sets receiving_activated=true. The old
+    // auto-select Effect only matched events_list.delivering_activated, so
+    // an event that is receiving but not yet delivering was never
+    // auto-selected — the pacing panel showed "No event selected" even
+    // though the backend correctly reports an active streaming_event.
+    await request.post("http://127.0.0.1:8910/api/v1/events/1/activate");
+    await page.goto("/");
+    await page.waitForTimeout(1500);
+
+    const selectedValue = await page.locator(".event-selector").inputValue();
+    expect(selectedValue).toBe("1");
+
+    await expect(page.locator(".pacing-panel")).not.toContainText(
+      "No event selected",
+    );
+  });
 });
 
 // --- Settings Page (/settings) ---

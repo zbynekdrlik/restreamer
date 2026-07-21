@@ -98,26 +98,30 @@ function buildStatusResponse() {
   };
 }
 
+// Mirrors the real backend's query (crates/rs-core/src/db/mod.rs::
+// get_streaming_event): "prefer the event with receiving_activated=1,
+// fall back to highest ID". Previously this was a scenario-keyed
+// hardcoded object, decoupled from the actual `events` array mutations
+// made by /activate, /start-stream, /stop-stream etc — so an event
+// activated (not delivered) via /activate never showed up in /status's
+// streaming_event, and the dashboard's auto-select effect (keyed off
+// streaming_event) could never see it (#151).
 function currentStreamingEvent() {
-  if (scenario === "zero-endpoints" || scenario === "last-endpoint") {
-    return {
-      id: 1,
-      name: "Sunday Service",
-      received_bytes: 52428800,
-      receiving_activated: true,
-      delivering_activated: true,
-      cache_delay_secs: 120,
-      rescue_video_url: null,
-    };
-  }
+  if (events.length === 0) return null;
+  const active = events.reduce((best, e) => {
+    if (!best) return e;
+    if (e.receiving_activated && !best.receiving_activated) return e;
+    if (!e.receiving_activated && best.receiving_activated) return best;
+    return e.id > best.id ? e : best;
+  }, null);
   return {
-    id: 1,
-    name: "Sunday Service",
-    received_bytes: 52428800,
-    receiving_activated: false,
-    delivering_activated: false,
-    cache_delay_secs: null,
-    rescue_video_url: null,
+    id: active.id,
+    name: active.name,
+    received_bytes: active.received_bytes,
+    receiving_activated: active.receiving_activated,
+    delivering_activated: active.delivering_activated,
+    cache_delay_secs: active.cache_delay_secs,
+    rescue_video_url: active.rescue_video_url,
   };
 }
 
