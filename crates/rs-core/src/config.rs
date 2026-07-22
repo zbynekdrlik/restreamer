@@ -23,16 +23,37 @@ pub struct Config {
     pub notifications: NotificationsConfig,
 }
 
-/// Operator-facing outage notifications (#261). The webhook URL is a runtime
-/// secret set by the operator in `config.json` — it MUST NOT be committed
+/// Operator-facing outage notifications (#261, #306). All fields are runtime
+/// secrets set by the operator in `config.json` — they MUST NOT be committed
 /// anywhere in the repo.
+///
+/// Two delivery mechanisms are supported; the notifier picks one at build time
+/// (`OutageNotifier::from_config`):
+/// - **Bot token (#306, preferred)** — when both `discord_bot_token` and
+///   `discord_channel_id` are set, alerts POST to the Discord REST API
+///   (`channels/{id}/messages`) with an `Authorization: Bot <token>` header.
+///   A thread IS a channel, so this targets the operator's existing alerts-snv
+///   thread. This is the pattern camera-box already uses. Bot mode WINS when
+///   both bot and webhook fields are set.
+/// - **Webhook (#261, alternative)** — when only `discord_webhook_url` is set,
+///   alerts POST the same `{"content": ...}` body to the webhook URL.
+///
+/// All fields empty (the default) disables notifications entirely, so the
+/// feature ships dark until the operator fills one mechanism in.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NotificationsConfig {
-    /// Discord webhook URL for immediate outage alerts. Empty (the default)
-    /// disables notifications entirely, so the feature ships dark until the
-    /// operator fills it in.
+    /// Discord webhook URL for immediate outage alerts (#261, alternative to
+    /// bot mode). Empty (the default) means "no webhook".
     #[serde(default)]
     pub discord_webhook_url: String,
+    /// Discord bot token for posting to a channel/thread via the REST API
+    /// (#306). Set together with `discord_channel_id` to enable bot mode.
+    #[serde(default)]
+    pub discord_bot_token: String,
+    /// Discord channel/thread id to post alerts into (#306). A thread is a
+    /// channel in the Discord API. Set together with `discord_bot_token`.
+    #[serde(default)]
+    pub discord_channel_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -653,6 +674,38 @@ mod tests {
         assert_eq!(
             reparsed.notifications.discord_webhook_url,
             "https://discord.example/webhook/xyz"
+        );
+    }
+
+    #[test]
+    fn notifications_bot_fields_roundtrip_and_default_empty() {
+        // Absent bot fields default to empty (bot mode disabled) — #306.
+        let json_min = r#"{
+            "client_uuid": "abc",
+            "s3": { "bucket": "b", "region": "r", "endpoint": "e", "access_key_id": "k", "secret_access_key": "s" }
+        }"#;
+        let cfg_min: Config = serde_json::from_str(json_min).unwrap();
+        assert!(cfg_min.notifications.discord_bot_token.is_empty());
+        assert!(cfg_min.notifications.discord_channel_id.is_empty());
+
+        // Bot fields parse and survive a save/load roundtrip — #306.
+        let json = r#"{
+            "client_uuid": "abc",
+            "s3": { "bucket": "b", "region": "r", "endpoint": "e", "access_key_id": "k", "secret_access_key": "s" },
+            "notifications": { "discord_bot_token": "Bot.tok.value", "discord_channel_id": "1373592666733940816" }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.notifications.discord_bot_token, "Bot.tok.value");
+        assert_eq!(
+            config.notifications.discord_channel_id,
+            "1373592666733940816"
+        );
+        let reparsed: Config =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(reparsed.notifications.discord_bot_token, "Bot.tok.value");
+        assert_eq!(
+            reparsed.notifications.discord_channel_id,
+            "1373592666733940816"
         );
     }
 
