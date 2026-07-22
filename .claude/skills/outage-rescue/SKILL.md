@@ -161,6 +161,24 @@ dashboard banner keys off the same audit rows).
   to a crate's Cargo.toml to POST from there (rs-core did NOT have it before
   #261). Mock the external webhook in tests with a one-shot `tokio::net::
   TcpListener` that reads the request + returns `204` — no mock-server dep.
+- **Two delivery mechanisms (#306, v0.29.10):** `OutageNotifier` holds an
+  internal `AlertSink` (`Bot | Webhook`). `from_config` picks **bot mode** when
+  BOTH `notifications.discord_bot_token` + `discord_channel_id` are set (bot WINS
+  over a webhook when both configured), else webhook, else disabled. `post_alert_bot`
+  POSTs `{"content": ...}` with an `Authorization: Bot <token>` header to
+  `https://discord.com/api/v10/channels/{id}/messages` — **a thread IS a channel**,
+  so `channel_id` can be a thread id (the operator's alerts-snv thread
+  `1373592666733940816`, the camera-box pattern). Bot token is preferred because
+  the bot has SEND_MESSAGES on the thread but NOT Manage Webhooks on the parent.
+  The REST base is a `const DISCORD_API_BASE`; `post_alert_bot` takes it as a
+  param so the `TcpListener` mock points at a local base and asserts the request
+  line + `Authorization` header. Token + channel id are RUNTIME secrets in
+  `config.json` — never committed.
+- **Secret-staging hook gotcha:** unit-test fixtures like
+  `discord_bot_token: "tok-123"` trip `block-sensitive-staging.sh` (`token`/`secret`
+  assigned a quoted literal). For fake fixture values, commit with
+  `# airuleset:secret-ok <reason>` as a shell comment OUTSIDE any quoted string on
+  the `git commit` line — do NOT reshape the test just to dodge the scanner.
 
 ## Rescue EXIT Criterion — `producer_active` Alone Is Not Enough (#289, v0.29.1)
 
