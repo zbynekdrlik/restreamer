@@ -8,7 +8,7 @@ fn format_countdown_warmup() {
         },
         95,
     );
-    assert_eq!(text, "Stream starting ~ 1m 35s");
+    assert_eq!(text, "Vysielanie sa spustí o ~1m 35s");
 }
 
 #[test]
@@ -19,7 +19,31 @@ fn format_countdown_buffer_empty() {
         },
         30,
     );
-    assert_eq!(text, "Stream recovering ~ 30s");
+    assert_eq!(text, "Obnovujeme o ~30s");
+}
+
+#[test]
+fn format_countdown_warmup_seconds_only() {
+    // eta < 60 → seconds-only form, no minutes segment.
+    let text = format_countdown_text(
+        &DeliveryMode::Rescue {
+            reason: RescueReason::Warmup,
+        },
+        45,
+    );
+    assert_eq!(text, "Vysielanie sa spustí o ~45s");
+}
+
+#[test]
+fn format_countdown_buffer_empty_minutes() {
+    // eta >= 60 → minutes + seconds form.
+    let text = format_countdown_text(
+        &DeliveryMode::Rescue {
+            reason: RescueReason::BufferEmpty,
+        },
+        150,
+    );
+    assert_eq!(text, "Obnovujeme o ~2m 30s");
 }
 
 #[test]
@@ -30,7 +54,18 @@ fn format_countdown_zero() {
         },
         0,
     );
-    assert_eq!(text, "Stream starting soon");
+    assert_eq!(text, "Vysielanie sa spustí o chvíľu");
+}
+
+#[test]
+fn format_countdown_buffer_empty_zero() {
+    let text = format_countdown_text(
+        &DeliveryMode::Rescue {
+            reason: RescueReason::BufferEmpty,
+        },
+        0,
+    );
+    assert_eq!(text, "Obnovujeme o chvíľu");
 }
 
 #[test]
