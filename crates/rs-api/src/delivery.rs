@@ -260,12 +260,18 @@ impl DeliveryOrchestrator {
         }
 
         // Wipe S3 chunks for this event before spawning VPS (#174 operator
-        // policy 2026-05-07). See `wipe_event_s3_chunks` doc. We surface
-        // failure as a warn so orphaned chunks become visible without
-        // aborting Start Delivering.
-        if let Err(e) = wipe_event_s3_chunks(&self.pool, &self.config, event_id).await {
-            warn!(event_id, "S3 wipe-on-start: {e}");
-        }
+        // policy 2026-05-07), then REFUSE to start on an unclean prefix (#285).
+        // A dirty prefix (fossils from a prior cycle after a timed-out/partial
+        // wipe) would let the delivery VPS lag-probe jump onto stale objects and
+        // broadcast last-session video to the live endpoints. Fail loudly here
+        // instead of the old warn-and-proceed, which silently consumed fossils.
+        wipe_event_s3_chunks(&self.pool, &self.config, event_id)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "refusing to start delivery for event {event_id}: S3 prefix not clean ({e})"
+                )
+            })?;
 
         // Reset cumulative byte counter so dashboard shows current-cycle bytes
         // only, not cross-session totals (operator confusion: 57GB displayed for
