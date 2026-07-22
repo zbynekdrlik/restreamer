@@ -55,6 +55,15 @@ fn classify(action: Action) -> Option<Signal> {
     }
 }
 
+/// True when an event name belongs to the CI E2E test events, whose deliberate
+/// outage edges must never reach the operator's alert channel (#311). The two
+/// CI events are `E2E-Test` and `E2E-FB-Test` (ci.yml owns the names); the
+/// robust rule is the `E2E-` prefix so a future CI event named the same way is
+/// covered automatically.
+fn is_e2e_event_name(name: &str) -> bool {
+    name.starts_with("E2E-")
+}
+
 /// Human, Slovak, operator-facing alert text for an outage action.
 fn slovak_text(action: Action) -> &'static str {
     match action {
@@ -150,11 +159,24 @@ impl OutageNotifier {
     /// tied to a named event (e.g. host-level internet signals) and is never
     /// suppressed on that basis.
     pub fn observe(&mut self, row: &AuditRow, event_name: Option<&str>) -> Option<DiscordAlert> {
-        // #311: event_name is wired through here so CI test events (E2E-*) can
-        // be suppressed. The suppression itself lands in the fix commit; here
-        // the parameter is accepted (and ignored) so the RED test compiles.
-        let _ = event_name;
-        match classify(row.action)? {
+        let signal = classify(row.action)?;
+        // #311: never alert for CI test events. The two CI events are E2E-Test
+        // and E2E-FB-Test, whose OBS-disconnect / rescue-gate / network-drop
+        // steps deliberately trigger outage edges several times per run; without
+        // this they would spam the operator's alerts-snv thread and drown real
+        // pings. Return BEFORE mutating episode state so a CI event can never
+        // disturb the dedup/episode tracking of a genuine outage.
+        if let Some(name) = event_name {
+            if is_e2e_event_name(name) {
+                tracing::debug!(
+                    event = %name,
+                    action = ?row.action,
+                    "outage notifier: suppressing alert for CI test event (#311)"
+                );
+                return None;
+            }
+        }
+        match signal {
             Signal::Onset(action) => {
                 self.in_outage = true;
                 // First occurrence of this onset in the episode alerts; repeats
@@ -372,6 +394,19 @@ mod tests {
         assert!(!n.in_outage);
         // A real onset right after still fires (state was untouched).
         assert!(n.observe(&row(Action::S3UploadFailed), None).is_some());
+    }
+
+    #[test]
+    fn is_e2e_event_name_matches_ci_events_only() {
+        // The two CI events ci.yml creates (contract with #311).
+        assert!(is_e2e_event_name("E2E-Test"));
+        assert!(is_e2e_event_name("E2E-FB-Test"));
+        // Any future E2E-prefixed CI event is covered.
+        assert!(is_e2e_event_name("E2E-Whatever"));
+        // Real operator events are not.
+        assert!(!is_e2e_event_name("Nedeľná bohoslužba"));
+        assert!(!is_e2e_event_name("Sunday E2E recap")); // "E2E" mid-name, not a CI event
+        assert!(!is_e2e_event_name(""));
     }
 
     #[test]
