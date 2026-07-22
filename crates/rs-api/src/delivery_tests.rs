@@ -272,6 +272,9 @@ fn pick_last_error_line_inline_returns_none_when_only_progress() {
 struct MockWiper {
     captured_prefix: std::sync::Mutex<Option<String>>,
     result: Result<u64, String>,
+    /// Objects reported as REMAINING under the prefix after the delete (#285
+    /// post-wipe verify). Default 0 = the delete emptied the prefix.
+    remaining: Result<u64, String>,
 }
 
 impl MockWiper {
@@ -279,13 +282,21 @@ impl MockWiper {
         Self {
             captured_prefix: std::sync::Mutex::new(None),
             result: Ok(count),
+            remaining: Ok(0),
         }
     }
     fn err(msg: &str) -> Self {
         Self {
             captured_prefix: std::sync::Mutex::new(None),
             result: Err(msg.to_string()),
+            remaining: Ok(0),
         }
+    }
+    /// Simulate a delete that LEAVES `n` objects behind (partial wipe / fossil /
+    /// eventual consistency) — the case the #285 guard must reject.
+    fn with_remaining(mut self, n: u64) -> Self {
+        self.remaining = Ok(n);
+        self
     }
     fn last_prefix(&self) -> Option<String> {
         self.captured_prefix.lock().unwrap().clone()
@@ -297,6 +308,9 @@ impl crate::delivery::EventChunkWiper for MockWiper {
     async fn delete_event_chunks(&self, event_prefix: &str) -> Result<u64, String> {
         *self.captured_prefix.lock().unwrap() = Some(event_prefix.to_string());
         self.result.clone()
+    }
+    async fn count_event_chunks(&self, _event_prefix: &str) -> Result<u64, String> {
+        self.remaining.clone()
     }
 }
 
@@ -338,4 +352,60 @@ async fn wipe_propagates_backend_error() {
     let mock = MockWiper::err("boom");
     let res = wipe_event_s3_chunks_with(&pool, &Config::default(), event_id, &mock).await;
     assert!(matches!(res, Err(ref s) if s.contains("boom")));
+}
+
+// --- #285 app-side wipe-safety guard (RED) ---
+//
+// A successful delete that LEAVES objects behind (partial wipe, concurrent
+// fossil, eventual consistency) must FAIL the wipe so `start_delivery` aborts
+// LOUDLY instead of silently streaming stale/last-session chunks. Before the
+// guard, `wipe_event_s3_chunks_with` returns Ok(deleted) with no verify.
+#[tokio::test]
+async fn wipe_fails_loudly_when_prefix_dirty_after_delete() {
+    use crate::delivery::wipe_event_s3_chunks_with;
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+    let event_id = db::upsert_streaming_event(&pool, "evt-dirty")
+        .await
+        .unwrap();
+    // Delete reports success (10 removed) but 3 objects still remain.
+    let mock = MockWiper::ok(10).with_remaining(3);
+    let res = wipe_event_s3_chunks_with(&pool, &Config::default(), event_id, &mock).await;
+    assert!(
+        matches!(res, Err(ref s) if s.contains("not clean")),
+        "dirty prefix must fail the wipe loudly, got {res:?}"
+    );
+}
+
+// A verify that itself errors is a loud failure too (we cannot PROVE the prefix
+// is clean, so delivery must not proceed).
+#[tokio::test]
+async fn wipe_fails_when_verify_errors() {
+    use crate::delivery::wipe_event_s3_chunks_with;
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+    let event_id = db::upsert_streaming_event(&pool, "evt-verify-err")
+        .await
+        .unwrap();
+    let mut mock = MockWiper::ok(5);
+    mock.remaining = Err("list failed".to_string());
+    let res = wipe_event_s3_chunks_with(&pool, &Config::default(), event_id, &mock).await;
+    assert!(
+        matches!(res, Err(ref s) if s.contains("verify")),
+        "a failed post-wipe verify must fail the wipe, got {res:?}"
+    );
+}
+
+// The happy path still returns the deleted count when the prefix verifies clean.
+#[tokio::test]
+async fn wipe_ok_when_prefix_clean_after_delete() {
+    use crate::delivery::wipe_event_s3_chunks_with;
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+    let event_id = db::upsert_streaming_event(&pool, "evt-clean")
+        .await
+        .unwrap();
+    let mock = MockWiper::ok(7); // remaining defaults to 0 (clean)
+    let res = wipe_event_s3_chunks_with(&pool, &Config::default(), event_id, &mock).await;
+    assert_eq!(res, Ok(7));
 }

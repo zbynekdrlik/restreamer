@@ -27,6 +27,13 @@ use rs_core::db;
 #[async_trait::async_trait]
 pub trait EventChunkWiper: Send + Sync {
     async fn delete_event_chunks(&self, event_prefix: &str) -> Result<u64, String>;
+
+    /// Count the objects still present under this event's prefix. Used by the
+    /// post-wipe safety guard (#285) to PROVE the prefix is clean before
+    /// delivery proceeds — a successful delete is not proof of emptiness (a
+    /// partial delete, a concurrent fossil, or eventual consistency can leave
+    /// objects behind). Same `event_prefix` contract as `delete_event_chunks`.
+    async fn count_event_chunks(&self, event_prefix: &str) -> Result<u64, String>;
 }
 
 #[async_trait::async_trait]
@@ -34,6 +41,15 @@ impl EventChunkWiper for rs_endpoint::s3::S3Client {
     async fn delete_event_chunks(&self, event_prefix: &str) -> Result<u64, String> {
         rs_endpoint::s3::S3Client::delete_event_chunks(self, event_prefix)
             .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn count_event_chunks(&self, event_prefix: &str) -> Result<u64, String> {
+        // `measure_prefix` returns (total_bytes, object_count); count the same
+        // trailing-slash set that `delete_event_chunks` targets.
+        rs_endpoint::s3::S3Client::measure_prefix(self, &format!("{event_prefix}/"))
+            .await
+            .map(|(_bytes, objects)| objects)
             .map_err(|e| e.to_string())
     }
 }
