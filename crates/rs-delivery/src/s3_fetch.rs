@@ -79,11 +79,19 @@ impl S3Fetcher {
         )
         .map_err(|e| S3FetchError::Credentials(e.to_string()))?;
 
-        let mut bucket = Bucket::new(&config.bucket, region, credentials)
+        // Bound the per-GET fetch so a wedged/blackhole connection fails fast
+        // into the existing retry-with-backoff instead of hanging on the reqwest
+        // client for minutes (holding a fetch permit — #252/#276). MUST use
+        // `with_request_timeout`, NOT `set_request_timeout`: on the tokio backend
+        // the latter only sets a dead struct field, while the former rebuilds the
+        // cached reqwest client with `.timeout(request_timeout)` (which bounds the
+        // whole request, connect + body). Order matters — `with_path_style` then
+        // clones that timeout-bearing client.
+        let bucket = Bucket::new(&config.bucket, region, credentials)
+            .map_err(|e| S3FetchError::Bucket(e.to_string()))?
+            .with_request_timeout(request_timeout)
             .map_err(|e| S3FetchError::Bucket(e.to_string()))?
             .with_path_style();
-        // Bound the per-GET fetch so a wedged connection fails fast into retry.
-        bucket.set_request_timeout(Some(request_timeout));
 
         Ok(Self {
             bucket,
@@ -198,11 +206,8 @@ mod tests {
         let _accept = tokio::spawn(async move {
             // Hold every accepted socket open, never respond — a true blackhole.
             let mut held = Vec::new();
-            loop {
-                match listener.accept().await {
-                    Ok((sock, _)) => held.push(sock),
-                    Err(_) => break,
-                }
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
             }
         });
 
