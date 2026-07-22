@@ -88,8 +88,16 @@ pub fn TemplatesView() -> impl IntoView {
             </div>
 
             <div class="items-list">
-                {move || {
-                    store.templates_list.get().iter().map(|t| {
+                // Keyed <For> (keyed on template id) so a background
+                // `templates_list.set(...)` that delivers the same ids PRESERVES
+                // each existing TemplateCard component instead of recreating it.
+                // A non-keyed closure recreated every card on any refresh,
+                // re-seeding each card's local rescue-URL input from the server
+                // value and WIPING an operator's typed-but-unsaved edit (#310).
+                <For
+                    each=move || store.templates_list.get()
+                    key=|t| t.id
+                    children=move |t| {
                         let id = t.id;
                         let name = t.name.clone();
                         let cache = t.cache_delay_secs;
@@ -102,8 +110,8 @@ pub fn TemplatesView() -> impl IntoView {
                                 rescue_video_url=rescue
                             />
                         }
-                    }).collect::<Vec<_>>()
-                }}
+                    }
+                />
             </div>
         </div>
     }
