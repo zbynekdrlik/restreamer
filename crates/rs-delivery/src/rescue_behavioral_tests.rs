@@ -103,7 +103,7 @@ async fn rescue_push_actually_pushes_rescue_clip_bytes() {
         crate::rust_rescue_push::rust_rescue_push_with_pusher(
             pusher,
             "rescue-bytes-test",
-            flv,
+            crate::rescue_segments::RescueClipSource::Fixed(flv),
             bs_task,
             stats_task,
             &mut stop_rx,
@@ -180,7 +180,7 @@ async fn rescue_push_errors_do_not_stamp_last_push_ok() {
         crate::rust_rescue_push::rust_rescue_push_with_pusher(
             ErroringPusher,
             "rescue-err-test",
-            flv,
+            crate::rescue_segments::RescueClipSource::Fixed(flv),
             bs_task,
             stats_task,
             &mut stop_rx,
@@ -255,7 +255,7 @@ async fn rescue_push_resumes_normal_when_producer_recovers() {
         crate::rust_rescue_push::rust_rescue_push_with_pusher(
             pusher,
             "rescue-recover-test",
-            flv,
+            crate::rescue_segments::RescueClipSource::Fixed(flv),
             bs_task,
             stats,
             &mut stop_rx,
@@ -316,7 +316,7 @@ async fn outage_rescue_persists_when_producer_active_flaps_without_fresh_chunks(
         crate::rust_rescue_push::rust_rescue_push_with_pusher(
             pusher,
             "rescue-flap-test",
-            flv,
+            crate::rescue_segments::RescueClipSource::Fixed(flv),
             bs_task,
             stats_task,
             &mut stop_rx,
@@ -389,7 +389,7 @@ async fn rescue_exits_after_recovery_even_when_channel_backpressure_plateaus_sen
         crate::rust_rescue_push::rust_rescue_push_with_pusher(
             pusher,
             "rescue-plateau-test",
-            flv,
+            crate::rescue_segments::RescueClipSource::Fixed(flv),
             bs_task,
             stats,
             &mut stop_rx,
@@ -460,7 +460,7 @@ async fn outage_rescue_persists_when_only_one_stray_chunk_lands_early() {
         crate::rust_rescue_push::rust_rescue_push_with_pusher(
             pusher,
             "rescue-stray-chunk-test",
-            flv,
+            crate::rescue_segments::RescueClipSource::Fixed(flv),
             bs_task,
             stats,
             &mut stop_rx,
