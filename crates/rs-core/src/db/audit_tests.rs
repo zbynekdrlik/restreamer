@@ -175,7 +175,7 @@ async fn record_through_writer_task_persists_and_broadcasts() {
     let writer_pool = pool.clone();
     let writer_ws_tx = ws_tx.clone();
     let writer = tokio::spawn(async move {
-        audit::audit_writer_task(writer_pool, writer_ws_tx, audit_rx).await;
+        audit::audit_writer_task(writer_pool, writer_ws_tx, audit_rx, None).await;
     });
 
     // Fire a VPS-sourced row through the fire-and-forget API, exactly as
@@ -252,7 +252,7 @@ async fn writer_task_flushes_on_time_deadline() {
 
     let writer_pool = pool.clone();
     let writer = tokio::spawn(async move {
-        audit::audit_writer_task(writer_pool, ws_tx, audit_rx).await;
+        audit::audit_writer_task(writer_pool, ws_tx, audit_rx, None).await;
     });
 
     let start = std::time::Instant::now();

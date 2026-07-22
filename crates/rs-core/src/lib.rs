@@ -6,3 +6,4 @@ pub mod error;
 pub mod log_buffer;
 pub mod log_capture;
 pub mod models;
+pub mod notify;
