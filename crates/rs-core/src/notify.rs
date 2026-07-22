@@ -13,9 +13,13 @@
 //! one alert per state transition. A recovery signal ends the episode and
 //! re-arms the onset alerts so a genuinely new outage alerts again.
 //!
-//! Disabled when `notifications.discord_webhook_url` is empty (the default), so
-//! the feature ships dark until the operator sets the webhook in `config.json`.
-//! The webhook URL is a runtime secret — it is never committed to the repo.
+//! Two delivery mechanisms (#306): a **bot token** posting to the Discord REST
+//! API (`channels/{id}/messages` with an `Authorization: Bot <token>` header —
+//! a thread IS a channel, so this targets the operator's alerts-snv thread, the
+//! same pattern camera-box uses) OR the original **webhook** POST (#261). Bot
+//! mode wins when both are configured. Disabled when neither is set (the
+//! default), so the feature ships dark until the operator fills one in.
+//! The token / webhook URL are runtime secrets — never committed to the repo.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -73,10 +77,24 @@ fn slovak_text(action: Action) -> &'static str {
     }
 }
 
+/// Discord REST API base for bot-token posting (#306). A thread is addressed
+/// as a channel: `POST {base}/channels/{id}/messages`. Split out as a const so
+/// tests can drive [`post_alert_bot`] against a local mock base.
+const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+
+/// Where an alert is delivered — bot token (#306) or webhook (#261).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AlertSink {
+    /// Bot token → REST API `channels/{id}/messages` with `Authorization: Bot`.
+    Bot { token: String, channel_id: String },
+    /// Legacy webhook URL → `{"content": ...}` POST.
+    Webhook { url: String },
+}
+
 /// Edge-triggered Discord outage notifier. Built from config; owned mutably by
 /// the audit writer task, which calls [`observe`](Self::observe) on each row.
 pub struct OutageNotifier {
-    webhook_url: String,
+    sink: AlertSink,
     client: reqwest::Client,
     /// Whether an outage episode is currently active.
     in_outage: bool,
@@ -85,15 +103,31 @@ pub struct OutageNotifier {
 }
 
 impl OutageNotifier {
-    /// Build from config; returns `None` (disabled) when the webhook URL is
-    /// empty or whitespace-only.
+    /// Build from config; returns `None` (disabled) when no delivery mechanism
+    /// is configured. Bot mode (#306) wins when both `discord_bot_token` and
+    /// `discord_channel_id` are set; otherwise the webhook URL (#261) is used
+    /// when set; otherwise disabled. All comparisons ignore surrounding
+    /// whitespace so a blank-but-present field still counts as unset.
     pub fn from_config(cfg: &NotificationsConfig) -> Option<Self> {
-        let url = cfg.discord_webhook_url.trim();
-        if url.is_empty() {
+        let token = cfg.discord_bot_token.trim();
+        let channel_id = cfg.discord_channel_id.trim();
+        let webhook = cfg.discord_webhook_url.trim();
+
+        let sink = if !token.is_empty() && !channel_id.is_empty() {
+            AlertSink::Bot {
+                token: token.to_string(),
+                channel_id: channel_id.to_string(),
+            }
+        } else if !webhook.is_empty() {
+            AlertSink::Webhook {
+                url: webhook.to_string(),
+            }
+        } else {
             return None;
-        }
+        };
+
         Some(Self {
-            webhook_url: url.to_string(),
+            sink,
             client: reqwest::Client::new(),
             in_outage: false,
             alerted: HashSet::new(),
@@ -129,11 +163,19 @@ impl OutageNotifier {
     }
 
     /// Fire-and-forget POST of the alert to Discord; never blocks the writer.
+    /// Routes to the bot REST endpoint (#306) or the webhook (#261) per the
+    /// configured [`AlertSink`].
     pub fn spawn_dispatch(&self, alert: DiscordAlert) {
         let client = self.client.clone();
-        let url = self.webhook_url.clone();
+        let sink = self.sink.clone();
         tokio::spawn(async move {
-            if let Err(e) = post_alert(&client, &url, &alert).await {
+            let res = match &sink {
+                AlertSink::Bot { token, channel_id } => {
+                    post_alert_bot(&client, DISCORD_API_BASE, channel_id, token, &alert).await
+                }
+                AlertSink::Webhook { url } => post_alert(&client, url, &alert).await,
+            };
+            if let Err(e) = res {
                 tracing::warn!("discord outage alert POST failed: {e}");
             }
         });
@@ -159,6 +201,30 @@ pub async fn post_alert(
 ) -> reqwest::Result<()> {
     client
         .post(url)
+        .json(&serde_json::json!({ "content": alert.content }))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+/// POST a single alert via a Discord BOT TOKEN to `{api_base}/channels/{id}/
+/// messages` (#306), with an `Authorization: Bot <token>` header and the same
+/// `{"content": ...}` body, 10 s timeout. A thread is a channel, so `channel_id`
+/// may be a thread id (the operator's alerts-snv thread). `api_base` is
+/// [`DISCORD_API_BASE`] in production; tests pass a local mock base. Public so
+/// tests can drive it against a mock server.
+pub async fn post_alert_bot(
+    client: &reqwest::Client,
+    api_base: &str,
+    channel_id: &str,
+    token: &str,
+    alert: &DiscordAlert,
+) -> reqwest::Result<()> {
+    client
+        .post(format!("{api_base}/channels/{channel_id}/messages"))
+        .header("Authorization", format!("Bot {token}"))
         .json(&serde_json::json!({ "content": alert.content }))
         .timeout(Duration::from_secs(10))
         .send()
@@ -193,11 +259,13 @@ mod tests {
         }
     }
 
-    /// Disabled notifier state — constructed directly so the pure `observe`
-    /// core can be exercised without a live webhook.
+    /// Notifier state constructed directly so the pure `observe` core can be
+    /// exercised without a live webhook / bot endpoint.
     fn notifier() -> OutageNotifier {
         OutageNotifier {
-            webhook_url: "http://127.0.0.1:1/unused".to_string(),
+            sink: AlertSink::Webhook {
+                url: "http://127.0.0.1:1/unused".to_string(),
+            },
             client: reqwest::Client::new(),
             in_outage: false,
             alerted: HashSet::new(),
@@ -302,15 +370,68 @@ mod tests {
 
     #[test]
     fn from_config_disabled_when_empty_enabled_when_set() {
+        // Nothing set (blank-but-present webhook) -> disabled.
         let empty = NotificationsConfig {
             discord_webhook_url: "   ".to_string(),
+            ..Default::default()
         };
         assert!(OutageNotifier::from_config(&empty).is_none());
 
+        // Webhook only -> webhook sink.
         let set = NotificationsConfig {
             discord_webhook_url: "https://discord.example/webhook/abc".to_string(),
+            ..Default::default()
         };
-        assert!(OutageNotifier::from_config(&set).is_some());
+        let n = OutageNotifier::from_config(&set).expect("webhook enables");
+        assert!(matches!(n.sink, AlertSink::Webhook { .. }));
+    }
+
+    #[test]
+    fn from_config_bot_mode_when_both_bot_fields_set() {
+        let cfg = NotificationsConfig {
+            discord_bot_token: "  tok-123  ".to_string(),
+            discord_channel_id: "  1373592666733940816 ".to_string(),
+            ..Default::default()
+        };
+        let n = OutageNotifier::from_config(&cfg).expect("bot fields enable");
+        // Whitespace is trimmed off both fields.
+        assert_eq!(
+            n.sink,
+            AlertSink::Bot {
+                token: "tok-123".to_string(),
+                channel_id: "1373592666733940816".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_config_bot_needs_both_fields() {
+        // Token without channel -> not bot mode (and no webhook) -> disabled.
+        let token_only = NotificationsConfig {
+            discord_bot_token: "tok-123".to_string(),
+            ..Default::default()
+        };
+        assert!(OutageNotifier::from_config(&token_only).is_none());
+        // Channel without token -> disabled.
+        let channel_only = NotificationsConfig {
+            discord_channel_id: "123".to_string(),
+            ..Default::default()
+        };
+        assert!(OutageNotifier::from_config(&channel_only).is_none());
+    }
+
+    #[test]
+    fn from_config_bot_wins_when_both_bot_and_webhook_set() {
+        let cfg = NotificationsConfig {
+            discord_webhook_url: "https://discord.example/webhook/abc".to_string(),
+            discord_bot_token: "tok-123".to_string(),
+            discord_channel_id: "1373592666733940816".to_string(),
+        };
+        let n = OutageNotifier::from_config(&cfg).expect("enabled");
+        assert!(
+            matches!(n.sink, AlertSink::Bot { .. }),
+            "bot mode must win over webhook when both are set"
+        );
     }
 
     /// Drive `post_alert` against a one-shot mock HTTP server (mocking the
@@ -368,6 +489,83 @@ mod tests {
 
         let body = rx.await.unwrap();
         let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["content"], "TEST výpadok");
+    }
+
+    /// Drive `post_alert_bot` against a one-shot mock HTTP server and assert it
+    /// POSTs to `channels/{id}/messages` with the `Authorization: Bot <token>`
+    /// header and the `{"content": ...}` JSON body (#306). Captures the FULL raw
+    /// request (request line + headers + body).
+    #[tokio::test]
+    async fn post_alert_bot_posts_to_channel_with_bot_auth() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let mut data: Vec<u8> = Vec::new();
+            loop {
+                let n = sock.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                data.extend_from_slice(&buf[..n]);
+                let s = String::from_utf8_lossy(&data);
+                if let Some(hdr_end) = s.find("\r\n\r\n") {
+                    let content_len = s
+                        .lines()
+                        .find_map(|l| {
+                            let ll = l.to_ascii_lowercase();
+                            ll.strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if data.len() >= hdr_end + 4 + content_len {
+                        break;
+                    }
+                }
+            }
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            let _ = tx.send(String::from_utf8_lossy(&data).to_string());
+        });
+
+        let client = reqwest::Client::new();
+        let alert = DiscordAlert {
+            content: "TEST výpadok".to_string(),
+        };
+        post_alert_bot(
+            &client,
+            &format!("http://{addr}"),
+            "1373592666733940816",
+            "tok-secret",
+            &alert,
+        )
+        .await
+        .unwrap();
+
+        let raw = rx.await.unwrap();
+        // Request targets the thread-as-channel messages endpoint.
+        assert!(
+            raw.starts_with("POST /channels/1373592666733940816/messages "),
+            "unexpected request line in:\n{raw}"
+        );
+        // Bot-token authorization header is present (case-insensitive header name).
+        let has_bot_auth = raw.lines().any(|l| {
+            l.to_ascii_lowercase().starts_with("authorization:") && l.contains("Bot tok-secret")
+        });
+        assert!(
+            has_bot_auth,
+            "missing 'Authorization: Bot <token>' in:\n{raw}"
+        );
+        // Body carries the alert content as JSON.
+        let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+        let v: Value = serde_json::from_str(body).unwrap();
         assert_eq!(v["content"], "TEST výpadok");
     }
 }
