@@ -461,6 +461,58 @@ impl S3Client {
         }
         Ok(prefixes)
     }
+
+    /// Fetch a single object's body as UTF-8 (lossy) text. Returns `Ok(None)`
+    /// when the object is absent (HTTP 404), `Err` on any other failure. Used
+    /// by the host to recover a delivery VPS's own log from S3 after the VPS is
+    /// unreachable at stop (#307) — the cloud-init log-uploader.sh uploads
+    /// `rs-delivery.log` to `delivery-logs/<hostname>.log` every 15s, so the
+    /// last snapshot survives the VPS's death.
+    pub async fn get_object_string(&self, key: &str) -> Result<Option<String>, EndpointError> {
+        match self.bucket.get_object(key).await {
+            Ok(resp) => {
+                let code = resp.status_code();
+                if code == 404 {
+                    return Ok(None);
+                }
+                if code >= 300 {
+                    return Err(EndpointError::S3(format!(
+                        "get {key} returned status {code}"
+                    )));
+                }
+                Ok(Some(String::from_utf8_lossy(resp.bytes()).to_string()))
+            }
+            // Some rust-s3 code paths surface a 404 as an Err rather than an
+            // Ok with status 404; treat a not-found message as "absent".
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("404") || msg.to_ascii_lowercase().contains("not found") {
+                    Ok(None)
+                } else {
+                    Err(EndpointError::S3(format!("get {key} failed: {e}")))
+                }
+            }
+        }
+    }
+
+    /// Delete a single object by key. A 404 (already gone) is treated as
+    /// success so cleanup is idempotent. Used to reap the per-VPS S3 log object
+    /// (`delivery-logs/<hostname>.log`) when its instance is deleted so the
+    /// `delivery-logs/` prefix does not accumulate (#307).
+    pub async fn delete_object(&self, key: &str) -> Result<(), EndpointError> {
+        let response = self
+            .bucket
+            .delete_object(key)
+            .await
+            .map_err(|e| EndpointError::S3(format!("delete {key} failed: {e}")))?;
+        let code = response.status_code();
+        if code >= 300 && code != 404 {
+            return Err(EndpointError::S3(format!(
+                "delete {key} returned status {code}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

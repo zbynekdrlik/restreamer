@@ -14,7 +14,7 @@ use rs_core::db;
 
 pub(crate) use crate::delivery_helpers::{
     build_endpoint_init_entry, is_delivery_active, is_delivery_or_spawning,
-    is_permanent_hetzner_error, persist_delivery_log_to_disk,
+    is_permanent_hetzner_error,
 };
 
 // Re-exports so existing call sites (`crate::delivery::Foo`, test modules,
@@ -832,75 +832,20 @@ impl DeliveryOrchestrator {
                 .await;
         }
 
-        // Capture VPS logs before deletion for post-mortem analysis.
-        // Best-effort: if the VPS is unresponsive, we still proceed with deletion.
+        // Capture VPS logs before deletion for post-mortem analysis (#307).
+        // Tries the live VPS HTTP endpoint first, then falls back to the S3 copy
+        // the VPS uploads every 15s (which survives an unreachable/dead VPS —
+        // the exact 2026-07-22 gap), and emits a loud `delivery_log_lost` audit
+        // row only when BOTH sources fail. Best-effort: deletion proceeds either
+        // way.
         if is_delivery_active(&instance.status) {
-            let client = reqwest::Client::new();
-            let delivery_url = format!("http://{}:8000", instance.ipv4);
-            match client
-                .get(format!("{delivery_url}/api/logs?limit=5000"))
-                .bearer_auth(&instance.auth_token)
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    match resp.json::<serde_json::Value>().await {
-                        Ok(body) => {
-                            // Format log entries as text lines for human-readable storage
-                            let log_text = body["entries"]
-                                .as_array()
-                                .map(|entries| {
-                                    entries
-                                        .iter()
-                                        .rev() // API returns newest-first, store chronologically
-                                        .map(|e| {
-                                            format!(
-                                                "[{}] {} {}",
-                                                e["level"].as_str().unwrap_or("?"),
-                                                e["target"].as_str().unwrap_or("?"),
-                                                e["message"].as_str().unwrap_or("")
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
-                                })
-                                .unwrap_or_default();
-
-                            if !log_text.is_empty() {
-                                if let Err(e) = db::insert_delivery_log(
-                                    &self.pool,
-                                    instance.id,
-                                    instance.event_id,
-                                    &log_text,
-                                )
-                                .await
-                                {
-                                    warn!("Failed to persist VPS logs: {e}");
-                                } else {
-                                    info!(
-                                        instance_id = instance.id,
-                                        lines = log_text.lines().count(),
-                                        "Captured VPS logs before deletion"
-                                    );
-                                }
-                                persist_delivery_log_to_disk(
-                                    instance.id,
-                                    instance.event_id,
-                                    &log_text,
-                                );
-                            }
-                        }
-                        Err(e) => warn!("Failed to parse VPS log response: {e}"),
-                    }
-                }
-                Ok(resp) => {
-                    warn!(status = %resp.status(), "VPS log capture returned non-success");
-                }
-                Err(e) => {
-                    warn!("VPS log capture failed (VPS may be unresponsive): {e}");
-                }
-            }
+            crate::delivery_log_capture::capture_delivery_log_before_delete(
+                &self.config,
+                self.audit_tx.as_ref(),
+                &self.pool,
+                &instance,
+            )
+            .await;
         }
 
         // Delete Hetzner server
@@ -918,6 +863,12 @@ impl DeliveryOrchestrator {
             hetzner_id = instance.hetzner_id,
             event_id, "Delivery instance stopped and deleted"
         );
+
+        // #307: reap the per-VPS S3 log object now that the instance is gone so
+        // the delivery-logs/ prefix (outside the event prefixes the chunk-wipe
+        // targets) does not accumulate. Runs after capture above, so the disk
+        // post-mortem copy already exists.
+        crate::delivery_log_capture::cleanup_delivery_log_s3(&self.config, &instance.name).await;
 
         // Audit: VPS destroyed.
         if let Some(tx) = &self.audit_tx {

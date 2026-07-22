@@ -202,6 +202,13 @@ pub enum Action {
     /// version than the client (or none). Delivery start is aborted and the
     /// VPS deleted. Detail JSON: {vps_version, client_version, binary_url}.
     DeliveryBinaryVersionMismatch,
+    /// Host-side ERROR (#307): at delivery stop, NEITHER the live VPS HTTP log
+    /// fetch NOR the S3 fallback copy (cloud-init uploads rs-delivery.log to
+    /// `delivery-logs/<hostname>.log` every 15s) yielded a post-mortem log, so
+    /// there is no evidence to root-cause why the VPS died. Loud on purpose —
+    /// the previous behavior failed silently. Detail JSON:
+    /// {instance_name, s3_key, reason}.
+    DeliveryLogLost,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -524,6 +531,14 @@ mod tests {
         let a = Action::DeliveryBinaryVersionMismatch;
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"delivery_binary_version_mismatch\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_delivery_log_lost_serdes() {
+        let a = Action::DeliveryLogLost;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"delivery_log_lost\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
 }
