@@ -135,7 +135,7 @@ pub async fn rust_rescue_push(
     alias: &str,
     service_type: ServiceType,
     stream_key: &str,
-    flv_bytes: Arc<Vec<u8>>,
+    source: crate::rescue_segments::RescueClipSource,
     buffer_state: Arc<BufferState>,
     stats: Stats,
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
@@ -151,11 +151,11 @@ pub async fn rust_rescue_push(
     tracing::info!(
         alias,
         url = %url,
-        flv_len = flv_bytes.len(),
+        source = %source.describe(mode, false, RESCUE_REFILL_TARGET_SECS),
         "rust_rescue_push: starting rust rescue loop"
     );
     let pusher = RtmpPusher::new(url, PusherConfig::default());
-    rust_rescue_push_with_pusher(pusher, alias, flv_bytes, buffer_state, stats, stop_rx, mode).await
+    rust_rescue_push_with_pusher(pusher, alias, source, buffer_state, stats, stop_rx, mode).await
 }
 
 /// Inner rescue push loop, generic over the `Pushable` so tests can inject a
@@ -168,7 +168,7 @@ pub async fn rust_rescue_push(
 pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
     mut pusher: P,
     alias: &str,
-    flv_bytes: Arc<Vec<u8>>,
+    source: crate::rescue_segments::RescueClipSource,
     buffer_state: Arc<BufferState>,
     stats: Stats,
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
@@ -176,6 +176,13 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
 ) -> bool {
     let mut continuous_active_ms: u64 = 0;
     let mut last_check = Instant::now();
+    // #259: the rescue state that drives WHICH segment we push. `refilling` +
+    // `eta` are recomputed after each push (below); the NEXT push picks the
+    // segment matching them, so the viewer-facing "Obnovujeme o ~…" countdown
+    // moves as recovery progresses. Seed with the pre-recovery state (static
+    // outage notice) so the first push is correct before any bookkeeping.
+    let mut refilling = false;
+    let mut eta = RESCUE_REFILL_TARGET_SECS;
     // #289: the high-water mark of chunks the producer had SENT into the
     // prefetch channel at the start of the current continuous-active window.
     // Outage rescue must exit only on GENUINE resumed live delivery, never on
@@ -192,8 +199,15 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
     let mut active_window_start_sent = buffer_state.highest_sent_chunk_id.load(Ordering::Relaxed);
 
     loop {
+        // #259: pick the segment for the CURRENT rescue state. For the
+        // Countdown source this swaps to the matching ETA-bucket clip; for a
+        // custom operator Fixed clip it always returns the same blob. Safe on
+        // the live session: every countdown segment shares byte-identical
+        // SPS/PPS and starts with an IDR keyframe, and the swap only happens
+        // between whole segments — see rescue_segments module docs.
+        let segment = source.pick(mode, refilling, eta);
         tokio::select! {
-            res = pusher.push_flv_bytes(&flv_bytes) => {
+            res = pusher.push_flv_bytes(segment) => {
                 let push_ok = res.is_ok();
                 if let Err(e) = res {
                     tracing::warn!(alias, "rust_rescue_push: push error: {e}; backing off");
@@ -242,11 +256,13 @@ pub(crate) async fn rust_rescue_push_with_pusher<P: crate::pushable::Pushable>(
                 // PREFETCH_BUFFER_SIZE. The COUNT separates them — recency
                 // cannot (the plateau made a recency gate deadlock recovery,
                 // 2026-07-15 E2E). See RESCUE_EXIT_MIN_FRESH_CHUNKS.
-                let refilling = active && fresh_chunks >= RESCUE_EXIT_MIN_FRESH_CHUNKS;
+                // #259: assign the outer `refilling`/`eta` so the NEXT loop
+                // iteration's `source.pick` selects the matching segment.
+                refilling = active && fresh_chunks >= RESCUE_EXIT_MIN_FRESH_CHUNKS;
                 // Only count down once genuinely refilling — otherwise report
                 // the full target so the dashboard never shows a false "about
                 // to recover" ~0s while durably stuck (no real refill queued).
-                let eta = if refilling {
+                eta = if refilling {
                     RESCUE_REFILL_TARGET_SECS.saturating_sub(continuous_active_ms / 1000)
                 } else {
                     RESCUE_REFILL_TARGET_SECS
@@ -343,7 +359,9 @@ mod tests {
         // Minimal valid-looking FLV header bytes (FLV signature + version +
         // flags + header length). Content doesn't matter — the test never
         // actually pushes because stop_rx wins the select.
-        let flv_bytes = Arc::new(vec![b'F', b'L', b'V', 0x01, 0x05, 0, 0, 0, 9, 0, 0, 0, 0]);
+        let source = crate::rescue_segments::RescueClipSource::Fixed(Arc::new(vec![
+            b'F', b'L', b'V', 0x01, 0x05, 0, 0, 0, 9, 0, 0, 0, 0,
+        ]));
 
         // Send stop BEFORE calling so the loop short-circuits on first poll.
         stop_tx.send(true).expect("stop_tx send");
@@ -355,7 +373,7 @@ mod tests {
                 "test-alias",
                 ServiceType::TestFile,
                 "test-key",
-                flv_bytes,
+                source,
                 buffer_state,
                 stats,
                 &mut stop_rx,

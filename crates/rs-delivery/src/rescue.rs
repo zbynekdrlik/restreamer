@@ -1,8 +1,7 @@
-//! Rescue mode: plays a looped video with countdown overlay when the
-//! delivery buffer is empty (warmup or outage recovery).
-use std::borrow::Cow;
-
-use crate::rescue_default::DEFAULT_RESCUE_FLV;
+//! Rescue mode: plays pre-rendered Slovak rescue segments with a live
+//! viewer-facing recovery countdown when the delivery buffer is empty
+//! (warmup or outage recovery). See `rescue_segments` for the segment set
+//! and the ETA-bucket selection (#259).
 
 /// Fixed buffer refill target before resuming normal delivery (seconds).
 pub const RESCUE_REFILL_TARGET_SECS: u64 = 120;
@@ -32,66 +31,57 @@ pub enum RescueReason {
     BufferEmpty,
 }
 
-/// Format the countdown text for the rescue video overlay.
+/// Human-readable Slovak rescue status text for the dashboard + logs (#259).
+///
+/// This is the STATUS string (an exact-seconds countdown a viewer/operator
+/// reads on the dashboard and that we log on rescue transitions), distinct
+/// from the pre-rendered VIEWER segments in `rescue_segments` (which show a
+/// coarser bucketed countdown because there is no runtime text renderer on
+/// the VPS). Both derive from the same (reason, eta) rescue state.
+///
+/// Warmup → "Vysielanie sa spustí o ~…"; buffer-empty/recovery →
+/// "Obnovujeme o ~…"; `Normal` → empty (no rescue active).
 pub fn format_countdown_text(mode: &DeliveryMode, eta_secs: u64) -> String {
     match mode {
         DeliveryMode::Normal => String::new(),
         DeliveryMode::Rescue { reason } => {
             let prefix = match reason {
-                RescueReason::Warmup => "Stream starting",
-                RescueReason::BufferEmpty => "Stream recovering",
+                RescueReason::Warmup => "Vysielanie sa spustí",
+                RescueReason::BufferEmpty => "Obnovujeme",
             };
             if eta_secs == 0 {
-                format!("{prefix} soon")
+                format!("{prefix} o chvíľu")
             } else if eta_secs >= 60 {
                 let mins = eta_secs / 60;
                 let secs = eta_secs % 60;
-                format!("{prefix} ~ {mins}m {secs}s")
+                format!("{prefix} o ~{mins}m {secs}s")
             } else {
-                format!("{prefix} ~ {eta_secs}s")
+                format!("{prefix} o ~{eta_secs}s")
             }
         }
     }
 }
 
-/// Path to the countdown text file for a given endpoint alias.
+// #259: the temp-file countdown plumbing (`countdown_file_path` /
+// `write_countdown_file` / `cleanup_countdown_file`) has been REMOVED. It
+// wrote a text file that a since-deleted ffmpeg drawtext filter was meant to
+// read; on the pure-Rust pusher path nothing ever read it, so the countdown
+// was dead. The countdown is now genuinely viewer-visible via the pre-rendered
+// segment set (`rescue_segments`), swapped by the pusher as the ETA changes.
+
+/// Run the rescue push loop: resolve the rescue clip SOURCE (operator custom
+/// FLV, or the embedded Slovak countdown segment set) and push via
+/// `rust_rescue_push` until the buffer is refilled or a stop signal arrives.
 ///
-/// Uses the platform temp dir so tests work on both Linux (VPS) and
-/// Windows (stream.lan CI). The rescue ffmpeg drawtext filter reads the
-/// file path literally, so whatever path we return here must be a path
-/// that ffmpeg can open.
-pub fn countdown_file_path(alias: &str) -> String {
-    let safe_alias = alias.replace([' ', '/', '\\'], "_");
-    std::env::temp_dir()
-        .join(format!("rescue_{safe_alias}.txt"))
-        .to_string_lossy()
-        .into_owned()
-}
-
-/// Write the countdown text to the file. Called periodically by the producer.
-pub fn write_countdown_file(alias: &str, text: &str) {
-    let path = countdown_file_path(alias);
-    if let Err(e) = std::fs::write(&path, text) {
-        tracing::warn!(alias, path, "Failed to write countdown file: {e}");
-    }
-}
-
-/// Clean up the countdown file when rescue mode ends.
-pub fn cleanup_countdown_file(alias: &str) {
-    let path = countdown_file_path(alias);
-    let _ = std::fs::remove_file(&path);
-}
-
-/// Run the rescue push loop: resolve FLV bytes (operator URL or embedded
-/// default) and push via `rust_rescue_push` until the buffer is refilled
-/// or a stop signal arrives.
+/// Task 6 (R1 GREEN): the body no longer requires a configured rescue URL.
+/// `resolve_rescue_source(None, ...)` returns the `Countdown` segment set so
+/// rescue ALWAYS has something to push — closing the 2026-05-30 stream.lan
+/// crash gap where all 5 production templates had `rescue_video_url = NULL`
+/// and the cache-drain branch went silent. The pure-rust pusher replaces the
+/// legacy ffmpeg spawn.
 ///
-/// Task 6 (R1 GREEN): the body no longer requires a configured rescue
-/// URL. `resolve_rescue_bytes(None, ...)` substitutes the embedded
-/// `DEFAULT_RESCUE_FLV` blob so rescue ALWAYS has something to push —
-/// closing the 2026-05-30 stream.lan crash gap where all 5 production
-/// templates had `rescue_video_url = NULL` and the cache-drain branch
-/// went silent. The pure-rust pusher replaces the legacy ffmpeg spawn.
+/// #259: for the `Countdown` source the pusher swaps the ETA-bucket segment
+/// each iteration so viewers see a live "Obnovujeme o ~…" countdown.
 ///
 /// Returns `true` if a stop signal was received (caller should exit),
 /// `false` if the buffer was refilled and normal delivery can resume.
@@ -106,38 +96,33 @@ pub async fn run_rescue_loop(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
 ) -> bool {
-    // Resolve the FLV bytes to push. Falls back to DEFAULT_RESCUE_FLV
-    // when URL is None / empty / non-FLV / fetch-failed (audit events
-    // emitted by resolve_rescue_bytes for the rejection paths).
-    let bytes_cow = resolve_rescue_bytes(rescue_url, audit_ring, alias).await;
-    let flv_bytes = std::sync::Arc::new(bytes_cow.into_owned());
+    // Resolve the rescue clip source. Falls back to the Slovak countdown
+    // segment set when URL is None / empty / non-FLV / fetch-failed (audit
+    // events emitted by resolve_rescue_source for the rejection paths).
+    let source = resolve_rescue_source(rescue_url, audit_ring, alias).await;
 
-    // Seed countdown overlay at the start of the refill window — the
-    // pusher pacing-loop updates it on each tick, but the file must
-    // exist by the time the first push completes so the file-based
-    // status surface stays consistent.
-    let initial_text = format_countdown_text(
-        &DeliveryMode::Rescue {
-            reason: RescueReason::BufferEmpty,
-        },
-        RESCUE_REFILL_TARGET_SECS,
+    // Log the human Slovak status at rescue entry (comprehensive-logging:
+    // the rescue state must be reconstructable from logs alone).
+    tracing::info!(
+        alias,
+        status = %format_countdown_text(
+            &DeliveryMode::Rescue { reason: RescueReason::BufferEmpty },
+            RESCUE_REFILL_TARGET_SECS,
+        ),
+        "Rescue: entering outage rescue"
     );
-    write_countdown_file(alias, &initial_text);
 
-    let stopped = crate::rust_rescue_push::rust_rescue_push(
+    crate::rust_rescue_push::rust_rescue_push(
         alias,
         service_type,
         stream_key,
-        flv_bytes,
+        source,
         buffer_state.clone(),
         stats.clone(),
         stop_rx,
         crate::rust_rescue_push::RescuePushMode::Outage,
     )
-    .await;
-
-    cleanup_countdown_file(alias);
-    stopped
+    .await
 }
 
 /// Result of a cache-drain rescue cycle handled by `run_outage_rescue`.
@@ -362,24 +347,18 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
             .parse()
             .unwrap_or(rs_ffmpeg::ServiceType::TestFile);
 
-        // Resolve bytes BEFORE spawning so the audit_ring borrow stays
-        // local to this function — the spawned task only owns the
-        // resolved Arc<Vec<u8>>.
+        // Resolve the rescue clip source BEFORE spawning so the audit_ring
+        // borrow stays local to this function — the spawned task only owns
+        // the resolved source. Warmup mode always shows the "Vysielanie sa o
+        // chvíľu spustí…" segment (the probe loop below owns warmup timing),
+        // so segment swapping is a no-op here; the source is still resolved so
+        // a custom operator clip plays during warmup if configured.
         let audit_ring_owned: Option<std::sync::Arc<crate::audit_ring::AuditRing>> =
             audit_ring.cloned();
-        let bytes_cow = resolve_rescue_bytes(rescue_video_url, &audit_ring_owned, alias).await;
-        let flv_bytes = std::sync::Arc::new(bytes_cow.into_owned());
+        let source = resolve_rescue_source(rescue_video_url, &audit_ring_owned, alias).await;
 
-        // Seed the countdown overlay + stats so the dashboard reflects
-        // warmup state from the first frame. The pusher pacing loop
-        // updates these on each tick.
-        let initial_text = format_countdown_text(
-            &DeliveryMode::Rescue {
-                reason: RescueReason::Warmup,
-            },
-            delivery_delay_ms / 1000,
-        );
-        write_countdown_file(alias, &initial_text);
+        // Seed warmup stats so the dashboard reflects warmup state from the
+        // first frame. The probe loop below updates rescue_eta_secs each tick.
         {
             let mut s = stats.lock().await;
             s.delivery_mode = "warmup".to_string();
@@ -406,7 +385,7 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
                 &alias_owned,
                 svc_type,
                 &stream_key_owned,
-                flv_bytes,
+                source,
                 dummy_buffer_state,
                 stats_clone,
                 &mut warmup_stop,
@@ -456,28 +435,21 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
                 accum_ms += dur_ms.max(0) as u64;
                 probe_id += 1;
 
-                // R3 GREEN: non-fast endpoints always have rescue pushing
-                // in the background, so the countdown overlay + warmup
-                // stats must reflect progress regardless of URL config.
-                // Fast endpoints skip rescue entirely (per design) and
-                // therefore skip the countdown/stats update too.
+                // R3 GREEN: non-fast endpoints always have rescue pushing in
+                // the background, so the warmup stats must reflect progress
+                // (the dashboard reads rescue_eta_secs) regardless of URL
+                // config. Fast endpoints skip rescue entirely (per design) and
+                // therefore skip the stats update too. #259: the viewer sees
+                // the "Vysielanie sa o chvíľu spustí…" warmup segment; the
+                // exact-seconds countdown lives on the dashboard via
+                // rescue_eta_secs.
                 if !ep_cfg.is_fast {
                     let remaining_ms = delivery_delay_ms.saturating_sub(accum_ms);
                     let eta_secs = remaining_ms.div_ceil(1000);
 
-                    {
-                        let mut s = stats.lock().await;
-                        s.delivery_mode = "warmup".to_string();
-                        s.rescue_eta_secs = Some(eta_secs);
-                    }
-
-                    let text = format_countdown_text(
-                        &DeliveryMode::Rescue {
-                            reason: RescueReason::Warmup,
-                        },
-                        eta_secs,
-                    );
-                    write_countdown_file(alias, &text);
+                    let mut s = stats.lock().await;
+                    s.delivery_mode = "warmup".to_string();
+                    s.rescue_eta_secs = Some(eta_secs);
                 }
 
                 if accum_ms >= delivery_delay_ms {
@@ -590,7 +562,7 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
         }
     };
 
-    // Tear down the warmup rescue pusher task and countdown file.
+    // Tear down the warmup rescue pusher task.
     // Aborting the JoinHandle drops the spawned task; the RtmpPusher
     // inside is dropped, which closes its session (kill_on_drop-equivalent
     // for pure-rust). No external ffmpeg process to reap.
@@ -606,7 +578,6 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
         let _ = handle.await;
         tracing::info!(alias, "Warmup rescue pusher stopped");
     }
-    cleanup_countdown_file(alias);
 
     if !stopped {
         let mut s = stats.lock().await;
@@ -619,38 +590,43 @@ pub async fn run_warmup_loop<F: crate::endpoint_task::ChunkFetcher>(
 
 /// Resolve the FLV bytes to push during rescue for this endpoint.
 ///
-/// Returns `Cow::Borrowed(DEFAULT_RESCUE_FLV)` when:
+/// Returns `RescueClipSource::Countdown` (the embedded Slovak segment set)
+/// when:
 ///   * no operator URL configured (None / empty)
 ///   * URL is non-FLV (legacy MP4 / MOV / etc) — emits `RescueLegacyFormatRejected`
 ///   * S3 fetch fails — emits `RescueCustomFetchFailed`
 ///
-/// Returns `Cow::Owned(<S3 bytes>)` when a custom `.flv` URL fetches
-/// successfully.
+/// Returns `RescueClipSource::Fixed(<S3 bytes>)` when a custom `.flv` URL
+/// fetches successfully — a custom operator clip plays as-is (we cannot
+/// composite a countdown onto it without a runtime renderer).
 ///
-/// Caller wraps the result in `Arc<Vec<u8>>` for cheap cloning across
-/// rust_rescue_push loop iterations.
-pub async fn resolve_rescue_bytes(
+/// #259: the fallback is no longer a single static blob but the ETA-bucket
+/// segment set, so the DEFAULT (no-custom-URL) rescue path — which is what
+/// every production template uses — gets the live viewer-facing countdown.
+pub async fn resolve_rescue_source(
     rescue_video_url: Option<&str>,
     audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
     alias: &str,
-) -> Cow<'static, [u8]> {
+) -> crate::rescue_segments::RescueClipSource {
+    use crate::rescue_segments::RescueClipSource;
+
     let url = match rescue_video_url {
         Some(u) if !u.is_empty() => u,
-        _ => return Cow::Borrowed(DEFAULT_RESCUE_FLV),
+        _ => return RescueClipSource::Countdown,
     };
 
     if !url.to_lowercase().ends_with(".flv") {
-        tracing::warn!(alias, url, "Non-FLV rescue URL rejected; using default");
+        tracing::warn!(alias, url, "Non-FLV rescue URL rejected; using countdown");
         crate::rescue_audit::emit_legacy_rejected(audit_ring, alias, url);
-        return Cow::Borrowed(DEFAULT_RESCUE_FLV);
+        return RescueClipSource::Countdown;
     }
 
     match fetch_flv_from_s3(url).await {
-        Ok(bytes) => Cow::Owned(bytes),
+        Ok(bytes) => RescueClipSource::Fixed(std::sync::Arc::new(bytes)),
         Err(e) => {
-            tracing::warn!(alias, url, "Rescue FLV fetch failed: {e}; using default");
+            tracing::warn!(alias, url, "Rescue FLV fetch failed: {e}; using countdown");
             crate::rescue_audit::emit_custom_fetch_failed(audit_ring, alias, url, &e.to_string());
-            Cow::Borrowed(DEFAULT_RESCUE_FLV)
+            RescueClipSource::Countdown
         }
     }
 }
@@ -671,31 +647,32 @@ async fn fetch_flv_from_s3(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Err
 mod tests;
 
 #[cfg(test)]
-mod resolve_rescue_bytes_tests {
+mod resolve_rescue_source_tests {
     use super::*;
-    use crate::rescue_default::DEFAULT_RESCUE_FLV;
+    use crate::rescue_segments::RescueClipSource;
 
     #[tokio::test]
-    async fn returns_default_when_url_none() {
-        let result = resolve_rescue_bytes(None, &None, "test-alias").await;
-        assert_eq!(result.as_ref(), DEFAULT_RESCUE_FLV);
+    async fn returns_countdown_when_url_none() {
+        let result = resolve_rescue_source(None, &None, "test-alias").await;
+        assert!(matches!(result, RescueClipSource::Countdown));
     }
 
     #[tokio::test]
-    async fn returns_default_when_url_empty() {
-        let result = resolve_rescue_bytes(Some(""), &None, "test-alias").await;
-        assert_eq!(result.as_ref(), DEFAULT_RESCUE_FLV);
+    async fn returns_countdown_when_url_empty() {
+        let result = resolve_rescue_source(Some(""), &None, "test-alias").await;
+        assert!(matches!(result, RescueClipSource::Countdown));
     }
 
     #[tokio::test]
-    async fn returns_default_when_url_not_flv() {
-        // Legacy MP4 URL → reject, fallback. No audit ring so no panic on emit.
-        let result = resolve_rescue_bytes(
+    async fn returns_countdown_when_url_not_flv() {
+        // Legacy MP4 URL → reject, fall back to the countdown segment set.
+        // No audit ring so no panic on emit.
+        let result = resolve_rescue_source(
             Some("https://example.com/rescue-videos/abc.mp4"),
             &None,
             "test-alias",
         )
         .await;
-        assert_eq!(result.as_ref(), DEFAULT_RESCUE_FLV);
+        assert!(matches!(result, RescueClipSource::Countdown));
     }
 }

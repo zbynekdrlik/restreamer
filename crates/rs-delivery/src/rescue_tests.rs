@@ -8,7 +8,7 @@ fn format_countdown_warmup() {
         },
         95,
     );
-    assert_eq!(text, "Stream starting ~ 1m 35s");
+    assert_eq!(text, "Vysielanie sa spustí o ~1m 35s");
 }
 
 #[test]
@@ -19,7 +19,31 @@ fn format_countdown_buffer_empty() {
         },
         30,
     );
-    assert_eq!(text, "Stream recovering ~ 30s");
+    assert_eq!(text, "Obnovujeme o ~30s");
+}
+
+#[test]
+fn format_countdown_warmup_seconds_only() {
+    // eta < 60 → seconds-only form, no minutes segment.
+    let text = format_countdown_text(
+        &DeliveryMode::Rescue {
+            reason: RescueReason::Warmup,
+        },
+        45,
+    );
+    assert_eq!(text, "Vysielanie sa spustí o ~45s");
+}
+
+#[test]
+fn format_countdown_buffer_empty_minutes() {
+    // eta >= 60 → minutes + seconds form.
+    let text = format_countdown_text(
+        &DeliveryMode::Rescue {
+            reason: RescueReason::BufferEmpty,
+        },
+        150,
+    );
+    assert_eq!(text, "Obnovujeme o ~2m 30s");
 }
 
 #[test]
@@ -30,7 +54,18 @@ fn format_countdown_zero() {
         },
         0,
     );
-    assert_eq!(text, "Stream starting soon");
+    assert_eq!(text, "Vysielanie sa spustí o chvíľu");
+}
+
+#[test]
+fn format_countdown_buffer_empty_zero() {
+    let text = format_countdown_text(
+        &DeliveryMode::Rescue {
+            reason: RescueReason::BufferEmpty,
+        },
+        0,
+    );
+    assert_eq!(text, "Obnovujeme o chvíľu");
 }
 
 #[test]
@@ -39,15 +74,11 @@ fn format_countdown_normal_mode_empty() {
     assert_eq!(text, "");
 }
 
-#[test]
-fn countdown_file_path_sanitizes() {
-    // Path is platform-dependent (temp_dir), so assert only the suffix
-    let path = countdown_file_path("FB/Test Stream");
-    assert!(
-        path.ends_with("rescue_FB_Test_Stream.txt"),
-        "path should end with sanitized alias, got: {path}"
-    );
-}
+// #259: the temp-file countdown plumbing (countdown_file_path /
+// write_countdown_file / cleanup_countdown_file) was removed — nothing ever
+// read the file on the pure-Rust path. The viewer countdown is now genuinely
+// rendered via the pre-rendered segment set; its selection is unit-tested in
+// `rescue_segments::tests`.
 
 // ------------------------------------------------------------------
 // Integration tests for run_warmup_loop
@@ -278,72 +309,13 @@ async fn warmup_with_rescue_url_updates_mode_to_warmup() {
         saw_warmup,
         "stats.delivery_mode should have been 'warmup' at some point during fill"
     );
-
-    // Countdown file should be cleaned up after stop
-    assert!(
-        !std::path::Path::new(&countdown_file_path(&alias)).exists(),
-        "countdown file should be cleaned up after stop"
-    );
 }
 
-#[tokio::test]
-async fn warmup_writes_countdown_file_with_warmup_text() {
-    // TDD: this catches that the countdown file is actually written with
-    // Warmup text (not BufferEmpty, not empty). Earlier implementation only
-    // updated stats — no file was ever written during warmup.
-    //
-    // Approach: set up fetcher with limited chunks so the fill never
-    // completes, then send a stop signal after 1s. During that second,
-    // the initial seed write (+ per-chunk updates on the 1 chunk available)
-    // should have produced a "Stream starting" file.
-    let alias = unique_alias("countdown");
-    let fetcher = WarmupMockFetcher::new(0, 100); // only 1 chunk available, 100ms
-    let ep_cfg = test_endpoint_config(&alias, false);
-    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
-    let (stop_tx, mut stop_rx) = watch::channel(false);
-
-    // Poll the countdown file for warmup text, AND send a stop signal
-    // after 1s so the main warmup loop terminates (otherwise it hangs
-    // forever waiting for the target buffer duration).
-    let alias_probe = alias.clone();
-    let probe = tokio::spawn(async move {
-        let mut saw_warmup_text = false;
-        for _ in 0..100 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            if let Ok(contents) = std::fs::read_to_string(countdown_file_path(&alias_probe)) {
-                if contents.starts_with("Stream starting") {
-                    saw_warmup_text = true;
-                    break;
-                }
-            }
-        }
-        // Stop the warmup loop regardless so the test doesn't hang.
-        let _ = stop_tx.send(true);
-        saw_warmup_text
-    });
-
-    let _ = run_warmup_loop(
-        &fetcher,
-        &alias,
-        &ep_cfg,
-        0,
-        10_000, // large target we'll never reach
-        Some("file:///tmp/nonexistent.mp4"),
-        &stats,
-        &mut stop_rx,
-        None,
-    )
-    .await;
-
-    let saw_warmup_text = probe.await.unwrap();
-    // The rescue ffmpeg will fail to spawn on a file:// URL that doesn't
-    // exist, but the seed countdown write happens BEFORE the spawn, so
-    // the file should still have been created with the warmup text.
-    assert!(
-        saw_warmup_text,
-        "countdown file should contain 'Stream starting' text during warmup"
-    );
-}
+// #259: `warmup_writes_countdown_file_with_warmup_text` was REMOVED — the
+// temp-file countdown surface no longer exists. The warmup viewer clip is the
+// "Vysielanie sa o chvíľu spustí…" segment (`rescue_segments::SEG_WARMUP`) and
+// warmup selection is unit-tested in `rescue_segments::tests`; warmup stats
+// (`rescue_eta_secs`) are still asserted by the mode tests above/below.
 
 #[tokio::test]
 async fn warmup_fast_endpoint_skips_rescue_ffmpeg() {
@@ -368,10 +340,12 @@ async fn warmup_fast_endpoint_skips_rescue_ffmpeg() {
     )
     .await;
 
-    // Fast endpoint: no countdown file should be created
-    assert!(
-        !std::path::Path::new(&countdown_file_path(&alias)).exists(),
-        "fast endpoint should not create countdown file"
+    // Fast endpoint: stats.delivery_mode must never flip to "warmup" (fast
+    // endpoints skip rescue entirely per the low-latency design).
+    let s = stats.lock().await;
+    assert_ne!(
+        s.delivery_mode, "warmup",
+        "fast endpoint should not enter warmup rescue"
     );
 }
 
@@ -404,11 +378,6 @@ async fn warmup_stop_signal_cleans_up_and_returns_true() {
     .await;
 
     assert!(stopped, "should return true when stop signal received");
-    // Countdown file should be cleaned up
-    assert!(
-        !std::path::Path::new(&countdown_file_path(&alias)).exists(),
-        "countdown file should be cleaned up on stop"
-    );
 }
 
 /// Hardens warmup against the "start_chunk_id points at a pruned chunk"

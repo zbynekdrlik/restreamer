@@ -43,6 +43,16 @@ Always `source ~/.cargo/env` and `export SQLX_OFFLINE=true` on dev2.
 - `rs-delivery`'s `producer_lag` / `endpoint_producer` / most producer logic
   lives in the **BIN** target, not the lib — a `cargo test -p rs-delivery --lib`
   runs 0 of those. Use `cargo test --bin rs-delivery`.
+- **`ld terminated with signal 7 [Bus error]` or `No space left on device`
+  during a `cargo test --workspace` link = dev2 DISK is FULL, not a code bug.**
+  The workspace test links MANY large test binaries (rs-service e2e, rs-api lib
+  test, …) and can tip `target/` over the edge; `ld` then SIGBUSes on a failed
+  mmap. `clippy --all-targets` and `cargo test --bin rs-delivery` can still pass
+  (they build less), so trust those for correctness. Fix: `df -h /` (root is one
+  915G disk), then free a stale build cache — `du -sh ~/*/target | sort -rh`,
+  `rm -rf ~/<stale-verify-checkout>/target` (a `target/` is always regenerable —
+  purge on sight). Do NOT touch `~/camera_cache` (camera-box recordings) or
+  `~/devel`. Then re-run `cargo test --workspace --jobs 2`.
 - Workspace: `cargo test --workspace` and `cargo clippy --workspace
   --all-targets -- -D warnings` (a real CI gate).
 - **`leptos-ui` is EXCLUDED from the workspace** — test it separately:

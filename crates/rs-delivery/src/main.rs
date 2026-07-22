@@ -37,6 +37,7 @@ pub mod refill_audit;
 pub mod rescue;
 pub mod rescue_audit;
 pub mod rescue_default;
+pub mod rescue_segments;
 pub mod rtmp_push_telemetry;
 pub mod rust_rescue_push;
 mod s3_fetch;
