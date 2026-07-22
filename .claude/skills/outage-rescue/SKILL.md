@@ -127,6 +127,19 @@ Five failure layers discovered in 2026-06-14 crash test (event 9312 — all 7 en
 
 **Fix constraint**: Cannot build/test locally (dev1 OOM) — all via CI. Crash verification needs forced kill on stream.lan (destructive → requires operator to not be in a live event).
 
+## S3 fetch MUST be bounded — `set_request_timeout` is a NO-OP on our backend (#252/#276, v0.29.12)
+
+The recovery-to-live gap (#252 gap #2 above, exposed by the crash-exhaustion gate: a non-fast RTMP endpoint never returned to `normal` within 420s after restart) was root-caused to an **unbounded S3 chunk GET** starving recovery fetches: a wedged/blackhole GET hung on the reqwest client until the OS TCP timeout (minutes), holding a `max_concurrent=8` fetch permit so recovery fetches couldn't run.
+
+**rust-s3 0.37 gotcha (cost real investigation — don't re-derive):** on the `tokio-rustls-tls` backend the reqwest client is built ONCE at `Bucket::new` from `ClientOptions::default()` (no timeout) and every request uses that cached `http_client()`. So:
+- `Bucket::new(..).with_path_style()` has **no effective per-GET timeout** (the `request_timeout: Some(60s)` struct field is dead — only the *blocking* backend reads it).
+- `bucket.set_request_timeout(Some(d))` — **NO-OP for the effective timeout**: it sets the dead field, never rebuilds the cached client. (This was the ticket plan's named fix; it does nothing.)
+- `Bucket::new(..)?.with_request_timeout(d)?.with_path_style()` — **the working fix**: `with_request_timeout` rebuilds the client with reqwest `.timeout(d)` (bounds connect + body); `with_path_style` then clones that timeout-bearing client. Order matters.
+
+Bound = **20s** (`S3_GET_REQUEST_TIMEOUT_SECS` in `rs-delivery/src/s3_fetch.rs`) — clears the measured legit-GET p99 (8.2–16.4s, #275/#276) with margin while failing a true wedge fast into the existing retry-with-backoff.
+
+**Deterministic test pattern** (`s3_fetch.rs::wedged_s3_get_is_bounded_by_request_timeout`, runs in the **bin** target — `cargo test --bin rs-delivery`): a local `TcpListener` that ACCEPTS then never responds (hold the sockets in a Vec, else the closed conn returns fast and isn't a real blackhole) + an injected short timeout + an outer `tokio::time::timeout` ceiling. It asserts EFFECTIVE behavior, so it also fails a naive `set_request_timeout` "fix".
+
 ## Outage Audit Events
 
 Wired in PR #232 (v0.20.0) — these events must fire for correct forensic reconstruction:
