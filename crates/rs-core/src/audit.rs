@@ -318,7 +318,21 @@ pub async fn audit_writer_task(
         // always corresponds to an audit row an operator can go back and read.
         if let Some(n) = notifier.as_mut() {
             for row in &buf {
-                if let Some(alert) = n.observe(row) {
+                // #311: only outage-relevant rows need the event-name lookup
+                // used to suppress CI E2E-* test events, so the high-volume
+                // non-outage rows never touch the DB.
+                if !n.is_outage_relevant(row) {
+                    continue;
+                }
+                let event_name = match row.event_id {
+                    Some(id) => crate::db::get_streaming_event_by_id(&pool, id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|e| e.name),
+                    None => None,
+                };
+                if let Some(alert) = n.observe(row, event_name.as_deref()) {
                     n.spawn_dispatch(alert);
                 }
             }

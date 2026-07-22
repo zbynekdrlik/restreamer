@@ -134,10 +134,26 @@ impl OutageNotifier {
         })
     }
 
+    /// Cheap pre-check: does this row carry an action the notifier would alert
+    /// on? The audit writer uses it to gate the (rare) event-name DB lookup that
+    /// drives #311 CI-event suppression, so non-outage rows cost nothing.
+    pub fn is_outage_relevant(&self, row: &AuditRow) -> bool {
+        classify(row.action).is_some()
+    }
+
     /// Pure edge-trigger / dedup core. Returns `Some(alert)` when this row is a
     /// state transition that should fire, `None` otherwise. Mutates the episode
     /// state. HTTP-free, so it is directly unit-testable.
-    pub fn observe(&mut self, row: &AuditRow) -> Option<DiscordAlert> {
+    ///
+    /// `event_name` is the resolved name of `row.event_id` (the caller looks it
+    /// up), used to suppress CI test events (#311). `None` means the row is not
+    /// tied to a named event (e.g. host-level internet signals) and is never
+    /// suppressed on that basis.
+    pub fn observe(&mut self, row: &AuditRow, event_name: Option<&str>) -> Option<DiscordAlert> {
+        // #311: event_name is wired through here so CI test events (E2E-*) can
+        // be suppressed. The suppression itself lands in the fix commit; here
+        // the parameter is accepted (and ignored) so the RED test compiles.
+        let _ = event_name;
         match classify(row.action)? {
             Signal::Onset(action) => {
                 self.in_outage = true;
@@ -307,52 +323,116 @@ mod tests {
     fn first_onset_alerts_then_dedups_within_episode() {
         let mut n = notifier();
         // First VpsUnreachable fires.
-        assert!(n.observe(&row(Action::VpsUnreachable)).is_some());
+        assert!(n.observe(&row(Action::VpsUnreachable), None).is_some());
         // The per-retry storm is suppressed (edge-triggered).
-        assert!(n.observe(&row(Action::VpsUnreachable)).is_none());
-        assert!(n.observe(&row(Action::VpsUnreachable)).is_none());
+        assert!(n.observe(&row(Action::VpsUnreachable), None).is_none());
+        assert!(n.observe(&row(Action::VpsUnreachable), None).is_none());
     }
 
     #[test]
     fn distinct_onsets_each_alert_once_in_one_episode() {
         let mut n = notifier();
-        assert!(n.observe(&row(Action::VpsUnreachable)).is_some());
+        assert!(n.observe(&row(Action::VpsUnreachable), None).is_some());
         // A different transition (S3 upload failing) is its own alert.
-        assert!(n.observe(&row(Action::S3UploadFailed)).is_some());
+        assert!(n.observe(&row(Action::S3UploadFailed), None).is_some());
         // But repeats of either are still deduped.
-        assert!(n.observe(&row(Action::VpsUnreachable)).is_none());
-        assert!(n.observe(&row(Action::S3UploadFailed)).is_none());
+        assert!(n.observe(&row(Action::VpsUnreachable), None).is_none());
+        assert!(n.observe(&row(Action::S3UploadFailed), None).is_none());
     }
 
     #[test]
     fn recovery_fires_only_when_in_outage() {
         let mut n = notifier();
         // Recovery with no active outage must NOT fire a spurious "all-clear".
-        assert!(n.observe(&row(Action::RescueRecovered)).is_none());
+        assert!(n.observe(&row(Action::RescueRecovered), None).is_none());
         // Now enter an outage, then recover.
-        assert!(n.observe(&row(Action::RescueActivated)).is_some());
-        assert!(n.observe(&row(Action::RescueRecovered)).is_some());
+        assert!(n.observe(&row(Action::RescueActivated), None).is_some());
+        assert!(n.observe(&row(Action::RescueRecovered), None).is_some());
         // Recovery again with no active outage is suppressed.
-        assert!(n.observe(&row(Action::RescueRecovered)).is_none());
+        assert!(n.observe(&row(Action::RescueRecovered), None).is_none());
     }
 
     #[test]
     fn recovery_resets_and_rearms_onset_alerts() {
         let mut n = notifier();
-        assert!(n.observe(&row(Action::VpsUnreachable)).is_some());
-        assert!(n.observe(&row(Action::VpsUnreachable)).is_none()); // deduped
-        assert!(n.observe(&row(Action::HostInternetRecovered)).is_some()); // recover
+        assert!(n.observe(&row(Action::VpsUnreachable), None).is_some());
+        assert!(n.observe(&row(Action::VpsUnreachable), None).is_none()); // deduped
+        assert!(
+            n.observe(&row(Action::HostInternetRecovered), None)
+                .is_some()
+        ); // recover
         // A genuinely new outage after recovery must alert again.
-        assert!(n.observe(&row(Action::VpsUnreachable)).is_some());
+        assert!(n.observe(&row(Action::VpsUnreachable), None).is_some());
     }
 
     #[test]
     fn unrelated_action_does_not_touch_state() {
         let mut n = notifier();
-        assert!(n.observe(&row(Action::EventStarted)).is_none());
+        assert!(n.observe(&row(Action::EventStarted), None).is_none());
         assert!(!n.in_outage);
         // A real onset right after still fires (state was untouched).
-        assert!(n.observe(&row(Action::S3UploadFailed)).is_some());
+        assert!(n.observe(&row(Action::S3UploadFailed), None).is_some());
+    }
+
+    #[test]
+    fn is_outage_relevant_gates_the_name_lookup() {
+        let n = notifier();
+        // Outage onset + recovery actions are relevant (the writer will resolve
+        // the event name for these to drive #311 suppression).
+        assert!(n.is_outage_relevant(&row(Action::VpsUnreachable)));
+        assert!(n.is_outage_relevant(&row(Action::RescueActivated)));
+        assert!(n.is_outage_relevant(&row(Action::RescueRecovered)));
+        // Everything else is not — the writer skips the DB lookup entirely.
+        assert!(!n.is_outage_relevant(&row(Action::EventStarted)));
+        assert!(!n.is_outage_relevant(&row(Action::DiskCachePushSample)));
+    }
+
+    #[test]
+    fn e2e_named_event_is_suppressed_real_still_alerts() {
+        // #311: CI test events (E2E-*) deliberately trigger outage edges several
+        // times per run; they must NOT reach the operator's alert channel.
+        let mut n = notifier();
+        assert!(
+            n.observe(&row(Action::RescueActivated), Some("E2E-Test"))
+                .is_none(),
+            "E2E-Test event must be suppressed"
+        );
+        assert!(
+            n.observe(&row(Action::VpsUnreachable), Some("E2E-FB-Test"))
+                .is_none(),
+            "E2E-FB-Test event must be suppressed"
+        );
+        // A real (non-E2E) event still alerts.
+        let mut real = notifier();
+        assert!(
+            real.observe(&row(Action::RescueActivated), Some("Nedeľná bohoslužba"))
+                .is_some(),
+            "a real event must still alert"
+        );
+        // A host-level row with no event name is never suppressed on that basis.
+        let mut host = notifier();
+        assert!(
+            host.observe(&row(Action::HostInternetUnreachable), None)
+                .is_some(),
+            "host-level (no event name) signal must still alert"
+        );
+    }
+
+    #[test]
+    fn e2e_suppression_does_not_touch_episode_state() {
+        // A suppressed E2E onset must not flip the notifier into an outage
+        // episode, so it can never disturb a real outage's dedup/episode state.
+        let mut n = notifier();
+        assert!(
+            n.observe(&row(Action::VpsUnreachable), Some("E2E-Test"))
+                .is_none()
+        );
+        assert!(!n.in_outage, "E2E event must not start an outage episode");
+        // A subsequent REAL onset still alerts (state was untouched).
+        assert!(
+            n.observe(&row(Action::VpsUnreachable), Some("Real Event"))
+                .is_some()
+        );
     }
 
     #[test]
