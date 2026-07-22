@@ -92,6 +92,14 @@ The `stream-lan-box` concurrency group (`queue: max`, `cancel-in-progress: false
 
 **If two runs ARE ever in flight**: cancel the lower-value run immediately (keep the release-bound main run), clean shared state (deactivate/detach the E2E event via API, delete any orphan VPS), then let the surviving run continue. One decisive cancel beats letting both race.
 
+**When a superseded run IGNORES a normal `gh run cancel` (force-cancel escalation, #303)**: a superseded dev run holding the self-hosted stream-lan E2E jobs can ignore `gh run cancel` — it keeps STARTING new jobs (observed moving from YT E2E into the FB soak 50+ min after the cancel request) and holds the workflow-level `rust-ci-<ref>` concurrency slot, so the successor sits at `pending` with 0 jobs. If a submitted cancel does not reach a terminal state within **~2 min**, escalate to the force-cancel endpoint:
+
+```bash
+gh api repos/zbynekdrlik/restreamer/actions/runs/<id>/force-cancel -X POST
+```
+
+It reaches terminal `cancelled` within seconds and lets the successor start. **Then, before the successor's E2E begins, verify shared box state is clean**: no active event, no lingering delivery instance, no orphan Hetzner VPS (the force-killed run may have left an event activated or a VPS running). Observed twice (runs 29807113362, 29864817389) where a normal cancel had no effect and force-cancel was the only thing that worked.
+
 ## CI/CD Pipelines
 
 | Workflow     | Trigger                     | Purpose                                        |

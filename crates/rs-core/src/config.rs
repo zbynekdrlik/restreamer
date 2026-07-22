@@ -19,6 +19,20 @@ pub struct Config {
     pub delivery: DeliveryConfig,
     #[serde(default)]
     pub obs: ObsConfig,
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+}
+
+/// Operator-facing outage notifications (#261). The webhook URL is a runtime
+/// secret set by the operator in `config.json` — it MUST NOT be committed
+/// anywhere in the repo.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NotificationsConfig {
+    /// Discord webhook URL for immediate outage alerts. Empty (the default)
+    /// disables notifications entirely, so the feature ships dark until the
+    /// operator fills it in.
+    #[serde(default)]
+    pub discord_webhook_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,6 +426,7 @@ impl Config {
                 enabled: false, // Disable in tests to avoid background connection attempts
                 ..ObsConfig::default()
             },
+            notifications: NotificationsConfig::default(),
         }
     }
 }
@@ -433,6 +448,7 @@ impl Default for Config {
             api: ApiConfig::default(),
             delivery: DeliveryConfig::default(),
             obs: ObsConfig::default(),
+            notifications: NotificationsConfig::default(),
         }
     }
 }
@@ -606,6 +622,38 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(config.client_s3_base(), "abc-uuid/");
+    }
+
+    #[test]
+    fn notifications_default_is_empty_disabled() {
+        // Absent `notifications` block -> empty webhook -> disabled (#261).
+        let json = r#"{
+            "client_uuid": "abc",
+            "s3": { "bucket": "b", "region": "r", "endpoint": "e", "access_key_id": "k", "secret_access_key": "s" }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.notifications.discord_webhook_url.is_empty());
+    }
+
+    #[test]
+    fn notifications_webhook_roundtrips() {
+        let json = r#"{
+            "client_uuid": "abc",
+            "s3": { "bucket": "b", "region": "r", "endpoint": "e", "access_key_id": "k", "secret_access_key": "s" },
+            "notifications": { "discord_webhook_url": "https://discord.example/webhook/xyz" }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.notifications.discord_webhook_url,
+            "https://discord.example/webhook/xyz"
+        );
+        // Survives a save/load roundtrip.
+        let reparsed: Config =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            reparsed.notifications.discord_webhook_url,
+            "https://discord.example/webhook/xyz"
+        );
     }
 
     #[test]

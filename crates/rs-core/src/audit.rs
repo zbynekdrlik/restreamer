@@ -278,11 +278,16 @@ pub fn record(tx: &mpsc::Sender<AuditRow>, row: AuditRow) {
     }
 }
 
-/// Drains the audit channel, INSERTs rows (batched), broadcasts WS events.
+/// Drains the audit channel, INSERTs rows (batched), broadcasts WS events, and
+/// — when a Discord outage notifier is configured (#261) — fires an
+/// edge-triggered alert on each outage state transition observed in the drained
+/// rows. The notifier sees BOTH host-side signals and VPS-side signals mirrored
+/// into this same channel, so one dispatcher covers the whole outage.
 pub async fn audit_writer_task(
     pool: SqlitePool,
     ws_tx: broadcast::Sender<WsEvent>,
     mut rx: mpsc::Receiver<AuditRow>,
+    mut notifier: Option<crate::notify::OutageNotifier>,
 ) {
     const BATCH_MAX: usize = 32;
     const FLUSH_AFTER: Duration = Duration::from_millis(100);
@@ -308,6 +313,15 @@ pub async fn audit_writer_task(
 
         if let Err(e) = crate::db::audit::insert_batch(&pool, &buf, &ws_tx).await {
             tracing::error!("audit batch insert failed: {e}");
+        }
+        // Fire outage alerts AFTER the rows are persisted, so a delivered alert
+        // always corresponds to an audit row an operator can go back and read.
+        if let Some(n) = notifier.as_mut() {
+            for row in &buf {
+                if let Some(alert) = n.observe(row) {
+                    n.spawn_dispatch(alert);
+                }
+            }
         }
         buf.clear();
     }

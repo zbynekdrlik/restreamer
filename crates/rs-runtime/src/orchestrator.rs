@@ -224,8 +224,12 @@ impl ServiceCore {
         {
             let pool = pool.clone();
             let ws_tx = ws_tx.clone();
+            // #261: build the Discord outage notifier from config. Returns None
+            // (disabled) when the operator has not set a webhook URL, so the
+            // writer runs unchanged until notifications are configured.
+            let notifier = rs_core::notify::OutageNotifier::from_config(&self.config.notifications);
             tokio::spawn(async move {
-                rs_core::audit::audit_writer_task(pool, ws_tx, audit_rx).await;
+                rs_core::audit::audit_writer_task(pool, ws_tx, audit_rx, notifier).await;
             });
         }
         {

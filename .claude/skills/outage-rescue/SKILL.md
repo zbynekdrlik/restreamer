@@ -98,6 +98,31 @@ Wired in PR #232 (v0.20.0) — these events must fire for correct forensic recon
 
 "Working" = cache ~120s GREEN + 0 deaths + 0 crashes + 0 errors over full soak — NOT just "chunks advancing".
 
+## Outage Notifications — Discord alert wiring (#261, v0.29.8)
+
+Proactive outage alerts are hooked at the **audit writer**, not per-subsystem —
+`rs-core/src/notify.rs::OutageNotifier` is passed into
+`audit::audit_writer_task` and observes every drained `AuditRow`. Because
+`delivery_audit_mirror` funnels VPS-side rows into the SAME host audit channel,
+ONE dispatcher there covers BOTH host signals (`VpsUnreachable`,
+`S3UploadFailed`, `HostInternetUnreachable`) and VPS signals
+(`RescueActivated`, `RescueRecovered`) — no per-source duplication. This is the
+landing point for any future notification channel (#262 phone escalation, #263
+dashboard banner keys off the same audit rows).
+
+- **Edge-triggered / deduped:** `observe()` is a pure, HTTP-free state machine —
+  one alert per distinct transition per outage episode (NOT per retry; the audit
+  `RateLimiter` already throttles the storm actions to 1/min). A recovery signal
+  ends the episode and re-arms the onset alerts. Unit-test the logic directly;
+  no live webhook needed.
+- **Config:** `notifications.discord_webhook_url` (empty = disabled → feature
+  ships dark). The webhook URL is a RUNTIME secret the operator sets in
+  `config.json` — NEVER commit a real webhook URL anywhere (placeholder only).
+- **reqwest in rs-core:** it is a workspace dep — add `reqwest.workspace = true`
+  to a crate's Cargo.toml to POST from there (rs-core did NOT have it before
+  #261). Mock the external webhook in tests with a one-shot `tokio::net::
+  TcpListener` that reads the request + returns `204` — no mock-server dep.
+
 ## Rescue EXIT Criterion — `producer_active` Alone Is Not Enough (#289, v0.29.1)
 
 `producer_active` is a **transient per-tick flag** — it flaps `true` on respawn churn / stale-tail re-fetch even when NO new chunks are actually flowing. Gating rescue-exit on `producer_active` alone (as `rust_rescue_push_with_pusher` originally did) lets rescue exit onto a stuttering/trickle uplink, snapping the viewer back to a sekajúci stream before real recovery.

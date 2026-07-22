@@ -24,7 +24,5 @@ pub use confirm_modal::ConfirmModal;
 pub use endpoints::EndpointsView;
 pub use header::Header;
 pub use operator_dashboard::OperatorDashboard;
-pub use pacing_panel::PacingPanel;
 pub use settings::SettingsView;
-pub use templates::TemplatesView;
 pub use uploads::UploadsView;
