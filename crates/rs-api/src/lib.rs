@@ -9,6 +9,7 @@ pub mod delivery_endpoints;
 pub mod delivery_handlers;
 pub(crate) mod delivery_helpers;
 pub mod delivery_live_edge;
+pub(crate) mod delivery_log_capture;
 pub(crate) mod delivery_monitor;
 pub(crate) mod delivery_orphan;
 #[cfg(test)]

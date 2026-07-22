@@ -128,3 +128,35 @@ ssh newlevel@dev2 'cd ~/restreamer-buildcheck/e2e && npm install >/dev/null 2>&1
   mock change. Playwright browsers are already installed on dev2.
 - Each spec `beforeEach` posts `/api/v1/__reset` — that's the mock's, so the
   mock MUST be up before the tests (the `sleep 4`).
+
+### `ssh … npx playwright test` drops with **exit 255** when dev2 is loaded — run E2E DETACHED + poll a sentinel
+
+dev2 is shared: other Claude sessions leave **Playwright MCP** chrome running for
+days (`ps -eo pid,etime,cmd | grep playwright-mcp`; user-data-dir
+`~/.cache/ms-playwright-mcp/…`, load avg often ~10). Under that load a heavy
+interactive `ssh newlevel@dev2 '… npx playwright test …'` frequently drops at
+handshake — the tool returns **`exit 255` with zero stdout** (looks like the
+command failed; it never ran). A trivial `ssh … 'echo alive'` still works, which
+is the tell. **Do NOT pkill those MCP chrome/`playwright-mcp` processes — they
+belong to other sessions**, not your `~/restreamer-buildcheck/e2e` run.
+
+Fix: don't hold the run in the ssh session. Launch it **detached** (writes a log
++ a done-sentinel) and poll the sentinel with separate short ssh calls — this
+survives connection drops. Use `--workers=1` to keep load down:
+
+```bash
+ssh newlevel@dev2 'cd ~/restreamer-buildcheck/e2e
+  pkill -f "node mock-api.js" 2>/dev/null; sleep 1; rm -f /tmp/pw.log /tmp/pw.done
+  RESTREAMER_TEST_HOOKS=1 nohup node mock-api.js >/tmp/mockapi.log 2>&1 & sleep 5
+  ss -ltn | grep -q :8910 && echo MOCK_UP || echo MOCK_DOWN
+  setsid bash -c "cd ~/restreamer-buildcheck/e2e; npx playwright test \
+    --config playwright-frontend.config.ts <spec>.spec.ts --repeat-each=5 --workers=1 \
+    >/tmp/pw.log 2>&1; echo EXIT=\$? >/tmp/pw.done" >/dev/null 2>&1 &
+  echo LAUNCHED'
+# then poll from dev1 (survives drops): loop `ssh … 'cat /tmp/pw.done'` until non-empty,
+# then `ssh … 'tail -20 /tmp/pw.log'`.
+```
+
+`--repeat-each=5` is the sanctioned way to prove a FLAKE fix (a keyed `<For>`
+re-render fix, a refresh-race). If even the detached-launch ssh keeps dropping,
+retry it a few times spaced ~20s — it's intermittent, not a code problem.
