@@ -38,7 +38,7 @@ use rs_core::models::PusherKind;
 use crate::api::EndpointConfig;
 use crate::audit_ring::AuditRing;
 use crate::buffer_state::BufferState;
-use crate::disk_cache::{DiskCache, DiskCacheConfig, FetchedChunk, S3Backend};
+use crate::disk_cache::{ChunkAvailability, DiskCache, DiskCacheConfig, FetchedChunk, S3Backend};
 use crate::disk_cache_fetcher::DiskCacheFetcher;
 use crate::endpoint_producer::producer_task;
 use crate::endpoint_stats::{EndpointStats, Stats};
@@ -132,6 +132,30 @@ impl S3Backend for ExhaustingBackend {
             return Ok(Some(1000));
         }
         Ok(None)
+    }
+}
+
+/// Serves EVERY requested chunk (the chunk persists on S3), counting GETs.
+/// Models the #252 resume-at-evicted-chunk scenario: the chunk still lives on
+/// S3; only the LOCAL disk-cache copy is gone.
+#[derive(Default)]
+struct AlwaysServeBackend {
+    fetches: AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl S3Backend for AlwaysServeBackend {
+    async fn fetch(&self, _chunk_id: i64) -> Result<Option<FetchedChunk>, String> {
+        self.fetches.fetch_add(1, AtomicOrdering::SeqCst);
+        Ok(Some(FetchedChunk {
+            data: vec![7u8; 64],
+            duration_ms: 1000,
+            host_emit_ts: None,
+            s3_upload_complete_ts: None,
+        }))
+    }
+    async fn head_duration_ms(&self, _chunk_id: i64) -> Result<Option<i64>, String> {
+        Ok(Some(1000))
     }
 }
 
@@ -369,5 +393,115 @@ async fn genuine_exhaustion_404_activates_rescue_through_real_disk_cache_path() 
         s.delivery_mode, "rescue",
         "delivery_mode must read 'rescue' after exhaustion, got {:?}",
         s.delivery_mode
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #252 — resume position lands on an EVICTED chunk (crash-exhaustion recovery)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn resume_at_evicted_chunk_refetches_from_s3_instead_of_looping() {
+    // #252 crash-exhaustion recovery (run 29969272303): after a host restart
+    // the resume position can land on a chunk whose LOCAL disk-cache file was
+    // already EVICTED while its ChunkRegistry slot still reads `Available` (a
+    // re-download -> eviction-sweep race). The chunk still lives on S3.
+    //
+    // Pre-fix, the producer's fetch chain surfaced the resulting ENOENT as a
+    // retryable "disk read ... (retry)" Err on the SAME disk source, and
+    // `request_chunk` dedup-skips when `registry.exists()` is true (the stale
+    // `Available`) -- so NO S3 GET is ever issued, the re-read hits the same
+    // missing file, and `fetch_chunk_with_meta` returns a hard Err. The
+    // producer then loops forever on "S3 fetch error, retrying in 60s"
+    // (mode=rescue, prod_active=false for the whole 420s recovery window) and
+    // the endpoint never returns to live. A missing LOCAL file must be a
+    // CACHE MISS that refetches from S3.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let backend = Arc::new(AlwaysServeBackend::default());
+
+    // REAL DiskCache + DiskCacheFetcher -- the production wiring from
+    // EndpointHandle::spawn (mirrors `real_fetcher`, but we keep the shared
+    // DiskCache handle to reproduce the stale-Available / evicted-file state).
+    let evicted_id: i64 = 877;
+    let cfg = DiskCacheConfig {
+        cache_dir: tmp.path().to_path_buf(),
+        window_chunks: 4,
+        s3_ingress_cap_mbit: 10_000,
+        eviction_interval_secs: 3600, // keep the sweeper quiet
+        read_stall_timeout_secs: STALL_TIMEOUT_SECS,
+        download_queue_capacity: 50,
+    };
+    let cache = Arc::new(
+        DiskCache::new(cfg, backend.clone(), "resume-evt".to_string(), None)
+            .await
+            .expect("DiskCache::new"),
+    );
+
+    // Prime the stale state: download the chunk (registry -> Available,
+    // 877.bin on disk), then delete ONLY the file -- the registry slot keeps
+    // reading `Available`, exactly the evicted-file / stale-registry race.
+    cache.download_service.request_chunk(evicted_id).await;
+    let path = cache.event_dir().join(format!("{evicted_id}.bin"));
+    assert!(
+        path.exists(),
+        "setup: chunk file must exist after request_chunk"
+    );
+    assert!(
+        matches!(
+            cache.registry.peek(evicted_id),
+            Some(ChunkAvailability::Available { .. })
+        ),
+        "setup: registry must read Available before eviction"
+    );
+    tokio::fs::remove_file(&path)
+        .await
+        .expect("setup: simulate eviction by deleting the local file");
+    assert!(
+        matches!(
+            cache.registry.peek(evicted_id),
+            Some(ChunkAvailability::Available { .. })
+        ),
+        "setup: registry keeps the STALE Available after the file is gone"
+    );
+
+    let fetcher = DiskCacheFetcher::new(
+        Arc::clone(&cache),
+        "resume-evicted".to_string(),
+        evicted_id,
+        4,
+        STALL_TIMEOUT_SECS,
+        None,
+    );
+
+    // The fetch must RECOVER via S3 (Ok(Some(bytes))), NOT loop on a disk
+    // ENOENT Err. 10s real-time safety bound (the mock serves instantly).
+    let got = tokio::time::timeout(
+        Duration::from_secs(10),
+        fetcher.fetch_chunk_with_meta(evicted_id),
+    )
+    .await
+    .expect("fetch must not hang");
+
+    match got {
+        Ok(Some((data, dur))) => {
+            assert_eq!(data.len(), 64, "recovered chunk must carry the S3 bytes");
+            assert_eq!(dur, 1000, "recovered chunk must carry the S3 duration");
+        }
+        Ok(None) => panic!(
+            "#252 REGRESSION: evicted resume chunk surfaced as a permanent \
+             cache miss (None) -- the chunk IS on S3 and must be refetched"
+        ),
+        Err(e) => panic!(
+            "#252 REGRESSION: evicted resume chunk returned a hard Err \
+             ({e:?}) -- request_chunk dedup-skipped the stale `Available` so \
+             no S3 refetch happened; the producer loops forever on \
+             'S3 fetch error, retrying in 60s' and never returns to live"
+        ),
+    }
+
+    // The recovery must have re-downloaded the chunk to local disk.
+    assert!(
+        path.exists(),
+        "recovery must re-download the evicted chunk to local disk"
     );
 }
