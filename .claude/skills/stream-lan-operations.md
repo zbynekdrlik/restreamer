@@ -13,8 +13,28 @@ This skill documents ALL operations for the stream.lan Windows PC. **USE THIS SK
 | --------------- | ----------------------------------- | ------------------------------------------------ |
 | MCP Server      | `win-stream-snv` (stream.lan:8090)  | Bearer token (configured in ~/.claude.json)      |
 | OBS WebSocket   | `ws://stream.lan:4455`              | password: `<OBS WS password — live value lives in OBS on stream.lan (obs-websocket settings), owned by the camera-box project; the value historically committed here was stale and is dead>` (auth not required) |
-| Restreamer API  | `http://127.0.0.1:8910`             | (local only)                                     |
+| Restreamer API  | `http://127.0.0.1:8910`             | NOT truly local-only — publicly reachable via the cloudflared tunnel (see Security note) |
 | Restreamer RTMP | `rtmp://stream.lan:1234/live/{app}` | (no auth)                                        |
+
+### SECURITY: `:8910` is exposed to the public internet via the cloudflared tunnel
+
+`cloudflared` runs on stream.lan and tunnels `https://streamsnv.newlevel.media`
+→ `http://localhost:8910`. So a request from the **public internet** arrives at
+the API from `127.0.0.1` (the local cloudflared socket). Consequence: **an
+`addr.ip().is_loopback()` check ALONE does NOT make an endpoint local-only** —
+it lets the whole internet through. This bit `/api/v1/diag/dump` (#205: 13 KB of
+internal data — VPS IPv4, Hetzner ids, event ids, s3_fetch_profile — was world-
+readable despite a loopback guard).
+
+The tunnel is **token-managed remotely**, so a cloudflared-side `path:` deny is
+NOT reliably available to us — the CODE must close the exposure. Pattern to gate
+an endpoint as genuinely-local-operator-only (`crates/rs-api/src/diag.rs`
+`diag_access_allowed`): require BOTH `addr.ip().is_loopback()` AND the **absence
+of any reverse-proxy forwarded header** (`Cf-Connecting-Ip` / `X-Forwarded-For`
+/ `X-Forwarded-Host`) — a tunneled request always carries one, a genuine local
+request carries none. Optional `api.diag_token` + `X-Diag-Token` header allows an
+authenticated remote caller (config-only secret, never committed). Any NEW
+sensitive endpoint on `:8910` MUST use this guard, not a bare loopback check.
 
 ## MCP Access
 
