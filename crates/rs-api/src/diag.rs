@@ -376,6 +376,17 @@ mod loopback_tests {
         req
     }
 
+    fn req_with_peer_headers(peer: &str, headers: &[(&str, &str)]) -> Request<Body> {
+        let addr: SocketAddr = peer.parse().unwrap();
+        let mut builder = Request::builder().method("POST").uri("/api/v1/diag/dump");
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        let mut req = builder.body(Body::empty()).unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        req
+    }
+
     #[tokio::test]
     async fn diag_dump_rejects_non_loopback_ipv4() {
         let app = build_router(test_state().await);
@@ -420,6 +431,77 @@ mod loopback_tests {
             resp.status(),
             StatusCode::OK,
             "loopback ::1 must be allowed"
+        );
+    }
+
+    // Issue #205 — loopback alone is insufficient once cloudflared tunnels
+    // public traffic to localhost:8910. A tunneled request arrives from
+    // 127.0.0.1 (passing the naive loopback check) but always carries a
+    // forwarded header (Cf-Connecting-Ip / X-Forwarded-For / X-Forwarded-Host)
+    // that a genuinely-local operator request never sets. Reject those.
+
+    #[tokio::test]
+    async fn diag_dump_rejects_loopback_with_x_forwarded_for() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req_with_peer_headers(
+                "127.0.0.1:54321",
+                &[("x-forwarded-for", "203.0.113.7")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "loopback peer carrying X-Forwarded-For is a tunneled request and must be denied (issue #205)"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_rejects_loopback_with_cf_connecting_ip() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req_with_peer_headers(
+                "127.0.0.1:54321",
+                &[("cf-connecting-ip", "203.0.113.7")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "loopback peer carrying Cf-Connecting-Ip (Cloudflare tunnel) must be denied (issue #205)"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_rejects_loopback_with_x_forwarded_host() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req_with_peer_headers(
+                "127.0.0.1:54321",
+                &[("x-forwarded-host", "streamsnv.newlevel.media")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "loopback peer carrying X-Forwarded-Host must be denied (issue #205)"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_accepts_genuinely_local_no_forwarded_headers() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req_with_peer_headers("127.0.0.1:54321", &[]))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "genuinely-local loopback request with no forwarded headers must still be allowed"
         );
     }
 }
