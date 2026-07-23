@@ -5112,14 +5112,17 @@ jobs:
       - name: "GATE: Second YouTube health check after resilience tests"
         if: success()
         shell: powershell
-        timeout-minutes: 2
+        timeout-minutes: 6
         run: |
           # Second health gate: verify YouTube stream is still healthy after
           # resilience tests (OBS disconnect, network disconnect, crash recovery).
-          # By now the stream has been running 10+ minutes -- any degradation
-          # would be visible.
-          $maxRetries = 5
-          $retryDelay = 10
+          # The crash-exhaustion gate DELIBERATELY interrupts ingest; after data
+          # resumes YouTube reports transitional health=ok for a few minutes
+          # before upgrading back to "good" (run 29974587872: recovery worked,
+          # stream active + receiving, health stuck at "ok" for the old 50s
+          # window). Target stays "good" -- give it a realistic ~4min window.
+          $maxRetries = 12
+          $retryDelay = 20
 
           for ($i = 1; $i -le $maxRetries; $i++) {
             Write-Host "--- Second health check ${i}/${maxRetries} ---"
