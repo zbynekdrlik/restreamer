@@ -191,32 +191,92 @@ impl ChunkFetcher for DiskCacheFetcher {
                     }
                 }
                 let path = self.event_dir.join(format!("{chunk_id}.bin"));
-                // Single ENOENT retry: an EvictionTask sweep can race
-                // a reader between the registry mark_available and the
-                // tokio::fs::read (#174 review finding 3). One retry
-                // covers the race; if the chunk truly vanished, fall
-                // through to the producer's outer retry/backoff.
+                // A registry-`Available` chunk whose LOCAL file is missing is
+                // a CACHE MISS, not a disk error (#252). Two ways to get here:
+                //  1. An EvictionTask sweep raced this reader between the
+                //     registry mark_available and the tokio::fs::read (#174
+                //     review finding 3), OR
+                //  2. the resume position landed on a chunk whose file was
+                //     evicted while its slot still read `Available` (a
+                //     re-download -> sweep race) — the crash-exhaustion
+                //     recovery path, run 29969272303.
+                // In BOTH cases the chunk still lives on S3, so the fix is the
+                // same: refetch it. The subtlety that made this loop forever
+                // pre-fix: `request_chunk` dedup-skips when
+                // `registry.exists()` is true (the stale `Available`), so a
+                // bare re-request issued NO S3 GET and the re-read hit the
+                // same missing file — the producer then looped on
+                // "S3 fetch error, retrying in 60s" (mode=rescue,
+                // prod_active=false for the whole 420s recovery window).
+                // `mark_in_flight` invalidates the stale slot (the #184 reset
+                // pattern) so the re-request issues a genuine S3 GET.
                 let data = match tokio::fs::read(&path).await {
                     Ok(d) => d,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        self.cache.registry.mark_in_flight(chunk_id);
                         // Same single-deadline bound as the main path (#284):
                         // an unbounded request_chunk().await here would park
                         // the producer identically.
-                        tokio::time::timeout(Duration::from_secs(self.stall_timeout_secs), async {
-                            self.cache.download_service.request_chunk(chunk_id).await;
-                            self.cache.registry.wait_for_chunk(chunk_id).await
-                        })
+                        let refetched = tokio::time::timeout(
+                            Duration::from_secs(self.stall_timeout_secs),
+                            async {
+                                self.cache.download_service.request_chunk(chunk_id).await;
+                                self.cache.registry.wait_for_chunk(chunk_id).await
+                            },
+                        )
                         .await
                         .map_err(|_| {
                             format!(
-                                "disk_cache enoent retry stall on chunk {chunk_id}: \
+                                "disk_cache evicted-chunk refetch on {chunk_id}: \
                                  request+wait exceeded stall_timeout"
                             )
                         })?
-                        .map_err(|e| format!("disk_cache enoent retry stall: {e}"))?;
-                        tokio::fs::read(&path)
-                            .await
-                            .map_err(|e| format!("disk read {} (retry): {e}", path.display()))?
+                        .map_err(|e| format!("disk_cache evicted-chunk refetch: {e}"))?;
+
+                        match refetched {
+                            // Refetch landed the file back on disk — read it.
+                            // If it is STILL missing (a second eviction race),
+                            // degrade to a cache miss so the producer's
+                            // skip-ahead probe advances past it — never loop
+                            // on the disk path.
+                            ChunkAvailability::Available { .. } => {
+                                match tokio::fs::read(&path).await {
+                                    Ok(d) => d,
+                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                        return Ok(None);
+                                    }
+                                    Err(e) => {
+                                        return Err(format!(
+                                            "disk read {} (refetch): {e}",
+                                            path.display()
+                                        ));
+                                    }
+                                }
+                            }
+                            // The chunk is genuinely gone from S3 (or evicted
+                            // past every window): a cache miss the producer
+                            // resolves by probing ahead — NOT a hard Err that
+                            // would re-arm the 60s backoff loop.
+                            ChunkAvailability::NotFound | ChunkAvailability::Evicted => {
+                                return Ok(None);
+                            }
+                            // A GENUINE S3 failure — surface as Err so the
+                            // producer's consecutive-error rescue counter
+                            // advances and it retries on its backoff cadence.
+                            // Only real S3 failures keep the retry/backoff.
+                            ChunkAvailability::Failed { error } => {
+                                return Err(format!(
+                                    "disk_cache: chunk {chunk_id} evicted-chunk \
+                                     refetch failed: {error}"
+                                ));
+                            }
+                            ChunkAvailability::InFlight => {
+                                return Err(format!(
+                                    "disk_cache: chunk {chunk_id} stuck InFlight \
+                                     after evicted-chunk refetch"
+                                ));
+                            }
+                        }
                     }
                     Err(e) => return Err(format!("disk read {}: {e}", path.display())),
                 };

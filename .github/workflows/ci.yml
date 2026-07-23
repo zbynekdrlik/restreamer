@@ -4481,14 +4481,32 @@ jobs:
 
           # Soak: sample every 10s for ~90s, asserting on every endpoint each
           # sample. Logs each sample so a failure is debuggable from CI alone.
+          # Transient tolerance mirrors the FB soak watchdog: a single empty
+          # endpoint_details response is a host->VPS status-poll blip, not an
+          # endpoint death (run 29966308471: gate threw on ONE empty sample
+          # while the captured VPS log showed healthy pushes, skew <=22ms).
+          # Only N consecutive empties fail the gate.
           $soakSamples = 9
           $soakIntervalSecs = 10
+          $emptyStreak = 0
+          $maxEmptyStreak = 4
           for ($n = 1; $n -le $soakSamples; $n++) {
             Start-Sleep -Seconds $soakIntervalSecs
-            $st = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
-            if (-not $st.endpoint_details -or $st.endpoint_details.Count -eq 0) {
-              throw "FAILED: endpoint_details empty at soak sample $n -- delivery status lost all endpoints"
+            $st = $null
+            try {
+              $st = Invoke-RestMethod -Uri "http://127.0.0.1:8910/api/v1/delivery/status?event_id=$eventId"
+            } catch {
+              Write-Host "SAMPLE $n/$soakSamples status poll failed transiently: $($_.Exception.Message)"
             }
+            if (-not $st -or -not $st.endpoint_details -or $st.endpoint_details.Count -eq 0) {
+              $emptyStreak++
+              Write-Host "SAMPLE $n/$soakSamples endpoint_details empty transiently ($emptyStreak/$maxEmptyStreak) -- status-poll blip?"
+              if ($emptyStreak -ge $maxEmptyStreak) {
+                throw "FAILED: endpoint_details empty for $emptyStreak consecutive soak samples -- delivery status lost all endpoints"
+              }
+              continue
+            }
+            $emptyStreak = 0
             foreach ($ep in $st.endpoint_details) {
               $skew = [int]$ep.av_skew_ms
               $absSkew = [math]::Abs($skew)
@@ -4891,8 +4909,9 @@ jobs:
           # mid-stream (source + uploads stop instantly), hold the host DOWN
           # until the delivery VPS genuinely EXHAUSTS its chunk supply, and
           # assert EVERY endpoint switches to the rescue clip with a LIVE
-          # push. (Restart-recovery-to-live is a SEPARATE guarantee tracked
-          # in #252; see the restart note below.) The earlier crash-recovery
+          # push -- then restart the host and assert full recovery to live
+          # delivery (the #252 boot-reconcile + bounded S3 fetch guarantee).
+          # The earlier crash-recovery
           # step restarts within ~13s
           # (before the cache drains), so it never exercises this path; the
           # long-outage step blocks uploads WHILE the host runs. This gate
@@ -5001,13 +5020,13 @@ jobs:
           }
           Write-Host "OK: rescue clip is actively pushing on every endpoint"
 
-          # Restart the host so downstream steps have Restreamer up again.
-          # Restart-recovery-to-live (boot-reconcile) is a SEPARATE guarantee
-          # asserted under #252 -- this gate EXPOSED that it does not hold for
-          # a non-fast RTMP endpoint (the endpoint did not return to live
-          # after a full host restart). That recovery assertion + its fix live
-          # in #252, not here. This gate proves the #280 core: genuine
-          # chunk exhaustion -> rescue LIVE on every endpoint.
+          # PHASE 3: restart the host; boot-reconcile (#252) resumes
+          # delivery; every endpoint must return to live ('normal'). This
+          # assertion was descoped in b3ffa194 while #252 was open (the
+          # non-fast RTMP endpoint did not return to live after a full host
+          # restart — a wedged S3 recovery GET held a fetch permit for
+          # minutes, starving recovery). Re-added now that #252 bounds the
+          # per-GET S3 fetch (rs-delivery/s3_fetch.rs with_request_timeout).
           Write-Host "Restarting Restreamer via scheduled task..."
           Start-ScheduledTask -TaskName "RestreamerGUI"
           $apiUp = $false
@@ -5020,7 +5039,52 @@ jobs:
           }
           if (-not $apiUp) { throw "FAILED: Restreamer API not responding after restart" }
           Write-Host "Host API back up"
-          Write-Host "=== Crash-exhaustion -> rescue gate PASSED (#280); restart-recovery tracked in #252 ==="
+
+          # OBS auto-reconnects, chunks flow, the VPS refills for
+          # RESCUE_REFILL_TARGET_SECS (120s of continuous producer
+          # activity), then exits rescue. Budget: reconnect + refill +
+          # margin.
+          $recovered = @{}
+          $deadline2 = (Get-Date).AddSeconds(420)
+          while ((Get-Date) -lt $deadline2) {
+            Start-Sleep -Seconds 10
+            try {
+              $st = Invoke-RestMethod -Uri "$vpsBase/api/status" -Headers $vpsHeaders -TimeoutSec 10
+            } catch {
+              Write-Host "VPS poll error (retrying): $($_.Exception.Message)"
+              continue
+            }
+            $line = @()
+            foreach ($ep in $st.endpoints) {
+              $line += "$($ep.alias): mode=$($ep.delivery_mode) prod_active=$($ep.producer_active)"
+              $recovered[$ep.alias] = ($ep.delivery_mode -eq "normal")
+            }
+            Write-Host ("recovery poll: " + ($line -join " | "))
+            $notBack = @($aliases | Where-Object { -not $recovered[$_] })
+            if ($notBack.Count -eq 0) { break }
+          }
+          $notBack = @($aliases | Where-Object { -not $recovered[$_] })
+          if ($notBack.Count -gt 0) {
+            throw "FAILED: endpoints did not return to live delivery after host restart: $($notBack -join ', ')"
+          }
+          Write-Host "OK: every endpoint recovered to live delivery"
+
+          # rescue_recovered audit rows land on the host mirror (mirror lag
+          # tolerated -- poll up to 180s).
+          $sinceIso = (Get-Date).AddMinutes(-30).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+          $sawRecovered = $false
+          for ($i = 0; $i -lt 36; $i++) {
+            try {
+              $rec = Invoke-RestMethod -Uri "$base/api/v1/audit?action=rescue_recovered&since=$sinceIso&limit=100" -TimeoutSec 10
+              $recRows = if ($rec.rows) { $rec.rows } elseif ($rec.items) { $rec.items } else { @() }
+              if (@($recRows).Count -ge 1) { $sawRecovered = $true; break }
+            } catch {
+              Write-Host "audit poll error (retrying): $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $sawRecovered) { throw "FAILED: no rescue_recovered audit row after recovery" }
+          Write-Host "=== Crash-exhaustion rescue gate PASSED ==="
 
       - name: "Ensure Restreamer is running after crash-exhaustion gate"
         if: always()
@@ -5048,14 +5112,17 @@ jobs:
       - name: "GATE: Second YouTube health check after resilience tests"
         if: success()
         shell: powershell
-        timeout-minutes: 2
+        timeout-minutes: 6
         run: |
           # Second health gate: verify YouTube stream is still healthy after
           # resilience tests (OBS disconnect, network disconnect, crash recovery).
-          # By now the stream has been running 10+ minutes -- any degradation
-          # would be visible.
-          $maxRetries = 5
-          $retryDelay = 10
+          # The crash-exhaustion gate DELIBERATELY interrupts ingest; after data
+          # resumes YouTube reports transitional health=ok for a few minutes
+          # before upgrading back to "good" (run 29974587872: recovery worked,
+          # stream active + receiving, health stuck at "ok" for the old 50s
+          # window). Target stays "good" -- give it a realistic ~4min window.
+          $maxRetries = 12
+          $retryDelay = 20
 
           for ($i = 1; $i -le $maxRetries; $i++) {
             Write-Host "--- Second health check ${i}/${maxRetries} ---"
