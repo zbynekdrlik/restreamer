@@ -200,3 +200,39 @@ dashboard banner keys off the same audit rows).
 **Fix (final form, v0.29.2):** rescue exits only when `producer_active` is continuously true for `RESCUE_REFILL_TARGET_SECS` **AND** `fresh_chunks >= RESCUE_EXIT_MIN_FRESH_CHUNKS` (= `PREFETCH_BUFFER_SIZE/2` = 5) have been queued since the active window began. The discriminator is a COUNT, deliberately NOT recency: during genuine recovery the producer fills the prefetch channel while the consumer is still pushing the rescue clip, so `highest_sent_chunk_id` PLATEAUS at channel capacity (10) — a recency gate ("advanced within last 15s") deadlocks recovery (RescueRecovered never fires; caught by E2E 2026-07-15 overnight). A stray tail re-fetch lands 1-2 chunks (< threshold, stays latched); genuine recovery fills to 10 (> threshold, exits at the 120s target). `delivery_mode` reports `"recovering"` only while genuinely refilling, else `"rescue"`.
 
 Rescue **ENTRY** (chunk-exhaustion driven, #280/#284) is untouched — do not confuse entry and exit criteria; they use different discriminators for a reason (entry only needs to detect starvation, exit must prove genuine recovery).
+
+## Crash-Recovery Resume — Missing Local Cache File MUST Be a Cache Miss, Not a Disk Error (#252, v0.29.12)
+
+After a host restart the crash-exhaustion recovery resume position can land on
+a chunk whose LOCAL disk-cache file (`/var/cache/rs-delivery/<uuid>/<evt>/N.bin`)
+was already EVICTED while its `ChunkRegistry` slot still reads `Available` — a
+re-download → eviction-sweep race (`disk_cache_chunk_evicted` rows run all day).
+The chunk still lives on S3.
+
+**The trap:** `DownloadService::request_chunk` DEDUP-SKIPS when
+`registry.exists()` is true (`exists()` == "slot is `Available`"). So on a stale
+`Available` slot whose file is gone, a bare re-request issues **NO S3 GET** and
+the re-read hits the same missing file. Pre-fix `DiskCacheFetcher::fetch_chunk_with_meta`
+surfaced that ENOENT as a retryable `disk read … (retry): No such file or
+directory` Err on the SAME disk source, and the producer looped forever on
+`Producer: S3 fetch error, retrying in 60s` (`mode=rescue`, `prod_active=false`
+for the whole 420 s recovery window — run 29969272303, the crash-exhaustion gate
+FAILED here even after the s3_fetch request-timeout fix e14f2882).
+
+**The fix (the CLASS):** a registry-`Available` chunk whose local file is
+missing is a CACHE MISS, not a disk error. On ENOENT, call
+`registry.mark_in_flight(chunk_id)` FIRST (the #184 reset pattern) — that
+invalidates the stale slot so `request_chunk` issues a genuine S3 GET — then
+route the refetch's terminal state: `Available` → re-read (residual ENOENT →
+`Ok(None)`); `NotFound`/`Evicted` → `Ok(None)` so the producer's skip-ahead
+probe advances; `Failed` → `Err` (ONLY a genuine S3 failure keeps the
+retry/backoff). `EvictionTask::run_once` does `mark_evicted` after delete, but
+a re-download can re-mark `Available` and get swept again before the read — so
+never trust `Available` to mean the file is on disk.
+
+**RED-test recipe (deterministic, no live infra):** real `DiskCache` +
+`DiskCacheFetcher` over a mock `S3Backend` that has the chunk; prime the stale
+state by `download_service.request_chunk(id)` then `remove_file(id.bin)` WITHOUT
+`mark_evicted` (leaves stale `Available`); assert `fetch_chunk_with_meta(id)`
+returns `Ok(Some(bytes))` not `Err`. Lives in the BIN target
+(`disk_cache_stall_tests.rs`, `cargo test --bin rs-delivery`).
