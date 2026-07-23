@@ -189,6 +189,14 @@ pub struct ApiConfig {
     pub tls_key: String,
     #[serde(default)]
     pub https_domain: Option<String>,
+    /// Optional shared secret for authenticated remote diagnostic access.
+    /// When set, a request bearing a matching `X-Diag-Token` header may reach
+    /// `/api/v1/diag/dump` even if it arrived through a reverse proxy /
+    /// Cloudflare tunnel (i.e. carries forwarded headers). When unset
+    /// (default), only genuinely-local loopback requests with no forwarded
+    /// headers are allowed. Never committed with a real value. Issue #205.
+    #[serde(default)]
+    pub diag_token: Option<String>,
 }
 
 fn default_rtmp_port() -> u16 {
@@ -244,6 +252,7 @@ impl Default for ApiConfig {
             tls_cert: default_tls_cert(),
             tls_key: default_tls_key(),
             https_domain: None,
+            diag_token: None,
         }
     }
 }
