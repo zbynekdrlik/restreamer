@@ -55,6 +55,53 @@ fn classify(action: Action) -> Option<Signal> {
     }
 }
 
+/// #315: some onset ACTIONS are emitted for BOTH real outages and harmless
+/// telemetry / transient noise — the discriminator is the row's `detail`
+/// payload, not the action. Returns `true` when this onset row must be
+/// SUPPRESSED (no alert) despite its action being outage-relevant.
+///
+/// Keying only on the action fired FALSE alerts during the 2026-07-23 live
+/// event (the alert channel's first live use), so the classifier must consult
+/// the detail. The rule is symmetric across the two ambiguous actions: suppress
+/// ONLY when the detail POSITIVELY signals noise; anything else (including an
+/// unknown/absent discriminator from a future emitter) keeps the safety net and
+/// alerts, so a genuine outage is never silently dropped.
+fn onset_suppressed_by_detail(action: Action, detail: &serde_json::Value) -> bool {
+    match action {
+        Action::VpsUnreachable => {
+            // (1) `delivery_audit_mirror` — telemetry-only audit-log poll,
+            //     detail.phase == "mirror". Delivery is unaffected → suppress.
+            if detail.get("phase").and_then(|v| v.as_str()) == Some("mirror") {
+                return true;
+            }
+            // (2) `delivery_monitor` — real delivery health poll,
+            //     detail.consecutive_failures. The monitor itself only treats it
+            //     as a real problem at >= 3 (delivery_monitor.rs); the first 1-2
+            //     transient failures must not alert. Suppress while < 3.
+            if let Some(cf) = detail.get("consecutive_failures").and_then(|v| v.as_i64()) {
+                return cf < 3;
+            }
+            // Neither field (no known emitter) → keep the safety net, alert.
+            false
+        }
+        Action::S3UploadFailed => {
+            // A single transient retry (`permanent:false`, e.g. a 408 timeout the
+            // uploader retries) is not an outage → suppress. A permanent
+            // (terminal) failure alerts. We suppress on the POSITIVE transient
+            // signal (permanent == false) rather than "alert only when
+            // permanent == true": it is symmetric with VpsUnreachable above, and
+            // every real emitter (uploader.rs) always sets `permanent`, so for
+            // production traffic this is identical to permanent-only while a
+            // genuinely sustained internet outage is still covered by the
+            // HostInternetUnreachable / RescueActivated signals.
+            detail.get("permanent").and_then(|v| v.as_bool()) == Some(false)
+        }
+        // Other onsets (HostInternetUnreachable, RescueActivated) carry no
+        // detail-based discriminator and always alert.
+        _ => false,
+    }
+}
+
 /// True when an event name belongs to the CI E2E test events, whose deliberate
 /// outage edges must never reach the operator's alert channel (#311). The two
 /// CI events are `E2E-Test` and `E2E-FB-Test` (ci.yml owns the names); the
@@ -178,6 +225,19 @@ impl OutageNotifier {
         }
         match signal {
             Signal::Onset(action) => {
+                // #315: the SAME onset action can be a real outage or telemetry /
+                // transient noise depending on its detail payload. Suppress the
+                // noise BEFORE touching episode state (like the E2E gate above),
+                // so a mirror-poll / transient blip can never flip the notifier
+                // into an outage episode or disturb a real outage's dedup.
+                if onset_suppressed_by_detail(action, &row.detail) {
+                    tracing::debug!(
+                        action = ?action,
+                        detail = %row.detail,
+                        "outage notifier: suppressing alert — detail signals telemetry/transient noise (#315)"
+                    );
+                    return None;
+                }
                 self.in_outage = true;
                 // First occurrence of this onset in the episode alerts; repeats
                 // (the per-retry storm) are suppressed.
@@ -293,6 +353,16 @@ mod tests {
     fn row_ep(action: Action, ep: &str) -> AuditRow {
         AuditRow {
             endpoint: Some(ep.to_string()),
+            ..row(action)
+        }
+    }
+
+    /// Build a row carrying a specific `detail` payload — the discriminator
+    /// #315 keys on to tell a real outage from telemetry / transient noise for
+    /// the same action.
+    fn row_detail(action: Action, detail: Value) -> AuditRow {
+        AuditRow {
+            detail,
             ..row(action)
         }
     }
@@ -467,6 +537,131 @@ mod tests {
         assert!(
             n.observe(&row(Action::VpsUnreachable), Some("Real Event"))
                 .is_some()
+        );
+    }
+
+    // ---- #315: alert on the DETAIL, not just the action ----------------
+    // The 2026-07-23 live event fired FALSE outage alerts because `classify`
+    // keyed only on the `Action` enum. The same action can mean "stream is
+    // down" or "harmless telemetry/transient blip" depending on its `detail`
+    // payload; these tests pin the discriminators.
+
+    #[test]
+    fn vps_unreachable_mirror_phase_is_suppressed() {
+        // `delivery_audit_mirror` emits VpsUnreachable with detail.phase=="mirror"
+        // when the host fails to PULL the VPS audit log. Delivery is unaffected —
+        // it is telemetry-only and must NOT alert (2026-07-23 15:33 + 16:33 FALSE).
+        let mut n = notifier();
+        assert!(
+            n.observe(
+                &row_detail(
+                    Action::VpsUnreachable,
+                    serde_json::json!({ "phase": "mirror", "error": "timeout" }),
+                ),
+                None,
+            )
+            .is_none(),
+            "mirror-phase VpsUnreachable is telemetry-only and must not alert (#315)"
+        );
+        assert!(
+            !n.in_outage,
+            "a suppressed mirror poll must not start an outage episode"
+        );
+    }
+
+    #[test]
+    fn vps_unreachable_health_monitor_alerts_only_at_threshold() {
+        // The delivery health monitor emits VpsUnreachable with
+        // detail.consecutive_failures and only treats it as a real problem at
+        // >= 3 (delivery_monitor.rs). The alert must mirror that threshold — the
+        // first 1-2 transient failures must NOT alert.
+        let mut n1 = notifier();
+        assert!(
+            n1.observe(
+                &row_detail(
+                    Action::VpsUnreachable,
+                    serde_json::json!({ "consecutive_failures": 1 }),
+                ),
+                None,
+            )
+            .is_none(),
+            "consecutive_failures=1 is transient, must not alert (#315)"
+        );
+        let mut n2 = notifier();
+        assert!(
+            n2.observe(
+                &row_detail(
+                    Action::VpsUnreachable,
+                    serde_json::json!({ "consecutive_failures": 2 }),
+                ),
+                None,
+            )
+            .is_none(),
+            "consecutive_failures=2 is transient, must not alert (#315)"
+        );
+        let mut n3 = notifier();
+        assert!(
+            n3.observe(
+                &row_detail(
+                    Action::VpsUnreachable,
+                    serde_json::json!({ "consecutive_failures": 3 }),
+                ),
+                None,
+            )
+            .is_some(),
+            "consecutive_failures=3 is a real delivery outage, must alert (#315)"
+        );
+    }
+
+    #[test]
+    fn s3_upload_failed_transient_suppressed_permanent_alerts() {
+        // A single transient retry (permanent:false, attempt:1 — e.g. a 408
+        // timeout the uploader retries) must NOT alert (2026-07-23 17:16 FALSE).
+        let mut n1 = notifier();
+        assert!(
+            n1.observe(
+                &row_detail(
+                    Action::S3UploadFailed,
+                    serde_json::json!({ "permanent": false, "attempt": 1, "error_class": "timeout" }),
+                ),
+                None,
+            )
+            .is_none(),
+            "a single transient S3 retry must not alert (#315)"
+        );
+        assert!(
+            !n1.in_outage,
+            "a suppressed transient S3 failure must not start an outage episode"
+        );
+        // A permanent (terminal) failure IS a real problem and alerts.
+        let mut n2 = notifier();
+        assert!(
+            n2.observe(
+                &row_detail(
+                    Action::S3UploadFailed,
+                    serde_json::json!({ "permanent": true, "attempt": 5, "error_class": "forbidden" }),
+                ),
+                None,
+            )
+            .is_some(),
+            "a permanent S3 failure is a real outage, must alert (#315)"
+        );
+    }
+
+    #[test]
+    fn genuinely_real_onsets_still_alert_under_315() {
+        // #315 must NOT change the genuinely-real signals: rescue activation and
+        // host-internet loss were correct on 2026-07-23 and stay alerting.
+        let mut r = notifier();
+        assert!(
+            r.observe(&row(Action::RescueActivated), None).is_some(),
+            "RescueActivated must still alert (#315)"
+        );
+        let mut h = notifier();
+        assert!(
+            h.observe(&row(Action::HostInternetUnreachable), None)
+                .is_some(),
+            "HostInternetUnreachable must still alert (#315)"
         );
     }
 
