@@ -119,18 +119,43 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $ffmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
           $ffmpegZip = "$env:TEMP\ffmpeg.zip"
           $ffmpegDir = "C:\ffmpeg"
-
-          Write-Host "Downloading ffmpeg..."
-          Invoke-WebRequest -Uri $ffmpegUrl -OutFile $ffmpegZip
+          # #316: gyan.dev throws transient 503s (three runs blocked on
+          # 2026-07-24 alone). Retry with backoff, then fall back to the
+          # GitHub-hosted BtbN build - never hard-depend on one origin.
+          $sources = @(
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+            "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
+          )
+          $downloaded = $false
+          foreach ($url in $sources) {
+            for ($try = 1; $try -le 3; $try++) {
+              try {
+                Write-Host "Downloading ffmpeg from $url (attempt $try)..."
+                Invoke-WebRequest -Uri $url -OutFile $ffmpegZip -TimeoutSec 120
+                $downloaded = $true
+                break
+              } catch {
+                Write-Host "Download failed: $($_.Exception.Message)"
+                if ($try -lt 3) { Start-Sleep -Seconds (10 * $try) }
+              }
+            }
+            if ($downloaded) { break }
+          }
+          if (-not $downloaded) {
+            Write-Error "FAILED: could not download ffmpeg from any source (#316)"
+            exit 1
+          }
 
           Write-Host "Extracting ffmpeg..."
           Expand-Archive -Path $ffmpegZip -DestinationPath $env:TEMP -Force
 
-          # Find the extracted folder (includes version number)
-          $extractedDir = Get-ChildItem "$env:TEMP\ffmpeg-*-essentials_build" | Select-Object -First 1
+          # Both layouts ship <root>\bin: gyan "ffmpeg-*-essentials_build",
+          # BtbN "ffmpeg-master-latest-win64-gpl".
+          $extractedDir = Get-ChildItem "$env:TEMP\ffmpeg-*" -Directory |
+            Where-Object { Test-Path "$($_.FullName)\bin\ffmpeg.exe" } |
+            Select-Object -First 1
           if ($extractedDir) {
             Move-Item "$($extractedDir.FullName)\bin" $ffmpegDir -Force
             Write-Host "Installed ffmpeg to $ffmpegDir"
@@ -1920,7 +1945,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 75 # 42min typical + crash-exhaustion gate (#238) ~10min
+    timeout-minutes: 85 # 42min typical + crash-exhaustion gate (#238/#318) up to ~18min
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -5042,10 +5067,20 @@ jobs:
 
           # OBS auto-reconnects, chunks flow, the VPS refills for
           # RESCUE_REFILL_TARGET_SECS (120s of continuous producer
-          # activity), then exits rescue. Budget: reconnect + refill +
-          # margin.
+          # activity), then exits rescue. Budget (#318): the full path is
+          # re-anchor (~2.5min: OBS reconnect + chunker + VPS pickup) +
+          # recovering (~2min) + REFILLING, which delivers DELIBERATELY
+          # slower than realtime to rebuild an up-to-120s cushion deficit
+          # (producer_lag.rs #296) -- several minutes BY DESIGN when the
+          # deficit is deep. The old 420s window lost that race twice on
+          # identical green-elsewhere code (run 30097365437 a1+a2) while a
+          # zero-deficit path passed in 271s (run 30088500034). 900s fits
+          # the physics; a genuine wedge no longer needs the deadline at
+          # all -- the chunk-progress stall check below catches it in 120s.
           $recovered = @{}
-          $deadline2 = (Get-Date).AddSeconds(420)
+          $lastChunks = @{}
+          $stallStreak = @{}
+          $deadline2 = (Get-Date).AddSeconds(900)
           while ((Get-Date) -lt $deadline2) {
             Start-Sleep -Seconds 10
             try {
@@ -5056,8 +5091,23 @@ jobs:
             }
             $line = @()
             foreach ($ep in $st.endpoints) {
-              $line += "$($ep.alias): mode=$($ep.delivery_mode) prod_active=$($ep.producer_active)"
+              $line += "$($ep.alias): mode=$($ep.delivery_mode) prod_active=$($ep.producer_active) chunks=$($ep.chunks_processed)"
               $recovered[$ep.alias] = ($ep.delivery_mode -eq "normal")
+              # #318 stall check: once past rescue, chunks_processed must keep
+              # advancing (a wedged S3 GET -- the b3ffa194 regression this gate
+              # re-added for -- freezes it). 12 static polls (~120s) = stalled.
+              if ($ep.delivery_mode -ne "rescue") {
+                $prev = $lastChunks[$ep.alias]
+                if ($null -ne $prev -and $ep.chunks_processed -le $prev) {
+                  $stallStreak[$ep.alias] = [int]$stallStreak[$ep.alias] + 1
+                  if ($stallStreak[$ep.alias] -ge 12) {
+                    throw "FAILED: [$($ep.alias)] recovery stalled - chunks_processed frozen at $($ep.chunks_processed) for ~120s in mode=$($ep.delivery_mode) (#318)"
+                  }
+                } else {
+                  $stallStreak[$ep.alias] = 0
+                }
+                $lastChunks[$ep.alias] = $ep.chunks_processed
+              }
             }
             Write-Host ("recovery poll: " + ($line -join " | "))
             $notBack = @($aliases | Where-Object { -not $recovered[$_] })
