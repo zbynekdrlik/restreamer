@@ -119,18 +119,43 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $ffmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
           $ffmpegZip = "$env:TEMP\ffmpeg.zip"
           $ffmpegDir = "C:\ffmpeg"
-
-          Write-Host "Downloading ffmpeg..."
-          Invoke-WebRequest -Uri $ffmpegUrl -OutFile $ffmpegZip
+          # #316: gyan.dev throws transient 503s (three runs blocked on
+          # 2026-07-24 alone). Retry with backoff, then fall back to the
+          # GitHub-hosted BtbN build - never hard-depend on one origin.
+          $sources = @(
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+            "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
+          )
+          $downloaded = $false
+          foreach ($url in $sources) {
+            for ($try = 1; $try -le 3; $try++) {
+              try {
+                Write-Host "Downloading ffmpeg from $url (attempt $try)..."
+                Invoke-WebRequest -Uri $url -OutFile $ffmpegZip -TimeoutSec 120
+                $downloaded = $true
+                break
+              } catch {
+                Write-Host "Download failed: $($_.Exception.Message)"
+                if ($try -lt 3) { Start-Sleep -Seconds (10 * $try) }
+              }
+            }
+            if ($downloaded) { break }
+          }
+          if (-not $downloaded) {
+            Write-Error "FAILED: could not download ffmpeg from any source (#316)"
+            exit 1
+          }
 
           Write-Host "Extracting ffmpeg..."
           Expand-Archive -Path $ffmpegZip -DestinationPath $env:TEMP -Force
 
-          # Find the extracted folder (includes version number)
-          $extractedDir = Get-ChildItem "$env:TEMP\ffmpeg-*-essentials_build" | Select-Object -First 1
+          # Both layouts ship <root>\bin: gyan "ffmpeg-*-essentials_build",
+          # BtbN "ffmpeg-master-latest-win64-gpl".
+          $extractedDir = Get-ChildItem "$env:TEMP\ffmpeg-*" -Directory |
+            Where-Object { Test-Path "$($_.FullName)\bin\ffmpeg.exe" } |
+            Select-Object -First 1
           if ($extractedDir) {
             Move-Item "$($extractedDir.FullName)\bin" $ffmpegDir -Force
             Write-Host "Installed ffmpeg to $ffmpegDir"
