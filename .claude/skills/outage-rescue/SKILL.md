@@ -236,3 +236,42 @@ state by `download_service.request_chunk(id)` then `remove_file(id.bin)` WITHOUT
 `mark_evicted` (leaves stale `Available`); assert `fetch_chunk_with_meta(id)`
 returns `Ok(Some(bytes))` not `Err`. Lives in the BIN target
 (`disk_cache_stall_tests.rs`, `cargo test --bin rs-delivery`).
+
+## Outage Alerts Must Classify on the ROW DETAIL, Not Just the Action (#315, v0.29.14)
+
+The #261/#306 Discord outage-alert channel (`crates/rs-core/src/notify.rs`)
+fired its FIRST live alerts during the 2026-07-23 event and MOST were FALSE,
+because `notify::classify` keyed only on the `Action` enum and never inspected
+`row.detail`. The lesson: **one audit Action can mean "stream is down" OR
+"harmless telemetry/transient blip" depending on its `detail` payload — the
+alert gate MUST read the detail.**
+
+The three false-alert sources, and their discriminators:
+
+| Action | Emitter / detail | Rule |
+|---|---|---|
+| `VpsUnreachable` | `delivery_audit_mirror.rs` → `detail.phase=="mirror"` (host failed to PULL the VPS audit log; delivery UNAFFECTED) | SUPPRESS |
+| `VpsUnreachable` | `delivery_monitor.rs` → `detail.consecutive_failures` (real health poll; monitor itself treats `>=3` as the real problem, `delivery_monitor.rs:156`) | alert only at `>= 3` |
+| `S3UploadFailed` | `uploader.rs` → `detail.permanent:bool` (a `permanent:false` retry, e.g. a 408 timeout, is transient) | alert only when `permanent==true` |
+
+`RescueActivated` / `RescueRecovered` / `HostInternet*` carry no detail
+discriminator and were genuinely real on 2026-07-23 — left untouched.
+
+**Implementation pattern (surgical, no signature churn):** keep `classify(action)`
+as-is; add `onset_suppressed_by_detail(action, &row.detail) -> bool` and consult
+it in `observe()`'s `Signal::Onset` arm BEFORE mutating episode state (mirrors
+the #311 E2E-event gate that returns early). A suppressed row must NOT flip
+`in_outage` or touch the dedup set, else it disturbs a real outage's episode
+tracking. Suppression is SYMMETRIC: fire UNLESS the detail POSITIVELY signals
+noise (`phase=="mirror"`, `consecutive_failures<3`, `permanent==false`) — an
+unknown/absent discriminator keeps the safety net and alerts, so a genuine
+outage from a future emitter is never silently dropped. In production every
+emitter always sets its discriminator, so "suppress on positive noise" is
+behaviorally identical to permanent/threshold-only there.
+
+**RED-test recipe:** the notify test module builds `AuditRow`s; add a
+`row_detail(action, serde_json::json!({...}))` helper and assert `observe()`
+returns `None` for the noise rows (mirror phase, `consecutive_failures=1/2`,
+`permanent:false`) and `Some` for the real ones (`consecutive_failures=3`,
+`permanent:true`, `RescueActivated`). RED fails on the action-only classifier.
+`cargo test -p rs-core --lib notify` on dev2.
