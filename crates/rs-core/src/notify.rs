@@ -55,6 +55,53 @@ fn classify(action: Action) -> Option<Signal> {
     }
 }
 
+/// #315: some onset ACTIONS are emitted for BOTH real outages and harmless
+/// telemetry / transient noise — the discriminator is the row's `detail`
+/// payload, not the action. Returns `true` when this onset row must be
+/// SUPPRESSED (no alert) despite its action being outage-relevant.
+///
+/// Keying only on the action fired FALSE alerts during the 2026-07-23 live
+/// event (the alert channel's first live use), so the classifier must consult
+/// the detail. The rule is symmetric across the two ambiguous actions: suppress
+/// ONLY when the detail POSITIVELY signals noise; anything else (including an
+/// unknown/absent discriminator from a future emitter) keeps the safety net and
+/// alerts, so a genuine outage is never silently dropped.
+fn onset_suppressed_by_detail(action: Action, detail: &serde_json::Value) -> bool {
+    match action {
+        Action::VpsUnreachable => {
+            // (1) `delivery_audit_mirror` — telemetry-only audit-log poll,
+            //     detail.phase == "mirror". Delivery is unaffected → suppress.
+            if detail.get("phase").and_then(|v| v.as_str()) == Some("mirror") {
+                return true;
+            }
+            // (2) `delivery_monitor` — real delivery health poll,
+            //     detail.consecutive_failures. The monitor itself only treats it
+            //     as a real problem at >= 3 (delivery_monitor.rs); the first 1-2
+            //     transient failures must not alert. Suppress while < 3.
+            if let Some(cf) = detail.get("consecutive_failures").and_then(|v| v.as_i64()) {
+                return cf < 3;
+            }
+            // Neither field (no known emitter) → keep the safety net, alert.
+            false
+        }
+        Action::S3UploadFailed => {
+            // A single transient retry (`permanent:false`, e.g. a 408 timeout the
+            // uploader retries) is not an outage → suppress. A permanent
+            // (terminal) failure alerts. We suppress on the POSITIVE transient
+            // signal (permanent == false) rather than "alert only when
+            // permanent == true": it is symmetric with VpsUnreachable above, and
+            // every real emitter (uploader.rs) always sets `permanent`, so for
+            // production traffic this is identical to permanent-only while a
+            // genuinely sustained internet outage is still covered by the
+            // HostInternetUnreachable / RescueActivated signals.
+            detail.get("permanent").and_then(|v| v.as_bool()) == Some(false)
+        }
+        // Other onsets (HostInternetUnreachable, RescueActivated) carry no
+        // detail-based discriminator and always alert.
+        _ => false,
+    }
+}
+
 /// True when an event name belongs to the CI E2E test events, whose deliberate
 /// outage edges must never reach the operator's alert channel (#311). The two
 /// CI events are `E2E-Test` and `E2E-FB-Test` (ci.yml owns the names); the
@@ -178,6 +225,19 @@ impl OutageNotifier {
         }
         match signal {
             Signal::Onset(action) => {
+                // #315: the SAME onset action can be a real outage or telemetry /
+                // transient noise depending on its detail payload. Suppress the
+                // noise BEFORE touching episode state (like the E2E gate above),
+                // so a mirror-poll / transient blip can never flip the notifier
+                // into an outage episode or disturb a real outage's dedup.
+                if onset_suppressed_by_detail(action, &row.detail) {
+                    tracing::debug!(
+                        action = ?action,
+                        detail = %row.detail,
+                        "outage notifier: suppressing alert — detail signals telemetry/transient noise (#315)"
+                    );
+                    return None;
+                }
                 self.in_outage = true;
                 // First occurrence of this onset in the episode alerts; repeats
                 // (the per-retry storm) are suppressed.
