@@ -40,6 +40,14 @@ purpose (you verify BEFORE committing). Re-run the rsync after EVERY local edit.
 
 Always `source ~/.cargo/env` and `export SQLX_OFFLINE=true` on dev2.
 
+- **Proving RED→GREEN on dev2 with no `.git` in the warm checkout** (it's a
+  source copy): to show the RED test FAILS at the RED commit without a second
+  checkout, on dev1 `git stash push -- <fix-files>` (reverts the working tree to
+  the committed RED state, keeping the RED test), rsync, run the specific tests
+  on dev2 (they FAIL — RED proof); then `git stash pop`, rsync again, run the
+  full suite (PASS — GREEN proof). Keep the RED test itself out of the stash
+  (commit it first) so it exists in both states. One incremental dev2 build each.
+
 - `rs-delivery`'s `producer_lag` / `endpoint_producer` / most producer logic
   lives in the **BIN** target, not the lib — a `cargo test -p rs-delivery --lib`
   runs 0 of those. Use `cargo test --bin rs-delivery`.

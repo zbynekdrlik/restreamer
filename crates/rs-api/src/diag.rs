@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{ConnectInfo, State};
+use axum::http::HeaderMap;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -169,16 +170,63 @@ pub async fn build_dump<S: DumpSources>(sources: &S) -> Value {
     })
 }
 
-/// Refuses non-loopback callers. The dump exposes the audit log and
-/// endpoint state; only the local operator (127.0.0.1 / ::1) is allowed
-/// to read it. `lib.rs::serve` wires the request peer address via
-/// `into_make_service_with_connect_info::<SocketAddr>()`. Issue #179.
+/// Forwarded-header names set by reverse proxies (Cloudflare tunnel, nginx,
+/// …). A genuinely-local operator request sets none of these; a request that
+/// reached us through cloudflared on stream.lan — which connects from
+/// `127.0.0.1` and so passes a naive loopback check — carries at least one.
+/// Issue #205.
+const PROXY_HEADERS: [&str; 3] = ["cf-connecting-ip", "x-forwarded-for", "x-forwarded-host"];
+
+/// Decides whether a caller may read the diagnostic dump.
+///
+/// Loopback alone is insufficient: cloudflared on stream.lan tunnels public
+/// traffic to `http://localhost:8910`, so a request from the public internet
+/// arrives from `127.0.0.1` and passes a naive loopback check (issue #205). A
+/// proxied request always carries a forwarded header ([`PROXY_HEADERS`]) that a
+/// genuinely-local operator request does not, so we require BOTH a loopback
+/// peer AND the absence of any forwarded header.
+///
+/// Defense in depth: when `api.diag_token` is configured, a request bearing a
+/// matching `X-Diag-Token` header is allowed even if it looks proxied, so a
+/// future authenticated remote diagnostic path keeps working. When the token is
+/// unset (default), the loopback + no-forwarded-header rule governs alone.
+fn diag_access_allowed(
+    addr: &std::net::SocketAddr,
+    headers: &HeaderMap,
+    diag_token: Option<&str>,
+) -> bool {
+    // Authenticated token path: a valid shared secret overrides the
+    // loopback/proxy rules so an authenticated remote diag can work.
+    if let Some(expected) = diag_token {
+        let provided = headers.get("x-diag-token").and_then(|v| v.to_str().ok());
+        if !expected.is_empty() && provided == Some(expected) {
+            return true;
+        }
+    }
+    // Otherwise the request must be genuinely local: a loopback peer with no
+    // forwarded headers (any of which would betray a reverse proxy / tunnel).
+    if !addr.ip().is_loopback() {
+        return false;
+    }
+    !PROXY_HEADERS.iter().any(|h| headers.contains_key(*h))
+}
+
+/// Refuses any caller that is not a genuinely-local operator. The dump exposes
+/// the audit log and endpoint/VPS state; only a loopback request with no
+/// forwarded headers — or one bearing a valid `X-Diag-Token` when
+/// `api.diag_token` is configured — is allowed (see [`diag_access_allowed`]).
+/// `lib.rs::serve` wires the request peer address via
+/// `into_make_service_with_connect_info::<SocketAddr>()`. Issues #179, #205.
 pub async fn diag_dump_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, axum::http::StatusCode> {
-    if !addr.ip().is_loopback() {
-        tracing::warn!("/diag/dump refused: peer {addr} is not loopback");
+    if !diag_access_allowed(&addr, &headers, state.config.api.diag_token.as_deref()) {
+        tracing::warn!(
+            "/diag/dump refused: peer {addr} is not a genuinely-local operator \
+             (requires loopback + no forwarded headers, or a valid X-Diag-Token)"
+        );
         return Err(axum::http::StatusCode::FORBIDDEN);
     }
     let event_id = current_event_id_from_state(&state).await;
@@ -365,6 +413,16 @@ mod loopback_tests {
         AppState::new_for_tests(pool, config, ws_tx)
     }
 
+    async fn test_state_with_diag_token(token: &str) -> AppState {
+        let pool = rs_core::db::create_memory_pool().await.unwrap();
+        rs_core::db::run_migrations(&pool).await.unwrap();
+        let mut config = Config::for_testing();
+        // Fake fixture secret — never a real token. Issue #205.
+        config.api.diag_token = Some(token.to_string());
+        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
+        AppState::new_for_tests(pool, config, ws_tx)
+    }
+
     fn req_with_peer(peer: &str) -> Request<Body> {
         let addr: SocketAddr = peer.parse().unwrap();
         let mut req = Request::builder()
@@ -372,6 +430,17 @@ mod loopback_tests {
             .uri("/api/v1/diag/dump")
             .body(Body::empty())
             .unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        req
+    }
+
+    fn req_with_peer_headers(peer: &str, headers: &[(&str, &str)]) -> Request<Body> {
+        let addr: SocketAddr = peer.parse().unwrap();
+        let mut builder = Request::builder().method("POST").uri("/api/v1/diag/dump");
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        let mut req = builder.body(Body::empty()).unwrap();
         req.extensions_mut().insert(ConnectInfo(addr));
         req
     }
@@ -420,6 +489,140 @@ mod loopback_tests {
             resp.status(),
             StatusCode::OK,
             "loopback ::1 must be allowed"
+        );
+    }
+
+    // Issue #205 — loopback alone is insufficient once cloudflared tunnels
+    // public traffic to localhost:8910. A tunneled request arrives from
+    // 127.0.0.1 (passing the naive loopback check) but always carries a
+    // forwarded header (Cf-Connecting-Ip / X-Forwarded-For / X-Forwarded-Host)
+    // that a genuinely-local operator request never sets. Reject those.
+
+    #[tokio::test]
+    async fn diag_dump_rejects_loopback_with_x_forwarded_for() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req_with_peer_headers(
+                "127.0.0.1:54321",
+                &[("x-forwarded-for", "203.0.113.7")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "loopback peer carrying X-Forwarded-For is a tunneled request and must be denied (issue #205)"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_rejects_loopback_with_cf_connecting_ip() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req_with_peer_headers(
+                "127.0.0.1:54321",
+                &[("cf-connecting-ip", "203.0.113.7")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "loopback peer carrying Cf-Connecting-Ip (Cloudflare tunnel) must be denied (issue #205)"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_rejects_loopback_with_x_forwarded_host() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req_with_peer_headers(
+                "127.0.0.1:54321",
+                &[("x-forwarded-host", "streamsnv.newlevel.media")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "loopback peer carrying X-Forwarded-Host must be denied (issue #205)"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_accepts_genuinely_local_no_forwarded_headers() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req_with_peer_headers("127.0.0.1:54321", &[]))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "genuinely-local loopback request with no forwarded headers must still be allowed"
+        );
+    }
+
+    // Issue #205 option 3 (defense in depth) — an optional `api.diag_token`
+    // shared secret lets an authenticated remote diag reach the dump even
+    // through the tunnel, while a wrong/absent token stays denied.
+
+    #[tokio::test]
+    async fn diag_dump_accepts_proxied_request_with_valid_token() {
+        let app = build_router(test_state_with_diag_token("s3cr3t-fixture").await);
+        let resp = app
+            .oneshot(req_with_peer_headers(
+                "127.0.0.1:54321",
+                &[
+                    ("x-forwarded-for", "203.0.113.7"),
+                    ("x-diag-token", "s3cr3t-fixture"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a proxied request bearing the matching X-Diag-Token must be allowed (issue #205 option 3)"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_rejects_proxied_request_with_wrong_token() {
+        let app = build_router(test_state_with_diag_token("s3cr3t-fixture").await);
+        let resp = app
+            .oneshot(req_with_peer_headers(
+                "127.0.0.1:54321",
+                &[
+                    ("x-forwarded-for", "203.0.113.7"),
+                    ("x-diag-token", "wrong-token"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a proxied request with a wrong X-Diag-Token must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_rejects_proxied_request_with_no_token_even_when_configured() {
+        // Token configured, but the tunneled request carries none: the
+        // loopback + no-forwarded-header rule still governs, so it is denied.
+        let app = build_router(test_state_with_diag_token("s3cr3t-fixture").await);
+        let resp = app
+            .oneshot(req_with_peer_headers(
+                "127.0.0.1:54321",
+                &[("x-forwarded-for", "203.0.113.7")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a tunneled request without the token must be denied even when a token is configured"
         );
     }
 }
