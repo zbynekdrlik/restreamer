@@ -29,6 +29,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Verify merge ref is not stale (#268)
+        run: |
+          # GitHub can serve a CACHED refs/pull/N/merge built from an OLD PR
+          # head after a close/reopen or a rapid head update -- so this run
+          # silently tests stale pre-fix code while the real head is already
+          # green, wasting a full ~2h e2e cycle before anyone notices (#255
+          # incident). HEAD^2 (the checked-out synthetic merge commit's
+          # second parent) MUST equal the PR's actual current head SHA.
+          MERGE_PARENT2=$(git rev-parse HEAD^2)
+          PR_HEAD="${{ github.event.pull_request.head.sha }}"
+          echo "Merge-ref second parent (tested code): $MERGE_PARENT2"
+          echo "PR event head SHA (current PR head):    $PR_HEAD"
+          if [ "$MERGE_PARENT2" != "$PR_HEAD" ]; then
+            echo ""
+            echo "ERROR: Stale refs/pull/${{ github.event.pull_request.number }}/merge detected."
+            echo "This run checked out a merge ref built from $MERGE_PARENT2,"
+            echo "but the PR's current head is $PR_HEAD -- this run is NOT testing current code."
+            echo "Push a new commit (or close/reopen the PR) to force GitHub to rebuild the merge ref, then re-run."
+            exit 1
+          fi
+          echo ""
+          echo "OK: merge ref matches current PR head ($PR_HEAD)."
       - name: Require Cargo.toml version bump on PR to main
         run: |
           PR_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
