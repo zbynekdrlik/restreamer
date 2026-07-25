@@ -70,13 +70,12 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
     .as_str()
     .to_string();
 
-    // #278: read the LIVE config (not the startup snapshot) so the banner
-    // stays correct even after a runtime config patch (PATCH /config can
-    // change s3.region without a restart).
-    let s3_region_standard = match state.config_live.read() {
-        Ok(cfg) => cfg.s3_region_is_standard(),
-        Err(_) => true,
-    };
+    // #278: read the LIVE config (config_live) so a runtime config patch is reflected.
+    let s3_region_standard = state
+        .config_live
+        .read()
+        .map(|c| c.s3_region_is_standard())
+        .unwrap_or(true);
 
     Ok(Json(ServiceStatus {
         inpoint,
