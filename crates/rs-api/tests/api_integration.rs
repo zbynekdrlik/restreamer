@@ -78,6 +78,60 @@ async fn status_exposes_disk_pressure_level() {
     );
 }
 
+/// #278: `/api/v1/status` must expose whether the configured S3 region
+/// matches the project standard (fsn1), so the dashboard can render the
+/// S3-region banner instead of a stale/degraded region silently persisting
+/// (the 2026-06-24 nbg1 incident).
+#[tokio::test]
+async fn status_exposes_s3_region_standard_true_for_standard_region() {
+    let mut state = test_state().await;
+    {
+        let mut config = (*state.config).clone();
+        config.s3.region = "fsn1".to_string();
+        state.config = std::sync::Arc::new(config.clone());
+        *state.config_live.write().unwrap() = std::sync::Arc::new(config);
+    }
+    let (base, _) = start_server(state).await;
+
+    let body: serde_json::Value = reqwest::get(format!("{base}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        body["s3_region_standard"], true,
+        "fsn1 must report s3_region_standard=true, got: {}",
+        body["s3_region_standard"]
+    );
+}
+
+/// #278: a non-standard region (e.g. the historical nbg1 drift) must be
+/// flagged false so the dashboard banner and audit Critical row can fire.
+#[tokio::test]
+async fn status_exposes_s3_region_standard_false_for_nonstandard_region() {
+    let mut state = test_state().await;
+    {
+        let mut config = (*state.config).clone();
+        config.s3.region = "nbg1".to_string();
+        state.config = std::sync::Arc::new(config.clone());
+        *state.config_live.write().unwrap() = std::sync::Arc::new(config);
+    }
+    let (base, _) = start_server(state).await;
+
+    let body: serde_json::Value = reqwest::get(format!("{base}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        body["s3_region_standard"], false,
+        "nbg1 must report s3_region_standard=false, got: {}",
+        body["s3_region_standard"]
+    );
+}
+
 #[tokio::test]
 async fn streaming_event_lifecycle() {
     let state = test_state().await;

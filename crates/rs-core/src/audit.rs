@@ -209,6 +209,12 @@ pub enum Action {
     /// the previous behavior failed silently. Detail JSON:
     /// {instance_name, s3_key, reason}.
     DeliveryLogLost,
+    /// Host-side CRITICAL (#278): the configured `s3.region` differs from
+    /// the project standard (`fsn1`) -- e.g. a stale per-install
+    /// `config.json` carrying a degraded region (nbg1) across an upgrade,
+    /// the 2026-06-24 incident. Emitted once at startup, never auto-fixed.
+    /// Detail JSON: {"configured_region", "standard_region"}.
+    S3RegionNonStandard,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -137,6 +137,16 @@ fn default_daily_quota() -> u32 {
     10_000
 }
 
+/// The project's standard S3 (Hetzner Object Storage) region. Follows the
+/// same precedent as `HetznerConfig::location`'s default ("fsn1") -- fsn1 is
+/// healthy; nbg1 is a known-degraded region (Hetzner status, open since
+/// 2026-06-08) that caused a live production failure on 2026-06-24 when a
+/// stale per-install `config.json` silently carried `s3.region=nbg1` across
+/// an upgrade (#278). Not enforced/auto-overridden (an install's region is
+/// still whatever `config.json` says) -- `Config::s3_region_is_standard`
+/// below is the LOUD guard that flags drift instead.
+pub const STANDARD_S3_REGION: &str = "fsn1";
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct S3Config {
     pub bucket: String,
@@ -432,6 +442,17 @@ impl Config {
         Ok(())
     }
 
+    /// True when `s3.region` matches [`STANDARD_S3_REGION`]. A non-standard
+    /// region is NOT a validation error -- an operator's box keeps running
+    /// on whatever region its config carries (#278 explicitly rescoped away
+    /// from silent auto-override). Callers use this as a LOUD signal: emit
+    /// an `audit::Severity::Critical` row and surface the dashboard banner
+    /// so a stale/degraded region can never again go unnoticed across an
+    /// install or upgrade.
+    pub fn s3_region_is_standard(&self) -> bool {
+        self.s3.region == STANDARD_S3_REGION
+    }
+
     /// Create a minimal config for testing.
     pub fn for_testing() -> Self {
         Self {
@@ -582,6 +603,41 @@ mod tests {
     fn validate_accepts_valid_config() {
         let config = Config::for_testing();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn s3_region_guard_fires_on_nonstandard_region() {
+        // #278: a stale per-install config.json can carry a degraded/wrong
+        // region (the 2026-06-24 incident: streampp silently ran on nbg1).
+        // The guard must report non-standard for exactly that case, and it
+        // must NOT be a validate() error -- a non-standard region is a loud
+        // signal, never a hard rejection (rescoped away from auto-override).
+        let mut config = Config::for_testing();
+        config.s3.region = "nbg1".to_string();
+        assert!(
+            !config.s3_region_is_standard(),
+            "nbg1 must be flagged as non-standard"
+        );
+        assert!(
+            config.validate().is_ok(),
+            "a non-standard region must not fail validate() -- guard-only, not enforcement"
+        );
+    }
+
+    #[test]
+    fn s3_region_guard_passes_on_standard_region() {
+        let mut config = Config::for_testing();
+        config.s3.region = STANDARD_S3_REGION.to_string();
+        assert!(config.s3_region_is_standard());
+    }
+
+    #[test]
+    fn s3_region_guard_default_config_is_standard() {
+        // Config::default() already hardcodes fsn1 (precedent:
+        // HetznerConfig::location's default) -- the guard must agree.
+        let config = Config::default();
+        assert!(config.s3_region_is_standard());
+        assert_eq!(config.s3.region, STANDARD_S3_REGION);
     }
 
     #[test]

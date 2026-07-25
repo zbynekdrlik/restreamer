@@ -70,12 +70,20 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
     .as_str()
     .to_string();
 
+    // #278: read the LIVE config (config_live) so a runtime config patch is reflected.
+    let s3_region_standard = state
+        .config_live
+        .read()
+        .map(|c| c.s3_region_is_standard())
+        .unwrap_or(true);
+
     Ok(Json(ServiceStatus {
         inpoint,
         endpoint,
         delivery,
         streaming_event: event,
         disk_pressure,
+        s3_region_standard,
     }))
 }
 

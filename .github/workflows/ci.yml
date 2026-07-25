@@ -115,7 +115,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Note: gen_rescue_flv --check is local-only. ffmpeg output is not
       # bit-reproducible across ffmpeg versions / distros, so we cannot run
       # the reproducibility verifier in CI without pinning a specific
@@ -191,7 +191,7 @@ jobs:
         run: |
           C:\ffmpeg\ffmpeg.exe -version
       - name: Run tests
-        run: cargo test --workspace --verbose
+        run: cargo test --workspace --verbose --locked
         env:
           SQLX_OFFLINE: true
       # The outage-continuity integration test in crates/rs-endpoint is gated
@@ -200,7 +200,7 @@ jobs:
       # green CI means this test actually executed (test-strictness). Scoped to
       # one package + feature - no double-count or conflict with the step above.
       - name: Run rs-endpoint feature-gated integration tests
-        run: cargo test -p rs-endpoint --features testing --verbose
+        run: cargo test -p rs-endpoint --features testing --verbose --locked
         env:
           SQLX_OFFLINE: true
 
@@ -521,7 +521,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
       - name: Build rs-delivery
-        run: cargo build --release -p rs-delivery
+        run: cargo build --release -p rs-delivery --locked
       - name: Upload rs-delivery binary
         uses: actions/upload-artifact@v4
         with:
@@ -732,7 +732,7 @@ jobs:
       - name: Verify zero ignored tests in cargo test output
         run: |
           # Run tests and capture output
-          OUTPUT=$(cargo test --workspace 2>&1)
+          OUTPUT=$(cargo test --workspace --locked 2>&1)
           echo "$OUTPUT"
 
           # Check for any ignored tests
@@ -765,7 +765,7 @@ jobs:
         run: |
           # Check that deploy-stream-lan job uses always() to prevent incorrect skipping
           WORKFLOW_FILE=".github/workflows/ci.yml"
-          DEPLOY_CONDITION=$(grep -A3 "deploy-stream-lan:" "$WORKFLOW_FILE" | grep "if:" || true)
+          DEPLOY_CONDITION=$(grep -A3 "^  deploy-stream-lan:" "$WORKFLOW_FILE" | grep "if:" || true)
 
           if [ -z "$DEPLOY_CONDITION" ]; then
             echo "ERROR: deploy-stream-lan job missing 'if' condition"
@@ -786,7 +786,7 @@ jobs:
         run: |
           # Check that auto-release job uses always() to prevent incorrect skipping
           WORKFLOW_FILE=".github/workflows/ci.yml"
-          RELEASE_CONDITION=$(grep -A3 "auto-release:" "$WORKFLOW_FILE" | grep "if:" || true)
+          RELEASE_CONDITION=$(grep -A3 "^  auto-release:" "$WORKFLOW_FILE" | grep "if:" || true)
 
           if [ -z "$RELEASE_CONDITION" ]; then
             echo "ERROR: auto-release job missing 'if' condition"
@@ -809,7 +809,7 @@ jobs:
           # this ~40min real-YouTube e2e job run even after a compile/lint/test
           # failure made deploy-stream-lan SKIP (run 27884399527 burned e2e on
           # non-compiling code). '== success' is the correct, strict gate.
-          STREAMING_CONDITION=$(grep -A10 "e2e-streaming-test:" "$WORKFLOW_FILE" | grep "if:" || true)
+          STREAMING_CONDITION=$(grep -A10 "^  e2e-streaming-test:" "$WORKFLOW_FILE" | grep "if:" || true)
           if echo "$STREAMING_CONDITION" | grep -q "!= 'failure'"; then
             echo "ERROR: e2e-streaming-test uses '!= failure' which runs the e2e job even when"
             echo "deploy-stream-lan was SKIPPED (e.g. after a compile/lint/test failure)."
@@ -830,7 +830,7 @@ jobs:
           echo "OK: e2e-streaming-test uses == success condition and includes workflow_dispatch."
 
           # #267: e2e-obs-youtube-test must use the same strict '== success' gate.
-          YOUTUBE_CONDITION=$(grep -A10 "e2e-obs-youtube-test:" "$WORKFLOW_FILE" | grep "if:" || true)
+          YOUTUBE_CONDITION=$(grep -A10 "^  e2e-obs-youtube-test:" "$WORKFLOW_FILE" | grep "if:" || true)
           if echo "$YOUTUBE_CONDITION" | grep -q "!= 'failure'"; then
             echo "ERROR: e2e-obs-youtube-test uses '!= failure' which runs the e2e job even when"
             echo "deploy-stream-lan was SKIPPED (e.g. after a compile/lint/test failure)."
@@ -852,7 +852,7 @@ jobs:
 
           # #267: e2e-fb-push-stream-lan must also require BOTH upstream e2e
           # jobs to have succeeded, not just deploy-stream-lan.
-          FB_CONDITION=$(grep -A12 "e2e-fb-push-stream-lan:" "$WORKFLOW_FILE" | grep "if:" || true)
+          FB_CONDITION=$(grep -A12 "^  e2e-fb-push-stream-lan:" "$WORKFLOW_FILE" | grep "if:" || true)
           if ! echo "$FB_CONDITION" | grep -q "needs.e2e-streaming-test.result == 'success'"; then
             echo "ERROR: e2e-fb-push-stream-lan must require e2e-streaming-test.result == 'success'."
             echo "Found: $FB_CONDITION"
@@ -869,7 +869,7 @@ jobs:
           WORKFLOW_FILE=".github/workflows/ci.yml"
 
           # e2e-gate must exist and depend on both E2E test jobs
-          GATE_NEEDS=$(grep -A5 "e2e-gate:" "$WORKFLOW_FILE" | grep "needs:" || true)
+          GATE_NEEDS=$(grep -A5 "^  e2e-gate:" "$WORKFLOW_FILE" | grep "needs:" || true)
           if [ -z "$GATE_NEEDS" ]; then
             echo "ERROR: e2e-gate job not found or missing needs"
             exit 1
@@ -893,7 +893,7 @@ jobs:
           WORKFLOW_FILE=".github/workflows/ci.yml"
 
           # auto-release must depend on e2e-gate so releases only happen after E2E passes
-          RELEASE_NEEDS=$(grep -A3 "auto-release:" "$WORKFLOW_FILE" | grep "needs:" || true)
+          RELEASE_NEEDS=$(grep -A3 "^  auto-release:" "$WORKFLOW_FILE" | grep "needs:" || true)
           if ! echo "$RELEASE_NEEDS" | grep -q "e2e-gate"; then
             echo "ERROR: auto-release must depend on e2e-gate (the final gate that includes E2E verification)"
             echo "Found: $RELEASE_NEEDS"

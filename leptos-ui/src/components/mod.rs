@@ -14,6 +14,7 @@ mod header;
 mod operator_dashboard;
 pub mod outage_banner;
 pub mod pacing_panel;
+pub mod s3_region_banner;
 mod settings;
 mod templates;
 pub mod upload_strip;

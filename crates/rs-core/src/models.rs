@@ -365,6 +365,17 @@ pub struct ServiceStatus {
     /// Drives the dashboard disk-pressure banner (#231). Defaults to "ok".
     #[serde(default)]
     pub disk_pressure: String,
+    /// Whether the configured `s3.region` matches the project standard
+    /// (`fsn1`). Computed fresh from the LIVE config on every poll, so it
+    /// stays correct even after a runtime config patch. Drives the
+    /// dashboard S3-region banner (#278). Defaults to true (assume
+    /// standard) so an absent/older field never false-alarms.
+    #[serde(default = "default_true")]
+    pub s3_region_standard: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

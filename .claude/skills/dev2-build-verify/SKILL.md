@@ -20,8 +20,11 @@ warm — a cold build is ~40 min, a warm incremental is seconds-to-minutes). It'
 a plain source copy (no `.git`) with a warm `target/`; run all the dev2 commands
 below from there. (The old `~/hotfix294/repo` path is GONE — 2026-07-21; if
 `restreamer-buildcheck` is ever missing, `find ~ -maxdepth 3 -name Cargo.toml
--path '*restreamer*'` on dev2 finds the current warm checkout.) Sync your dev1
-working tree into it (source only; never ship `target/`):
+-path '*restreamer*'` on dev2 finds the current warm checkout.) **If it's
+missing entirely** (confirmed 2026-07-25 — no `target/` to keep warm, `mkdir -p
+~/restreamer-buildcheck` on dev2 first, then the same rsync below bootstraps it;
+the first build is the ~40 min cold one, same as any fresh checkout.) Sync your
+dev1 working tree into it (source only; never ship `target/`):
 
 ```bash
 # airuleset:deploy-dirty-ok   # build-verify sync, NOT a deploy (clean-tree hook)
@@ -35,6 +38,15 @@ rsync -a --delete \
 The `# airuleset:deploy-dirty-ok` marker is REQUIRED — the clean-tree hook
 blocks any rsync/scp from a dirty tree, and you sync UNCOMMITTED work here on
 purpose (you verify BEFORE committing). Re-run the rsync after EVERY local edit.
+
+**The `--exclude '*.png'` above breaks `trunk build` on a fresh/bootstrapped
+checkout.** `leptos-ui/index.html` references `icon-192.png` / `icon-512.png`;
+trunk fails with `error getting canonical path for ".../icon-192.png": No such
+file or directory` if they were never synced. One-time fix (or after any change
+to those specific files): `scp leptos-ui/icon-*.png
+newlevel@dev2:~/restreamer-buildcheck/leptos-ui/` with the same
+`# airuleset:deploy-dirty-ok` marker. Don't just drop the png exclude — it
+exists to avoid re-syncing large/binary test-fixture images on every rsync.
 
 ## Compile / test / clippy
 
@@ -143,6 +155,30 @@ ssh newlevel@dev2 'cd ~/restreamer-buildcheck/e2e && npm install >/dev/null 2>&1
   mock change. Playwright browsers are already installed on dev2.
 - Each spec `beforeEach` posts `/api/v1/__reset` — that's the mock's, so the
   mock MUST be up before the tests (the `sleep 4`).
+- **A NEW `/api/v1/status` field must ALSO be added to `e2e/tauri-mock.js`'s
+  `get_status` handler, not just `mock-api.js`'s response builder (#278).** The
+  whole frontend suite injects `window.__TAURI__` via `tauri-mock.js`, so
+  `is_tauri()` is true and every page goes through the Tauri IPC
+  `invoke("get_status")` path — which `tauri-mock.js` implements by fetching
+  `mock-api.js`'s real HTTP response and then hand-composing its OWN `data`
+  object field-by-field (it does NOT forward the response verbatim, unlike the
+  ws-broadcast relay above). A field present in `mock-api.js`'s JSON but missing
+  from `tauri-mock.js`'s hand-built object silently vanishes — a banner/store
+  test for that field passes or fails in the WRONG direction with no error,
+  because the frontend just sees the field as absent/default. Caught adding
+  `s3_region_standard`: the "banner shows" test failed (field missing ->
+  defaulted false-ish) while the "banner hidden" test passed by coincidence.
+- **`playwright-frontend.config.ts` hardcodes `workers: 1` on purpose — never
+  override with `--workers=N>1` for the FULL suite.** `mock-api.js` is ONE
+  shared Node process holding global mutable state (`scenario`, `events`,
+  `oauthGrants`, …); running >1 worker races that shared state across parallel
+  tests. Confirmed 2026-07-25: `--workers=2` on the full suite produced 3
+  cross-test-contamination failures (`change-key`, `oauth-authorize`,
+  `frontend.spec.ts` remove-endpoint) that vanished on a `--workers=1` rerun —
+  looked exactly like real app bugs, wasn't. `--workers=1` is fine (and
+  necessary) when scoping to a handful of spec files for a fast iteration loop;
+  just never assume a `--workers=N` full-suite run that shows failures means
+  your change broke something before re-running at `workers:1`.
 
 ### `ssh … npx playwright test` drops with **exit 255** when dev2 is loaded — run E2E DETACHED + poll a sentinel
 

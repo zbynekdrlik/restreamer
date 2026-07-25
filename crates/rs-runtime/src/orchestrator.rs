@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing::{info, warn};
 
 use rs_api::state::AppState;
-use rs_core::audit::AuditRow;
+use rs_core::audit::{Action, AuditRow, Severity, Source};
 use rs_core::config::Config;
 use rs_core::db;
 use rs_core::log_buffer::LogBuffer;
@@ -183,6 +183,39 @@ impl ServiceCore {
         // (it was previously a throwaway sender and all VPS-lifecycle
         // audit rows were silently dropped — see the 2026-04-19 post-mortem).
         let (audit_tx, audit_rx) = mpsc::channel::<AuditRow>(1024);
+
+        // #278: a stale per-install config.json can silently carry a
+        // degraded/wrong S3 region across an upgrade (the 2026-06-24
+        // incident: streampp ran a live event on nbg1, a known-degraded
+        // region, because its config was never migrated to the fsn1
+        // standard). Guard-only, never auto-overridden -- emit ONE loud
+        // Critical audit row at startup so it can never again go unnoticed.
+        // The dashboard S3-region banner (leptos-ui) reads the live config
+        // on every /api/v1/status poll, so it stays correct independent of
+        // this one-shot startup emission.
+        if !self.config.s3_region_is_standard() {
+            warn!(
+                "S3 region '{}' does not match the project standard '{}' (#278)",
+                self.config.s3.region,
+                rs_core::config::STANDARD_S3_REGION
+            );
+            rs_core::audit::record(
+                &audit_tx,
+                AuditRow {
+                    severity: Severity::Critical,
+                    source: Source::System,
+                    event_id: None,
+                    instance_id: None,
+                    endpoint: None,
+                    action: Action::S3RegionNonStandard,
+                    detail: serde_json::json!({
+                        "configured_region": self.config.s3.region,
+                        "standard_region": rs_core::config::STANDARD_S3_REGION,
+                    }),
+                    ts_override: None,
+                },
+            );
+        }
 
         let mut api_state = AppState::new(
             pool.clone(),
