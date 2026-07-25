@@ -75,7 +75,7 @@ Full E2E test coverage is the primary goal. Every feature ships with E2E tests c
 
 - CI `test-integrity` job scans for `#[ignore]`, `assert!(true)`, empty test bodies — MUST pass
 - `deploy-stream-lan` job MUST run on every push (use `always()` in complex `if` conditions)
-- E2E gate requires both frontend and YouTube E2E to pass — condition uses `!= 'failure'`
+- E2E gate requires both frontend and YouTube E2E to pass — the expensive stream-lan e2e jobs (`e2e-streaming-test`, `e2e-obs-youtube-test`, `e2e-fb-push-stream-lan`) require `needs.deploy-stream-lan.result == 'success'` (STRICT — not `!= 'failure'`, which used to let them run even after deploy was SKIPPED by an upstream compile/lint/test failure, #267)
 - Every CSS class referenced in UI components MUST be defined in the stylesheet
 
 ### Local Build Policy — Tier 0 (dev1 OOM)

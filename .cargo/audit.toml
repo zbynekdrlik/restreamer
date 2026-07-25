@@ -1,0 +1,37 @@
+# cargo-audit ignore list.
+#
+# cargo-audit reads this file automatically (project-local `.cargo/audit.toml`,
+# see https://github.com/rustsec/rustsec cargo-audit config docs) -- no
+# `--ignore` flags needed on the CLI. Moved out of the inline `--ignore` chain
+# in .github/workflows/ci.yml (`security` job) so the list is reviewable in one
+# place instead of growing silently in a CI script one flag at a time (#281).
+#
+# Every ID below MUST be paired with a comment directly above it in this exact
+# shape, so the "Validate audit.toml" CI step (security job, ci.yml) can parse
+# and enforce it:
+#
+#   # RUSTSEC-XXXX-YYYY: <why ignored> | dep: <path> | expires: YYYY-MM-DD
+#
+# When an entry's expiry date passes, that CI step FAILS the build -- forcing
+# a periodic human re-check instead of an ignore living forever unreviewed.
+# Default expiry is 2026-10-31 for entries with no advisory-specific date.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071: Marvin Attack timing side-channel in RSA PKCS#1 v1.5 decryption | dep: rsa <- sqlx-mysql (unused DB backend, this project runs SQLite only via sqlx-sqlite) | expires: 2026-10-31
+    "RUSTSEC-2023-0071",
+    # RUSTSEC-2025-0134: rustls-pemfile is unmaintained (informational, repo archived) | dep: rustls-pemfile <- rust-s3, no fix available upstream | expires: 2026-10-31
+    "RUSTSEC-2025-0134",
+    # RUSTSEC-2026-0037: quinn-proto panic-DoS on invalid QUIC transport params, patched >=0.11.14 | dep: was pulled in transitively; as of 2026-07-25 quinn-proto no longer appears in Cargo.lock at all (cargo tree -i quinn-proto: empty) -- this ignore is currently a harmless no-op, kept per #281's "carry every currently-ignored ID" decision rather than pruned in this PR | expires: 2026-10-31
+    "RUSTSEC-2026-0037",
+    # RUSTSEC-2026-0049: rustls-webpki CRL distribution-point matching bug, patched >=0.103.10 | dep: rustls-webpki <- rustls <- attohttpc <- aws-creds <- rust-s3; current lockfile is already at 0.103.13 (>= patched) -- currently a harmless no-op ignore, kept per #281's decision rather than pruned in this PR | expires: 2026-10-31
+    "RUSTSEC-2026-0049",
+    # RUSTSEC-2026-0098: rustls-webpki URI name-constraint bypass, patched >=0.103.12,<0.104.0-alpha.1 or >=0.104.0-alpha.6 | dep: same rustls-webpki chain as RUSTSEC-2026-0049; current lockfile 0.103.13 already satisfies the patched range -- currently a harmless no-op ignore, kept per #281's decision rather than pruned in this PR | expires: 2026-10-31
+    "RUSTSEC-2026-0098",
+    # RUSTSEC-2026-0099: rustls-webpki wildcard name-constraint bypass, patched >=0.103.12,<0.104.0-alpha.1 or >=0.104.0-alpha.6 | dep: same rustls-webpki chain as RUSTSEC-2026-0049; current lockfile 0.103.13 already satisfies the patched range -- currently a harmless no-op ignore, kept per #281's decision rather than pruned in this PR | expires: 2026-10-31
+    "RUSTSEC-2026-0099",
+    # RUSTSEC-2026-0194: quick-xml quadratic run time checking a start tag for duplicate attribute names (DoS) | dep: quick-xml <- rust-s3 0.37.1 -> aws-creds, pinned to quick-xml ^0.38 (0.38.4 is the ceiling reachable without a rust-s3 major bump, tracked in #207); quick-xml here only parses XML responses from our own trusted Hetzner S3 bucket, so the crafted-XML DoS is out of threat model | expires: 2026-10-31
+    "RUSTSEC-2026-0194",
+    # RUSTSEC-2026-0195: quick-xml unbounded namespace-declaration allocation (DoS) | dep: same quick-xml <- rust-s3 -> aws-creds chain as RUSTSEC-2026-0194, same #207 tracking, same trusted-input threat model | expires: 2026-10-31
+    "RUSTSEC-2026-0195",
+]

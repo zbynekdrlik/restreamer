@@ -29,6 +29,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Verify merge ref is not stale (#268)
+        run: |
+          # GitHub can serve a CACHED refs/pull/N/merge built from an OLD PR
+          # head after a close/reopen or a rapid head update -- so this run
+          # silently tests stale pre-fix code while the real head is already
+          # green, wasting a full ~2h e2e cycle before anyone notices (#255
+          # incident). HEAD^2 (the checked-out synthetic merge commit's
+          # second parent) MUST equal the PR's actual current head SHA.
+          MERGE_PARENT2=$(git rev-parse HEAD^2)
+          PR_HEAD="${{ github.event.pull_request.head.sha }}"
+          echo "Merge-ref second parent (tested code): $MERGE_PARENT2"
+          echo "PR event head SHA (current PR head):    $PR_HEAD"
+          if [ "$MERGE_PARENT2" != "$PR_HEAD" ]; then
+            echo ""
+            echo "ERROR: Stale refs/pull/${{ github.event.pull_request.number }}/merge detected."
+            echo "This run checked out a merge ref built from $MERGE_PARENT2,"
+            echo "but the PR's current head is $PR_HEAD -- this run is NOT testing current code."
+            echo "Push a new commit (or close/reopen the PR) to force GitHub to rebuild the merge ref, then re-run."
+            exit 1
+          fi
+          echo ""
+          echo "OK: merge ref matches current PR head ($PR_HEAD)."
       - name: Require Cargo.toml version bump on PR to main
         run: |
           PR_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -331,17 +353,67 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # #281: the advisory ignore list used to live as inline --ignore flags
+      # on the `cargo audit` command below and grew unreviewed one flag at a
+      # time. It now lives in the committed .cargo/audit.toml (cargo-audit
+      # reads it automatically), with a reason + dependency + expiry date per
+      # entry. This step validates that file BEFORE installing cargo-audit,
+      # so a broken/expired ignore fails fast.
+      - name: Validate audit.toml (parses + every ignore has a non-expired reason)
+        run: |
+          python3 - <<'PYEOF'
+          import re
+          import sys
+          from datetime import date
+
+          try:
+              import tomllib
+          except ImportError:
+              import tomli as tomllib
+
+          path = ".cargo/audit.toml"
+          with open(path, "rb") as f:
+              raw_bytes = f.read()
+          try:
+              cfg = tomllib.loads(raw_bytes.decode("utf-8"))
+          except Exception as e:
+              print(f"ERROR: {path} does not parse as TOML: {e}")
+              sys.exit(1)
+
+          ignore_ids = cfg.get("advisories", {}).get("ignore", [])
+          if not ignore_ids:
+              print(f"ERROR: {path} has an empty or missing [advisories] ignore list.")
+              sys.exit(1)
+
+          text = raw_bytes.decode("utf-8")
+          today = date.today()
+          failed = False
+          for adv_id in ignore_ids:
+              m = re.search(rf"#\s*{re.escape(adv_id)}:.*?expires:\s*(\d{{4}}-\d{{2}}-\d{{2}})", text)
+              if not m:
+                  print(f"ERROR: {adv_id} is ignored but has no '# {adv_id}: ... expires: YYYY-MM-DD' comment.")
+                  failed = True
+                  continue
+              expiry = date.fromisoformat(m.group(1))
+              if expiry < today:
+                  print(f"ERROR: {adv_id} ignore expired on {expiry} (today: {today}). Re-check and renew or remove.")
+                  failed = True
+              else:
+                  print(f"OK: {adv_id} ignored until {expiry}")
+
+          if failed:
+              sys.exit(1)
+          print(f"OK: all {len(ignore_ids)} audit.toml ignores parse and are not expired.")
+          PYEOF
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Run audit
         run: |
-          # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml DoS) are transitive via
-          # rust-s3 0.37.1 -> aws-creds, pinned to quick-xml ^0.38 (0.38.4 is the ceiling;
-          # the patch is not reachable without a rust-s3 major bump, tracked in #207).
-          # quick-xml here only parses XML from our own trusted Hetzner S3 bucket, so the
-          # crafted-XML DoS is out of threat model. Ignore until #207 removes rust-s3.
+          # Ignore list is read automatically from the committed .cargo/audit.toml
+          # (validated by the "Validate audit.toml" step above) -- see that file
+          # for the reason + dependency + expiry behind each ignored RUSTSEC ID.
           for i in 1 2 3; do
-            cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0049 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 && exit 0
+            cargo audit && exit 0
             echo "Attempt $i failed, retrying in 10s..."
             sleep 10
           done
@@ -728,20 +800,25 @@ jobs:
           fi
 
           echo "OK: auto-release uses always() in condition."
-      - name: Verify E2E tests use != failure (not == success)
+      - name: Verify E2E tests use == success (not != failure) (#267)
         run: |
           WORKFLOW_FILE=".github/workflows/ci.yml"
 
-          # e2e-streaming-test must use != 'failure' so it runs when deploy is skipped
-          STREAMING_CONDITION=$(grep -A3 "e2e-streaming-test:" "$WORKFLOW_FILE" | grep "if:" || true)
-          if echo "$STREAMING_CONDITION" | grep -q "== 'success'"; then
-            echo "ERROR: e2e-streaming-test uses '== success' which skips tests when deploy is skipped."
-            echo "Must use '!= failure' so E2E tests run on every dev/main push."
+          # #267: e2e-streaming-test MUST require deploy-stream-lan SUCCESS.
+          # 'skipped' != 'failure' is true, so the old '!= failure' condition let
+          # this ~40min real-YouTube e2e job run even after a compile/lint/test
+          # failure made deploy-stream-lan SKIP (run 27884399527 burned e2e on
+          # non-compiling code). '== success' is the correct, strict gate.
+          STREAMING_CONDITION=$(grep -A10 "e2e-streaming-test:" "$WORKFLOW_FILE" | grep "if:" || true)
+          if echo "$STREAMING_CONDITION" | grep -q "!= 'failure'"; then
+            echo "ERROR: e2e-streaming-test uses '!= failure' which runs the e2e job even when"
+            echo "deploy-stream-lan was SKIPPED (e.g. after a compile/lint/test failure)."
+            echo "Must use '== success' so this expensive e2e job only runs after a real deploy."
             echo "Found: $STREAMING_CONDITION"
             exit 1
           fi
-          if ! echo "$STREAMING_CONDITION" | grep -q "!= 'failure'"; then
-            echo "ERROR: e2e-streaming-test must use '!= failure' condition for deploy-stream-lan."
+          if ! echo "$STREAMING_CONDITION" | grep -q "== 'success'"; then
+            echo "ERROR: e2e-streaming-test must use '== success' condition for deploy-stream-lan."
             echo "Found: $STREAMING_CONDITION"
             exit 1
           fi
@@ -750,18 +827,19 @@ jobs:
             echo "Found: $STREAMING_CONDITION"
             exit 1
           fi
-          echo "OK: e2e-streaming-test uses != failure condition and includes workflow_dispatch."
+          echo "OK: e2e-streaming-test uses == success condition and includes workflow_dispatch."
 
-          # e2e-obs-youtube-test must use != 'failure' so it runs when deploy is skipped
-          YOUTUBE_CONDITION=$(grep -A3 "e2e-obs-youtube-test:" "$WORKFLOW_FILE" | grep "if:" || true)
-          if echo "$YOUTUBE_CONDITION" | grep -q "== 'success'"; then
-            echo "ERROR: e2e-obs-youtube-test uses '== success' which skips tests when deploy is skipped."
-            echo "Must use '!= failure' so E2E tests run on every dev/main push."
+          # #267: e2e-obs-youtube-test must use the same strict '== success' gate.
+          YOUTUBE_CONDITION=$(grep -A10 "e2e-obs-youtube-test:" "$WORKFLOW_FILE" | grep "if:" || true)
+          if echo "$YOUTUBE_CONDITION" | grep -q "!= 'failure'"; then
+            echo "ERROR: e2e-obs-youtube-test uses '!= failure' which runs the e2e job even when"
+            echo "deploy-stream-lan was SKIPPED (e.g. after a compile/lint/test failure)."
+            echo "Must use '== success' so this expensive e2e job only runs after a real deploy."
             echo "Found: $YOUTUBE_CONDITION"
             exit 1
           fi
-          if ! echo "$YOUTUBE_CONDITION" | grep -q "!= 'failure'"; then
-            echo "ERROR: e2e-obs-youtube-test must use '!= failure' condition for deploy-stream-lan."
+          if ! echo "$YOUTUBE_CONDITION" | grep -q "== 'success'"; then
+            echo "ERROR: e2e-obs-youtube-test must use '== success' condition for deploy-stream-lan."
             echo "Found: $YOUTUBE_CONDITION"
             exit 1
           fi
@@ -770,7 +848,22 @@ jobs:
             echo "Found: $YOUTUBE_CONDITION"
             exit 1
           fi
-          echo "OK: e2e-obs-youtube-test uses != failure condition and includes workflow_dispatch."
+          echo "OK: e2e-obs-youtube-test uses == success condition and includes workflow_dispatch."
+
+          # #267: e2e-fb-push-stream-lan must also require BOTH upstream e2e
+          # jobs to have succeeded, not just deploy-stream-lan.
+          FB_CONDITION=$(grep -A12 "e2e-fb-push-stream-lan:" "$WORKFLOW_FILE" | grep "if:" || true)
+          if ! echo "$FB_CONDITION" | grep -q "needs.e2e-streaming-test.result == 'success'"; then
+            echo "ERROR: e2e-fb-push-stream-lan must require e2e-streaming-test.result == 'success'."
+            echo "Found: $FB_CONDITION"
+            exit 1
+          fi
+          if ! echo "$FB_CONDITION" | grep -q "needs.e2e-obs-youtube-test.result == 'success'"; then
+            echo "ERROR: e2e-fb-push-stream-lan must require e2e-obs-youtube-test.result == 'success'."
+            echo "Found: $FB_CONDITION"
+            exit 1
+          fi
+          echo "OK: e2e-fb-push-stream-lan requires both upstream e2e jobs to succeed."
       - name: Verify e2e-gate requires both E2E tests
         run: |
           WORKFLOW_FILE=".github/workflows/ci.yml"
@@ -1406,7 +1499,12 @@ jobs:
   e2e-streaming-test:
     name: E2E Streaming Test
     needs: [deploy-stream-lan]
-    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # #267: must require deploy-stream-lan SUCCESS, not merely "not failure" --
+    # 'skipped' != 'failure' is true, so a compile/lint/test failure upstream
+    # (which makes deploy-stream-lan SKIP via its own rust-ci-gate=='success'
+    # gate) used to let this ~40min real-YouTube e2e job run anyway on
+    # non-compiling code (run 27884399527).
+    if: always() && needs.deploy-stream-lan.result == 'success' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     # See deploy-stream-lan: cross-run serialization on the shared box.
     concurrency:
       group: stream-lan-box
@@ -1935,7 +2033,8 @@ jobs:
   e2e-obs-youtube-test:
     name: E2E OBS-to-YouTube Test
     needs: [deploy-stream-lan]
-    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # #267: see e2e-streaming-test above -- require SUCCESS, not != 'failure'.
+    if: always() && needs.deploy-stream-lan.result == 'success' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     # See deploy-stream-lan: cross-run serialization on the shared box.
     concurrency:
       group: stream-lan-box
@@ -5754,7 +5853,11 @@ jobs:
     # ran in parallel it would deactivate the YT event mid-observation and
     # break the sustained YT health gate (CI run 26085993055 regression).
     needs: [deploy-stream-lan, e2e-streaming-test, e2e-obs-youtube-test]
-    if: always() && needs.deploy-stream-lan.result != 'failure' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # #267: require deploy SUCCESS (not != 'failure'), and ALSO require both
+    # upstream e2e jobs to have actually succeeded -- previously this job only
+    # checked deploy-stream-lan, so it would still run the ~32min real-FB push
+    # even after e2e-streaming-test or e2e-obs-youtube-test failed.
+    if: always() && needs.deploy-stream-lan.result == 'success' && needs.e2e-streaming-test.result == 'success' && needs.e2e-obs-youtube-test.result == 'success' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     # See deploy-stream-lan: cross-run serialization on the shared box.
     concurrency:
       group: stream-lan-box
