@@ -70,6 +70,13 @@ Always `source ~/.cargo/env` and `export SQLX_OFFLINE=true` on dev2.
   the workspace jobs skip leptos, so ALWAYS run it after a leptos edit.
 - clippy `too_many_arguments` fires at 7 params — prefer dropping a genuinely
   unused param over `#[allow]`.
+- clippy `items_after_test_module` (`-D warnings` fails the build on it): a
+  `#[cfg(test)] mod tests { ... }` block MUST be the LAST item in the file —
+  any `pub fn`/`fn`/`struct`/etc. declared AFTER it fails clippy, even though
+  `cargo fmt`/`rustc` accept the file fine. Bit twice inserting a test module
+  between two functions in the same file (e.g. after function A but before
+  function B still to come) — always append new test modules at the very end
+  of the file, never mid-file next to the function they cover.
 - **leptos gotchas the wasm check catches (nothing else does):**
   - `leptos::Memo<T>::new` requires `T: PartialEq`. A `Memo` returning a custom
     struct (e.g. a grouped-rows vec) needs `#[derive(Clone, PartialEq)]` on that
