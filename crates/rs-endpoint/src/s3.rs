@@ -291,6 +291,21 @@ impl S3Client {
         Ok(url)
     }
 
+    /// Given a URL that MAY be one of our own rescue-video uploads (produced
+    /// by `upload_public_object` under the `rescue-videos/` prefix), return
+    /// its S3 key. Returns `None` for any URL that is NOT exactly under this
+    /// bucket's `rescue-videos/` prefix -- including externally-hosted URLs
+    /// an operator pasted in manually, or a bare directory with no object
+    /// name. We must never attempt to delete those (#115).
+    pub fn rescue_video_key_from_url(&self, url: &str) -> Option<String> {
+        let prefix = format!("{}/rescue-videos/", self.bucket.url());
+        let rest = url.strip_prefix(&prefix)?;
+        if rest.is_empty() || rest.contains('/') {
+            return None;
+        }
+        Some(format!("rescue-videos/{rest}"))
+    }
+
     /// Delete all S3 objects under the given event name prefix.
     /// Returns the number of objects deleted.
     ///
@@ -561,6 +576,76 @@ mod tests {
         // The base prefix itself (no event underneath) should yield None.
         let out = strip_event_from_common_prefix("abc-uuid/", "abc-uuid/");
         assert_eq!(out, None);
+    }
+
+    // ----- rescue_video_key_from_url (#115) -----
+
+    fn test_s3_client(endpoint: &str) -> S3Client {
+        S3Client::new(&S3Config {
+            bucket: "test-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: endpoint.to_string(),
+            access_key_id: "key".to_string(),
+            secret_access_key: "secret".to_string(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn rescue_video_key_from_url_extracts_key_for_own_bucket() {
+        let client = test_s3_client("http://localhost:9000");
+        let url = format!("{}/rescue-videos/abc-123.flv", client.bucket.url());
+        assert_eq!(
+            client.rescue_video_key_from_url(&url),
+            Some("rescue-videos/abc-123.flv".to_string())
+        );
+    }
+
+    #[test]
+    fn rescue_video_key_from_url_round_trips_with_upload_public_object_format() {
+        // Mirrors exactly how upload_public_object builds its returned URL:
+        // format!("{}/{}", self.bucket.url(), key).
+        let client = test_s3_client("http://localhost:9000");
+        let key = "rescue-videos/deadbeef.flv";
+        let uploaded_url = format!("{}/{}", client.bucket.url(), key);
+        assert_eq!(
+            client.rescue_video_key_from_url(&uploaded_url),
+            Some(key.to_string())
+        );
+    }
+
+    #[test]
+    fn rescue_video_key_from_url_rejects_externally_hosted_url() {
+        let client = test_s3_client("http://localhost:9000");
+        assert_eq!(
+            client.rescue_video_key_from_url("https://s3.example.com/rescue-video.mp4"),
+            None
+        );
+    }
+
+    #[test]
+    fn rescue_video_key_from_url_rejects_different_bucket() {
+        let client = test_s3_client("http://localhost:9000");
+        assert_eq!(
+            client.rescue_video_key_from_url(
+                "http://localhost:9000/other-bucket/rescue-videos/abc.flv"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn rescue_video_key_from_url_rejects_bare_prefix_with_no_object() {
+        let client = test_s3_client("http://localhost:9000");
+        let url = format!("{}/rescue-videos/", client.bucket.url());
+        assert_eq!(client.rescue_video_key_from_url(&url), None);
+    }
+
+    #[test]
+    fn rescue_video_key_from_url_rejects_nested_path() {
+        let client = test_s3_client("http://localhost:9000");
+        let url = format!("{}/rescue-videos/sub/abc.flv", client.bucket.url());
+        assert_eq!(client.rescue_video_key_from_url(&url), None);
     }
 
     #[test]

@@ -276,3 +276,116 @@ runcmd:
             .join("\n"),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_creds() -> DeliveryS3Credentials {
+        DeliveryS3Credentials {
+            bucket: "test-bucket".to_string(),
+            region: "eu-central".to_string(),
+            endpoint: "https://s3.example.com".to_string(),
+            access_key_id: "AKIAEXAMPLE".to_string(),
+            secret_access_key: "s3cr3t".to_string(),
+        }
+    }
+
+    // ----- delivery_env_file (#116) -----
+
+    #[test]
+    fn delivery_env_file_contains_all_fields_in_order() {
+        let out = delivery_env_file(&test_creds(), "auth-tok-123");
+        assert_eq!(
+            out,
+            "DELIVERY_S3_BUCKET=test-bucket\n\
+             DELIVERY_S3_REGION=eu-central\n\
+             DELIVERY_S3_ENDPOINT=https://s3.example.com\n\
+             DELIVERY_S3_ACCESS_KEY_ID=AKIAEXAMPLE\n\
+             DELIVERY_S3_SECRET_ACCESS_KEY=s3cr3t\n\
+             DELIVERY_AUTH_TOKEN=auth-tok-123\n"
+        );
+    }
+
+    // ----- bootstrap_cloud_init (#116) -----
+
+    #[test]
+    fn bootstrap_cloud_init_writes_env_file_with_0600_permissions() {
+        // The env file carries S3 secrets in plaintext -- a mutation that
+        // swapped '0600' for '0700' (world-readable-ish) would be a real
+        // security regression. Pin the exact permission line.
+        let out = bootstrap_cloud_init("https://cdn.example.com/rs-delivery", &test_creds(), "tok");
+        assert!(
+            out.contains("path: /opt/restreamer/rs-delivery.env\n    permissions: '0600'"),
+            "env file must be mode 0600 (contains S3 secrets):\n{out}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_cloud_init_embeds_binary_url_and_indented_env_content() {
+        let creds = test_creds();
+        let out = bootstrap_cloud_init("https://cdn.example.com/rs-delivery-v9", &creds, "tok-xyz");
+        assert!(out.contains(
+            r#"curl -fsSL -o /opt/restreamer/rs-delivery "https://cdn.example.com/rs-delivery-v9""#
+        ));
+        // env_lines must be indented 6 spaces under the YAML `content: |` block.
+        assert!(out.contains("      DELIVERY_S3_BUCKET=test-bucket"));
+        assert!(out.contains("      DELIVERY_S3_REGION=eu-central"));
+        assert!(out.contains("      DELIVERY_AUTH_TOKEN=tok-xyz"));
+        assert!(out.contains("packages:\n  - ffmpeg"));
+        assert!(out.contains("runcmd:\n  - /opt/restreamer/setup.sh"));
+    }
+
+    #[test]
+    fn bootstrap_cloud_init_starts_log_uploader_and_awscli_install() {
+        let out = bootstrap_cloud_init("https://cdn.example.com/bin", &test_creds(), "tok");
+        assert!(out.contains("nohup /opt/restreamer/log-uploader.sh"));
+        assert!(out.contains("nohup /opt/restreamer/install-awscli.sh"));
+        assert!(out.contains("path: /opt/restreamer/log-uploader.sh\n    permissions: '0755'"));
+    }
+
+    // ----- snapshot_cloud_init (#116) -----
+
+    #[test]
+    fn snapshot_cloud_init_writes_env_file_with_0600_permissions() {
+        let out = snapshot_cloud_init("https://cdn.example.com/rs-delivery", &test_creds(), "tok");
+        assert!(
+            out.contains("path: /opt/restreamer/rs-delivery.env\n    permissions: '0600'"),
+            "env file must be mode 0600 (contains S3 secrets):\n{out}"
+        );
+    }
+
+    #[test]
+    fn snapshot_cloud_init_kills_old_binary_before_restart() {
+        let out = snapshot_cloud_init(
+            "https://cdn.example.com/rs-delivery-v9",
+            &test_creds(),
+            "tok-xyz",
+        );
+        assert!(out.contains(r"pkill -f '^/opt/restreamer/rs-delivery$' || true"));
+        assert!(out.contains(r"pkill -f log-uploader || true"));
+        assert!(out.contains(
+            r#"curl -fsSL -o /opt/restreamer/rs-delivery "https://cdn.example.com/rs-delivery-v9""#
+        ));
+        assert!(
+            !out.contains("packages:"),
+            "snapshot path must not reinstall packages (already in the snapshot)"
+        );
+    }
+
+    #[test]
+    fn snapshot_cloud_init_embeds_indented_env_content() {
+        let creds = test_creds();
+        let out = snapshot_cloud_init("https://cdn.example.com/bin", &creds, "tok-xyz");
+        assert!(out.contains("      DELIVERY_S3_BUCKET=test-bucket"));
+        assert!(out.contains("      DELIVERY_AUTH_TOKEN=tok-xyz"));
+    }
+
+    #[test]
+    fn bootstrap_and_snapshot_produce_different_scripts() {
+        let creds = test_creds();
+        let a = bootstrap_cloud_init("https://cdn.example.com/bin", &creds, "tok");
+        let b = snapshot_cloud_init("https://cdn.example.com/bin", &creds, "tok");
+        assert_ne!(a, b);
+    }
+}
