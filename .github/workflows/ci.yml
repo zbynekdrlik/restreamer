@@ -331,17 +331,67 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # #281: the advisory ignore list used to live as inline --ignore flags
+      # on the `cargo audit` command below and grew unreviewed one flag at a
+      # time. It now lives in the committed .cargo/audit.toml (cargo-audit
+      # reads it automatically), with a reason + dependency + expiry date per
+      # entry. This step validates that file BEFORE installing cargo-audit,
+      # so a broken/expired ignore fails fast.
+      - name: Validate audit.toml (parses + every ignore has a non-expired reason)
+        run: |
+          python3 - <<'PYEOF'
+          import re
+          import sys
+          from datetime import date
+
+          try:
+              import tomllib
+          except ImportError:
+              import tomli as tomllib
+
+          path = ".cargo/audit.toml"
+          with open(path, "rb") as f:
+              raw_bytes = f.read()
+          try:
+              cfg = tomllib.loads(raw_bytes.decode("utf-8"))
+          except Exception as e:
+              print(f"ERROR: {path} does not parse as TOML: {e}")
+              sys.exit(1)
+
+          ignore_ids = cfg.get("advisories", {}).get("ignore", [])
+          if not ignore_ids:
+              print(f"ERROR: {path} has an empty or missing [advisories] ignore list.")
+              sys.exit(1)
+
+          text = raw_bytes.decode("utf-8")
+          today = date.today()
+          failed = False
+          for adv_id in ignore_ids:
+              m = re.search(rf"#\s*{re.escape(adv_id)}:.*?expires:\s*(\d{{4}}-\d{{2}}-\d{{2}})", text)
+              if not m:
+                  print(f"ERROR: {adv_id} is ignored but has no '# {adv_id}: ... expires: YYYY-MM-DD' comment.")
+                  failed = True
+                  continue
+              expiry = date.fromisoformat(m.group(1))
+              if expiry < today:
+                  print(f"ERROR: {adv_id} ignore expired on {expiry} (today: {today}). Re-check and renew or remove.")
+                  failed = True
+              else:
+                  print(f"OK: {adv_id} ignored until {expiry}")
+
+          if failed:
+              sys.exit(1)
+          print(f"OK: all {len(ignore_ids)} audit.toml ignores parse and are not expired.")
+          PYEOF
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Run audit
         run: |
-          # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml DoS) are transitive via
-          # rust-s3 0.37.1 -> aws-creds, pinned to quick-xml ^0.38 (0.38.4 is the ceiling;
-          # the patch is not reachable without a rust-s3 major bump, tracked in #207).
-          # quick-xml here only parses XML from our own trusted Hetzner S3 bucket, so the
-          # crafted-XML DoS is out of threat model. Ignore until #207 removes rust-s3.
+          # Ignore list is read automatically from the committed .cargo/audit.toml
+          # (validated by the "Validate audit.toml" step above) -- see that file
+          # for the reason + dependency + expiry behind each ignored RUSTSEC ID.
           for i in 1 2 3; do
-            cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0049 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 && exit 0
+            cargo audit && exit 0
             echo "Attempt $i failed, retrying in 10s..."
             sleep 10
           done
