@@ -5077,7 +5077,18 @@ jobs:
           # zero-deficit path passed in 271s (run 30088500034). 900s fits
           # the physics; a genuine wedge no longer needs the deadline at
           # all -- the chunk-progress stall check below catches it in 120s.
+          # #318 fix v2: PASS = live delivery RESTORED, not cushion refilled.
+          # After a full drain, mode=normal is ~100 MINUTES away BY DESIGN
+          # (refill.rs REFILL_SPEED_FACTOR = 0.98: "rebuilds ~100s of cushion
+          # in ~1.4h") -- no CI window can wait for it, and run 30131235537
+          # proved a perfectly healthy recovery (chunks advancing, live video
+          # pushing) red-flagged for 10.7min of correct refilling. The #238/
+          # #280 guarantee is "endpoints return to LIVE delivery": require
+          # producer_active AND mode normal-or-refilling SUSTAINED for 3
+          # consecutive polls; the stall detector below still fails a wedge
+          # (frozen chunks_processed) in ~120s.
           $recovered = @{}
+          $liveStreak = @{}
           $lastChunks = @{}
           $stallStreak = @{}
           $deadline2 = (Get-Date).AddSeconds(900)
@@ -5092,7 +5103,10 @@ jobs:
             $line = @()
             foreach ($ep in $st.endpoints) {
               $line += "$($ep.alias): mode=$($ep.delivery_mode) prod_active=$($ep.producer_active) chunks=$($ep.chunks_processed)"
-              $recovered[$ep.alias] = ($ep.delivery_mode -eq "normal")
+              $isLive = ($ep.producer_active -and ($ep.delivery_mode -in @("normal", "refilling")))
+              if ($isLive) { $liveStreak[$ep.alias] = [int]$liveStreak[$ep.alias] + 1 }
+              else { $liveStreak[$ep.alias] = 0 }
+              $recovered[$ep.alias] = ([int]$liveStreak[$ep.alias] -ge 3)
               # #318 stall check: once past rescue, chunks_processed must keep
               # advancing (a wedged S3 GET -- the b3ffa194 regression this gate
               # re-added for -- freezes it). 12 static polls (~120s) = stalled.
