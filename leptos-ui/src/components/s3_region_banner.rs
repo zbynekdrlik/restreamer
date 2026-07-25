@@ -25,7 +25,7 @@ pub fn S3RegionBanner() -> impl IntoView {
     view! {
         <Show when=move || show.get()>
             <div class="banner banner--critical" role="alert" data-testid="s3-region-banner">
-                {"\u{1F534} S3 storage region is NOT the project standard (fsn1). A stale/degraded region can cause upload failures and starved endpoints. Fix s3.region in Settings."}
+                {"\u{1F534} S3 storage region is NOT the project standard (fsn1). A stale/degraded region can cause upload failures and starved endpoints. Edit s3.region in config.json and restart Restreamer."}
             </div>
         </Show>
     }
