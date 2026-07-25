@@ -212,6 +212,11 @@ pub struct DashboardStore {
     // Local chunk-store disk-pressure level: "ok" | "warn" | "critical".
     // Polled from `/status`; drives the DiskPressureBanner (#231).
     pub disk_pressure: RwSignal<String>,
+
+    // Whether the configured S3 region matches the project standard
+    // (fsn1). Polled from `/status`; drives the S3RegionBanner (#278).
+    // Defaults true (assume standard) until the first poll lands.
+    pub s3_region_standard: RwSignal<bool>,
 }
 
 impl DashboardStore {
@@ -237,6 +242,7 @@ impl DashboardStore {
             endpoint_metrics_history: RwSignal::new(std::collections::HashMap::new()),
             rtmp_stable_secs: RwSignal::new(0),
             disk_pressure: RwSignal::new("ok".to_string()),
+            s3_region_standard: RwSignal::new(true),
         }
     }
 

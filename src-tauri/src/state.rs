@@ -78,6 +78,17 @@ impl AppState {
         .to_string()
     }
 
+    /// Whether the configured `s3.region` matches the project standard
+    /// (`fsn1`). Mirrors `/api/v1/status.s3_region_standard` so the tray
+    /// webview renders the same S3-region banner as the LAN dashboard
+    /// (#278). Reads the startup config snapshot -- this Tauri-side
+    /// `AppState.config` is not live-patched (same as every other config
+    /// read here), which matches the real incident shape: a stale region
+    /// baked into `config.json` at install/upgrade time.
+    pub fn s3_region_standard(&self) -> bool {
+        self.config.s3_region_is_standard()
+    }
+
     /// Seconds since the RTMP publisher has been continuously stable.
     /// Zero when no publisher is currently connected.
     pub async fn rtmp_stable_secs(&self) -> u64 {

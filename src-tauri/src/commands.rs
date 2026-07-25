@@ -50,6 +50,9 @@ pub struct StatusResponse {
     /// Seconds since the RTMP publisher has been continuously connected.
     /// Mirrors `/api/v1/status.inpoint.details.rtmp_stable_secs` (#234).
     pub rtmp_stable_secs: u64,
+    /// Whether `s3.region` matches the project standard (`fsn1`). Mirrors
+    /// `/api/v1/status.s3_region_standard` (#278).
+    pub s3_region_standard: bool,
 }
 
 /// Get the current service status including streaming event and chunk stats.
@@ -70,6 +73,7 @@ pub async fn get_status(
     let inpoint_connected = state.is_inpoint_connected();
     let disk_pressure = state.disk_pressure();
     let rtmp_stable_secs = state.rtmp_stable_secs().await;
+    let s3_region_standard = state.s3_region_standard();
 
     Ok(CommandResult::ok(StatusResponse {
         streaming_event,
@@ -77,6 +81,7 @@ pub async fn get_status(
         inpoint_connected,
         disk_pressure,
         rtmp_stable_secs,
+        s3_region_standard,
     }))
 }
 

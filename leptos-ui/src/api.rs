@@ -72,6 +72,15 @@ pub struct StatusResponse {
     /// (the IPC StatusResponse does not carry it) -> banner stays hidden.
     #[serde(default)]
     pub disk_pressure: String,
+    /// Whether the configured S3 region matches the project standard
+    /// (`fsn1`). Drives the S3RegionBanner (#278). Defaults to true
+    /// (assume standard) so a missing field never false-alarms.
+    #[serde(default = "default_true")]
+    pub s3_region_standard: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Log entry from the backend.
@@ -121,12 +130,14 @@ pub async fn get_status() -> Result<StatusResponse, String> {
         .as_str()
         .unwrap_or("ok")
         .to_string();
+    let s3_region_standard = status["s3_region_standard"].as_bool().unwrap_or(true);
     Ok(StatusResponse {
         streaming_event: event,
         chunk_stats,
         inpoint_connected,
         rtmp_stable_secs,
         disk_pressure,
+        s3_region_standard,
     })
 }
 

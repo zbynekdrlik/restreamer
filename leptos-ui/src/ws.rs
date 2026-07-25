@@ -169,6 +169,7 @@ async fn load_initial_state(store: DashboardStore) {
         store.streaming_event.set(status.streaming_event);
         store.rtmp_stable_secs.set(status.rtmp_stable_secs);
         store.disk_pressure.set(status.disk_pressure);
+        store.s3_region_standard.set(status.s3_region_standard);
     }
     // Fetch cached delivery status (instant, no VPS round-trip)
     if let Ok(ds) = api::get_delivery_status_cached().await {

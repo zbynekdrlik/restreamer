@@ -49,7 +49,7 @@ Dashboard reachable from dev1 (returns 200).
 | IP | `10.77.8.204:8910` |
 | User | `interkom` |
 | MCP | `win-streampp` |
-| S3 region | `nbg1` |
+| S3 region | `fsn1` (migrated 2026-06-24 after the nbg1 incident, #278 — verify live via `/api/v1/status` s3_region_standard or config.json, don't trust this snapshot) |
 | Disk | disk_pressure="ok" as of 2026-07-12 (was ~82%/"warn" on 2026-06-07 — check live via `/api/v1/status`, don't trust either snapshot) |
 | Subnet | 10.77.8.x — LAN IP `10.77.8.204` NOT reachable from dev1 (10.77.9.x) |
 | Tailscale | streampp has its OWN tailscale IP (`tailscale ip -4` via `win-streampp` Shell) — reachable from dev1/Playwright even though the LAN IP isn't. Don't assume unreachable; check tailscale first. |
