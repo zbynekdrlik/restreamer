@@ -11,7 +11,9 @@ use tracing::error;
 
 use rs_core::db;
 use rs_core::models::{DeliveryEndpointMetrics, WsEvent};
+use rs_endpoint::s3::S3Client;
 
+use crate::rescue_video_cleanup::cleanup_orphaned_rescue_video;
 use crate::state::AppState;
 
 pub async fn start_stream(
@@ -301,12 +303,30 @@ pub async fn update_event(
         .clone()
         .or(existing.rescue_video_url.clone());
 
-    db::update_streaming_event(&state.pool, id, new_name, new_delay, new_rescue_url)
+    db::update_streaming_event(&state.pool, id, new_name, new_delay, new_rescue_url.clone())
         .await
         .map_err(|e| {
             error!("Failed to update event {id}: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    // #115: best-effort delete of the old S3 rescue video if it changed.
+    // Never fails the request -- a stray S3 object is tech debt, not a
+    // correctness problem.
+    match S3Client::new(&state.config.s3) {
+        Ok(s3_client) => {
+            cleanup_orphaned_rescue_video(
+                &state.pool,
+                &s3_client,
+                existing.rescue_video_url.as_deref(),
+                new_rescue_url.as_deref(),
+                None,
+                Some(id),
+            )
+            .await;
+        }
+        Err(e) => error!("Failed to create S3 client for rescue video cleanup (event {id}): {e}"),
+    }
 
     // Broadcast WS event
     if let Err(e) = state.ws_tx.send(WsEvent::StreamingEvent {

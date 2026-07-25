@@ -587,6 +587,19 @@ pub async fn delete_event_by_id(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    // #115: best-effort delete of the event's rescue video from S3. Reuses
+    // the s3_client already built above for chunk cleanup. Never fails the
+    // request -- a stray S3 object is tech debt, not a correctness problem.
+    crate::rescue_video_cleanup::cleanup_orphaned_rescue_video(
+        &state.pool,
+        &s3_client,
+        event.rescue_video_url.as_deref(),
+        None,
+        None,
+        Some(id),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 

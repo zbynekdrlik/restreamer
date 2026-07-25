@@ -924,3 +924,4 @@ async fn update_event_rescue_video_url() {
 // Upload telemetry tests are in upload_tests.rs
 // Migration idempotency tests are in migration_tests.rs
 // Pool PRAGMA tests are in pool_tests.rs
+// rescue_video_url_referenced_elsewhere tests (#115) are in rescue_video_ref_tests.rs

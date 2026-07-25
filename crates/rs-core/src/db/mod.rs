@@ -35,6 +35,9 @@ pub mod metrics;
 mod tests;
 
 #[cfg(test)]
+mod rescue_video_ref_tests;
+
+#[cfg(test)]
 mod upload_tests;
 
 #[cfg(test)]
@@ -264,6 +267,36 @@ pub async fn delete_streaming_event(pool: &SqlitePool, id: i64) -> Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Returns true if `url` is still the `rescue_video_url` of any OTHER
+/// template or event (excluding the ids passed in). An event created from
+/// a template starts out sharing the exact same S3 URL as its template, so
+/// before deleting a rescue-video S3 object we must confirm no sibling
+/// template/event still points at it (#115).
+pub async fn rescue_video_url_referenced_elsewhere(
+    pool: &SqlitePool,
+    url: &str,
+    exclude_template_id: Option<i64>,
+    exclude_event_id: Option<i64>,
+) -> Result<bool> {
+    let template_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM event_templates WHERE rescue_video_url = ?1 AND (?2 IS NULL OR id != ?2)",
+    )
+    .bind(url)
+    .bind(exclude_template_id)
+    .fetch_one(pool)
+    .await?;
+
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM streaming_events WHERE rescue_video_url = ?1 AND (?2 IS NULL OR id != ?2)",
+    )
+    .bind(url)
+    .bind(exclude_event_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(template_count + event_count > 0)
 }
 
 /// Delete all streaming events except the one with the given ID.
