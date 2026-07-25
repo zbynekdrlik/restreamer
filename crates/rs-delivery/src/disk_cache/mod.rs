@@ -7,46 +7,42 @@
 //! Component map:
 //! - `ChunkRegistry`: in-memory availability state with tokio::Notify wake.
 //! - `DownloadService`: bandwidth-managed S3 fetcher; deduplicates in-flight requests.
-//! - `EndpointReader`: replaces the consumer_task hot loop; reads disk -> RTMP.
 //! - `EvictionTask`: deletes files outside any endpoint window.
 //! - `EndpointPositionRegistry`: tracks per-endpoint chunk_id for eviction.
 //!
-//! `DiskCache` is the public facade. One instance per event.
+//! `DiskCache` is the public facade. One instance per event. Production
+//! wiring goes through `DiskCacheFetcher` (`disk_cache_fetcher.rs`), the
+//! `ChunkFetcher` impl `EndpointHandle::spawn` actually uses -- NOT through
+//! this module's `PrefetchQueue`, which the unbounded-reader alternate
+//! wiring (`EndpointReader` + `PrefetchReader`) used before it was deleted
+//! as dead code (#286). `PrefetchQueue` itself stays as a tested, reusable
+//! primitive even though nothing currently wires it in.
 //!
-//! Tasks 13+ wire this module into `init_endpoints` and `EndpointHandle::spawn`.
-//! Until that integration lands, the components are unused outside their tests
-//! -- the allow(dead_code, unused_imports) below silences the lints across the
-//! whole module while preserving the exact API surface for the integration PR.
+//! The `#![allow(dead_code, unused_imports)]` below is STILL needed after
+//! #286's deletion: `registry::wait_for_chunk_with_timeout` and some of
+//! `PrefetchQueue`'s API are exercised only by this module's own unit tests
+//! now that their production caller (`EndpointReader`) is gone, and `mod
+//! disk_cache` is private in `main.rs` so pub-ness alone doesn't shield
+//! them from the lint on the bin target.
 #![allow(dead_code, unused_imports)]
 
 pub mod download_service;
-mod endpoint_reader;
 mod eviction;
 mod position_registry;
 pub mod prefetch_queue;
-pub mod prefetch_reader;
 mod registry;
 
 #[cfg(test)]
 mod prefetch_queue_tests;
-#[cfg(test)]
-mod prefetch_reader_tests;
 
 pub use download_service::{DownloadService, FetchedChunk, S3Backend};
-pub use endpoint_reader::EndpointReader;
 pub use eviction::EvictionTask;
 pub use position_registry::{EndpointPositionRegistry, EndpointWindow};
 pub use prefetch_queue::PrefetchQueue;
-pub use prefetch_reader::PrefetchReader;
 pub use registry::{ChunkAvailability, ChunkRegistry};
 
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Per-endpoint PrefetchQueue payload type alias. Tames clippy's
-/// `type_complexity` lint and matches the `T = Arc<Vec<u8>>` payload
-/// PrefetchReader pushes.
-pub type EndpointPrefetchQueue = Arc<prefetch_queue::PrefetchQueue<Arc<Vec<u8>>>>;
 
 /// Configuration for a `DiskCache` instance. One per event.
 #[derive(Debug, Clone)]
@@ -87,9 +83,6 @@ pub struct DiskCache {
     pub cache_dir: PathBuf,
     pub event_id: String,
     pub window_chunks: i64,
-    /// Per-endpoint PrefetchQueue handles, keyed by alias. Lifetimes
-    /// match the endpoint's run; close()-d on endpoint stop.
-    endpoint_queues: tokio::sync::Mutex<std::collections::HashMap<String, EndpointPrefetchQueue>>,
 }
 
 impl DiskCache {
@@ -131,7 +124,6 @@ impl DiskCache {
             cache_dir: cfg.cache_dir,
             event_id,
             window_chunks: cfg.window_chunks,
-            endpoint_queues: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -150,45 +142,5 @@ impl DiskCache {
     /// for the same event will reuse them).
     pub async fn shutdown(self) {
         self.eviction_handle.abort();
-    }
-
-    /// Build (and remember) a PrefetchQueue + spawn its PrefetchReader for
-    /// the given endpoint alias. Idempotent: returns the existing queue if
-    /// the alias is already registered. `prefetch_k` is the prefetch depth
-    /// (0 = synchronous rendezvous, >=1 = buffered).
-    ///
-    /// Spawns the PrefetchReader in the background. Caller's responsibility
-    /// to invoke `close_endpoint_queue(alias)` on endpoint shutdown so the
-    /// reader task exits cleanly.
-    pub async fn ensure_endpoint_queue(
-        &self,
-        alias: &str,
-        start_chunk_id: i64,
-        prefetch_k: usize,
-        audit_ring: Option<Arc<crate::audit_ring::AuditRing>>,
-    ) -> EndpointPrefetchQueue {
-        use std::sync::atomic::AtomicI64;
-        let mut g = self.endpoint_queues.lock().await;
-        if let Some(q) = g.get(alias) {
-            return Arc::clone(q);
-        }
-        let queue = prefetch_queue::PrefetchQueue::new(prefetch_k);
-        let next_id = Arc::new(AtomicI64::new(start_chunk_id));
-        let q_run = Arc::clone(&queue);
-        let dl = Arc::clone(&self.download_service);
-        tokio::spawn(async move {
-            prefetch_reader::PrefetchReader::run(q_run, dl, next_id, audit_ring).await;
-        });
-        g.insert(alias.to_string(), Arc::clone(&queue));
-        queue
-    }
-
-    /// Close the per-endpoint queue (signals the PrefetchReader task to
-    /// exit by causing its push_back to return Err). Idempotent.
-    pub async fn close_endpoint_queue(&self, alias: &str) {
-        let mut g = self.endpoint_queues.lock().await;
-        if let Some(q) = g.remove(alias) {
-            q.close();
-        }
     }
 }
