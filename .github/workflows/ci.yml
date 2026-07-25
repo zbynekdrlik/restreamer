@@ -272,9 +272,6 @@ jobs:
             --exclude-re 'S3Client::upload_public_object' \
             --exclude-re 'FfmpegProcess::stderr_tail' \
             --exclude-re 'last_stderr_line' \
-            --exclude-re 'bootstrap_cloud_init' \
-            --exclude-re 'snapshot_cloud_init' \
-            --exclude-re 'delivery_env_file' \
             --exclude-re 'DeliveryOrchestrator::monitor_delivery_health' \
             --exclude-re 'MAX_INPUT_BYTES' \
             --exclude-re 'MAX_FLV_BYTES' \
