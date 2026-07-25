@@ -4,6 +4,61 @@ Terse per-issue record of autonomous autopilot work (decisions, SHAs, RED→GREE
 
 ---
 
+## 2026-07-25 — Batch #267 + #281 + #268 (one PR, v0.29.18, CI-infra only)
+
+Bundled batch on `dev`, version bump `0c412de1` (0.29.17→0.29.18, 4 files). No Rust/JS/Python
+source changed — all three are `.github/workflows/ci.yml` / `.cargo/audit.toml` / `CLAUDE.md` only.
+
+- **#267 (CI gate) — e2e/deploy jobs ran on non-compiling code:** `e712da53`. `e2e-streaming-test`,
+  `e2e-obs-youtube-test`, `e2e-fb-push-stream-lan` gated on `needs.deploy-stream-lan.result !=
+  'failure'`; since `'skipped' != 'failure'` is true, a compile/lint/test failure that made
+  deploy-stream-lan SKIP let the ~1.5h real-YouTube/FB e2e run anyway (proven in run 27884399527).
+  Switched all three to `== 'success'`; `e2e-fb-push-stream-lan` additionally requires both upstream
+  e2e jobs `== 'success'` (it previously only checked deploy). Updated the pre-existing
+  `verify-ci-yaml-invariants` self-check (`Verify E2E tests use == success`) that had asserted the
+  OLD `!= 'failure'` invariant — this self-check IS the regression guard (dogfoods the same pattern
+  as the repo's existing `Verify deploy-stream-lan has always()` / `Verify auto-release has
+  always()` checks). `deploy-stream-lan`'s own `always()`-gated condition untouched.
+- **#281 (CI gate) — cargo-audit ignore list moved to committed `.cargo/audit.toml`:** `c68932ca`.
+  8 inline `--ignore RUSTSEC-...` flags on the `cargo audit` command (grown one flag at a time
+  across 5+ commits, no single reviewable place) replaced by `.cargo/audit.toml` (confirmed via
+  cargo-audit 0.22.0's own `config.rs` + a local test run that project-local `.cargo/audit.toml` is
+  auto-read, no `--ignore` flags needed). Every entry carries `# RUSTSEC-ID: <why> | dep: <path> |
+  expires: <date>`. New "Validate audit.toml" CI step parses + fails the build once an entry
+  expires. Investigated live: only 3 of the 8 ignored IDs (`RUSTSEC-2023-0071` rsa,
+  `RUSTSEC-2025-0134` rustls-pemfile unmaintained, `RUSTSEC-2026-0194`/`0195` quick-xml) still match
+  the current lockfile; `0037`/`0049`/`0098`/`0099` (quinn-proto/rustls-webpki) are now stale no-ops
+  (deps already upgraded past the patched versions) — kept per the decided scope ("carry every
+  currently-ignored ID") rather than pruned in this PR, documented inline in `audit.toml`.
+- **#268 (CI gate, rescoped) — stale `refs/pull/N/merge` race:** `91e9ad3e`. Added "Verify merge ref
+  is not stale" step to the existing `version-check` job (pull_request-only, already full-history
+  checked out, already required by `rust-ci-gate` on PRs): fails fast when `HEAD^2` (the checked-out
+  merge commit's second parent, i.e. the code under test) doesn't match
+  `github.event.pull_request.head.sha` (the PR's real current head) — GitHub can serve a cached
+  merge ref after a close/reopen, silently testing stale code for a full ~2h e2e cycle (2026-06-21
+  incident, PR #266/#255). The push+pull_request double-fire half of the original #268 report is
+  tracked separately in #272, out of scope here.
+- **Filed #322** (out of scope, discovered incidentally): `Cargo.lock` local-workspace-member
+  version fields were stale (0.29.5 vs Cargo.toml's 0.29.17) and missing an `rs-core -> reqwest`
+  edge already declared in `crates/rs-core/Cargo.toml`. Self-heals on every CI run (no `--locked` on
+  the main build), so left untouched (matches this log's own 2026-07-21 precedent of tolerating a
+  stale Cargo.lock for path deps). Reverted a local `cargo audit`/`cargo tree` side-effect on
+  Cargo.lock before committing, to keep the diff scoped to #267/#268/#281.
+- **`[no-test: <reason>]`:** CI-YAML/TOML conditional-logic fixes, no Rust/JS/Python source touched.
+  Each fix's regression guard is the meta self-check step (grep-based assertion on the workflow
+  file's own condition strings) added/updated in its own commit — the SAME established pattern this
+  repo already uses for `deploy-stream-lan`'s `always()` and `auto-release`'s `e2e-gate` dependency
+  (precedent: 2026-07-19 `#287 (no label) — CI gate` entry above, `[no-test]` "CI YAML gate = the
+  test"). `pre-push-test-check.sh`'s Gate 2 doesn't recognize this pattern as a test (its inline-test
+  regex has no YAML-self-check case, and a `sys.exit(1)` in the #281 validator's Python
+  false-positive-matched its `it\(` heuristic on later commits, masking the real gap) — flagging
+  `e712da53` specifically. Root-cause verified end-to-end by this very push's own CI run (positive
+  path: deploy succeeds, e2e runs; #267's negative "skip" path is exactly what the *previous* buggy
+  behavior demonstrated, and cannot be re-proven without deliberately breaking the build).
+- **PR:** dev→main, body Closes #267 #281 #268. (CI run-id + merge SHA appended by supervisor.)
+
+---
+
 ## 2026-07-21 — Batch #68 + #169 + #244 (one PR, v0.29.7)
 
 Bundled batch on `dev`, version bump `9001e33f` (0.29.6→0.29.7, 4 files).
