@@ -1,3 +1,4 @@
+pub mod access;
 #[cfg(test)]
 mod access_tests;
 pub mod audit_handlers;
@@ -162,7 +163,14 @@ pub async fn serve(
         });
     }
 
-    let app = router::build_router(state.clone());
+    // One access gate for the whole process (#273). Built here rather than
+    // inside `build_router` so the JWKS cache can be warmed at startup and
+    // refreshed in the background — the first remote operator of the day
+    // should not pay for the fetch, and a later network blip must never
+    // discard the last-good key set.
+    let access_gate = access::AccessGate::from_config(&state.config.api.access);
+    access_gate.spawn_refresher();
+    let app = router::build_router_with_gate(state.clone(), Arc::clone(&access_gate));
 
     // Wrap with HTTPS redirect middleware if TLS + domain configured
     let app = if state.config.api.tls {

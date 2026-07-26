@@ -199,14 +199,67 @@ pub struct ApiConfig {
     pub tls_key: String,
     #[serde(default)]
     pub https_domain: Option<String>,
-    /// Optional shared secret for authenticated remote diagnostic access.
-    /// When set, a request bearing a matching `X-Diag-Token` header may reach
-    /// `/api/v1/diag/dump` even if it arrived through a reverse proxy /
-    /// Cloudflare tunnel (i.e. carries forwarded headers). When unset
-    /// (default), only genuinely-local loopback requests with no forwarded
-    /// headers are allowed. Never committed with a real value. Issue #205.
+    /// Origin-aware access control (#70 / #273 / #337 / #339).
     #[serde(default)]
-    pub diag_token: Option<String>,
+    pub access: AccessConfig,
+}
+
+/// Cloudflare Access (Zero Trust) verification settings.
+///
+/// **Every value here is a PUBLIC identifier, not a credential** — which is the
+/// whole point of the design chosen in #273: the box stores no shared secret at
+/// all, so nothing on it can be stolen, leaked through `GET /api/v1/config`, or
+/// rewritten through `PATCH /api/v1/config` to unlock the door.
+///
+/// Layer 1 is the Cloudflare Access application in front of the tunnel; this is
+/// layer 2, which re-verifies the signed assertion inside the app so that a
+/// second ingress rule, a port-forward, a second `cloudflared`, or a revived
+/// tunnel on another box cannot bypass the edge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessConfig {
+    /// `enforce` (default) — internet-sourced requests need a valid Access JWT.
+    /// `log_only` — classify and log, allow everything (the zero-rebuild
+    /// rollback: behaviour identical to before #273).
+    /// `lan_only` — reject every internet-sourced request outright, valid JWT
+    /// or not (the opposite emergency lever, for a stolen phone session).
+    #[serde(default = "default_access_mode")]
+    pub mode: String,
+    /// Zero Trust team domain; JWKS is fetched from
+    /// `https://<team_domain>/cdn-cgi/access/certs` and the expected issuer is
+    /// `https://<team_domain>`.
+    #[serde(default = "default_access_team_domain")]
+    pub team_domain: String,
+    /// Accepted `aud` values — the Access application IDs. Both boxes list both
+    /// AUDs so `streamsnv` and `streampp` can ship a byte-identical config.
+    #[serde(default = "default_access_aud")]
+    pub aud: Vec<String>,
+}
+
+fn default_access_mode() -> String {
+    "enforce".to_string()
+}
+
+fn default_access_team_domain() -> String {
+    "newlevelchurch.cloudflareaccess.com".to_string()
+}
+
+fn default_access_aud() -> Vec<String> {
+    vec![
+        // restreamer-snv -> streamsnv.newlevel.media
+        "3d69cb15e165fef384d065feebe37f94918e2f4730756bc6c0ba0c054ff42d26".to_string(),
+        // restreamer-pp  -> streampp.newlevel.media
+        "238d9efbb4659d984e6b454d6ccf39156aa67007db1f2c7f709e153ce788dca0".to_string(),
+    ]
+}
+
+impl Default for AccessConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_access_mode(),
+            team_domain: default_access_team_domain(),
+            aud: default_access_aud(),
+        }
+    }
 }
 
 fn default_rtmp_port() -> u16 {
@@ -262,7 +315,7 @@ impl Default for ApiConfig {
             tls_cert: default_tls_cert(),
             tls_key: default_tls_key(),
             https_domain: None,
-            diag_token: None,
+            access: AccessConfig::default(),
         }
     }
 }

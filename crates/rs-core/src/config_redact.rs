@@ -244,6 +244,11 @@ mod tests {
             "api": {
                 "tls_cert": "cert.pem",
                 "tls_key": "key.pem",
+                // NOT a `Config` field any more (`api.diag_token` was deleted
+                // with #273 — the Access design stores no secret on the box).
+                // Kept in this fixture on purpose: it proves the walker masks a
+                // credential-named field it has never heard of, which is the
+                // deny-by-default promise this module exists for.
                 "diag_token": "fake-diag",
                 "port": 8910
             },
@@ -414,8 +419,10 @@ mod tests {
     /// field: classify it here. Mask it unless you can argue it is NOT a
     /// credential (a name, an id, a path, a port, a flag).
     const CONFIG_INVENTORY: &[(&str, bool)] = &[
+        ("api.access.aud", false),
+        ("api.access.mode", false),
+        ("api.access.team_domain", false),
         ("api.bind", false),
-        ("api.diag_token", true),
         ("api.https_domain", false),
         ("api.https_port", false),
         ("api.port", false),
@@ -517,7 +524,6 @@ mod tests {
         config.notifications.discord_webhook_url = "https://discord.test/h".into();
         config.notifications.discord_channel_id = "123".into();
         config.obs.ws_password = "fake-g".into();
-        config.api.diag_token = Some("fake-h".into());
         config.api.https_domain = Some("example.test".into());
 
         let plain = serde_json::to_value(&config).unwrap();

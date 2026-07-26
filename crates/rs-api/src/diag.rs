@@ -5,8 +5,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{ConnectInfo, State};
-use axum::http::HeaderMap;
+use axum::extract::State;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -170,65 +169,23 @@ pub async fn build_dump<S: DumpSources>(sources: &S) -> Value {
     })
 }
 
-/// Forwarded-header names set by reverse proxies (Cloudflare tunnel, nginx,
-/// …). A genuinely-local operator request sets none of these; a request that
-/// reached us through cloudflared on stream.lan — which connects from
-/// `127.0.0.1` and so passes a naive loopback check — carries at least one.
-/// Issue #205.
-const PROXY_HEADERS: [&str; 3] = ["cf-connecting-ip", "x-forwarded-for", "x-forwarded-host"];
-
-/// Decides whether a caller may read the diagnostic dump.
+/// Serves the diagnostic dump (audit log + endpoint/VPS state).
 ///
-/// Loopback alone is insufficient: cloudflared on stream.lan tunnels public
-/// traffic to `http://localhost:8910`, so a request from the public internet
-/// arrives from `127.0.0.1` and passes a naive loopback check (issue #205). A
-/// proxied request always carries a forwarded header ([`PROXY_HEADERS`]) that a
-/// genuinely-local operator request does not, so we require BOTH a loopback
-/// peer AND the absence of any forwarded header.
+/// Access control used to live HERE — a hand-rolled loopback + no-forwarded-
+/// header check with an `api.diag_token` escape hatch (#179, #205, PR #314).
+/// That rule was right, but it protected exactly one route while the other ~60
+/// stayed open. It now lives in [`crate::access`] as router-wide middleware, so
+/// this handler carries no check of its own: `/diag/dump` is an ordinary
+/// **gated** route — reachable from the LAN unauthenticated, and from the
+/// internet with a valid Cloudflare Access assertion, which is what keeps
+/// remote diagnosis from a phone working (#273).
 ///
-/// Defense in depth: when `api.diag_token` is configured, a request bearing a
-/// matching `X-Diag-Token` header is allowed even if it looks proxied, so a
-/// future authenticated remote diagnostic path keeps working. When the token is
-/// unset (default), the loopback + no-forwarded-header rule governs alone.
-fn diag_access_allowed(
-    addr: &std::net::SocketAddr,
-    headers: &HeaderMap,
-    diag_token: Option<&str>,
-) -> bool {
-    // Authenticated token path: a valid shared secret overrides the
-    // loopback/proxy rules so an authenticated remote diag can work.
-    if let Some(expected) = diag_token {
-        let provided = headers.get("x-diag-token").and_then(|v| v.to_str().ok());
-        if !expected.is_empty() && provided == Some(expected) {
-            return true;
-        }
-    }
-    // Otherwise the request must be genuinely local: a loopback peer with no
-    // forwarded headers (any of which would betray a reverse proxy / tunnel).
-    if !addr.ip().is_loopback() {
-        return false;
-    }
-    !PROXY_HEADERS.iter().any(|h| headers.contains_key(*h))
-}
-
-/// Refuses any caller that is not a genuinely-local operator. The dump exposes
-/// the audit log and endpoint/VPS state; only a loopback request with no
-/// forwarded headers — or one bearing a valid `X-Diag-Token` when
-/// `api.diag_token` is configured — is allowed (see [`diag_access_allowed`]).
-/// `lib.rs::serve` wires the request peer address via
-/// `into_make_service_with_connect_info::<SocketAddr>()`. Issues #179, #205.
+/// The shared secret `api.diag_token` is gone with it: it was a credential
+/// stored in the very config file that leaked (#336) and was rewritable through
+/// `PATCH /api/v1/config`. The Access design stores no secret on the box at all.
 pub async fn diag_dump_handler(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
 ) -> Result<Json<Value>, axum::http::StatusCode> {
-    if !diag_access_allowed(&addr, &headers, state.config.api.diag_token.as_deref()) {
-        tracing::warn!(
-            "/diag/dump refused: peer {addr} is not a genuinely-local operator \
-             (requires loopback + no forwarded headers, or a valid X-Diag-Token)"
-        );
-        return Err(axum::http::StatusCode::FORBIDDEN);
-    }
     let event_id = current_event_id_from_state(&state).await;
     let sources = ProductionSources {
         pool: state.pool.clone(),
@@ -389,240 +346,75 @@ mod tests {
 }
 
 #[cfg(test)]
-mod loopback_tests {
-    //! Issue #179 — /api/v1/diag/dump must refuse non-loopback callers.
-    //! The dump exposes the audit log and endpoint state; only the local
-    //! operator (127.0.0.1 / ::1) is allowed to read it.
+mod diag_access_tests {
+    //! `/api/v1/diag/dump` is now an ordinary **gated** route (#273): the
+    //! router-wide middleware in [`crate::access`] decides, not the handler.
+    //!
+    //! What changed vs #179/#205, deliberately: a **LAN peer is now allowed**.
+    //! The dump exposes the audit log and endpoint state, which the same LAN
+    //! client can already read through `/api/v1/audit` and `/api/v1/status` —
+    //! and on this box "LAN is trusted, the internet is not" is the whole
+    //! model. What has NOT changed is the part that actually mattered: a
+    //! tunneled request (loopback peer + a forwarded header) is still refused
+    //! unless it carries a valid Cloudflare Access assertion.
 
+    use crate::access_tests::{req, test_state};
     use crate::router::build_router;
-    use crate::state::AppState;
-    use axum::body::Body;
-    use axum::extract::ConnectInfo;
-    use axum::http::{Request, StatusCode};
-    use rs_core::config::Config;
-    use rs_core::models::WsEvent;
-    use std::net::SocketAddr;
-    use tokio::sync::broadcast;
+    use axum::http::StatusCode;
     use tower::ServiceExt;
 
-    async fn test_state() -> AppState {
-        let pool = rs_core::db::create_memory_pool().await.unwrap();
-        rs_core::db::run_migrations(&pool).await.unwrap();
-        let config = Config::for_testing();
-        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new_for_tests(pool, config, ws_tx)
-    }
-
-    async fn test_state_with_diag_token(token: &str) -> AppState {
-        let pool = rs_core::db::create_memory_pool().await.unwrap();
-        rs_core::db::run_migrations(&pool).await.unwrap();
-        let mut config = Config::for_testing();
-        // Fake fixture secret — never a real token. Issue #205.
-        config.api.diag_token = Some(token.to_string());
-        let (ws_tx, _) = broadcast::channel::<WsEvent>(16);
-        AppState::new_for_tests(pool, config, ws_tx)
-    }
-
-    fn req_with_peer(peer: &str) -> Request<Body> {
-        let addr: SocketAddr = peer.parse().unwrap();
-        let mut req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/diag/dump")
-            .body(Body::empty())
+    #[tokio::test]
+    async fn diag_dump_allows_a_genuinely_local_operator() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req("POST", "/api/v1/diag/dump", "127.0.0.1:54321", &[]))
+            .await
             .unwrap();
-        req.extensions_mut().insert(ConnectInfo(addr));
-        req
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    fn req_with_peer_headers(peer: &str, headers: &[(&str, &str)]) -> Request<Body> {
-        let addr: SocketAddr = peer.parse().unwrap();
-        let mut builder = Request::builder().method("POST").uri("/api/v1/diag/dump");
-        for (k, v) in headers {
-            builder = builder.header(*k, *v);
+    #[tokio::test]
+    async fn diag_dump_allows_a_lan_operator() {
+        let app = build_router(test_state().await);
+        let resp = app
+            .oneshot(req("POST", "/api/v1/diag/dump", "10.77.9.42:54000", &[]))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "#273 supersedes #179's loopback-only rule for /diag/dump: the LAN is trusted"
+        );
+    }
+
+    #[tokio::test]
+    async fn diag_dump_refuses_a_tunneled_request_without_an_access_token() {
+        for header in crate::access::PROXY_HEADERS {
+            let app = build_router(test_state().await);
+            let resp = app
+                .oneshot(req(
+                    "POST",
+                    "/api/v1/diag/dump",
+                    "127.0.0.1:54321",
+                    &[(header, "203.0.113.7")],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "loopback peer carrying {header} is a tunneled request (#205)"
+            );
         }
-        let mut req = builder.body(Body::empty()).unwrap();
-        req.extensions_mut().insert(ConnectInfo(addr));
-        req
     }
 
     #[tokio::test]
-    async fn diag_dump_rejects_non_loopback_ipv4() {
-        let app = build_router(test_state().await);
-        let resp = app.oneshot(req_with_peer("8.8.8.8:65432")).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::FORBIDDEN,
-            "non-loopback 8.8.8.8 must be denied"
-        );
-    }
-
-    #[tokio::test]
-    async fn diag_dump_rejects_lan_peer() {
+    async fn diag_dump_refuses_a_direct_public_peer() {
         let app = build_router(test_state().await);
         let resp = app
-            .oneshot(req_with_peer("10.77.9.42:54000"))
+            .oneshot(req("POST", "/api/v1/diag/dump", "8.8.8.8:65432", &[]))
             .await
             .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::FORBIDDEN,
-            "LAN peer 10.77.9.42 must be denied"
-        );
-    }
-
-    #[tokio::test]
-    async fn diag_dump_accepts_loopback_ipv4() {
-        let app = build_router(test_state().await);
-        let resp = app.oneshot(req_with_peer("127.0.0.1:54321")).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "loopback 127.0.0.1 must be allowed"
-        );
-    }
-
-    #[tokio::test]
-    async fn diag_dump_accepts_loopback_ipv6() {
-        let app = build_router(test_state().await);
-        let resp = app.oneshot(req_with_peer("[::1]:54321")).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "loopback ::1 must be allowed"
-        );
-    }
-
-    // Issue #205 — loopback alone is insufficient once cloudflared tunnels
-    // public traffic to localhost:8910. A tunneled request arrives from
-    // 127.0.0.1 (passing the naive loopback check) but always carries a
-    // forwarded header (Cf-Connecting-Ip / X-Forwarded-For / X-Forwarded-Host)
-    // that a genuinely-local operator request never sets. Reject those.
-
-    #[tokio::test]
-    async fn diag_dump_rejects_loopback_with_x_forwarded_for() {
-        let app = build_router(test_state().await);
-        let resp = app
-            .oneshot(req_with_peer_headers(
-                "127.0.0.1:54321",
-                &[("x-forwarded-for", "203.0.113.7")],
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::FORBIDDEN,
-            "loopback peer carrying X-Forwarded-For is a tunneled request and must be denied (issue #205)"
-        );
-    }
-
-    #[tokio::test]
-    async fn diag_dump_rejects_loopback_with_cf_connecting_ip() {
-        let app = build_router(test_state().await);
-        let resp = app
-            .oneshot(req_with_peer_headers(
-                "127.0.0.1:54321",
-                &[("cf-connecting-ip", "203.0.113.7")],
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::FORBIDDEN,
-            "loopback peer carrying Cf-Connecting-Ip (Cloudflare tunnel) must be denied (issue #205)"
-        );
-    }
-
-    #[tokio::test]
-    async fn diag_dump_rejects_loopback_with_x_forwarded_host() {
-        let app = build_router(test_state().await);
-        let resp = app
-            .oneshot(req_with_peer_headers(
-                "127.0.0.1:54321",
-                &[("x-forwarded-host", "streamsnv.newlevel.media")],
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::FORBIDDEN,
-            "loopback peer carrying X-Forwarded-Host must be denied (issue #205)"
-        );
-    }
-
-    #[tokio::test]
-    async fn diag_dump_accepts_genuinely_local_no_forwarded_headers() {
-        let app = build_router(test_state().await);
-        let resp = app
-            .oneshot(req_with_peer_headers("127.0.0.1:54321", &[]))
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "genuinely-local loopback request with no forwarded headers must still be allowed"
-        );
-    }
-
-    // Issue #205 option 3 (defense in depth) — an optional `api.diag_token`
-    // shared secret lets an authenticated remote diag reach the dump even
-    // through the tunnel, while a wrong/absent token stays denied.
-
-    #[tokio::test]
-    async fn diag_dump_accepts_proxied_request_with_valid_token() {
-        let app = build_router(test_state_with_diag_token("s3cr3t-fixture").await);
-        let resp = app
-            .oneshot(req_with_peer_headers(
-                "127.0.0.1:54321",
-                &[
-                    ("x-forwarded-for", "203.0.113.7"),
-                    ("x-diag-token", "s3cr3t-fixture"),
-                ],
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "a proxied request bearing the matching X-Diag-Token must be allowed (issue #205 option 3)"
-        );
-    }
-
-    #[tokio::test]
-    async fn diag_dump_rejects_proxied_request_with_wrong_token() {
-        let app = build_router(test_state_with_diag_token("s3cr3t-fixture").await);
-        let resp = app
-            .oneshot(req_with_peer_headers(
-                "127.0.0.1:54321",
-                &[
-                    ("x-forwarded-for", "203.0.113.7"),
-                    ("x-diag-token", "wrong-token"),
-                ],
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::FORBIDDEN,
-            "a proxied request with a wrong X-Diag-Token must be denied"
-        );
-    }
-
-    #[tokio::test]
-    async fn diag_dump_rejects_proxied_request_with_no_token_even_when_configured() {
-        // Token configured, but the tunneled request carries none: the
-        // loopback + no-forwarded-header rule still governs, so it is denied.
-        let app = build_router(test_state_with_diag_token("s3cr3t-fixture").await);
-        let resp = app
-            .oneshot(req_with_peer_headers(
-                "127.0.0.1:54321",
-                &[("x-forwarded-for", "203.0.113.7")],
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::FORBIDDEN,
-            "a tunneled request without the token must be denied even when a token is configured"
-        );
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

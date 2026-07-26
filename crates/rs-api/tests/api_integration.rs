@@ -512,24 +512,51 @@ async fn clear_chunks_resets_stats_to_zero() {
     assert_eq!(stats["pending_chunks"], 0);
 }
 
+/// CORS is same-origin now (#339).
+///
+/// This test used to assert `Access-Control-Allow-Origin: *`. That wildcard was
+/// wrong, not merely loose: it let ANY page on the internet read the dashboard's
+/// state off a box on the church LAN. The dashboard is served by this very
+/// process — `compute_api_base()` returns `window.location.origin + '/api/v1'` —
+/// so every legitimate browser call is same-origin and nothing real needs the
+/// wildcard.
 #[tokio::test]
-async fn cors_allows_any_origin() {
+async fn cors_allows_only_the_requests_own_origin() {
     let state = test_state().await;
     let (base, _) = start_server(state).await;
     let client = reqwest::Client::new();
 
-    // Any origin should be accepted (LAN access)
+    // `base` is http://127.0.0.1:<port>/api/v1 — derive the page origin the
+    // dashboard would actually be loaded from.
+    let origin = base.trim_end_matches("/api/v1").to_string();
+
     let resp = client
         .get(format!("{base}/health"))
-        .header("Origin", "http://192.168.1.100:8910")
+        .header("Origin", &origin)
         .send()
         .await
         .unwrap();
-
     assert_eq!(resp.status(), 200);
-    let cors_header = resp.headers().get("access-control-allow-origin");
-    assert!(cors_header.is_some());
-    assert_eq!(cors_header.unwrap(), "*");
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some(origin.as_str()),
+        "the dashboard's own origin must be allowed"
+    );
+
+    // A foreign origin gets no CORS grant at all, so the browser refuses to
+    // hand the response body to that page.
+    let resp = client
+        .get(format!("{base}/health"))
+        .header("Origin", "https://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.headers().get("access-control-allow-origin").is_none(),
+        "a cross-origin page must not be granted a read of the dashboard API"
+    );
 }
 
 #[tokio::test]

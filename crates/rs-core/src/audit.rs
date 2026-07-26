@@ -64,6 +64,11 @@ pub enum Action {
     /// looking at the activity feed should immediately see "rust pusher
     /// reconnected" rather than the misleading "ffmpeg died" (#103).
     EndpointRtmpPushDied,
+    /// A mutating request arrived from the internet and was allowed because it
+    /// carried a valid Cloudflare Access assertion. Detail JSON:
+    /// {identity, method, path} — `identity` is the Access `email` claim, so
+    /// remote control is attributed to a person for free (#273).
+    RemoteControlAction,
     S3UploadFailed,
     S3FetchFailed,
     /// Delivery VPS switched an endpoint to the rescue video because the

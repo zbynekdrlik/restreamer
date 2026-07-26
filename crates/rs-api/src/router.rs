@@ -1,10 +1,12 @@
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::http::{Method, header};
+use axum::http::request::Parts;
+use axum::http::{HeaderValue, Method, header};
 use axum::routing::{get, post};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use crate::access;
 use crate::delivery_handlers;
 use crate::handlers;
 use crate::rescue_video_handlers;
@@ -17,7 +19,17 @@ use crate::websocket;
 use crate::youtube;
 
 /// Build the Axum router with all API routes.
+///
+/// Creates its own [`access::AccessGate`] from the config. Production uses
+/// [`build_router_with_gate`] instead so `lib.rs::serve` can hold the same gate
+/// and warm/refresh its JWKS cache in the background.
 pub fn build_router(state: AppState) -> Router {
+    let gate = access::AccessGate::from_config(&state.config.api.access);
+    build_router_with_gate(state, gate)
+}
+
+/// Build the router around an existing access gate.
+pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::AccessGate>) -> Router {
     let api = Router::new()
         // Core status/health
         .route("/health", get(handlers::health))
@@ -210,9 +222,26 @@ pub fn build_router(state: AppState) -> Router {
             post(crate::oauth_device::test_grant_now),
         );
 
-    // Allow any origin so the dashboard is accessible from LAN devices
+    // Same-origin only (#339). The dashboard is served by this very process
+    // (`compute_api_base()` returns `window.location.origin + '/api/v1'`), so
+    // every legitimate browser call is same-origin — via the LAN IP, via
+    // `stream.lan`, or via the public hostname behind the tunnel, each of which
+    // matches its own Host. `allow_origin(Any)` used to hand every page on the
+    // internet a read of the dashboard's state; it is gone.
+    //
+    // CORS is NOT the CSRF barrier — a bodyless cross-origin POST is a simple
+    // request and is never preflighted. That is handled in
+    // `access::csrf_violation`.
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(AllowOrigin::predicate(
+            |origin: &HeaderValue, parts: &Parts| {
+                origin
+                    .to_str()
+                    .ok()
+                    .map(|o| access::origin_is_same_site(o, &parts.headers))
+                    .unwrap_or(false)
+            },
+        ))
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -224,7 +253,6 @@ pub fn build_router(state: AppState) -> Router {
 
     let mut router = Router::new()
         .nest("/api/v1", api)
-        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 
@@ -237,7 +265,25 @@ pub fn build_router(state: AppState) -> Router {
         router = router.fallback_service(serve);
     }
 
+    // Origin-aware access control (#70/#273/#337/#339) goes on LAST, AFTER
+    // `fallback_service`, because `Router::layer` only wraps routes registered
+    // BEFORE it — attaching it up where the CORS layer used to sit would have
+    // left the dashboard SPA (HTML + WASM) completely ungated. `access_tests`
+    // pins that with `the_spa_fallback_is_gated_too`.
+    //
+    // CORS stays OUTERMOST (applied after, so it runs first) so that an
+    // `OPTIONS` preflight is answered by the CORS layer rather than being
+    // refused by the gate.
+    let ctx = access::AccessCtx {
+        gate,
+        state: state.clone(),
+    };
     router
+        .layer(axum::middleware::from_fn_with_state(
+            ctx,
+            access::access_middleware,
+        ))
+        .layer(cors)
 }
 
 #[cfg(test)]
