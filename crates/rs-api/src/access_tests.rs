@@ -439,6 +439,44 @@ pub(crate) fn declared_routes() -> Vec<String> {
     out
 }
 
+/// The scraper reads ONE file, so it would be blind to a route registered in
+/// another module and `nest`ed in — the coverage test below would keep passing
+/// while the new route went ungated. Fail loudly if that day comes.
+#[tokio::test]
+async fn no_routes_are_registered_outside_router_rs() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut strays = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("read src/") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        // router.rs is the inventory's source; the test files assert ABOUT
+        // routes and legitimately mention the macro text.
+        if name == "router.rs" || name.contains("test") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).expect("read source");
+        // Only PRODUCTION code counts. Several modules build a throwaway
+        // `Router` inside their own `#[cfg(test)]` block, which is not a route
+        // on the real server. Truncating at the first `#[cfg(test)]` is exact
+        // here rather than a heuristic: clippy's `items_after_test_module`
+        // (a hard `-D warnings` error in this repo) guarantees the test module
+        // is the LAST item in every file.
+        let production = body.split("#[cfg(test)]").next().unwrap_or("");
+        if production.contains(".route(") {
+            strays.push(name);
+        }
+    }
+    assert!(
+        strays.is_empty(),
+        "these modules register routes that `declared_routes()` cannot see, so the \
+         every-route-is-gated guard would silently skip them: {strays:?}. \
+         Either move the routes into router.rs or teach the scraper about the file."
+    );
+}
+
 #[tokio::test]
 async fn route_inventory_is_not_empty() {
     let routes = declared_routes();

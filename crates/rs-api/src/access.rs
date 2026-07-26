@@ -57,7 +57,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
@@ -86,6 +85,12 @@ const LOOPBACK_ONLY_PREFIX: &str = "/api/v1/_test/";
 /// failed refresh the last-good set keeps being served indefinitely — a
 /// transient network blip must never lock the operator out.
 const JWKS_MAX_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Floor between two REQUEST-TRIGGERED key fetches. Cloudflare rotates keys on
+/// the order of weeks, so a minute of staleness costs nothing, while without a
+/// floor an unauthenticated attacker could make us hammer the identity
+/// endpoint once per request by sending an unknown `kid`.
+const JWKS_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Where a request came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +194,12 @@ pub fn is_genuinely_local(peer: Option<&SocketAddr>, headers: &HeaderMap) -> boo
         return false;
     }
     match peer {
-        Some(addr) => addr.ip().is_loopback(),
+        // `to_canonical()` unmaps `::ffff:127.0.0.1` to `127.0.0.1` first. A
+        // bare `is_loopback()` returns false for the mapped form, so if
+        // `api.bind` were ever switched to `::` (dual-stack) every CI `_test`
+        // hook call — all of which use `http://127.0.0.1:8910` — would start
+        // 403ing and the E2E jobs would break for no visible reason.
+        Some(addr) => addr.ip().to_canonical().is_loopback(),
         None => true,
     }
 }
@@ -226,6 +236,71 @@ fn request_authorities(headers: &HeaderMap) -> Vec<String> {
     out
 }
 
+/// DNS suffixes the box legitimately answers to.
+///
+/// Extending this is a one-line change; the only rule is that every entry must
+/// be a name WE control, never a public suffix an attacker could register a
+/// label under.
+const TRUSTED_HOST_SUFFIXES: &[&str] = &[".lan", ".local", ".ts.net", ".newlevel.media"];
+
+/// Strip a port (and IPv6 brackets) from a `host[:port]` authority.
+fn authority_host(authority: &str) -> &str {
+    let a = authority.trim();
+    if let Some(rest) = a.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    match a.rsplit_once(':') {
+        // Only strip when what follows is actually a port, so a bare IPv6
+        // literal is not truncated.
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => a,
+    }
+}
+
+/// True when this box could plausibly be addressed by that authority.
+///
+/// **This is the DNS-rebinding defence.** Comparing `Origin` against `Host`
+/// alone is not enough: in a rebinding attack BOTH are attacker-chosen. The
+/// attacker serves a page on `http://evil.example:8910/` with a low-TTL record,
+/// rebinds the name to the box's LAN address, and the browser then sends
+/// `Host: evil.example:8910` and a matching `Origin` — the two agree, yet the
+/// request is forgery from a page the operator merely visited. Requiring the
+/// host to be one WE answer to breaks that, because the attacker cannot make
+/// the browser send a Host it did not navigate to.
+///
+/// Accepted: an IP literal (a rebinding attack cannot use one — the browser
+/// sends the name it navigated to), a single-label name (`stream-pp`,
+/// `localhost`, mDNS/MagicDNS short names — not registrable, so not an attack
+/// vector), and the suffixes in [`TRUSTED_HOST_SUFFIXES`].
+fn is_trusted_authority(authority: &str) -> bool {
+    let host = authority_host(authority).to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    if host.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    if !host.contains('.') {
+        return true;
+    }
+    TRUSTED_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host.ends_with(suffix))
+}
+
+/// A WebSocket handshake is a `GET`, and WebSockets are exempt from CORS — so
+/// without this check any page on the internet, opened by a browser on the
+/// church LAN, could `new WebSocket('ws://10.77.9.204:8910/api/v1/ws')` and
+/// read the live stream/delivery state (cross-site WebSocket hijacking). The
+/// socket only accepts Close/Ping inbound so no control action is reachable,
+/// but the state leak is real.
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+}
+
 /// True when `origin` addresses the same host this request was sent to.
 ///
 /// Used by the CORS layer so cross-origin READS are refused as well: with
@@ -252,8 +327,18 @@ pub fn origin_is_same_site(origin: &str, headers: &HeaderMap) -> bool {
 ///
 /// Non-browser callers (curl, `Invoke-RestMethod`, the Playwright *request*
 /// API, the CI runner) send neither header, so nothing in CI is affected.
+///
+/// The same check covers WebSocket handshakes, which are `GET` but are exempt
+/// from CORS — see [`is_websocket_upgrade`].
+///
+/// Residual case, accepted knowingly: a browser that sends NEITHER `Origin`
+/// nor `Sec-Fetch-Site` on a cross-site mutating request would pass. Every
+/// currently-supported browser sends `Origin` on cross-site POSTs, and the
+/// alternative — refusing requests with no `Origin` — would break curl, the CI
+/// runner and `soak-mini.ps1`, i.e. trade a theoretical hole for a certain
+/// outage.
 fn csrf_violation(headers: &HeaderMap, method: &Method) -> Option<String> {
-    if !is_mutating(method) {
+    if !is_mutating(method) && !is_websocket_upgrade(headers) {
         return None;
     }
     if let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
@@ -270,6 +355,14 @@ fn csrf_violation(headers: &HeaderMap, method: &Method) -> Option<String> {
     // barriers.
     if authorities.is_empty() {
         return None;
+    }
+    // The Host must be one this box actually answers to, or `Origin == Host`
+    // proves nothing (DNS rebinding — see `is_trusted_authority`).
+    if !authorities.iter().any(|a| is_trusted_authority(a)) {
+        return Some(format!(
+            "Host {authorities:?} is not an address this box answers to \
+             (possible DNS rebinding)"
+        ));
     }
     match origin_authority(origin) {
         Some(a) if authorities.contains(&a.to_ascii_lowercase()) => None,
@@ -296,8 +389,10 @@ struct Jwk {
 }
 
 /// The claims we care about. `aud`, `iss`, `exp` and `nbf` are validated by
-/// `jsonwebtoken` itself against [`Validation`]; `email` is what we attribute
-/// the audit row to.
+/// `jsonwebtoken` against [`Validation`] — and all four are marked REQUIRED
+/// there, because `set_audience`/`set_issuer` alone only validate a claim when
+/// it is PRESENT: a token that simply omits `aud` would otherwise sail past the
+/// audience pin. `email` is what we attribute the audit row to.
 #[derive(Debug, Deserialize)]
 pub struct AccessClaims {
     #[serde(default)]
@@ -335,7 +430,9 @@ pub struct AccessGate {
     jwks_url: String,
     http: reqwest::Client,
     cache: RwLock<KeyCache>,
-    /// Single-flight guard so a burst of internet requests triggers one fetch.
+    /// Serialises refreshes so a burst of internet requests triggers ONE fetch.
+    /// The freshness re-check inside the critical section is what makes it a
+    /// real single-flight rather than just a queue.
     fetching: Mutex<()>,
 }
 
@@ -349,9 +446,13 @@ impl AccessGate {
             jwks_url: format!("https://{team}/cdn-cgi/access/certs"),
             http: reqwest::Client::builder()
                 // Never let a slow identity endpoint hold a request open.
+                // `expect` rather than a default client: the fallback would
+                // silently have NO timeout, which is the one thing this line
+                // exists to prevent. It runs once at startup, so a panic here
+                // is honest and immediate.
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_default(),
+                .expect("build the Access HTTP client"),
             cache: RwLock::new(KeyCache::default()),
             fetching: Mutex::new(()),
         })
@@ -379,14 +480,42 @@ impl AccessGate {
         let gate = Arc::clone(self);
         tokio::spawn(async move {
             loop {
-                gate.refresh_keys().await;
+                gate.refresh_keys(true).await;
                 tokio::time::sleep(JWKS_MAX_AGE).await;
             }
         });
     }
 
-    async fn refresh_keys(&self) {
+    /// Fetch the team's JWKS, replacing the cache only on success.
+    ///
+    /// `forced` skips the rate limit and is used by the startup/periodic
+    /// refresher. A request-path caller passes `false`: an internet-sourced
+    /// request naming an unknown `kid` must NOT be able to make us hit
+    /// Cloudflare again. Without that limit, N requests with N random `kid`s
+    /// cost N sequential 5-second fetches — a free amplifier pointed at the
+    /// identity endpoint and a self-DoS of our own remote path.
+    async fn refresh_keys(&self, forced: bool) {
         let _guard = self.fetching.lock().await;
+        // Re-check under the lock: while we queued, another task may already
+        // have fetched. THIS is what makes the mutex a single-flight rather
+        // than just a queue of identical fetches.
+        {
+            let cache = self.cache.read().await;
+            if let Some(at) = cache.fetched_at {
+                let min_age = if forced {
+                    Duration::ZERO
+                } else {
+                    JWKS_MIN_REFRESH_INTERVAL
+                };
+                if at.elapsed() < min_age {
+                    tracing::debug!(
+                        "access: JWKS refresh skipped, last fetch was {:?} ago",
+                        at.elapsed()
+                    );
+                    return;
+                }
+            }
+        }
         let fetched = match self.http.get(&self.jwks_url).send().await {
             Ok(resp) => match resp.error_for_status() {
                 Ok(ok) => ok.json::<Jwks>().await,
@@ -450,7 +579,9 @@ impl AccessGate {
                 }
             }
         }
-        self.refresh_keys().await;
+        // Rate-limited: an unknown `kid` from the internet must not be able to
+        // trigger a fetch per request.
+        self.refresh_keys(false).await;
         let cache = self.cache.read().await;
         cache.keys.get(kid).cloned()
     }
@@ -476,6 +607,17 @@ impl AccessGate {
         validation.set_issuer(&[&self.issuer]);
         validation.validate_exp = true;
         validation.validate_nbf = true;
+        // MANDATORY, not decoration. `set_audience`/`set_issuer` only validate
+        // a claim that is PRESENT — jsonwebtoken treats an absent `aud`/`iss`
+        // as "nothing to check" and returns Ok. Without this line a token
+        // signed by any key in the team's JWKS but carrying no `aud` would be
+        // accepted for THIS application, which is precisely the pin the whole
+        // design rests on.
+        // `nbf` is deliberately NOT required — it is still validated when
+        // present (`validate_nbf` above), but an absent `nbf` means "valid
+        // now", so demanding it would buy nothing and would lock the operator
+        // out if Cloudflare ever stopped stamping it.
+        validation.set_required_spec_claims(&["exp", "aud", "iss"]);
 
         decode::<AccessClaims>(token, &key, &validation)
             .map(|data| data.claims)
@@ -622,13 +764,17 @@ pub struct AccessCtx {
     pub state: AppState,
 }
 
+/// Serialized, not `format!`ed: `reason` is a closed set of `&'static str`
+/// today, but hand-rolling JSON is one refactor away from letting an
+/// attacker-influenced string break out of the body.
 fn forbidden(reason: &str) -> Response {
     (
         StatusCode::FORBIDDEN,
-        [(header::CONTENT_TYPE, "application/json")],
-        Body::from(format!(
-            r#"{{"error":"forbidden","reason":"{reason}","hint":"open the dashboard from the church LAN, or sign in through Cloudflare Access"}}"#
-        )),
+        axum::Json(serde_json::json!({
+            "error": "forbidden",
+            "reason": reason,
+            "hint": "open the dashboard from the church LAN, or sign in through Cloudflare Access",
+        })),
     )
         .into_response()
 }

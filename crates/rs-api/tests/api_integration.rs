@@ -685,3 +685,34 @@ async fn status_shows_inpoint_connected_when_set() {
     assert_eq!(body["inpoint"]["state"], "connected");
     assert_eq!(body["inpoint"]["details"]["rtmp_connected"], true);
 }
+
+/// The gate must be live on the REAL server, not just on a router built in a
+/// unit test — `serve()` is where `ConnectInfo` is wired and where the
+/// middleware is attached, and a refactor that dropped either would leave every
+/// route open with no unit test failing.
+#[tokio::test]
+async fn the_access_gate_is_live_through_the_real_listener() {
+    let state = test_state().await;
+    let (base, _) = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    // A genuinely local request is untouched.
+    let resp = client.get(format!("{base}/status")).send().await.unwrap();
+    assert_eq!(resp.status(), 200, "loopback must never be authenticated");
+
+    // The same request carrying what cloudflared adds is refused.
+    let resp = client
+        .get(format!("{base}/status"))
+        .header("cf-connecting-ip", "203.0.113.7")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "an internet-sourced request with no Access assertion must be refused \
+         by the middleware attached in serve()"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["reason"], "no_access_token");
+}

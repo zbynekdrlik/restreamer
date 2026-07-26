@@ -487,3 +487,194 @@ fn mode_parsing_defaults_to_enforce() {
     assert_eq!(AccessMode::parse("nonsense"), AccessMode::Enforce);
     assert_eq!(AccessMode::parse(""), AccessMode::Enforce);
 }
+
+// -- review follow-ups: the properties the design CLAIMS, pinned ----------
+
+#[test]
+fn ipv4_mapped_loopback_is_still_genuinely_local() {
+    // If `api.bind` were ever switched to `::`, every CI `_test` call (all of
+    // which use 127.0.0.1) would arrive as ::ffff:127.0.0.1.
+    assert!(is_genuinely_local(
+        Some(&peer("[::ffff:127.0.0.1]:1")),
+        &headers(&[])
+    ));
+    assert_eq!(
+        classify(Some(&peer("[::ffff:10.77.9.42]:1")), &headers(&[])),
+        Origin::Local
+    );
+    assert_eq!(
+        classify(Some(&peer("[::ffff:8.8.8.8]:1")), &headers(&[])),
+        Origin::Internet
+    );
+}
+
+#[test]
+fn dns_rebinding_is_refused_even_though_origin_matches_host() {
+    // The attack Origin-vs-Host alone cannot see: the operator's browser is
+    // pointed at evil.example, which has been rebound to the box's LAN
+    // address, so Origin and Host agree perfectly — and both are the
+    // attacker's choosing.
+    let h = headers(&[
+        ("origin", "http://evil.example:8910"),
+        ("host", "evil.example:8910"),
+        ("sec-fetch-site", "same-origin"),
+    ]);
+    let violation = csrf_violation(&h, &Method::POST);
+    assert!(
+        violation.is_some(),
+        "a Host this box does not answer to must be refused for a mutating request"
+    );
+    assert!(violation.unwrap().contains("rebinding"));
+}
+
+#[test]
+fn every_host_the_box_legitimately_answers_to_is_trusted() {
+    for authority in [
+        "127.0.0.1:8910",
+        "10.77.9.204:8910",
+        "192.168.1.7:8910",
+        "[::1]:8910",
+        "localhost:8910",
+        "stream.lan:8910",
+        "stream-pp", // single-label / MagicDNS short name
+        "streamsnv.newlevel.media",
+        "streampp.newlevel.media",
+        "stream-snv.tailnet.ts.net",
+    ] {
+        assert!(
+            is_trusted_authority(authority),
+            "{authority} is a legitimate way to reach the box and must not 403"
+        );
+    }
+    for authority in [
+        "evil.example:8910",
+        "attacker.co.uk",
+        "newlevel.media.evil.com",
+    ] {
+        assert!(
+            !is_trusted_authority(authority),
+            "{authority} is attacker-registrable and must not be trusted"
+        );
+    }
+}
+
+#[test]
+fn websocket_upgrade_gets_the_same_origin_check_as_a_mutating_request() {
+    // Cross-site WebSocket hijacking: the handshake is a GET and WebSockets
+    // are exempt from CORS, so without this a page on the internet could open
+    // a socket to the LAN box and read live state.
+    let h = headers(&[
+        ("upgrade", "websocket"),
+        ("origin", "https://evil.example"),
+        ("host", "stream.lan:8910"),
+    ]);
+    assert!(csrf_violation(&h, &Method::GET).is_some());
+
+    // The dashboard's own socket is same-origin and must still connect.
+    let ok = headers(&[
+        ("upgrade", "websocket"),
+        ("origin", "http://stream.lan:8910"),
+        ("host", "stream.lan:8910"),
+    ]);
+    assert!(csrf_violation(&ok, &Method::GET).is_none());
+
+    // A non-browser client (the delivery VPS, a test harness) sends no Origin.
+    let no_origin = headers(&[("upgrade", "websocket"), ("host", "127.0.0.1:8910")]);
+    assert!(csrf_violation(&no_origin, &Method::GET).is_none());
+}
+
+#[tokio::test]
+async fn a_token_without_aud_is_rejected() {
+    // `set_audience` alone only validates an aud that is PRESENT — an absent
+    // one used to sail straight through, defeating the application pin.
+    #[derive(Serialize)]
+    struct NoAud {
+        iss: String,
+        exp: i64,
+        email: String,
+    }
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(KEYS.kid.clone());
+    let token = encode(
+        &header,
+        &NoAud {
+            iss: ISS.to_string(),
+            exp: chrono::Utc::now().timestamp() + 3600,
+            email: "x@y.z".to_string(),
+        },
+        &KEYS.encoding,
+    )
+    .unwrap();
+    let err = test_gate().verify(&token).await.unwrap_err();
+    assert!(err.contains("rejected"), "{err}");
+}
+
+#[tokio::test]
+async fn a_token_without_iss_is_rejected() {
+    #[derive(Serialize)]
+    struct NoIss {
+        aud: Vec<String>,
+        exp: i64,
+    }
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(KEYS.kid.clone());
+    let token = encode(
+        &header,
+        &NoIss {
+            aud: vec![AUD.to_string()],
+            exp: chrono::Utc::now().timestamp() + 3600,
+        },
+        &KEYS.encoding,
+    )
+    .unwrap();
+    let err = test_gate().verify(&token).await.unwrap_err();
+    assert!(err.contains("rejected"), "{err}");
+}
+
+#[tokio::test]
+async fn a_non_rs256_token_is_rejected_before_any_key_lookup() {
+    // Algorithm confusion: an HS256 token signed with the PUBLIC key material
+    // must never be treated as a valid signature.
+    let header = Header::new(Algorithm::HS256);
+    let token = encode(
+        &header,
+        &serde_json::json!({"aud": [AUD], "iss": ISS, "exp": chrono::Utc::now().timestamp() + 3600}),
+        &EncodingKey::from_secret(b"whatever"),
+    )
+    .unwrap();
+    let err = test_gate().verify(&token).await.unwrap_err();
+    assert!(err.contains("unexpected algorithm"), "{err}");
+}
+
+#[tokio::test]
+async fn an_unknown_kid_does_not_refetch_the_jwks_per_request() {
+    // Otherwise an unauthenticated attacker has a free amplifier: N requests
+    // with N random kids = N fetches against the identity endpoint, each
+    // holding a request open for the 5s timeout.
+    let gate = test_gate();
+    let started = std::time::Instant::now();
+    for i in 0..5 {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(format!("random-kid-{i}"));
+        let token = encode(
+            &header,
+            &TestClaims {
+                aud: vec![AUD.to_string()],
+                iss: ISS.to_string(),
+                exp: chrono::Utc::now().timestamp() + 3600,
+                nbf: chrono::Utc::now().timestamp() - 60,
+                email: "x@y.z".to_string(),
+            },
+            &KEYS.encoding,
+        )
+        .unwrap();
+        assert!(gate.verify(&token).await.is_err());
+    }
+    // The gate's jwks_url points at a dead port; without the rate limit each
+    // miss would attempt a fresh connection.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "5 unknown-kid requests took {:?} — the refresh rate limit is not working",
+        started.elapsed()
+    );
+}
