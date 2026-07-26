@@ -302,11 +302,20 @@ impl ChunkFetcher for DiskCacheFetcher {
                 // (persistently-erroring S3). Surface as Err so the
                 // producer's consecutive-error counter advances toward the
                 // rescue flip; the producer's backoff loop re-requests, so
-                // retrying never stops system-wide (#184).
-                Err(format!(
-                    "disk_cache: chunk {chunk_id} fetch failed after bounded attempts: {error}"
-                ))
+                // retrying never stops system-wide (#184). #286: route
+                // through note_stall (like the sibling Ok(Err(e)) /
+                // Err(_elapsed) branches above) so this outage class also
+                // records the DiskCacheStallTimeout audit row and arms the
+                // paired DiskCacheReaderRecovered bracket -- MAX_FETCH_ATTEMPTS
+                // typically resolves well before the outer stall_timeout, so
+                // without this the common error-storm outage left no stall
+                // row on the audit timeline even though rescue still fired.
+                Err(self.note_stall(chunk_id, &error))
             }
+            // Unreachable in practice: `wait_for_chunk` only returns once a
+            // slot transitions to a TERMINAL state (Available / NotFound /
+            // Evicted / Failed) -- it never resolves while still InFlight.
+            // Kept only for match exhaustiveness over `ChunkAvailability`.
             ChunkAvailability::InFlight => Err(format!(
                 "disk_cache: chunk {chunk_id} stuck InFlight after timeout"
             )),

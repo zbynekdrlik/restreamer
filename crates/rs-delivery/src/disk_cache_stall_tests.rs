@@ -294,6 +294,76 @@ async fn erroring_s3_fetch_surfaces_err_within_stall_budget() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn erroring_s3_failed_arm_records_stall_for_audit_bracket() {
+    // #286 (follow-up from the #280/#284 review): MAX_FETCH_ATTEMPTS (3)
+    // consecutive S3 errors = 1s + 2s backoff = ~3s wall, well under
+    // STALL_TIMEOUT_SECS (5) here and prod's 60s -- so `fetch_with_retry`
+    // marks the chunk `Failed` and wait_for_chunk resolves via the OUTER
+    // `ChunkAvailability::Failed` match arm in `fetch_chunk_with_meta`
+    // (disk_cache_fetcher.rs), NOT the `Err(_elapsed)` stall-timeout
+    // branch. That `Failed` arm bypasses `note_stall` and returns `Err`
+    // directly, so a persistently-erroring S3 -- the common error-storm
+    // outage class -- never emits `DiskCacheStallTimeout` and never arms
+    // the paired `DiskCacheReaderRecovered` bracket, even though rescue
+    // still fires correctly from the producer's side.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let backend = Arc::new(ErroringBackend::default());
+    let ring = AuditRing::new(500);
+    let cfg = DiskCacheConfig {
+        cache_dir: tmp.path().to_path_buf(),
+        window_chunks: 4,
+        s3_ingress_cap_mbit: 10_000,
+        eviction_interval_secs: 3600,
+        read_stall_timeout_secs: STALL_TIMEOUT_SECS,
+        download_queue_capacity: 50,
+    };
+    let cache = Arc::new(
+        DiskCache::new(
+            cfg,
+            backend,
+            "stall-failed-arm".to_string(),
+            Some(ring.clone()),
+        )
+        .await
+        .expect("DiskCache::new"),
+    );
+    let fetcher = DiskCacheFetcher::new(
+        Arc::clone(&cache),
+        "failed-arm".to_string(),
+        1,
+        4,
+        STALL_TIMEOUT_SECS,
+        Some(ring.clone()),
+    );
+
+    // Budget strictly BELOW STALL_TIMEOUT_SECS: the fetch must resolve via
+    // the bounded-attempts Failed state (~3s), not the outer timeout.
+    let budget = Duration::from_secs(STALL_TIMEOUT_SECS - 1);
+    match tokio::time::timeout(budget, fetcher.fetch_chunk_with_meta(1)).await {
+        Ok(Err(_)) => {}
+        Ok(Ok(got)) => panic!("erroring backend can never yield a chunk, got {got:?}"),
+        Err(_) => panic!(
+            "fetch must resolve via the bounded-attempts Failed state \
+             (~3s: MAX_FETCH_ATTEMPTS backoff) well inside the {budget:?} \
+             test budget -- it should never reach the outer stall_timeout \
+             for this scenario"
+        ),
+    }
+
+    let (rows, _) = ring.since(0);
+    assert!(
+        rows.iter()
+            .any(|r| r.action == Action::DiskCacheStallTimeout),
+        "#286 REGRESSION: the outer `ChunkAvailability::Failed` arm in \
+         fetch_chunk_with_meta must route through `note_stall` (like the \
+         sibling Ok(Err(e)) / Err(_elapsed) stall paths) so a \
+         persistently-erroring S3 also records DiskCacheStallTimeout -- \
+         without it, the disk-cache stall/recovered audit bracket never \
+         opens for this outage class even though rescue still fires."
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn erroring_s3_flips_producer_active_within_bounded_window() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let backend = Arc::new(ErroringBackend::default());
