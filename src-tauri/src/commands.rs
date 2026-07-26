@@ -119,43 +119,18 @@ pub fn get_logs(
     CommandResult::ok(logs)
 }
 
-/// Redaction placeholder for sensitive config values.
-const REDACTED: &str = "***";
-
-/// Get the current configuration with sensitive fields redacted.
+/// Get the current configuration with every credential redacted.
+///
+/// Uses the same deny-by-default walker as the HTTP handler
+/// (`rs_core::config_redact`, #336). This command used to carry its OWN
+/// hardcoded list of four fields — the exact rot that leaked two credentials
+/// on the HTTP side, and this copy was even further behind (it never masked
+/// `obs.ws_password`). There is now ONE redaction mechanism for both surfaces.
 #[tauri::command]
 pub fn get_config(state: State<'_, Arc<AppState>>) -> CommandResult<serde_json::Value> {
     match serde_json::to_value(state.config()) {
         Ok(mut config) => {
-            // Redact sensitive credentials before exposing to the frontend
-            if let Some(s3) = config.get_mut("s3") {
-                if let Some(obj) = s3.as_object_mut() {
-                    obj.insert(
-                        "access_key_id".to_string(),
-                        serde_json::Value::String(REDACTED.to_string()),
-                    );
-                    obj.insert(
-                        "secret_access_key".to_string(),
-                        serde_json::Value::String(REDACTED.to_string()),
-                    );
-                }
-            }
-            if let Some(hetzner) = config.get_mut("hetzner") {
-                if let Some(obj) = hetzner.as_object_mut() {
-                    obj.insert(
-                        "api_token".to_string(),
-                        serde_json::Value::String(REDACTED.to_string()),
-                    );
-                }
-            }
-            if let Some(youtube) = config.get_mut("youtube") {
-                if let Some(obj) = youtube.as_object_mut() {
-                    obj.insert(
-                        "client_secret".to_string(),
-                        serde_json::Value::String(REDACTED.to_string()),
-                    );
-                }
-            }
+            rs_core::config_redact::redact_secrets(&mut config);
             CommandResult::ok(config)
         }
         Err(e) => CommandResult::err(e.to_string()),

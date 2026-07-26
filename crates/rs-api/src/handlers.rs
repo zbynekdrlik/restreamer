@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use rs_core::config::Config;
+use rs_core::config_redact;
 use rs_core::db;
 use rs_core::log_buffer::LogEntry;
 use rs_core::models::{
@@ -14,7 +15,6 @@ use rs_endpoint::s3::S3Client;
 
 use crate::state::AppState;
 
-const REDACTED: &str = "***";
 const VALID_SERVICE_TYPES: &[&str] = &["FB", "YT_RTMP", "VIMEO", "INSTAGRAM", "TEST_FILE"];
 
 pub async fn health() -> StatusCode {
@@ -255,26 +255,36 @@ pub async fn action_toggle_delivering(
     Ok(StatusCode::OK)
 }
 
-pub async fn get_config(State(state): State<AppState>) -> Json<Config> {
+/// `GET /api/v1/config` — the config as the dashboard sees it, with every
+/// credential masked.
+///
+/// Redaction is deny-by-default ([`rs_core::config_redact`], #336): a field is
+/// masked because its NAME looks like a credential, not because someone
+/// remembered to add it to a list. The previous hardcoded list silently leaked
+/// two credentials that were added to `Config` after it was written.
+pub async fn get_config(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let config_arc = state
         .config_live
         .read()
         .map(|c| c.clone())
         .unwrap_or_else(|_| state.config.clone());
-    let mut config = (*config_arc).clone();
-    // Redact sensitive credentials before sending over the API
-    config.s3.access_key_id = REDACTED.to_string();
-    config.s3.secret_access_key = REDACTED.to_string();
-    config.hetzner.api_token = REDACTED.to_string();
-    config.youtube.client_secret = REDACTED.to_string();
-    config.obs.ws_password = REDACTED.to_string();
-    Json(config)
+    // Serializing `Config` cannot fail in practice (no non-string map keys, no
+    // floats) — mapped to a 500 rather than unwrapped, because a panic in a
+    // handler is never the better failure mode.
+    let mut value = serde_json::to_value(&*config_arc).map_err(|e| {
+        error!("Failed to serialize config: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    config_redact::redact_secrets(&mut value);
+    Ok(Json(value))
 }
 
 pub async fn patch_config(
     State(state): State<AppState>,
     Json(updates): Json<serde_json::Value>,
-) -> Result<Json<Config>, StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let current_config = state
         .config_live
         .read()
@@ -294,29 +304,18 @@ pub async fn patch_config(
         _ => Vec::new(),
     };
 
-    let merged = merge_json(current, updates);
+    let mut merged = merge_json(current.clone(), updates);
 
-    let mut new_config: Config = serde_json::from_value(merged).map_err(|e| {
+    // Preserve credentials the client echoed back as the mask. Symmetric with
+    // `get_config`'s deny-by-default redaction (#336): whatever that masks,
+    // this restores — so a dashboard round-trip can never overwrite a real
+    // credential with "***", and a genuinely new value still takes effect.
+    config_redact::restore_redacted(&mut merged, &current);
+
+    let new_config: Config = serde_json::from_value(merged).map_err(|e| {
         tracing::warn!("Invalid config update: {e}");
         StatusCode::BAD_REQUEST
     })?;
-
-    // Preserve redacted credentials — keep originals if placeholder sent back
-    if new_config.s3.access_key_id == REDACTED {
-        new_config.s3.access_key_id = current_config.s3.access_key_id.clone();
-    }
-    if new_config.s3.secret_access_key == REDACTED {
-        new_config.s3.secret_access_key = current_config.s3.secret_access_key.clone();
-    }
-    if new_config.hetzner.api_token == REDACTED {
-        new_config.hetzner.api_token = current_config.hetzner.api_token.clone();
-    }
-    if new_config.youtube.client_secret == REDACTED {
-        new_config.youtube.client_secret = current_config.youtube.client_secret.clone();
-    }
-    if new_config.obs.ws_password == REDACTED {
-        new_config.obs.ws_password = current_config.obs.ws_password.clone();
-    }
 
     new_config.validate().map_err(|e| {
         tracing::warn!("Config validation failed: {e}");
@@ -350,14 +349,14 @@ pub async fn patch_config(
         tracing::info!("OBS client restarted due to config change");
     }
 
-    new_config.s3.access_key_id = REDACTED.to_string();
-    new_config.s3.secret_access_key = REDACTED.to_string();
-    new_config.hetzner.api_token = REDACTED.to_string();
-    new_config.youtube.client_secret = REDACTED.to_string();
-    new_config.obs.ws_password = REDACTED.to_string();
+    let mut response = serde_json::to_value(&new_config).map_err(|e| {
+        error!("Failed to serialize config: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    config_redact::redact_secrets(&mut response);
 
-    // Audit: record config change. Redaction is already applied above so
-    // patched_fields is safe to emit (just names of top-level sections).
+    // Audit: record config change. Only top-level section names are recorded,
+    // never values, so the audit row carries no credential material.
     rs_core::audit::record(
         &state.audit_tx,
         rs_core::audit::AuditRow {
@@ -372,7 +371,7 @@ pub async fn patch_config(
         },
     );
 
-    Ok(Json(new_config))
+    Ok(Json(response))
 }
 
 /// Maximum recursion depth for JSON merge to prevent stack overflow from malicious input.
