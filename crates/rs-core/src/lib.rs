@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod config;
+pub mod config_redact;
 pub mod db;
 pub mod endpoint_lifecycle;
 pub mod error;
