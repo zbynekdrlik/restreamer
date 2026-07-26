@@ -1,6 +1,8 @@
 pub mod audit_handlers;
 pub mod clock_skew_probe;
 #[cfg(test)]
+mod config_redaction_tests;
+#[cfg(test)]
 mod crash_recovery_tests;
 pub mod delivery;
 pub(crate) mod delivery_audit_mirror;
