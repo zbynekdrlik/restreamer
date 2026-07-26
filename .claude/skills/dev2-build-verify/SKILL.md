@@ -134,22 +134,55 @@ ssh newlevel@dev2 'source ~/.cargo/env; export SQLX_OFFLINE=true
 - Expect 3 pre-existing `dead_code` warnings (`TrayState` helpers). src-tauri is
   not under `-D warnings`.
 
-## Cargo.lock is often STALE (0.29.0 while sources are higher)
+## EVERY version bump MUST regenerate Cargo.lock — `--locked` is a CI gate now
 
-Past version bumps did NOT regenerate `Cargo.lock`, so its workspace crate
-versions lag. After bumping the 4 version files, regenerate the lock on dev2
-(`cargo metadata --offline >/dev/null`) then pull it back to dev1. The pull is a
-dev2→dev1 copy, NOT a deploy — the clean-tree deploy hook blocks it; use
-`# airuleset:deploy-dirty-ok` on that one `scp`.
+**A stale lock is a HARD CI FAILURE, not cosmetic** (changed by #322,
+commit `a969fa19`, 2026-07-25 — this section used to say the opposite and that
+stale advice cost a full CI cycle on #336). Five workspace commands in ci.yml
+carry `--locked`:
 
-**But a stale lock is HARMLESS — don't sweat it.** The workspace crates use
-`version.workspace = true` (path deps), and `cargo metadata --offline` / a build
-does NOT rewrite their versions in `Cargo.lock` — the lock's `rs-core` etc. can
-stay at an old version while the build resolves the current one from Cargo.toml.
-The workspace build/test/clippy jobs are NOT `--locked` (only the
-`cargo install trunk … --locked` tool step is), so cargo tolerates the drift.
-The green 0.29.6 AND 0.29.7 releases both shipped with a stale lock. Regen it if
-you want tidiness, but a no-change `scp` is expected and NOT a problem.
+```
+cargo clippy --workspace --all-targets --locked -- -D warnings   # Lint
+cargo test --workspace --verbose --locked                        # Test
+cargo test -p rs-endpoint --features testing --verbose --locked   # Test
+cargo test --workspace --locked                                  # Test integrity
+cargo build --release -p rs-delivery --locked                     # Build rs-delivery
+```
+
+Bumping the 4 version files changes the 11 local member versions, so the lock no
+longer matches and cargo refuses to fix it:
+
+```
+error: cannot update the lock file … because --locked was passed to prevent this
+```
+
+Symptom shape: **Lint + Test + Test-integrity all fail together within ~1 min**,
+`Rust CI Gate` + `E2E Gate` fail, and everything downstream (Build Tauri,
+Deploy, all three E2E) is SKIPPED. Test-integrity's message is misleading —
+"Expected at least 130 tests, but only 0 passed" — because its `cargo test`
+never ran. If you see that trio, check the lock BEFORE reading any test code.
+
+Regenerate it as part of the version-bump step, in the same commit if possible:
+
+```bash
+ssh newlevel@dev2 'source ~/.cargo/env; export SQLX_OFFLINE=true
+  cd ~/restreamer-buildcheck && cargo metadata --offline --format-version 1 >/dev/null'
+# airuleset:deploy-dirty-ok   (dev2→dev1 pull, NOT a deploy — the clean-tree hook blocks it)
+scp -q newlevel@dev2:~/restreamer-buildcheck/Cargo.lock ./Cargo.lock
+grep -A1 '^name = "rs-core"$' Cargo.lock     # must show the NEW version
+```
+
+The diff must be exactly the 11 local member versions (`rs-api`, `rs-cloud`,
+`rs-core`, `rs-delivery`, `rs-endpoint`, `rs-ffmpeg`, `rs-inpoint`,
+`rs-rtmp-push`, `rs-runtime`, `rs-service`, `rs-youtube`) and nothing else — any
+transitive-dependency churn means you resolved online; redo it `--offline`.
+
+**Then re-verify WITH `--locked`**, since a plain `cargo test`/`clippy` on dev2
+silently self-heals the lock and hides exactly this failure.
+
+`src-tauri/Cargo.lock` and `leptos-ui/Cargo.lock` are separate and ARE stale
+(they carry unrelated old versions); no `--locked` command touches them, so
+leave them alone.
 
 ## Frontend E2E (CI-equivalent) on dev2
 
