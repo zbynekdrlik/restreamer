@@ -270,6 +270,9 @@ pub async fn get_config(
         .read()
         .map(|c| c.clone())
         .unwrap_or_else(|_| state.config.clone());
+    // Serializing `Config` cannot fail in practice (no non-string map keys, no
+    // floats) — mapped to a 500 rather than unwrapped, because a panic in a
+    // handler is never the better failure mode.
     let mut value = serde_json::to_value(&*config_arc).map_err(|e| {
         error!("Failed to serialize config: {e}");
         StatusCode::INTERNAL_SERVER_ERROR

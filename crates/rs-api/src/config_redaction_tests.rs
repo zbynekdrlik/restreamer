@@ -29,6 +29,12 @@ const FAKE: &str = "fake-not-a-real-credential";
 const MASK: &str = "***";
 
 /// Case-insensitive field-name markers that make a config field a credential.
+///
+/// Do NOT "sync" this list with the production one in
+/// `rs_core::config_redact` — it is a deliberate second opinion. If both lists
+/// are edited together, this file stops testing anything. (The production
+/// module's `config_inventory_is_fully_classified` test is the mechanism that
+/// catches a field neither list's markers happen to match.)
 const SECRET_MARKERS: &[&str] = &[
     "secret",
     "token",
@@ -161,6 +167,18 @@ async fn get_config_json(state: AppState) -> Value {
 /// this test without anyone editing it.
 #[tokio::test]
 async fn public_config_get_masks_every_secretish_field() {
+    // Positive control FIRST: prove the oracle can still fire. Without this the
+    // test goes vacuously green if a field is renamed, the marker list is
+    // truncated, or the fixture stops populating credentials — it would then
+    // assert "nothing leaked" while inspecting nothing.
+    let raw = serde_json::to_value(secret_laden_config()).unwrap();
+    let would_leak = unmasked_secret_paths(&raw);
+    assert!(
+        would_leak.len() >= 8,
+        "the oracle went blind — it flags only {} field(s) on the RAW config: {would_leak:?}",
+        would_leak.len()
+    );
+
     let state = state_with(secret_laden_config()).await;
     let json = get_config_json(state).await;
     let leaked = unmasked_secret_paths(&json);

@@ -26,9 +26,18 @@ pub const REDACTED: &str = "***";
 
 /// Case-insensitive substrings that mark a config field name as a credential.
 ///
-/// `webhook` is included because a Discord webhook URL is a bearer credential
-/// in its own right (anyone holding it can post as the integration), even
-/// though its name carries no "secret"/"token" word.
+/// Deliberately wider than the obvious four words:
+/// - `webhook` — a Discord webhook URL is a bearer credential in its own right
+///   (anyone holding it can post as the integration), though its name carries
+///   no "secret"/"token" word.
+/// - `auth` / `credential` / `bearer` / `signature` / `salt` / `private` /
+///   `cookie` / `session` / `pwd` — the plausible names of the NEXT credential
+///   added here. A false positive is cheap (add the path to
+///   [`READABLE_PATHS`]); a false negative is the bug this module exists for.
+///
+/// The marker list is a heuristic, not the guarantee. The guarantee is the
+/// `config_inventory_is_fully_classified` test below: any new `Config` field,
+/// credential-named or not, fails CI until someone classifies it.
 const SECRET_MARKERS: &[&str] = &[
     "secret",
     "token",
@@ -36,6 +45,15 @@ const SECRET_MARKERS: &[&str] = &[
     "password",
     "passphrase",
     "webhook",
+    "auth",
+    "credential",
+    "bearer",
+    "signature",
+    "salt",
+    "private",
+    "cookie",
+    "session",
+    "pwd",
 ];
 
 /// Dotted paths that MATCH a marker but are not credentials, so they stay
@@ -43,10 +61,12 @@ const SECRET_MARKERS: &[&str] = &[
 ///
 /// - `hetzner.ssh_key_name` / `hetzner.extra_ssh_key_names` — *names* of keys
 ///   registered in Hetzner Cloud, not key material.
-/// - `api.tls_cert` / `api.tls_key` — file *paths* (`cert.pem` / `key.pem`),
-///   resolved against the config directory. If either field is ever changed to
-///   hold inline PEM material, DELETE it from this list — the material would
-///   then be a credential.
+/// - `api.tls_key` — a file *path* (`key.pem`), resolved against the config
+///   directory. If it is ever changed to hold inline PEM material, DELETE it
+///   from this list — the material would then be a credential.
+/// - `api.tls_cert` — also a path (`cert.pem`). It matches no marker today, so
+///   the exemption is inert; it is listed so the cert/key pair stays together
+///   and a future `cert`/`pem` marker cannot silently mask a path.
 const READABLE_PATHS: &[&str] = &[
     "hetzner.ssh_key_name",
     "hetzner.extra_ssh_key_names",
@@ -65,10 +85,15 @@ fn is_secret_field(path: &str, key: &str) -> bool {
 
 /// Mask every credential in a serialized `Config` in place.
 ///
-/// Only string leaves are replaced: numbers, bools and `null` carry no
-/// credential material, and masking them would break the typed round-trip
-/// (callers deserialize this response back into `Config`). A `null` staying
-/// `null` also keeps "unset" honest in the UI.
+/// Only NON-EMPTY string leaves are replaced:
+/// - numbers, bools and `null` carry no credential material, and masking them
+///   would break the typed round-trip (callers deserialize this response back
+///   into `Config`); a `null` staying `null` keeps "unset" honest in the UI;
+/// - an EMPTY string is left empty for the same reason — a zero-length value
+///   discloses nothing, and masking it to `***` would make an unconfigured
+///   mechanism (no Discord token, no OBS password) look configured on the
+///   settings screen, which is exactly the question an operator opens it to
+///   answer.
 pub fn redact_secrets(value: &mut Value) {
     redact_at("", value);
 }
@@ -100,7 +125,7 @@ fn redact_at(path: &str, value: &mut Value) {
 /// sub-struct cannot slip through.
 fn mask_in_place(value: &mut Value) {
     match value {
-        Value::String(s) => *s = REDACTED.to_string(),
+        Value::String(s) if !s.is_empty() => *s = REDACTED.to_string(),
         Value::Array(items) => items.iter_mut().for_each(mask_in_place),
         Value::Object(map) => map.values_mut().for_each(mask_in_place),
         _ => {}
@@ -113,23 +138,45 @@ fn mask_in_place(value: &mut Value) {
 /// the stored config as JSON. Wherever a credential field in `patched` carries
 /// the mask, the stored value is put back. A field carrying a genuinely new
 /// value is left alone, so rotating a credential through the API still works.
+///
+/// RECURSION BOUND: `patched` is attacker-influenced (`merge_json` embeds the
+/// request subtree verbatim once it hits its own depth limit), but the walk
+/// descends ONLY where `current.get(..)` yields a value — and `current` must
+/// always be a serialized `Config`, which is shallow. Depth is therefore bound
+/// by the STORED config's shape, not by the request. Do not add an
+/// else-recurse-anyway branch, and never call this with an attacker-controlled
+/// `current`, or that bound is gone.
 pub fn restore_redacted(patched: &mut Value, current: &Value) {
     restore_at("", patched, current);
 }
 
 fn restore_at(path: &str, patched: &mut Value, current: &Value) {
-    if let Value::Object(map) = patched {
-        for (key, child) in map.iter_mut() {
-            let child_path = join_path(path, key);
-            let Some(current_child) = current.get(key.as_str()) else {
-                continue;
-            };
-            if is_secret_field(&child_path, key) {
-                restore_masked_leaves(child, current_child);
-            } else {
-                restore_at(&child_path, child, current_child);
+    match patched {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                let child_path = join_path(path, key);
+                let Some(current_child) = current.get(key.as_str()) else {
+                    continue;
+                };
+                if is_secret_field(&child_path, key) {
+                    restore_masked_leaves(child, current_child);
+                } else {
+                    restore_at(&child_path, child, current_child);
+                }
             }
         }
+        // Mirrors `redact_at`'s array arm. Without it, a credential nested in
+        // an array of objects would be masked on the way out and then written
+        // back as `***` on a verbatim round-trip — silent credential
+        // destruction. Elements are paired positionally with the stored array.
+        Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                if let Some(current_item) = current.get(index) {
+                    restore_at(path, item, current_item);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -200,7 +247,10 @@ mod tests {
                 "diag_token": "fake-diag",
                 "port": 8910
             },
-            "obs": { "ws_url": "ws://x", "ws_password": "fake-obs" }
+            "obs": { "ws_url": "ws://x", "ws_password": "fake-obs" },
+            // Not a real Config shape — guards the array arms of both walkers
+            // against a future `Vec<SomeStruct>` config field.
+            "vps_pool": [{ "api_token": "fake-vps-a" }, { "api_token": "fake-vps-b" }]
         })
     }
 
@@ -217,6 +267,16 @@ mod tests {
         assert_eq!(v["notifications"]["discord_webhook_url"], REDACTED);
         assert_eq!(v["api"]["diag_token"], REDACTED);
         assert_eq!(v["obs"]["ws_password"], REDACTED);
+        // Inside an array of objects too.
+        assert_eq!(v["vps_pool"][0]["api_token"], REDACTED);
+        assert_eq!(v["vps_pool"][1]["api_token"], REDACTED);
+    }
+
+    #[test]
+    fn leaves_an_empty_credential_empty_so_unset_stays_visible() {
+        let mut v = json!({ "notifications": { "discord_bot_token": "" } });
+        redact_secrets(&mut v);
+        assert_eq!(v["notifications"]["discord_bot_token"], "");
     }
 
     #[test]
@@ -319,6 +379,15 @@ mod tests {
     }
 
     #[test]
+    fn restores_masks_echoed_from_inside_an_array_of_objects() {
+        let current = sample();
+        let mut patched = current.clone();
+        patched["vps_pool"][0]["api_token"] = json!(REDACTED);
+        restore_redacted(&mut patched, &current);
+        assert_eq!(patched["vps_pool"][0]["api_token"], "fake-vps-a");
+    }
+
+    #[test]
     fn redact_then_restore_round_trips_to_the_original() {
         let current = sample();
         let mut public = current.clone();
@@ -327,5 +396,152 @@ mod tests {
         let mut patched = public;
         restore_redacted(&mut patched, &current);
         assert_eq!(patched, current);
+    }
+
+    // ---------------------------------------------------------------------
+    // The actual guarantee behind "the next credential cannot leak".
+    //
+    // The marker list above is a heuristic and will miss a name nobody
+    // predicted (`ingest_url` carrying a stream key, `svc_creds`, …). This
+    // inventory pins EVERY leaf of the real `Config` to an explicit
+    // classification, so adding ANY field — credential-named or not — fails
+    // this test until a human classifies it. That is what makes the module's
+    // promise real rather than aspirational.
+    // ---------------------------------------------------------------------
+
+    /// Every serialized leaf path of `Config`, with `true` = must be masked in
+    /// the public response. When this test fails because you added a config
+    /// field: classify it here. Mask it unless you can argue it is NOT a
+    /// credential (a name, an id, a path, a port, a flag).
+    const CONFIG_INVENTORY: &[(&str, bool)] = &[
+        ("api.bind", false),
+        ("api.diag_token", true),
+        ("api.https_domain", false),
+        ("api.https_port", false),
+        ("api.port", false),
+        ("api.tls", false),
+        ("api.tls_cert", false),
+        ("api.tls_key", false),
+        ("client_uuid", false),
+        ("delivery.delivery_delay_secs", false),
+        ("hetzner.api_token", true),
+        ("hetzner.default_server_type", false),
+        ("hetzner.extra_ssh_key_names", false),
+        ("hetzner.location", false),
+        ("hetzner.snapshot_label", false),
+        ("hetzner.ssh_key_name", false),
+        ("inpoint.chunk_duration_ms", false),
+        ("inpoint.chunk_format", false),
+        ("inpoint.read_buffer_bytes", false),
+        ("inpoint.rtmp_bind", false),
+        ("inpoint.rtmp_port", false),
+        ("notifications.discord_bot_token", true),
+        ("notifications.discord_channel_id", false),
+        ("notifications.discord_webhook_url", true),
+        ("obs.enabled", false),
+        ("obs.ws_password", true),
+        ("obs.ws_url", false),
+        ("s3.access_key_id", true),
+        ("s3.bucket", false),
+        ("s3.endpoint", false),
+        ("s3.region", false),
+        ("s3.secret_access_key", true),
+        ("youtube.client_id", false),
+        ("youtube.client_secret", true),
+        ("youtube.device_flow.client_id", false),
+        ("youtube.device_flow.client_secret", true),
+        ("youtube.device_flow.daily_quota", false),
+    ];
+
+    /// Collect every leaf path of a serialized value, in sorted order.
+    fn leaf_paths(value: &Value) -> Vec<String> {
+        let mut out = Vec::new();
+        collect_leaf_paths("", value, &mut out);
+        out.sort();
+        out
+    }
+
+    fn collect_leaf_paths(path: &str, value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) if !map.is_empty() => {
+                for (key, child) in map {
+                    collect_leaf_paths(&join_path(path, key), child, out);
+                }
+            }
+            // An empty object, an array (of any length) and every scalar are
+            // leaves for classification purposes.
+            _ => out.push(path.to_string()),
+        }
+    }
+
+    #[test]
+    fn config_inventory_is_fully_classified() {
+        let actual = leaf_paths(&serde_json::to_value(crate::config::Config::default()).unwrap());
+        let expected: Vec<String> = {
+            let mut v: Vec<String> = CONFIG_INVENTORY
+                .iter()
+                .map(|(p, _)| p.to_string())
+                .collect();
+            v.sort();
+            v
+        };
+        let unclassified: Vec<&String> = actual.iter().filter(|p| !expected.contains(p)).collect();
+        let stale: Vec<&String> = expected.iter().filter(|p| !actual.contains(p)).collect();
+        assert!(
+            unclassified.is_empty(),
+            "new/renamed config field(s) not classified in CONFIG_INVENTORY: {unclassified:?} — \
+             add them (mask unless provably not a credential), see #336"
+        );
+        assert!(
+            stale.is_empty(),
+            "CONFIG_INVENTORY lists field(s) that no longer exist: {stale:?}"
+        );
+    }
+
+    #[test]
+    fn redaction_matches_the_classification_field_for_field() {
+        // A config with every string field populated, so a "must be masked"
+        // field has something to mask. Based on `for_testing()` rather than
+        // `default()` so clippy's `field_reassign_with_default` stays quiet.
+        let mut config = crate::config::Config::for_testing();
+        config.client_uuid = "uuid".into();
+        config.s3.access_key_id = "fake-a".into();
+        config.s3.secret_access_key = "fake-b".into();
+        config.hetzner.api_token = "fake-c".into();
+        config.hetzner.extra_ssh_key_names = vec!["extra".into()];
+        config.youtube.client_id = "id".into();
+        config.youtube.client_secret = "fake-d".into();
+        config.youtube.device_flow.client_id = "id2".into();
+        config.youtube.device_flow.client_secret = "fake-e".into();
+        config.notifications.discord_bot_token = "fake-f".into();
+        config.notifications.discord_webhook_url = "https://discord.test/h".into();
+        config.notifications.discord_channel_id = "123".into();
+        config.obs.ws_password = "fake-g".into();
+        config.api.diag_token = Some("fake-h".into());
+        config.api.https_domain = Some("example.test".into());
+
+        let plain = serde_json::to_value(&config).unwrap();
+        let mut masked = plain.clone();
+        redact_secrets(&mut masked);
+
+        for (path, should_mask) in CONFIG_INVENTORY {
+            let before = plain.pointer(&pointer_of(path)).unwrap();
+            let after = masked.pointer(&pointer_of(path)).unwrap();
+            if *should_mask {
+                assert_eq!(
+                    after, REDACTED,
+                    "{path} is classified as a credential but was NOT masked"
+                );
+            } else {
+                assert_eq!(
+                    after, before,
+                    "{path} is classified as readable but was masked"
+                );
+            }
+        }
+    }
+
+    fn pointer_of(dotted: &str) -> String {
+        format!("/{}", dotted.replace('.', "/"))
     }
 }
