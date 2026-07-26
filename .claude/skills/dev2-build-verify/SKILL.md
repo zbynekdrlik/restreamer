@@ -101,6 +101,39 @@ Always `source ~/.cargo/env` and `export SQLX_OFFLINE=true` on dev2.
   - `trunk build --release` does NOT pass `-D warnings`; leptos dead-code
     warnings (unused pub fns/structs) are pre-existing and don't fail CI.
 
+## `src-tauri` CAN be type-checked on dev2 (it just needed system libs)
+
+`src-tauri` is excluded from the workspace, so `cargo test/clippy --workspace`
+never compiles it — a change there used to be verifiable only by a ~2 h CI
+round-trip. It checks fine on dev2 now; two one-time blockers were cleared
+(2026-07-26, #336):
+
+```bash
+# one-time (already done on dev2):
+ssh newlevel@dev2 'sudo -n apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev \
+  libsoup-3.0-dev libjavascriptcoregtk-4.1-dev'
+# after EVERY rsync (the rsync excludes *.png, and generate_context! needs the icons):
+# airuleset:deploy-dirty-ok
+scp -q src-tauri/icons/*.png newlevel@dev2:~/restreamer-buildcheck/src-tauri/icons/
+ssh newlevel@dev2 'source ~/.cargo/env; export SQLX_OFFLINE=true
+  cd ~/restreamer-buildcheck/src-tauri && cargo check'
+```
+
+- Without the GTK/webkit dev libs: `The system library gdk-3.0 required by crate
+  gdk-sys was not found` (a `gdk-sys` build-script failure, nothing to do with
+  your code).
+- Without the icons: `proc macro panicked … failed to open icon
+  .../icons/32x32.png` at `tauri::generate_context!()` in `src-tauri/src/lib.rs`
+  — same root cause as the `leptos-ui/icon-*.png` / trunk gotcha above (the
+  rsync's `--exclude '*.png'`), different consumer.
+- `cargo check --offline` does NOT work here: the `tauri` crate isn't in dev2's
+  offline registry cache (`no matching package named tauri found`). Run it
+  online.
+- It checks the LINUX target, which is fine for platform-independent code
+  (commands/state); it does NOT validate Windows-only `cfg` branches.
+- Expect 3 pre-existing `dead_code` warnings (`TrayState` helpers). src-tauri is
+  not under `-D warnings`.
+
 ## Cargo.lock is often STALE (0.29.0 while sources are higher)
 
 Past version bumps did NOT regenerate `Cargo.lock`, so its workspace crate
