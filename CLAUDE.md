@@ -70,6 +70,16 @@ mcp__win-stream-snv__Shell command="Invoke-RestMethod -Uri http://127.0.0.1:8910
 
 Restreamer.exe MUST run as a tray app in the user's desktop session — NEVER as background service or headless. Task name: `RestreamerGUI`, user: `newlevel`, install path: `C:\Program Files\Restreamer\`. No `--headless` flag ever. If the scheduled task fails, CI must fail.
 
+### Adding a field to `Config` — classify it for redaction
+
+`GET`/`PATCH /api/v1/config` redact **deny-by-default** via `rs_core::config_redact` (#336): a field
+whose NAME carries a credential marker is masked, and only the short `READABLE_PATHS` list is
+exempt. Adding ANY field to `crates/rs-core/src/config.rs` fails
+`config_redact::tests::config_inventory_is_fully_classified` until you add it to `CONFIG_INVENTORY`
+with an explicit masked/readable classification — that is deliberate. **Mask it unless you can argue
+it is not a credential** (a name, an id, a path, a port, a flag). Never re-introduce a hardcoded
+per-field mask list in a handler; that list rotted twice and leaked live credentials.
+
 ### Testing — PRIMARY GOAL
 
 Full E2E test coverage is the primary goal. Every feature ships with E2E tests covering the full user flow. All tests run in GitHub CI — never skipped.
