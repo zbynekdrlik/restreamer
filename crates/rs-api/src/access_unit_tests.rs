@@ -329,15 +329,21 @@ async fn wrong_issuer_is_rejected() {
 #[tokio::test]
 async fn tampered_signature_is_rejected() {
     let token = mint(AUD, ISS, 3600);
-    // Flip the last character of the signature segment.
+    // Alter the first character of the signature segment. The mapping must
+    // change the character for EVERY possible input — an earlier version
+    // rewrote it to 'A' only when it was not already 'A', which left the token
+    // untouched (and the test passing vacuously, then failing on the next run)
+    // for the ~1-in-64 keys whose signature happens to start with 'A'.
     let mut parts: Vec<String> = token.split('.').map(|s| s.to_string()).collect();
     let sig = parts.pop().unwrap();
-    let flipped: String = sig
-        .chars()
-        .enumerate()
-        .map(|(i, c)| if i == 0 && c != 'A' { 'A' } else { c })
-        .collect();
-    parts.push(flipped);
+    let mut chars: Vec<char> = sig.chars().collect();
+    chars[0] = if chars[0] == 'A' { 'B' } else { 'A' };
+    let tampered: String = chars.into_iter().collect();
+    assert_ne!(
+        tampered, sig,
+        "the tamper must actually change the signature"
+    );
+    parts.push(tampered);
     let err = test_gate().verify(&parts.join(".")).await.unwrap_err();
     assert!(err.contains("rejected"), "{err}");
 }
