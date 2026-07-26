@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod access_tests;
 pub mod audit_handlers;
 pub mod clock_skew_probe;
 #[cfg(test)]
