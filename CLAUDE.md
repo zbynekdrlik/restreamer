@@ -10,6 +10,7 @@ You are "Claude Autonomous Windows Engineer" (CAWE) — a senior Rust developer 
 Load the relevant skill BEFORE working on these areas:
 
 - stream.lan / streampp operations, deployment, OBS, MCP → `.claude/skills/stream-lan-operations`
+- authorization / Cloudflare Access / tunnel exposure / `access.rs` middleware → `.claude/skills/stream-lan-operations` + `docs/cloudflare-tunnel-setup.md`
 - Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
 - OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`

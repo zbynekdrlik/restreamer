@@ -27,14 +27,32 @@ internal data — VPS IPv4, Hetzner ids, event ids, s3_fetch_profile — was wor
 readable despite a loopback guard).
 
 The tunnel is **token-managed remotely**, so a cloudflared-side `path:` deny is
-NOT reliably available to us — the CODE must close the exposure. Pattern to gate
-an endpoint as genuinely-local-operator-only (`crates/rs-api/src/diag.rs`
-`diag_access_allowed`): require BOTH `addr.ip().is_loopback()` AND the **absence
-of any reverse-proxy forwarded header** (`Cf-Connecting-Ip` / `X-Forwarded-For`
-/ `X-Forwarded-Host`) — a tunneled request always carries one, a genuine local
-request carries none. Optional `api.diag_token` + `X-Diag-Token` header allows an
-authenticated remote caller (config-only secret, never committed). Any NEW
-sensitive endpoint on `:8910` MUST use this guard, not a bare loopback check.
+NOT reliably available to us — the CODE must close the exposure.
+
+**Since v0.29.22 you no longer gate endpoints one at a time** (#70/#273/#337/
+#339). `crates/rs-api/src/access.rs` is router-wide middleware in front of
+everything — API, `/ws` and the dashboard SPA — so a new route is protected the
+moment it is registered, and a route-coverage test fails CI if it somehow is
+not. Nothing to remember, nothing to add per endpoint.
+
+- Local (loopback / RFC1918 / Tailscale, and NO forwarded header) → allowed,
+  unauthenticated, with zero network I/O. Never break this: it is what keeps
+  the church LAN working on a Sunday when Cloudflare or the building's internet
+  is down.
+- Internet (any forwarded header, or a public peer) → needs a valid Cloudflare
+  Access JWT. Layer 1 is the Access application at the edge; see
+  `docs/cloudflare-tunnel-setup.md`.
+- `/api/v1/_test/*` is stricter: **loopback only**, so even a signed-in remote
+  operator cannot call `s3-block` and starve the delivery cache. CI satisfies
+  this — every `_test` call in ci.yml goes to `127.0.0.1`.
+- Mutating requests also need a same-origin `Origin` and a non-`cross-site`
+  `Sec-Fetch-Site` (#339 CSRF), and CORS is same-origin only — no
+  `allow_origin(Any)`.
+
+`api.access.mode` is the no-rebuild rollback: `log_only` = pre-#273 behaviour,
+`lan_only` = refuse all remote control. `api.diag_token` is GONE (deleted with
+#273 — it was a shared secret living in the config file that leaked in #336 and
+was rewritable via `PATCH /config`); `/diag/dump` is now an ordinary gated route.
 
 ## MCP Access
 
