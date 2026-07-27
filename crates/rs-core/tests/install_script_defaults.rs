@@ -74,9 +74,8 @@ fn install_script_never_references_the_deleted_nbg1_bucket() {
             "install.ps1 references the degraded nbg1 region outside a comment: {line}"
         );
         // `restreamer-chunks` without the region suffix is the deleted bucket.
-        let bare_old_bucket = line.contains("restreamer-chunks")
-            && !line.contains(STANDARD_S3_BUCKET)
-            && !is_comment;
+        let bare_old_bucket =
+            line.contains("restreamer-chunks") && !line.contains(STANDARD_S3_BUCKET) && !is_comment;
         assert!(
             !bare_old_bucket,
             "install.ps1 references the deleted bucket `restreamer-chunks`: {line}"
