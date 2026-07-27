@@ -121,9 +121,15 @@ if (-not (Test-Path $ConfigFile)) {
     Write-Status "Creating default config..."
     $defaultConfig = @{
         client_uuid  = [guid]::NewGuid().ToString()
+        # Bucket/region/endpoint MUST match the project standard (fsn1 --
+        # rs_core::config::STANDARD_S3_REGION). The old nbg1-bound bucket
+        # "restreamer-chunks" was deleted 2026-07-27; a fresh install that
+        # defaulted to it (with a region that matched nothing) could never
+        # upload a chunk. Buckets are region-bound on Hetzner, so the name
+        # carries the region suffix.
         s3           = @{
-            bucket            = "restreamer-chunks"
-            region            = "eu-central-1"
+            bucket            = "restreamer-chunks-fsn1"
+            region            = "fsn1"
             endpoint          = "https://fsn1.your-objectstorage.com"
             access_key_id     = ""
             secret_access_key = ""
