@@ -78,7 +78,6 @@ fn secret_laden_config() -> Config {
     c.notifications.discord_webhook_url = format!("https://discord.test/api/webhooks/{FAKE}");
     c.notifications.discord_channel_id = "1234567890".to_string();
     c.obs.ws_password = format!("{FAKE}-obs-ws");
-    c.api.diag_token = Some(format!("{FAKE}-diag"));
     c
 }
 
@@ -260,7 +259,6 @@ async fn patch_config_echoing_masks_does_not_destroy_credentials() {
                             "discord_bot_token": MASK,
                             "discord_webhook_url": MASK
                         },
-                        "api": { "diag_token": MASK },
                         "obs": { "ws_password": MASK }
                     })
                     .to_string(),
@@ -283,10 +281,6 @@ async fn patch_config_echoing_masks_does_not_destroy_credentials() {
     assert_eq!(
         live.notifications.discord_webhook_url, original.notifications.discord_webhook_url,
         "discord_webhook_url was overwritten by the mask"
-    );
-    assert_eq!(
-        live.api.diag_token, original.api.diag_token,
-        "diag_token was overwritten by the mask"
     );
     assert_eq!(live.youtube.client_secret, original.youtube.client_secret);
     assert_eq!(live.obs.ws_password, original.obs.ws_password);

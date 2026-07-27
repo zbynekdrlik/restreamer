@@ -99,12 +99,37 @@ external actor on this shared box, after all non-E2E jobs had already gone
 green — not a code defect, just a wasted cycle from pushing the log update
 separately instead of bundling it into the ticket's PR).
 
-## `sleep`-based CI-monitoring waits are BLOCKED in the autopilot-worker sandbox — use `timeout N gh run watch`
+## CI-monitoring waits: `sleep` may or may not be blocked — check, don't assume
 
-The global `ci-monitoring.md` module's recommended foreground-wait pattern
-(`sleep 300 && gh run view <id> --json status,conclusion`, in a Bash loop) is
-hard-blocked by this session's sandbox — both the chained form and a
-standalone `sleep N` — forcing `Monitor`/`run_in_background`, which then
+**The `sleep` block is PER-SESSION, not a property of this repo** (#336,
+2026-07-26): in that worker a bounded foreground loop with plain `sleep`
+*worked* and was the cheapest correct pattern —
+
+```bash
+for i in $(seq 1 7); do
+  s=$(gh run view <id> --json status,conclusion -q '.status+" "+(.conclusion//"-")')
+  echo "[$(date +%H:%M:%S)] $s"; case "$s" in completed*) break;; esac
+  sleep 55
+done      # Bash tool timeout: 450000
+```
+
+Try that FIRST (one tool call ≈ 7 min of waiting, and `gh run view --json jobs`
+lets you print which job is running, which `gh run watch` does not). If the
+sandbox rejects `sleep`, fall back to the `timeout` form below.
+
+**Two hazards that DO bite regardless of the `sleep` question:**
+
+- **The harness can auto-background a long Bash call** ("manually backgrounded
+  by user with ID: …"). For a dispatched subagent that is fatal — a turn ending
+  with background work in flight trips the Stop hook / kills the worker. Fix:
+  `TaskStop` that task id immediately, then resume with a SHORTER foreground
+  loop (7 × 55 s ≈ 6.5 min per call was safe; 8 × 60 s got backgrounded).
+- Keep each poll call well under the Bash tool's 600 s cap.
+
+The `timeout`-based fallback, when `sleep` genuinely is blocked — the global
+`ci-monitoring.md` foreground pattern (`sleep 300 && gh run view …`) is then
+hard-blocked in both the chained and standalone forms, forcing
+`Monitor`/`run_in_background`, which then
 terminates a dispatched subagent's turn if left in flight when the turn ends
 (confirmed twice, 2026-07-26: a raw `gh run watch` auto-backgrounded on the
 Bash tool's own timeout, AND a dispatched review `Agent`, both tripped the

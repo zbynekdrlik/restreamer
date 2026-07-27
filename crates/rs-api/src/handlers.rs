@@ -306,11 +306,11 @@ pub async fn patch_config(
 
     let mut merged = merge_json(current.clone(), updates);
 
-    // Preserve credentials the client echoed back as the mask. Symmetric with
-    // `get_config`'s deny-by-default redaction (#336): whatever that masks,
-    // this restores — so a dashboard round-trip can never overwrite a real
-    // credential with "***", and a genuinely new value still takes effect.
-    config_redact::restore_redacted(&mut merged, &current);
+    // Two things at once (#336, #273): restore credentials the client echoed
+    // back as the mask, so a dashboard round-trip cannot overwrite a real
+    // credential with "***"; and refuse any change to `api.access`, because a
+    // door that can be unlocked through the door it guards is not a lock.
+    config_redact::sanitize_patch(&mut merged, &current);
 
     let new_config: Config = serde_json::from_value(merged).map_err(|e| {
         tracing::warn!("Invalid config update: {e}");

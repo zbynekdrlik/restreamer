@@ -212,6 +212,97 @@ fn join_path(parent: &str, key: &str) -> String {
     }
 }
 
+/// Config subtrees the API may never modify, whatever a client PATCHes.
+///
+/// `api.access` governs who is allowed to reach the API at all (#273). Leaving
+/// it writable through `PATCH /api/v1/config` would mean the door can be
+/// unlocked through the door it guards: one request could persist
+/// `mode = "log_only"`, or — far worse — repoint `team_domain` at an
+/// attacker-controlled Zero Trust org, after which the app would fetch THEIR
+/// signing keys and accept THEIR tokens from the internet on the next restart.
+/// That would turn momentary LAN presence into permanent remote access.
+///
+/// Changing these values is a deliberate act on the box: edit
+/// `C:\ProgramData\Restreamer\config.json` and restart. That is exactly the
+/// property the design depends on, so it is enforced here rather than
+/// described in a comment.
+const IMMUTABLE_PATHS: &[&[&str]] = &[&["api", "access"]];
+
+/// Everything `PATCH /api/v1/config` must do to an incoming merged config
+/// before it is deserialized and saved.
+///
+/// 1. [`restore_redacted`] — a client that read the masked config and sent it
+///    back must not overwrite real credentials with `***` (#336).
+/// 2. [`preserve_immutable`] — the access-control settings are put back
+///    verbatim from the stored config (#273).
+///
+/// Call THIS from the handler, not the two halves separately, so a future
+/// immutable path cannot be forgotten at one call site.
+pub fn sanitize_patch(patched: &mut Value, current: &Value) {
+    restore_redacted(patched, current);
+    preserve_immutable(patched, current);
+}
+
+/// Overwrite every [`IMMUTABLE_PATHS`] subtree in `patched` with the stored
+/// value (or delete it when the stored config has none).
+fn preserve_immutable(patched: &mut Value, current: &Value) {
+    for path in IMMUTABLE_PATHS {
+        let stored = lookup(current, path).cloned();
+        let changed = lookup(patched, path) != stored.as_ref();
+        if changed {
+            // Deliberately loud: an attempt to rewrite the access gate through
+            // the gated API is exactly what a reader of these logs is looking
+            // for. The value is not a credential, so logging it is safe.
+            tracing::warn!(
+                "config PATCH tried to change the immutable {} subtree — ignored (#273)",
+                path.join(".")
+            );
+        }
+        apply(patched, path, stored);
+    }
+}
+
+fn lookup<'v>(value: &'v Value, path: &[&str]) -> Option<&'v Value> {
+    let mut node = value;
+    for segment in path {
+        node = node.get(*segment)?;
+    }
+    Some(node)
+}
+
+/// Set (or, with `None`, remove) `path` in `target`, creating intermediate
+/// objects as needed. A non-object on the way is replaced — the caller is
+/// restoring a known-good subtree, so a client that sent `"api": 5` must not
+/// be able to keep the gate's settings out of the result.
+fn apply(target: &mut Value, path: &[&str], value: Option<Value>) {
+    let Some((leaf, parents)) = path.split_last() else {
+        return;
+    };
+    let mut node = target;
+    for segment in parents {
+        if !node.is_object() {
+            *node = Value::Object(serde_json::Map::new());
+        }
+        node = node
+            .as_object_mut()
+            .expect("just ensured object")
+            .entry((*segment).to_string())
+            .or_insert(Value::Object(serde_json::Map::new()));
+    }
+    if !node.is_object() {
+        *node = Value::Object(serde_json::Map::new());
+    }
+    let map = node.as_object_mut().expect("just ensured object");
+    match value {
+        Some(v) => {
+            map.insert((*leaf).to_string(), v);
+        }
+        None => {
+            map.remove(*leaf);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +335,11 @@ mod tests {
             "api": {
                 "tls_cert": "cert.pem",
                 "tls_key": "key.pem",
+                // NOT a `Config` field any more (`api.diag_token` was deleted
+                // with #273 — the Access design stores no secret on the box).
+                // Kept in this fixture on purpose: it proves the walker masks a
+                // credential-named field it has never heard of, which is the
+                // deny-by-default promise this module exists for.
                 "diag_token": "fake-diag",
                 "port": 8910
             },
@@ -414,8 +510,10 @@ mod tests {
     /// field: classify it here. Mask it unless you can argue it is NOT a
     /// credential (a name, an id, a path, a port, a flag).
     const CONFIG_INVENTORY: &[(&str, bool)] = &[
+        ("api.access.aud", false),
+        ("api.access.mode", false),
+        ("api.access.team_domain", false),
         ("api.bind", false),
-        ("api.diag_token", true),
         ("api.https_domain", false),
         ("api.https_port", false),
         ("api.port", false),
@@ -517,7 +615,6 @@ mod tests {
         config.notifications.discord_webhook_url = "https://discord.test/h".into();
         config.notifications.discord_channel_id = "123".into();
         config.obs.ws_password = "fake-g".into();
-        config.api.diag_token = Some("fake-h".into());
         config.api.https_domain = Some("example.test".into());
 
         let plain = serde_json::to_value(&config).unwrap();
@@ -539,6 +636,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // The access gate must not be rewritable through the gated API (#273).
+    // -----------------------------------------------------------------
+
+    fn stored_with_access() -> Value {
+        json!({
+            "api": {
+                "port": 8910,
+                "access": {
+                    "mode": "enforce",
+                    "team_domain": "example.cloudflareaccess.com",
+                    "aud": ["aud-one"]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn a_patch_cannot_switch_the_gate_to_log_only() {
+        let current = stored_with_access();
+        let mut patched = current.clone();
+        patched["api"]["access"]["mode"] = json!("log_only");
+        sanitize_patch(&mut patched, &current);
+        assert_eq!(
+            patched["api"]["access"]["mode"], "enforce",
+            "one unauthenticated LAN request must not be able to disable the gate"
+        );
+    }
+
+    #[test]
+    fn a_patch_cannot_repoint_the_team_domain_at_an_attacker() {
+        // The worst case: the app would fetch the attacker's JWKS on restart
+        // and accept tokens they mint.
+        let current = stored_with_access();
+        let mut patched = current.clone();
+        patched["api"]["access"]["team_domain"] = json!("attacker.cloudflareaccess.com");
+        patched["api"]["access"]["aud"] = json!(["attacker-aud"]);
+        sanitize_patch(&mut patched, &current);
+        assert_eq!(patched["api"]["access"], current["api"]["access"]);
+    }
+
+    #[test]
+    fn a_patch_cannot_delete_the_access_subtree_to_fall_back_to_defaults() {
+        let current = stored_with_access();
+        let mut patched = current.clone();
+        patched["api"].as_object_mut().unwrap().remove("access");
+        sanitize_patch(&mut patched, &current);
+        assert_eq!(patched["api"]["access"], current["api"]["access"]);
+    }
+
+    #[test]
+    fn a_patch_cannot_smuggle_the_gate_out_by_retyping_its_parent() {
+        // "api": 5 would leave nothing to merge into; the restore must still
+        // put a well-formed access subtree back.
+        let current = stored_with_access();
+        let mut patched = json!({ "api": 5 });
+        sanitize_patch(&mut patched, &current);
+        assert_eq!(patched["api"]["access"], current["api"]["access"]);
+    }
+
+    #[test]
+    fn a_patch_that_leaves_the_gate_alone_still_applies_everything_else() {
+        let current = stored_with_access();
+        let mut patched = current.clone();
+        patched["api"]["port"] = json!(9999);
+        sanitize_patch(&mut patched, &current);
+        assert_eq!(
+            patched["api"]["port"], 9999,
+            "unrelated fields must still change"
+        );
+        assert_eq!(patched["api"]["access"], current["api"]["access"]);
+    }
+
+    #[test]
+    fn sanitize_patch_still_restores_masked_credentials() {
+        // It replaces restore_redacted at the call site, so it must not have
+        // lost that half.
+        let current = sample();
+        let mut patched = current.clone();
+        patched["s3"]["access_key_id"] = json!(REDACTED);
+        sanitize_patch(&mut patched, &current);
+        assert_eq!(patched["s3"]["access_key_id"], "fake-access");
     }
 
     fn pointer_of(dotted: &str) -> String {

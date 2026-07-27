@@ -7,9 +7,12 @@ You are "Claude Autonomous Windows Engineer" (CAWE) — a senior Rust developer 
 
 ## Playbook Router
 
-Load the relevant skill BEFORE working on these areas:
+Load the relevant skill BEFORE working on these areas. `.claude/rules/*.md` files
+auto-load on their `paths:` — you do not invoke those.
 
 - stream.lan / streampp operations, deployment, OBS, MCP → `.claude/skills/stream-lan-operations`
+- authorization / Cloudflare Access / tunnel exposure → `.claude/rules/access-control.md` (auto) + `docs/cloudflare-tunnel-setup.md`
+- file-size cap, `Cargo.lock`/`--locked`, test-crypto, secret scanner → `.claude/rules/rust-crate-hygiene.md` (auto)
 - Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
 - OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`
@@ -69,6 +72,16 @@ mcp__win-stream-snv__Shell command="Invoke-RestMethod -Uri http://127.0.0.1:8910
 ### Tray App Deployment (CRITICAL)
 
 Restreamer.exe MUST run as a tray app in the user's desktop session — NEVER as background service or headless. Task name: `RestreamerGUI`, user: `newlevel`, install path: `C:\Program Files\Restreamer\`. No `--headless` flag ever. If the scheduled task fails, CI must fail.
+
+### Adding a field to `Config` — classify it for redaction
+
+`GET`/`PATCH /api/v1/config` redact **deny-by-default** via `rs_core::config_redact` (#336): a field
+whose NAME carries a credential marker is masked, and only the short `READABLE_PATHS` list is
+exempt. Adding ANY field to `crates/rs-core/src/config.rs` fails
+`config_redact::tests::config_inventory_is_fully_classified` until you add it to `CONFIG_INVENTORY`
+with an explicit masked/readable classification — that is deliberate. **Mask it unless you can argue
+it is not a credential** (a name, an id, a path, a port, a flag). Never re-introduce a hardcoded
+per-field mask list in a handler; that list rotted twice and leaked live credentials.
 
 ### Testing — PRIMARY GOAL
 

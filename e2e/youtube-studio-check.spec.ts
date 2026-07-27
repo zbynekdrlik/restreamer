@@ -628,10 +628,18 @@ test(testName, async () => {
       const hostHealthStart = Date.now();
       let hostHealthAttached = false;
       while (Date.now() - hostHealthStart < 60_000) {
-        const body = await page.evaluate(async () => {
-          const r = await fetch("http://10.77.9.204:8910/api/v1/delivery/status/cached");
-          return r.json();
-        });
+        // Read the host metric through Playwright's Node-side request API, NOT
+        // `page.evaluate(fetch(...))`. The page is studio.youtube.com, so an
+        // in-page fetch to the box was a CROSS-ORIGIN read that only worked
+        // because the API answered `Access-Control-Allow-Origin: *` — which
+        // #339 removed (any page on the internet could read the dashboard's
+        // state off a LAN box). The Node-side request has no origin and no
+        // mixed-content problem, and asserts exactly the same thing.
+        const body = await (
+          await page.request.get(
+            "http://10.77.9.204:8910/api/v1/delivery/status/cached",
+          )
+        ).json();
         const ep = (body?.endpoints || []).find(
           (e: any) => e.alias === "e2e rtmp",
         );

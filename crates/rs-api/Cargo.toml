@@ -34,6 +34,11 @@ base64.workspace = true
 dashmap.workspace = true
 regex = "1"
 tempfile = "3"
+jsonwebtoken.workspace = true
 
 [dev-dependencies]
 wiremock = "0.6"
+# Test-only RSA key generation for the Access JWT verification tests. No key
+# material is committed — a private key in the repo would be a leak even as a
+# fixture (#274).
+rsa = "0.9"
