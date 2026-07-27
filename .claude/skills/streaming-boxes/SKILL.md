@@ -34,7 +34,7 @@ Two Windows streaming boxes (separate from dev1/dev2). Both run the single unifi
 | User | `newlevel` |
 | MCP | `win-stream-snv` (stream.lan:8090) |
 | OBS MCP | `obs-stream-snv` (stream.lan:8091) |
-| S3 region | `fsn1` (`fsn1.your-objectstorage.com` → 88.198.120.64) |
+| S3 bucket | `restreamer-chunks-fsn1` @ `fsn1.your-objectstorage.com` (the ONLY bucket — see Object storage below) |
 | Disk | ~63% full (low upload jitter, max ~2s) |
 | CI role | Self-hosted runner + E2E box — CI auto-deploys here every dev/main push |
 | OBS ingest | `rtmp://127.0.0.1:1234/live/obs-e2e-test` |
@@ -49,7 +49,7 @@ Dashboard reachable from dev1 (returns 200).
 | IP | `10.77.8.204:8910` |
 | User | `interkom` |
 | MCP | `win-streampp` |
-| S3 region | `fsn1` (migrated 2026-06-24 after the nbg1 incident, #278 — verify live via `/api/v1/status` s3_region_standard or config.json, don't trust this snapshot) |
+| S3 bucket | `restreamer-chunks-fsn1` @ fsn1 (migrated 2026-06-24 after the nbg1 incident, #278 — verify live via `/api/v1/status` s3_region_standard or config.json, don't trust this snapshot). Its DB `rescue_video_url` still points at the DELETED nbg1 bucket — #347. |
 | Disk | disk_pressure="ok" as of 2026-07-12 (was ~82%/"warn" on 2026-06-07 — check live via `/api/v1/status`, don't trust either snapshot) |
 | Subnet | 10.77.8.x — LAN IP `10.77.8.204` NOT reachable from dev1 (10.77.9.x) |
 | Tailscale | streampp has its OWN tailscale IP (`tailscale ip -4` via `win-streampp` Shell) — reachable from dev1/Playwright even though the LAN IP isn't. Don't assume unreachable; check tailscale first. |
@@ -91,6 +91,49 @@ Move-Item "$env:TEMP\www_extract\www" 'C:\Program Files\Restreamer\www'
 **Gotcha: the NSIS silent installer STOPS the `RestreamerGUI` scheduled task and does not restart it** — after `/S` completes, the task is left in `Ready` (not `Running`) state and the API stops answering. Always follow with `Start-ScheduledTask -TaskName RestreamerGUI` and re-verify `/api/v1/status` responds before declaring the upgrade done. Streaming-event state (DB) survives the upgrade untouched (confirmed 2026-07-12: same event id/name/received_bytes before and after).
 
 Verify the new version from the LIVE DOM (not just the exe's `ProductVersion`) via streampp's tailscale IP — the `www\` swap is a separate step from the exe upgrade and can silently fail independently.
+
+## Object storage — ONE bucket exists: `restreamer-chunks-fsn1`
+
+Hetzner buckets are region-bound, so the region lives in the bucket NAME. The
+only bucket is `restreamer-chunks-fsn1` (endpoint `https://fsn1.your-objectstorage.com`,
+region `fsn1`). The old nbg1 bucket `restreamer-chunks` was **deleted 2026-07-27**
+— it had sat unused but BILLED since the 2026-06-24 fsn1 migration (#278), 94 640
+objects / 332 GB. Anything that still names it is a bug (see #347, #348).
+
+Credentials are account-wide: the same key pair in a box's `config.json` signs
+against every region's endpoint, so you can list/delete in a region no box uses.
+`aws.exe` is installed on stream.lan (`C:\Program Files\Amazon\AWSCLIV2\aws.exe`)
+— run S3 admin work THERE so the credentials never leave the box.
+
+**A region migration is not finished when config.json changes.** Two things live
+outside the config and were both missed in 2026-06:
+
+- **`rescue_video_url` is DB data, not code** — `streaming_events.rescue_video_url`
+  and `event_templates.rescue_video_url` hold an absolute S3 URL. stream.lan's CI
+  event still pointed at the nbg1 bucket a month after the migration. Grep both
+  tables for the old host before deleting anything, and PATCH via
+  `/api/v1/events/{id}` (never write the live DB behind the running app).
+- **`scripts/install.ps1` hardcodes the defaults a fresh box boots with** — pinned
+  since #348 by `crates/rs-core/tests/install_script_defaults.rs`, which fails if
+  they drift from `rs_core::config::STANDARD_S3_REGION`.
+
+**Deleting a bucket: `aws s3 rm --recursive` is NOT enough.** It removes objects
+but leaves *incomplete multipart uploads*, and `delete-bucket` then fails with
+`BucketNotEmpty` even though `list-objects-v2` returns zero keys (hit 2026-07-27:
+12 abandoned `delivery-logs/*.log` MPUs, oldest from 2026-05-10). Abort them
+first:
+
+```powershell
+$mp = & $aws s3api list-multipart-uploads --bucket <b> --endpoint-url $ep --region <r> --output json | ConvertFrom-Json
+foreach ($u in $mp.Uploads) {
+  & $aws s3api abort-multipart-upload --bucket <b> --key $u.Key --upload-id $u.UploadId --endpoint-url $ep --region <r>
+}
+& $aws s3api delete-bucket --bucket <b> --endpoint-url $ep --region <r>
+```
+
+A full-bucket wipe is long (94 640 objects took ~44 min) — the MCP `Shell` tool
+times out at 30 s, so launch it as a detached `Start-Process powershell -File`
+writing to a log and poll that log, rather than waiting inline.
 
 ## Fast Endpoints (is_fast=1)
 
