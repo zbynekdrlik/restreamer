@@ -7,78 +7,301 @@
 //! (it had been billed unused since the migration) a fresh install could not
 //! upload a single chunk.
 //!
-//! This test pins the script's defaults to the same standard the code uses.
+//! Two independent oracles, because either alone is escapable:
+//!
+//! 1. `Config::default()` — the values a binary boots with when `config.json`
+//!    is absent. Pinning the script to a literal repeated in this file would
+//!    re-create #348: the next migration would edit `config.rs`, and script +
+//!    test would agree with each other while disagreeing with the code.
+//! 2. The region-DERIVED shape of the other two values. Hetzner buckets are
+//!    region-bound, so `<bucket>` must end `-<region>` and the endpoint host
+//!    must be `<region>.your-objectstorage.com`. Without this, a copy-paste
+//!    slip that mirrors the SAME wrong endpoint into both config.rs and the
+//!    script (fsn1 bucket, hel1 endpoint) passes oracle 1 silently.
 
-use rs_core::config::STANDARD_S3_REGION;
+use rs_core::config::{Config, STANDARD_S3_REGION};
 
-/// The bucket the project actually writes to. Region-bound by Hetzner, hence
-/// the region suffix in the name.
-const STANDARD_S3_BUCKET: &str = "restreamer-chunks-fsn1";
-
-fn install_script() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/install.ps1")
-        .canonicalize()
-        .expect("scripts/install.ps1 must exist relative to crates/rs-core");
-    std::fs::read_to_string(&path).expect("scripts/install.ps1 must be readable")
+/// One physical line of the script, split into what the PowerShell parser would
+/// see. `code` keeps string literals intact (the values live in them); `skeleton`
+/// blanks their contents, so a brace, a `;` or a `bucket =` inside a string can
+/// neither shift the block depth nor be mistaken for a separator or a key.
+struct CodeLine {
+    code: String,
+    skeleton: String,
+    /// The line's `;`-separated statements. A PowerShell hashtable may be
+    /// written on one line (`s3 = @{ bucket = "x"; region = "y" }`), so key
+    /// lookup works per statement, not per line.
+    segments: Vec<CodeLine>,
 }
 
-/// Pull the value out of a `key = "value"` line in the PowerShell hashtable.
-fn ps_default(script: &str, key: &str) -> String {
-    script
-        .lines()
-        .find(|l| {
-            let t = l.trim_start();
-            t.starts_with(key) && t[key.len()..].trim_start().starts_with('=')
-        })
-        .unwrap_or_else(|| panic!("install.ps1 has no `{key} = ...` default"))
-        .split('=')
-        .nth(1)
-        .unwrap()
-        .trim()
-        .trim_matches('"')
-        .to_string()
+impl CodeLine {
+    fn leaf(code: String, skeleton: String) -> Self {
+        Self {
+            code,
+            skeleton,
+            segments: Vec::new(),
+        }
+    }
+
+    /// The statements to search for a `key = value`: the `;`-separated parts if
+    /// there are several, else the line itself.
+    fn statements(&self) -> Vec<&CodeLine> {
+        if self.segments.is_empty() {
+            vec![self]
+        } else {
+            self.segments.iter().collect()
+        }
+    }
 }
 
-#[test]
-fn install_script_s3_defaults_match_the_project_standard() {
-    let script = install_script();
-
-    assert_eq!(
-        ps_default(&script, "bucket"),
-        STANDARD_S3_BUCKET,
-        "install.ps1 default S3 bucket drifted from the standard bucket"
-    );
-    assert_eq!(
-        ps_default(&script, "region"),
-        STANDARD_S3_REGION,
-        "install.ps1 default S3 region drifted from rs_core STANDARD_S3_REGION"
-    );
-    assert_eq!(
-        ps_default(&script, "endpoint"),
-        format!("https://{STANDARD_S3_REGION}.your-objectstorage.com"),
-        "install.ps1 default S3 endpoint must be the standard region's endpoint"
-    );
-}
-
-/// The deleted bucket must never reappear anywhere in the install script —
-/// including in the Hetzner block or a comment that a later edit copies.
-#[test]
-fn install_script_never_references_the_deleted_nbg1_bucket() {
-    let script = install_script();
+/// Strip PowerShell comments — `#` to end-of-line and `<# … #>` blocks — with
+/// enough string awareness that a `#` inside a literal (a URL fragment, a
+/// password) is NOT treated as a comment, and a `<#` inside a `#` comment does
+/// NOT open a block. Output stays 1:1 with input lines, so line numbers hold.
+fn code_lines(script: &str) -> Vec<CodeLine> {
+    let mut out = Vec::new();
+    let mut in_block = false;
 
     for line in script.lines() {
-        let is_comment = line.trim_start().starts_with('#');
-        assert!(
-            is_comment || !line.contains("nbg1"),
-            "install.ps1 references the degraded nbg1 region outside a comment: {line}"
-        );
-        // `restreamer-chunks` without the region suffix is the deleted bucket.
-        let bare_old_bucket =
-            line.contains("restreamer-chunks") && !line.contains(STANDARD_S3_BUCKET) && !is_comment;
-        assert!(
-            !bare_old_bucket,
-            "install.ps1 references the deleted bucket `restreamer-chunks`: {line}"
-        );
+        let mut code = String::new();
+        let mut skeleton = String::new();
+        let bytes: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        let mut quote: Option<char> = None;
+
+        while i < bytes.len() {
+            let c = bytes[i];
+
+            if in_block {
+                if c == '#' && bytes.get(i + 1) == Some(&'>') {
+                    in_block = false;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+
+            if let Some(q) = quote {
+                code.push(c);
+                skeleton.push(if c == q { c } else { ' ' });
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+                continue;
+            }
+
+            // Outside any string: comments start here and nowhere else.
+            if c == '<' && bytes.get(i + 1) == Some(&'#') {
+                in_block = true;
+                i += 2;
+                continue;
+            }
+            if c == '#' {
+                break; // rest of the line is a comment
+            }
+            if c == '"' || c == '\'' {
+                quote = Some(c);
+            }
+            code.push(c);
+            skeleton.push(c);
+            i += 1;
+        }
+
+        let segments = split_statements(&code, &skeleton);
+        out.push(CodeLine {
+            code,
+            skeleton,
+            segments,
+        });
     }
+    out
+}
+
+/// Split a line on the statement separators `;` `{` `}` that sit OUTSIDE string
+/// literals — located in the skeleton, then applied to both strings by char
+/// index (their byte lengths can differ, since blanking a multi-byte char in the
+/// skeleton shortens it). Braces count as separators so a one-line hashtable
+/// (`s3 = @{ bucket = "x"; region = "y" }`) yields its keys as statements.
+fn split_statements(code: &str, skeleton: &str) -> Vec<CodeLine> {
+    const SEPARATORS: [char; 3] = [';', '{', '}'];
+    let sk: Vec<char> = skeleton.chars().collect();
+    if !sk.iter().any(|c| SEPARATORS.contains(c)) {
+        return Vec::new();
+    }
+    let cd: Vec<char> = code.chars().collect();
+    debug_assert_eq!(
+        cd.len(),
+        sk.len(),
+        "code and skeleton must stay char-aligned"
+    );
+
+    let mut out = Vec::new();
+    let mut start = 0;
+    for end in sk
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| SEPARATORS.contains(c))
+        .map(|(i, _)| i)
+        .chain(std::iter::once(sk.len()))
+    {
+        if end > start {
+            out.push(CodeLine::leaf(
+                cd[start..end].iter().collect(),
+                sk[start..end].iter().collect(),
+            ));
+        }
+        start = end + 1;
+    }
+    out
+}
+
+/// The `s3 = @{ … }` hashtable. Scoping to it matters: a `bucket =` key in any
+/// block placed above `s3` would otherwise silently become what is validated.
+fn s3_block(lines: &[CodeLine]) -> Vec<&CodeLine> {
+    let start = lines
+        .iter()
+        .position(|l| {
+            // `strip_prefix` + `=`, not `starts_with("s3")` — otherwise a decoy
+            // `s3_archive = @{` above the real block matches first.
+            l.skeleton
+                .trim_start()
+                .strip_prefix("s3")
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+                && l.skeleton.contains("@{")
+        })
+        .expect("install.ps1 must have an `s3 = @{` default block");
+
+    let mut depth = 0i32;
+    let mut block = Vec::new();
+    for line in &lines[start..] {
+        depth += line.skeleton.matches('{').count() as i32;
+        depth -= line.skeleton.matches('}').count() as i32;
+        block.push(line);
+        if depth <= 0 {
+            return block;
+        }
+    }
+    panic!("install.ps1 `s3 = @{{` block is never closed");
+}
+
+/// Value of a `key = "value"` line. `split_once` — not `split('=')` — so a value
+/// that itself contains `=` (base64 padding, a query string) survives.
+fn ps_value(block: &[&CodeLine], key: &str) -> String {
+    let stmt = block
+        .iter()
+        .flat_map(|l| l.statements())
+        .find(|l| {
+            let t = l.skeleton.trim_start();
+            t.starts_with(key) && t[key.len()..].trim_start().starts_with('=')
+        })
+        .unwrap_or_else(|| panic!("install.ps1 s3 block has no `{key} = ...` default"));
+
+    let raw = stmt
+        .code
+        .split_once('=')
+        .expect("the find predicate already proved an `=` is present")
+        .1
+        .trim();
+
+    // Both quote styles are valid PowerShell; strip one matching pair only, so a
+    // malformed `"""x"""` fails the comparison instead of being tidied away.
+    for q in ['"', '\''] {
+        if raw.len() >= 2 && raw.starts_with(q) && raw.ends_with(q) {
+            return raw[1..raw.len() - 1].to_string();
+        }
+    }
+    raw.to_string()
+}
+
+#[test]
+fn install_script_s3_defaults_match_the_binary_defaults() {
+    let lines = code_lines(&install_script());
+    let block = s3_block(&lines);
+    let want = Config::default().s3;
+
+    assert_eq!(
+        ps_value(&block, "bucket"),
+        want.bucket,
+        "install.ps1 default S3 bucket drifted from Config::default()"
+    );
+    assert_eq!(
+        ps_value(&block, "region"),
+        want.region,
+        "install.ps1 default S3 region drifted from Config::default()"
+    );
+    assert_eq!(
+        ps_value(&block, "endpoint"),
+        want.endpoint,
+        "install.ps1 default S3 endpoint drifted from Config::default()"
+    );
+}
+
+/// Oracle 2 — the region-derived shape. Guards the copy-paste slip that mirrors
+/// the same wrong value into BOTH config.rs and the script, which oracle 1
+/// cannot see.
+#[test]
+fn binary_defaults_are_internally_consistent_with_the_region() {
+    let want = Config::default().s3;
+
+    assert_eq!(
+        want.region, STANDARD_S3_REGION,
+        "Config::default() drifted from STANDARD_S3_REGION"
+    );
+    assert_eq!(
+        want.endpoint,
+        format!("https://{}.your-objectstorage.com", want.region),
+        "S3 endpoint host must be the configured region's — Hetzner buckets are region-bound"
+    );
+    assert!(
+        want.bucket.ends_with(&format!("-{}", want.region)),
+        "S3 bucket `{}` must carry the `-{}` region suffix — buckets are region-bound, \
+         and a name without it was the deleted nbg1 bucket (#348)",
+        want.bucket,
+        want.region
+    );
+}
+
+/// The deleted nbg1 bucket must not reappear in EXECUTABLE script lines.
+/// Comments are exempt by design — install.ps1 documents why the value changed.
+#[test]
+fn install_script_never_references_the_deleted_nbg1_bucket() {
+    let standard_bucket = Config::default().s3.bucket;
+    let lines = code_lines(&install_script());
+
+    // Positive control: without it, anything that reduced `code_lines` to blanks
+    // (an unterminated block comment, the defaults moving to a JSON template)
+    // would leave this test green while checking nothing at all.
+    assert!(
+        lines.iter().any(|l| l.code.contains(&standard_bucket)),
+        "no executable line names `{standard_bucket}` — the scan below is checking nothing"
+    );
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_no = i + 1;
+        let code = &line.code;
+        assert!(
+            !code.contains("nbg1"),
+            "install.ps1:{line_no} names the degraded nbg1 region in executable code: {code}"
+        );
+        // Every `restreamer-chunks…` occurrence must be the standard bucket
+        // EXACTLY — `-hel1` is as wrong as the bare deleted name.
+        let mut rest = code.as_str();
+        while let Some(at) = rest.find("restreamer-chunks") {
+            let from = &rest[at..];
+            assert!(
+                from.starts_with(&standard_bucket),
+                "install.ps1:{line_no} references a non-standard bucket \
+                 (standard is `{standard_bucket}`): {code}"
+            );
+            rest = &from["restreamer-chunks".len()..];
+        }
+    }
+}
+
+fn install_script() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install.ps1");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("scripts/install.ps1 must be readable at {path:?}: {e}"))
 }
