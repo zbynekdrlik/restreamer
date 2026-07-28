@@ -114,8 +114,11 @@ outside the config and were both missed in 2026-06:
   tables for the old host before deleting anything, and PATCH via
   `/api/v1/events/{id}` (never write the live DB behind the running app).
 - **`scripts/install.ps1` hardcodes the defaults a fresh box boots with** — pinned
-  since #348 by `crates/rs-core/tests/install_script_defaults.rs`, which fails if
-  they drift from `rs_core::config::STANDARD_S3_REGION`.
+  since #348 by `crates/rs-core/tests/install_script_defaults.rs`, which parses the
+  script's `s3 = @{` block and fails if bucket/region/endpoint drift from
+  `Config::default()` (the values a binary boots with when `config.json` is
+  absent). Pinning to a literal in the test would only make script and test agree
+  with each other while both drift away from the code.
 
 **Deleting a bucket: `aws s3 rm --recursive` is NOT enough.** It removes objects
 but leaves *incomplete multipart uploads*, and `delete-bucket` then fails with
