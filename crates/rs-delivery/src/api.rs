@@ -259,6 +259,12 @@ struct StatusResponse {
     /// is active. Issue #176.
     #[serde(skip_serializing_if = "Option::is_none")]
     s3_fetch_profile: Option<crate::s3_fetch_profile::S3FetchProfileSnapshot>,
+    /// Latest VPS resource sample (CPU/RAM/disk). `None` until the first
+    /// `resource_sample::run_sampler` tick lands. The durable copy is the
+    /// periodic `VpsResourceSample` audit row mirrored to the host; this is
+    /// the live-read convenience field. Issue #353.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_sample: Option<crate::resource_sample::ResourceSample>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -365,6 +371,8 @@ async fn endpoint_status(
         .as_ref()
         .map(|dc| dc.s3_fetch_profile_snapshot());
 
+    let resource_sample = state.latest_resource_sample.read().await.clone();
+
     Json(StatusResponse {
         status: "ok".to_string(),
         endpoint_count: entries.len(),
@@ -372,6 +380,7 @@ async fn endpoint_status(
         recent_audit,
         next_audit_cursor,
         s3_fetch_profile,
+        resource_sample,
     })
 }
 

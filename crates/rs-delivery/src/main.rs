@@ -38,6 +38,7 @@ pub mod rescue;
 pub mod rescue_audit;
 pub mod rescue_default;
 pub mod rescue_segments;
+mod resource_sample;
 pub mod rtmp_push_telemetry;
 pub mod rust_rescue_push;
 mod s3_fetch;
@@ -80,6 +81,10 @@ pub struct AppState {
     /// once in `init_endpoints` and held for the lifetime of the
     /// delivery session. `None` until init runs. Issue #174.
     pub disk_cache: RwLock<Option<Arc<DiskCache>>>,
+    /// Latest VPS resource sample (CPU/RAM/disk), refreshed ~1/min by
+    /// `resource_sample::run_sampler`. Exposed on `/api/status` so the host
+    /// reads current usage live; `None` until the first sample lands. #353.
+    pub latest_resource_sample: RwLock<Option<resource_sample::ResourceSample>>,
 }
 
 impl AppState {
@@ -106,6 +111,7 @@ impl AppState {
             db_pool,
             audit_ring,
             disk_cache: RwLock::new(None),
+            latest_resource_sample: RwLock::new(None),
         }
     }
 
@@ -130,6 +136,7 @@ impl AppState {
             db_pool,
             audit_ring,
             disk_cache: RwLock::new(None),
+            latest_resource_sample: RwLock::new(None),
         }
     }
 }
@@ -151,6 +158,11 @@ async fn main() {
     // First meaningful log line — a stale-binary incident (2026-06-10) is now
     // one `grep` away from diagnosis.
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "rs-delivery starting");
+
+    // #353: sample VPS CPU/RAM/disk ~1/min into the audit ring. The host
+    // mirrors these rows into stream.lan's `audit_log`, so the numbers outlive
+    // the VPS and can back a data-driven server-type (tier) choice.
+    tokio::spawn(resource_sample::run_sampler(state.clone(), "/".to_string()));
 
     let app = api::router(state);
 

@@ -78,8 +78,12 @@ pub struct HetznerConfig {
 fn default_hetzner_location() -> String {
     "fsn1".to_string()
 }
+/// Empty = "auto": size the delivery VPS by endpoint count
+/// (`rs_cloud::select_server_type`). A non-empty value is an explicit operator
+/// override honoured by `rs_cloud::resolve_server_type` (#353). Defaulting to a
+/// real type here would make the override always-on and defeat the tiering.
 fn default_hetzner_server_type() -> String {
-    "cpx22".to_string()
+    String::new()
 }
 fn default_hetzner_snapshot_label() -> String {
     "rs-delivery".to_string()
@@ -592,7 +596,9 @@ mod tests {
         assert_eq!(config.inpoint.chunk_duration_ms, 1000);
         assert_eq!(config.api.port, 8910);
         assert_eq!(config.api.bind, "127.0.0.1");
-        assert_eq!(config.hetzner.default_server_type, "cpx22");
+        // #353: default is now empty = "auto" (size by endpoint count). A real
+        // type here would make the override always-on and defeat the tiering.
+        assert_eq!(config.hetzner.default_server_type, "");
         assert_eq!(config.delivery.delivery_delay_secs, 120);
         assert_eq!(config.inpoint.chunk_format, "flv");
         assert!(config.obs.enabled);

@@ -115,10 +115,29 @@ pub fn select_server_type(endpoint_count: usize) -> &'static str {
 /// is normalized to its `cpx22/cpx32/cpx42` successor (the `de4df3e9` rename)
 /// so an old `config.json` cannot push a type the Hetzner API rejects.
 pub fn resolve_server_type(config_override: &str, endpoint_count: usize) -> String {
-    // STUB (RED): ignores the override — the override + normalization tests
-    // fail until the real resolver lands in the GREEN commit.
-    let _ = config_override;
-    select_server_type(endpoint_count).to_string()
+    let trimmed = config_override.trim();
+    if trimmed.is_empty() {
+        // "auto" — size by endpoint count.
+        return select_server_type(endpoint_count).to_string();
+    }
+    // Explicit override. Normalize the three known-deprecated cx* strings to
+    // their cpx* successors (the de4df3e9 rename) so a stale config.json can't
+    // push a retired type the Hetzner API rejects.
+    match trimmed.to_ascii_lowercase().as_str() {
+        "cx23" => {
+            tracing::warn!("hetzner.default_server_type 'cx23' is deprecated; using 'cpx22'");
+            "cpx22".to_string()
+        }
+        "cx33" => {
+            tracing::warn!("hetzner.default_server_type 'cx33' is deprecated; using 'cpx32'");
+            "cpx32".to_string()
+        }
+        "cx43" => {
+            tracing::warn!("hetzner.default_server_type 'cx43' is deprecated; using 'cpx42'");
+            "cpx42".to_string()
+        }
+        _ => trimmed.to_string(),
+    }
 }
 
 /// S3 credentials passed to delivery VPS via cloud-init environment file.
