@@ -34,6 +34,13 @@ pub struct Server {
     pub public_net: PublicNet,
     pub server_type: ServerType,
     pub created: String,
+    /// Hetzner labels attached at create time (`app`, `event_id`,
+    /// `client_uuid`). Defaults empty when absent so older/partial API
+    /// responses deserialize. Used by the orphan reaper (#352) to re-verify a
+    /// server's `client_uuid` locally before ever deleting it (defense in
+    /// depth over the server-side `label_selector`, the #137 guard).
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]

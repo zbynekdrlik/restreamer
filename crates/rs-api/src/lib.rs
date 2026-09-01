@@ -17,6 +17,7 @@ pub mod delivery_live_edge;
 pub(crate) mod delivery_log_capture;
 pub(crate) mod delivery_monitor;
 pub(crate) mod delivery_orphan;
+pub(crate) mod delivery_orphan_reaper;
 #[cfg(test)]
 mod delivery_orphan_tests;
 pub(crate) mod delivery_recovery;
