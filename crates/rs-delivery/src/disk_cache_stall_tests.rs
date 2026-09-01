@@ -185,6 +185,37 @@ impl S3Backend for StallThenMissBackend {
     }
 }
 
+/// #331: errors on the listed `stall_chunks` (each drives the bounded-attempts
+/// `Failed` arm) and serves every other chunk (a clean recovery via the
+/// `Available` arm). Lets a test script two error-storm blips separated by
+/// recoveries to exercise the stall/recovered pairing under the rate limiter.
+struct StallSetBackend {
+    stall_chunks: Vec<i64>,
+}
+
+#[async_trait::async_trait]
+impl S3Backend for StallSetBackend {
+    async fn fetch(&self, chunk_id: i64) -> Result<Option<FetchedChunk>, String> {
+        if self.stall_chunks.contains(&chunk_id) {
+            return Err(format!("forced persistent S3 error on chunk {chunk_id}"));
+        }
+        Ok(Some(FetchedChunk {
+            data: vec![9u8; 64],
+            duration_ms: 1000,
+            host_emit_ts: None,
+            s3_upload_complete_ts: None,
+        }))
+    }
+    async fn head_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        if self.stall_chunks.contains(&chunk_id) {
+            return Err(format!(
+                "forced persistent S3 HEAD error on chunk {chunk_id}"
+            ));
+        }
+        Ok(Some(1000))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared harness
 // ---------------------------------------------------------------------------
@@ -689,5 +720,75 @@ async fn notfound_recovery_after_failed_arm_closes_bracket() {
         recovered, 1,
         "#333 REGRESSION: a NotFound recovery after a stall must close the \
          bracket with exactly one DiskCacheReaderRecovered; found {recovered}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #331 — every DiskCacheReaderRecovered must pair with an emitted
+// DiskCacheStallTimeout. Arming was_stalled unconditionally while the stall
+// row is rate-limited produced unpaired recovered edges.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn recovered_rows_stay_paired_when_stall_row_is_rate_limited() {
+    // Two bounded-attempts error-storm blips in rapid succession (well inside
+    // the RateLimiter's real-clock 60s window, so the SECOND stall row is
+    // suppressed), each followed by an Available recovery. The stall/recovered
+    // bracket must stay paired: exactly as many DiskCacheReaderRecovered rows
+    // as DiskCacheStallTimeout rows. Pre-fix, was_stalled armed on BOTH blips
+    // (unconditionally) while only the first stall row emitted, so the second
+    // recovery emitted an unpaired DiskCacheReaderRecovered.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ring = AuditRing::new(500);
+    // stall on 1 and 100; serve everything else. 100 is far outside the
+    // window-4 prefetch of the low-chunk fetches, so background prefetch never
+    // pre-marks it and the second stall is a clean, independent blip.
+    let backend = Arc::new(StallSetBackend {
+        stall_chunks: vec![1, 100],
+    });
+    let fetcher = real_fetcher_with_ring(backend, &tmp, "pairing", ring.clone()).await;
+    let budget = Duration::from_secs(STALL_TIMEOUT_SECS * 4);
+
+    // Blip 1: stall on chunk 1 (Failed arm) -> stall row #1 + was_stalled armed.
+    let r = tokio::time::timeout(budget, fetcher.fetch_chunk_with_meta(1)).await;
+    assert!(matches!(r, Ok(Err(_))), "blip 1 must stall, got {r:?}");
+    // Recovery 1: chunk 2 served -> Available -> recovered row #1.
+    let r = tokio::time::timeout(budget, fetcher.fetch_chunk_with_meta(2)).await;
+    assert!(
+        matches!(r, Ok(Ok(Some(_)))),
+        "recovery 1 must serve a chunk, got {r:?}"
+    );
+
+    // Blip 2: stall on chunk 100 (Failed arm) -> stall row SUPPRESSED by the
+    // rate limiter (same key, within 60s real-clock).
+    let r = tokio::time::timeout(budget, fetcher.fetch_chunk_with_meta(100)).await;
+    assert!(matches!(r, Ok(Err(_))), "blip 2 must stall, got {r:?}");
+    // Recovery 2: chunk 101 served -> Available.
+    let r = tokio::time::timeout(budget, fetcher.fetch_chunk_with_meta(101)).await;
+    assert!(
+        matches!(r, Ok(Ok(Some(_)))),
+        "recovery 2 must serve a chunk, got {r:?}"
+    );
+
+    let (rows, _) = ring.since(0);
+    let stalls = rows
+        .iter()
+        .filter(|r| r.action == Action::DiskCacheStallTimeout)
+        .count();
+    let recovered = rows
+        .iter()
+        .filter(|r| r.action == Action::DiskCacheReaderRecovered)
+        .count();
+    assert_eq!(
+        stalls, 1,
+        "setup: the rate limiter must suppress the second same-shape stall row \
+         (found {stalls}) so the pairing invariant is actually exercised"
+    );
+    assert_eq!(
+        recovered, stalls,
+        "#331 REGRESSION: every DiskCacheReaderRecovered must pair with an \
+         emitted DiskCacheStallTimeout; got {recovered} recovered vs {stalls} \
+         stall rows (unpaired recovered edge from arming was_stalled while the \
+         stall row was rate-limited)"
     );
 }
