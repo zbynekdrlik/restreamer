@@ -216,6 +216,33 @@ impl S3Backend for StallSetBackend {
     }
 }
 
+/// #330: serves the FIRST fetch (the priming GET that seeds the stale
+/// `Available` slot + on-disk file) then errors on every subsequent fetch —
+/// models a resume-after-eviction landing in an S3 storm on the refetch.
+#[derive(Default)]
+struct ServeOnceThenErrorBackend {
+    fetches: AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl S3Backend for ServeOnceThenErrorBackend {
+    async fn fetch(&self, chunk_id: i64) -> Result<Option<FetchedChunk>, String> {
+        let n = self.fetches.fetch_add(1, AtomicOrdering::SeqCst);
+        if n == 0 {
+            return Ok(Some(FetchedChunk {
+                data: vec![5u8; 64],
+                duration_ms: 1000,
+                host_emit_ts: None,
+                s3_upload_complete_ts: None,
+            }));
+        }
+        Err(format!("forced persistent S3 error on chunk {chunk_id}"))
+    }
+    async fn head_duration_ms(&self, _chunk_id: i64) -> Result<Option<i64>, String> {
+        Ok(Some(1000))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared harness
 // ---------------------------------------------------------------------------
@@ -790,5 +817,91 @@ async fn recovered_rows_stay_paired_when_stall_row_is_rate_limited() {
          emitted DiskCacheStallTimeout; got {recovered} recovered vs {stalls} \
          stall rows (unpaired recovered edge from arming was_stalled while the \
          stall row was rate-limited)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #330 — the evicted-chunk refetch stall arms must record DiskCacheStallTimeout
+// like the main path, so a resume-after-eviction outage is not silent.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn evicted_refetch_failure_records_stall_for_audit_bracket() {
+    // Reproduce the #252 resume-after-eviction race, then break S3 so the
+    // refetch resolves Failed: the registry slot reads stale `Available`, the
+    // local file is gone, and the re-request lands in an error storm. The
+    // refetch's Failed arm MUST route through note_stall and record a
+    // DiskCacheStallTimeout. Pre-fix it returned a raw Err string, leaving the
+    // resume-after-eviction outage silent on the audit timeline.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let backend = Arc::new(ServeOnceThenErrorBackend::default());
+    let ring = AuditRing::new(500);
+    let evicted_id: i64 = 877;
+    let cfg = DiskCacheConfig {
+        cache_dir: tmp.path().to_path_buf(),
+        window_chunks: 4,
+        s3_ingress_cap_mbit: 10_000,
+        eviction_interval_secs: 3600,
+        read_stall_timeout_secs: STALL_TIMEOUT_SECS,
+        download_queue_capacity: 50,
+    };
+    let cache = Arc::new(
+        DiskCache::new(
+            cfg,
+            backend.clone(),
+            "evict-refetch-evt".to_string(),
+            Some(ring.clone()),
+        )
+        .await
+        .expect("DiskCache::new"),
+    );
+
+    // Prime: the FIRST fetch serves -> registry Available + 877.bin on disk.
+    cache.download_service.request_chunk(evicted_id).await;
+    let path = cache.event_dir().join(format!("{evicted_id}.bin"));
+    assert!(
+        path.exists(),
+        "setup: chunk file must exist after priming GET"
+    );
+    assert!(
+        matches!(
+            cache.registry.peek(evicted_id),
+            Some(ChunkAvailability::Available { .. })
+        ),
+        "setup: registry must read Available before eviction"
+    );
+    // Simulate eviction: delete ONLY the local file; the slot stays Available.
+    tokio::fs::remove_file(&path)
+        .await
+        .expect("setup: simulate eviction by deleting the local file");
+
+    let fetcher = DiskCacheFetcher::new(
+        Arc::clone(&cache),
+        "evict-refetch".to_string(),
+        evicted_id,
+        4,
+        STALL_TIMEOUT_SECS,
+        Some(ring.clone()),
+    );
+
+    // The refetch re-requests into the now-erroring S3 -> Failed -> Err.
+    let got = tokio::time::timeout(
+        Duration::from_secs(30),
+        fetcher.fetch_chunk_with_meta(evicted_id),
+    )
+    .await
+    .expect("fetch must not hang");
+    assert!(
+        matches!(got, Err(_)),
+        "the evicted-chunk refetch into an S3 storm must surface as Err, got {got:?}"
+    );
+
+    let (rows, _) = ring.since(0);
+    assert!(
+        rows.iter()
+            .any(|r| r.action == Action::DiskCacheStallTimeout),
+        "#330 REGRESSION: the evicted-chunk refetch stall arms must route \
+         through note_stall so a resume-after-eviction outage records a \
+         DiskCacheStallTimeout (found none)"
     );
 }
