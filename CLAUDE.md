@@ -32,7 +32,7 @@ Pure Rust monorepo with Cargo workspace at the root.
 | `e2e/`       | Playwright E2E tests (frontend + YouTube)    |
 | `scripts/`   | Windows install/deploy PowerShell scripts    |
 
-**Architecture**: 10 workspace crates (`rs-core`, `rs-inpoint`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `rs-cloud`, `rs-delivery`, `rs-ffmpeg`, `rs-youtube`) + `rs-ts-normalize`. `src-tauri` and `leptos-ui` excluded from workspace. Single unified binary `Restreamer.exe` (Tauri + embedded service + Leptos/WASM UI). SQLite via sqlx, Axum on `:8910`, RTMP in pure Rust. Rust edition 2024 (requires `unsafe` for `set_var`/`remove_var`), min Rust 1.85. Use `log` crate (not `tracing`) — xiu RTMP stack uses `log`; use `env_logger` in tests.
+**Architecture**: 11 workspace crates (`rs-core`, `rs-inpoint`, `rs-rtmp-push`, `rs-endpoint`, `rs-api`, `rs-runtime`, `rs-service`, `rs-ffmpeg`, `rs-cloud`, `rs-delivery`, `rs-youtube`). `src-tauri` and `leptos-ui` excluded from workspace. Single unified binary `Restreamer.exe` (Tauri + embedded service + Leptos/WASM UI). SQLite via sqlx, Axum on `:8910`, RTMP in pure Rust. Rust edition 2024 (requires `unsafe` for `set_var`/`remove_var`), min Rust 1.85. Use `log` crate (not `tracing`) — xiu RTMP stack uses `log`; use `env_logger` in tests.
 
 ## Strict Rules
 
