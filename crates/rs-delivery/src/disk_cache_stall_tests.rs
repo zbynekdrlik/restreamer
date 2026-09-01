@@ -250,11 +250,15 @@ impl S3Backend for ServeOnceThenErrorBackend {
 
 /// REAL `DiskCache` (registry + download service + eviction) over the given
 /// backend, plus the REAL `DiskCacheFetcher` — the exact production wiring
-/// from `EndpointHandle::spawn`, with a tight stall budget.
+/// from `EndpointHandle::spawn`, with a tight stall budget. Pass `Some(ring)`
+/// when the test needs to observe the outage-forensics rows
+/// (`DiskCacheStallTimeout` / `DiskCacheReaderRecovered`), `None` otherwise
+/// (#335: one harness, no duplicated config).
 async fn real_fetcher(
     backend: Arc<dyn S3Backend>,
     tmp: &tempfile::TempDir,
     alias: &str,
+    ring: Option<Arc<AuditRing>>,
 ) -> DiskCacheFetcher {
     let cfg = DiskCacheConfig {
         cache_dir: tmp.path().to_path_buf(),
@@ -265,43 +269,11 @@ async fn real_fetcher(
         download_queue_capacity: 50,
     };
     let cache = Arc::new(
-        DiskCache::new(cfg, backend, "stall-evt".to_string(), None)
+        DiskCache::new(cfg, backend, "stall-evt".to_string(), ring.clone())
             .await
             .expect("DiskCache::new"),
     );
-    DiskCacheFetcher::new(cache, alias.to_string(), 1, 4, STALL_TIMEOUT_SECS, None)
-}
-
-/// Like `real_fetcher` but wires a live `AuditRing` so the outage-forensics
-/// rows (`DiskCacheStallTimeout` / `DiskCacheReaderRecovered`) are observable.
-/// (#335 folds this into `real_fetcher` via an `Option<Arc<AuditRing>>` param.)
-async fn real_fetcher_with_ring(
-    backend: Arc<dyn S3Backend>,
-    tmp: &tempfile::TempDir,
-    alias: &str,
-    ring: Arc<AuditRing>,
-) -> DiskCacheFetcher {
-    let cfg = DiskCacheConfig {
-        cache_dir: tmp.path().to_path_buf(),
-        window_chunks: 4,
-        s3_ingress_cap_mbit: 10_000,
-        eviction_interval_secs: 3600,
-        read_stall_timeout_secs: STALL_TIMEOUT_SECS,
-        download_queue_capacity: 50,
-    };
-    let cache = Arc::new(
-        DiskCache::new(cfg, backend, "stall-evt".to_string(), Some(ring.clone()))
-            .await
-            .expect("DiskCache::new"),
-    );
-    DiskCacheFetcher::new(
-        cache,
-        alias.to_string(),
-        1,
-        4,
-        STALL_TIMEOUT_SECS,
-        Some(ring),
-    )
+    DiskCacheFetcher::new(cache, alias.to_string(), 1, 4, STALL_TIMEOUT_SECS, ring)
 }
 
 fn ep_cfg(alias: &str) -> EndpointConfig {
@@ -329,7 +301,7 @@ async fn run_real_cache_until_rescue(
 ) -> (Arc<AuditRing>, Stats) {
     tokio::time::pause();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let fetcher = real_fetcher(backend, &tmp, alias).await;
+    let fetcher = real_fetcher(backend, &tmp, alias, None).await;
 
     let ring = AuditRing::new(500);
     let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
@@ -381,7 +353,7 @@ async fn run_real_cache_until_rescue(
 async fn erroring_s3_fetch_surfaces_err_within_stall_budget() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let backend = Arc::new(ErroringBackend::default());
-    let fetcher = real_fetcher(backend.clone(), &tmp, "stall-fetch").await;
+    let fetcher = real_fetcher(backend.clone(), &tmp, "stall-fetch", None).await;
 
     // 4x the stall budget: far above the bound the fetcher must honor, far
     // below "forever". Pre-fix, request_chunk().await never returns (the
@@ -426,32 +398,7 @@ async fn erroring_s3_failed_arm_records_stall_for_audit_bracket() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let backend = Arc::new(ErroringBackend::default());
     let ring = AuditRing::new(500);
-    let cfg = DiskCacheConfig {
-        cache_dir: tmp.path().to_path_buf(),
-        window_chunks: 4,
-        s3_ingress_cap_mbit: 10_000,
-        eviction_interval_secs: 3600,
-        read_stall_timeout_secs: STALL_TIMEOUT_SECS,
-        download_queue_capacity: 50,
-    };
-    let cache = Arc::new(
-        DiskCache::new(
-            cfg,
-            backend,
-            "stall-failed-arm".to_string(),
-            Some(ring.clone()),
-        )
-        .await
-        .expect("DiskCache::new"),
-    );
-    let fetcher = DiskCacheFetcher::new(
-        Arc::clone(&cache),
-        "failed-arm".to_string(),
-        1,
-        4,
-        STALL_TIMEOUT_SECS,
-        Some(ring.clone()),
-    );
+    let fetcher = real_fetcher(backend, &tmp, "failed-arm", Some(ring.clone())).await;
 
     // Budget strictly BELOW STALL_TIMEOUT_SECS: the fetch must resolve via
     // the bounded-attempts Failed state (~3s), not the outer timeout.
@@ -484,7 +431,7 @@ async fn erroring_s3_failed_arm_records_stall_for_audit_bracket() {
 async fn erroring_s3_flips_producer_active_within_bounded_window() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let backend = Arc::new(ErroringBackend::default());
-    let fetcher = real_fetcher(backend, &tmp, "stall-producer").await;
+    let fetcher = real_fetcher(backend, &tmp, "stall-producer", None).await;
 
     let buffer_state = Arc::new(BufferState::new());
     let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
@@ -711,7 +658,7 @@ async fn notfound_recovery_after_failed_arm_closes_bracket() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let ring = AuditRing::new(500);
     let backend = Arc::new(StallThenMissBackend { stall_chunk: 1 });
-    let fetcher = real_fetcher_with_ring(backend, &tmp, "notfound-recover", ring.clone()).await;
+    let fetcher = real_fetcher(backend, &tmp, "notfound-recover", Some(ring.clone())).await;
 
     // 1) Stall on chunk 1 (bounded-attempts Failed arm -> Err, was_stalled armed).
     let budget = Duration::from_secs(STALL_TIMEOUT_SECS * 4);
@@ -774,7 +721,7 @@ async fn recovered_rows_stay_paired_when_stall_row_is_rate_limited() {
     let backend = Arc::new(StallSetBackend {
         stall_chunks: vec![1, 100],
     });
-    let fetcher = real_fetcher_with_ring(backend, &tmp, "pairing", ring.clone()).await;
+    let fetcher = real_fetcher(backend, &tmp, "pairing", Some(ring.clone())).await;
     let budget = Duration::from_secs(STALL_TIMEOUT_SECS * 4);
 
     // Blip 1: stall on chunk 1 (Failed arm) -> stall row #1 + was_stalled armed.
@@ -924,7 +871,7 @@ async fn bounded_attempts_stall_row_is_shaped_and_not_timeout_labelled() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let ring = AuditRing::new(500);
     let backend = Arc::new(ErroringBackend::default());
-    let fetcher = real_fetcher_with_ring(backend, &tmp, "shaped", ring.clone()).await;
+    let fetcher = real_fetcher(backend, &tmp, "shaped", Some(ring.clone())).await;
 
     let budget = Duration::from_secs(STALL_TIMEOUT_SECS * 4);
     let got = tokio::time::timeout(budget, fetcher.fetch_chunk_with_meta(1)).await;
@@ -955,5 +902,54 @@ async fn bounded_attempts_stall_row_is_shaped_and_not_timeout_labelled() {
         "#332 REGRESSION: the bounded-attempts path never consults \
          stall_timeout, so its detail must NOT report timeout_secs; detail was {:?}",
         stall.detail
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #335 — the canonical Available-recovery bracket: a stall followed by a served
+// chunk must emit exactly one DiskCacheReaderRecovered carrying the recovering
+// chunk_id. This is what a mutation dropping `was_stalled.store(true)` from
+// note_stall would silently disable, and nothing asserted it before.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn available_recovery_after_stall_emits_reader_recovered() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ring = AuditRing::new(500);
+    // stall on chunk 1, serve everything else (chunk 2 recovers via Available).
+    let backend = Arc::new(StallSetBackend {
+        stall_chunks: vec![1],
+    });
+    let fetcher = real_fetcher(backend, &tmp, "avail-recover", Some(ring.clone())).await;
+    let budget = Duration::from_secs(STALL_TIMEOUT_SECS * 4);
+
+    // Stall on chunk 1 (bounded-attempts Failed arm) -> was_stalled armed.
+    let r = tokio::time::timeout(budget, fetcher.fetch_chunk_with_meta(1)).await;
+    assert!(matches!(r, Ok(Err(_))), "chunk 1 must stall, got {r:?}");
+
+    // Recovery on chunk 2: served -> Available arm -> the paired recovered row.
+    let r = tokio::time::timeout(budget, fetcher.fetch_chunk_with_meta(2)).await;
+    assert!(
+        matches!(r, Ok(Ok(Some(_)))),
+        "chunk 2 must serve (recover), got {r:?}"
+    );
+
+    let (rows, _) = ring.since(0);
+    let recovered: Vec<_> = rows
+        .iter()
+        .filter(|r| r.action == Action::DiskCacheReaderRecovered)
+        .collect();
+    assert_eq!(
+        recovered.len(),
+        1,
+        "#335: exactly one DiskCacheReaderRecovered must close the bracket; \
+         found {}",
+        recovered.len()
+    );
+    assert_eq!(
+        recovered[0].detail.get("chunk_id").and_then(|v| v.as_i64()),
+        Some(2),
+        "the recovered row must carry the recovering chunk_id (2); detail was {:?}",
+        recovered[0].detail
     );
 }

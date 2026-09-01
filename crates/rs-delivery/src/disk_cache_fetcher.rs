@@ -61,6 +61,13 @@ pub struct DiskCacheFetcher {
     was_stalled: std::sync::atomic::AtomicBool,
     /// Rate-limits the `DiskCacheStallTimeout` emit (a sustained outage
     /// would otherwise emit one row per stall_timeout window).
+    ///
+    /// #335: `RateLimiter` keys off `std::time::Instant`, which does NOT honor
+    /// tokio's paused clock. Under `#[tokio::test(start_paused)]` its 60s
+    /// window is measured in REAL elapsed time (~microseconds between two rapid
+    /// calls), so two same-key stall rows in one test are suppressed regardless
+    /// of virtual time — a test asserting a SECOND row must space the calls by
+    /// real wall time or key them on a different `(alias, shape)`.
     stall_rl: rs_core::audit::RateLimiter,
 }
 

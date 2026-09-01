@@ -27,6 +27,13 @@ use super::registry::ChunkRegistry;
 /// loops re-request (which resets the slot to InFlight), so system-wide
 /// retrying never stops (#184); only the single in-flight attempt is
 /// bounded.
+///
+/// #335: the bounded-attempts wall time (3 attempts, 1s+2s backoff = ~3s)
+/// is load-bearing for `disk_cache_stall_tests` — several tests use a
+/// `STALL_TIMEOUT_SECS - 1` (4s) budget to select the bounded-attempts
+/// `Failed` path OVER the outer stall_timeout. Bumping this constant (or the
+/// backoff) past that budget would silently flip those tests to exercise the
+/// outer-timeout path instead; adjust the test budgets in lockstep.
 const MAX_FETCH_ATTEMPTS: u64 = 3;
 
 /// Trait abstracting the S3 fetch operation. The real implementation
