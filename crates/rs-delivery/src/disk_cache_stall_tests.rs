@@ -159,6 +159,32 @@ impl S3Backend for AlwaysServeBackend {
     }
 }
 
+/// #333: persistently errors on ONE stalling chunk (drives the bounded-attempts
+/// `Failed` arm → arms `was_stalled` + a `DiskCacheStallTimeout` row) and
+/// clean-404s every other chunk, so the recovery fetch resolves through the
+/// top-level `NotFound` arm.
+struct StallThenMissBackend {
+    stall_chunk: i64,
+}
+
+#[async_trait::async_trait]
+impl S3Backend for StallThenMissBackend {
+    async fn fetch(&self, chunk_id: i64) -> Result<Option<FetchedChunk>, String> {
+        if chunk_id == self.stall_chunk {
+            return Err(format!("forced persistent S3 error on chunk {chunk_id}"));
+        }
+        Ok(None)
+    }
+    async fn head_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        if chunk_id == self.stall_chunk {
+            return Err(format!(
+                "forced persistent S3 HEAD error on chunk {chunk_id}"
+            ));
+        }
+        Ok(None)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared harness
 // ---------------------------------------------------------------------------
@@ -185,6 +211,38 @@ async fn real_fetcher(
             .expect("DiskCache::new"),
     );
     DiskCacheFetcher::new(cache, alias.to_string(), 1, 4, STALL_TIMEOUT_SECS, None)
+}
+
+/// Like `real_fetcher` but wires a live `AuditRing` so the outage-forensics
+/// rows (`DiskCacheStallTimeout` / `DiskCacheReaderRecovered`) are observable.
+/// (#335 folds this into `real_fetcher` via an `Option<Arc<AuditRing>>` param.)
+async fn real_fetcher_with_ring(
+    backend: Arc<dyn S3Backend>,
+    tmp: &tempfile::TempDir,
+    alias: &str,
+    ring: Arc<AuditRing>,
+) -> DiskCacheFetcher {
+    let cfg = DiskCacheConfig {
+        cache_dir: tmp.path().to_path_buf(),
+        window_chunks: 4,
+        s3_ingress_cap_mbit: 10_000,
+        eviction_interval_secs: 3600,
+        read_stall_timeout_secs: STALL_TIMEOUT_SECS,
+        download_queue_capacity: 50,
+    };
+    let cache = Arc::new(
+        DiskCache::new(cfg, backend, "stall-evt".to_string(), Some(ring.clone()))
+            .await
+            .expect("DiskCache::new"),
+    );
+    DiskCacheFetcher::new(
+        cache,
+        alias.to_string(),
+        1,
+        4,
+        STALL_TIMEOUT_SECS,
+        Some(ring),
+    )
 }
 
 fn ep_cfg(alias: &str) -> EndpointConfig {
@@ -573,5 +631,63 @@ async fn resume_at_evicted_chunk_refetches_from_s3_instead_of_looping() {
     assert!(
         path.exists(),
         "recovery must re-download the evicted chunk to local disk"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #333 — was_stalled must clear on the NotFound / Evicted terminal arms too,
+// not only Available, so the DiskCacheReaderRecovered bracket closes on the
+// transition it actually recovered on.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn notfound_recovery_after_failed_arm_closes_bracket() {
+    // An error storm on chunk 1 arms `was_stalled` via the bounded-attempts
+    // Failed arm (one DiskCacheStallTimeout row). When S3 recovers and the
+    // producer's next fetch lands on a clean 404 (the top-level NotFound arm),
+    // the outage bracket MUST close with exactly one DiskCacheReaderRecovered.
+    // Pre-fix the NotFound arm returned Ok(None) without clearing was_stalled,
+    // so NO recovered row fired on that transition (it would only fire on a
+    // much-later Available, mis-bracketing the window).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ring = AuditRing::new(500);
+    let backend = Arc::new(StallThenMissBackend { stall_chunk: 1 });
+    let fetcher = real_fetcher_with_ring(backend, &tmp, "notfound-recover", ring.clone()).await;
+
+    // 1) Stall on chunk 1 (bounded-attempts Failed arm -> Err, was_stalled armed).
+    let budget = Duration::from_secs(STALL_TIMEOUT_SECS * 4);
+    let r1 = tokio::time::timeout(budget, fetcher.fetch_chunk_with_meta(1)).await;
+    assert!(
+        matches!(r1, Ok(Err(_))),
+        "chunk 1 must stall (Err) via the Failed arm, got {r1:?}"
+    );
+    let (rows, _) = ring.since(0);
+    assert!(
+        rows.iter()
+            .any(|r| r.action == Action::DiskCacheStallTimeout),
+        "setup: the Failed arm must record a DiskCacheStallTimeout"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.action == Action::DiskCacheReaderRecovered),
+        "setup: no recovered row before the recovery fetch"
+    );
+
+    // 2) Recovery fetch on chunk 2: S3 clean-404s -> top-level NotFound arm -> Ok(None).
+    let r2 = tokio::time::timeout(budget, fetcher.fetch_chunk_with_meta(2)).await;
+    assert!(
+        matches!(r2, Ok(Ok(None))),
+        "chunk 2 clean-404 must be a cache miss Ok(None), got {r2:?}"
+    );
+    let (rows, _) = ring.since(0);
+    let recovered = rows
+        .iter()
+        .filter(|r| r.action == Action::DiskCacheReaderRecovered)
+        .count();
+    assert_eq!(
+        recovered, 1,
+        "#333 REGRESSION: a NotFound recovery after a stall must close the \
+         bracket with exactly one DiskCacheReaderRecovered; found {recovered}"
     );
 }
