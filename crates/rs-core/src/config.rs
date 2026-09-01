@@ -325,7 +325,8 @@ pub struct DeliveryConfig {
     #[serde(default = "default_delivery_delay_secs")]
     pub delivery_delay_secs: u64,
     /// #352 orphan reaper: how often the runtime re-lists Hetzner and reconciles
-    /// against the DB (seconds). Default 30 min.
+    /// against the DB (seconds). Default 30 min. The runtime clamps this to a
+    /// floor of 60s so a mis-set tiny value cannot hammer the Hetzner API.
     #[serde(default = "default_orphan_sweep_interval_secs")]
     pub orphan_sweep_interval_secs: u64,
     /// #352 orphan reaper: a rowless labelled server younger than this (seconds)

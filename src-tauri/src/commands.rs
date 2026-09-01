@@ -53,6 +53,10 @@ pub struct StatusResponse {
     /// Whether `s3.region` matches the project standard (`fsn1`). Mirrors
     /// `/api/v1/status.s3_region_standard` (#278).
     pub s3_region_standard: bool,
+    /// Number of orphaned delivery VPS still billing. Mirrors
+    /// `/api/v1/status.vps_orphan_count` so the tray webview shows the orphan
+    /// banner — the tray app is the production deployment (#352).
+    pub vps_orphan_count: u8,
 }
 
 /// Get the current service status including streaming event and chunk stats.
@@ -74,6 +78,7 @@ pub async fn get_status(
     let disk_pressure = state.disk_pressure();
     let rtmp_stable_secs = state.rtmp_stable_secs().await;
     let s3_region_standard = state.s3_region_standard();
+    let vps_orphan_count = state.vps_orphan_count();
 
     Ok(CommandResult::ok(StatusResponse {
         streaming_event,
@@ -82,6 +87,7 @@ pub async fn get_status(
         disk_pressure,
         rtmp_stable_secs,
         s3_region_standard,
+        vps_orphan_count,
     }))
 }
 

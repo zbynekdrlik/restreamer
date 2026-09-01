@@ -167,6 +167,54 @@ fn unparseable_created_is_skipped() {
     );
 }
 
+/// A server labelled `app=restreamer` but carrying NO `client_uuid` label at all
+/// (a mis-labelled / partially-labelled server) is never an orphan — the #137
+/// guard requires an EXACT client_uuid match, not merely "not someone else's".
+#[test]
+fn missing_client_uuid_label_is_never_an_orphan() {
+    let no_uuid = vec![("app", "restreamer"), ("event_id", "5")];
+    let servers = vec![server(600, "2020-01-01T00:00:00+00:00", &no_uuid)];
+    let orphans = classify_orphan_vps(&servers, &HashSet::new(), now(), THIS_UUID, DETECT, DELETE);
+    assert!(
+        orphans.is_empty(),
+        "a server missing the client_uuid label must never be touched (#137)"
+    );
+}
+
+/// Boundary: age EXACTLY at the detect grace is detected (the skip is `age <
+/// detect_grace`, so `==` is NOT skipped); age exactly at the delete grace marks
+/// deletion (`age >= delete_grace`).
+#[test]
+fn grace_boundaries_are_inclusive_for_action() {
+    // created exactly DETECT (1800s) before now → age == 1800 → detected.
+    let at_detect = vec![server(700, "2026-08-11T11:30:00+00:00", &ours())];
+    let d = classify_orphan_vps(
+        &at_detect,
+        &HashSet::new(),
+        now(),
+        THIS_UUID,
+        DETECT,
+        DELETE,
+    );
+    assert_eq!(d.len(), 1, "age == detect_grace is detected");
+    assert_eq!(d[0].age_secs, 1800);
+    assert!(!d[0].delete, "still within the delete grace");
+
+    // created exactly DELETE (10800s = 3h) before now → age == 10800 → delete.
+    let at_delete = vec![server(701, "2026-08-11T09:00:00+00:00", &ours())];
+    let x = classify_orphan_vps(
+        &at_delete,
+        &HashSet::new(),
+        now(),
+        THIS_UUID,
+        DETECT,
+        DELETE,
+    );
+    assert_eq!(x.len(), 1);
+    assert_eq!(x[0].age_secs, 10800);
+    assert!(x[0].delete, "age == delete_grace marks deletion");
+}
+
 /// Mixed real-world list: one of ours to reap, one foreign, one tracked — only
 /// ours-and-rowless is returned.
 #[test]

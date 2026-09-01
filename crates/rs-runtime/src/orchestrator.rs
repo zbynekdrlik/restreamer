@@ -45,6 +45,12 @@ pub struct ServiceCore {
     /// `provided_disk_pressure_level` — shared with Tauri AppState so the
     /// IPC `get_status` exposes the same `rtmp_stable_secs` (#234).
     provided_rtmp_stable_since: Option<Arc<Mutex<Option<Instant>>>>,
+    /// Externally provided orphan-VPS-count atomic. When set, the Tauri GUI
+    /// shares this Arc so its IPC `get_status` reads the SAME count the runtime
+    /// orphan reaper writes — the tray tray-app is the production deployment, so
+    /// without this the orphan banner would never appear on stream.lan (#352,
+    /// mirror of `provided_disk_pressure_level`).
+    provided_vps_orphan_count: Option<Arc<std::sync::atomic::AtomicU8>>,
 }
 
 impl ServiceCore {
@@ -75,6 +81,7 @@ impl ServiceCore {
             provided_pool: None,
             provided_disk_pressure_level: None,
             provided_rtmp_stable_since: None,
+            provided_vps_orphan_count: None,
         }
     }
 
@@ -105,6 +112,14 @@ impl ServiceCore {
     /// embedded `AppState` (#234, mirror of `with_disk_pressure_level`).
     pub fn with_rtmp_stable_since(mut self, arc: Arc<Mutex<Option<Instant>>>) -> Self {
         self.provided_rtmp_stable_since = Some(arc);
+        self
+    }
+
+    /// Share an externally created `vps_orphan_count` atomic with the embedded
+    /// `AppState` so the Tauri tray IPC `get_status` surfaces the orphan banner,
+    /// same as the HTTP path (#352, mirror of `with_disk_pressure_level`).
+    pub fn with_vps_orphan_count(mut self, arc: Arc<std::sync::atomic::AtomicU8>) -> Self {
+        self.provided_vps_orphan_count = Some(arc);
         self
     }
 
@@ -240,6 +255,12 @@ impl ServiceCore {
         if let Some(arc) = self.provided_rtmp_stable_since.take() {
             api_state = api_state.with_rtmp_stable_since(arc);
         }
+        // #352: same for the orphan-VPS count, so the reaper writes and the tray
+        // IPC reads the SAME atomic (the boot_orphan_count clone below is taken
+        // AFTER this, so it too shares the Tauri-provided Arc).
+        if let Some(arc) = self.provided_vps_orphan_count.take() {
+            api_state = api_state.with_vps_orphan_count(arc);
+        }
 
         // Capture the disk-critical Arc before `api_state` is moved into
         // `rs_api::serve` below. The disk-pressure monitor (spawned later)
@@ -373,6 +394,10 @@ impl ServiceCore {
                 orphan_orch.reconcile_orphan_vps(&orphan_count).await;
                 let mut tick =
                     tokio::time::interval(std::time::Duration::from_secs(orphan_interval_secs));
+                // A slow sweep (many deletes / Hetzner latency) must NOT be chased
+                // by a back-to-back catch-up tick — space the NEXT one a full
+                // interval AFTER this one finishes.
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 tick.tick().await; // consume the immediate first tick
                 loop {
                     tokio::select! {

@@ -239,6 +239,16 @@ impl AppState {
         self
     }
 
+    /// Replace the `vps_orphan_count` atomic with one provided externally.
+    /// Tauri uses this to share the SAME Arc the runtime orphan reaper writes,
+    /// so the tray-side IPC `get_status` surfaces the orphan banner exactly as
+    /// the HTTP `/api/v1/status` path does (#352, mirror of
+    /// `with_disk_pressure_level`).
+    pub fn with_vps_orphan_count(mut self, arc: Arc<std::sync::atomic::AtomicU8>) -> Self {
+        self.vps_orphan_count = arc;
+        self
+    }
+
     /// Replace the `rtmp_stable_since` mutex with one provided externally.
     /// Used by the Tauri GUI to surface `rtmp_stable_secs` in the tray
     /// `get_status` IPC alongside the HTTP path (#234).

@@ -190,6 +190,48 @@ async fn tracked_server_is_never_deleted() {
     );
 }
 
+/// Fail-safe: a Hetzner `GET /servers` error (500) aborts the sweep with ZERO
+/// deletes and leaves the orphan count untouched — never delete on an incomplete
+/// picture.
+#[tokio::test]
+async fn hetzner_list_error_makes_zero_deletes() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/servers"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "error": {"code": "service_error", "message": "boom"}
+        })))
+        .mount(&mock)
+        .await;
+
+    let pool = db::create_memory_pool().await.unwrap();
+    db::run_migrations(&pool).await.unwrap();
+
+    let orch = orch(pool, &mock.uri());
+    let count = AtomicU8::new(7);
+    tokio::time::timeout(Duration::from_secs(10), orch.reconcile_orphan_vps(&count))
+        .await
+        .expect("sweep must not hang");
+
+    assert_eq!(
+        count.load(Ordering::Relaxed),
+        7,
+        "a Hetzner list error must leave the count untouched (never delete on incomplete info)"
+    );
+    // A delete hits `/servers/<id>`; the list hits `/servers`. No id-scoped path
+    // may appear when the list failed.
+    let reqs = mock.received_requests().await.unwrap();
+    assert!(
+        reqs.iter().all(|r| !r
+            .url
+            .path()
+            .trim_end_matches('/')
+            .trim_start_matches("/servers")
+            .starts_with('/')),
+        "no per-server (delete) request may be issued when the server list could not be read"
+    );
+}
+
 /// An empty client_uuid fails the sweep closed — no list, no delete (#137).
 #[tokio::test]
 async fn empty_client_uuid_refuses_to_sweep() {

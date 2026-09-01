@@ -45,8 +45,7 @@ test("orphaned VPS shows the amber orphan banner, clean console", async ({
   const banner = page.locator('[data-testid="vps-orphan-banner"]');
   await expect(banner).toBeVisible({ timeout: 10000 });
   await expect(banner).toHaveClass(/banner--warn/);
-  await expect(banner).toContainText("orphaned delivery VPS still billing");
-  await expect(banner).toContainText("2");
+  await expect(banner).toContainText("2 orphaned delivery VPS still billing");
 
   const real = consoleMessages.filter(
     (m) => !ALLOWED_CONSOLE.some((r) => r.test(m)),

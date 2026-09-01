@@ -127,6 +127,22 @@ impl DeliveryOrchestrator {
             warn!("orphan reaper: client_uuid is empty — refusing to sweep (fail-closed, #137)");
             return;
         }
+        // Read the DB live-row set FIRST, THEN list Hetzner — this ordering makes
+        // a concurrent stop/create harmless. `stop_delivery` deletes the server
+        // then flips the row to `deleted`; if we listed Hetzner first and read the
+        // DB second, a stop landing between the two reads could show a just-deleted
+        // server as an orphan (a spurious delete_server + a phantom banner). With
+        // DB-first: a stop's row is still live when we read it (so its server, even
+        // if already gone from the later Hetzner list, is not classified), and a
+        // create between the reads only adds a server too young for the detect
+        // grace. Both fail-safe.
+        let live_ids: HashSet<i64> = match db::list_delivery_instances(self.pool()).await {
+            Ok(rows) => rows.into_iter().map(|r| r.hetzner_id).collect(),
+            Err(e) => {
+                warn!("orphan reaper: DB list_delivery_instances failed, skipping this cycle: {e}");
+                return;
+            }
+        };
         let selector = format!("app=restreamer,client_uuid={uuid}");
         let servers = match self.hetzner().list_servers(Some(&selector)).await {
             Ok(s) => s,
@@ -135,13 +151,6 @@ impl DeliveryOrchestrator {
                     "orphan reaper: Hetzner list_servers failed, skipping this cycle (never \
                      delete on incomplete info): {e}"
                 );
-                return;
-            }
-        };
-        let live_ids: HashSet<i64> = match db::list_delivery_instances(self.pool()).await {
-            Ok(rows) => rows.into_iter().map(|r| r.hetzner_id).collect(),
-            Err(e) => {
-                warn!("orphan reaper: DB list_delivery_instances failed, skipping this cycle: {e}");
                 return;
             }
         };
@@ -180,6 +189,16 @@ impl DeliveryOrchestrator {
                             hetzner_id = o.hetzner_id,
                             age_secs = o.age_secs,
                             "orphan reaper: auto-deleted orphaned VPS past the delete grace (#352)"
+                        );
+                    }
+                    // A 404 means the server is ALREADY gone (a concurrent stop
+                    // deleted it between our list and this delete) — not a failure,
+                    // and NOT still billing. Any other error leaves it billing.
+                    Err(rs_cloud::CloudError::Api { status: 404, .. }) => {
+                        auto_deleted = true;
+                        info!(
+                            hetzner_id = o.hetzner_id,
+                            "orphan reaper: orphaned VPS already gone (404) — nothing to delete"
                         );
                     }
                     Err(e) => {
