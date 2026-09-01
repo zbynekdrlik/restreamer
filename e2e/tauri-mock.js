@@ -17,6 +17,12 @@ const mockResponses = {
     const disk_pressure = status.disk_pressure || "ok";
     const s3_region_standard =
       status.s3_region_standard !== undefined ? status.s3_region_standard : true;
+    // #354: ingest A/V-skew mirrors /api/v1/status.inpoint.details -- must be
+    // forwarded here too (this hand-composed object does not relay the HTTP
+    // response verbatim), or the IngestSkewBanner/gate silently see defaults
+    // under the Tauri-mock IPC path every frontend spec runs through.
+    const ingest_skew_ms = status.inpoint?.details?.ingest_skew_ms || 0;
+    const ingest_skew_active = status.inpoint?.details?.ingest_skew_active || false;
     const data = {
       streaming_event: status.streaming_event || null,
       chunk_stats,
@@ -24,6 +30,8 @@ const mockResponses = {
       rtmp_stable_secs,
       disk_pressure,
       s3_region_standard,
+      ingest_skew_ms,
+      ingest_skew_active,
     };
     return { success: true, data, error: null };
   },
