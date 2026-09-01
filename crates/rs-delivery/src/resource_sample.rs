@@ -22,8 +22,11 @@ use crate::AppState;
 use rs_core::audit::{Action, Severity, Source};
 
 /// How often the sampler ticks. 1/min matches the other rate-limited telemetry
-/// (DiskCachePushSample, lifecycle samples) and stays well under the 500-row
-/// audit ring cap over a multi-hour event.
+/// (DiskCachePushSample, lifecycle samples). Over a multi-hour event this alone
+/// produces ~480 rows in 8 h — more than the 500-row ring cap SHARED with every
+/// other action; the ring stays healthy only because the host mirror drains it
+/// by cursor every poll (`mirror_vps_audit`). Don't "fix" the ring cap based on
+/// a per-source count.
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A single point-in-time resource reading of the delivery VPS.
@@ -63,11 +66,14 @@ pub fn parse_proc_stat_cpu(proc_stat: &str) -> Option<CpuTimes> {
     let line = proc_stat
         .lines()
         .find(|l| l.starts_with("cpu ") || *l == "cpu")?;
+    // Fail closed: a non-numeric token would shift every column (idle read from
+    // the wrong field), so refuse the whole line rather than silently dropping.
     let nums: Vec<u64> = line
         .split_whitespace()
         .skip(1) // the "cpu" label
-        .filter_map(|f| f.parse::<u64>().ok())
-        .collect();
+        .map(|f| f.parse::<u64>())
+        .collect::<std::result::Result<Vec<u64>, _>>()
+        .ok()?;
     if nums.len() < 4 {
         return None; // need at least user/nice/system/idle
     }
@@ -190,32 +196,74 @@ pub fn sample_from_sources(
     (sample, cur_cpu)
 }
 
-/// Read the raw source strings from the live host. Best-effort: a missing file
-/// or a failed `df` yields an empty string / `None`, which `sample_from_sources`
-/// degrades gracefully.
+/// Read a `/proc` file, WARN-logging (not silently swallowing) a read error so a
+/// degraded sample is diagnosable. Returns "" on error — the pure assemblers
+/// degrade that gracefully.
+fn read_proc_or_warn(path: &str) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("resource_sample: reading {path} failed: {e}");
+            String::new()
+        }
+    }
+}
+
+/// Run `df -kP <path>`, WARN-logging a spawn failure or a non-zero exit (with
+/// its stderr). `None` on any failure — never a silently-empty disk figure.
+fn run_df(disk_path: &str) -> Option<String> {
+    match std::process::Command::new("df")
+        .args(["-kP", disk_path])
+        .output()
+    {
+        Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+        Ok(o) => {
+            tracing::warn!(
+                "resource_sample: df -kP {disk_path} exited {}: {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!("resource_sample: spawning df failed: {e}");
+            None
+        }
+    }
+}
+
+/// Read the raw source strings from the live host and assemble one sample.
+/// Blocking (fs + `df`) — the caller runs it on a blocking thread. Returns
+/// `None` for the sample when BOTH `/proc/stat` and `/proc/meminfo` were
+/// unreadable: an all-zero row would corrupt the very dataset #353 collects, so
+/// it is skipped rather than pushed. The current [`CpuTimes`] is still returned
+/// to seed the next delta.
 fn read_live_sample(
     prev_cpu: Option<CpuTimes>,
     disk_path: &str,
-) -> (ResourceSample, Option<CpuTimes>) {
-    let proc_stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
-    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-    let self_status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    let loadavg = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
-    let df_output = std::process::Command::new("df")
-        .args(["-kP", disk_path])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+) -> (Option<ResourceSample>, Option<CpuTimes>) {
+    let proc_stat = read_proc_or_warn("/proc/stat");
+    let meminfo = read_proc_or_warn("/proc/meminfo");
+    let self_status = read_proc_or_warn("/proc/self/status");
+    let loadavg = read_proc_or_warn("/proc/loadavg");
+    let df_output = run_df(disk_path);
 
-    sample_from_sources(
+    if proc_stat.is_empty() && meminfo.is_empty() {
+        tracing::warn!(
+            "resource_sample: both /proc/stat and /proc/meminfo unreadable — skipping this sample"
+        );
+        return (None, None);
+    }
+
+    let (sample, cur_cpu) = sample_from_sources(
         &proc_stat,
         &meminfo,
         &self_status,
         &loadavg,
         df_output.as_deref(),
         prev_cpu,
-    )
+    );
+    (Some(sample), cur_cpu)
 }
 
 /// Background task: sample the VPS resources every [`SAMPLE_INTERVAL`], store
@@ -232,10 +280,23 @@ pub async fn run_sampler(state: Arc<AppState>, disk_path: String) {
     }
     loop {
         tokio::time::sleep(SAMPLE_INTERVAL).await;
-        let (sample, cur_cpu) = read_live_sample(prev_cpu, &disk_path);
+        // The reads are blocking (fs + `df`); keep them off the async worker
+        // that also serves /api/status and chunk fetch (a wedged mount would
+        // otherwise stall a runtime thread).
+        let dp = disk_path.clone();
+        let (sample, cur_cpu) =
+            tokio::task::spawn_blocking(move || read_live_sample(prev_cpu, &dp))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("resource_sample: sampler task panicked: {e}");
+                    (None, None)
+                });
         if cur_cpu.is_some() {
             prev_cpu = cur_cpu;
         }
+        let Some(sample) = sample else {
+            continue; // sources unreadable this tick — already warned
+        };
         *state.latest_resource_sample.write().await = Some(sample.clone());
         match serde_json::to_value(&sample) {
             Ok(detail) => {

@@ -158,7 +158,7 @@ fn split_statements(code: &str, skeleton: &str) -> Vec<CodeLine> {
 }
 
 /// The `<name> = @{ … }` hashtable block. Scoping to it matters: a `bucket =`
-/// (or `default_server_type =`) key in any block placed above `<name>` would
+/// (or `server_type_override =`) key in any block placed above `<name>` would
 /// otherwise silently become what is validated.
 fn named_block<'a>(lines: &'a [CodeLine], name: &str) -> Vec<&'a CodeLine> {
     let start = lines
@@ -194,7 +194,7 @@ fn s3_block(lines: &[CodeLine]) -> Vec<&CodeLine> {
 
 /// Value of a `key = "value"` line. `split_once` — not `split('=')` — so a value
 /// that itself contains `=` (base64 padding, a query string) survives.
-fn ps_value(block: &[&CodeLine], key: &str) -> String {
+fn ps_value(block: &[&CodeLine], block_name: &str, key: &str) -> String {
     let stmt = block
         .iter()
         .flat_map(|l| l.statements())
@@ -202,7 +202,7 @@ fn ps_value(block: &[&CodeLine], key: &str) -> String {
             let t = l.skeleton.trim_start();
             t.starts_with(key) && t[key.len()..].trim_start().starts_with('=')
         })
-        .unwrap_or_else(|| panic!("install.ps1 s3 block has no `{key} = ...` default"));
+        .unwrap_or_else(|| panic!("install.ps1 {block_name} block has no `{key} = ...` default"));
 
     let raw = stmt
         .code
@@ -228,36 +228,37 @@ fn install_script_s3_defaults_match_the_binary_defaults() {
     let want = Config::default().s3;
 
     assert_eq!(
-        ps_value(&block, "bucket"),
+        ps_value(&block, "s3", "bucket"),
         want.bucket,
         "install.ps1 default S3 bucket drifted from Config::default()"
     );
     assert_eq!(
-        ps_value(&block, "region"),
+        ps_value(&block, "s3", "region"),
         want.region,
         "install.ps1 default S3 region drifted from Config::default()"
     );
     assert_eq!(
-        ps_value(&block, "endpoint"),
+        ps_value(&block, "s3", "endpoint"),
         want.endpoint,
         "install.ps1 default S3 endpoint drifted from Config::default()"
     );
 }
 
-/// #353: the script's `hetzner.default_server_type` default must match the
+/// #353: the script's `hetzner.server_type_override` default must match the
 /// binary default (empty = "auto"). The old script default `cx23` was BOTH a
-/// deprecated Hetzner type AND — until #353 wired the override — dead config;
-/// pinning it to `Config::default()` stops it silently drifting back.
+/// deprecated Hetzner type AND — under the old `default_server_type` name —
+/// dead config; pinning it to `Config::default()` stops it silently drifting
+/// back to a forced type.
 #[test]
-fn install_script_hetzner_default_server_type_matches_the_binary_default() {
+fn install_script_hetzner_server_type_override_matches_the_binary_default() {
     let lines = code_lines(&install_script());
     let block = named_block(&lines, "hetzner");
-    let want = Config::default().hetzner.default_server_type;
+    let want = Config::default().hetzner.server_type_override;
 
     assert_eq!(
-        ps_value(&block, "default_server_type"),
+        ps_value(&block, "hetzner", "server_type_override"),
         want,
-        "install.ps1 default hetzner.default_server_type drifted from Config::default() \
+        "install.ps1 default hetzner.server_type_override drifted from Config::default() \
          (empty = auto-size by endpoint count)"
     );
 }

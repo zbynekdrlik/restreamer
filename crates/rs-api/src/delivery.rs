@@ -282,12 +282,22 @@ impl DeliveryOrchestrator {
         }
 
         // Get event endpoints to determine server size. An explicit
-        // `hetzner.default_server_type` override wins over the endpoint-count
-        // tiering; empty = "auto" falls back to it (#353).
+        // `hetzner.server_type_override` wins over the endpoint-count tiering;
+        // empty = "auto" falls back to it (#353).
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
-        let server_type = rs_cloud::resolve_server_type(
-            &self.config.hetzner.default_server_type,
-            endpoints.len(),
+        let server_type_override = self.config.hetzner.server_type_override.trim();
+        let server_type_source = if server_type_override.is_empty() {
+            "auto"
+        } else {
+            "override"
+        };
+        let server_type = rs_cloud::resolve_server_type(server_type_override, endpoints.len());
+        info!(
+            event_id,
+            endpoint_count = endpoints.len(),
+            %server_type,
+            server_type_source,
+            "resolved delivery VPS server type"
         );
 
         let name = format!("rs-delivery-evt{event_id}");
@@ -356,6 +366,7 @@ impl DeliveryOrchestrator {
                     action: Action::VpsCreating,
                     detail: serde_json::json!({
                         "server_type": server_type.as_str(),
+                        "server_type_source": server_type_source,
                         "datacenter": self.config.hetzner.location,
                     }),
                     ts_override: None,

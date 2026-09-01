@@ -523,7 +523,7 @@ mod tests {
         ("client_uuid", false),
         ("delivery.delivery_delay_secs", false),
         ("hetzner.api_token", true),
-        ("hetzner.default_server_type", false),
+        ("hetzner.server_type_override", false),
         ("hetzner.extra_ssh_key_names", false),
         ("hetzner.location", false),
         ("hetzner.snapshot_label", false),

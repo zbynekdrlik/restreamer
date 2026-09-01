@@ -136,7 +136,9 @@ pub fn resolve_server_type(config_override: &str, endpoint_count: usize) -> Stri
             tracing::warn!("hetzner.default_server_type 'cx43' is deprecated; using 'cpx42'");
             "cpx42".to_string()
         }
-        _ => trimmed.to_string(),
+        // Hetzner server types are all lowercase, so normalize case here too —
+        // a "CPX32" typo would otherwise 400 at event start.
+        other => other.to_string(),
     }
 }
 
@@ -350,8 +352,10 @@ mod tests {
         // event (tiering would pick cpx32) is forced onto the cheaper cpx11.
         assert_eq!(resolve_server_type("cpx11", 5), "cpx11");
         assert_eq!(resolve_server_type("cpx22", 8), "cpx22");
-        // Surrounding whitespace is trimmed but the value is otherwise verbatim.
+        // Surrounding whitespace is trimmed; the value is lowercased (Hetzner
+        // types are lowercase, so a "CPX32" typo must not reach the API as-is).
         assert_eq!(resolve_server_type("  cpx31  ", 1), "cpx31");
+        assert_eq!(resolve_server_type("CPX32", 1), "cpx32");
     }
 
     #[test]
