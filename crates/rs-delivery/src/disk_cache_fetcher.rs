@@ -167,15 +167,16 @@ impl DiskCacheFetcher {
     }
 
     /// Close the outage bracket (#333): if a stall was recorded, clear the
-    /// flag and emit the paired `DiskCacheReaderRecovered`. Called on EVERY
-    /// clean terminal state -- `Available`, `NotFound`, AND `Evicted` --
-    /// because all three mean S3 answered and the reader is no longer
-    /// stalled. `swap` is the atomic test-and-clear so exactly one recovered
-    /// row closes each bracket regardless of which clean state arrives first.
-    /// Emitting on `NotFound`/`Evicted` too avoids a mis-bracketed window: a
-    /// stall armed by the ~3s `Failed` arm, followed by the producer's
-    /// skip-ahead probe recovering on a clean 404 hundreds of chunks later,
-    /// would otherwise stay open until an unrelated `Available`.
+    /// flag and emit the paired `DiskCacheReaderRecovered`. Called only where a
+    /// GENUINE clean terminal is established -- after a successful file read, a
+    /// top-level `NotFound`/`Evicted`, or a refetch that resolved
+    /// `Available`/`NotFound`/`Evicted` -- because those mean S3 actually
+    /// answered and the reader is no longer stalled. It is deliberately NOT
+    /// called on a bare registry `Available` (which can be STALE: the slot reads
+    /// Available while the local file was evicted and no fresh S3 GET was
+    /// issued), or on the stall arms (which re-arm instead). `swap` is the
+    /// atomic test-and-clear so exactly one recovered row closes each bracket
+    /// regardless of which clean terminal arrives first.
     fn note_recovered(&self, chunk_id: i64) {
         if self
             .was_stalled
@@ -251,9 +252,15 @@ impl ChunkFetcher for DiskCacheFetcher {
 
         match state {
             ChunkAvailability::Available { .. } => {
-                // Recovered after a stall: emit the paired ReaderRecovered
-                // exactly once per outage so the audit timeline brackets the gap.
-                self.note_recovered(chunk_id);
+                // NOTE (#333 review): do NOT close the bracket here. A registry
+                // `Available` can be STALE — the slot still reads Available while
+                // the local file was already evicted (#252), and `request_chunk`
+                // dedup-skips it so NO fresh S3 GET was issued. Closing the
+                // bracket on that stale state would emit a spurious
+                // DiskCacheReaderRecovered while S3 is still down. Instead
+                // `note_recovered` is called only where a clean terminal is
+                // genuinely established: after a successful file read, and on the
+                // refetch's clean terminals below.
                 let path = self.event_dir.join(format!("{chunk_id}.bin"));
                 // A registry-`Available` chunk whose LOCAL file is missing is
                 // a CACHE MISS, not a disk error (#252). Two ways to get here:
@@ -275,7 +282,12 @@ impl ChunkFetcher for DiskCacheFetcher {
                 // `mark_in_flight` invalidates the stale slot (the #184 reset
                 // pattern) so the re-request issues a genuine S3 GET.
                 let data = match tokio::fs::read(&path).await {
-                    Ok(d) => d,
+                    Ok(d) => {
+                        // Genuine clean terminal: the chunk's bytes are on disk.
+                        // Close any open outage bracket here (#333 review).
+                        self.note_recovered(chunk_id);
+                        d
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         self.cache.registry.mark_in_flight(chunk_id);
                         // Same single-deadline bound as the main path (#284):
@@ -287,8 +299,8 @@ impl ChunkFetcher for DiskCacheFetcher {
                         // records DiskCacheStallTimeout and arms the paired
                         // DiskCacheReaderRecovered bracket -- previously these
                         // returned raw strings and left the resume outage silent
-                        // on the timeline. was_stalled was cleared at the top of
-                        // the Available arm, so re-arming here brackets the
+                        // on the timeline. The bracket was NOT closed on the
+                        // stale Available above, so re-arming here brackets the
                         // resume outage correctly.
                         let refetched = match tokio::time::timeout(
                             Duration::from_secs(self.stall_timeout_secs),
@@ -316,6 +328,11 @@ impl ChunkFetcher for DiskCacheFetcher {
                             // skip-ahead probe advances past it — never loop
                             // on the disk path.
                             ChunkAvailability::Available { .. } => {
+                                // A genuine S3 GET succeeded (mark_in_flight
+                                // forced a real fetch), so this IS a recovery
+                                // regardless of whether the re-read then races
+                                // (#333 review): close the bracket.
+                                self.note_recovered(chunk_id);
                                 match tokio::fs::read(&path).await {
                                     Ok(d) => d,
                                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -332,8 +349,10 @@ impl ChunkFetcher for DiskCacheFetcher {
                             // The chunk is genuinely gone from S3 (or evicted
                             // past every window): a cache miss the producer
                             // resolves by probing ahead — NOT a hard Err that
-                            // would re-arm the 60s backoff loop.
+                            // would re-arm the 60s backoff loop. A clean S3
+                            // answer, so close the bracket too (#333 review).
                             ChunkAvailability::NotFound | ChunkAvailability::Evicted => {
+                                self.note_recovered(chunk_id);
                                 return Ok(None);
                             }
                             // A GENUINE S3 failure — surface as Err so the
