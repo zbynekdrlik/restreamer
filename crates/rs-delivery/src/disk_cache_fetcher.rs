@@ -17,6 +17,27 @@ use std::time::Duration;
 use crate::disk_cache::{ChunkAvailability, DiskCache};
 use crate::endpoint_task::ChunkFetcher;
 
+/// Discriminates the two shapes of a disk-cache stall. Keeps the rate-limiter
+/// window separate per class (#331) so a bounded-attempts error storm and a
+/// stall_timeout-length wedge in the same 60s window each keep their audit row
+/// and the class transition stays visible on the timeline.
+#[derive(Clone, Copy)]
+enum StallShape {
+    /// `MAX_FETCH_ATTEMPTS` exhausted in ~3s (a persistently-erroring S3).
+    BoundedAttempts,
+    /// The outer `stall_timeout` deadline elapsed (a wedge >= the cache window).
+    StallTimeout,
+}
+
+impl StallShape {
+    fn as_str(self) -> &'static str {
+        match self {
+            StallShape::BoundedAttempts => "bounded_attempts",
+            StallShape::StallTimeout => "stall_timeout",
+        }
+    }
+}
+
 pub struct DiskCacheFetcher {
     cache: Arc<DiskCache>,
     alias: String,
@@ -91,14 +112,20 @@ impl DiskCacheFetcher {
     /// `DiskCacheReaderRecovered` bracket, emit the rate-limited
     /// `DiskCacheStallTimeout` audit row, and build the Err string the
     /// producer's backoff loop expects.
-    fn note_stall(&self, chunk_id: i64, detail: &str) -> String {
-        self.was_stalled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+    fn note_stall(&self, chunk_id: i64, shape: StallShape, detail: &str) -> String {
         if let Some(ring) = &self.audit_ring {
-            if self
-                .stall_rl
-                .allow(rs_core::audit::Action::DiskCacheStallTimeout, &self.alias)
-            {
+            // #331: key the limiter on (action, alias, shape) so a
+            // bounded-attempts storm and a stall_timeout wedge in the same 60s
+            // window each keep their row. Arm `was_stalled` ONLY when the stall
+            // row is actually emitted -- a rate-limited (suppressed) stall must
+            // NOT arm the flag, or the next recovery would emit a
+            // DiskCacheReaderRecovered with no matching stall row.
+            if self.stall_rl.allow(
+                rs_core::audit::Action::DiskCacheStallTimeout,
+                &format!("{}:{}", self.alias, shape.as_str()),
+            ) {
+                self.was_stalled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 ring.push_parts(crate::audit_ring::RingRowParts {
                     severity: rs_core::audit::Severity::Error,
                     source: rs_core::audit::Source::Vps,
@@ -186,10 +213,17 @@ impl ChunkFetcher for DiskCacheFetcher {
             .await
             {
                 Ok(Ok(s)) => s,
-                Ok(Err(e)) => return Err(self.note_stall(chunk_id, &e.to_string())),
+                Ok(Err(e)) => {
+                    return Err(self.note_stall(
+                        chunk_id,
+                        StallShape::StallTimeout,
+                        &e.to_string(),
+                    ));
+                }
                 Err(_elapsed) => {
                     return Err(self.note_stall(
                         chunk_id,
+                        StallShape::StallTimeout,
                         &format!(
                             "request+wait exceeded stall_timeout {}s",
                             self.stall_timeout_secs
@@ -331,7 +365,7 @@ impl ChunkFetcher for DiskCacheFetcher {
                 // typically resolves well before the outer stall_timeout, so
                 // without this the common error-storm outage left no stall
                 // row on the audit timeline even though rescue still fired.
-                Err(self.note_stall(chunk_id, &error))
+                Err(self.note_stall(chunk_id, StallShape::BoundedAttempts, &error))
             }
             // Unreachable in practice: `wait_for_chunk` only returns once a
             // slot transitions to a TERMINAL state (Available / NotFound /
