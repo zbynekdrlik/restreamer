@@ -114,6 +114,33 @@ impl DiskCacheFetcher {
         }
         format!("disk_cache stall on chunk {chunk_id}: {detail}")
     }
+
+    /// Close the outage bracket (#333): if a stall was recorded, clear the
+    /// flag and emit the paired `DiskCacheReaderRecovered`. Called on EVERY
+    /// clean terminal state -- `Available`, `NotFound`, AND `Evicted` --
+    /// because all three mean S3 answered and the reader is no longer
+    /// stalled. `swap` is the atomic test-and-clear so exactly one recovered
+    /// row closes each bracket regardless of which clean state arrives first.
+    /// Emitting on `NotFound`/`Evicted` too avoids a mis-bracketed window: a
+    /// stall armed by the ~3s `Failed` arm, followed by the producer's
+    /// skip-ahead probe recovering on a clean 404 hundreds of chunks later,
+    /// would otherwise stay open until an unrelated `Available`.
+    fn note_recovered(&self, chunk_id: i64) {
+        if self
+            .was_stalled
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some(ring) = &self.audit_ring {
+                ring.push_parts(crate::audit_ring::RingRowParts {
+                    severity: rs_core::audit::Severity::Info,
+                    source: rs_core::audit::Source::Vps,
+                    endpoint: Some(self.alias.clone()),
+                    action: rs_core::audit::Action::DiskCacheReaderRecovered,
+                    detail: serde_json::json!({ "chunk_id": chunk_id }),
+                });
+            }
+        }
+    }
 }
 
 impl ChunkFetcher for DiskCacheFetcher {
@@ -174,22 +201,8 @@ impl ChunkFetcher for DiskCacheFetcher {
         match state {
             ChunkAvailability::Available { .. } => {
                 // Recovered after a stall: emit the paired ReaderRecovered
-                // exactly once per outage so the audit timeline brackets the
-                // gap. `swap` is the atomic test-and-clear.
-                if self
-                    .was_stalled
-                    .swap(false, std::sync::atomic::Ordering::Relaxed)
-                {
-                    if let Some(ring) = &self.audit_ring {
-                        ring.push_parts(crate::audit_ring::RingRowParts {
-                            severity: rs_core::audit::Severity::Info,
-                            source: rs_core::audit::Source::Vps,
-                            endpoint: Some(self.alias.clone()),
-                            action: rs_core::audit::Action::DiskCacheReaderRecovered,
-                            detail: serde_json::json!({ "chunk_id": chunk_id }),
-                        });
-                    }
-                }
+                // exactly once per outage so the audit timeline brackets the gap.
+                self.note_recovered(chunk_id);
                 let path = self.event_dir.join(format!("{chunk_id}.bin"));
                 // A registry-`Available` chunk whose LOCAL file is missing is
                 // a CACHE MISS, not a disk error (#252). Two ways to get here:
@@ -288,13 +301,21 @@ impl ChunkFetcher for DiskCacheFetcher {
                     .unwrap_or(0);
                 Ok(Some((data, duration_ms)))
             }
-            ChunkAvailability::NotFound => Ok(None),
+            ChunkAvailability::NotFound => {
+                // A clean 404 means S3 answered -- the reader is no longer
+                // stalled, so close any open outage bracket (#333) before
+                // reporting the cache miss.
+                self.note_recovered(chunk_id);
+                Ok(None)
+            }
             ChunkAvailability::Evicted => {
                 // The chunk used to exist on disk and was swept. The
                 // producer treats `None` as "not on S3", which triggers
                 // its skip-ahead probe loop. That's the right recovery
                 // because eviction only happens for chunks outside any
-                // endpoint's window.
+                // endpoint's window. A clean Evicted is likewise an S3
+                // answer -- close any open outage bracket (#333).
+                self.note_recovered(chunk_id);
                 Ok(None)
             }
             ChunkAvailability::Failed { error } => {
