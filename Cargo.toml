@@ -34,7 +34,7 @@ tokio = { version = "1", features = ["full"] }
 
 # Web framework
 axum = { version = "0.8", features = ["ws", "multipart"] }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 # TLS for rtmps:// pusher (#156)
 tokio-rustls = "0.26"
