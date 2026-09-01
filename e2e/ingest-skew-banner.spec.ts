@@ -104,9 +104,66 @@ test("no ingest-skew banner when the source is clean", async ({
   // Default scenario => ingest_skew_active=false.
   await page.goto("/");
 
-  // Give the dashboard a moment to load + poll, then confirm no banner.
-  await page.waitForTimeout(2000);
-  await expect(
-    page.locator('[data-testid="ingest-skew-banner"]'),
-  ).toHaveCount(0);
+  // Wait for the dashboard to actually finish its FIRST /status poll (the
+  // event selector only renders once that lands), rather than a fixed sleep
+  // -- proves the negative assertion below is checked against real polled
+  // state, not just "the page hasn't loaded yet".
+  await expect(page.locator(".event-selector")).toBeVisible({
+    timeout: 10000,
+  });
+  const banner = page.locator('[data-testid="ingest-skew-banner"]');
+  await expect(banner).toHaveCount(0);
+
+  // The store polls /status every 2s -- wait one more full poll cycle and
+  // re-check, so a banner that only appeared on a LATER poll (not just "not
+  // yet rendered") would still be caught.
+  await page.waitForTimeout(2500);
+  await expect(banner).toHaveCount(0);
+});
+
+test("emergency override starts delivery anyway and audits the bypass", async ({
+  page,
+  request,
+}) => {
+  const consoleMessages: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error" || msg.type() === "warning") {
+      consoleMessages.push(`[${msg.type()}] ${msg.text()}`);
+    }
+  });
+
+  await page.addInitScript(tauriMockScript);
+  await request.post("http://127.0.0.1:8910/api/v1/__reset");
+  await request.post("http://127.0.0.1:8910/api/v1/_test/scenario", {
+    data: { scenario: "ingest-skew" },
+  });
+
+  await page.goto("/");
+  await expect(page.locator(".event-selector")).toBeVisible({
+    timeout: 10000,
+  });
+  await page.locator(".event-selector").selectOption({ index: 1 });
+
+  // The override button appears ONLY because skew is the sole blocker
+  // (event selected, RTMP already stable in this scenario).
+  const overrideBtn = page.locator('[data-testid="skew-override-btn"]');
+  await expect(overrideBtn).toBeVisible();
+  await overrideBtn.click();
+
+  // Confirm modal names the risk; confirming sends force=true, which the
+  // mock (mirroring the real backend gate) accepts despite the active skew.
+  await expect(page.getByText(/Naozaj chceš spustiť delivery/)).toBeVisible();
+  await page.getByRole("button", { name: "Spustiť napriek tomu" }).click();
+
+  // The event card / control bar reflects a started delivery (state badge
+  // leaves "idle") -- proves the force=true request actually succeeded
+  // against the mock's gate, not merely that the modal closed.
+  await expect(page.locator(".state-badge")).not.toHaveText(/idle/i, {
+    timeout: 10000,
+  });
+
+  const real = consoleMessages.filter(
+    (m) => !ALLOWED_CONSOLE.some((r) => r.test(m)),
+  );
+  expect(real).toEqual([]);
 });

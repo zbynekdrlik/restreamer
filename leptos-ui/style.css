@@ -91,6 +91,16 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
 }
 .stop-btn:hover:not(:disabled) { background: rgba(220,53,69,0.15); }
 .stop-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+/* #354: the emergency "start anyway" override, shown ONLY while the ingest
+   A/V-skew gate is the sole thing blocking Start Delivering. Amber/warning
+   styling -- distinct from the normal green start / red stop actions, so an
+   operator never mistakes it for the ordinary Start button. */
+.skew-override-btn {
+    padding: 10px 16px; border: var(--border-w) solid var(--status-warn); border-radius: var(--radius);
+    background: transparent; color: var(--status-warn); font-family: var(--font-sans);
+    font-weight: 600; font-size: 13px; cursor: pointer;
+}
+.skew-override-btn:hover { background: rgba(217,164,65,0.15); }
 .state-badge {
     font-size: 14px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
     border: none; background: none; padding: 0;

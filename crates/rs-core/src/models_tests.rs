@@ -443,3 +443,37 @@ fn endpoint_config_serde_preserves_youtube_oauth_id() {
     let parsed2: EndpointConfig = serde_json::from_str(json_missing).unwrap();
     assert_eq!(parsed2.youtube_oauth_id, None);
 }
+
+#[test]
+fn inpoint_state_clone_shares_ingest_skew_cells() {
+    // #354: the orchestrator wiring comment claims the chunker's writes are
+    // "already visible through every InpointState clone" because the skew
+    // cells are `Arc`-shared -- prove that claim directly, since it's the
+    // whole reason no separate cross-component wiring (like
+    // `rtmp_stable_since`'s explicit re-wire) was needed for this feature.
+    let state = InpointState::new();
+    let clone = state.clone();
+
+    assert_eq!(state.ingest_skew_ms(), 0);
+    assert!(!state.ingest_skew_active());
+
+    state.set_ingest_skew_ms(25_470);
+    state.set_ingest_skew_active(true);
+
+    assert_eq!(
+        clone.ingest_skew_ms(),
+        25_470,
+        "a write through the original must be visible through the clone"
+    );
+    assert!(
+        clone.ingest_skew_active(),
+        "a write through the original must be visible through the clone"
+    );
+
+    // And the reverse direction, proving it's a shared cell, not a
+    // one-way/coincidental read.
+    clone.set_ingest_skew_ms(0);
+    clone.set_ingest_skew_active(false);
+    assert_eq!(state.ingest_skew_ms(), 0);
+    assert!(!state.ingest_skew_active());
+}

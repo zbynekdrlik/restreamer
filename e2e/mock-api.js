@@ -332,6 +332,18 @@ app.post("/api/v1/events/:id/start-stream", (req, res) => {
   if (conflict) {
     return res.status(409).json({ error: "another event is active" });
   }
+  // #354: mirrors the REAL backend's ingest-skew gate on this same endpoint
+  // (stream_handlers::start_stream) -- the operator dashboard's Start
+  // Delivering button calls THIS path, not the separate /delivery/start
+  // handler, so the E2E gate test must exercise it here.
+  const force = req.query.force === "true";
+  if (scenario === "ingest-skew" && !force) {
+    return res.status(400).json({
+      error: "ingest_skew_too_high",
+      skew_ms: 25470,
+      reason: "Zvuk a obraz z OBS sú rozídené o ~25 s — reštartuj stream v OBS pred spustením delivery.",
+    });
+  }
   evt.receiving_activated = true;
   evt.delivering_activated = true;
 

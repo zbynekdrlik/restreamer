@@ -66,6 +66,10 @@ fn ControlBar() -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let loading = RwSignal::new(false);
     let show_stop_confirm = RwSignal::new(false);
+    // #354: the emergency-override confirmation for starting delivery while
+    // the ingest A/V-skew banner is latched. Separate from `show_stop_confirm`
+    // so the two flows don't fight over one signal.
+    let show_skew_override_confirm = RwSignal::new(false);
 
     // Poll /status every 2s so rtmp_stable_secs updates even when the
     // WebSocket only emits InpointStatus on byte-count ticks.
@@ -115,12 +119,14 @@ fn ControlBar() -> impl IntoView {
         }
     });
 
-    let on_start = move |_| {
+    // Shared by the normal Start click AND the skew-override confirm below --
+    // `force` is `false` for the former, `true` for the latter (#354).
+    let start_delivery = move |force: bool| {
         let selected = store.selected_event_id.get();
         if let Some(event_id) = selected {
             loading.set(true);
             spawn_local(async move {
-                if let Err(e) = api::start_stream(event_id).await {
+                if let Err(e) = api::start_stream(event_id, force).await {
                     store.push_error("dashboard".to_string(), format!("Start failed: {e}"));
                 }
                 loading.set(false);
@@ -130,6 +136,34 @@ fn ControlBar() -> impl IntoView {
             });
         }
     };
+
+    let on_start = move |_| start_delivery(false);
+
+    // #354: the ONLY thing blocking Start is the ingest-skew latch -- offer
+    // the deliberate emergency override instead of a hard dead-end. Gated on
+    // the SAME conditions as the Start button's own `disabled` (below), minus
+    // the skew check itself, so this never appears while some OTHER gate
+    // (no event selected, already active, RTMP not stable) is also failing.
+    let skew_override_available = move || {
+        store.ingest_skew_active.get()
+            && store.selected_event_id.get().is_some()
+            && !is_active()
+            && store.rtmp_stable_secs.get() >= RTMP_STABLE_REQUIRED_SECS
+    };
+    let on_skew_override_click = move |_| {
+        show_skew_override_confirm.set(true);
+    };
+    let on_skew_override_confirmed = Callback::new(move |()| {
+        start_delivery(true);
+    });
+    let skew_override_confirm_message = Signal::derive(move || {
+        let secs = (store.ingest_skew_ms.get().abs() as f64 / 1000.0).round();
+        format!(
+            "Zvuk a obraz z OBS sú rozídené o ~{secs} s. Každý cieľ (YouTube, Facebook...) sa \
+             pravdepodobne bude opakovane odpájať, kým to platí. Naozaj chceš spustiť delivery \
+             napriek tomu?"
+        )
+    });
 
     let on_stop_click = move |_| {
         show_stop_confirm.set(true);
@@ -260,6 +294,16 @@ fn ControlBar() -> impl IntoView {
                 >
                     "Start Delivering"
                 </button>
+                <Show when=skew_override_available>
+                    <button
+                        class="skew-override-btn"
+                        data-testid="skew-override-btn"
+                        on:click=on_skew_override_click
+                        title="Núdzové spustenie napriek rozídenému zvuku a obrazu z OBS"
+                    >
+                        "Spustiť napriek rozídeniu"
+                    </button>
+                </Show>
                 <button
                     class="stop-btn"
                     on:click=on_stop_click
@@ -278,6 +322,13 @@ fn ControlBar() -> impl IntoView {
                 message=stop_confirm_message
                 confirm_label="Stop Delivering"
                 on_confirm=on_stop_confirmed
+            />
+            <ConfirmModal
+                show=show_skew_override_confirm
+                title="Spustiť napriek rozídeniu OBS?"
+                message=skew_override_confirm_message
+                confirm_label="Spustiť napriek tomu"
+                on_confirm=on_skew_override_confirmed
             />
         </div>
     }

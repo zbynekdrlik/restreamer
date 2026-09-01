@@ -47,6 +47,8 @@ pub mod router;
 #[cfg(test)]
 mod router_ingest_skew_gate_tests;
 #[cfg(test)]
+mod router_start_stream_skew_gate_tests;
+#[cfg(test)]
 mod router_tests;
 pub mod s3_handlers;
 pub mod state;

@@ -55,6 +55,11 @@ pub struct FlvChunkSink {
     /// row through its `audit_tx`. `None` in tests / the null sink (no
     /// surfacing). Wired via `with_ingest_state`.
     ingest_state: Option<InpointState>,
+    /// The operator alert threshold (ms) the monitor was built with (#354).
+    /// Mirrored here (outside the `inner` mutex) so `report_skew` can stamp
+    /// it onto the audit row without re-acquiring the lock it was just
+    /// dropped from.
+    skew_threshold_ms: i64,
 }
 
 struct FlvChunkSinkInner {
@@ -136,6 +141,7 @@ impl FlvChunkSink {
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
             ingest_state: None,
+            skew_threshold_ms: DEFAULT_SKEW_THRESHOLD_MS,
         }
     }
 
@@ -164,6 +170,7 @@ impl FlvChunkSink {
             chunk_tx,
             pending_writes: Arc::new(AtomicU32::new(0)),
             ingest_state: None,
+            skew_threshold_ms: DEFAULT_SKEW_THRESHOLD_MS,
         }
     }
 
@@ -181,20 +188,35 @@ impl FlvChunkSink {
         // default is DEFAULT_SKEW_THRESHOLD_MS for the null/test paths).
         self.inner.get_mut().skew_monitor = IngestSkewMonitor::new(threshold_ms);
         self.ingest_state = Some(state);
+        self.skew_threshold_ms = threshold_ms;
         self
     }
 
     /// Publish a chunk-boundary skew transition to the shared ingest state:
     /// store the live skew, flip the banner latch, and emit ONE audit row on
     /// a Detected/Cleared transition (#354). No-op when no state is wired.
+    /// Uses the paired `IngestSkewDetected`/`IngestSkewRecovered` actions
+    /// (not a single action + `detail.state`) so `notify::OutageNotifier`'s
+    /// existing Onset/Recovery `classify()` can alert the operator on this
+    /// signal exactly like `HostInternetUnreachable`/`Recovered` (#354).
     fn report_skew(&self, t: SkewTransition) {
         let Some(state) = &self.ingest_state else {
             return;
         };
         state.set_ingest_skew_ms(t.skew_ms);
-        let (active, severity, state_str) = match t.event {
-            Some(SkewEvent::Detected) => (true, rs_core::audit::Severity::Warn, "detected"),
-            Some(SkewEvent::Cleared) => (false, rs_core::audit::Severity::Info, "recovered"),
+        let (active, severity, action, state_str) = match t.event {
+            Some(SkewEvent::Detected) => (
+                true,
+                rs_core::audit::Severity::Warn,
+                rs_core::audit::Action::IngestSkewDetected,
+                "detected",
+            ),
+            Some(SkewEvent::Cleared) => (
+                false,
+                rs_core::audit::Severity::Info,
+                rs_core::audit::Action::IngestSkewRecovered,
+                "recovered",
+            ),
             None => return,
         };
         state.set_ingest_skew_active(active);
@@ -207,9 +229,10 @@ impl FlvChunkSink {
                     event_id: None,
                     instance_id: None,
                     endpoint: None,
-                    action: rs_core::audit::Action::IngestSkewDetected,
+                    action,
                     detail: serde_json::json!({
                         "skew_ms": t.skew_ms,
+                        "threshold_ms": self.skew_threshold_ms,
                         "state": state_str,
                     }),
                     ts_override: None,
@@ -326,6 +349,15 @@ impl FlvChunkSink {
                 );
                 if pending.is_none() {
                     pending = Self::extract_chunk(&mut inner);
+                    // #354: this is ALSO a real chunk boundary -- evaluate the
+                    // skew monitor here too, not just on the normal
+                    // duration+keyframe path above (this branch runs only
+                    // when that one did NOT, since `pending` is still `None`
+                    // at this point in exactly that case). Otherwise a
+                    // pathological stream that keeps hitting the 50MB
+                    // force-flush path (e.g. a misconfigured chunk_duration)
+                    // would never advance the debounce counter.
+                    skew_transition = Some(inner.skew_monitor.evaluate_chunk());
                 }
             }
 

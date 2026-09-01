@@ -13,11 +13,25 @@
 //! VPS into a feed every endpoint would skew-kill.
 //!
 //! This monitor reuses the EXACT same `SkewTracker` measurement at the INGEST
-//! (the chunker on stream.lan), so the ingest number and the VPS `av_skew_ms`
-//! are the SAME number by construction (they observe the same chunker-stamped
-//! content-PTS). That makes the source-desync distinguishable from the
+//! (the chunker on stream.lan), observing the identical chunker-stamped
+//! content-PTS the VPS pusher's own tracker later reads from the SAME FLV
+//! bytes. That makes the source-desync distinguishable from the
 //! chunker-internal re-anchor gap (#146/#255) in future incidents, and lets
 //! the operator be warned + `Start Delivering` be gated BEFORE any push dies.
+//!
+//! **Caveat — NOT necessarily the identical NUMBER as the VPS's `av_skew_ms`
+//! on a long-running stream.** Both trackers baseline (zero) at their OWN
+//! first both-tracks chunk — this monitor at RTMP publish, the VPS pusher's
+//! at ITS connect, which can be much later (VPS creation + catch-up read).
+//! If skew SLOWLY accumulates from a benign relative-clock drift over the
+//! session (rather than the sudden multi-second jump the incidents actually
+//! showed), the two trackers measure that drift over different windows and
+//! can disagree. This is a documentation/precision note, not a known false
+//! positive: the debounce threshold (2000 ms default) is far above ordinary
+//! frame-timestamp jitter, and `constant_startup_offset_never_detects` proves
+//! a fixed baseline offset never trips this monitor on its own. A rate-based
+//! criterion would be immune to this even in the slow-drift case; out of
+//! scope for #354 (the incidents were sudden jumps, not slow drift).
 //!
 //! ## Diagnostic ONLY — never a recovery actuator
 //!
@@ -150,9 +164,21 @@ impl IngestSkewMonitor {
         }
 
         // Latch transitions: DETECT after a sustained over-threshold window
-        // (rejects transients), CLEAR the moment skew falls back under
-        // threshold (a fixed source recovers fast — skew drops to ~0 the
-        // instant OBS realigns / on session re-anchor).
+        // (rejects transients), CLEAR once skew drops back under a MARGIN
+        // below threshold (a fixed source recovers fast — skew drops to ~0
+        // the instant OBS realigns / on session re-anchor — so this never
+        // meaningfully delays a real recovery). The margin, not a bare
+        // `!over`, is deliberate: DETECT needs `SKEW_DEBOUNCE_CHUNKS`
+        // consecutive over-threshold chunks but CLEAR needed only ONE
+        // under-threshold chunk, so a skew hovering right at the threshold
+        // (±one FLV-frame's worth of jitter) could flap Detected/Cleared
+        // every couple of chunks — and since #354 wires this action into
+        // `notify::OutageNotifier`, each flap re-fires a Discord alert (the
+        // per-episode dedup only suppresses REPEATS of the same signal
+        // within one still-active episode, not a new episode right after a
+        // spurious Cleared).
+        let clear_margin_ms = self.threshold_ms - (self.threshold_ms / 5); // 80% of threshold
+        let clear = skew.abs() <= clear_margin_ms;
         let event = if !self.active && self.consecutive_over >= SKEW_DEBOUNCE_CHUNKS {
             self.active = true;
             tracing::warn!(
@@ -161,7 +187,7 @@ impl IngestSkewMonitor {
                 "ingest A/V skew DETECTED — source (OBS) audio/video desynced"
             );
             Some(SkewEvent::Detected)
-        } else if self.active && !over {
+        } else if self.active && clear {
             self.active = false;
             tracing::info!(skew_ms = skew, "ingest A/V skew CLEARED — source realigned");
             Some(SkewEvent::Cleared)

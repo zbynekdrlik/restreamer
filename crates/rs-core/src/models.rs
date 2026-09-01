@@ -506,24 +506,31 @@ impl InpointState {
     }
 
     /// Record the live ingest A/V skew (ms, signed) — called by the chunker at
-    /// each chunk boundary.
+    /// each chunk boundary. `Release`, paired with `ingest_skew_ms`'s
+    /// `Acquire` load: the chunker (`report_skew`, #354) always writes this
+    /// BEFORE `set_ingest_skew_active`, so a reader that checks
+    /// `ingest_skew_active()` first and this second observes a skew value at
+    /// least as fresh as the transition it just saw (`Ordering::Relaxed`
+    /// gives no such guarantee across the two separate atomics).
     pub fn set_ingest_skew_ms(&self, ms: i64) {
-        self.ingest_skew_ms.store(ms, Ordering::Relaxed);
+        self.ingest_skew_ms.store(ms, Ordering::Release);
     }
 
     /// Current live ingest A/V skew (ms, signed; positive = audio behind video).
     pub fn ingest_skew_ms(&self) -> i64 {
-        self.ingest_skew_ms.load(Ordering::Relaxed)
+        self.ingest_skew_ms.load(Ordering::Acquire)
     }
 
-    /// Set the latched "ingest skew sustained over threshold" flag.
+    /// Set the latched "ingest skew sustained over threshold" flag. `Release`
+    /// — see [`Self::set_ingest_skew_ms`] doc for the publish ordering.
     pub fn set_ingest_skew_active(&self, active: bool) {
-        self.ingest_skew_active.store(active, Ordering::Relaxed);
+        self.ingest_skew_active.store(active, Ordering::Release);
     }
 
-    /// Whether ingest skew is currently latched over threshold (source desynced).
+    /// Whether ingest skew is currently latched over threshold (source
+    /// desynced). `Acquire` — see [`Self::set_ingest_skew_ms`] doc.
     pub fn ingest_skew_active(&self) -> bool {
-        self.ingest_skew_active.load(Ordering::Relaxed)
+        self.ingest_skew_active.load(Ordering::Acquire)
     }
 }
 

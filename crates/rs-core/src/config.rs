@@ -503,6 +503,14 @@ impl Config {
         if self.inpoint.chunk_format == "ts" {
             return Err("chunk_format \"ts\" is no longer supported, use \"flv\"".to_string());
         }
+        // #354: a non-positive threshold would latch the ingest-skew banner
+        // (and block Start Delivering) on the very first debounce window of
+        // ANY stream, including a perfectly healthy one -- reject it here
+        // the same way other required-positive knobs are guarded, instead of
+        // silently shipping a mis-set operator config.
+        if self.inpoint.skew_threshold_ms <= 0 {
+            return Err("inpoint.skew_threshold_ms must be positive".to_string());
+        }
         Ok(())
     }
 
@@ -702,6 +710,22 @@ mod tests {
         let config = Config::default();
         assert!(config.s3_region_is_standard());
         assert_eq!(config.s3.region, STANDARD_S3_REGION);
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_skew_threshold() {
+        // #354: a non-positive threshold would latch the ingest-skew banner
+        // (and block Start Delivering) on a perfectly healthy stream.
+        let mut config = Config::for_testing();
+        config.inpoint.skew_threshold_ms = 0;
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("skew_threshold_ms"),
+            "Error should mention skew_threshold_ms: {err}"
+        );
+
+        config.inpoint.skew_threshold_ms = -1;
+        assert!(config.validate().is_err());
     }
 
     #[test]

@@ -80,6 +80,14 @@ pub async fn delivery_start(
         ));
     }
     if skew_active && req.force {
+        // Re-fires the SAME onset action the chunker already emitted when the
+        // skew was first detected (`IngestSkewDetected`) — an operator
+        // override during an already-active episode is a duplicate onset by
+        // construction (the gate only reaches here while `skew_active` is
+        // true), which `notify::OutageNotifier`'s per-episode dedup correctly
+        // suppresses as a repeat alert. `state: "override"` in the detail is
+        // what distinguishes this row from the chunker's own Detected row
+        // when an operator later reads the audit log (#354).
         rs_core::audit::record(
             &state.audit_tx,
             rs_core::audit::AuditRow {
@@ -91,6 +99,7 @@ pub async fn delivery_start(
                 action: rs_core::audit::Action::IngestSkewDetected,
                 detail: serde_json::json!({
                     "skew_ms": state.inpoint_state.ingest_skew_ms(),
+                    "threshold_ms": state.config.inpoint.skew_threshold_ms,
                     "state": "override",
                 }),
                 ts_override: None,
