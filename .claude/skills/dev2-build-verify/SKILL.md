@@ -48,6 +48,41 @@ newlevel@dev2:~/restreamer-buildcheck/leptos-ui/` with the same
 `# airuleset:deploy-dirty-ok` marker. Don't just drop the png exclude — it
 exists to avoid re-syncing large/binary test-fixture images on every rsync.
 
+## Parallel worktree lanes: use a LANE-PRIVATE checkout, and `touch` after sync
+
+`~/restreamer-buildcheck` is a SINGLE shared path. When several `/autopilot`
+worktree lanes verify on dev2 at once (the default fleet mode), a sibling's
+`rsync --delete` silently clobbers your source mid-run — a test binary then
+recompiles from the sibling's tree and your just-added tests vanish (observed
+2026-09-01: two new `rs-delivery` api tests present after rsync, gone by the
+next `cargo test`, file back to its pre-edit length). Symptom: your new tests
+simply don't appear in the run and the file's `wc -l` is back to `main`'s.
+
+Fix — give your lane its OWN warm checkout, keeping `target/` warm for free via
+hardlinks (no data copy, seconds, negligible disk):
+
+```bash
+ssh newlevel@dev2 'cp -al ~/restreamer-buildcheck ~/restreamer-bc-<laneid>'
+# then rsync your worktree source in WITHOUT --delete (avoids the leptos-ui/dist
+# "cannot delete non-empty directory" abort), and build/test from that path.
+```
+
+**After every rsync into a hardlinked checkout, `touch` the files you changed.**
+`rsync -a` preserves your worktree's mtimes, which are OLDER than the hardlinked
+`target/` fingerprints, so cargo thinks nothing changed and runs the STALE
+binary (tell: `Finished in 0.30s`, no `Compiling`, and your new `#[test]`s are
+absent from the run):
+
+```bash
+ssh newlevel@dev2 'cd ~/restreamer-bc-<laneid> && touch <changed files> && \
+  SQLX_OFFLINE=true ~/.cargo/bin/cargo test ...'
+```
+
+Note `SQLX_OFFLINE=true ~/.cargo/bin/cargo …` (inline var + full path) instead of
+`export SQLX_OFFLINE=true; source ~/.cargo/env` — the latter trips
+`block-destructive-remote.sh` as a "bare env dump over ssh". A lane-private
+`target/` is regenerable — purge `~/restreamer-bc-<laneid>` when the lane ends.
+
 ## Compile / test / clippy
 
 Always `source ~/.cargo/env` and `export SQLX_OFFLINE=true` on dev2.
