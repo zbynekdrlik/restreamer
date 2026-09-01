@@ -177,6 +177,31 @@ async fn config_read_from_the_internet_is_denied() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN, "#273 default-deny");
 }
 
+/// #340 — the WRITE half of the config surface. `PATCH /api/v1/config` is the
+/// escalation the ticket is about (repointing `s3.endpoint`, setting
+/// `api.diag_token`), and it must be refused for an internet-sourced request
+/// just like the GET. The `#345` gate closes it (a tunneled request classifies
+/// as `Origin::Internet` and is denied without a valid Access JWT), and a
+/// genuinely-local PATCH still works — proven by `patch_config_updates_field`
+/// in `router_inline_tests`, which drives the same gated router with no peer
+/// and no forwarded header (i.e. `Origin::Local`) and gets a 200. This test
+/// pins the MUTATION verb specifically so a future refactor that re-registers
+/// `patch_config` after the access layer cannot silently re-open #340.
+#[tokio::test]
+async fn config_patch_from_the_internet_is_denied() {
+    let app = build_router(test_state().await);
+    let resp = app
+        .oneshot(tunneled("PATCH", "/api/v1/config"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "#340: an unauthenticated internet request must not be able to repoint \
+         s3.endpoint or set api.diag_token via PATCH /config"
+    );
+}
+
 #[tokio::test]
 async fn status_read_from_the_internet_is_denied() {
     let app = build_router(test_state().await);
