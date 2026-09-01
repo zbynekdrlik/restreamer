@@ -1,6 +1,6 @@
 //! DownloadService — bandwidth-managed S3 chunk downloader with dedup.
 //!
-//! One instance per event. EndpointReaders call `request_chunk(id)`;
+//! One instance per event. `DiskCacheFetcher` calls `request_chunk(id)`;
 //! the service deduplicates concurrent requests for the same chunk,
 //! issues a single S3 GET, writes atomically to disk, and marks the
 //! registry available.
@@ -265,10 +265,10 @@ impl DownloadService {
                             });
                         }
                         // Disk-write failures are not handled here -- the
-                        // outer PrefetchReader loop re-requests, and the
-                        // next iteration retries from scratch. Mark
-                        // NotFound so anyone awaiting wait_for_chunk
-                        // wakes immediately rather than hanging.
+                        // producer's outer backoff loop (via DiskCacheFetcher)
+                        // re-requests, and the next iteration retries from
+                        // scratch. Mark NotFound so anyone awaiting
+                        // wait_for_chunk wakes immediately rather than hanging.
                         self.registry.mark_not_found(chunk_id);
                         return;
                     }
@@ -278,9 +278,9 @@ impl DownloadService {
                 }
                 Ok(None) => {
                     // 404: chunk genuinely not on S3 yet. Don't loop here
-                    // forever -- mark NotFound so the OUTER PrefetchReader
-                    // loop decides whether to retry (genuine miss is rare;
-                    // uploader will eventually PUT).
+                    // forever -- mark NotFound so the producer's OUTER backoff
+                    // loop (via DiskCacheFetcher) decides whether to retry
+                    // (genuine miss is rare; uploader will eventually PUT).
                     self.registry.mark_not_found(chunk_id);
                     return;
                 }

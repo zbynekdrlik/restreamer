@@ -2,7 +2,7 @@
 //!
 //! Owns the source of truth for "is chunk N on disk and ready to read?".
 //! `DownloadService` calls `mark_available` after the file rename;
-//! `EndpointReader` calls `wait_for_chunk` to block until ready.
+//! `DiskCacheFetcher` calls `wait_for_chunk` to block until ready.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -106,9 +106,10 @@ impl ChunkRegistry {
 
     /// Set the slot to InFlight, ALWAYS — even if a previous fetch
     /// already terminated (NotFound / Evicted). Without this active
-    /// reset, a PrefetchReader retry against a chunk that previously
-    /// 404'd would observe stale NotFound state via `wait_for_chunk`
-    /// and never block on the new in-flight fetch (#184).
+    /// reset, the fetcher's evicted-chunk refetch (or any re-request)
+    /// against a chunk that previously 404'd would observe stale NotFound
+    /// state via `wait_for_chunk` and never block on the new in-flight
+    /// fetch (#184).
     pub fn mark_in_flight(self: &Arc<Self>, chunk_id: i64) {
         let mut g = self.inner.lock().unwrap();
         let slot = g.entry(chunk_id).or_insert_with(|| Slot {

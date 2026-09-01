@@ -97,8 +97,8 @@ pub enum Action {
     /// the embedded default rescue blob for this endpoint's lifetime.
     /// Severity::Warn. Detail JSON: {"url", "error"}.
     RescueCustomFetchFailed,
-    /// Disk cache started pre-filling for an event. Emitted on first
-    /// EndpointReader registration. Issue #174.
+    /// Disk cache started pre-filling for an event. Emitted on
+    /// `DiskCacheFetcher` construction (one per endpoint). Issue #174.
     DiskCachePrefillStarted,
     /// Disk cache window is fully populated for at least one endpoint;
     /// the first push is imminent.
@@ -123,7 +123,8 @@ pub enum Action {
     /// the transient. Pair with DiskCacheStallTimeout to bound outage
     /// duration in the audit log.
     DiskCacheReaderRecovered,
-    /// Per-endpoint push sample emitted by EndpointReader on chunk push.
+    /// Per-endpoint push sample emitted by the consumer_task on chunk push
+    /// (`disk_cache_push_sample::emit_push_sample`).
     /// Rate-limited 1/min/endpoint via RateLimiter keyed by
     /// (DiskCachePushSample, endpoint_alias). Carries chunk_supply_lag_ms,
     /// inter_chunk_gap_ms, burst_factor, cumulative_pushed_secs (total media
