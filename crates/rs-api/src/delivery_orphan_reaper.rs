@@ -18,9 +18,15 @@
 //! carrying a different `client_uuid` is never listed, never counted, never deleted.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use chrono::{DateTime, Utc};
 use rs_cloud::hetzner::Server;
+use rs_core::audit::{Action, AuditRow, Severity, Source};
+use rs_core::db;
+use tracing::{error, info, warn};
+
+use crate::delivery::DeliveryOrchestrator;
 
 /// An orphaned Hetzner VPS: a labelled server for this install with no live
 /// `delivery_instances` row.
@@ -101,6 +107,117 @@ pub fn classify_orphan_vps(
         });
     }
     orphans
+}
+
+impl DeliveryOrchestrator {
+    /// #352: one reconciliation sweep — treat Hetzner as the source of truth for
+    /// what is billing. List the servers labelled for THIS install, classify any
+    /// with no live DB row as orphans (via [`classify_orphan_vps`]), log + audit
+    /// (`vps_orphan_detected`) each, auto-delete those past the delete grace, and
+    /// publish the count still billing into `orphan_count` (the dashboard banner
+    /// signal). Called once on boot and on a periodic timer from the runtime.
+    ///
+    /// Fail-closed at every step: an empty `client_uuid`, a Hetzner list error,
+    /// or a DB error all abort the sweep WITHOUT deleting anything — a delete is
+    /// only ever made from a complete, unambiguous picture (#137).
+    pub(crate) async fn reconcile_orphan_vps(&self, orphan_count: &AtomicU8) {
+        let config = self.config();
+        let uuid = config.client_uuid.clone();
+        if uuid.is_empty() {
+            warn!("orphan reaper: client_uuid is empty — refusing to sweep (fail-closed, #137)");
+            return;
+        }
+        let selector = format!("app=restreamer,client_uuid={uuid}");
+        let servers = match self.hetzner().list_servers(Some(&selector)).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    "orphan reaper: Hetzner list_servers failed, skipping this cycle (never \
+                     delete on incomplete info): {e}"
+                );
+                return;
+            }
+        };
+        let live_ids: HashSet<i64> = match db::list_delivery_instances(self.pool()).await {
+            Ok(rows) => rows.into_iter().map(|r| r.hetzner_id).collect(),
+            Err(e) => {
+                warn!("orphan reaper: DB list_delivery_instances failed, skipping this cycle: {e}");
+                return;
+            }
+        };
+
+        let orphans = classify_orphan_vps(
+            &servers,
+            &live_ids,
+            Utc::now(),
+            &uuid,
+            config.delivery.orphan_detect_grace_secs as i64,
+            config.delivery.orphan_delete_grace_secs as i64,
+        );
+
+        if orphans.is_empty() {
+            orphan_count.store(0, Ordering::Relaxed);
+            return;
+        }
+
+        let mut still_billing: u32 = 0;
+        for o in &orphans {
+            warn!(
+                hetzner_id = o.hetzner_id,
+                name = %o.name,
+                ipv4 = %o.ipv4,
+                age_secs = o.age_secs,
+                will_delete = o.delete,
+                "orphan reaper: Hetzner VPS labelled for this install has NO live \
+                 delivery_instances row — billing but invisible to the app (money leak, #352)"
+            );
+            let mut auto_deleted = false;
+            if o.delete {
+                match self.hetzner().delete_server(o.hetzner_id).await {
+                    Ok(()) => {
+                        auto_deleted = true;
+                        info!(
+                            hetzner_id = o.hetzner_id,
+                            age_secs = o.age_secs,
+                            "orphan reaper: auto-deleted orphaned VPS past the delete grace (#352)"
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            hetzner_id = o.hetzner_id,
+                            "orphan reaper: failed to delete orphaned VPS (still billing): {e}"
+                        );
+                    }
+                }
+            }
+            if !auto_deleted {
+                still_billing += 1;
+            }
+            if let Some(tx) = self.audit_tx() {
+                rs_core::audit::record(
+                    tx,
+                    AuditRow {
+                        severity: Severity::Warn,
+                        source: Source::Delivery,
+                        event_id: None,
+                        instance_id: None,
+                        endpoint: None,
+                        action: Action::VpsOrphanDetected,
+                        detail: serde_json::json!({
+                            "hetzner_id": o.hetzner_id,
+                            "name": o.name,
+                            "ipv4": o.ipv4,
+                            "age_secs": o.age_secs,
+                            "auto_deleted": auto_deleted,
+                        }),
+                        ts_override: None,
+                    },
+                );
+            }
+        }
+        // The banner reflects money STILL leaking — orphans not (yet) deleted.
+        orphan_count.store(still_billing.min(u8::MAX as u32) as u8, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
