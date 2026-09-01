@@ -220,6 +220,14 @@ pub enum Action {
     /// the 2026-06-24 incident. Emitted once at startup, never auto-fixed.
     /// Detail JSON: {"configured_region", "standard_region"}.
     S3RegionNonStandard,
+    /// VPS-side (#236): a Rust-pusher endpoint crossed
+    /// `DEAD_TARGET_ZERO_BYTE_THRESHOLD` consecutive zero-byte-since-connect
+    /// deaths -- the remote session/broadcast is bound-but-dead (e.g. an
+    /// expired FB persistent-key `live_video`), not a transient outage.
+    /// Emitted once at the threshold transition, never per-retry.
+    /// Severity::Error. Detail JSON: {backend, message,
+    /// consecutive_zero_byte_deaths, backoff_ms}.
+    EndpointDeadTarget,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

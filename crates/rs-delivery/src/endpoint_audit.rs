@@ -327,6 +327,37 @@ pub fn emit_rtmp_push_died_detailed(
     );
 }
 
+/// #236: emitted ONCE when a Rust-pusher endpoint crosses
+/// `DEAD_TARGET_ZERO_BYTE_THRESHOLD` consecutive zero-byte-since-connect
+/// deaths -- the remote session/broadcast is bound-but-dead (e.g. an
+/// expired FB persistent-key `live_video`) rather than a transient outage.
+/// Distinct from `emit_rtmp_push_died`/`emit_rtmp_push_died_detailed`
+/// (which fire on EVERY reconnect): this is the classification event, so
+/// the caller emits it only at the threshold transition. Severity::Error
+/// -- this is the row that tells the operator "stop waiting, go recreate
+/// the broadcast", not a routine reconnect.
+pub fn emit_endpoint_dead_target(
+    audit_ring: &Option<Arc<AuditRing>>,
+    alias: &str,
+    message: &str,
+    consecutive_zero_byte_deaths: u32,
+    backoff_ms: u64,
+) {
+    let Some(ring) = audit_ring else { return };
+    ring.push(
+        Severity::Error,
+        Source::Vps,
+        Some(alias.to_string()),
+        Action::EndpointDeadTarget,
+        serde_json::json!({
+            "backend": "rust_rtmp_push",
+            "message": message,
+            "consecutive_zero_byte_deaths": consecutive_zero_byte_deaths,
+            "backoff_ms": backoff_ms,
+        }),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,5 +443,40 @@ mod tests {
         assert_eq!(detail["last_rtmp_message_type_sent"], "Audio");
         assert_eq!(detail["upstream_close_first_bytes_hex"], "00c00003");
         assert_eq!(detail["chunks_buffered_in_pipeline"], 0);
+    }
+
+    // --- emit_endpoint_dead_target (#236) ---
+
+    #[test]
+    fn emit_endpoint_dead_target_appends_error_severity_row() {
+        let ring = AuditRing::new(64);
+        emit_endpoint_dead_target(
+            &Some(Arc::clone(&ring)),
+            "FB-NewLevel",
+            "DEAD_TARGET: FB broadcast expired/killed -- recreate the live broadcast on Facebook (stream key stays the same)",
+            5,
+            30_000,
+        );
+
+        let (rows, _) = ring.since(0i64);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, Severity::Error);
+        assert_eq!(rows[0].source, Source::Vps);
+        assert_eq!(rows[0].action, Action::EndpointDeadTarget);
+        assert_eq!(rows[0].endpoint.as_deref(), Some("FB-NewLevel"));
+        let detail = &rows[0].detail;
+        assert_eq!(detail["backend"], "rust_rtmp_push");
+        assert_eq!(
+            detail["message"],
+            "DEAD_TARGET: FB broadcast expired/killed -- recreate the live broadcast on Facebook (stream key stays the same)"
+        );
+        assert_eq!(detail["consecutive_zero_byte_deaths"], 5);
+        assert_eq!(detail["backoff_ms"], 30_000);
+    }
+
+    #[test]
+    fn emit_endpoint_dead_target_with_none_ring_is_no_op() {
+        emit_endpoint_dead_target(&None, "test-alias", "DEAD_TARGET: x", 5, 30_000);
+        // If we get here without panic the test passes.
     }
 }
