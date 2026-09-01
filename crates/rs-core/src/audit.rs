@@ -109,8 +109,13 @@ pub enum Action {
     /// DownloadService bandwidth cap reached; sustained S3 latency
     /// expected. Operator may want to investigate Hetzner status.
     DiskCacheDownloadThrottled,
-    /// EndpointReader.wait_for_chunk timed out (default 60 s).
-    /// Indicates a real S3 outage longer than the cache window.
+    /// The disk-cache fetcher failed to land a chunk within its stall budget.
+    /// The `detail.shape` field (#332) discriminates the two outage classes:
+    /// `"bounded_attempts"` -- the bounded S3-retry cap (~3s) was exhausted (a
+    /// persistently-erroring S3); `"stall_timeout"` -- the outer stall-timeout
+    /// deadline (default 60 s) elapsed, i.e. a wedge >= the cache window.
+    /// `detail.timeout_secs` is present ONLY on the `stall_timeout` shape.
+    /// Pairs with `DiskCacheReaderRecovered` to bracket the outage window.
     DiskCacheStallTimeout,
     /// Disk write failed (ENOSPC / EIO). Severity::Error.
     DiskCacheWriteFailed,

@@ -126,20 +126,36 @@ impl DiskCacheFetcher {
             ) {
                 self.was_stalled
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                // #332: stamp the shape so a ~3s bounded-attempts storm is not
+                // read as a stall_timeout-length outage, and set `timeout_secs`
+                // ONLY on the stall_timeout branch -- the bounded-attempts path
+                // reaches here after ~3s and never consults the timeout.
+                let mut row_detail = serde_json::json!({
+                    "chunk_id": chunk_id,
+                    "shape": shape.as_str(),
+                    "detail": detail,
+                });
+                if matches!(shape, StallShape::StallTimeout) {
+                    row_detail["timeout_secs"] = serde_json::json!(self.stall_timeout_secs);
+                }
                 ring.push_parts(crate::audit_ring::RingRowParts {
                     severity: rs_core::audit::Severity::Error,
                     source: rs_core::audit::Source::Vps,
                     endpoint: Some(self.alias.clone()),
                     action: rs_core::audit::Action::DiskCacheStallTimeout,
-                    detail: serde_json::json!({
-                        "chunk_id": chunk_id,
-                        "timeout_secs": self.stall_timeout_secs,
-                        "detail": detail,
-                    }),
+                    detail: row_detail,
                 });
             }
         }
-        format!("disk_cache stall on chunk {chunk_id}: {detail}")
+        // #332: keep the shape in the operator-facing last_error string
+        // (stored on stats.last_error and shown on the dashboard) so a 3-attempt
+        // cap is not misread as a 60s stall.
+        match shape {
+            StallShape::BoundedAttempts => {
+                format!("disk_cache bounded attempts exhausted on chunk {chunk_id}: {detail}")
+            }
+            StallShape::StallTimeout => format!("disk_cache stall on chunk {chunk_id}: {detail}"),
+        }
     }
 
     /// Close the outage bracket (#333): if a stall was recorded, clear the
