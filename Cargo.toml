@@ -101,6 +101,7 @@ rs-ffmpeg = { path = "crates/rs-ffmpeg" }
 rs-cloud = { path = "crates/rs-cloud" }
 rs-delivery = { path = "crates/rs-delivery" }
 rs-youtube = { path = "crates/rs-youtube" }
+rs-rtmp-push = { path = "crates/rs-rtmp-push" }
 
 [profile.release]
 lto = true

@@ -2700,6 +2700,7 @@ dependencies = [
  "log",
  "md-5",
  "rs-core",
+ "rs-rtmp-push",
  "rtmp",
  "serde_json",
  "streamhub",

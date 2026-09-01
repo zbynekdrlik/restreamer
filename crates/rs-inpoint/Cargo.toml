@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 rs-core.workspace = true
+rs-rtmp-push.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 tracing.workspace = true

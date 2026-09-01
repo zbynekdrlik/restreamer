@@ -17,5 +17,5 @@ mod url;
 
 pub use error::{PushError, backoff_floor_ms, is_exponential, map_read_err};
 pub use pusher::RtmpPusher;
-pub use skew::{MAX_AV_SKEW_MS, SkewDecision, SkewTracker};
+pub use skew::{MAX_AV_SKEW_MS, SKEW_DEBOUNCE_CHUNKS, SkewDecision, SkewTracker};
 pub use state::{PusherConfig, PusherState, Track};
