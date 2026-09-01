@@ -109,7 +109,7 @@ pub fn select_server_type(endpoint_count: usize) -> &'static str {
 
 /// Resolve the Hetzner server type for a delivery VPS (#353).
 ///
-/// An explicit `config_override` (`hetzner.default_server_type`) WINS over the
+/// An explicit `config_override` (`hetzner.server_type_override`) WINS over the
 /// endpoint-count tiering; an empty/whitespace override means "auto" and falls
 /// back to [`select_server_type`]. A known-deprecated `cx23/cx33/cx43` override
 /// is normalized to its `cpx22/cpx32/cpx42` successor (the `de4df3e9` rename)
@@ -125,15 +125,15 @@ pub fn resolve_server_type(config_override: &str, endpoint_count: usize) -> Stri
     // push a retired type the Hetzner API rejects.
     match trimmed.to_ascii_lowercase().as_str() {
         "cx23" => {
-            tracing::warn!("hetzner.default_server_type 'cx23' is deprecated; using 'cpx22'");
+            tracing::warn!("hetzner.server_type_override 'cx23' is deprecated; using 'cpx22'");
             "cpx22".to_string()
         }
         "cx33" => {
-            tracing::warn!("hetzner.default_server_type 'cx33' is deprecated; using 'cpx32'");
+            tracing::warn!("hetzner.server_type_override 'cx33' is deprecated; using 'cpx32'");
             "cpx32".to_string()
         }
         "cx43" => {
-            tracing::warn!("hetzner.default_server_type 'cx43' is deprecated; using 'cpx42'");
+            tracing::warn!("hetzner.server_type_override 'cx43' is deprecated; using 'cpx42'");
             "cpx42".to_string()
         }
         // Hetzner server types are all lowercase, so normalize case here too —
