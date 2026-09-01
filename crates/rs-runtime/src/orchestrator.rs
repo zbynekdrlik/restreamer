@@ -321,6 +321,10 @@ impl ServiceCore {
         // moved into `serve`, so boot reconciliation (below) can re-establish
         // delivery management after a crash. `serve` consumes `api_state`.
         let boot_delivery_orch = api_state.delivery_orchestrator.clone();
+        // #352: the SAME orphan-count Arc the `get_status` handler reads, cloned
+        // before `api_state` is moved into `serve`, so the runtime orphan reaper
+        // (below) publishes into the exact atomic the dashboard banner polls.
+        let boot_orphan_count = std::sync::Arc::clone(&api_state.vps_orphan_count);
         let (actual_addr, api_handle) = rs_api::serve(api_state, api_addr).await?;
         info!("API server running on {actual_addr}");
 
@@ -351,6 +355,37 @@ impl ServiceCore {
             if let Err(e) = orch.reconcile_delivery_on_boot(ws_tx.clone()).await {
                 tracing::warn!("reconcile_delivery_on_boot failed: {e}");
             }
+
+            // #352: money-leak reconciliation. Every OTHER teardown path is keyed
+            // on a delivery_instances DB row; when that row is lost (DB
+            // reset/reinstall, a crash in the create window, a forced kill
+            // mid-stop) the Hetzner VPS bills forever, invisible to the app. Run
+            // one sweep now (catch an orphan left by the previous run
+            // immediately) and then on a periodic timer, treating Hetzner as the
+            // source of truth for what is billing. Only servers carrying THIS
+            // install's client_uuid are ever touched (#137).
+            let orphan_orch = std::sync::Arc::clone(orch);
+            let orphan_count = std::sync::Arc::clone(&boot_orphan_count);
+            let orphan_interval_secs = self.config.delivery.orphan_sweep_interval_secs.max(60);
+            let mut orphan_shutdown_rx = shutdown.subscribe();
+            tokio::spawn(async move {
+                // Boot sweep.
+                orphan_orch.reconcile_orphan_vps(&orphan_count).await;
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_secs(orphan_interval_secs));
+                tick.tick().await; // consume the immediate first tick
+                loop {
+                    tokio::select! {
+                        _ = tick.tick() => {
+                            orphan_orch.reconcile_orphan_vps(&orphan_count).await;
+                        }
+                        _ = orphan_shutdown_rx.recv() => {
+                            tracing::info!("orphan reaper: shutting down");
+                            break;
+                        }
+                    }
+                }
+            });
         }
 
         // Chunk directory

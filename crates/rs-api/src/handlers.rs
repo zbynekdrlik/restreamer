@@ -77,6 +77,12 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
         .map(|c| c.s3_region_is_standard())
         .unwrap_or(true);
 
+    // #352: surface how many orphaned delivery VPS are still billing so the
+    // dashboard can show the orphan banner. Written by the runtime orphan reaper.
+    let vps_orphan_count = state
+        .vps_orphan_count
+        .load(std::sync::atomic::Ordering::Relaxed);
+
     Ok(Json(ServiceStatus {
         inpoint,
         endpoint,
@@ -84,6 +90,7 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
         streaming_event: event,
         disk_pressure,
         s3_region_standard,
+        vps_orphan_count,
     }))
 }
 

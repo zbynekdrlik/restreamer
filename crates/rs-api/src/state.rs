@@ -89,6 +89,12 @@ pub struct AppState {
     /// (#231). Unlike `disk_critical` (a bool), this carries the early Warn
     /// (80%) state so the banner shows before the red wall.
     pub disk_pressure_level: Arc<std::sync::atomic::AtomicU8>,
+    /// Number of orphaned delivery VPS still billing (#352). Written by the
+    /// runtime orphan reaper (`reconcile_orphan_vps`) on every sweep and read by
+    /// `get_status` to drive the dashboard orphan banner. The runtime hands the
+    /// reaper the SAME Arc via a clone taken before `api_state` is moved, so the
+    /// sweep and the status handler share one source of truth.
+    pub vps_orphan_count: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl AppState {
@@ -144,6 +150,7 @@ impl AppState {
             device_flow_api_base: None,
             disk_critical,
             disk_pressure_level,
+            vps_orphan_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         }
     }
 
