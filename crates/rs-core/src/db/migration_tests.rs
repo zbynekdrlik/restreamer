@@ -758,15 +758,16 @@ async fn assert_rewind_preserves_all(keep: i32) {
     .await
     .unwrap();
     assert_eq!(chunk_count, 1, "chunk_records lost (rewind {keep})");
+    // The fetch_one proves the endpoint_configs row survived the rewind (it
+    // panics if gone); 'rust' is also the only pusher value V28/V29 leave.
     let pusher: String =
         sqlx::query_scalar("SELECT pusher FROM endpoint_configs WHERE alias = 'ep1'")
             .fetch_one(&pool)
             .await
-            .unwrap();
-    assert_eq!(
-        pusher, "rust",
-        "endpoint_configs pusher changed (rewind {keep})"
-    );
+            .unwrap_or_else(|e| {
+                panic!("endpoint_configs ep1 row lost after rewind to {keep}: {e}")
+            });
+    assert_eq!(pusher, "rust", "rewind {keep}");
 }
 
 #[tokio::test]
@@ -791,4 +792,82 @@ async fn rewind_past_v12_preserves_all_data() {
 async fn rewind_past_v16_preserves_all_data() {
     // keep=15 -> re-runs the V16 rebuild.
     assert_rewind_preserves_all(15).await;
+}
+
+// #125 (S2): a REAL legacy pre-V3 database — the V1 `streaming_events`
+// (`identifier`, no `name`) and V2 narrow-CHECK `delivery_instances` shapes,
+// with rows, at schema_version=2 — must migrate FORWARD to MAX with the core
+// rows transformed and preserved. This is the guard-NOT-fire path with data:
+// the #125 guards must run the rebuilds here (not short-circuit), so it would
+// catch a guard that false-positives on a genuine legacy DB. Only the tables
+// rebuilt via INSERT..SELECT (streaming_events, delivery_instances) are
+// asserted; FK children (chunk_records, delivery_endpoint_status) are
+// intentionally not seeded because the forward DROP TABLE cascades them (a
+// pre-existing property of these destructive migrations — see migrate_v4 doc).
+#[tokio::test]
+async fn legacy_v2_shape_with_data_migrates_forward_intact() {
+    let pool = crate::db::create_memory_pool().await.unwrap();
+    // Build the COMPLETE V1+V2 schema from the real migration DDL (so every
+    // table a later migration touches exists), then pin schema_version=2 and
+    // seed rows into the pre-V3 shapes. streaming_events therefore has
+    // `identifier` (not `name`) and delivery_instances the narrow status CHECK.
+    for sql in [
+        crate::db::migrations::migration_sql::MIGRATION_V1_SQL,
+        crate::db::migrations::migration_sql::MIGRATION_V2_SQL,
+    ] {
+        for stmt in sql.split(';') {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(&pool).await.unwrap();
+            }
+        }
+    }
+    for stmt in [
+        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)",
+        "INSERT INTO schema_version (version) VALUES (2)",
+        "INSERT INTO streaming_events (identifier, received_bytes) VALUES ('legacy-evt', 55)",
+        // event_id NULL so the V3 rebuild's ON DELETE SET NULL cascade is a
+        // no-op and does not muddy the assertion.
+        "INSERT INTO delivery_instances (hetzner_id, name, ipv4, status, server_type, event_id, auth_token) \
+         VALUES (900, 'vps-legacy', '9.9.9.9', 'running', 'cx23', NULL, 'legacy-token')",
+    ] {
+        sqlx::query(stmt).execute(&pool).await.unwrap();
+    }
+
+    // Forward-migrate to MAX. The rebuilds MUST run (guards must not fire).
+    crate::db::run_migrations(&pool).await.unwrap();
+    let v: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_version")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(v, crate::db::MAX_SCHEMA_VERSION);
+
+    // V3 rebuilt streaming_events: identifier -> name (COALESCE), rest kept.
+    let (name, rb): (String, i64) =
+        sqlx::query_as("SELECT name, received_bytes FROM streaming_events WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(name, "legacy-evt", "V3 must map identifier -> name");
+    assert_eq!(rb, 55, "V3 must preserve received_bytes");
+
+    // V4 + V16 rebuilt delivery_instances: the row and its copied columns
+    // (name, status) survive. NOTE auth_token is intentionally reset to '' on
+    // this GENUINE forward path — V4 historically rebuilds the table WITHOUT
+    // auth_token and V5 re-adds it with DEFAULT '' (harmless historically:
+    // auth_token is written at runtime, after migrations). This is the reverse
+    // of the rewind tests, where the V4 guard fires (skips) so the already-
+    // present auth_token is preserved.
+    let (name_di, status, token): (String, String, String) = sqlx::query_as(
+        "SELECT name, status, auth_token FROM delivery_instances WHERE hetzner_id = 900",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(name_di, "vps-legacy", "delivery_instances name preserved");
+    assert_eq!(status, "running", "delivery_instances status preserved");
+    assert_eq!(
+        token, "",
+        "auth_token reset to '' by the historical V4-drop/V5-readd"
+    );
 }
