@@ -905,3 +905,54 @@ async fn evicted_refetch_failure_records_stall_for_audit_bracket() {
          DiskCacheStallTimeout (found none)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #332 — the bounded-attempts (~3s) Failed arm must be distinguishable from a
+// stall_timeout-length wedge: a "shape" discriminator in the detail, no
+// timeout_secs on the bounded branch, and a shape-aware last_error string.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn bounded_attempts_stall_row_is_shaped_and_not_timeout_labelled() {
+    // The Failed arm resolves after ~3s of bounded attempts and never consults
+    // stall_timeout, so its DiskCacheStallTimeout row must carry
+    // shape="bounded_attempts" and NO timeout_secs, and the returned Err string
+    // must read "bounded attempts", not "stall". Pre-fix every row hardcoded
+    // timeout_secs=stall_timeout and had no shape, so a 3s transient read as a
+    // 60s cache-window-exceeding outage.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ring = AuditRing::new(500);
+    let backend = Arc::new(ErroringBackend::default());
+    let fetcher = real_fetcher_with_ring(backend, &tmp, "shaped", ring.clone()).await;
+
+    let budget = Duration::from_secs(STALL_TIMEOUT_SECS * 4);
+    let got = tokio::time::timeout(budget, fetcher.fetch_chunk_with_meta(1)).await;
+    let err = match got {
+        Ok(Err(e)) => e,
+        other => panic!("bounded-attempts Failed arm must surface Err, got {other:?}"),
+    };
+    assert!(
+        err.contains("bounded attempts"),
+        "#332 REGRESSION: the bounded-attempts last_error must keep its shape \
+         hint (\"bounded attempts\"), got {err:?}"
+    );
+
+    let (rows, _) = ring.since(0);
+    let stall = rows
+        .iter()
+        .find(|r| r.action == Action::DiskCacheStallTimeout)
+        .expect("a DiskCacheStallTimeout row must have been emitted");
+    assert_eq!(
+        stall.detail.get("shape").and_then(|v| v.as_str()),
+        Some("bounded_attempts"),
+        "#332 REGRESSION: the bounded-attempts stall row must carry \
+         shape=\"bounded_attempts\"; detail was {:?}",
+        stall.detail
+    );
+    assert!(
+        stall.detail.get("timeout_secs").is_none(),
+        "#332 REGRESSION: the bounded-attempts path never consults \
+         stall_timeout, so its detail must NOT report timeout_secs; detail was {:?}",
+        stall.detail
+    );
+}
