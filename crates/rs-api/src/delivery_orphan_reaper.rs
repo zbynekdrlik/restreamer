@@ -62,16 +62,45 @@ pub fn classify_orphan_vps(
     detect_grace_secs: i64,
     delete_grace_secs: i64,
 ) -> Vec<OrphanVps> {
-    // RED stub — real classification lands in the GREEN commit.
-    let _ = (
-        servers,
-        live_hetzner_ids,
-        now,
-        expected_client_uuid,
-        detect_grace_secs,
-        delete_grace_secs,
-    );
-    Vec::new()
+    let mut orphans = Vec::new();
+    for s in servers {
+        // #137 guard (defense in depth over the server-side label_selector):
+        // NEVER touch a server unless it is unambiguously THIS install's —
+        // `app=restreamer` AND `client_uuid=<expected>`. A missing or
+        // mismatched label is skipped outright.
+        if s.labels.get("app").map(String::as_str) != Some("restreamer") {
+            continue;
+        }
+        if s.labels.get("client_uuid").map(String::as_str) != Some(expected_client_uuid) {
+            continue;
+        }
+        // A server with a live DB row is tracked, not an orphan.
+        if live_hetzner_ids.contains(&s.id) {
+            continue;
+        }
+        // Age gate. An unparseable `created` is skipped (fail-safe: never
+        // delete a server whose age we cannot determine).
+        let age_secs = match DateTime::parse_from_rfc3339(&s.created) {
+            Ok(created) => (now - created.with_timezone(&Utc)).num_seconds(),
+            Err(_) => continue,
+        };
+        // Younger than the detect grace → an in-flight create (create_server
+        // ran, the DB row write has not landed yet); leave it alone.
+        if age_secs < detect_grace_secs {
+            continue;
+        }
+        // Past the detect grace with no row → an orphan. Mark it for deletion
+        // only once it is past the (positive) delete grace.
+        let delete = delete_grace_secs > 0 && age_secs >= delete_grace_secs;
+        orphans.push(OrphanVps {
+            hetzner_id: s.id,
+            name: s.name.clone(),
+            ipv4: s.public_net.ipv4.ip.clone(),
+            age_secs,
+            delete,
+        });
+    }
+    orphans
 }
 
 #[cfg(test)]
