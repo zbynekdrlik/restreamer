@@ -217,6 +217,10 @@ pub struct DashboardStore {
     // (fsn1). Polled from `/status`; drives the S3RegionBanner (#278).
     // Defaults true (assume standard) until the first poll lands.
     pub s3_region_standard: RwSignal<bool>,
+
+    // Number of orphaned delivery VPS still billing (#352). Polled from
+    // `/status`; drives the VpsOrphanBanner. Defaults 0 (assume none).
+    pub vps_orphan_count: RwSignal<u8>,
 }
 
 impl DashboardStore {
@@ -243,6 +247,7 @@ impl DashboardStore {
             rtmp_stable_secs: RwSignal::new(0),
             disk_pressure: RwSignal::new("ok".to_string()),
             s3_region_standard: RwSignal::new(true),
+            vps_orphan_count: RwSignal::new(0),
         }
     }
 

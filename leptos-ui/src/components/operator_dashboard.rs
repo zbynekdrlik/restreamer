@@ -14,6 +14,7 @@ use super::outage_banner::OutageBanner;
 use super::pacing_panel::PacingPanel;
 use super::s3_region_banner::S3RegionBanner;
 use super::upload_strip::UploadStrip;
+use super::vps_orphan_banner::VpsOrphanBanner;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
 use crate::store::DashboardStore;
@@ -36,6 +37,7 @@ pub fn OperatorDashboard() -> impl IntoView {
         <div class="operator-dashboard">
             <DiskPressureBanner />
             <S3RegionBanner />
+            <VpsOrphanBanner />
             <ZeroEndpointBanner />
             <OutageBanner />
             <div class="operator-dashboard__layout">
@@ -79,6 +81,7 @@ fn ControlBar() -> impl IntoView {
                 store.rtmp_stable_secs.set(s.rtmp_stable_secs);
                 store.disk_pressure.set(s.disk_pressure);
                 store.s3_region_standard.set(s.s3_region_standard);
+                store.vps_orphan_count.set(s.vps_orphan_count);
             }
         });
     });

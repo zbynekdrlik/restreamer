@@ -77,6 +77,11 @@ pub struct StatusResponse {
     /// (assume standard) so a missing field never false-alarms.
     #[serde(default = "default_true")]
     pub s3_region_standard: bool,
+    /// Number of orphaned delivery VPS still billing on Hetzner (#352). Drives
+    /// the VpsOrphanBanner. Defaults 0 (assume none) so a missing field never
+    /// false-alarms.
+    #[serde(default)]
+    pub vps_orphan_count: u8,
 }
 
 fn default_true() -> bool {
@@ -131,6 +136,7 @@ pub async fn get_status() -> Result<StatusResponse, String> {
         .unwrap_or("ok")
         .to_string();
     let s3_region_standard = status["s3_region_standard"].as_bool().unwrap_or(true);
+    let vps_orphan_count = status["vps_orphan_count"].as_u64().unwrap_or(0) as u8;
     Ok(StatusResponse {
         streaming_event: event,
         chunk_stats,
@@ -138,6 +144,7 @@ pub async fn get_status() -> Result<StatusResponse, String> {
         rtmp_stable_secs,
         disk_pressure,
         s3_region_standard,
+        vps_orphan_count,
     })
 }
 

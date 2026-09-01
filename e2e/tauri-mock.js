@@ -17,6 +17,7 @@ const mockResponses = {
     const disk_pressure = status.disk_pressure || "ok";
     const s3_region_standard =
       status.s3_region_standard !== undefined ? status.s3_region_standard : true;
+    const vps_orphan_count = status.vps_orphan_count || 0;
     const data = {
       streaming_event: status.streaming_event || null,
       chunk_stats,
@@ -24,6 +25,7 @@ const mockResponses = {
       rtmp_stable_secs,
       disk_pressure,
       s3_region_standard,
+      vps_orphan_count,
     };
     return { success: true, data, error: null };
   },
