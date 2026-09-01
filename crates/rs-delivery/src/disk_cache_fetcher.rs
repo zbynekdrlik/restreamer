@@ -264,7 +264,16 @@ impl ChunkFetcher for DiskCacheFetcher {
                         // Same single-deadline bound as the main path (#284):
                         // an unbounded request_chunk().await here would park
                         // the producer identically.
-                        let refetched = tokio::time::timeout(
+                        // #330: route the evicted-chunk refetch stall arms
+                        // through note_stall (like the main path) so a
+                        // resume-after-eviction that lands in an S3 storm also
+                        // records DiskCacheStallTimeout and arms the paired
+                        // DiskCacheReaderRecovered bracket -- previously these
+                        // returned raw strings and left the resume outage silent
+                        // on the timeline. was_stalled was cleared at the top of
+                        // the Available arm, so re-arming here brackets the
+                        // resume outage correctly.
+                        let refetched = match tokio::time::timeout(
                             Duration::from_secs(self.stall_timeout_secs),
                             async {
                                 self.cache.download_service.request_chunk(chunk_id).await;
@@ -272,13 +281,23 @@ impl ChunkFetcher for DiskCacheFetcher {
                             },
                         )
                         .await
-                        .map_err(|_| {
-                            format!(
-                                "disk_cache evicted-chunk refetch on {chunk_id}: \
-                                 request+wait exceeded stall_timeout"
-                            )
-                        })?
-                        .map_err(|e| format!("disk_cache evicted-chunk refetch: {e}"))?;
+                        {
+                            Ok(Ok(s)) => s,
+                            Ok(Err(e)) => {
+                                return Err(self.note_stall(
+                                    chunk_id,
+                                    StallShape::StallTimeout,
+                                    &format!("evicted-chunk refetch: {e}"),
+                                ));
+                            }
+                            Err(_elapsed) => {
+                                return Err(self.note_stall(
+                                    chunk_id,
+                                    StallShape::StallTimeout,
+                                    "evicted-chunk refetch request+wait exceeded stall_timeout",
+                                ));
+                            }
+                        };
 
                         match refetched {
                             // Refetch landed the file back on disk — read it.
@@ -311,12 +330,20 @@ impl ChunkFetcher for DiskCacheFetcher {
                             // producer's consecutive-error rescue counter
                             // advances and it retries on its backoff cadence.
                             // Only real S3 failures keep the retry/backoff.
+                            // #330: route through note_stall (bounded-attempts
+                            // shape) like the main-path Failed arm so this
+                            // outage class also brackets on the timeline.
                             ChunkAvailability::Failed { error } => {
-                                return Err(format!(
-                                    "disk_cache: chunk {chunk_id} evicted-chunk \
-                                     refetch failed: {error}"
+                                return Err(self.note_stall(
+                                    chunk_id,
+                                    StallShape::BoundedAttempts,
+                                    &format!("evicted-chunk refetch failed: {error}"),
                                 ));
                             }
+                            // #330: unreachable in practice -- wait_for_chunk
+                            // only resolves on a TERMINAL state, never while
+                            // still InFlight (mirrors the main-path arm below).
+                            // Kept only for match exhaustiveness.
                             ChunkAvailability::InFlight => {
                                 return Err(format!(
                                     "disk_cache: chunk {chunk_id} stuck InFlight \
