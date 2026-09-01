@@ -38,7 +38,8 @@ use rs_core::models::PusherKind;
 use crate::api::EndpointConfig;
 use crate::audit_ring::AuditRing;
 use crate::buffer_state::BufferState;
-use crate::disk_cache::{ChunkAvailability, DiskCache, DiskCacheConfig, FetchedChunk, S3Backend};
+use crate::disk_cache::download_service::FetchedChunk;
+use crate::disk_cache::{ChunkAvailability, DiskCache, DiskCacheConfig, S3Backend};
 use crate::disk_cache_fetcher::DiskCacheFetcher;
 use crate::endpoint_producer::producer_task;
 use crate::endpoint_stats::{EndpointStats, Stats};
@@ -892,7 +893,7 @@ async fn evicted_refetch_failure_records_stall_for_audit_bracket() {
     .await
     .expect("fetch must not hang");
     assert!(
-        matches!(got, Err(_)),
+        got.is_err(),
         "the evicted-chunk refetch into an S3 storm must surface as Err, got {got:?}"
     );
 

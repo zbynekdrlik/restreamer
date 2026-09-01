@@ -46,9 +46,10 @@ pub struct DiskCacheFetcher {
     /// Endpoint window length in chunks. Used for prefetch-ahead and the
     /// position-registry registration.
     window_chunks: i64,
-    /// `wait_for_chunk_with_timeout` deadline: how long the producer
-    /// waits for a single chunk before returning Err. The producer's
-    /// existing backoff loop turns the Err into a retry.
+    /// Stall deadline: how long the producer waits for a single chunk
+    /// (the `tokio::time::timeout` wrapping `request_chunk` + `wait_for_chunk`)
+    /// before returning Err. The producer's existing backoff loop turns the
+    /// Err into a retry.
     stall_timeout_secs: u64,
     /// VPS audit ring for outage-forensics events (stall-timeout,
     /// reader-recovered, prefill-started). `None` outside production.
@@ -228,14 +229,7 @@ impl ChunkFetcher for DiskCacheFetcher {
             })
             .await
             {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => {
-                    return Err(self.note_stall(
-                        chunk_id,
-                        StallShape::StallTimeout,
-                        &e.to_string(),
-                    ));
-                }
+                Ok(s) => s,
                 Err(_elapsed) => {
                     return Err(self.note_stall(
                         chunk_id,
@@ -298,14 +292,7 @@ impl ChunkFetcher for DiskCacheFetcher {
                         )
                         .await
                         {
-                            Ok(Ok(s)) => s,
-                            Ok(Err(e)) => {
-                                return Err(self.note_stall(
-                                    chunk_id,
-                                    StallShape::StallTimeout,
-                                    &format!("evicted-chunk refetch: {e}"),
-                                ));
-                            }
+                            Ok(s) => s,
                             Err(_elapsed) => {
                                 return Err(self.note_stall(
                                     chunk_id,

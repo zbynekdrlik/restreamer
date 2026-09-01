@@ -153,20 +153,6 @@ impl DownloadService {
         self.profile.snapshot()
     }
 
-    /// Path of the cached chunk file inside the per-event directory.
-    /// Used by `PrefetchReader::try_read_from_disk` so the reader does
-    /// not depend on internal layout knowledge.
-    pub fn chunk_path(&self, chunk_id: i64) -> std::path::PathBuf {
-        self.event_dir.join(format!("{chunk_id}.bin"))
-    }
-
-    /// Test/integration helper: clone of the registry handle so external
-    /// callers (PrefetchReader) can call `wait_for_chunk_with_timeout`
-    /// without re-plumbing a separate registry argument.
-    pub fn registry_for_test(&self) -> Arc<super::registry::ChunkRegistry> {
-        Arc::clone(&self.registry)
-    }
-
     /// HEAD-only duration probe. Returns `Ok(Some(ms))` if the chunk
     /// exists on S3, `Ok(None)` for 404, `Err(_)` for transient errors.
     /// Caches the result in `durations` so a follow-up `request_chunk`
@@ -558,7 +544,7 @@ mod tests {
             None,
         );
         svc.request_chunk(404).await;
-        let state = registry.wait_for_chunk(404).await.unwrap();
+        let state = registry.wait_for_chunk(404).await;
         assert!(matches!(state, ChunkAvailability::NotFound));
         let path = tmp.path().join("evt").join("404.bin");
         assert!(!path.exists());
@@ -598,7 +584,7 @@ mod tests {
             None,
         );
         svc.request_chunk(99).await;
-        let state = registry.wait_for_chunk(99).await.unwrap();
+        let state = registry.wait_for_chunk(99).await;
         assert!(matches!(state, ChunkAvailability::Available { .. }));
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
@@ -668,7 +654,7 @@ mod tests {
             result.is_ok(),
             "request_chunk hung after backend panic; catch_unwind missing"
         );
-        let state = registry.wait_for_chunk(7).await.unwrap();
+        let state = registry.wait_for_chunk(7).await;
         assert!(matches!(state, ChunkAvailability::NotFound));
     }
 
