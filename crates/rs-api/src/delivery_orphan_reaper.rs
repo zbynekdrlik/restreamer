@@ -120,7 +120,7 @@ impl DeliveryOrchestrator {
     /// Fail-closed at every step: an empty `client_uuid`, a Hetzner list error,
     /// or a DB error all abort the sweep WITHOUT deleting anything — a delete is
     /// only ever made from a complete, unambiguous picture (#137).
-    pub(crate) async fn reconcile_orphan_vps(&self, orphan_count: &AtomicU8) {
+    pub async fn reconcile_orphan_vps(&self, orphan_count: &AtomicU8) {
         let config = self.config();
         let uuid = config.client_uuid.clone();
         if uuid.is_empty() {
