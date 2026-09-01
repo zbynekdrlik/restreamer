@@ -107,6 +107,20 @@ pub fn select_server_type(endpoint_count: usize) -> &'static str {
     }
 }
 
+/// Resolve the Hetzner server type for a delivery VPS (#353).
+///
+/// An explicit `config_override` (`hetzner.default_server_type`) WINS over the
+/// endpoint-count tiering; an empty/whitespace override means "auto" and falls
+/// back to [`select_server_type`]. A known-deprecated `cx23/cx33/cx43` override
+/// is normalized to its `cpx22/cpx32/cpx42` successor (the `de4df3e9` rename)
+/// so an old `config.json` cannot push a type the Hetzner API rejects.
+pub fn resolve_server_type(config_override: &str, endpoint_count: usize) -> String {
+    // STUB (RED): ignores the override — the override + normalization tests
+    // fail until the real resolver lands in the GREEN commit.
+    let _ = config_override;
+    select_server_type(endpoint_count).to_string()
+}
+
 /// S3 credentials passed to delivery VPS via cloud-init environment file.
 pub struct DeliveryS3Credentials {
     pub bucket: String,
@@ -289,6 +303,47 @@ mod tests {
             access_key_id: "AKIAEXAMPLE".to_string(),
             secret_access_key: "s3cr3t".to_string(),
         }
+    }
+
+    // ----- resolve_server_type (#353) -----
+
+    #[test]
+    fn resolve_empty_override_falls_back_to_endpoint_tiering() {
+        // "unset" (empty / whitespace) => the endpoint-count tiering still applies.
+        for (raw, count, want) in [
+            ("", 0usize, "cpx22"),
+            ("   ", 2, "cpx22"),
+            ("", 3, "cpx32"),
+            ("\t", 7, "cpx32"),
+            ("", 8, "cpx42"),
+        ] {
+            assert_eq!(
+                resolve_server_type(raw, count),
+                want,
+                "empty override {raw:?} with {count} endpoints must use tiering"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_explicit_override_wins_over_tiering() {
+        // The operator's explicit choice beats the endpoint count — a 5-endpoint
+        // event (tiering would pick cpx32) is forced onto the cheaper cpx11.
+        assert_eq!(resolve_server_type("cpx11", 5), "cpx11");
+        assert_eq!(resolve_server_type("cpx22", 8), "cpx22");
+        // Surrounding whitespace is trimmed but the value is otherwise verbatim.
+        assert_eq!(resolve_server_type("  cpx31  ", 1), "cpx31");
+    }
+
+    #[test]
+    fn resolve_normalizes_deprecated_cx_override() {
+        // A stale config.json carrying a deprecated cx* string (old install.ps1
+        // default was cx23) must map to its cpx* successor, not be forced verbatim
+        // onto the Hetzner API (which rejects the retired cx line).
+        assert_eq!(resolve_server_type("cx23", 5), "cpx22");
+        assert_eq!(resolve_server_type("cx33", 0), "cpx32");
+        assert_eq!(resolve_server_type("cx43", 1), "cpx42");
+        assert_eq!(resolve_server_type("  CX23  ", 5), "cpx22");
     }
 
     // ----- delivery_env_file (#116) -----
