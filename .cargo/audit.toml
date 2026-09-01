@@ -34,4 +34,6 @@ ignore = [
     "RUSTSEC-2026-0194",
     # RUSTSEC-2026-0195: quick-xml unbounded namespace-declaration allocation (DoS) | dep: same quick-xml <- rust-s3 -> aws-creds chain as RUSTSEC-2026-0194, same #207 tracking, same trusted-input threat model | expires: 2026-10-31
     "RUSTSEC-2026-0195",
+    # RUSTSEC-2026-0258: h2 unbounded empty DATA frames (DoS), patched >=0.4.16 | dep: h2 0.3.27 <- hyper 0.14.32 <- hyper-tls/reqwest 0.11.27 <- streamhub 0.2.4 <- rtmp 0.6.5 (xiu RTMP-ingest fork, #354); h2 has NO patched 0.3.x release (the fix is only in the 0.4 line, which needs hyper 1.x -- our OWN h2 0.4.13 instance, pulled via axum/reqwest 0.12, is bumped to the patched 0.4.16 in the same PR) -- this instance is pinned by the vendored xiu RTMP stack's own reqwest 0.11 dep, not by our code, and reqwest here is an outbound HTTP CLIENT (not an inbound HTTP/2 server accepting untrusted connections), so the attack needs us to connect to a malicious HTTP/2 peer, not an inbound RTMP publisher | expires: 2026-10-31
+    "RUSTSEC-2026-0258",
 ]
