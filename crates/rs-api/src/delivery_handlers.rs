@@ -17,6 +17,11 @@ use crate::state::AppState;
 #[derive(Deserialize)]
 pub struct DeliveryStartRequest {
     pub event_id: i64,
+    /// Emergency override for the ingest-skew gate (#354). When `true`, the
+    /// operator has SEEN the "OBS desynced" banner and deliberately chooses to
+    /// spin up the VPS anyway. Defaults to `false`; an override is audited.
+    #[serde(default)]
+    pub force: bool,
 }
 #[derive(Serialize)]
 pub struct DeliveryStartResponse {
@@ -51,6 +56,46 @@ pub async fn delivery_start(
                 "need_secs": RTMP_STABLE_REQUIRED_SECS,
             })),
         ));
+    }
+
+    // Ingest A/V-skew gate (#354): refuse to spin up a paid VPS while the
+    // SOURCE (OBS) is feeding video/audio desynced past the operator
+    // threshold — every endpoint would just skew-kill in a loop. The banner
+    // already tells the operator to restart OBS; `force: true` is the
+    // deliberate emergency override (audited below).
+    let skew_active = state.inpoint_state.ingest_skew_active();
+    if skew_active && !req.force {
+        let skew_ms = state.inpoint_state.ingest_skew_ms();
+        let skew_secs = (skew_ms.abs() as f64 / 1000.0).round() as i64;
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "ingest_skew_too_high",
+                "skew_ms": skew_ms,
+                "reason": format!(
+                    "Zvuk a obraz z OBS sú rozídené o ~{skew_secs} s — reštartuj stream v OBS \
+                     pred spustením delivery."
+                ),
+            })),
+        ));
+    }
+    if skew_active && req.force {
+        rs_core::audit::record(
+            &state.audit_tx,
+            rs_core::audit::AuditRow {
+                severity: rs_core::audit::Severity::Warn,
+                source: rs_core::audit::Source::Operator,
+                event_id: Some(req.event_id),
+                instance_id: None,
+                endpoint: None,
+                action: rs_core::audit::Action::IngestSkewDetected,
+                detail: serde_json::json!({
+                    "skew_ms": state.inpoint_state.ingest_skew_ms(),
+                    "state": "override",
+                }),
+                ts_override: None,
+            },
+        );
     }
 
     let orch = state.delivery_orchestrator.as_ref().ok_or_else(|| {

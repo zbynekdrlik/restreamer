@@ -7,6 +7,7 @@ pub mod change_key_modal;
 mod confirm_modal;
 pub mod disk_pressure_banner;
 pub mod endpoint_history;
+pub mod ingest_skew_banner;
 pub mod endpoint_remove_confirm_modal;
 mod endpoint_tree;
 mod endpoints;

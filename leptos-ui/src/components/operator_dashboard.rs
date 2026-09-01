@@ -9,6 +9,7 @@ use super::audit_panel::AuditPanel;
 use super::confirm_modal::ConfirmModal;
 use super::disk_pressure_banner::DiskPressureBanner;
 use super::endpoint_tree::EndpointTree;
+use super::ingest_skew_banner::IngestSkewBanner;
 use super::oauth_authorize::OAuthAuthorize;
 use super::outage_banner::OutageBanner;
 use super::pacing_panel::PacingPanel;
@@ -34,6 +35,7 @@ pub fn OperatorDashboard() -> impl IntoView {
 
     view! {
         <div class="operator-dashboard">
+            <IngestSkewBanner />
             <DiskPressureBanner />
             <S3RegionBanner />
             <ZeroEndpointBanner />
@@ -79,6 +81,8 @@ fn ControlBar() -> impl IntoView {
                 store.rtmp_stable_secs.set(s.rtmp_stable_secs);
                 store.disk_pressure.set(s.disk_pressure);
                 store.s3_region_standard.set(s.s3_region_standard);
+                store.ingest_skew_ms.set(s.ingest_skew_ms);
+                store.ingest_skew_active.set(s.ingest_skew_active);
             }
         });
     });
@@ -234,10 +238,18 @@ fn ControlBar() -> impl IntoView {
                             || store.selected_event_id.get().is_none()
                             || is_active()
                             || store.rtmp_stable_secs.get() < RTMP_STABLE_REQUIRED_SECS
+                            || store.ingest_skew_active.get()
                     }
                     title=move || {
                         let stable = store.rtmp_stable_secs.get();
-                        if stable < RTMP_STABLE_REQUIRED_SECS {
+                        if store.ingest_skew_active.get() {
+                            // #354: name the SOURCE fault + the remedy so the
+                            // operator knows WHY Start is blocked.
+                            let secs = (store.ingest_skew_ms.get().abs() as f64 / 1000.0).round();
+                            format!(
+                                "Zvuk a obraz z OBS sú rozídené o ~{secs} s — reštartuj stream v OBS"
+                            )
+                        } else if stable < RTMP_STABLE_REQUIRED_SECS {
                             format!(
                                 "Waiting for OBS stream to stabilize ({stable}/{RTMP_STABLE_REQUIRED_SECS}s)"
                             )

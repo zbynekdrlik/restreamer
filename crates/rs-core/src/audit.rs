@@ -48,6 +48,10 @@ pub enum Action {
     RtmpConnected,
     RtmpDisconnected,
     RtmpHandshakeFailed,
+    /// Ingest A/V skew crossed the operator threshold (Detected) or fell back
+    /// under it (Recovered) — the SOURCE (OBS) is/was desynced. Warn severity,
+    /// `Source::Inpoint`. Detail carries `{skew_ms, threshold_ms, state}`. #354.
+    IngestSkewDetected,
     VpsCreating,
     VpsReady,
     VpsDeleted,

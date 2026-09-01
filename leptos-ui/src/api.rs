@@ -77,6 +77,15 @@ pub struct StatusResponse {
     /// (assume standard) so a missing field never false-alarms.
     #[serde(default = "default_true")]
     pub s3_region_standard: bool,
+    /// Live ingest A/V skew (ms, signed; positive = audio behind video).
+    /// Drives the IngestSkewBanner's "~N s" text (#354).
+    #[serde(default)]
+    pub ingest_skew_ms: i64,
+    /// Latched "ingest skew over threshold" flag — source (OBS) desynced.
+    /// Drives IngestSkewBanner visibility + the Start-Delivering client gate
+    /// (#354). Defaults false so a missing field never false-alarms.
+    #[serde(default)]
+    pub ingest_skew_active: bool,
 }
 
 fn default_true() -> bool {
@@ -131,6 +140,12 @@ pub async fn get_status() -> Result<StatusResponse, String> {
         .unwrap_or("ok")
         .to_string();
     let s3_region_standard = status["s3_region_standard"].as_bool().unwrap_or(true);
+    let ingest_skew_ms = status["inpoint"]["details"]["ingest_skew_ms"]
+        .as_i64()
+        .unwrap_or(0);
+    let ingest_skew_active = status["inpoint"]["details"]["ingest_skew_active"]
+        .as_bool()
+        .unwrap_or(false);
     Ok(StatusResponse {
         streaming_event: event,
         chunk_stats,
@@ -138,6 +153,8 @@ pub async fn get_status() -> Result<StatusResponse, String> {
         rtmp_stable_secs,
         disk_pressure,
         s3_region_standard,
+        ingest_skew_ms,
+        ingest_skew_active,
     })
 }
 

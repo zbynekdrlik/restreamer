@@ -72,6 +72,12 @@ pub struct IngestSkewMonitor {
     /// Latched "sustained over threshold" state surfaced to the dashboard +
     /// the Start-Delivering gate.
     active: bool,
+    /// Last baseline-relative skew (ms) computed at a chunk boundary. Tracked
+    /// on the monitor rather than read straight from `SkewTracker` because the
+    /// tracker's own `last_skew_ms` is NOT cleared by `reset_tracks()` (it
+    /// would report a stale value after a republish re-anchor); this one is
+    /// zeroed in `reset()`.
+    last_skew_ms: i64,
     /// Monotonic pseudo-clock (ms) fed to `SkewTracker::evaluate_chunk`; only
     /// gates the tracker's own (ignored) rate-limit, so a simple per-chunk
     /// increment is sufficient.
@@ -86,6 +92,7 @@ impl IngestSkewMonitor {
             threshold_ms,
             consecutive_over: 0,
             active: false,
+            last_skew_ms: 0,
             chunk_clock_ms: 0,
         }
     }
@@ -101,9 +108,9 @@ impl IngestSkewMonitor {
     }
 
     /// The current baseline-relative skew (ms, signed). 0 until both tracks
-    /// are present and a baseline is captured.
+    /// are present and a baseline is captured; re-zeroed on `reset()`.
     pub fn skew_ms(&self) -> i64 {
-        self.tracker.last_skew_ms()
+        self.last_skew_ms
     }
 
     /// Whether the sustained-over-threshold latch is currently set.
@@ -119,21 +126,52 @@ impl IngestSkewMonitor {
         self.tracker.reset_tracks();
         self.consecutive_over = 0;
         self.active = false;
+        self.last_skew_ms = 0;
     }
 
     /// Evaluate at the END of one chunk. Advances the tracker, reads the
     /// baseline-relative skew, updates the debounce, and returns the current
     /// skew plus any latch transition.
     pub fn evaluate_chunk(&mut self) -> SkewTransition {
-        // RED stub: measurement + latch not yet wired — every chunk reports
-        // zero skew and never flips the latch, so a real mid-stream desync is
-        // propagated silently (the #354 bug). Replaced by the GREEN impl.
-        let _ = SKEW_DEBOUNCE_CHUNKS;
+        // Advance the tracker so it captures/updates the baseline and its
+        // `last_skew_ms`. The tracker's OWN recovery decision (its 4000 ms
+        // MAX_AV_SKEW_MS trip) is deliberately DISCARDED here — this monitor
+        // never actuates recovery (camera-box owns OBS); it only measures.
         self.chunk_clock_ms = self.chunk_clock_ms.saturating_add(1_000);
         let _ = self.tracker.evaluate_chunk(self.chunk_clock_ms);
+        let skew = self.tracker.last_skew_ms();
+        self.last_skew_ms = skew;
+
+        let over = skew.abs() > self.threshold_ms;
+        if over {
+            self.consecutive_over = self.consecutive_over.saturating_add(1);
+        } else {
+            self.consecutive_over = 0;
+        }
+
+        // Latch transitions: DETECT after a sustained over-threshold window
+        // (rejects transients), CLEAR the moment skew falls back under
+        // threshold (a fixed source recovers fast — skew drops to ~0 the
+        // instant OBS realigns / on session re-anchor).
+        let event = if !self.active && self.consecutive_over >= SKEW_DEBOUNCE_CHUNKS {
+            self.active = true;
+            tracing::warn!(
+                skew_ms = skew,
+                threshold_ms = self.threshold_ms,
+                "ingest A/V skew DETECTED — source (OBS) audio/video desynced"
+            );
+            Some(SkewEvent::Detected)
+        } else if self.active && !over {
+            self.active = false;
+            tracing::info!(skew_ms = skew, "ingest A/V skew CLEARED — source realigned");
+            Some(SkewEvent::Cleared)
+        } else {
+            None
+        };
+
         SkewTransition {
-            skew_ms: 0,
-            event: None,
+            skew_ms: skew,
+            event,
         }
     }
 }

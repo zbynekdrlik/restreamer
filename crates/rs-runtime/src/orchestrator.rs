@@ -298,6 +298,10 @@ impl ServiceCore {
         // Re-wire the inpoint_state so the MediaReceiver can write the
         // shared `rtmp_stable_since` cell read by `POST /delivery/start`,
         // and emit RtmpConnected/Disconnected audit rows.
+        // #354: the ingest-skew cells live ON `InpointState` and are shared by
+        // Arc across every clone, so the chunker's writes are already visible
+        // through `api_state.inpoint_state` (and the Tauri tray's clone) — no
+        // separate wiring needed, unlike `rtmp_stable_since`.
         let wired_inpoint = api_state
             .inpoint_state
             .clone()
@@ -357,10 +361,16 @@ impl ServiceCore {
         tokio::fs::create_dir_all(&self.chunk_dir).await?;
 
         // RTMP Inpoint server (FLV-only)
-        let flv_chunk_sink = Arc::new(FlvChunkSink::new(
-            self.chunk_dir.clone(),
-            Duration::from_millis(self.config.inpoint.chunk_duration_ms),
-        ));
+        let flv_chunk_sink = Arc::new(
+            FlvChunkSink::new(
+                self.chunk_dir.clone(),
+                Duration::from_millis(self.config.inpoint.chunk_duration_ms),
+            )
+            // #354: give the chunker the shared ingest state + operator skew
+            // threshold so it publishes the live ingest A/V skew, latches the
+            // banner, and emits the skew audit row.
+            .with_ingest_state(inpoint_state.clone(), self.config.inpoint.skew_threshold_ms),
+        );
 
         // Forward chunk events to the database.
         let mut chunk_rx = flv_chunk_sink.subscribe();

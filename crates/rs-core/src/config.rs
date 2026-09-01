@@ -181,6 +181,13 @@ pub struct InpointConfig {
     /// Chunk storage format: "flv" (direct FLV, zero overhead) or "ts" (MPEG-TS legacy).
     #[serde(default = "default_chunk_format")]
     pub chunk_format: String,
+    /// Ingest A/V-skew operator-alert threshold (ms). When the source (OBS)
+    /// feeds video/audio desynced past this for the debounce window, the
+    /// dashboard raises a red "restart OBS" banner and `Start Delivering` is
+    /// gated (#354). Deliberately BELOW the pusher's 4000 ms recovery kill so
+    /// the operator is warned BEFORE endpoints start skew-killing.
+    #[serde(default = "default_skew_threshold_ms")]
+    pub skew_threshold_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,6 +284,9 @@ fn default_read_buffer_bytes() -> usize {
 fn default_chunk_format() -> String {
     "flv".to_string()
 }
+fn default_skew_threshold_ms() -> i64 {
+    2_000
+}
 fn default_api_port() -> u16 {
     8910
 }
@@ -301,6 +311,7 @@ impl Default for InpointConfig {
             chunk_duration_ms: default_chunk_duration_ms(),
             read_buffer_bytes: default_read_buffer_bytes(),
             chunk_format: default_chunk_format(),
+            skew_threshold_ms: default_skew_threshold_ms(),
         }
     }
 }
