@@ -282,15 +282,9 @@ pub(super) async fn handle_rust_push(
             } else {
                 *consecutive_zero_byte_deaths = 0;
             }
-            // RED (#236): classification not implemented yet -- the counter
-            // above already tracks consecutive zero-byte RemoteClosed
-            // deaths, but nothing acts on it yet, so the endpoint keeps
-            // death-looping on the unmodified backoff/last_error path
-            // below exactly like it did before this ticket. This is the
-            // failing-test commit; the next commit flips these two lines
-            // to the real threshold check.
-            let is_dead_target = false;
-            let just_became_dead_target = false;
+            let is_dead_target = *consecutive_zero_byte_deaths >= DEAD_TARGET_ZERO_BYTE_THRESHOLD;
+            let just_became_dead_target =
+                *consecutive_zero_byte_deaths == DEAD_TARGET_ZERO_BYTE_THRESHOLD;
             let floor = backoff_floor_ms(&push_err);
             let Some(floor_ms) = floor else {
                 // LocalCancel is the only None-floor variant. Returning
