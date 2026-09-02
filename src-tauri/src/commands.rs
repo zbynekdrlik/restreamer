@@ -53,6 +53,12 @@ pub struct StatusResponse {
     /// Whether `s3.region` matches the project standard (`fsn1`). Mirrors
     /// `/api/v1/status.s3_region_standard` (#278).
     pub s3_region_standard: bool,
+    /// Live ingest A/V skew (ms) — mirrors
+    /// `/api/v1/status.inpoint.details.ingest_skew_ms` (#354).
+    pub ingest_skew_ms: i64,
+    /// Latched ingest-skew-over-threshold flag — mirrors
+    /// `/api/v1/status.inpoint.details.ingest_skew_active` (#354).
+    pub ingest_skew_active: bool,
 }
 
 /// Get the current service status including streaming event and chunk stats.
@@ -74,6 +80,8 @@ pub async fn get_status(
     let disk_pressure = state.disk_pressure();
     let rtmp_stable_secs = state.rtmp_stable_secs().await;
     let s3_region_standard = state.s3_region_standard();
+    let ingest_skew_ms = state.ingest_skew_ms();
+    let ingest_skew_active = state.ingest_skew_active();
 
     Ok(CommandResult::ok(StatusResponse {
         streaming_event,
@@ -82,6 +90,8 @@ pub async fn get_status(
         disk_pressure,
         rtmp_stable_secs,
         s3_region_standard,
+        ingest_skew_ms,
+        ingest_skew_active,
     }))
 }
 

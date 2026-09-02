@@ -217,6 +217,12 @@ pub struct DashboardStore {
     // (fsn1). Polled from `/status`; drives the S3RegionBanner (#278).
     // Defaults true (assume standard) until the first poll lands.
     pub s3_region_standard: RwSignal<bool>,
+
+    // Live ingest A/V skew (ms) + latched-over-threshold flag. Polled from
+    // `/status`; drive the IngestSkewBanner and the Start-Delivering client
+    // gate (#354).
+    pub ingest_skew_ms: RwSignal<i64>,
+    pub ingest_skew_active: RwSignal<bool>,
 }
 
 impl DashboardStore {
@@ -243,6 +249,8 @@ impl DashboardStore {
             rtmp_stable_secs: RwSignal::new(0),
             disk_pressure: RwSignal::new("ok".to_string()),
             s3_region_standard: RwSignal::new(true),
+            ingest_skew_ms: RwSignal::new(0),
+            ingest_skew_active: RwSignal::new(false),
         }
     }
 

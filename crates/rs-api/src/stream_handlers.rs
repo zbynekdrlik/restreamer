@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use tracing::error;
@@ -16,9 +16,18 @@ use rs_endpoint::s3::S3Client;
 use crate::rescue_video_cleanup::cleanup_orphaned_rescue_video;
 use crate::state::AppState;
 
+/// Query params for `POST /events/{id}/start-stream` (#354: `force` is the
+/// emergency override for the ingest-skew gate below).
+#[derive(Debug, Deserialize, Default)]
+pub struct StartStreamQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
 pub async fn start_stream(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<i64>,
+    Query(query): Query<StartStreamQuery>,
 ) -> Result<StatusCode, StatusCode> {
     // Verify event exists
     let event = db::get_streaming_event_by_id(&state.pool, id)
@@ -90,6 +99,59 @@ pub async fn start_stream(
             ts_override: None,
         },
     );
+
+    // Ingest A/V-skew gate (#354): refuse to spin up a paid VPS while the
+    // SOURCE (OBS) is feeding video/audio desynced past the operator
+    // threshold -- every endpoint would just skew-kill in a loop. This is
+    // the REAL production "Start Delivering" path (the operator dashboard's
+    // ControlBar button calls THIS endpoint, not `POST /delivery/start` --
+    // that HTTP handler is unreachable from the current UI and only tested
+    // directly; the ingest-skew AND the pre-existing rtmp-stable checks live
+    // there too, but neither one actually gates this call site without this
+    // block). `force=true` is the deliberate emergency override (audited).
+    // The event itself stays marked receiving/delivering-activated even when
+    // this blocks the VPS -- mirrors the existing `delivery_orchestrator ==
+    // None` fallthrough below (Hetzner not configured), which has always
+    // left the event activated with no VPS.
+    if state.inpoint_state.ingest_skew_active() && !query.force {
+        let skew_ms = state.inpoint_state.ingest_skew_ms();
+        error!(
+            event_id = id,
+            skew_ms, "Refusing to start delivery VPS -- ingest A/V skew is active (#354)"
+        );
+        if let Err(e) = state.ws_tx.send(WsEvent::ActivityFeed {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            severity: "error".to_string(),
+            message: format!(
+                "Delivery VPS NOT started -- OBS audio/video sú rozídené o ~{} s. \
+                 Reštartuj stream v OBS.",
+                (skew_ms.abs() as f64 / 1000.0).round()
+            ),
+            source: "delivery".to_string(),
+        }) {
+            tracing::debug!("No WS subscribers for ActivityFeed: {e}");
+        }
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if state.inpoint_state.ingest_skew_active() && query.force {
+        rs_core::audit::record(
+            &state.audit_tx,
+            rs_core::audit::AuditRow {
+                severity: rs_core::audit::Severity::Warn,
+                source: rs_core::audit::Source::Operator,
+                event_id: Some(id),
+                instance_id: None,
+                endpoint: None,
+                action: rs_core::audit::Action::IngestSkewDetected,
+                detail: serde_json::json!({
+                    "skew_ms": state.inpoint_state.ingest_skew_ms(),
+                    "threshold_ms": state.config.inpoint.skew_threshold_ms,
+                    "state": "override",
+                }),
+                ts_override: None,
+            },
+        );
+    }
 
     // Start delivery VPS if orchestrator is available
     if let Some(orch) = state.delivery_orchestrator.as_ref() {

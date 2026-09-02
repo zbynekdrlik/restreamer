@@ -531,6 +531,7 @@ mod tests {
         ("inpoint.chunk_duration_ms", false),
         ("inpoint.chunk_format", false),
         ("inpoint.read_buffer_bytes", false),
+        ("inpoint.skew_threshold_ms", false),
         ("inpoint.rtmp_bind", false),
         ("inpoint.rtmp_port", false),
         ("notifications.discord_bot_token", true),

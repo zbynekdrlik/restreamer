@@ -181,6 +181,13 @@ pub struct InpointConfig {
     /// Chunk storage format: "flv" (direct FLV, zero overhead) or "ts" (MPEG-TS legacy).
     #[serde(default = "default_chunk_format")]
     pub chunk_format: String,
+    /// Ingest A/V-skew operator-alert threshold (ms). When the source (OBS)
+    /// feeds video/audio desynced past this for the debounce window, the
+    /// dashboard raises a red "restart OBS" banner and `Start Delivering` is
+    /// gated (#354). Deliberately BELOW the pusher's 4000 ms recovery kill so
+    /// the operator is warned BEFORE endpoints start skew-killing.
+    #[serde(default = "default_skew_threshold_ms")]
+    pub skew_threshold_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,6 +284,9 @@ fn default_read_buffer_bytes() -> usize {
 fn default_chunk_format() -> String {
     "flv".to_string()
 }
+fn default_skew_threshold_ms() -> i64 {
+    2_000
+}
 fn default_api_port() -> u16 {
     8910
 }
@@ -301,6 +311,7 @@ impl Default for InpointConfig {
             chunk_duration_ms: default_chunk_duration_ms(),
             read_buffer_bytes: default_read_buffer_bytes(),
             chunk_format: default_chunk_format(),
+            skew_threshold_ms: default_skew_threshold_ms(),
         }
     }
 }
@@ -491,6 +502,14 @@ impl Config {
         }
         if self.inpoint.chunk_format == "ts" {
             return Err("chunk_format \"ts\" is no longer supported, use \"flv\"".to_string());
+        }
+        // #354: a non-positive threshold would latch the ingest-skew banner
+        // (and block Start Delivering) on the very first debounce window of
+        // ANY stream, including a perfectly healthy one -- reject it here
+        // the same way other required-positive knobs are guarded, instead of
+        // silently shipping a mis-set operator config.
+        if self.inpoint.skew_threshold_ms <= 0 {
+            return Err("inpoint.skew_threshold_ms must be positive".to_string());
         }
         Ok(())
     }
@@ -691,6 +710,22 @@ mod tests {
         let config = Config::default();
         assert!(config.s3_region_is_standard());
         assert_eq!(config.s3.region, STANDARD_S3_REGION);
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_skew_threshold() {
+        // #354: a non-positive threshold would latch the ingest-skew banner
+        // (and block Start Delivering) on a perfectly healthy stream.
+        let mut config = Config::for_testing();
+        config.inpoint.skew_threshold_ms = 0;
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("skew_threshold_ms"),
+            "Error should mention skew_threshold_ms: {err}"
+        );
+
+        config.inpoint.skew_threshold_ms = -1;
+        assert!(config.validate().is_err());
     }
 
     #[test]

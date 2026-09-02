@@ -588,3 +588,119 @@ async fn start_new_session_preserves_chunk_index_and_sequence_headers() {
         );
     }
 }
+
+// -----------------------------------------------------------------------
+// #354: FlvChunkSink <-> IngestSkewMonitor <-> InpointState wiring.
+//
+// The pure IngestSkewMonitor logic already has its own thorough unit tests
+// (ingest_skew_tests.rs). This section proves the PRODUCTION WIRING itself:
+// with_ingest_state() actually reaches the monitor, a real chunk-boundary
+// desync flips InpointState's shared skew cells, and the audit row lands.
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn with_ingest_state_reports_active_ingest_skew_and_audit_row() {
+    use rs_core::audit::Action;
+    use rs_core::models::InpointState;
+    use tokio::sync::mpsc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (audit_tx, mut audit_rx) = mpsc::channel(16);
+    let ingest_state = InpointState::new().with_audit_tx(audit_tx);
+    // A tiny threshold + chunk duration keep this test fast and deterministic
+    // -- it only needs a growing wall-clock-vs-frozen-audio gap that exceeds
+    // a threshold, not the production 2000 ms / real desync magnitude.
+    const THRESHOLD_MS: i64 = 10;
+    let sink = Arc::new(
+        FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_millis(5))
+            .with_ingest_state(ingest_state.clone(), THRESHOLD_MS),
+    );
+
+    assert!(
+        !ingest_state.ingest_skew_active(),
+        "must start clear before any chunk is processed"
+    );
+
+    let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
+    sink.write_video(0, &video_seq).await;
+    let audio_seq = BytesMut::from(&[0xAF, 0x00, 0x12, 0x10][..]);
+    sink.write_audio(0, &audio_seq).await;
+
+    // First keyframe starts the chunk (chunk_start = Some) -- required
+    // before write_audio will accept a real audio tag.
+    let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
+    sink.write_video(0, &keyframe).await;
+
+    // ONE real audio tag at xiu_ts=0, then audio is never written again --
+    // its `audio_max_abs` stays frozen while video's wall-clock ts keeps
+    // growing on every subsequent keyframe, producing a growing skew.
+    let audio_data = BytesMut::from(&[0xAF, 0x01, 0xBE, 0xEF][..]);
+    sink.write_audio(0, &audio_data).await;
+
+    // Five more keyframes, each preceded by a sleep well past chunk_duration
+    // (5ms), so each one flushes the previous chunk and evaluates a skew
+    // boundary. Boundary 1 captures the baseline (skew=0, never trips);
+    // boundaries 2-4 each see a LARGER deviation from that baseline as video
+    // ts grows and audio stays put -- the 3rd over-threshold boundary
+    // (SKEW_DEBOUNCE_CHUNKS) must latch Detected.
+    for i in 1..=5u8 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let kf = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xE0, i][..]);
+        sink.write_video(0, &kf).await;
+    }
+
+    assert!(
+        ingest_state.ingest_skew_active(),
+        "a sustained wall-clock-vs-frozen-audio gap must latch the ingest skew flag \
+         (got skew_ms={})",
+        ingest_state.ingest_skew_ms()
+    );
+    assert!(
+        ingest_state.ingest_skew_ms().abs() > THRESHOLD_MS,
+        "the reported skew must exceed the configured threshold"
+    );
+
+    let row = audit_rx
+        .try_recv()
+        .expect("a Detected transition must emit an audit row");
+    assert_eq!(row.action, Action::IngestSkewDetected);
+    assert_eq!(row.source, rs_core::audit::Source::Inpoint);
+    assert_eq!(row.detail["threshold_ms"], THRESHOLD_MS);
+    assert_eq!(row.detail["state"], "detected");
+}
+
+#[tokio::test]
+async fn with_ingest_state_stays_clear_on_a_healthy_source() {
+    use rs_core::models::InpointState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ingest_state = InpointState::new();
+    let sink = Arc::new(
+        FlvChunkSink::new(dir.path().to_path_buf(), Duration::from_millis(5))
+            .with_ingest_state(ingest_state.clone(), 2_000),
+    );
+
+    let video_seq = BytesMut::from(&[0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64][..]);
+    sink.write_video(0, &video_seq).await;
+    let audio_seq = BytesMut::from(&[0xAF, 0x00, 0x12, 0x10][..]);
+    sink.write_audio(0, &audio_seq).await;
+
+    let keyframe = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xAA, 0xBB][..]);
+    sink.write_video(0, &keyframe).await;
+
+    // Keep BOTH tracks advancing together (a healthy shared-epoch source):
+    // one audio tag per video keyframe, same cadence.
+    for i in 1..=5u8 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let audio_data = BytesMut::from(&[0xAF, 0x01, 0xBE, i][..]);
+        sink.write_audio((i as u32) * 20, &audio_data).await;
+        let kf = BytesMut::from(&[0x17, 0x01, 0x00, 0x00, 0x00, 0xE0, i][..]);
+        sink.write_video(0, &kf).await;
+    }
+
+    assert!(
+        !ingest_state.ingest_skew_active(),
+        "a healthy, aligned source must never latch the ingest skew flag (got skew_ms={})",
+        ingest_state.ingest_skew_ms()
+    );
+}

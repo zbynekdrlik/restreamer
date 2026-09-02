@@ -48,6 +48,19 @@ pub enum Action {
     RtmpConnected,
     RtmpDisconnected,
     RtmpHandshakeFailed,
+    /// Ingest A/V skew crossed the operator threshold — the SOURCE (OBS) is
+    /// desynced. Warn severity, `Source::Inpoint` (or `Source::Operator` for
+    /// the `Start Delivering` `force:true` override, which re-fires this same
+    /// onset action so the operator's deliberate bypass is itself audited).
+    /// Detail carries `{skew_ms, threshold_ms, state}`. Outage-alert onset —
+    /// see `notify::classify` (#354).
+    IngestSkewDetected,
+    /// Ingest A/V skew fell back under the operator threshold after having
+    /// been `IngestSkewDetected` — the source (OBS) realigned. Info severity,
+    /// `Source::Inpoint`. Detail carries `{skew_ms, threshold_ms, state}`.
+    /// Outage-alert recovery, pairs with `IngestSkewDetected` — see
+    /// `notify::classify` (#354).
+    IngestSkewRecovered,
     VpsCreating,
     VpsReady,
     VpsDeleted,

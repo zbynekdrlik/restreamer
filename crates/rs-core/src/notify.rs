@@ -49,8 +49,15 @@ fn classify(action: Action) -> Option<Signal> {
         Action::VpsUnreachable
         | Action::S3UploadFailed
         | Action::HostInternetUnreachable
-        | Action::RescueActivated => Some(Signal::Onset(action)),
-        Action::RescueRecovered | Action::HostInternetRecovered => Some(Signal::Recovery(action)),
+        | Action::RescueActivated
+        // #354: the ingest-side A/V-skew banner exists BECAUSE the 2026-08-30
+        // incidents alerted no one ("žiadny alert nikam nešiel") — the source
+        // (OBS) desync was only ever visible on the dashboard. Route it
+        // through the SAME onset/recovery pairing as HostInternetUnreachable.
+        | Action::IngestSkewDetected => Some(Signal::Onset(action)),
+        Action::RescueRecovered
+        | Action::HostInternetRecovered
+        | Action::IngestSkewRecovered => Some(Signal::Recovery(action)),
         _ => None,
     }
 }
@@ -128,7 +135,12 @@ fn slovak_text(action: Action) -> &'static str {
         }
         Action::RescueRecovered => "✅ Spojenie obnovené — vysielanie pokračuje normálne.",
         Action::HostInternetRecovered => "✅ Internet na streamovacom PC obnovený.",
-        // classify() only routes the six actions above into this function.
+        Action::IngestSkewDetected => {
+            "🔴 Zvuk a obraz z OBS sú rozídené — reštartuj stream v OBS. Delivery sa nedá spustiť, \
+             kým to platí."
+        }
+        Action::IngestSkewRecovered => "✅ Zvuk a obraz z OBS sú znova zosynchronizované.",
+        // classify() only routes the eight actions above into this function.
         _ => "",
     }
 }
@@ -406,9 +418,39 @@ mod tests {
             classify(Action::HostInternetRecovered),
             Some(Signal::Recovery(_))
         ));
+        // #354: the ingest A/V-skew banner must alert too — the incident it
+        // fixes is precisely a source desync that alerted NO ONE.
+        assert!(matches!(
+            classify(Action::IngestSkewDetected),
+            Some(Signal::Onset(_))
+        ));
+        assert!(matches!(
+            classify(Action::IngestSkewRecovered),
+            Some(Signal::Recovery(_))
+        ));
         // Unrelated actions are ignored.
         assert!(classify(Action::EventStarted).is_none());
         assert!(classify(Action::DiskCachePushSample).is_none());
+    }
+
+    #[test]
+    fn ingest_skew_onset_alerts_then_recovery_rearms() {
+        let mut n = notifier();
+        // Detected fires once, the per-chunk-boundary repeat is deduped.
+        assert!(
+            n.observe(&row(Action::IngestSkewDetected), None).is_some(),
+            "first IngestSkewDetected must alert (#354 -- the incident this fixes alerted no one)"
+        );
+        assert!(n.observe(&row(Action::IngestSkewDetected), None).is_none());
+        // The operator's `force:true` override re-fires the SAME onset action
+        // (delivery_handlers.rs) -- also a dedup, not a second alert.
+        assert!(n.observe(&row(Action::IngestSkewDetected), None).is_none());
+        // Recovery clears the episode and re-arms.
+        assert!(n.observe(&row(Action::IngestSkewRecovered), None).is_some());
+        assert!(
+            n.observe(&row(Action::IngestSkewDetected), None).is_some(),
+            "a NEW desync after recovery must alert again"
+        );
     }
 
     #[test]

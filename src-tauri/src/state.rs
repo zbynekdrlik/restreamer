@@ -104,6 +104,17 @@ impl AppState {
         self.inpoint_state.is_connected()
     }
 
+    /// Live ingest A/V skew (ms) + latched-over-threshold flag. Read from the
+    /// SAME shared `InpointState` the chunker writes (its skew cells are
+    /// `Arc`-shared across every clone), so the tray webview renders the same
+    /// ingest-skew banner as the LAN dashboard (#354, parity with #234).
+    pub fn ingest_skew_ms(&self) -> i64 {
+        self.inpoint_state.ingest_skew_ms()
+    }
+    pub fn ingest_skew_active(&self) -> bool {
+        self.inpoint_state.ingest_skew_active()
+    }
+
     /// Get chunk statistics directly from the database.
     pub async fn get_chunk_stats(&self) -> Result<ChunkStats, String> {
         let chunk_duration_ms = self.config.inpoint.chunk_duration_ms;

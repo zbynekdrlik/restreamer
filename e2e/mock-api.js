@@ -32,6 +32,7 @@ let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
 //   - "disk-warn"       — status.disk_pressure="warn" (amber DiskPressureBanner)
 //   - "disk-critical"   — status.disk_pressure="critical" (red DiskPressureBanner)
 //   - "s3-region-nonstandard" — status.s3_region_standard=false (red S3RegionBanner, #278)
+//   - "ingest-skew"     — inpoint.details.ingest_skew_active=true (red IngestSkewBanner + gate, #354)
 let scenario = "default";
 let rtmpStableSecs = 999; // default: stream has been stable plenty long
 let rtmpTickStartMs = null; // when the tick scenario started
@@ -80,12 +81,18 @@ function buildStatusResponse() {
   else if (scenario === "disk-critical") diskPressure = "critical";
   // #278: s3_region_standard drives the dashboard S3RegionBanner.
   const s3RegionStandard = scenario !== "s3-region-nonstandard";
+  // #354: ingest A/V-skew drives the IngestSkewBanner + the Start-Delivering
+  // gate. The "ingest-skew" scenario feeds a large sustained skew.
+  const ingestSkewActive = scenario === "ingest-skew";
+  const ingestSkewMs = ingestSkewActive ? 25470 : 0;
   return {
     inpoint: {
       state: rtmpActive ? "connected" : "idle",
       details: {
         rtmp_connected: rtmpActive,
         rtmp_stable_secs: currentRtmpStableSecs(),
+        ingest_skew_ms: ingestSkewMs,
+        ingest_skew_active: ingestSkewActive,
       },
     },
     streaming_event: currentStreamingEvent(),
@@ -324,6 +331,18 @@ app.post("/api/v1/events/:id/start-stream", (req, res) => {
   );
   if (conflict) {
     return res.status(409).json({ error: "another event is active" });
+  }
+  // #354: mirrors the REAL backend's ingest-skew gate on this same endpoint
+  // (stream_handlers::start_stream) -- the operator dashboard's Start
+  // Delivering button calls THIS path, not the separate /delivery/start
+  // handler, so the E2E gate test must exercise it here.
+  const force = req.query.force === "true";
+  if (scenario === "ingest-skew" && !force) {
+    return res.status(400).json({
+      error: "ingest_skew_too_high",
+      skew_ms: 25470,
+      reason: "Zvuk a obraz z OBS sú rozídené o ~25 s — reštartuj stream v OBS pred spustením delivery.",
+    });
   }
   evt.receiving_activated = true;
   evt.delivering_activated = true;
