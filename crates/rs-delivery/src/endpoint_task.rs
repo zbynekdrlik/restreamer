@@ -142,9 +142,9 @@ async fn consumer_task<P: OutputProcessFactory>(
     let mut consecutive_write_failures: u32 = 0;
     // Last delivered chunk id, recorded in the rescue audit row on stall.
     let mut last_delivered_chunk_id: i64 = -1;
-    // Last full FLV chunk pushed — replayed as a freeze during keepalive.
-    // Only populated for fast endpoints (avoids a per-chunk clone on the
-    // high-bitrate normal endpoints).
+    // Last full FLV chunk pushed — replayed as a codec-homogeneous freeze
+    // during a keepalive bridge. #124: populated for ALL rust-pusher endpoints
+    // (fast AND non-fast); moved (not cloned) into the Arc at the push site.
     let mut last_chunk_bytes: Option<std::sync::Arc<Vec<u8>>> = None;
     let mut last_heartbeat = std::time::Instant::now();
     // Consecutive push errors for the Rust pusher exponential backoff ladder.
@@ -296,13 +296,16 @@ async fn consumer_task<P: OutputProcessFactory>(
 
         // Pull next chunk from channel (rescue-mode-aware).
         //
-        // FAST + rust pusher only: a short producer gap triggers the
-        // never-crash keepalive (freeze last chunk → default rescue) on the
-        // SAME rtmp session, so starvation never tears the connection down.
-        // EVERY other path (normal YT/FB, any ffmpeg endpoint) keeps the
-        // existing select! verbatim — the 8s `run_outage_rescue` behaviour is
-        // unchanged byte-for-byte.
-        let chunk = if ep_cfg.is_fast && use_rust_pusher {
+        // ALL rust-pusher endpoints (fast AND non-fast — #124): a producer gap
+        // triggers the codec-homogeneous keepalive bridge (freeze the last real
+        // chunk) on the SAME rtmp session, so starvation never tears the
+        // connection down and short gaps/trickle resolve with zero outage. Only
+        // the ffmpeg path (no RtmpPusher handle) keeps the old select! verbatim,
+        // dropping+reconnecting via `run_outage_rescue`. The escalation to the
+        // fresh-reconnect rescue clip stays anchored to the last real chunk
+        // (`keepalive_escalate_after`), so rescue never engages slower than
+        // before #124.
+        let chunk = if crate::fast_keepalive::uses_keepalive_bridge(use_rust_pusher) {
             tokio::select! {
                 maybe_chunk = rx.recv() => {
                     match maybe_chunk {
@@ -360,6 +363,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                             &mut stop_rx,
                             &stats,
                             &buffer_state,
+                            crate::fast_keepalive::keepalive_escalate_after(
+                                ep_cfg.is_fast,
+                                crate::rescue::RESCUE_STALL_THRESHOLD_SECS,
+                            ),
                         )
                         .await
                     } else {
@@ -376,10 +383,10 @@ async fn consumer_task<P: OutputProcessFactory>(
                         }
                         KeepaliveOutcome::Stop => break,
                         KeepaliveOutcome::EscalateToRescue => {
-                            // C1 (#251): sustained outage on a fast endpoint.
-                            // Keepalive could not hold the live session (frozen
-                            // or dark) — switch to the SAME fresh-session
-                            // rescue the non-fast 8s arm uses. NEVER spliced
+                            // C1 (#251) / #124: sustained outage on a rust
+                            // endpoint (fast OR non-fast). Keepalive could not
+                            // hold the live session (frozen or dark) — switch to
+                            // the fresh-session rescue clip. NEVER spliced
                             // into the live session (that is the #249 green-
                             // video corruption); run_outage_rescue drops the
                             // existing rust_pusher and reconnects FRESH for the
@@ -428,7 +435,8 @@ async fn consumer_task<P: OutputProcessFactory>(
                 }
             }
         } else {
-            // EXISTING chunk-pull select! — non-fast and ffmpeg paths, UNCHANGED.
+            // EXISTING chunk-pull select! — ffmpeg path only now (#124 routed
+            // non-fast rust endpoints through the keepalive bridge arm above).
             tokio::select! {
             maybe_chunk = rx.recv() => {
                 match maybe_chunk {
@@ -580,11 +588,17 @@ async fn consumer_task<P: OutputProcessFactory>(
                         chunk_duration_ms,
                         cumulative_pushed_secs,
                     );
-                    // Fast endpoints only: remember the chunk so keepalive can
-                    // replay it as a freeze during a producer gap. Skipped on
-                    // normal endpoints to avoid the per-chunk clone.
-                    if ep_cfg.is_fast {
-                        last_chunk_bytes = Some(std::sync::Arc::new(chunk.data.clone()));
+                    // Remember the last real chunk so the keepalive bridge can
+                    // replay it as a codec-homogeneous freeze during a producer
+                    // gap. #124: populated for ALL bridging (rust) endpoints,
+                    // fast AND non-fast, so the non-fast production stream gets
+                    // the same zero-outage bridge. `chunk` is dead after this
+                    // point (its id/duration are already copied out and the
+                    // ffmpeg branch is the disjoint `else`), so MOVE the bytes
+                    // into the Arc instead of cloning — no per-chunk memcpy on
+                    // the high-bitrate production endpoints.
+                    if crate::fast_keepalive::uses_keepalive_bridge(use_rust_pusher) {
+                        last_chunk_bytes = Some(std::sync::Arc::new(chunk.data));
                     }
                 }
             }
