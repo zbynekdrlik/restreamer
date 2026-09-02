@@ -96,7 +96,6 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
     )
     .await;
 
-
     Ok(Json(ServiceStatus {
         inpoint,
         endpoint,
