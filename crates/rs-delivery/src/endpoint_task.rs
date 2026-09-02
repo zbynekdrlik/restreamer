@@ -297,7 +297,7 @@ async fn consumer_task<P: OutputProcessFactory>(
         // EVERY other path (normal YT/FB, any ffmpeg endpoint) keeps the
         // existing select! verbatim — the 8s `run_outage_rescue` behaviour is
         // unchanged byte-for-byte.
-        let chunk = if ep_cfg.is_fast && use_rust_pusher {
+        let chunk = if crate::fast_keepalive::uses_keepalive_bridge(&ep_cfg) {
             tokio::select! {
                 maybe_chunk = rx.recv() => {
                     match maybe_chunk {
@@ -355,6 +355,7 @@ async fn consumer_task<P: OutputProcessFactory>(
                             &mut stop_rx,
                             &stats,
                             &buffer_state,
+                            crate::fast_keepalive::keepalive_escalate_after(&ep_cfg),
                         )
                         .await
                     } else {
@@ -574,10 +575,13 @@ async fn consumer_task<P: OutputProcessFactory>(
                         chunk_duration_ms,
                         cumulative_pushed_secs,
                     );
-                    // Fast endpoints only: remember the chunk so keepalive can
-                    // replay it as a freeze during a producer gap. Skipped on
-                    // normal endpoints to avoid the per-chunk clone.
-                    if ep_cfg.is_fast {
+                    // Remember the last real chunk so the keepalive bridge can
+                    // replay it as a codec-homogeneous freeze during a producer
+                    // gap. #124: populated for ALL bridging (rust) endpoints,
+                    // fast AND non-fast, so the non-fast production stream gets
+                    // the same zero-outage bridge. The per-chunk clone is the
+                    // cost of holding the live session across the gap.
+                    if crate::fast_keepalive::uses_keepalive_bridge(&ep_cfg) {
                         last_chunk_bytes = Some(std::sync::Arc::new(chunk.data.clone()));
                     }
                 }

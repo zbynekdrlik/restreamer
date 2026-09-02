@@ -514,6 +514,7 @@ mod fast_upload_gap_regression {
                 &mut stop_rx,
                 &stats_task,
                 &buffer_state_task,
+                std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS),
             )
             .await
         });
@@ -657,6 +658,7 @@ mod fast_upload_gap_regression {
                 &mut stop_rx,
                 &stats_task,
                 &buffer_state_task,
+                std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS),
             )
             .await
         });

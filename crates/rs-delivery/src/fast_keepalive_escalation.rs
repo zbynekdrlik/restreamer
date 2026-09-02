@@ -77,6 +77,11 @@ pub(crate) async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     stats: &Stats,
     buffer_state: &std::sync::Arc<crate::buffer_state::BufferState>,
+    // #124: elapsed-since-keepalive-ENTRY at which a stalled producer escalates
+    // to the fresh-reconnect rescue clip. Anchored by the caller to the last
+    // real chunk (`keepalive_escalate_after`) so escalation never fires later
+    // than RESCUE_STALL_THRESHOLD_SECS after the last real chunk.
+    escalate_after: std::time::Duration,
 ) -> KeepaliveOutcome {
     // ONLY codec-homogeneous bytes (the last real chunk). `None` => no chunk
     // delivered yet => pure-wait, never push. Borrows `last_chunk_bytes` (an
@@ -103,9 +108,7 @@ pub(crate) async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     // fresh-session rescue? Gated on `producer_active==false` so trickle
     // jitter (producer alive) stays freeze-only forever (#249 protection).
     let should_escalate = |bs: &std::sync::Arc<crate::buffer_state::BufferState>| -> bool {
-        started.elapsed()
-            >= std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS)
-            && !bs.producer_active.load(AtomicOrdering::Relaxed)
+        started.elapsed() >= escalate_after && !bs.producer_active.load(AtomicOrdering::Relaxed)
     };
     // Periodic re-check tick for the escalation gate. Far below the 8s
     // threshold so escalation fires within ~1s of the threshold being
