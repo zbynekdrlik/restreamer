@@ -455,4 +455,80 @@ mod tests {
         let resp: ErrorResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.error.code, "not_found");
     }
+
+    // ----- create_server transient-error retry (#223) -----
+
+    fn ok_server_body(id: i64, name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "server": {
+                "id": id,
+                "name": name,
+                "status": "initializing",
+                "public_net": {"ipv4": {"ip": "1.2.3.4"}},
+                "server_type": {"name": "cpx22"},
+                "created": "2026-01-01T00:00:00+00:00"
+            }
+        })
+    }
+
+    /// #223 RED: a transient 5xx from `POST /servers` must be retried
+    /// server-side (after an idempotency name lookup that finds nothing),
+    /// and the eventual 201 returns the created server. Before the fix,
+    /// `create_server` POSTs once and surfaces the 503 immediately.
+    #[tokio::test]
+    async fn create_server_retries_transient_5xx_then_succeeds() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Idempotency name lookup: no pre-existing server with this name.
+        Mock::given(method("GET"))
+            .and(path("/servers"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"servers": []})),
+            )
+            .mount(&server)
+            .await;
+
+        // Fallthrough POST -> 201 success. Mounted FIRST so it has lower
+        // priority than the 503 mock below (wiremock: last-mounted wins).
+        // Once the 503 mock is exhausted, this one answers the retry.
+        Mock::given(method("POST"))
+            .and(path("/servers"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(ok_server_body(999, "rs-delivery-evt7")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // First POST -> transient 503; mounted LAST => wins the first match,
+        // then `up_to_n_times(1)` exhausts it so the retry falls through to 201.
+        Mock::given(method("POST"))
+            .and(path("/servers"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "error": {"code": "unavailable", "message": "service temporarily unavailable"}
+            })))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = HetznerClient::with_base_url("tok", &server.uri());
+        let got = client
+            .create_server(
+                "rs-delivery-evt7",
+                "cpx22",
+                "fsn1",
+                "ubuntu-24.04",
+                &["restreamer".to_string()],
+                "#cloud-config\n",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("create_server should retry the transient 503 and return the 201 server");
+        assert_eq!(got.id, 999);
+        assert_eq!(got.name, "rs-delivery-evt7");
+    }
 }
