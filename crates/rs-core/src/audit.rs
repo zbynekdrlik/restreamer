@@ -48,6 +48,18 @@ pub enum Action {
     RtmpConnected,
     RtmpDisconnected,
     RtmpHandshakeFailed,
+    /// The RTMP listener could not BIND its port (e.g. another process holds
+    /// 1234). Warn severity, `Source::Inpoint`. Detail carries
+    /// `{port, holder, error}`. Durable post-mortem for a silent-ingest window;
+    /// pairs with `RtmpBindRecovered`. Surfaced on the dashboard via a red
+    /// banner + `WsEvent::RtmpBindFailed` (#106). Edge-triggered (first failure
+    /// of a streak only), so it never floods the audit log on the retry loop.
+    RtmpBindFailed,
+    /// The RTMP listener port became bindable again after an `RtmpBindFailed`
+    /// — the conflicting process released the port. Info severity,
+    /// `Source::Inpoint`. Detail carries `{port}`. Pairs with `RtmpBindFailed`
+    /// (#106).
+    RtmpBindRecovered,
     /// Ingest A/V skew crossed the operator threshold — the SOURCE (OBS) is
     /// desynced. Warn severity, `Source::Inpoint` (or `Source::Operator` for
     /// the `Start Delivering` `force:true` override, which re-fires this same
@@ -220,6 +232,11 @@ pub enum Action {
     /// `{from: Option<String>, to: Option<String>}`. Bounded at most once
     /// per 30 s per endpoint by the surrounding caller.
     YoutubeIssueChanged,
+    /// Host-side (#166): FB Graph ingest-health probe observed the mapped
+    /// `health` value change for an FB endpoint. Detail JSON:
+    /// `{from: Option<String>, to: Option<String>}`. Emitted only on transition
+    /// (parity with `YoutubeIssueChanged`), bounded by the surrounding TTL cache.
+    FacebookStatusChanged,
     /// Operator successfully completed an OAuth 2.0 Device Code Flow grant
     /// for a YouTube channel. Detail JSON: `{label, channel_id, scopes}`.
     OAuthGranted,
@@ -261,6 +278,14 @@ pub enum Action {
     /// data-driven server-type (tier) choice for the next event. Severity::Info.
     /// Detail JSON is `resource_sample::ResourceSample`.
     VpsResourceSample,
+    /// #84: a single delivery has been running longer than
+    /// `delivery.long_stream_warn_secs` (default 2.5 h) — a heads-up that the
+    /// stream may have been left on after the event finished. Emitted ONCE per
+    /// delivery by the delivery health monitor (`LongStreamWarner` re-arms when
+    /// a new delivery starts). Severity::Warn, Source::Delivery. Detail JSON:
+    /// {elapsed_secs, threshold_secs}. Routed to the operator's Discord as a
+    /// standalone heads-up (NOT an outage episode) — see `notify::classify`.
+    LongStreamWarning,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

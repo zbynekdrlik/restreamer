@@ -24,6 +24,16 @@ const mockResponses = {
     const ingest_skew_ms = status.inpoint?.details?.ingest_skew_ms || 0;
     const ingest_skew_active = status.inpoint?.details?.ingest_skew_active || false;
     const vps_orphan_count = status.vps_orphan_count || 0;
+    // #84: long_stream_warning is a top-level /status field; forward it here
+    // too (this hand-composed object does not relay the HTTP response
+    // verbatim), or the LongStreamBanner silently sees the default under the
+    // Tauri-mock IPC path every frontend spec runs through.
+    const long_stream_warning = status.long_stream_warning || false;
+    // #106: RTMP bind error mirrors /api/v1/status.inpoint.details -- must be
+    // forwarded here too (this object is hand-composed, not a verbatim relay),
+    // or the RtmpBindErrorBanner silently sees a default under the Tauri-mock
+    // IPC path every frontend spec runs through.
+    const rtmp_bind_error = status.inpoint?.details?.rtmp_bind_error || null;
     const data = {
       streaming_event: status.streaming_event || null,
       chunk_stats,
@@ -34,6 +44,8 @@ const mockResponses = {
       ingest_skew_ms,
       ingest_skew_active,
       vps_orphan_count,
+      long_stream_warning,
+      rtmp_bind_error,
     };
     return { success: true, data, error: null };
   },

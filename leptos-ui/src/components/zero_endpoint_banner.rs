@@ -4,7 +4,7 @@
 //! audience sees nothing while the operator might not realise because the
 //! pipeline still appears healthy (RTMP green, buffer filling, VPS up).
 
-use crate::store::DashboardStore;
+use crate::store::{DashboardStore, zero_endpoint_alarm};
 use leptos::prelude::*;
 
 #[component]
@@ -13,13 +13,15 @@ pub fn ZeroEndpointBanner() -> impl IntoView {
     let pipeline = store.pipeline_state;
     let delivery = store.delivery;
 
-    // Show when the pipeline is active (any non-idle state) AND the
-    // delivery layer has zero live endpoints. During pure "idle" we stay
-    // silent — that's the expected state before a stream starts.
+    // Show when the pipeline is active (a KNOWN, non-idle/stopping state) AND
+    // the delivery layer has zero live endpoints. During pure "idle" — and on
+    // a fresh load, before the first WS tick populates the pipeline state — we
+    // stay silent (see `zero_endpoint_alarm`, the shared predicate the
+    // app-level glow uses too).
     let show = Memo::new(move |_| {
         let ps = pipeline.get();
         let d = delivery.get();
-        ps.state != "idle" && ps.state != "stopping" && d.endpoints.is_empty()
+        zero_endpoint_alarm(&ps, &d)
     });
 
     view! {

@@ -68,6 +68,14 @@ const testName = EXPECT_NO_STREAM
 // runtime).
 import { assertYtHealthGood } from "./yt-health";
 
+// #249 content-level picture verification (YT_PICTURE_GATE=shadow|enforce|off).
+// The sampling + analysis logic lives in ./lib/picture-gate.ts (browser half)
+// and ./lib/frame-analysis.ts (pure, unit-tested). See
+// .claude/rules/youtube-picture-check.md for the CI wiring + profile prereq.
+import { verifyPicture, resolvePictureMode } from "./lib/picture-gate";
+
+const PICTURE_MODE = resolvePictureMode(process.env.YT_PICTURE_GATE);
+
 test(testName, async () => {
   const headed = !!process.env.HEADED;
 
@@ -614,6 +622,14 @@ test(testName, async () => {
           path: path.join(SCREENSHOT_DIR, "stream-preview.png"),
         });
         console.log("Saved stream preview screenshot to stream-preview.png");
+      }
+
+      // #249: content-level picture check — sample the decoded preview and
+      // assert it is not a sustained uniform colour field (green-video).
+      // Health metrics (asserted below) can read good while the picture is
+      // a solid green field, so this runs alongside them, not instead.
+      if (PICTURE_MODE !== "off") {
+        await verifyPicture(page, PICTURE_MODE);
       }
 
       // Phase 1 (#176): assert structured YT health is good with no

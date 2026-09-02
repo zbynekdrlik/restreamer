@@ -15,12 +15,22 @@ auto-load on their `paths:` — you do not invoke those.
 - file-size cap, `Cargo.lock`/`--locked`, test-crypto, secret scanner → `.claude/rules/rust-crate-hygiene.md` (auto)
 - DB migrations / destructive-rebuild idempotency / schema_version rewind → `.claude/rules/migrations.md` (auto)
 - disk_cache stall/recovered audit-bracket invariant (was_stalled, note_stall/note_recovered) → `.claude/rules/disk-cache-audit-bracket.md` (auto)
+- installer `scripts/install.ps1` (firewall dual-path, ErrorAction=Stop, script-shape tests) → `.claude/rules/installer-script.md` (auto)
+- rs-rtmp-push in-process RTMP test servers / rejection-path harness → `.claude/rules/rtmp-test-harness.md` (auto)
+- Leptos UI gotchas (controlled `<select>` with dynamic options → `prop:selected`) → `.claude/rules/leptos-ui.md` (auto)
 - Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
 - OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`
 - Outage survival, rescue clip, keepalive, notification UX → `.claude/skills/outage-rescue`
+- Adding a status-driven dashboard banner (backend + both frontends + Tauri + E2E) → `.claude/rules/dashboard-status-banner.md` (auto)
 - Compile / test / clippy / frontend-E2E (dev1 Tier-0 → build on dev2) → `.claude/skills/dev2-build-verify`
+- leptos-ui timers / detached async / reactive-disposal panics on SPA nav → `.claude/rules/leptos-ownership.md` (auto-loads on `leptos-ui/src/**`)
 - ci.yml conditional-logic gates, verify-ci-yaml-invariants, .cargo/audit.toml → `.claude/skills/ci-yaml-maintenance`
+- A/V-skew guard (ingest diag #354 vs push actuator #257/#359, STEP-vs-DRIFT, DriftHold) → `.claude/rules/av-skew-guard.md` (auto)
+- adding a dashboard status banner (the 9-place mirror-set + audit row) → `.claude/rules/dashboard-status-banners.md` (auto)
+- E2E fast-endpoint (`is_fast`) cache-label shapes + audit assertions → `.claude/rules/e2e-fast-endpoint.md` (auto)
+- YouTube content-level picture check (green-video, frame-analysis) → `.claude/rules/youtube-picture-check.md` (auto)
+- per-endpoint YT/FB ingest health (attach pattern, DeliveryEndpointMetrics field fanout, Graph specifics) → `.claude/rules/delivery-health-monitoring.md` (auto)
 
 ## Project Structure
 

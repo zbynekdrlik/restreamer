@@ -132,6 +132,50 @@ async fn status_exposes_s3_region_standard_false_for_nonstandard_region() {
     );
 }
 
+/// #106: `/api/v1/status` must expose the RTMP listener bind error under
+/// `inpoint.details.rtmp_bind_error` so the dashboard can show a red banner
+/// naming the port conflict. Absent by default (`null`).
+#[tokio::test]
+async fn status_exposes_rtmp_bind_error_null_by_default() {
+    let state = test_state().await;
+    let (base, _) = start_server(state).await;
+
+    let body: serde_json::Value = reqwest::get(format!("{base}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        body["inpoint"]["details"]["rtmp_bind_error"].is_null(),
+        "rtmp_bind_error must be null when the listener is healthy, got: {}",
+        body["inpoint"]["details"]["rtmp_bind_error"]
+    );
+}
+
+/// #106: when the shared `InpointState` carries a bind error, `/status` must
+/// echo it verbatim so the dashboard banner names the port + holding process.
+#[tokio::test]
+async fn status_exposes_rtmp_bind_error_when_set() {
+    let inpoint = InpointState::new();
+    let msg = "Port 1234 is already in use by another process (PID 4321: inpoint_service.exe)";
+    inpoint.set_bind_error(msg.to_string());
+    let state = test_state().await.with_inpoint_state(inpoint);
+    let (base, _) = start_server(state).await;
+
+    let body: serde_json::Value = reqwest::get(format!("{base}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        body["inpoint"]["details"]["rtmp_bind_error"], msg,
+        "rtmp_bind_error must echo the recorded message, got: {}",
+        body["inpoint"]["details"]["rtmp_bind_error"]
+    );
+}
+
 #[tokio::test]
 async fn streaming_event_lifecycle() {
     let state = test_state().await;
@@ -591,6 +635,7 @@ fn live_metrics(alias: &str) -> DeliveryEndpointMetrics {
         delivery_mode: None,
         rescue_eta_secs: None,
         youtube_health: None,
+        facebook_health: None,
         lifecycle: EndpointLifecycle::Live,
     }
 }

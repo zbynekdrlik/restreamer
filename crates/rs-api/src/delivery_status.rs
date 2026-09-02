@@ -537,11 +537,27 @@ impl DeliveryOrchestrator {
                 delivery_mode: ep.delivery_mode,
                 rescue_eta_secs: ep.rescue_eta_secs,
                 youtube_health: None,
+                facebook_health: None,
                 lifecycle: rs_core::models::EndpointLifecycle::Live,
             };
             if let Some(cfg) = configs.iter().find(|c| c.alias == m.alias) {
                 if cfg.youtube_oauth_id.is_some() && cfg.service_type == "YT_RTMP" {
                     attach_yt_health_cached(self.pool(), cfg, &mut m, self.audit_tx()).await;
+                } else if cfg.service_type == "FB" && self.config().facebook.enabled {
+                    // FB ingestion health (#166): ask the Graph API whether FB is
+                    // actually decoding what we push (persistent keys silently
+                    // discard bytes when unbound). Parity with the YT health badge.
+                    // Gated on `facebook.enabled` so the feature ships DARK — an
+                    // install without FB monitoring leaves facebook_health None
+                    // (no grey badge, no audit noise on every process start).
+                    crate::delivery_fb_health::attach_fb_health_cached(
+                        &self.config().facebook,
+                        cfg.id,
+                        &cfg.alias,
+                        &mut m,
+                        self.audit_tx(),
+                    )
+                    .await;
                 }
             }
             // Host-compute the operator-facing lifecycle from the metrics we
@@ -706,7 +722,7 @@ pub fn clear_yt_health_cache_for_test() {
 /// by `daily_quota` from `youtube.device_flow` config (default 10_000).
 /// `acquire(1)` is called before every `liveStreams.list` probe in
 /// `attach_yt_health`. Exhausted budget → `error: "quota_throttled"`.
-fn youtube_quota_tracker() -> &'static rs_youtube::quota::QuotaTracker {
+pub(crate) fn youtube_quota_tracker() -> &'static rs_youtube::quota::QuotaTracker {
     static T: OnceLock<rs_youtube::quota::QuotaTracker> = OnceLock::new();
     T.get_or_init(|| rs_youtube::quota::QuotaTracker::new(10_000))
 }

@@ -506,12 +506,14 @@ impl ServiceCore {
         let inpoint_port = self.config.inpoint.rtmp_port;
         let inpoint_flv_sink = Arc::clone(&flv_chunk_sink);
         let inpoint_state_clone = inpoint_state.clone();
+        let inpoint_ws_tx = ws_tx.clone();
         let inpoint_task = tokio::spawn(async move {
             run_inpoint_loop(
                 inpoint_bind,
                 inpoint_port,
                 inpoint_flv_sink,
                 inpoint_state_clone,
+                inpoint_ws_tx,
                 inpoint_restart_rx,
                 inpoint_shutdown_rx,
             )
@@ -660,22 +662,79 @@ impl ServiceCore {
 
 /// Run the RTMP inpoint server with restart support.
 ///
-/// Auto-restarts on crash with exponential backoff (2s, 4s, 8s, 16s, max 30s).
-/// Crash counter resets when a publisher connects. Gives up after 10 consecutive
-/// crashes without any successful connection.
+/// Each iteration first PROBES the RTMP port (#106): if it cannot bind, the
+/// failure is recorded on `inpoint_state` (red dashboard banner + `/status`),
+/// broadcast, audited once, and retried on a 2s→30s bind backoff — the app
+/// keeps serving and the banner auto-clears when the port frees. Once bindable,
+/// it runs xiu and auto-restarts on crash with exponential backoff (2s, 4s, 8s,
+/// 16s, max 30s). Crash counter resets when a publisher connects. Gives up after
+/// 10 consecutive crashes without any successful connection.
+#[allow(clippy::too_many_arguments)]
 async fn run_inpoint_loop(
     bind: String,
     port: u16,
     flv_chunk_sink: Arc<FlvChunkSink>,
     inpoint_state: InpointState,
+    ws_tx: broadcast::Sender<WsEvent>,
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
     let mut consecutive_crashes: u32 = 0;
     let mut last_connected = false;
+    let mut bind_backoff_secs: u64 = 2;
     const MAX_CONSECUTIVE_CRASHES: u32 = 10;
+    const MAX_BIND_BACKOFF_SECS: u64 = 30;
 
     loop {
+        // #106: probe the RTMP port BEFORE starting xiu. A bind conflict used
+        // to be swallowed into a clean stop, leaving the dashboard blind. Now
+        // the failure is recorded on `inpoint_state` (surfaced on `/status` +
+        // a red banner) and broadcast, and we retry on a capped backoff instead
+        // of giving up — the API + dashboard keep serving, and the banner
+        // auto-clears the moment the port frees. The probe binds a socket and,
+        // on failure, may spawn blocking diagnostics child processes
+        // (netstat/tasklist/ss), so it runs on the blocking pool to avoid
+        // stalling an async worker.
+        let bindable = {
+            let probe_bind = bind.clone();
+            let probe_state = inpoint_state.clone();
+            let probe_ws = ws_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::rtmp_bind::probe_and_record_bind(&probe_bind, port, &probe_state, &probe_ws)
+            })
+            .await
+            .unwrap_or(false)
+        };
+        if !bindable {
+            let backoff = bind_backoff_secs.min(MAX_BIND_BACKOFF_SECS);
+            warn!(
+                port,
+                backoff_secs = backoff,
+                "RTMP port unavailable, retrying bind in {backoff}s"
+            );
+            let (bind_wait, was_restart) = tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => (true, false),
+                _ = shutdown_rx.recv() => {
+                    info!("Inpoint shutting down while waiting for RTMP port");
+                    (false, false)
+                }
+                msg = restart_rx.recv() => (msg.is_some(), msg.is_some()),
+            };
+            if !bind_wait {
+                break;
+            }
+            if was_restart {
+                // A restart request re-probes immediately without consuming a
+                // doubling step — start the next conflict backoff fresh at 2s.
+                bind_backoff_secs = 2;
+            } else {
+                bind_backoff_secs = (bind_backoff_secs * 2).min(MAX_BIND_BACKOFF_SECS);
+            }
+            continue;
+        }
+        // Port is free — reset the bind backoff for the next conflict.
+        bind_backoff_secs = 2;
+
         let server = RtmpServer::new(&bind, port);
         let rtmp_shutdown = server.shutdown_handle();
         let flv_sink = Arc::clone(&flv_chunk_sink);
@@ -898,57 +957,5 @@ async fn run_status_broadcast(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use rs_core::db;
-
-    /// Test: ServiceCore should accept an externally provided pool via with_pool()
-    /// This prevents duplicate pool creation in GUI mode.
-    #[tokio::test]
-    async fn service_core_with_pool_stores_provided_pool() {
-        // Arrange: Create a pool externally (simulating GUI mode)
-        let pool = db::create_memory_pool().await.unwrap();
-        db::run_migrations(&pool).await.unwrap();
-
-        // Create test config
-        let config = Config::for_testing();
-        let config_path = PathBuf::from("/tmp/test-config.json");
-        let log_buffer = LogBuffer::new(10);
-
-        // Act: Create ServiceCore with externally provided pool
-        let core = ServiceCore::new(config, config_path, log_buffer).with_pool(pool.clone());
-
-        // Assert: ServiceCore should have the provided pool stored
-        assert!(
-            core.provided_pool.is_some(),
-            "ServiceCore should store the provided pool"
-        );
-    }
-
-    /// Test: When pool is provided, the provided pool should contain our test data
-    /// This verifies we're using the SAME pool, not creating a new one.
-    #[tokio::test]
-    async fn service_core_with_pool_uses_same_pool_instance() {
-        // Arrange: Create a pool and insert test data
-        let pool = db::create_memory_pool().await.unwrap();
-        db::run_migrations(&pool).await.unwrap();
-
-        // Insert a test client profile to verify we're using THIS pool
-        db::upsert_client_profile(&pool, "test-client-uuid")
-            .await
-            .unwrap();
-
-        let config = Config::for_testing();
-        let config_path = PathBuf::from("/tmp/test-config.json");
-        let log_buffer = LogBuffer::new(10);
-
-        // Act: Create ServiceCore with the pool containing test data
-        let core = ServiceCore::new(config, config_path, log_buffer).with_pool(pool.clone());
-
-        // Assert: The pool should be the same one we provided (has our test data)
-        let provided_pool = core.provided_pool.as_ref().unwrap();
-        let profile = db::get_client_profile(provided_pool).await.unwrap();
-        assert!(profile.is_some(), "Should find test data in provided pool");
-        assert_eq!(profile.unwrap().user_uuid, "test-client-uuid");
-    }
-}
+#[path = "orchestrator_tests.rs"]
+mod tests;

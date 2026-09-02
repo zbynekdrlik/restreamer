@@ -53,6 +53,10 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
             // the server enforces the gate too.
             "ingest_skew_ms": state.inpoint_state.ingest_skew_ms(),
             "ingest_skew_active": state.inpoint_state.ingest_skew_active(),
+            // #106: human-readable RTMP listener bind error (e.g. port 1234 held
+            // by another process). null when the listener is healthy. Drives the
+            // dashboard's red bind-failure banner.
+            "rtmp_bind_error": state.inpoint_state.bind_error(),
         }),
     };
 
@@ -76,21 +80,37 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
     .as_str()
     .to_string();
 
-    // #278 s3_region_standard: read the LIVE config so a runtime patch is reflected.
-    // #352 vps_orphan_count: written by the runtime orphan reaper. Both inlined to
-    // keep this file under the 1000-line CI cap.
+    // #278 + #84: read the LIVE config (config_live) once so a runtime config
+    // patch is reflected in both the S3-region flag and the long-stream
+    // threshold. #352 vps_orphan_count is written by the runtime orphan reaper
+    // and inlined in the struct below to keep this file under the 1000-line cap.
+    let (s3_region_standard, long_stream_warn_secs) = state
+        .config_live
+        .read()
+        .map(|c| (c.s3_region_is_standard(), c.delivery.long_stream_warn_secs))
+        .unwrap_or((true, 0));
+
+    // #84: warn when the current delivery has been running longer than the
+    // operator threshold. Computed live (auto-clears when delivery stops)
+    // through the shared rs-core helper so the Tauri IPC path matches exactly.
+    let long_stream_warning = rs_core::long_stream::is_long_running_now(
+        &state.pool,
+        event.as_ref(),
+        long_stream_warn_secs,
+    )
+    .await;
+
     Ok(Json(ServiceStatus {
         inpoint,
         endpoint,
         delivery,
         streaming_event: event,
         disk_pressure,
-        s3_region_standard: (state.config_live.read())
-            .map(|c| c.s3_region_is_standard())
-            .unwrap_or(true),
+        s3_region_standard,
         vps_orphan_count: state
             .vps_orphan_count
             .load(std::sync::atomic::Ordering::Relaxed),
+        long_stream_warning,
     }))
 }
 

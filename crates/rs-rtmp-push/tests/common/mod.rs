@@ -664,3 +664,12 @@ pub async fn spawn_recording_xiu_server_tls() -> (
 
     (rtmps_url, recorded, certified, server_handle, sub_ready_rx)
 }
+
+// ---------------------------------------------------------------------------
+// Hand-rolled rejecting RTMP server (#149)
+// ---------------------------------------------------------------------------
+//
+// Split into its own file to keep this module under the 1000-line CI cap.
+// Callers reach it as `common::rejecting_server::run_rejecting_server` (no
+// re-export, which a binary that never calls it would flag as unused).
+pub mod rejecting_server;

@@ -2563,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "rs-api"
-version = "0.29.26"
+version = "0.29.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2579,6 +2579,7 @@ dependencies = [
  "rs-cloud",
  "rs-core",
  "rs-endpoint",
+ "rs-facebook",
  "rs-youtube",
  "rsa",
  "rustls",
@@ -2599,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "rs-cloud"
-version = "0.29.26"
+version = "0.29.27"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2611,7 +2612,7 @@ dependencies = [
 
 [[package]]
 name = "rs-core"
-version = "0.29.26"
+version = "0.29.27"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2630,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "rs-delivery"
-version = "0.29.26"
+version = "0.29.27"
 dependencies = [
  "async-trait",
  "axum",
@@ -2656,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "rs-endpoint"
-version = "0.29.26"
+version = "0.29.27"
 dependencies = [
  "anyhow",
  "axum",
@@ -2680,8 +2681,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rs-facebook"
+version = "0.29.27"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "rs-ffmpeg"
-version = "0.29.26"
+version = "0.29.27"
 dependencies = [
  "serde",
  "serde_json",
@@ -2693,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "rs-inpoint"
-version = "0.29.26"
+version = "0.29.27"
 dependencies = [
  "bytes",
  "env_logger 0.11.10",
@@ -2713,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "rs-rtmp-push"
-version = "0.29.26"
+version = "0.29.27"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2737,7 +2750,7 @@ dependencies = [
 
 [[package]]
 name = "rs-runtime"
-version = "0.29.26"
+version = "0.29.27"
 dependencies = [
  "anyhow",
  "axum",
@@ -2757,7 +2770,7 @@ dependencies = [
 
 [[package]]
 name = "rs-service"
-version = "0.29.26"
+version = "0.29.27"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -2776,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "rs-youtube"
-version = "0.29.26"
+version = "0.29.27"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",

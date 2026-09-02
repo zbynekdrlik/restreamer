@@ -59,6 +59,7 @@ fn ws_event_serde_roundtrip() {
                 delivery_mode: None,
                 rescue_eta_secs: None,
                 youtube_health: None,
+                facebook_health: None,
                 lifecycle: EndpointLifecycle::Live,
             }],
         },
@@ -188,6 +189,7 @@ fn delivery_metrics_diagnostics_roundtrip() {
         delivery_mode: None,
         rescue_eta_secs: None,
         youtube_health: None,
+        facebook_health: None,
         lifecycle: EndpointLifecycle::Live,
     };
     let json = serde_json::to_string(&metrics).unwrap();
@@ -239,6 +241,7 @@ fn ws_event_delivery_with_diagnostics_roundtrip() {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            facebook_health: None,
             lifecycle: EndpointLifecycle::Live,
         }],
     };
@@ -269,6 +272,7 @@ fn delay_excludes_fast_endpoints() {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            facebook_health: None,
             lifecycle: EndpointLifecycle::Live,
         },
         DeliveryEndpointMetrics {
@@ -289,6 +293,7 @@ fn delay_excludes_fast_endpoints() {
             delivery_mode: None,
             rescue_eta_secs: None,
             youtube_health: None,
+            facebook_health: None,
             lifecycle: EndpointLifecycle::Live,
         },
     ];
@@ -321,6 +326,7 @@ fn delay_all_fast_falls_back_to_zero() {
         delivery_mode: None,
         rescue_eta_secs: None,
         youtube_health: None,
+        facebook_health: None,
         lifecycle: EndpointLifecycle::Live,
     }];
     let delay = endpoints

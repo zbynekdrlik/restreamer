@@ -522,9 +522,14 @@ mod tests {
         ("api.tls_key", false),
         ("client_uuid", false),
         ("delivery.delivery_delay_secs", false),
+        ("delivery.long_stream_warn_secs", false),
         ("delivery.orphan_delete_grace_secs", false),
         ("delivery.orphan_detect_grace_secs", false),
         ("delivery.orphan_sweep_interval_secs", false),
+        ("facebook.api_version", false),
+        ("facebook.enabled", false),
+        ("facebook.page_access_token", true),
+        ("facebook.page_id", false),
         ("hetzner.api_token", true),
         ("hetzner.server_type_override", false),
         ("hetzner.extra_ssh_key_names", false),
@@ -611,6 +616,9 @@ mod tests {
         config.s3.secret_access_key = "fake-b".into();
         config.hetzner.api_token = "fake-c".into();
         config.hetzner.extra_ssh_key_names = vec!["extra".into()];
+        config.facebook.enabled = true;
+        config.facebook.page_id = "163104934022649".into();
+        config.facebook.page_access_token = "fake-fb-page-token".into();
         config.youtube.client_id = "id".into();
         config.youtube.client_secret = "fake-d".into();
         config.youtube.device_flow.client_id = "id2".into();

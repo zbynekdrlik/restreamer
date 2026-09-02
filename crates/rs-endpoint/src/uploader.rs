@@ -486,6 +486,8 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
                 at: Instant::now(),
                 duration_ms: duration.as_millis() as u32,
                 success: true,
+                // Outgoing bytes actually delivered to S3 (#77).
+                bytes: chunk.data_size.max(0) as u64,
             });
             debug!("Chunk {} uploaded to S3", chunk.id);
             let _ = ws_tx.send(WsEvent::ChunkUploaded { chunk_id: chunk.id });
@@ -519,6 +521,8 @@ async fn upload_one(ctx: &WorkerCtx, chunk: ChunkRecord) {
                 at: Instant::now(),
                 duration_ms: duration.as_millis() as u32,
                 success: false,
+                // Failed upload: nothing reached the internet (#77).
+                bytes: 0,
             });
 
             // Audit: rate-limited S3UploadFailed keyed on error_class so a

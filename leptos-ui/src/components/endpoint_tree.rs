@@ -3,7 +3,6 @@
 //! Split out of `operator_dashboard.rs` (#75) to keep that file under the
 //! project's 1000-line-per-file cap.
 
-use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -83,9 +82,13 @@ pub fn EndpointTree() -> impl IntoView {
         show_last_remove_modal.set(false);
     };
 
-    // YouTube health polling: fast initial poll, then every 30s
+    // YouTube health polling: fast initial poll, then every 30s.
+    // #343: both are bound to EndpointTree's owner (the 5s poll captures
+    // EndpointTree-scoped `yt_has_polled`; the 30s refresh touches only root
+    // `store.*`, but leaking it kept hitting the YT-health endpoint from a dead
+    // route). They stop on disposal via utils::interval_until_disposed.
     let yt_has_polled = RwSignal::new(false);
-    let _yt_poll = Interval::new(5_000, move || {
+    crate::utils::interval_until_disposed(5_000, move || {
         let delivery_active = !store.delivery.get().endpoints.is_empty();
         if delivery_active && !yt_has_polled.get_untracked() {
             yt_has_polled.set(true);
@@ -95,8 +98,7 @@ pub fn EndpointTree() -> impl IntoView {
             });
         }
     });
-    std::mem::forget(_yt_poll);
-    let _yt_refresh = Interval::new(30_000, move || {
+    crate::utils::interval_until_disposed(30_000, move || {
         let delivery_active = !store.delivery.get().endpoints.is_empty();
         if delivery_active {
             spawn_local(async move {
@@ -105,7 +107,6 @@ pub fn EndpointTree() -> impl IntoView {
             });
         }
     });
-    std::mem::forget(_yt_refresh);
 
     let has_endpoints = Memo::new(move |_| !store.delivery.get().endpoints.is_empty());
     let is_running = Memo::new(move |_| {
@@ -220,6 +221,35 @@ pub fn EndpointTree() -> impl IntoView {
                                                 <span class="yt-health-dot"></span>
                                                 <span class="yt-health-text">{h.health_status.clone()}</span>
                                                 <div class="yt-health-tooltip" data-testid="yt-health-tooltip">
+                                                    {tooltip}
+                                                </div>
+                                            </div>
+                                        }
+                                    })
+                                }}
+                                {move || {
+                                    ep_data.get().facebook_health.map(|h| {
+                                        let data_health = h.health.clone();
+                                        let bitrate = h.video_bitrate_kbps.map(|b| format!("{b} kbps")).unwrap_or_default();
+                                        let tooltip = format!(
+                                            "FB status: {}\nHealth: {}\n{}{}{}{}{}",
+                                            h.status,
+                                            h.health,
+                                            h.resolution.clone().unwrap_or_default(),
+                                            if h.resolution.is_some() && h.frame_rate.is_some() { " @ " } else { "" },
+                                            h.frame_rate.clone().map(|f| format!("{f}fps")).unwrap_or_default(),
+                                            if !bitrate.is_empty() { format!("\n{bitrate}") } else { String::new() },
+                                            h.error.clone().map(|e| format!("\nerror: {e}")).unwrap_or_default(),
+                                        );
+                                        view! {
+                                            <div
+                                                class="fb-health-badge"
+                                                data-testid="fb-health-badge"
+                                                data-health=data_health
+                                            >
+                                                <span class="fb-health-dot"></span>
+                                                <span class="fb-health-text">{h.health.clone()}</span>
+                                                <div class="fb-health-tooltip" data-testid="fb-health-tooltip">
                                                     {tooltip}
                                                 </div>
                                             </div>

@@ -20,6 +20,7 @@ app.use(express.static(distDir));
 // Keyed by label.  Each entry: { user_code, verification_url, status, channel_id }
 let oauthGrants = {};
 let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
+let oauthSuggestByEndpoint = {}; // #199: { endpointId: {oauth_id, owners, probed_ok} }
 
 // Scenario selection — set by `POST /api/v1/_test/scenario` before page.goto.
 // Supported values:
@@ -34,6 +35,8 @@ let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
 //   - "s3-region-nonstandard" — status.s3_region_standard=false (red S3RegionBanner, #278)
 //   - "ingest-skew"     — inpoint.details.ingest_skew_active=true (red IngestSkewBanner + gate, #354)
 //   - "vps-orphan"      — status.vps_orphan_count=2 (amber VpsOrphanBanner, #352)
+//   - "long-stream"     — status.long_stream_warning=true (amber LongStreamBanner, #84)
+//   - "rtmp-bind-error" — inpoint.details.rtmp_bind_error set (red RtmpBindErrorBanner, #106)
 let scenario = "default";
 let rtmpStableSecs = 999; // default: stream has been stable plenty long
 let rtmpTickStartMs = null; // when the tick scenario started
@@ -88,6 +91,13 @@ function buildStatusResponse() {
   const ingestSkewMs = ingestSkewActive ? 25470 : 0;
   // #352: vps_orphan_count drives the dashboard VpsOrphanBanner.
   const vpsOrphanCount = scenario === "vps-orphan" ? 2 : 0;
+  // #84: long_stream_warning drives the dashboard LongStreamBanner.
+  const longStreamWarning = scenario === "long-stream";
+  // #106: RTMP port-bind failure drives the RtmpBindErrorBanner.
+  const rtmpBindError =
+    scenario === "rtmp-bind-error"
+      ? "Port 1234 is already in use by another process (PID 4321: inpoint_service.exe). RTMP streaming will not work until the conflict is resolved."
+      : null;
   return {
     inpoint: {
       state: rtmpActive ? "connected" : "idle",
@@ -96,12 +106,14 @@ function buildStatusResponse() {
         rtmp_stable_secs: currentRtmpStableSecs(),
         ingest_skew_ms: ingestSkewMs,
         ingest_skew_active: ingestSkewActive,
+        rtmp_bind_error: rtmpBindError,
       },
     },
     streaming_event: currentStreamingEvent(),
     disk_pressure: diskPressure,
     s3_region_standard: s3RegionStandard,
     vps_orphan_count: vpsOrphanCount,
+    long_stream_warning: longStreamWarning,
     chunk_stats: {
       total_chunks: 42,
       pending_chunks: 3,
@@ -191,6 +203,7 @@ let endpoints = [
     position_last: 0,
     delivered_bytes: 1048576,
     is_fast: false,
+    youtube_oauth_id: null,
     created_at: "2026-03-01T00:00:00Z",
     updated_at: "2026-03-09T10:00:00Z",
   },
@@ -203,6 +216,7 @@ let endpoints = [
     position_last: 0,
     delivered_bytes: 0,
     is_fast: true,
+    youtube_oauth_id: null,
     created_at: "2026-03-05T00:00:00Z",
     updated_at: "2026-03-09T10:00:00Z",
   },
@@ -529,6 +543,7 @@ app.post("/api/v1/endpoints", (req, res) => {
     position_last: 0,
     delivered_bytes: 0,
     is_fast: false,
+    youtube_oauth_id: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -560,6 +575,34 @@ app.delete("/api/v1/endpoints/:id", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// #199: link/unlink an OAuth grant to an endpoint. Real backend returns 204.
+app.post("/api/v1/endpoints/:id/link-oauth", (req, res) => {
+  const ep = endpoints.find((e) => e.id === parseInt(req.params.id));
+  if (!ep) {
+    return res.status(404).json({ error: "not found" });
+  }
+  const oauthId =
+    req.body && req.body.oauth_id !== undefined ? req.body.oauth_id : null;
+  ep.youtube_oauth_id = oauthId;
+  res.status(204).end();
+});
+
+// #199: server-side auto-suggest verdict for one endpoint. Seeded per-endpoint
+// via _test/seed-oauth-grants; defaults to "no owner, probed_ok".
+app.get("/api/v1/endpoints/:id/oauth-suggest", (req, res) => {
+  const ep = endpoints.find((e) => e.id === parseInt(req.params.id));
+  if (!ep) {
+    return res.status(404).json({ error: "not found" });
+  }
+  const v = oauthSuggestByEndpoint[req.params.id] ||
+    oauthSuggestByEndpoint[parseInt(req.params.id)] || {
+      oauth_id: null,
+      owners: 0,
+      probed_ok: true,
+    };
+  res.json(v);
+});
+
 // Delivery endpoint add/remove. The real backend has these for adding /
 // removing endpoints from an actively delivering event. Mock as no-ops
 // (200) so frontend tests that fire these requests don't get a 404
@@ -587,6 +630,174 @@ app.post("/api/v1/delivery/endpoints/remove", (req, res) => {
 });
 app.get("/api/v1/_test/change-key-ops", (_req, res) => {
   res.json(changeKeyOps);
+});
+
+// --- Standalone delivery start/stop (#136) ---
+// The REAL backend exposes POST /api/v1/delivery/start and /delivery/stop
+// (delivery_handlers::delivery_start / delivery_stop) as a path DISTINCT from
+// the "Start Delivering" button's /events/{id}/start-stream. CI scripts,
+// tooling and future external integrations hit these directly. The handlers
+// flip streaming_events.delivering_activated and broadcast a WS StreamingEvent
+// so connected dashboards flip IDLE<->STREAMING without waiting for the 2s
+// poll. This mock mirrors that observable behavior (the RTMP-stable + skew
+// gates, the DeliveryStartResponse shape, the StreamingEvent broadcast) PLUS
+// the PipelineState/DeliveryStatus broadcasts the delivery-monitor loop emits
+// as delivery actually comes up — the end-to-end observable an operator sees.
+app.post("/api/v1/delivery/start", (req, res) => {
+  const eventId = req.body && req.body.event_id;
+  const force = !!(req.body && req.body.force);
+
+  // RTMP-stable gate (mirror of delivery_handlers::RTMP_STABLE_REQUIRED_SECS).
+  const stableSecs = currentRtmpStableSecs();
+  if (stableSecs < 15) {
+    return res.status(400).json({
+      error: "rtmp_not_stable",
+      current_secs: stableSecs,
+      need_secs: 15,
+    });
+  }
+
+  // Ingest A/V-skew gate (#354): refuse a paid VPS while OBS is desynced,
+  // unless the operator forces the override.
+  if (scenario === "ingest-skew" && !force) {
+    return res.status(400).json({
+      error: "ingest_skew_too_high",
+      skew_ms: 25470,
+      reason:
+        "Zvuk a obraz z OBS sú rozídené o ~25 s — reštartuj stream v OBS pred spustením delivery.",
+    });
+  }
+
+  const evt = events.find((e) => e.id === eventId);
+  if (!evt) {
+    return res.status(404).json({ error: "not found" });
+  }
+
+  // Mirror db::set_delivering_activated(true). The real handler does NOT touch
+  // receiving_activated here (the caller /activate set it first).
+  evt.delivering_activated = true;
+
+  // Mirror the real handler's WS StreamingEvent broadcast (dashboard flips
+  // events_list + streaming_event delivering flag immediately).
+  broadcastWs({
+    type: "StreamingEvent",
+    data: {
+      action: "delivering_activated",
+      name: null,
+      receiving: true,
+      delivering: true,
+    },
+  });
+
+  // Simulate the delivery-monitor's follow-up broadcasts that realize the
+  // STREAMING state + the VPS/endpoint view (a warming-up endpoint).
+  broadcastWs({
+    type: "PipelineState",
+    data: {
+      state: "streaming",
+      event_id: eventId,
+      event_name: evt.name,
+      target_delay_secs: 120,
+      session_start: new Date().toISOString(),
+      local_buffer_chunks: 10,
+      s3_queue_chunks: 5,
+      cache_duration_secs: 118.0,
+    },
+  });
+  const deliveryData = {
+    instance_name: `rs-delivery-evt${eventId}`,
+    status: "running",
+    server_ip: "1.2.3.4",
+    endpoint_count: 1,
+    endpoints: [
+      {
+        alias: "YouTube Main",
+        alive: true,
+        current_chunk_id: 1,
+        bytes_processed_total: 0,
+        chunks_processed: 0,
+        chunk_delay_secs: 0.0,
+        stall_reason: null,
+        ffmpeg_restart_count: 0,
+        reconnect_count: 0,
+        last_error: null,
+        is_fast: false,
+        delivery_mode: "warmup",
+        rescue_eta_secs: 30,
+        lifecycle: "pending",
+      },
+    ],
+  };
+  cachedDelivery = deliveryData;
+  broadcastWs({ type: "DeliveryStatus", data: deliveryData });
+
+  broadcastAudit("delivery_started", "operator", "info", null, {
+    event_id: eventId,
+    instance_id: 1,
+  });
+
+  // Mirror DeliveryStartResponse. The real StartDeliveryResult for a fresh
+  // new-VPS start returns status "creating" (delivery.rs) — "running" is only
+  // the already-active early-return branch. The eventual running/warmup state
+  // is carried by the DeliveryStatus broadcast above (the monitor's push).
+  res.json({
+    instance_id: 1,
+    hetzner_id: 12345,
+    name: `rs-delivery-evt${eventId}`,
+    server_type: "cx22",
+    status: "creating",
+  });
+});
+
+app.post("/api/v1/delivery/stop", (req, res) => {
+  const eventId = req.body && req.body.event_id;
+  const evt = events.find((e) => e.id === eventId);
+  if (!evt) {
+    return res.status(404).json({ error: "not found" });
+  }
+
+  // Mirror db::set_delivering_activated(false). Leaves receiving_activated as
+  // is (the real stop handler only clears delivering).
+  evt.delivering_activated = false;
+  const stillReceiving = evt.receiving_activated;
+
+  broadcastWs({
+    type: "StreamingEvent",
+    data: {
+      action: "delivering_deactivated",
+      name: null,
+      receiving: stillReceiving,
+      delivering: false,
+    },
+  });
+  broadcastWs({
+    type: "PipelineState",
+    data: {
+      state: "idle",
+      event_id: null,
+      event_name: null,
+      target_delay_secs: 0,
+      session_start: null,
+      local_buffer_chunks: 0,
+      s3_queue_chunks: 0,
+    },
+  });
+  const noneDelivery = {
+    instance_name: "",
+    status: "none",
+    server_ip: null,
+    endpoint_count: 0,
+    endpoints: [],
+  };
+  cachedDelivery = noneDelivery;
+  broadcastWs({ type: "DeliveryStatus", data: noneDelivery });
+
+  broadcastAudit("delivery_stopped", "operator", "info", null, {
+    event_id: eventId,
+  });
+
+  // Mirror the real delivery_stop: an empty 200 (no JSON body).
+  res.status(200).send();
 });
 
 // S3 usage + per-event clear stubs for the new Settings tab UI. Both
@@ -630,6 +841,19 @@ let uploadRecent = [
 ];
 app.get("/api/v1/uploads/recent", (_req, res) => {
   res.json(uploadRecent);
+});
+
+// --- Outgoing-Mbps history graph (#77) ---
+// A short synthetic series with >=2 points so the dashboard graph draws a
+// path. `t_ms` are bucket starts 15s apart; `mbps` varies incl. an idle 0.
+app.get("/api/v1/uploads/throughput", (_req, res) => {
+  const base = 1735000000000;
+  const step = 15000;
+  const mbps = [4.2, 5.1, 3.8, 0.0, 6.4, 5.9];
+  res.json({
+    interval_ms: step,
+    samples: mbps.map((m, i) => ({ t_ms: base + i * step, mbps: m })),
+  });
 });
 
 // --- Cached delivery status (for instant initial load) ---
@@ -717,6 +941,41 @@ function buildOutageDelivery(which) {
   };
 }
 
+// Build a DeliveryStatus payload with one FB endpoint carrying facebook_health
+// (#166). Health is "bad"/NO_LIVE_VIDEO — the silent-discard case: we push
+// bytes but FB has zero receiving live_video, so the badge must read RED.
+function buildFbHealthDelivery() {
+  return {
+    instance_name: "rs-delivery-evt1",
+    status: "running",
+    server_ip: "1.2.3.4",
+    endpoint_count: 1,
+    endpoints: [
+      {
+        alias: "Facebook Page",
+        alive: true,
+        current_chunk_id: 142,
+        bytes_processed_total: 1073741824,
+        chunks_processed: 1847,
+        chunk_delay_secs: 3.2,
+        stall_reason: null,
+        ffmpeg_restart_count: 0,
+        reconnect_count: 0,
+        last_error: null,
+        is_fast: false,
+        delivery_mode: "normal",
+        rescue_eta_secs: null,
+        facebook_health: {
+          status: "NO_LIVE_VIDEO",
+          health: "bad",
+          age_secs: 3,
+        },
+        lifecycle: "live",
+      },
+    ],
+  };
+}
+
 // --- Logs endpoint ---
 app.get("/api/v1/logs", (_req, res) => {
   res.json([
@@ -776,6 +1035,14 @@ app.get("/api/v1/youtube/status", (_req, res) => {
 // List authorized channels (initially empty; grows when _test/oauth-device-grant fires).
 app.get("/api/v1/youtube/oauths", (_req, res) => {
   res.json(oauthRows);
+});
+
+// Test fixture: seed OAuth grants + per-endpoint auto-suggest verdicts for
+// #199 tests. `suggest` is { endpointId: {oauth_id, owners, probed_ok} }.
+app.post("/api/v1/_test/seed-oauth-grants", (req, res) => {
+  oauthRows = (req.body && req.body.grants) || [];
+  oauthSuggestByEndpoint = (req.body && req.body.suggest) || {};
+  res.json({ seeded: true });
 });
 
 // Start device authorization: always returns a fixed mock code.
@@ -862,8 +1129,19 @@ app.post("/api/v1/__reset", (_req, res) => {
   auditIdCounter = 0;
   oauthGrants = {};
   oauthRows = [];
+  oauthSuggestByEndpoint = {};
   lastDestroyByEvent = {};
   changeKeyOps = [];
+  // #136: the standalone /delivery/start sets cachedDelivery to a running +
+  // warmup state no scenario default produces; clear it so it can't leak into
+  // the next spec's pre-WS instant load if a test fails before /delivery/stop.
+  cachedDelivery = {
+    instance_name: "",
+    status: "none",
+    server_ip: null,
+    endpoint_count: 0,
+    endpoints: [],
+  };
   res.json({ reset: true });
 });
 
@@ -939,6 +1217,16 @@ app.post("/api/v1/_test/scenario", (req, res) => {
     );
     eventEndpoints[1] = [1];
     cachedDelivery = buildOutageDelivery(scenario);
+  } else if (scenario === "fb-health") {
+    // #166: one FB endpoint whose Graph ingest health reads RED (silent
+    // discard). Keeps the event active/delivering so the endpoint tree renders.
+    events = events.map((e) =>
+      e.id === 1
+        ? { ...e, receiving_activated: true, delivering_activated: true }
+        : e,
+    );
+    eventEndpoints[1] = [2];
+    cachedDelivery = buildFbHealthDelivery();
   }
   res.json({ scenario });
 });
@@ -1089,6 +1377,8 @@ wss.on("connection", (ws) => {
   let deliveryData;
   if (scenario === "outage-rescue" || scenario === "outage-attention") {
     deliveryData = buildOutageDelivery(scenario);
+  } else if (scenario === "fb-health") {
+    deliveryData = buildFbHealthDelivery();
   } else if (scenario === "zero-endpoints") {
     deliveryData = {
       instance_name: "rs-delivery-evt1",
@@ -1171,6 +1461,7 @@ wss.on("connection", (ws) => {
     "last-endpoint",
     "outage-rescue",
     "outage-attention",
+    "fb-health",
   ];
   const pipelineData = activePipelineScenarios.includes(scenario)
     ? {

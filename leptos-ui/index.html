@@ -4,7 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Restreamer</title>
-    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <!-- data-integrity="none": Trunk's default SRI adds an `integrity` attr to
+         the generated wasm preload link, but a `<link rel="preload" as="fetch">`
+         destination does not support SRI, so Chromium logs "The `integrity`
+         attribute is currently ignored for preload destinations that do not
+         support subresource integrity". Disabling SRI removes the ignored attr
+         and the console warning; same-origin wasm load is unaffected. -->
+    <link data-trunk rel="rust" data-wasm-opt="z" data-integrity="none" />
     <link data-trunk rel="css" href="style.css" />
     <link data-trunk rel="copy-file" href="manifest.json" />
     <link data-trunk rel="copy-file" href="sw.js" />

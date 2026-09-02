@@ -514,6 +514,7 @@ mod fast_upload_gap_regression {
                 &mut stop_rx,
                 &stats_task,
                 &buffer_state_task,
+                std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS),
             )
             .await
         });
@@ -657,6 +658,7 @@ mod fast_upload_gap_regression {
                 &mut stop_rx,
                 &stats_task,
                 &buffer_state_task,
+                std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS),
             )
             .await
         });
@@ -712,6 +714,103 @@ mod fast_upload_gap_regression {
             !closed.load(Ordering::SeqCst),
             "keepalive must NOT close the connection while waiting for the first chunk"
         );
+    }
+
+    /// #124 GREEN lock: a NON-FAST endpoint now bridges the drain with the
+    /// codec-homogeneous freeze on the LIVE session (no dead air, no premature
+    /// disconnect), then escalates to the fresh-reconnect rescue clip ONLY once
+    /// the stall crosses the last-real-chunk anchor. Uses the non-fast anchor
+    /// `keepalive_escalate_after(false, 8) == 6s` (keepalive is entered ~2s
+    /// after the last real chunk, so escalation still lands at ~8s from it —
+    /// never slower than before #124). Producer stalled from the start.
+    #[tokio::test(start_paused = true)]
+    async fn non_fast_bridge_freezes_then_escalates_at_anchor() {
+        use crate::fast_keepalive::keepalive_escalate_after;
+
+        const FREEZE_LEN: usize = 4243;
+        let pushes = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let mut pusher = RecordingPusher {
+            pushes: Arc::clone(&pushes),
+            closed: Arc::clone(&closed),
+        };
+
+        let (_tx, mut rx) = mpsc::channel::<PrefetchedChunk>(10);
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+        let last: Option<Arc<Vec<u8>>> = Some(Arc::new(vec![0u8; FREEZE_LEN]));
+        let audit_ring: Option<Arc<crate::audit_ring::AuditRing>> = None;
+        let stats: crate::endpoint_stats::Stats = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::endpoint_stats::EndpointStats::default(),
+        ));
+        let stats_task = stats.clone();
+        // Producer STALLED from the start → a sustained outage that must escalate.
+        let buffer_state = Arc::new(crate::buffer_state::BufferState::new());
+        buffer_state.producer_active.store(false, Ordering::Relaxed);
+        let buffer_state_task = buffer_state.clone();
+
+        // Non-fast anchor: 8s threshold minus the 2s keepalive trigger = 6s.
+        let anchor = keepalive_escalate_after(false, crate::rescue::RESCUE_STALL_THRESHOLD_SECS);
+        assert_eq!(anchor, Duration::from_secs(6), "non-fast anchor must be 6s");
+
+        let task = tokio::spawn(async move {
+            keepalive_until_chunk(
+                &mut pusher,
+                &mut rx,
+                &last,
+                "nonfast-test",
+                &audit_ring,
+                &mut stop_rx,
+                &stats_task,
+                &buffer_state_task,
+                anchor,
+            )
+            .await
+        });
+
+        // Before the anchor: the bridge must emit freeze frames (no dead air).
+        advance_in_steps(Duration::from_millis(200), 15).await; // ~3s
+        {
+            let recorded = pushes.lock().unwrap();
+            assert!(
+                !recorded.is_empty(),
+                "non-fast bridge must push freeze frames during the gap (no dead air)"
+            );
+            assert!(
+                recorded.iter().all(|&l| l == FREEZE_LEN),
+                "non-fast bridge must push ONLY the codec-homogeneous freeze \
+                 chunk (len {FREEZE_LEN}); recorded: {recorded:?}"
+            );
+        }
+        assert!(
+            !closed.load(Ordering::SeqCst),
+            "the bridge must hold the LIVE session — never close it at the drain"
+        );
+
+        // Just BELOW the 6s anchor (~5.8s from entry): still bridging, NOT yet
+        // escalated. This locks the anchor precisely — a stale 8s anchor would
+        // also be un-escalated here, but the next step distinguishes them.
+        advance_in_steps(Duration::from_millis(200), 14).await; // 3.0 + 2.8 = ~5.8s
+        assert!(
+            !task.is_finished(),
+            "non-fast bridge must NOT escalate before the 6s anchor (it did at ~5.8s)"
+        );
+
+        // Just PAST the 6s anchor (~6.6s): escalate. Landing here — well before
+        // 8s — is what proves the anchor is the last-real-chunk 6s value, not
+        // the raw 8s threshold (never slower than before #124, never later).
+        advance_in_steps(Duration::from_millis(200), 4).await; // → ~6.6s total
+        let outcome = task.await.expect("keepalive task panicked");
+        match outcome {
+            KeepaliveOutcome::EscalateToRescue => {}
+            KeepaliveOutcome::Chunk(_) => panic!(
+                "non-fast bridge returned a chunk, but the producer was stalled — \
+                 it must escalate to the fresh-reconnect rescue at the anchor"
+            ),
+            KeepaliveOutcome::Stop => panic!(
+                "non-fast bridge returned Stop — it must escalate to the \
+                 fresh-reconnect rescue once the stall crosses the anchor"
+            ),
+        }
     }
 
     /// Advance virtual time in `count` steps of `step`, yielding to the

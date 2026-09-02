@@ -1,6 +1,5 @@
 //! Operator-facing single-page dashboard — vertical pipeline flow with endpoint tree.
 
-use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -10,9 +9,12 @@ use super::confirm_modal::ConfirmModal;
 use super::disk_pressure_banner::DiskPressureBanner;
 use super::endpoint_tree::EndpointTree;
 use super::ingest_skew_banner::IngestSkewBanner;
+use super::mbps_graph::MbpsGraph;
+use super::long_stream_banner::LongStreamBanner;
 use super::oauth_authorize::OAuthAuthorize;
 use super::outage_banner::OutageBanner;
 use super::pacing_panel::PacingPanel;
+use super::rtmp_bind_error_banner::RtmpBindErrorBanner;
 use super::s3_region_banner::S3RegionBanner;
 use super::upload_strip::UploadStrip;
 use super::vps_orphan_banner::VpsOrphanBanner;
@@ -36,7 +38,9 @@ pub fn OperatorDashboard() -> impl IntoView {
 
     view! {
         <div class="operator-dashboard">
+            <RtmpBindErrorBanner />
             <IngestSkewBanner />
+            <LongStreamBanner />
             <DiskPressureBanner />
             <S3RegionBanner />
             <VpsOrphanBanner />
@@ -81,7 +85,9 @@ fn ControlBar() -> impl IntoView {
     // the single source of truth for the RTMP connection indicator, so
     // overwriting it here would cause the pipeline display to flip back to
     // "connected" within a poll cycle after a disconnect event.
-    let _status_poll = Interval::new(2_000, move || {
+    // #343: bound to ControlBar's owner so the poll stops (and no longer hits
+    // /status) once the dashboard route is left — see utils::interval_until_disposed.
+    crate::utils::interval_until_disposed(2_000, move || {
         spawn_local(async move {
             if let Ok(s) = api::get_status().await {
                 store.rtmp_stable_secs.set(s.rtmp_stable_secs);
@@ -90,10 +96,13 @@ fn ControlBar() -> impl IntoView {
                 store.ingest_skew_ms.set(s.ingest_skew_ms);
                 store.ingest_skew_active.set(s.ingest_skew_active);
                 store.vps_orphan_count.set(s.vps_orphan_count);
+                store.long_stream_warning.set(s.long_stream_warning);
+                // #106: refresh the RTMP bind-error banner (clears when the
+                // port frees; the WS event sets it instantly on failure).
+                store.rtmp_bind_error.set(s.rtmp_bind_error);
             }
         });
     });
-    std::mem::forget(_status_poll);
 
     let pipeline_state = move || store.pipeline_state.get().state.clone();
     let is_active = move || {
@@ -202,12 +211,12 @@ fn ControlBar() -> impl IntoView {
         )
     });
 
-    // 1-second tick for session timer
+    // 1-second tick for session timer. #343: bound to ControlBar's owner so the
+    // tick stops firing against the disposed `tick` signal on a route change.
     let tick = RwSignal::new(0u32);
-    let _interval = Interval::new(1_000, move || {
+    crate::utils::interval_until_disposed(1_000, move || {
         tick.update(|t| *t = t.wrapping_add(1));
     });
-    std::mem::forget(_interval);
 
     let session_duration = move || {
         let _ = tick.get();
@@ -427,7 +436,9 @@ fn Pipeline() -> impl IntoView {
     };
     let prev_bytes = RwSignal::new(0i64);
     let bitrate_mbps = RwSignal::new(0.0f64);
-    let _bitrate_interval = Interval::new(2_000, move || {
+    // #343: bound to Pipeline's owner — the sampler captures Pipeline-scoped
+    // `prev_bytes` / `bitrate_mbps`; it stops on disposal (route change).
+    crate::utils::interval_until_disposed(2_000, move || {
         let current = store.chunk_stats.get().total_bytes;
         let prev = prev_bytes.get_untracked();
         if prev > 0 && current > prev {
@@ -437,7 +448,6 @@ fn Pipeline() -> impl IntoView {
         }
         prev_bytes.set(current);
     });
-    std::mem::forget(_bitrate_interval);
     let rtmp_metric = move || {
         if rtmp_connected() {
             let mbps = bitrate_mbps.get();
@@ -489,7 +499,11 @@ fn Pipeline() -> impl IntoView {
         match (status.is_empty() || status == "none", event_id) {
             (true, Some(id)) => {
                 spawn_local(async move {
-                    last_destroy.set(api::get_last_vps_destroy(id).await.ok().flatten());
+                    // #343: this fetch can resolve after Pipeline is disposed
+                    // on a route change — `try_set` no-ops then instead of
+                    // panicking on the disposed signal.
+                    let v = api::get_last_vps_destroy(id).await.ok().flatten();
+                    last_destroy.try_set(v);
                 });
             }
             _ => last_destroy.set(None),
@@ -621,6 +635,9 @@ fn Pipeline() -> impl IntoView {
             </div>
 
             <UploadStrip />
+
+            // --- Outgoing-Mbps history graph (#77) ---
+            <MbpsGraph />
 
             // --- Endpoint tree (branching from VPS) ---
             <EndpointTree />

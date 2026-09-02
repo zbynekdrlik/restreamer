@@ -425,6 +425,31 @@ impl RtmpPusher {
                 self.session = None;
                 return Err(e);
             }
+
+            // #124 cancel-safety: advance per-track output bookkeeping per
+            // SUCCESSFULLY sent tag. The rescue keepalive bridge races this
+            // `push_flv_bytes` future against `rx.recv()` / stop and drops it
+            // mid-chunk on recovery; without a per-tag advance the pusher's
+            // `last_*_output_ts_ms` stays at the pre-push value while tags
+            // were already sent on the wire, so the NEXT push re-anchors from
+            // a stale (too-low) base and emits BACKWARD wire timestamps for
+            // content already delivered — a non-monotonic-PTS glitch exactly
+            // at the clean-recovery moment #124 exists to make clean. The
+            // post-loop max update below is now redundant on the happy path.
+            if !skip {
+                match tag.tag_type {
+                    crate::flv::FLV_TAG_AUDIO => {
+                        self.state.last_audio_output_ts_ms =
+                            self.state.last_audio_output_ts_ms.max(output_ts_u64);
+                    }
+                    crate::flv::FLV_TAG_VIDEO => {
+                        self.state.last_video_output_ts_ms =
+                            self.state.last_video_output_ts_ms.max(output_ts_u64);
+                    }
+                    _ => {}
+                }
+                self.state.last_output_ts_ms = self.state.last_output_ts_ms.max(output_ts_u64);
+            }
         }
 
         // Advance per-track bookkeeping with the highest output_ts we
@@ -470,6 +495,10 @@ impl RtmpPusher {
             tracing::error!(
                 av_skew_ms,
                 max_av_skew_ms = crate::skew::MAX_AV_SKEW_MS,
+                // #359: which regime tripped — Normal (4000 ms threshold) or the
+                // DriftHold hard cap (SKEW_HOLD_MAX_MS) — so this line and the
+                // SkewTracker's own trip log agree on the acting threshold.
+                mode = ?self.skew.mode(),
                 a_out = max_audio_output_ts,
                 v_out = max_video_output_ts,
                 trip_count = self.skew.trip_count(),

@@ -14,6 +14,7 @@ use crate::s3_handlers;
 use crate::state::AppState;
 use crate::stream_handlers;
 use crate::template_handlers;
+use crate::throughput_endpoints;
 use crate::uploads_endpoints;
 use crate::websocket;
 use crate::youtube;
@@ -135,6 +136,10 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
             "/endpoints/{id}/link-oauth",
             post(crate::endpoint_oauth::link_endpoint_oauth),
         )
+        .route(
+            "/endpoints/{id}/oauth-suggest",
+            get(crate::oauth_stream_keys::endpoint_oauth_suggest),
+        )
         // Template CRUD
         .route(
             "/templates",
@@ -207,6 +212,11 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
         .route(
             "/uploads/recent",
             get(uploads_endpoints::get_recent_uploads),
+        )
+        // Outgoing-Mbps history graph (#77)
+        .route(
+            "/uploads/throughput",
+            get(throughput_endpoints::get_throughput),
         )
         // Diagnostics
         .route(

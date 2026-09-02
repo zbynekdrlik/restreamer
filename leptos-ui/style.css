@@ -169,6 +169,35 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
     text-decoration: underline wavy;
 }
 
+/* Issue #77: outgoing-Mbps history graph under the S3->VPS node. */
+.mbps-graph {
+    margin: 0.25rem 0;
+    padding: 0.4rem 0.8rem;
+    background: var(--bg-primary);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+}
+.mbps-graph__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    font-size: 0.8rem;
+    margin-bottom: 0.3rem;
+}
+.mbps-graph__title { color: var(--text-primary); font-weight: 500; }
+.mbps-graph__peak { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.mbps-graph__empty { color: var(--text-label); font-size: 0.8rem; margin: 0.4rem 0; }
+.mbps-graph__svg {
+    display: block;
+    width: 100%;
+    height: 80px;
+    background: var(--bg-card);
+    border-radius: var(--radius);
+}
+.mbps-graph__area { fill: var(--status-ok); opacity: 0.15; stroke: none; }
+.mbps-graph__line { fill: none; stroke: var(--status-ok); stroke-width: 1.5; }
+
 /* Uploads drill-down page */
 .uploads-page {
     padding: 1.5rem;
@@ -530,6 +559,8 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 .edit-row label { font-size: 13px; color: var(--text-label); }
 .edit-row input[type="text"], .edit-row select { width: 100%; }
 .edit-row.checkboxes { flex-direction: row; gap: var(--spacing-md); margin-top: var(--spacing-xs); }
+.edit-oauth-select { width: 100%; }
+.oauth-suggest-hint { font-size: 12px; color: var(--text-label); margin: calc(-1 * var(--spacing-xs)) 0 var(--spacing-sm); font-style: italic; }
 .checkbox-label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
 .checkbox-label input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--status-ok); cursor: pointer; }
 .edit-actions { display: flex; gap: var(--spacing-sm); margin-top: var(--spacing-sm); }
@@ -656,6 +687,34 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 /* DiskPressureBanner WARN (80%): amber, calm (no pulse) -- delivery still healthy. */
 .banner--warn { background: #3d3211; color: #ffe9b0; border: 1px solid #d9a441; }
 
+/* #73 -- unified app-level "any issue" red edge glow. A fixed, full-viewport,
+   click-through (pointer-events:none) overlay that pulses an inset red halo
+   around the screen border whenever ANY existing red/attention condition is
+   active. Purely a peripheral ambient cue -- the banners carry the actual
+   alert text -- so it sits above modals (z-index 1100) without obscuring
+   their centred content. Reuses the banner--critical red (#e85c47).
+   The box-shadow is STATIC and only `opacity` animates, so the pulse is a
+   compositor-only GPU op -- no per-frame repaint of a 60px blur on the
+   stream.lan WebView2 that runs next to the encoder. */
+.alert-glow {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1100;
+    border-radius: 2px;
+    box-shadow: inset 0 0 60px 12px rgba(232,92,71,0.9);
+    animation: alertGlowPulse 1.5s ease-in-out infinite;
+}
+@keyframes alertGlowPulse {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 1; }
+}
+/* Respect a reduced-motion preference: a full-viewport infinite pulse is a
+   strong vestibular trigger (WCAG 2.3.3). Keep a static red halo instead. */
+@media (prefers-reduced-motion: reduce) {
+    .alert-glow { animation: none; opacity: 1; }
+}
+
 /* --- EndpointRemoveConfirmModal --- */
 .modal__backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .endpoint-remove-modal { background: #1a1a1a; border: 1px solid #444; border-radius: 6px; padding: 20px; max-width: 500px; color: #eee; }
@@ -712,6 +771,39 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
   font-size: 0.85em;
 }
 .yt-health-badge:hover .yt-health-tooltip { display: block; }
+
+/* Facebook ingest health badge (#166) — parity with the YT health badge. */
+.fb-health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  cursor: help;
+  position: relative;
+}
+.fb-health-badge[data-health="good"] { background: #1b5e20; color: #fff; }
+.fb-health-badge[data-health="bad"]  { background: #b71c1c; color: #fff; }
+.fb-health-badge[data-health="noData"],
+.fb-health-badge[data-health="unknown"] { background: #424242; color: #ccc; }
+.fb-health-badge .fb-health-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+}
+.fb-health-badge .fb-health-text { font-weight: 600; }
+.fb-health-badge .fb-health-tooltip {
+  display: none;
+  position: absolute; top: 100%; left: 0; z-index: 10;
+  white-space: pre;
+  padding: 6px 8px;
+  background: #111; color: #eee;
+  border: 1px solid #555;
+  border-radius: 4px;
+  margin-top: 4px;
+  font-size: 0.85em;
+}
+.fb-health-badge:hover .fb-health-tooltip { display: block; }
 
 .oauth-section { padding: var(--spacing-md); border-top: 1px solid var(--border); }
 .oauth-channels-table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
