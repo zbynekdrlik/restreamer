@@ -53,12 +53,40 @@ pub async fn check_all_youtube_status(pool: &sqlx::SqlitePool) -> Vec<YouTubeSta
     out
 }
 
+/// Structured YouTube `configurationIssues[]` entry as exposed on
+/// `/api/v1/youtube/status` (#209). Replaces the former lossy
+/// `"{type}: {reason} ({severity})"` string projection so consumers (CI
+/// PowerShell, dashboard, tooling) read fields by property instead of
+/// regex-parsing them back out. A dedicated output DTO — deliberately NOT the
+/// internal `rs_youtube::streams::ConfigurationIssue` parse struct — keeps the
+/// public API wire shape decoupled from whatever fields YouTube may add.
+#[derive(Debug, serde::Serialize)]
+pub struct ConfigurationIssueOut {
+    // Serializes as `"type"` (raw identifier drops the `r#` prefix in serde).
+    pub r#type: String,
+    pub severity: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl From<&rs_youtube::streams::ConfigurationIssue> for ConfigurationIssueOut {
+    fn from(i: &rs_youtube::streams::ConfigurationIssue) -> Self {
+        ConfigurationIssueOut {
+            r#type: i.issue_type.clone(),
+            severity: i.severity.clone(),
+            reason: i.reason.clone(),
+            description: i.description.clone(),
+        }
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct YouTubeStreamInfo {
     pub title: String,
     pub stream_status: String,
     pub health_status: Option<String>,
-    pub configuration_issues: Vec<String>,
+    pub configuration_issues: Vec<ConfigurationIssueOut>,
     pub cdn_resolution: Option<String>,
     pub cdn_frame_rate: Option<String>,
     pub cdn_ingestion_type: Option<String>,
@@ -103,7 +131,7 @@ pub async fn youtube_status(State(state): State<AppState>) -> Json<YouTubeStatus
                         .map(|h| {
                             h.configuration_issues
                                 .iter()
-                                .map(|i| format!("{}: {} ({})", i.issue_type, i.reason, i.severity))
+                                .map(ConfigurationIssueOut::from)
                                 .collect()
                         })
                         .unwrap_or_default();

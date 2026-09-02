@@ -61,6 +61,8 @@ pub mod template_handlers;
 pub mod uploads_endpoints;
 pub mod websocket;
 pub mod youtube;
+#[cfg(test)]
+mod youtube_shape_tests;
 
 #[cfg(test)]
 mod yt_health_extract_tests;

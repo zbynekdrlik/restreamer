@@ -2620,7 +2620,7 @@ jobs:
                   }
                   if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                     foreach ($issue in $s.configuration_issues) {
-                      Write-Host "    ISSUE: $issue"
+                      Write-Host "    ISSUE: $($issue.type): $($issue.reason) ($($issue.severity))"
                     }
                   }
                 }
@@ -4132,7 +4132,7 @@ jobs:
                   }
                   if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                     foreach ($issue in $s.configuration_issues) {
-                      Write-Host "    ISSUE: $issue"
+                      Write-Host "    ISSUE: $($issue.type): $($issue.reason) ($($issue.severity))"
                     }
                   }
                 }
@@ -4140,12 +4140,12 @@ jobs:
 
               if ($response.stream_receiving -and $healthValue -eq "good") {
                 # Check for bitrateLow in configuration_issues even when health is "good".
-                # configuration_issues entries are "{type}: {reason} ({severity})"
-                # strings, so match "^bitrateLow:" not bare contains.
+                # configuration_issues are {type, severity, reason, description?}
+                # objects (#209), so compare .type by property, not regex.
                 $hasBitrateLow = $false
                 if ($response.streams) {
                   foreach ($s in $response.streams) {
-                    if ($s.configuration_issues -and @($s.configuration_issues | Where-Object { $_ -match '^bitrateLow:' }).Count -gt 0) {
+                    if ($s.configuration_issues -and @($s.configuration_issues | Where-Object { $_.type -eq 'bitrateLow' }).Count -gt 0) {
                       $hasBitrateLow = $true
                       Write-Host "  WARNING: bitrateLow detected on stream '$($s.title)' despite 'good' health"
                     }
@@ -4172,7 +4172,7 @@ jobs:
                     if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                       Write-Host "  YouTube configurationIssues:"
                       foreach ($issue in $s.configuration_issues) {
-                        Write-Host "    - $issue"
+                        Write-Host "    - $($issue.type): $($issue.reason) ($($issue.severity))"
                       }
                     }
                   }
@@ -4310,29 +4310,27 @@ jobs:
             foreach ($s in $activeStreams) {
               if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                 # /api/v1/youtube/status returns configuration_issues as
-                # Vec<String> formatted "{type}: {reason} ({severity})" by
-                # crates/rs-api/src/youtube.rs:106. Filter by parsing the
-                # trailing (severity) and the leading {type}. Two policies:
+                # structured {type, severity, reason, description?} objects
+                # (#209 - crates/rs-api/src/youtube.rs ConfigurationIssueOut).
+                # Filter by property access, no regex. Two policies:
                 #   1. Drift-class type list ALWAYS blocks regardless of
                 #      severity (defends against YT silently downgrading).
                 #   2. Otherwise, info-level advisories (e.g. persistent
                 #      audioBitrateLow on the synthetic test feed) are
                 #      logged + ignored; warning/error throws.
-                # Follow-up #209 tracks moving issues to structured Rust
-                # types so this string parsing goes away.
                 $driftTypes = @('videoIngestionStarved', 'videoIngestionFasterThanRealtime', 'bitrateLow')
-                $driftPattern = '^(' + ($driftTypes -join '|') + '):'
                 $blocking = @($s.configuration_issues | Where-Object {
-                  $_ -match $driftPattern -or $_ -notmatch '\(info\)$'
+                  $driftTypes -contains $_.type -or $_.severity -ne 'info'
                 })
                 $advisory = @($s.configuration_issues | Where-Object {
-                  $_ -match '\(info\)$' -and $_ -notmatch $driftPattern
+                  $_.severity -eq 'info' -and $driftTypes -notcontains $_.type
                 })
+                $fmt = { param($x) "$($x.type): $($x.reason) ($($x.severity))" }
                 if ($advisory.Count -gt 0) {
-                  Write-Host "  sample ${i}: ignoring advisory configuration_issues: $($advisory -join ', ')"
+                  Write-Host "  sample ${i}: ignoring advisory configuration_issues: $(($advisory | ForEach-Object { & $fmt $_ }) -join ', ')"
                 }
                 if ($blocking.Count -gt 0) {
-                  $issueList = $blocking -join ', '
+                  $issueList = ($blocking | ForEach-Object { & $fmt $_ }) -join ', '
                   throw "FAILED: sample $i/$samples - YT stream '$($s.title)' has blocking configuration_issues: $issueList. Drift-class types ($($driftTypes -join '/')) always block; other types block at warning/error severity per Phase 1 spec."
                 }
               }
@@ -5300,7 +5298,7 @@ jobs:
                   }
                   if ($s.configuration_issues -and $s.configuration_issues.Count -gt 0) {
                     foreach ($issue in $s.configuration_issues) {
-                      Write-Host "    ISSUE: $issue"
+                      Write-Host "    ISSUE: $($issue.type): $($issue.reason) ($($issue.severity))"
                     }
                   }
                 }
@@ -5308,12 +5306,12 @@ jobs:
 
               if ($response.stream_receiving -and $healthValue -eq "good") {
                 # Check for bitrateLow even when health reports "good".
-                # configuration_issues entries are "{type}: {reason} ({severity})"
-                # strings, so match "^bitrateLow:" not bare contains.
+                # configuration_issues are {type, severity, reason, description?}
+                # objects (#209), so compare .type by property, not regex.
                 $hasBitrateLow = $false
                 if ($response.streams) {
                   foreach ($s in $response.streams) {
-                    if ($s.configuration_issues -and @($s.configuration_issues | Where-Object { $_ -match '^bitrateLow:' }).Count -gt 0) {
+                    if ($s.configuration_issues -and @($s.configuration_issues | Where-Object { $_.type -eq 'bitrateLow' }).Count -gt 0) {
                       $hasBitrateLow = $true
                       Write-Host "  WARNING: bitrateLow detected on stream '$($s.title)'"
                     }
