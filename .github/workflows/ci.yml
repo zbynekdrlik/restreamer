@@ -1304,6 +1304,15 @@ jobs:
           New-NetFirewallRule -DisplayName "Restreamer HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow | Out-Null
           Write-Host "=== Firewall rule created for port 443 ==="
 
+          # #363: Allow RTMP ingest (remote OBS push) through Windows Firewall.
+          # This CI deploy block previously opened only 8910 + 443, so remote OBS
+          # pushing RTMP to :1234 was firewall-blocked even though ServiceCore
+          # listens on 1234 (CHECK 3b). Idempotent Remove-then-New, same pattern
+          # as the rules above.
+          Remove-NetFirewallRule -DisplayName "Restreamer RTMP" -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "Restreamer RTMP" -Direction Inbound -Protocol TCP -LocalPort 1234 -Action Allow | Out-Null
+          Write-Host "=== Firewall rule created for port 1234 (RTMP) ==="
+
       - name: Deploy TLS certificates
         if: env.TLS_CERT_PEM != ''
         shell: powershell
@@ -5874,6 +5883,90 @@ jobs:
           Write-Host "PRODUCTION CONFIG VERIFIED"
           Write-Host "=========================================="
 
+      - name: "Defensive StopRecord on stream OBS (#361)"
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # #361: OBS on the stream box (camera-box-owned) has RecordWhenStreaming,
+          # so our StartStream implicitly starts a recording that StopStream does
+          # NOT stop. Defensively StopRecord on teardown so a stray recording never
+          # outlives this job (a leftover recording blocks camera-box's
+          # rig-busy-gate). Best-effort: never fail the job on an unreachable OBS.
+          # StopRecord ONLY -- never StartRecord, never program routing (owner
+          # directive 2026-08-30: restreamer touches nothing in OBS but streaming;
+          # this defensive StopRecord is the single sanctioned exception, #361).
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            # Read messages until the RequestResponse (op=7) with our requestId --
+            # OBS may interleave events (op=5), so a single blind read could miss
+            # the response and mis-report outputActive as absent (fail-safe-wrong).
+            function Receive-Response($ws, $reqId) {
+              for ($k = 0; $k -lt 8; $k++) {
+                $m = Receive-OBSMessage $ws
+                if ($m.op -eq 7 -and $m.d.requestId -eq $reqId) { return $m }
+              }
+              return $null
+            }
+
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $null = Receive-OBSMessage $ws
+
+            $getRec = @{ op = 6; d = @{ requestType = "GetRecordStatus"; requestId = "teardown-rec-status" } } | ConvertTo-Json -Depth 5
+            Send-OBSMessage $ws $getRec
+            $recResp = Receive-Response $ws "teardown-rec-status"
+            if ($recResp -and $recResp.d.responseData.outputActive) {
+              Write-Host "Stray OBS recording detected (outputActive=true) -- issuing StopRecord (#361)"
+              $stopRec = @{ op = 6; d = @{ requestType = "StopRecord"; requestId = "teardown-rec-stop" } } | ConvertTo-Json -Depth 5
+              Send-OBSMessage $ws $stopRec
+              $null = Receive-Response $ws "teardown-rec-stop"
+              Write-Host "OBS recording stopped (#361 defensive teardown)"
+            } else {
+              Write-Host "No OBS recording active -- nothing to stop (#361)"
+            }
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+          } catch {
+            Write-Host "Defensive StopRecord skipped (non-fatal on teardown): $_"
+          }
+
   e2e-fb-push-stream-lan:
     name: E2E FB Push (stream-lan, real FB)
     # Sequence AFTER both Streaming + OBS-YouTube tests on the same stream-lan
@@ -6821,6 +6914,91 @@ jobs:
             try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
           } catch {
             Write-Host "OBS stop/restore failed (non-fatal on teardown): $_"
+          }
+
+      - name: "Defensive StopRecord on stream OBS (#361)"
+        if: always()
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          # #361: OBS on the stream box (camera-box-owned) has RecordWhenStreaming,
+          # so starting the OBS stream (this job does it via POST
+          # /api/v1/obs/start-stream) implicitly starts a recording that StopStream
+          # does NOT stop. Defensively StopRecord on teardown so a stray recording
+          # never outlives this job (a leftover recording blocks camera-box's
+          # rig-busy-gate). Best-effort: never fail the job on an unreachable OBS.
+          # StopRecord ONLY -- never StartRecord, never program routing (owner
+          # directive 2026-08-30; this defensive StopRecord is the sanctioned
+          # exception, #361).
+          try {
+            $ws = New-Object System.Net.WebSockets.ClientWebSocket
+            $uri = [Uri]"ws://$($env:OBS_WS_HOST):$($env:OBS_WS_PORT)"
+            $cts = New-Object System.Threading.CancellationTokenSource
+            $cts.CancelAfter(10000)
+            $ws.ConnectAsync($uri, $cts.Token).GetAwaiter().GetResult()
+
+            function Send-OBSMessage($ws, $message) {
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($message)
+              $segment = [ArraySegment[byte]]::new($bytes, 0, $bytes.Length)
+              $cts2 = New-Object System.Threading.CancellationTokenSource
+              $cts2.CancelAfter(10000)
+              $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts2.Token).GetAwaiter().GetResult()
+            }
+
+            function Receive-OBSMessage($ws) {
+              $buffer = New-Object byte[] 65536
+              $result = ""
+              do {
+                $segment = [ArraySegment[byte]]::new($buffer, 0, $buffer.Length)
+                $cts3 = New-Object System.Threading.CancellationTokenSource
+                $cts3.CancelAfter(10000)
+                $recv = $ws.ReceiveAsync($segment, $cts3.Token).GetAwaiter().GetResult()
+                $result += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $recv.Count)
+              } while (-not $recv.EndOfMessage)
+              return $result | ConvertFrom-Json
+            }
+
+            # Read until the RequestResponse (op=7) with our requestId -- OBS may
+            # interleave events (op=5), so a single blind read could miss the
+            # response and mis-report outputActive as absent (fail-safe-wrong).
+            function Receive-Response($ws, $reqId) {
+              for ($k = 0; $k -lt 8; $k++) {
+                $m = Receive-OBSMessage $ws
+                if ($m.op -eq 7 -and $m.d.requestId -eq $reqId) { return $m }
+              }
+              return $null
+            }
+
+            $hello = Receive-OBSMessage $ws
+            $authRequired = $hello.d.authentication
+            if ($authRequired) {
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
+              $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
+              $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
+              $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+            } else {
+              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+            }
+            Send-OBSMessage $ws $identify
+            $null = Receive-OBSMessage $ws
+
+            $getRec = @{ op = 6; d = @{ requestType = "GetRecordStatus"; requestId = "teardown-rec-status" } } | ConvertTo-Json -Depth 5
+            Send-OBSMessage $ws $getRec
+            $recResp = Receive-Response $ws "teardown-rec-status"
+            if ($recResp -and $recResp.d.responseData.outputActive) {
+              Write-Host "Stray OBS recording detected (outputActive=true) -- issuing StopRecord (#361)"
+              $stopRec = @{ op = 6; d = @{ requestType = "StopRecord"; requestId = "teardown-rec-stop" } } | ConvertTo-Json -Depth 5
+              Send-OBSMessage $ws $stopRec
+              $null = Receive-Response $ws "teardown-rec-stop"
+              Write-Host "OBS recording stopped (#361 defensive teardown)"
+            } else {
+              Write-Host "No OBS recording active -- nothing to stop (#361)"
+            }
+            try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+          } catch {
+            Write-Host "Defensive StopRecord skipped (non-fatal on teardown): $_"
           }
 
   e2e-gate:
