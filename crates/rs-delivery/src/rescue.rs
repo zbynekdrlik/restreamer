@@ -14,6 +14,14 @@ pub const RESCUE_REFILL_TARGET_SECS: u64 = 120;
 /// true during those, preventing rescue from triggering).
 pub const RESCUE_STALL_THRESHOLD_SECS: u64 = 8;
 
+// #124: `keepalive_escalate_after` anchors the non-fast escalation to the last
+// real chunk by subtracting FAST_KEEPALIVE_TRIGGER_SECS from this threshold. A
+// future edit that inverted the two would collapse the anchor to 0 (escalate
+// immediately) via saturating_sub — guard the ordering at compile time so that
+// can never happen silently.
+const _: () =
+    assert!(RESCUE_STALL_THRESHOLD_SECS > crate::fast_keepalive::FAST_KEEPALIVE_TRIGGER_SECS);
+
 /// Delivery mode state machine.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeliveryMode {

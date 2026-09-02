@@ -1,4 +1,5 @@
-//! Fast-endpoint keepalive + outage escalation, extracted from
+//! Keepalive bridge + outage escalation (ALL rust-pusher endpoints since
+//! #124 — fast AND non-fast; the `fast_` name is historical), extracted from
 //! `endpoint_task.rs` to keep that file under the 1000-line file-size gate
 //! (CI `file-size` job). Included via `#[path]` as `mod
 //! fast_keepalive_escalation` inside `endpoint_task.rs`, and its two public
@@ -116,6 +117,22 @@ pub(crate) async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
     // still observes the outage promptly. Uses `tokio::time::sleep` so it
     // advances under `start_paused`.
     const ESCALATION_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+    // #124: the EXACT escalation deadline (keepalive entry + the caller's
+    // last-real-chunk-anchored `escalate_after`). The select arms below wait
+    // until this instant (never the coarse 1s poll before it), so escalation
+    // to the fresh-reconnect rescue lands at the deadline — NOT up to
+    // ESCALATION_POLL late, which would make non-fast rescue slower than
+    // before #124. After the deadline (producer still active) the 1s poll
+    // resumes so a later stall is still observed promptly.
+    let escalation_deadline = started + escalate_after;
+    let next_tick = || {
+        let now = tokio::time::Instant::now();
+        if now < escalation_deadline {
+            escalation_deadline
+        } else {
+            now + ESCALATION_POLL
+        }
+    };
     // Shared exit bookkeeping. `resume` => record the TRUE gap for the
     // producer's adaptive controller and return the chunk; otherwise (stop) =>
     // return Stop. Both emit keepalive-ended and reset delivery_mode.
@@ -161,8 +178,9 @@ pub(crate) async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
                     }
                     // push_flv_bytes self-paces ~1x; loop to push the next tick.
                 }
-                _ = tokio::time::sleep(ESCALATION_POLL) => {
-                    // Re-evaluate the escalation gate at the top of the loop.
+                _ = tokio::time::sleep_until(next_tick()) => {
+                    // Re-evaluate the escalation gate at the top of the loop —
+                    // fires AT the deadline (precise), then every ESCALATION_POLL.
                 }
                 _ = stop_rx.changed() => { if *stop_rx.borrow() { finish!(stop); } }
             }
@@ -177,8 +195,9 @@ pub(crate) async fn keepalive_until_chunk<P: consumer_helpers::Pushable>(
             }
             tokio::select! {
                 maybe = rx.recv() => finish!(resume maybe),
-                _ = tokio::time::sleep(ESCALATION_POLL) => {
-                    // Re-evaluate the escalation gate at the top of the loop.
+                _ = tokio::time::sleep_until(next_tick()) => {
+                    // Re-evaluate the escalation gate at the top of the loop —
+                    // fires AT the deadline (precise), then every ESCALATION_POLL.
                 }
                 _ = stop_rx.changed() => { if *stop_rx.borrow() { finish!(stop); } }
             }

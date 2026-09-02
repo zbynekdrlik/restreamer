@@ -786,8 +786,19 @@ mod fast_upload_gap_regression {
             "the bridge must hold the LIVE session — never close it at the drain"
         );
 
-        // Past the 6s anchor: a stalled producer escalates to the fresh rescue.
-        advance_in_steps(Duration::from_millis(200), 25).await; // → ~8s total
+        // Just BELOW the 6s anchor (~5.8s from entry): still bridging, NOT yet
+        // escalated. This locks the anchor precisely — a stale 8s anchor would
+        // also be un-escalated here, but the next step distinguishes them.
+        advance_in_steps(Duration::from_millis(200), 14).await; // 3.0 + 2.8 = ~5.8s
+        assert!(
+            !task.is_finished(),
+            "non-fast bridge must NOT escalate before the 6s anchor (it did at ~5.8s)"
+        );
+
+        // Just PAST the 6s anchor (~6.6s): escalate. Landing here — well before
+        // 8s — is what proves the anchor is the last-real-chunk 6s value, not
+        // the raw 8s threshold (never slower than before #124, never later).
+        advance_in_steps(Duration::from_millis(200), 4).await; // → ~6.6s total
         let outcome = task.await.expect("keepalive task panicked");
         match outcome {
             KeepaliveOutcome::EscalateToRescue => {}

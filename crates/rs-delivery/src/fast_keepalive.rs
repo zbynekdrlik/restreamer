@@ -1,5 +1,7 @@
-//! Fast-endpoint keepalive: hold the EXISTING rtmp session alive during a
-//! short producer gap by re-pushing the LAST DELIVERED CHUNK (freeze frame).
+//! Keepalive bridge: hold the EXISTING rtmp session alive during a producer
+//! gap by re-pushing the LAST DELIVERED CHUNK (freeze frame). Used by ALL
+//! rust-pusher endpoints since #124 (fast AND non-fast) — see
+//! `uses_keepalive_bridge`; before #124 it was fast-only.
 //!
 //! FREEZE-ONLY, codec-homogeneous: the keepalive must never push any bytes
 //! that were not produced by the live encoder. The RTMP pusher de-duplicates
@@ -40,10 +42,13 @@ pub fn keepalive_bytes(last_chunk: &Option<Arc<Vec<u8>>>) -> Option<&[u8]> {
 /// of dead air + a premature disconnect at every drain — the "few seconds
 /// outage" #124 fixes.
 ///
-/// Takes primitives (not `EndpointConfig`) because this module is compiled
+/// Takes a primitive (not `EndpointConfig`) because this module is compiled
 /// into the rs-delivery LIBRARY target too, where `crate::api` does not
-/// exist. `is_rust` is `ep_cfg.pusher == PusherKind::Rust`.
-pub(crate) fn uses_keepalive_bridge(_is_fast: bool, is_rust: bool) -> bool {
+/// exist. `is_rust` is `ep_cfg.pusher == PusherKind::Rust`. Note: `is_fast`
+/// deliberately does NOT gate bridging — fast AND non-fast rust endpoints
+/// both bridge; only the escalation TIMING differs (see
+/// `keepalive_escalate_after`).
+pub(crate) fn uses_keepalive_bridge(is_rust: bool) -> bool {
     // #124: ALL rust-pusher endpoints bridge the gap on the live session —
     // fast AND non-fast. Only the ffmpeg path (no RtmpPusher handle) keeps the
     // old drop-then-reconnect rescue. Before #124 this was fast-only, which
@@ -93,15 +98,11 @@ mod tests {
         // #124: the non-fast production stream MUST bridge the gap on the live
         // session (no dead air, no premature disconnect), not just fast ones.
         assert!(
-            uses_keepalive_bridge(false, true),
-            "non-fast rust endpoint must use the freeze-frame bridge (#124)"
+            uses_keepalive_bridge(true),
+            "rust endpoints (fast AND non-fast) must use the freeze-frame bridge (#124)"
         );
         assert!(
-            uses_keepalive_bridge(true, true),
-            "fast rust endpoint still bridges"
-        );
-        assert!(
-            !uses_keepalive_bridge(false, false),
+            !uses_keepalive_bridge(false),
             "ffmpeg endpoints have no RtmpPusher to bridge"
         );
     }
