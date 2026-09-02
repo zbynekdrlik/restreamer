@@ -2579,6 +2579,7 @@ dependencies = [
  "rs-cloud",
  "rs-core",
  "rs-endpoint",
+ "rs-facebook",
  "rs-youtube",
  "rsa",
  "rustls",
@@ -2677,6 +2678,18 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-test",
+]
+
+[[package]]
+name = "rs-facebook"
+version = "0.29.25"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]

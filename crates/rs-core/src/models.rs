@@ -305,6 +305,38 @@ pub struct YoutubeHealth {
     pub error: Option<String>,
 }
 
+/// Snapshot of Facebook Graph API `live_videos` ingest health for a single FB
+/// endpoint (#166). Parity with [`YoutubeHealth`] — the dashboard renders an
+/// identical badge. FB silently discards bytes pushed to an unbound persistent
+/// key, so this asks FB whether it is actually decoding what we push.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FacebookHealth {
+    /// FB `live_video.status` or a synthetic marker: `LIVE` | `UNPUBLISHED` |
+    /// `PROCESSING` | `LIVE_STOPPED` | `NO_LIVE_VIDEO` | `unconfigured` |
+    /// `unknown`.
+    pub status: String,
+    /// Mapped health, parity with YT's badge: `good` | `bad` | `noData` |
+    /// `unknown`. `bad` (red) is the operator-critical case: we are pushing but
+    /// FB reports no receiving live_video (silent discard).
+    pub health: String,
+    /// FB-measured ingest video bitrate in kbps, when a receiving stream exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_bitrate_kbps: Option<i64>,
+    /// `"<width>x<height>"` from FB's `stream_health` when receiving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    /// FB-measured ingest framerate (formatted) when receiving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<String>,
+    /// Seconds since the data was probed.
+    #[serde(default)]
+    pub age_secs: i64,
+    /// Set when the probe could not run (fb_not_configured / oauth_invalid /
+    /// permission / probe_error).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 // `EndpointLifecycle` + `LifecycleInput` + `compute` live in
 // `crate::endpoint_lifecycle` (extracted to keep this file under the
 // 1000-line CI cap). Re-exported here so `rs_core::models::EndpointLifecycle`
@@ -351,6 +383,10 @@ pub struct DeliveryEndpointMetrics {
     pub rescue_eta_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub youtube_health: Option<YoutubeHealth>,
+    /// Facebook ingestion health (#166). `None` for non-FB endpoints or when FB
+    /// monitoring is not configured. Mirrors `youtube_health`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facebook_health: Option<FacebookHealth>,
     /// Operator-facing lifecycle (host-computed). Older payloads default to
     /// Live so the dashboard degrades gracefully.
     #[serde(default = "crate::endpoint_lifecycle::default_lifecycle")]
