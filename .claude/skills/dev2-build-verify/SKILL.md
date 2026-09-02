@@ -340,3 +340,17 @@ bug and was not:
   `cargo fmt --all`), so a hand-formatted targeted `Edit` needs no rustfmt at all;
   if you do rustfmt, `git checkout --` the files you did not intend to change
   before committing.
+- **A lane rsync WITHOUT `--delete` (the recommended shape, to protect `dist/`)
+  leaves STALE FILES a source refactor has since removed** — most dangerously a
+  file that MOVED (e.g. `src/api.rs` → `src/api/mod.rs`). Both then coexist in
+  the lane checkout and `rustc` aborts with `error[E0761]: file for module
+  \`api\` found at both "src/api.rs" and "src/api/mod.rs"`. It looks like a code
+  bug and is not — the file is gone in your source, stale on dev2. Fix:
+  `rm -f` the stale path on the dev2 lane (a `target/`/`dist/`-preserving lane
+  copy is regenerable), then re-run.
+- **`trunk build` needs `cargo` ON PATH** — a non-login ssh shell does not have
+  it, so `trunk build --release` fails with `error getting cargo metadata:
+  failed to start \`cargo metadata\`: No such file or directory`. Prefix the
+  ssh body with `export PATH="$HOME/.cargo/bin:$PATH"` (the `~/.cargo/bin/cargo`
+  full-path trick works only for a direct `cargo` call, NOT for trunk shelling
+  out to `cargo metadata`).
