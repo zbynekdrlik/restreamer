@@ -21,6 +21,35 @@ fn find_available_port() -> u16 {
     port
 }
 
+/// Reserve a free TCP port and KEEP the listener bound, so no concurrent test
+/// (or any other process) can grab the port before the RTMP server adopts it.
+/// Returns the held listener plus its port. See #148.
+fn reserved_listener() -> (std::net::TcpListener, u16) {
+    // NOTE (pre-fix, deliberately broken to reproduce #148): this mirrors the
+    // old `find_available_port` TOCTOU — it picks a port then RELEASES it, so
+    // the returned port is free the instant we return and can be stolen.
+    let picker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = picker.local_addr().unwrap().port();
+    drop(picker);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    (listener, port)
+}
+
+/// Regression for #148: the port a test hands to `RtmpServer` must stay BOUND
+/// from the moment it is picked until the server adopts it. If it is free in
+/// between, a concurrent test — or any process — can steal it in that window and
+/// the server bind fails with `os error 10048` on Windows CI (the flake).
+#[test]
+fn reserved_port_is_held_no_toctou_window() {
+    let (listener, port) = reserved_listener();
+    let stolen = std::net::TcpListener::bind(("127.0.0.1", port));
+    assert!(
+        stolen.is_err(),
+        "picked port {port} must remain reserved, but a competitor could bind it (TOCTOU race)"
+    );
+    drop(listener);
+}
+
 /// Wait for a TCP port to become connectable (server is ready).
 async fn wait_for_port(port: u16, timeout: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
