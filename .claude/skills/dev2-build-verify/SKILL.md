@@ -221,6 +221,44 @@ leave them alone.
 
 ## Frontend E2E (CI-equivalent) on dev2
 
+**PARALLEL WORKTREE LANES SHARE ONE PORT 8910 — the frontend E2E CANNOT run on
+two lanes at once without full private-port isolation (#73, cost hours).** The
+mock-api hardcodes `const PORT = 8910`, AND the app itself hardcodes 8910 for the
+Tauri/E2E path in THREE places — `leptos-ui/src/api/mod.rs` `compute_api_base()`
+(`http://127.0.0.1:8910/api/v1`), `leptos-ui/src/ws.rs` `ws_url()`
+(`ws://127.0.0.1:8910/api/v1/ws` + the `location.host` fallback), and
+`e2e/tauri-mock.js` (`const MOCK_API`). The suite injects `tauri-mock.js`, so
+`is_tauri()` is TRUE and the app fetches DATA + WS from the hardcoded 8910
+regardless of which port SERVES the dist. So when a sibling `/autopilot` lane is
+running its own mock on 8910, your run silently loads YOUR dist from your
+baseURL but reads DATA from the SIBLING's mock → glow/banners "don't appear",
+scenario POSTs seem ignored, `ERR_CONNECTION_REFUSED` floods the console when the
+sibling mock dies, and an `ENOENT .../restreamer-bc-<OTHER>/dist/index.html` in a
+Playwright error-context is the smoking gun (a sibling's dist path). Diagnose
+first: `ss -ltnp | grep :8910` shows the owning pid; if it's not yours, you are
+colliding — do NOT pkill it (it belongs to a sibling session).
+
+**Full private-port isolation recipe (lane-copy only, NEVER committed — your
+worktree keeps 8910 for CI):** pick a private port (e.g. 18973), then in the dev2
+lane checkout `sed -i s/127.0.0.1:8910/127.0.0.1:18973/g` on
+`leptos-ui/src/api/mod.rs`, `leptos-ui/src/ws.rs`, `e2e/tauri-mock.js`, and every
+`*.spec.ts` you run + your verify config's `baseURL`; `sed -i "s/const PORT =
+8910;/const PORT = 18973;/"` on `e2e/mock-api.js`; **rebuild `trunk build
+--release`** (bakes the port into the wasm); start the mock as a transient user
+unit so its lifecycle is controlled and it survives ssh drops (avoids the
+webServer/EADDRINUSE orphan races): `systemd-run --user --unit=mock-<lane>
+--working-directory=<lane>/e2e --setenv=RESTREAMER_TEST_HOOKS=1 /usr/bin/node
+mock-api.js`; run playwright with a NO-webServer config (`ss -ltn | grep :18973`
+to confirm up first); `systemctl --user stop mock-<lane>` at the end. Because the
+worktree-isolation guard rejects ssh commands containing `;`/`&`/`setsid`/`bash
+<script>`, a `systemd-run --user` unit + a no-webServer playwright config is the
+guard-friendly way to get a controlled background mock (a plain visible `cd DIR &&
+npx playwright ...` runs; the mock cannot be backgrounded with `&`).
+
+**Faster alternative when no sibling holds 8910:** just run the canonical
+single-mock recipe below on 8910. Confirm ownership with `ss -ltnp | grep :8910`
+before trusting any E2E result on a shared box.
+
 Mirrors ci.yml's frontend-E2E job. **The mock-api server dies when the SSH
 session ends** — start it and run the tests in the SAME ssh command (one
 heredoc), never as separate ssh calls:

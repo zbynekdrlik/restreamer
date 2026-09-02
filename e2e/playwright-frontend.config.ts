@@ -6,7 +6,7 @@ export default defineConfig({
   // `start-delivery-rtmp-gate` was removed — the RTMP-stable gate is
   // verified by backend unit tests (`rs-api/src/router_tests.rs`) and
   // the E2E version keeps hitting parallel-worker shared-state races.
-  testMatch: /(frontend|audit-panel|change-key|zero-endpoint-banner|remove-last-endpoint-modal|endpoint-history-sparkline|cache-drift-panel|delete-cleanup-button|rust-pusher|oauth-authorize|outage-ui|disk-pressure-banner|templates-default-rescue|version-label|s3-region-banner|ingest-skew-banner|vps-orphan-banner|mbps-graph|long-stream-banner|rtmp-bind-error-banner)\.spec\.ts$/,
+  testMatch: /(frontend|audit-panel|change-key|zero-endpoint-banner|remove-last-endpoint-modal|endpoint-history-sparkline|cache-drift-panel|delete-cleanup-button|rust-pusher|oauth-authorize|outage-ui|disk-pressure-banner|templates-default-rescue|version-label|s3-region-banner|ingest-skew-banner|vps-orphan-banner|mbps-graph|long-stream-banner|rtmp-bind-error-banner|alert-glow)\.spec\.ts$/,
   timeout: 30000,
   retries: 0,
   // Single worker — the new post-mortem specs (audit-panel,

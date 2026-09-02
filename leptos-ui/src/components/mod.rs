@@ -1,6 +1,7 @@
 //! UI components for the Restreamer dashboard.
 
 pub mod add_endpoint_modal;
+pub mod alert_glow;
 pub mod oauth_authorize;
 pub mod audit_panel;
 pub mod change_key_modal;
@@ -26,6 +27,7 @@ pub mod upload_strip;
 mod uploads;
 pub mod zero_endpoint_banner;
 
+pub use alert_glow::AlertGlow;
 pub use confirm_modal::ConfirmModal;
 pub use endpoints::EndpointsView;
 pub use header::Header;
