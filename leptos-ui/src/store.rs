@@ -223,6 +223,9 @@ pub struct DashboardStore {
     // gate (#354).
     pub ingest_skew_ms: RwSignal<i64>,
     pub ingest_skew_active: RwSignal<bool>,
+    // Number of orphaned delivery VPS still billing (#352). Polled from
+    // `/status`; drives the VpsOrphanBanner. Defaults 0 (assume none).
+    pub vps_orphan_count: RwSignal<u8>,
 }
 
 impl DashboardStore {
@@ -251,6 +254,7 @@ impl DashboardStore {
             s3_region_standard: RwSignal::new(true),
             ingest_skew_ms: RwSignal::new(0),
             ingest_skew_active: RwSignal::new(false),
+            vps_orphan_count: RwSignal::new(0),
         }
     }
 

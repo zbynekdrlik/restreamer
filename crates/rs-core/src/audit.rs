@@ -65,6 +65,13 @@ pub enum Action {
     VpsReady,
     VpsDeleted,
     VpsUnreachable,
+    /// Host-side (#352): the runtime orphan reaper found a Hetzner VPS labelled
+    /// for THIS install (`app=restreamer,client_uuid=<this>`) with no live
+    /// `delivery_instances` row — a server that is billing but invisible to the
+    /// app (DB row lost to a reset/reinstall, a crash in the create window, or a
+    /// forced kill mid-stop). Severity::Warn. Detail JSON:
+    /// `{hetzner_id, name, ipv4, age_secs, auto_deleted}`.
+    VpsOrphanDetected,
     DeliveryInitSent,
     DeliveryInitResponse,
     EndpointStarted,
@@ -110,8 +117,8 @@ pub enum Action {
     /// the embedded default rescue blob for this endpoint's lifetime.
     /// Severity::Warn. Detail JSON: {"url", "error"}.
     RescueCustomFetchFailed,
-    /// Disk cache started pre-filling for an event. Emitted on first
-    /// EndpointReader registration. Issue #174.
+    /// Disk cache started pre-filling for an event. Emitted on
+    /// `DiskCacheFetcher` construction (one per endpoint). Issue #174.
     DiskCachePrefillStarted,
     /// Disk cache window is fully populated for at least one endpoint;
     /// the first push is imminent.
@@ -122,8 +129,13 @@ pub enum Action {
     /// DownloadService bandwidth cap reached; sustained S3 latency
     /// expected. Operator may want to investigate Hetzner status.
     DiskCacheDownloadThrottled,
-    /// EndpointReader.wait_for_chunk timed out (default 60 s).
-    /// Indicates a real S3 outage longer than the cache window.
+    /// The disk-cache fetcher failed to land a chunk within its stall budget.
+    /// The `detail.shape` field (#332) discriminates the two outage classes:
+    /// `"bounded_attempts"` -- the bounded S3-retry cap (~3s) was exhausted (a
+    /// persistently-erroring S3); `"stall_timeout"` -- the outer stall-timeout
+    /// deadline (default 60 s) elapsed, i.e. a wedge >= the cache window.
+    /// `detail.timeout_secs` is present ONLY on the `stall_timeout` shape.
+    /// Pairs with `DiskCacheReaderRecovered` to bracket the outage window.
     DiskCacheStallTimeout,
     /// Disk write failed (ENOSPC / EIO). Severity::Error.
     DiskCacheWriteFailed,
@@ -131,7 +143,8 @@ pub enum Action {
     /// the transient. Pair with DiskCacheStallTimeout to bound outage
     /// duration in the audit log.
     DiskCacheReaderRecovered,
-    /// Per-endpoint push sample emitted by EndpointReader on chunk push.
+    /// Per-endpoint push sample emitted by the consumer_task on chunk push
+    /// (`disk_cache_push_sample::emit_push_sample`).
     /// Rate-limited 1/min/endpoint via RateLimiter keyed by
     /// (DiskCachePushSample, endpoint_alias). Carries chunk_supply_lag_ms,
     /// inter_chunk_gap_ms, burst_factor, cumulative_pushed_secs (total media
@@ -233,6 +246,21 @@ pub enum Action {
     /// the 2026-06-24 incident. Emitted once at startup, never auto-fixed.
     /// Detail JSON: {"configured_region", "standard_region"}.
     S3RegionNonStandard,
+    /// VPS-side (#236): a Rust-pusher endpoint crossed
+    /// `DEAD_TARGET_ZERO_BYTE_THRESHOLD` consecutive zero-byte-since-connect
+    /// deaths -- the remote session/broadcast is bound-but-dead (e.g. an
+    /// expired FB persistent-key `live_video`), not a transient outage.
+    /// Emitted once at the threshold transition, never per-retry.
+    /// Severity::Error. Detail JSON: {backend, message,
+    /// consecutive_zero_byte_deaths, backoff_ms}.
+    EndpointDeadTarget,
+    /// VPS-side (#353): periodic resource sample (system CPU %, load average,
+    /// memory used/total, rs-delivery process RSS, and best-effort disk
+    /// used/total) emitted ~1/min by the delivery VPS. Mirrored into the host
+    /// `audit_log` so the numbers survive VPS deletion and can back a
+    /// data-driven server-type (tier) choice for the next event. Severity::Info.
+    /// Detail JSON is `resource_sample::ResourceSample`.
+    VpsResourceSample,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -523,6 +551,17 @@ mod tests {
         let a = Action::BufferRefillEnded;
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"buffer_refill_ended\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_vps_resource_sample_serdes() {
+        // #353: the host mirror (`mirror_vps_audit`) STRICT-parses the action
+        // string, so the VPS-emitted `vps_resource_sample` row must round-trip
+        // to this exact variant or the sample never lands in `audit_log`.
+        let a = Action::VpsResourceSample;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"vps_resource_sample\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
 

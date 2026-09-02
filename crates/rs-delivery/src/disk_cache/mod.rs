@@ -12,33 +12,18 @@
 //!
 //! `DiskCache` is the public facade. One instance per event. Production
 //! wiring goes through `DiskCacheFetcher` (`disk_cache_fetcher.rs`), the
-//! `ChunkFetcher` impl `EndpointHandle::spawn` actually uses -- NOT through
-//! this module's `PrefetchQueue`, which the unbounded-reader alternate
-//! wiring (`EndpointReader` + `PrefetchReader`) used before it was deleted
-//! as dead code (#286). `PrefetchQueue` itself stays as a tested, reusable
-//! primitive even though nothing currently wires it in.
-//!
-//! The `#![allow(dead_code, unused_imports)]` below is STILL needed after
-//! #286's deletion: `registry::wait_for_chunk_with_timeout` and some of
-//! `PrefetchQueue`'s API are exercised only by this module's own unit tests
-//! now that their production caller (`EndpointReader`) is gone, and `mod
-//! disk_cache` is private in `main.rs` so pub-ness alone doesn't shield
-//! them from the lint on the bin target.
-#![allow(dead_code, unused_imports)]
+//! `ChunkFetcher` impl `EndpointHandle::spawn` actually uses. The former
+//! unbounded-reader alternate wiring (`EndpointReader` + `PrefetchReader`)
+//! and its `PrefetchQueue` primitive were deleted as dead code (#286 / #334).
 
 pub mod download_service;
 mod eviction;
 mod position_registry;
-pub mod prefetch_queue;
 mod registry;
 
-#[cfg(test)]
-mod prefetch_queue_tests;
-
-pub use download_service::{DownloadService, FetchedChunk, S3Backend};
+pub use download_service::{DownloadService, S3Backend};
 pub use eviction::EvictionTask;
-pub use position_registry::{EndpointPositionRegistry, EndpointWindow};
-pub use prefetch_queue::PrefetchQueue;
+pub use position_registry::EndpointPositionRegistry;
 pub use registry::{ChunkAvailability, ChunkRegistry};
 
 use std::path::PathBuf;

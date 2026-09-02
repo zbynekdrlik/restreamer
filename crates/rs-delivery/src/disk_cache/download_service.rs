@@ -1,6 +1,6 @@
 //! DownloadService — bandwidth-managed S3 chunk downloader with dedup.
 //!
-//! One instance per event. EndpointReaders call `request_chunk(id)`;
+//! One instance per event. `DiskCacheFetcher` calls `request_chunk(id)`;
 //! the service deduplicates concurrent requests for the same chunk,
 //! issues a single S3 GET, writes atomically to disk, and marks the
 //! registry available.
@@ -27,6 +27,13 @@ use super::registry::ChunkRegistry;
 /// loops re-request (which resets the slot to InFlight), so system-wide
 /// retrying never stops (#184); only the single in-flight attempt is
 /// bounded.
+///
+/// #335: the bounded-attempts wall time (3 attempts, 1s+2s backoff = ~3s)
+/// is load-bearing for `disk_cache_stall_tests` — several tests use a
+/// `STALL_TIMEOUT_SECS - 1` (4s) budget to select the bounded-attempts
+/// `Failed` path OVER the outer stall_timeout. Bumping this constant (or the
+/// backoff) past that budget would silently flip those tests to exercise the
+/// outer-timeout path instead; adjust the test budgets in lockstep.
 const MAX_FETCH_ATTEMPTS: u64 = 3;
 
 /// Trait abstracting the S3 fetch operation. The real implementation
@@ -153,20 +160,6 @@ impl DownloadService {
         self.profile.snapshot()
     }
 
-    /// Path of the cached chunk file inside the per-event directory.
-    /// Used by `PrefetchReader::try_read_from_disk` so the reader does
-    /// not depend on internal layout knowledge.
-    pub fn chunk_path(&self, chunk_id: i64) -> std::path::PathBuf {
-        self.event_dir.join(format!("{chunk_id}.bin"))
-    }
-
-    /// Test/integration helper: clone of the registry handle so external
-    /// callers (PrefetchReader) can call `wait_for_chunk_with_timeout`
-    /// without re-plumbing a separate registry argument.
-    pub fn registry_for_test(&self) -> Arc<super::registry::ChunkRegistry> {
-        Arc::clone(&self.registry)
-    }
-
     /// HEAD-only duration probe. Returns `Ok(Some(ms))` if the chunk
     /// exists on S3, `Ok(None)` for 404, `Err(_)` for transient errors.
     /// Caches the result in `durations` so a follow-up `request_chunk`
@@ -272,10 +265,10 @@ impl DownloadService {
                             });
                         }
                         // Disk-write failures are not handled here -- the
-                        // outer PrefetchReader loop re-requests, and the
-                        // next iteration retries from scratch. Mark
-                        // NotFound so anyone awaiting wait_for_chunk
-                        // wakes immediately rather than hanging.
+                        // producer's outer backoff loop (via DiskCacheFetcher)
+                        // re-requests, and the next iteration retries from
+                        // scratch. Mark NotFound so anyone awaiting
+                        // wait_for_chunk wakes immediately rather than hanging.
                         self.registry.mark_not_found(chunk_id);
                         return;
                     }
@@ -285,9 +278,9 @@ impl DownloadService {
                 }
                 Ok(None) => {
                     // 404: chunk genuinely not on S3 yet. Don't loop here
-                    // forever -- mark NotFound so the OUTER PrefetchReader
-                    // loop decides whether to retry (genuine miss is rare;
-                    // uploader will eventually PUT).
+                    // forever -- mark NotFound so the producer's OUTER backoff
+                    // loop (via DiskCacheFetcher) decides whether to retry
+                    // (genuine miss is rare; uploader will eventually PUT).
                     self.registry.mark_not_found(chunk_id);
                     return;
                 }
@@ -558,7 +551,7 @@ mod tests {
             None,
         );
         svc.request_chunk(404).await;
-        let state = registry.wait_for_chunk(404).await.unwrap();
+        let state = registry.wait_for_chunk(404).await;
         assert!(matches!(state, ChunkAvailability::NotFound));
         let path = tmp.path().join("evt").join("404.bin");
         assert!(!path.exists());
@@ -598,7 +591,7 @@ mod tests {
             None,
         );
         svc.request_chunk(99).await;
-        let state = registry.wait_for_chunk(99).await.unwrap();
+        let state = registry.wait_for_chunk(99).await;
         assert!(matches!(state, ChunkAvailability::Available { .. }));
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
@@ -668,7 +661,7 @@ mod tests {
             result.is_ok(),
             "request_chunk hung after backend panic; catch_unwind missing"
         );
-        let state = registry.wait_for_chunk(7).await.unwrap();
+        let state = registry.wait_for_chunk(7).await;
         assert!(matches!(state, ChunkAvailability::NotFound));
     }
 

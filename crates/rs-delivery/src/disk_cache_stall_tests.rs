@@ -38,7 +38,8 @@ use rs_core::models::PusherKind;
 use crate::api::EndpointConfig;
 use crate::audit_ring::AuditRing;
 use crate::buffer_state::BufferState;
-use crate::disk_cache::{ChunkAvailability, DiskCache, DiskCacheConfig, FetchedChunk, S3Backend};
+use crate::disk_cache::download_service::FetchedChunk;
+use crate::disk_cache::{ChunkAvailability, DiskCache, DiskCacheConfig, S3Backend};
 use crate::disk_cache_fetcher::DiskCacheFetcher;
 use crate::endpoint_producer::producer_task;
 use crate::endpoint_stats::{EndpointStats, Stats};
@@ -159,17 +160,105 @@ impl S3Backend for AlwaysServeBackend {
     }
 }
 
+/// #333: persistently errors on ONE stalling chunk (drives the bounded-attempts
+/// `Failed` arm → arms `was_stalled` + a `DiskCacheStallTimeout` row) and
+/// clean-404s every other chunk, so the recovery fetch resolves through the
+/// top-level `NotFound` arm.
+struct StallThenMissBackend {
+    stall_chunk: i64,
+}
+
+#[async_trait::async_trait]
+impl S3Backend for StallThenMissBackend {
+    async fn fetch(&self, chunk_id: i64) -> Result<Option<FetchedChunk>, String> {
+        if chunk_id == self.stall_chunk {
+            return Err(format!("forced persistent S3 error on chunk {chunk_id}"));
+        }
+        Ok(None)
+    }
+    async fn head_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        if chunk_id == self.stall_chunk {
+            return Err(format!(
+                "forced persistent S3 HEAD error on chunk {chunk_id}"
+            ));
+        }
+        Ok(None)
+    }
+}
+
+/// #331: errors on the listed `stall_chunks` (each drives the bounded-attempts
+/// `Failed` arm) and serves every other chunk (a clean recovery via the
+/// `Available` arm). Lets a test script two error-storm blips separated by
+/// recoveries to exercise the stall/recovered pairing under the rate limiter.
+struct StallSetBackend {
+    stall_chunks: Vec<i64>,
+}
+
+#[async_trait::async_trait]
+impl S3Backend for StallSetBackend {
+    async fn fetch(&self, chunk_id: i64) -> Result<Option<FetchedChunk>, String> {
+        if self.stall_chunks.contains(&chunk_id) {
+            return Err(format!("forced persistent S3 error on chunk {chunk_id}"));
+        }
+        Ok(Some(FetchedChunk {
+            data: vec![9u8; 64],
+            duration_ms: 1000,
+            host_emit_ts: None,
+            s3_upload_complete_ts: None,
+        }))
+    }
+    async fn head_duration_ms(&self, chunk_id: i64) -> Result<Option<i64>, String> {
+        if self.stall_chunks.contains(&chunk_id) {
+            return Err(format!(
+                "forced persistent S3 HEAD error on chunk {chunk_id}"
+            ));
+        }
+        Ok(Some(1000))
+    }
+}
+
+/// #330: serves the FIRST fetch (the priming GET that seeds the stale
+/// `Available` slot + on-disk file) then errors on every subsequent fetch —
+/// models a resume-after-eviction landing in an S3 storm on the refetch.
+#[derive(Default)]
+struct ServeOnceThenErrorBackend {
+    fetches: AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl S3Backend for ServeOnceThenErrorBackend {
+    async fn fetch(&self, chunk_id: i64) -> Result<Option<FetchedChunk>, String> {
+        let n = self.fetches.fetch_add(1, AtomicOrdering::SeqCst);
+        if n == 0 {
+            return Ok(Some(FetchedChunk {
+                data: vec![5u8; 64],
+                duration_ms: 1000,
+                host_emit_ts: None,
+                s3_upload_complete_ts: None,
+            }));
+        }
+        Err(format!("forced persistent S3 error on chunk {chunk_id}"))
+    }
+    async fn head_duration_ms(&self, _chunk_id: i64) -> Result<Option<i64>, String> {
+        Ok(Some(1000))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared harness
 // ---------------------------------------------------------------------------
 
 /// REAL `DiskCache` (registry + download service + eviction) over the given
 /// backend, plus the REAL `DiskCacheFetcher` — the exact production wiring
-/// from `EndpointHandle::spawn`, with a tight stall budget.
+/// from `EndpointHandle::spawn`, with a tight stall budget. Pass `Some(ring)`
+/// when the test needs to observe the outage-forensics rows
+/// (`DiskCacheStallTimeout` / `DiskCacheReaderRecovered`), `None` otherwise
+/// (#335: one harness, no duplicated config).
 async fn real_fetcher(
     backend: Arc<dyn S3Backend>,
     tmp: &tempfile::TempDir,
     alias: &str,
+    ring: Option<Arc<AuditRing>>,
 ) -> DiskCacheFetcher {
     let cfg = DiskCacheConfig {
         cache_dir: tmp.path().to_path_buf(),
@@ -180,11 +269,11 @@ async fn real_fetcher(
         download_queue_capacity: 50,
     };
     let cache = Arc::new(
-        DiskCache::new(cfg, backend, "stall-evt".to_string(), None)
+        DiskCache::new(cfg, backend, "stall-evt".to_string(), ring.clone())
             .await
             .expect("DiskCache::new"),
     );
-    DiskCacheFetcher::new(cache, alias.to_string(), 1, 4, STALL_TIMEOUT_SECS, None)
+    DiskCacheFetcher::new(cache, alias.to_string(), 1, 4, STALL_TIMEOUT_SECS, ring)
 }
 
 fn ep_cfg(alias: &str) -> EndpointConfig {
@@ -212,7 +301,7 @@ async fn run_real_cache_until_rescue(
 ) -> (Arc<AuditRing>, Stats) {
     tokio::time::pause();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let fetcher = real_fetcher(backend, &tmp, alias).await;
+    let fetcher = real_fetcher(backend, &tmp, alias, None).await;
 
     let ring = AuditRing::new(500);
     let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
@@ -264,7 +353,7 @@ async fn run_real_cache_until_rescue(
 async fn erroring_s3_fetch_surfaces_err_within_stall_budget() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let backend = Arc::new(ErroringBackend::default());
-    let fetcher = real_fetcher(backend.clone(), &tmp, "stall-fetch").await;
+    let fetcher = real_fetcher(backend.clone(), &tmp, "stall-fetch", None).await;
 
     // 4x the stall budget: far above the bound the fetcher must honor, far
     // below "forever". Pre-fix, request_chunk().await never returns (the
@@ -309,32 +398,7 @@ async fn erroring_s3_failed_arm_records_stall_for_audit_bracket() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let backend = Arc::new(ErroringBackend::default());
     let ring = AuditRing::new(500);
-    let cfg = DiskCacheConfig {
-        cache_dir: tmp.path().to_path_buf(),
-        window_chunks: 4,
-        s3_ingress_cap_mbit: 10_000,
-        eviction_interval_secs: 3600,
-        read_stall_timeout_secs: STALL_TIMEOUT_SECS,
-        download_queue_capacity: 50,
-    };
-    let cache = Arc::new(
-        DiskCache::new(
-            cfg,
-            backend,
-            "stall-failed-arm".to_string(),
-            Some(ring.clone()),
-        )
-        .await
-        .expect("DiskCache::new"),
-    );
-    let fetcher = DiskCacheFetcher::new(
-        Arc::clone(&cache),
-        "failed-arm".to_string(),
-        1,
-        4,
-        STALL_TIMEOUT_SECS,
-        Some(ring.clone()),
-    );
+    let fetcher = real_fetcher(backend, &tmp, "failed-arm", Some(ring.clone())).await;
 
     // Budget strictly BELOW STALL_TIMEOUT_SECS: the fetch must resolve via
     // the bounded-attempts Failed state (~3s), not the outer timeout.
@@ -367,7 +431,7 @@ async fn erroring_s3_failed_arm_records_stall_for_audit_bracket() {
 async fn erroring_s3_flips_producer_active_within_bounded_window() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let backend = Arc::new(ErroringBackend::default());
-    let fetcher = real_fetcher(backend, &tmp, "stall-producer").await;
+    let fetcher = real_fetcher(backend, &tmp, "stall-producer", None).await;
 
     let buffer_state = Arc::new(BufferState::new());
     let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
@@ -575,3 +639,9 @@ async fn resume_at_evicted_chunk_refetches_from_s3_instead_of_looping() {
         "recovery must re-download the evicted chunk to local disk"
     );
 }
+
+// The #330/#331/#332/#333/#335 stall/recovered bracket tests live in a child
+// module (kept under the 1000-line file cap); they reach the backends +
+// `real_fetcher` harness above via `use super::*` equivalents.
+#[path = "disk_cache_bracket_tests.rs"]
+mod bracket_tests;
