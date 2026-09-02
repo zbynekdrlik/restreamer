@@ -30,8 +30,10 @@ pub struct OauthStreamKeys {
 /// repeated dialog opens do not re-probe every grant against YouTube.
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
-static CACHE: LazyLock<Mutex<Option<(Instant, Vec<OauthStreamKeys>)>>> =
-    LazyLock::new(|| Mutex::new(None));
+/// `(probed_at, per-grant map)` — `None` until the first probe.
+type CacheEntry = Option<(Instant, Vec<OauthStreamKeys>)>;
+
+static CACHE: LazyLock<Mutex<CacheEntry>> = LazyLock::new(|| Mutex::new(None));
 
 /// Extract the non-empty `cdn.ingestionInfo.streamName` values from a grant's
 /// live streams. Pure — unit-tested.
