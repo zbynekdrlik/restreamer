@@ -12,6 +12,7 @@ members = [
     "crates/rs-cloud",
     "crates/rs-delivery",
     "crates/rs-youtube",
+    "crates/rs-webui",
 ]
 # src-tauri is excluded from default workspace builds because it requires
 # the frontend to be built first (Tauri generate_context! needs dist/).
