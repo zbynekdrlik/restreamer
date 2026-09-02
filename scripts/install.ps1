@@ -166,6 +166,19 @@ if (-not (Test-Path $ConfigFile)) {
     Write-Ok "Existing config preserved at $ConfigFile"
 }
 
+# --- Configure Windows Firewall (LAN access) ---
+Write-Status "Configuring Windows Firewall rules..."
+# Windows blocks unsolicited inbound TCP by default, which makes the dashboard
+# unreachable from other LAN hosts and stops remote OBS from pushing RTMP.
+# Idempotent: remove any prior rule of the same name before re-adding, so a
+# redeploy never stacks duplicate rules.
+Remove-NetFirewallRule -DisplayName "Restreamer-API-8910" -ErrorAction SilentlyContinue
+New-NetFirewallRule -DisplayName "Restreamer-API-8910" -Direction Inbound -Protocol TCP -LocalPort 8910 -Action Allow -Profile Any | Out-Null
+Write-Ok "Firewall rule added: TCP 8910 (dashboard/API)"
+Remove-NetFirewallRule -DisplayName "Restreamer-RTMP-1234" -ErrorAction SilentlyContinue
+New-NetFirewallRule -DisplayName "Restreamer-RTMP-1234" -Direction Inbound -Protocol TCP -LocalPort 1234 -Action Allow -Profile Any | Out-Null
+Write-Ok "Firewall rule added: TCP 1234 (RTMP ingest)"
+
 # --- Setup scheduled task for auto-start ---
 Write-Status "Setting up auto-start..."
 $exePath = "$InstallDir\$AppName.exe"
