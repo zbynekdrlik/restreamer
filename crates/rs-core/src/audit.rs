@@ -247,6 +247,13 @@ pub enum Action {
     /// Severity::Error. Detail JSON: {backend, message,
     /// consecutive_zero_byte_deaths, backoff_ms}.
     EndpointDeadTarget,
+    /// VPS-side (#353): periodic resource sample (system CPU %, load average,
+    /// memory used/total, rs-delivery process RSS, and best-effort disk
+    /// used/total) emitted ~1/min by the delivery VPS. Mirrored into the host
+    /// `audit_log` so the numbers survive VPS deletion and can back a
+    /// data-driven server-type (tier) choice for the next event. Severity::Info.
+    /// Detail JSON is `resource_sample::ResourceSample`.
+    VpsResourceSample,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -537,6 +544,17 @@ mod tests {
         let a = Action::BufferRefillEnded;
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(s, "\"buffer_refill_ended\"");
+        assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
+    }
+
+    #[test]
+    fn action_vps_resource_sample_serdes() {
+        // #353: the host mirror (`mirror_vps_audit`) STRICT-parses the action
+        // string, so the VPS-emitted `vps_resource_sample` row must round-trip
+        // to this exact variant or the sample never lands in `audit_log`.
+        let a = Action::VpsResourceSample;
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(s, "\"vps_resource_sample\"");
         assert_eq!(serde_json::from_str::<Action>(&s).unwrap(), a);
     }
 
