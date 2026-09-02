@@ -46,7 +46,9 @@ test("FB endpoint shows a red ingestion-health badge, clean console", async ({
   await expect(badge).toBeVisible({ timeout: 10000 });
   // RED — bad health (the silent-discard case).
   await expect(badge).toHaveAttribute("data-health", "bad");
-  await expect(badge).toContainText("bad");
+  // Assert on the visible text span, not the container (which also holds the
+  // hidden tooltip text).
+  await expect(badge.locator(".fb-health-text")).toHaveText("bad");
 
   // The tooltip carries the FB status for the operator on hover.
   await badge.hover();

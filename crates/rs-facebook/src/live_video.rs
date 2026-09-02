@@ -79,6 +79,11 @@ struct GraphErrorEnvelope {
 #[derive(Debug, Deserialize)]
 struct GraphError {
     message: String,
+    /// The Graph API error code (190 = invalid/expired token, 10 / 200-299 =
+    /// permission, 4 / 17 / 32 / 613 = rate limit). The HTTP status is almost
+    /// always 400, so callers must key error handling on THIS, not the status.
+    #[serde(default)]
+    code: Option<i64>,
 }
 
 impl LiveVideo {
@@ -92,9 +97,16 @@ impl LiveVideo {
             .or_else(|| streams.data.first())
     }
 
-    /// `true` when FB reports the object as currently live/receiving.
+    /// `true` when FB reports the object as currently live/receiving. `LIVE` is
+    /// the canonical `live_video.status` value; `SCHEDULED_LIVE` is a scheduled
+    /// broadcast that IS currently live (so its ingest must be inspected, not
+    /// dismissed as "scheduled"); `LIVE_NOW` is accepted defensively (it is the
+    /// page-edge create-status value and simply never matches on a real object).
     pub fn is_live(&self) -> bool {
-        matches!(self.status.as_deref(), Some("LIVE") | Some("LIVE_NOW"))
+        matches!(
+            self.status.as_deref(),
+            Some("LIVE") | Some("LIVE_NOW") | Some("SCHEDULED_LIVE")
+        )
     }
 }
 
@@ -111,9 +123,11 @@ impl StreamHealth {
 /// Fetch the `live_videos` edge for a page and return every returned object.
 /// Caller (`classify_fb_health`) decides which one is the receiving broadcast.
 ///
-/// A non-2xx response is surfaced as [`FacebookError::Api`] carrying the Graph
-/// `error.message` when parseable (so the dashboard can map 190→oauth_invalid,
-/// 200→permission, etc.), never swallowed.
+/// The token is sent as an `Authorization: Bearer` header (NEVER a URL query
+/// param) so it can never appear in a logged error or a redirect. A non-2xx
+/// response is surfaced as [`FacebookError::Api`] carrying the Graph
+/// `error.code` + `message` when parseable (so the caller can map 190 ->
+/// oauth_invalid, 10/200-299 -> permission, etc.), never swallowed.
 pub async fn fetch_page_live_videos(
     access_token: &str,
     page_id: &str,
@@ -122,8 +136,11 @@ pub async fn fetch_page_live_videos(
     if access_token.trim().is_empty() {
         return Err(FacebookError::Other("empty access token".to_string()));
     }
-    if page_id.trim().is_empty() {
-        return Err(FacebookError::Other("empty page id".to_string()));
+    let page_id = page_id.trim();
+    if page_id.is_empty() || !page_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(FacebookError::Other(format!(
+            "invalid page id (must be digits): {page_id:?}"
+        )));
     }
     let url = format!(
         "{}/{}/{}/live_videos",
@@ -131,28 +148,44 @@ pub async fn fetch_page_live_videos(
         api_version.trim_matches('/'),
         page_id
     );
-    let resp = Client::new()
+    // 10 s timeout: this is awaited inline in the delivery-status build loop, so
+    // a hung TLS handshake / Graph call must never stall status + WS updates.
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| FacebookError::Http(e.without_url().to_string()))?;
+    let resp = client
         .get(&url)
-        .query(&[
-            (
-                "fields",
-                "id,status,ingest_streams{stream_health,is_master}",
-            ),
-            ("access_token", access_token),
-        ])
+        .query(&[(
+            "fields",
+            "id,status,ingest_streams{stream_health,is_master}",
+        )])
+        .bearer_auth(access_token)
         .send()
-        .await?;
+        .await
+        .map_err(|e| FacebookError::Http(e.without_url().to_string()))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        let message = serde_json::from_str::<GraphErrorEnvelope>(&body)
-            .map(|e| e.error.message)
-            .unwrap_or(body);
-        return Err(FacebookError::Api { status, message });
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| FacebookError::Http(e.without_url().to_string()))?;
+        let (code, message) = match serde_json::from_str::<GraphErrorEnvelope>(&body) {
+            Ok(e) => (e.error.code, e.error.message),
+            Err(_) => (None, body),
+        };
+        return Err(FacebookError::Api {
+            status,
+            code,
+            message,
+        });
     }
 
-    let parsed: LiveVideosResponse = resp.json().await?;
+    let parsed: LiveVideosResponse = resp
+        .json()
+        .await
+        .map_err(|e| FacebookError::Http(e.without_url().to_string()))?;
     Ok(parsed.data)
 }
 

@@ -117,7 +117,13 @@ pub struct YouTubeOAuthConfig {
 /// empty by default; the FB Graph health probe runs only once the operator sets
 /// `enabled` and a never-expiring Page Access Token, mirroring how
 /// `NotificationsConfig` ships dark. `page_access_token` is masked by the
-/// deny-by-default config redactor (`token` marker).
+/// deny-by-default config redactor (`token` marker). Also settable via
+/// `RESTREAMER_FB_ENABLED` / `RESTREAMER_FB_PAGE_ID` /
+/// `RESTREAMER_FB_PAGE_ACCESS_TOKEN`.
+///
+/// NOTE: `DeliveryOrchestrator` clones `Config` at construction, so toggling
+/// these via `PATCH /api/v1/config` takes effect only after a process restart
+/// (same as every other orchestrator-read config field).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FacebookConfig {
     /// Master switch. When false (default) no FB Graph probe runs.
@@ -508,6 +514,17 @@ impl Config {
         }
         if let Ok(v) = std::env::var("RESTREAMER_OBS_WS_PASSWORD") {
             self.obs.ws_password = v;
+        }
+        // FB ingest monitoring (#166) — lets CI / prod drive it via env/secrets
+        // (parity with RESTREAMER_HETZNER_API_TOKEN) without editing config.json.
+        if let Ok(v) = std::env::var("RESTREAMER_FB_ENABLED") {
+            self.facebook.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("RESTREAMER_FB_PAGE_ID") {
+            self.facebook.page_id = v;
+        }
+        if let Ok(v) = std::env::var("RESTREAMER_FB_PAGE_ACCESS_TOKEN") {
+            self.facebook.page_access_token = v;
         }
     }
 

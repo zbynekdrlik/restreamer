@@ -732,6 +732,7 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 .fb-health-badge .fb-health-dot {
   width: 6px; height: 6px; border-radius: 50%; background: currentColor;
 }
+.fb-health-badge .fb-health-text { font-weight: 600; }
 .fb-health-badge .fb-health-tooltip {
   display: none;
   position: absolute; top: 100%; left: 0; z-index: 10;

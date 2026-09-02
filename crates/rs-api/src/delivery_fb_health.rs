@@ -8,8 +8,20 @@
 //! `live_video`, so the badge is rendered ONLY while an event is delivering
 //! (we ARE pushing). In that context "the page has no receiving live_video"
 //! IS the failure the operator must see, so it maps to `bad` (red), NOT the
-//! neutral grey `noData`. `noData` is reserved for a transient created-but-not-
-//! yet-live object (UNPUBLISHED/PROCESSING) during startup.
+//! neutral grey `noData`. `noData` is reserved only for `PROCESSING` (FB is
+//! transcoding an active ingest); UNPUBLISHED / SCHEDULED_* objects do NOT
+//! count as "receiving" and fall through to `bad`.
+//!
+//! KNOWN LIMITATION (discovery approach, #166 review): this inspects the page's
+//! currently-receiving `live_video` but does NOT correlate it with the specific
+//! endpoint's persistent stream key (a persistent key `FB-<id>-0-<rand>` is not
+//! the per-session `live_video` id, so it cannot be matched directly). If a
+//! SECOND session (a phone Live Producer, the CI broadcast) is live on the same
+//! page while our prod push is being discarded, the page reads `good` — a false
+//! green. This is the documented trade-off of the discovery approach ("fragile
+//! when multiple concurrent sessions exist on one page"); the deferred
+//! create+bind-broadcast follow-up resolves it by polling the exact bound id.
+//! For the church's single-session-per-page reality it is robust.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -52,18 +64,20 @@ pub fn classify_fb_health(videos: &[LiveVideo]) -> FacebookHealth {
         };
     }
 
-    // 2. Created-but-not-yet-receiving (transient delivery startup) → grey.
-    if let Some(v) = videos.iter().find(|v| {
-        matches!(
-            v.status.as_deref(),
-            Some("UNPUBLISHED")
-                | Some("PROCESSING")
-                | Some("SCHEDULED_UNPUBLISHED")
-                | Some("SCHEDULED_LIVE")
-        )
-    }) {
+    // 2. `PROCESSING` = FB is transcoding an active ingest → transient grey.
+    // Deliberately NARROW (only PROCESSING): a church page almost always carries
+    // a `SCHEDULED_*` "next Sunday" broadcast and may carry abandoned
+    // `UNPUBLISHED` Live Producer drafts. Treating those as `noData` would mask
+    // the silent-discard RED with grey while we are actively delivering (#166
+    // review). Since the badge renders ONLY while delivering, a page that shows
+    // no LIVE object and only scheduled/unpublished ones means FB is NOT
+    // ingesting our push — that is the failure, so it falls through to `bad`.
+    if videos
+        .iter()
+        .any(|v| v.status.as_deref() == Some("PROCESSING"))
+    {
         return FacebookHealth {
-            status: v.status.clone().unwrap_or_else(|| "UNPUBLISHED".into()),
+            status: "PROCESSING".into(),
             health: "noData".into(),
             video_bitrate_kbps: None,
             resolution: None,
@@ -73,7 +87,8 @@ pub fn classify_fb_health(videos: &[LiveVideo]) -> FacebookHealth {
         };
     }
 
-    // 3. No receiving/created live_video at all — the silent-discard case. RED.
+    // 3. No receiving live_video — the silent-discard case (incl. a page whose
+    // only objects are scheduled/unpublished/VOD). RED.
     FacebookHealth {
         status: "NO_LIVE_VIDEO".into(),
         health: "bad".into(),
@@ -162,7 +177,9 @@ pub async fn attach_fb_health(
     fb: &FacebookConfig,
     metrics: &mut rs_core::models::DeliveryEndpointMetrics,
 ) {
-    if !fb.enabled || fb.page_access_token.trim().is_empty() || fb.page_id.trim().is_empty() {
+    // Reached only when FB monitoring is enabled (the call site gates on
+    // `facebook.enabled`), so an empty token/page here is a real misconfig.
+    if fb.page_access_token.trim().is_empty() || fb.page_id.trim().is_empty() {
         metrics.facebook_health = Some(unknown_fb("unconfigured", "fb_not_configured"));
         return;
     }
@@ -174,16 +191,20 @@ pub async fn attach_fb_health(
     .await
     {
         Ok(videos) => metrics.facebook_health = Some(classify_fb_health(&videos)),
-        Err(rs_facebook::FacebookError::Api { status: 401, .. }) => {
-            metrics.facebook_health = Some(unknown_fb("unknown", "oauth_invalid"));
-        }
-        Err(rs_facebook::FacebookError::Api { status: 403, .. }) => {
-            metrics.facebook_health = Some(unknown_fb("unknown", "permission"));
-        }
-        Err(rs_facebook::FacebookError::Api { status, .. }) => {
-            metrics.facebook_health = Some(unknown_fb("unknown", &format!("fb_api_{status}")));
+        // Graph returns HTTP 400 for these; the meaning is in `error.code`, not
+        // the HTTP status — so map on the code (#166 review).
+        Err(rs_facebook::FacebookError::Api { code, .. }) => {
+            let reason = match code {
+                Some(190) => "oauth_invalid",
+                Some(10) | Some(200..=299) => "permission",
+                Some(4) | Some(17) | Some(32) | Some(613) => "rate_limited",
+                _ => "fb_api_error",
+            };
+            metrics.facebook_health = Some(unknown_fb("unknown", reason));
         }
         Err(e) => {
+            // `e` is already URL/token-stripped by rs_facebook, but the reason
+            // string is a fixed label anyway.
             tracing::warn!(page_id = %fb.page_id, error = %e, "fb_health probe failed");
             metrics.facebook_health = Some(unknown_fb("unknown", "probe_error"));
         }
@@ -193,6 +214,11 @@ pub async fn attach_fb_health(
 /// Adaptive-TTL wrapper over `attach_fb_health`, keyed per endpoint id. Emits
 /// one `FacebookStatusChanged` audit row on the slow path when the mapped
 /// `health` value changed — parity with `attach_yt_health_cached`.
+///
+/// The cache is keyed per endpoint id (not per page) — with the single-page
+/// config, N FB endpoints on the one page make N identical Graph calls per TTL.
+/// That is acceptable because the church runs a single FB endpoint; a
+/// multi-endpoint multi-page setup is the deferred create+bind follow-up.
 pub async fn attach_fb_health_cached(
     fb: &FacebookConfig,
     endpoint_id: i64,
@@ -200,11 +226,8 @@ pub async fn attach_fb_health_cached(
     metrics: &mut rs_core::models::DeliveryEndpointMetrics,
     audit_tx: Option<&Sender<AuditRow>>,
 ) {
-    let prior_health: Option<String> = fb_health_cache()
-        .get(&endpoint_id)
-        .map(|e| e.value().1.health.clone());
-
-    if let Some(entry) = fb_health_cache().get(&endpoint_id) {
+    // ONE lookup: capture the prior health AND serve a still-fresh snapshot.
+    let prior_health: Option<String> = if let Some(entry) = fb_health_cache().get(&endpoint_id) {
         let (when, h) = entry.value().clone();
         let age = when.elapsed();
         if age < ttl_for_fb_health(&h) {
@@ -213,11 +236,19 @@ pub async fn attach_fb_health_cached(
             metrics.facebook_health = Some(aged);
             return;
         }
-    }
+        Some(h.health)
+    } else {
+        None
+    };
+
     attach_fb_health(fb, metrics).await;
     if let Some(h) = metrics.facebook_health.as_ref() {
         fb_health_cache().insert(endpoint_id, (Instant::now(), h.clone()));
-        if let Some(tx) = audit_tx {
+        // Skip the audit row on a healthy cold start (prior None -> good): only
+        // real transitions are operator-interesting (parity with YT keying on
+        // top_issue, which is None when healthy). #166 review.
+        let suppress_healthy_start = prior_health.is_none() && h.health == "good";
+        if let (Some(tx), false) = (audit_tx, suppress_healthy_start) {
             let _ = record_and_maybe_emit_fb(
                 prior_health.as_deref(),
                 Some(h.health.as_str()),

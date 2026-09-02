@@ -543,10 +543,13 @@ impl DeliveryOrchestrator {
             if let Some(cfg) = configs.iter().find(|c| c.alias == m.alias) {
                 if cfg.youtube_oauth_id.is_some() && cfg.service_type == "YT_RTMP" {
                     attach_yt_health_cached(self.pool(), cfg, &mut m, self.audit_tx()).await;
-                } else if cfg.service_type == "FB" {
+                } else if cfg.service_type == "FB" && self.config().facebook.enabled {
                     // FB ingestion health (#166): ask the Graph API whether FB is
                     // actually decoding what we push (persistent keys silently
                     // discard bytes when unbound). Parity with the YT health badge.
+                    // Gated on `facebook.enabled` so the feature ships DARK — an
+                    // install without FB monitoring leaves facebook_health None
+                    // (no grey badge, no audit noise on every process start).
                     crate::delivery_fb_health::attach_fb_health_cached(
                         &self.config().facebook,
                         cfg.id,
