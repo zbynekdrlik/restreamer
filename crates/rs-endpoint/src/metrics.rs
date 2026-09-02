@@ -13,10 +13,17 @@ pub struct UploadEvent {
     pub at: Instant,
     pub duration_ms: u32,
     pub success: bool,
+    /// Bytes delivered to S3 by this upload (the chunk's `data_size`). Only
+    /// meaningful for `success == true`; failures carry 0 since nothing
+    /// reached the internet. Feeds the outgoing-Mbps history (#77).
+    pub bytes: u64,
 }
 
 pub struct UploadMetrics {
     inner: Mutex<Inner>,
+    /// Historical time-series of outgoing (S3-upload) Mbps for the dashboard
+    /// graph (#77). Has its own lock; never held together with `inner`.
+    throughput: crate::throughput::ThroughputHistory,
 }
 
 struct Inner {
@@ -43,12 +50,19 @@ impl Default for UploadMetrics {
                 adaptive_target: 4,
                 permanent_recent: 0,
             }),
+            throughput: crate::throughput::ThroughputHistory::default(),
         }
     }
 }
 
 impl UploadMetrics {
     pub fn record(&self, event: UploadEvent) {
+        // Feed the outgoing-throughput history on the success path (#77).
+        // A separate lock, taken outside `inner`, so the two never nest.
+        if event.success && event.bytes > 0 {
+            self.throughput
+                .record_bytes(event.bytes, chrono::Utc::now().timestamp_millis());
+        }
         let mut g = self.inner.lock().unwrap();
         if g.ring.len() < RING_CAPACITY {
             g.ring.push(event);
@@ -58,6 +72,12 @@ impl UploadMetrics {
             g.head = (g.head + 1) % RING_CAPACITY;
             g.filled = true;
         }
+    }
+
+    /// Snapshot the outgoing-Mbps history for the dashboard graph (#77).
+    pub fn throughput_series(&self) -> crate::throughput::ThroughputSeries {
+        self.throughput
+            .series(chrono::Utc::now().timestamp_millis())
     }
 
     pub fn set_in_flight(&self, n: usize) {
@@ -321,12 +341,14 @@ mod tests {
                 at: now,
                 duration_ms: 100,
                 success: true,
+                bytes: 0,
             });
         }
         m.record(UploadEvent {
             at: now,
             duration_ms: 5000,
             success: false,
+            bytes: 0,
         });
 
         let s = m.snapshot(Duration::from_secs(60));
@@ -437,6 +459,7 @@ mod tests {
                 at: now,
                 duration_ms: 100,
                 success: true,
+                bytes: 0,
             });
         }
         let s = m.snapshot(Duration::from_secs(60));

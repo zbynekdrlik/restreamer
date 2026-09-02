@@ -1,6 +1,7 @@
 pub mod disk_pressure;
 pub mod metrics;
 pub mod s3;
+pub mod throughput;
 pub mod uploader;
 
 /// Test-only helpers. Compiled only under `cfg(test)` or the `testing`

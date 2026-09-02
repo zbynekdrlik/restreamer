@@ -14,6 +14,7 @@ use super::oauth_authorize::OAuthAuthorize;
 use super::outage_banner::OutageBanner;
 use super::pacing_panel::PacingPanel;
 use super::s3_region_banner::S3RegionBanner;
+use super::mbps_graph::MbpsGraph;
 use super::upload_strip::UploadStrip;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
 use crate::api;
@@ -618,6 +619,9 @@ fn Pipeline() -> impl IntoView {
             </div>
 
             <UploadStrip />
+
+            // --- Outgoing-Mbps history graph (#77) ---
+            <MbpsGraph />
 
             // --- Endpoint tree (branching from VPS) ---
             <EndpointTree />
