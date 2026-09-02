@@ -10,9 +10,9 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: ".",
   testMatch: "youtube-studio-check.spec.ts",
-  // 4 min: the base health/preview flow plus the #249 picture gate
-  // (~60s readiness + 3 samples 10s apart).
-  timeout: 240_000,
+  // 5 min: the base health/preview flow (up to 6x10s retries + host-health
+  // poll) plus the #249 picture gate (~60s readiness + 3 samples 10s apart).
+  timeout: 300_000,
   retries: 0,
   workers: 1,
   reporter: [["list"]],

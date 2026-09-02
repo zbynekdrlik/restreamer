@@ -50,11 +50,23 @@ applied to YouTube's **decoded output** — no health field describes the pixels
 
 ## Secret hygiene (non-negotiable)
 
-The Live Control Room page carries the **stream-key panel**. `playwright-youtube.config.ts`
-sets `screenshot:'off'`, `video:'off'`, `trace:'off'` so Playwright never auto-captures
-the full page. Only the explicit element/canvas captures in the spec are ever written.
-Never add a full-page screenshot to this spec, and never print a stream key / OAuth
-token to the log.
+The Live Control Room page carries the **stream-key panel**. Two facts, stated accurately:
+
+- **The #249 picture gate itself never screenshots** — it reads pixels via in-page
+  `canvas`/`getImageData` of the preview `<video>` only. It writes no image files.
+- **The pre-existing debug screenshots DO capture the full page.** `youtube-studio-check.spec.ts`
+  takes several `page.screenshot({ fullPage: true })` of Studio (incl. the Live Control Room)
+  into a **local box directory** `SCREENSHOT_DIR` (`~/.playwright-yt-screenshots`, NOT the
+  `e2e/playwright-report/` dir that `frontend-e2e` uploads) — so they are **not** currently
+  uploaded as CI artifacts. `playwright-youtube.config.ts` sets `screenshot/video/trace:'off'`
+  as belt-and-suspenders; note this only governs Playwright's *fixture* context, and this spec
+  launches its own `launchPersistentContext`, so for THIS spec the setting is a harmless no-op
+  (those defaults are already off) rather than the thing that protects the key.
+
+**When wiring this into CI (follow-up), the stream-key panel must not leak:** ensure the CI step
+does NOT upload `SCREENSHOT_DIR`, and mask/element-scope (or drop) the pre-existing full-page
+Studio screenshots before an `actions/upload-artifact` ever points at them. Never print a stream
+key / OAuth token to the log.
 
 ## Not yet a wired always-on gate — and why
 

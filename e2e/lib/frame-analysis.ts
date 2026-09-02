@@ -42,6 +42,9 @@ function assertRgba(data: PixelBuffer, w: number, h: number): void {
   }
 }
 
+// Bucket width for the MEAN-RELATIVE distinct-colour count (below).
+const COLOR_BUCKET = 16;
+
 export function analyzeFrame(
   data: PixelBuffer,
   w: number,
@@ -49,6 +52,10 @@ export function analyzeFrame(
 ): FrameAnalysis {
   assertRgba(data, w, h);
   const n = w * h;
+  if (n === 0) {
+    throw new Error("frame-analysis: empty frame (w*h === 0)");
+  }
+  // Pass 1: per-channel mean, stddev, luma.
   let sumR = 0,
     sumG = 0,
     sumB = 0;
@@ -56,8 +63,6 @@ export function analyzeFrame(
     sumG2 = 0,
     sumB2 = 0;
   let sumLuma = 0;
-  const colors = new Set<number>();
-
   for (let p = 0; p < n; p++) {
     const i = p * 4;
     const r = data[i];
@@ -70,19 +75,37 @@ export function analyzeFrame(
     sumG2 += g * g;
     sumB2 += b * b;
     sumLuma += 0.299 * r + 0.587 * g + 0.114 * b;
-    // 4-bit-per-channel quantization -> 12-bit colour key.
-    colors.add(((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4));
   }
+  const meanR = sumR / n;
+  const meanG = sumG / n;
+  const meanB = sumB / n;
 
-  const std = (sum: number, sum2: number): number => {
-    const mean = sum / n;
+  const std = (sum2: number, mean: number): number => {
     // clamp tiny negative from float error before sqrt
-    const variance = Math.max(0, sum2 / n - mean * mean);
-    return Math.sqrt(variance);
+    return Math.sqrt(Math.max(0, sum2 / n - mean * mean));
   };
 
+  // Pass 2: distinct colours, quantized RELATIVE TO THE CHANNEL MEAN. Absolute
+  // 4-bit bucketing splits a uniform field whose mean straddles a 16-level
+  // boundary (e.g. a YUV-zero green ~ (0,135,0) with +/-2 codec noise) into
+  // several "colours", masking the green-video signature. Bucketing the
+  // deviation from the mean instead means a genuinely uniform field collapses
+  // to one bucket regardless of where its mean sits, while a two-tone field
+  // still splits (and is caught by maxStd anyway).
+  const colors = new Set<number>();
+  const q = (v: number, mean: number): number =>
+    Math.round((v - mean) / COLOR_BUCKET) + 8;
+  for (let p = 0; p < n; p++) {
+    const i = p * 4;
+    colors.add(
+      (q(data[i], meanR) << 16) |
+        (q(data[i + 1], meanG) << 8) |
+        q(data[i + 2], meanB),
+    );
+  }
+
   return {
-    maxStd: Math.max(std(sumR, sumR2), std(sumG, sumG2), std(sumB, sumB2)),
+    maxStd: Math.max(std(sumR2, meanR), std(sumG2, meanG), std(sumB2, meanB)),
     distinctColors: colors.size,
     meanLuma: sumLuma / n,
   };

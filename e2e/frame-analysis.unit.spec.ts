@@ -134,6 +134,47 @@ test.describe("frame-analysis: temporal verdict", () => {
   });
 });
 
+test.describe("frame-analysis: bucket-boundary + threshold robustness", () => {
+  // A uniform field whose channel mean straddles a 16-level quantization
+  // boundary (green ~ (0,135,0)) with codec noise must still be FLAT — the
+  // absolute-bucketing false-negative the mean-relative count fixes.
+  test("a uniform green field straddling a bucket boundary is FLAT", () => {
+    const r = rng(11);
+    const boundaryGreen = makeFrame(W, H, () => [
+      Math.round(r() * 4),
+      135 + Math.round(r() * 4 - 2),
+      Math.round(r() * 4),
+    ]);
+    const a = analyzeFrame(boundaryGreen, W, H);
+    expect(a.maxStd).toBeLessThan(6);
+    expect(isFlat(a)).toBe(true);
+  });
+
+  // Lock the FLAT_MAX_STD threshold: a 2-region field with stddev 5 is FLAT
+  // (few colours, low variance); stddev 7 is NOT. (Integer deltas — a
+  // Uint8ClampedArray rounds, so a fractional delta would not survive.)
+  test("FLAT_MAX_STD threshold: stddev 5 flat, 7 not", () => {
+    const twoRegion = (d: number) =>
+      makeFrame(W, H, (x) =>
+        x < W / 2 ? [100 - d, 100 - d, 100 - d] : [100 + d, 100 + d, 100 + d],
+      );
+    // half at mean-d, half at mean+d => stddev = d.
+    expect(analyzeFrame(twoRegion(5), W, H).maxStd).toBeCloseTo(5, 5);
+    expect(isFlat(analyzeFrame(twoRegion(5), W, H))).toBe(true);
+    expect(analyzeFrame(twoRegion(7), W, H).maxStd).toBeCloseTo(7, 5);
+    expect(isFlat(analyzeFrame(twoRegion(7), W, H))).toBe(false);
+  });
+
+  test("analyzeFrame throws on a wrong-length (RGB-not-RGBA) buffer", () => {
+    const rgb = new Uint8ClampedArray(W * H * 3); // 3 bytes/pixel, wrong
+    expect(() => analyzeFrame(rgb, W, H)).toThrow(/RGBA/);
+  });
+
+  test("analyzeFrame throws on an empty frame", () => {
+    expect(() => analyzeFrame(new Uint8ClampedArray(0), 0, 0)).toThrow();
+  });
+});
+
 test.describe("frame-analysis: change/freeze detection", () => {
   test("identical frames have ~zero diff", () => {
     expect(frameDiff(solidGreen, solidGreen, W, H)).toBeLessThan(1);
