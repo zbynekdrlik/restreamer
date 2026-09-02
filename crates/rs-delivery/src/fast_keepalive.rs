@@ -39,10 +39,14 @@ pub fn keepalive_bytes(last_chunk: &Option<Arc<Vec<u8>>>) -> Option<&[u8]> {
 /// endpoints only, leaving the non-fast production church stream with up-to-8s
 /// of dead air + a premature disconnect at every drain — the "few seconds
 /// outage" #124 fixes.
-pub(crate) fn uses_keepalive_bridge(ep_cfg: &crate::api::EndpointConfig) -> bool {
+///
+/// Takes primitives (not `EndpointConfig`) because this module is compiled
+/// into the rs-delivery LIBRARY target too, where `crate::api` does not
+/// exist. `is_rust` is `ep_cfg.pusher == PusherKind::Rust`.
+pub(crate) fn uses_keepalive_bridge(is_fast: bool, is_rust: bool) -> bool {
     // RED placeholder: fast-only (pre-#124 behaviour). Flipped to all
     // rust-pusher endpoints in the GREEN commit.
-    ep_cfg.is_fast && ep_cfg.pusher == rs_core::models::PusherKind::Rust
+    is_fast && is_rust
 }
 
 /// Escalation anchor passed to `keepalive_until_chunk`, measured from
@@ -50,47 +54,42 @@ pub(crate) fn uses_keepalive_bridge(ep_cfg: &crate::api::EndpointConfig) -> bool
 /// last real chunk). Keeping the fresh-reconnect rescue anchored to the LAST
 /// REAL CHUNK is the "rescue never slower than today" invariant (#124):
 /// non-fast subtracts the trigger delay so escalation still fires exactly
-/// `RESCUE_STALL_THRESHOLD_SECS` after the last real chunk, while fast keeps
-/// its prior 8s-from-entry timing byte-for-byte.
+/// `stall_threshold_secs` after the last real chunk, while fast keeps its
+/// prior threshold-from-entry timing byte-for-byte.
+///
+/// `stall_threshold_secs` is `crate::rescue::RESCUE_STALL_THRESHOLD_SECS`,
+/// passed by the caller so this lib-target module needs no `crate::rescue`.
 pub(crate) fn keepalive_escalate_after(
-    _ep_cfg: &crate::api::EndpointConfig,
+    _is_fast: bool,
+    stall_threshold_secs: u64,
 ) -> std::time::Duration {
     // RED placeholder: flat threshold-from-entry for both (pre-#124). Flipped
     // to the per-fast/non-fast anchor in the GREEN commit.
-    std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS)
+    std::time::Duration::from_secs(stall_threshold_secs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn cfg(is_fast: bool, pusher: rs_core::models::PusherKind) -> crate::api::EndpointConfig {
-        crate::api::EndpointConfig {
-            alias: "t".to_string(),
-            service_type: "TEST_FILE".to_string(),
-            stream_key: "k".to_string(),
-            is_fast,
-            chunk_format: "flv".to_string(),
-            start_chunk_id: None,
-            pusher,
-        }
-    }
+    // Stand-in for RESCUE_STALL_THRESHOLD_SECS (8) — that const lives in the
+    // bin-only `crate::rescue`, which this lib-target test cannot import.
+    const STALL: u64 = 8;
 
     #[test]
     fn non_fast_rust_endpoint_uses_keepalive_bridge() {
         // #124: the non-fast production stream MUST bridge the gap on the live
         // session (no dead air, no premature disconnect), not just fast ones.
-        use rs_core::models::PusherKind;
         assert!(
-            uses_keepalive_bridge(&cfg(false, PusherKind::Rust)),
+            uses_keepalive_bridge(false, true),
             "non-fast rust endpoint must use the freeze-frame bridge (#124)"
         );
         assert!(
-            uses_keepalive_bridge(&cfg(true, PusherKind::Rust)),
+            uses_keepalive_bridge(true, true),
             "fast rust endpoint still bridges"
         );
         assert!(
-            !uses_keepalive_bridge(&cfg(false, PusherKind::Ffmpeg)),
+            !uses_keepalive_bridge(false, false),
             "ffmpeg endpoints have no RtmpPusher to bridge"
         );
     }
@@ -101,20 +100,17 @@ mod tests {
         // RESCUE_STALL_THRESHOLD_SECS after the LAST REAL CHUNK — never slower
         // than before. Keepalive is entered ~FAST_KEEPALIVE_TRIGGER_SECS after
         // the last chunk, so the non-fast anchor subtracts that trigger delay.
-        use rs_core::models::PusherKind;
-        let expected_non_fast = std::time::Duration::from_secs(
-            crate::rescue::RESCUE_STALL_THRESHOLD_SECS - FAST_KEEPALIVE_TRIGGER_SECS,
-        );
+        let expected_non_fast = std::time::Duration::from_secs(STALL - FAST_KEEPALIVE_TRIGGER_SECS);
         assert_eq!(
-            keepalive_escalate_after(&cfg(false, PusherKind::Rust)),
+            keepalive_escalate_after(false, STALL),
             expected_non_fast,
             "non-fast escalation must be anchored to the last real chunk (8s), \
              i.e. threshold minus the keepalive trigger delay"
         );
         // Fast keeps its prior 8s-from-entry timing byte-for-byte.
         assert_eq!(
-            keepalive_escalate_after(&cfg(true, PusherKind::Rust)),
-            std::time::Duration::from_secs(crate::rescue::RESCUE_STALL_THRESHOLD_SECS),
+            keepalive_escalate_after(true, STALL),
+            std::time::Duration::from_secs(STALL),
             "fast escalation timing unchanged by #124"
         );
     }
