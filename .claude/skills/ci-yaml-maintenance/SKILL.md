@@ -145,3 +145,57 @@ fail with an ownership error ("owned by itself") — the fallback pacer is
 `timeout N tail -f /dev/null` (blocks reading `/dev/null` for exactly N
 seconds, no `sleep` in the command text) repeated until the dispatch's
 completion notification arrives naturally.
+
+## Asserting a feature DEEP in a job — `sed` job-range, not `grep -A<N>` (#363/#361, 2026-09-02)
+
+The existing self-checks use `grep -A3/-A10 "^  <job>:"` because they check the
+`if:`/`needs:` near the job header. To assert something FAR from the header (a
+firewall rule ~200 lines into `deploy-stream-lan`, a teardown step at the end of
+a job), extract the whole job block by its bracketing headers instead:
+
+```bash
+DEPLOY_BLOCK=$(sed -n '/^  deploy-stream-lan:/,/^  e2e-streaming-test:/p' "$WORKFLOW_FILE")
+echo "$DEPLOY_BLOCK" | grep -qE 'New-NetFirewallRule.*-Direction Inbound.*-LocalPort 1234.*-Action Allow' || exit 1
+```
+
+- Pick the CLOSING anchor = the very next `^  <job>:` header (verify it occurs
+  exactly once). This scoping is what makes the #325 self-match impossible: the
+  self-check lives in `test-integrity` (early in the file), so it is OUTSIDE the
+  sed range and its own grep-pattern line can never match — even when the pattern
+  literally contains the searched string.
+- **Assert per-job, not per-range, when N jobs must each carry the feature.** A
+  single `e2e-obs-youtube-test → e2e-gate` range spans BOTH OBS-streaming jobs, so
+  `grep -q StopRecord` on it passes if only ONE has the teardown. Split into
+  `obs-youtube→fb-push` and `fb-push→e2e-gate` and assert each (real #361 review
+  finding — the one-range guard did not encode "both jobs").
+- Pin the discriminating flags in a firewall/rule assertion (`-Direction Inbound`
+  … `-Action Allow`), or the grep also passes an Outbound/Block rule.
+- A negative directive ("we must NEVER do X") is a whole-file `grep -q` that EXITs
+  on a match — but write the pattern so it can't match its own line (e.g.
+  `requestType = "(StartRecord|ToggleRecord)"` does not match the literal
+  `requestType = "(StartRecord|ToggleRecord)"` because the ERE group needs
+  `StartRecord`/`ToggleRecord` right after the quote, not a literal `(`).
+
+## Syntax-check inline PowerShell before pushing (dev1 is Tier-0, no local pwsh)
+
+A PowerShell PARSE error in a `shell: powershell` step is NOT caught by an inner
+`try/catch` and fails the step (and, for an `if: always()` teardown, the job).
+dev1 can't run PowerShell, so verify a ci.yml PowerShell block against the REAL
+parser on the stream box via MCP before you rely on it: extract the `run:` body,
+strip the YAML indent, base64 it (avoids all quoting), then on stream.lan
+`[System.Management.Automation.Language.Parser]::ParseInput($code,[ref]$t,[ref]$e)`
+and print `$e.Count`. 0 errors = safe. (Also: `shell: powershell` on GitHub
+prepends `$ErrorActionPreference='stop'`, so a bare cmdlet error IS terminating
+and lands in your `catch`; no native exe means `$LASTEXITCODE` stays unset.)
+
+## Cross-repo rig lease (#349/#830): the two runners are DIFFERENT machines
+
+camera-box's `full-path-e2e` gate runs on `[self-hosted, linux, camera-lan]` =
+**dev1 Linux**; restreamer's OBS-driving E2E jobs run on
+`[self-hosted, windows, stream-lan]` = **the Windows stream box (10.77.9.204)**.
+There is NO shared local filesystem between them, so the camera-box #830 lockdir
+design (`/var/tmp/rig-lease/` acquired by atomic `mkdir`, "both runners are the
+same machine") CANNOT coordinate the restreamer side as-is — a lockdir restreamer
+writes locally is invisible to camera-box's dev1 gate. #349 is parked
+needs-decision on the coordination surface (SSH-to-dev1 lease vs shared mount vs
+lock service). Don't implement a stream-box-local lockdir: it is a false guard.
