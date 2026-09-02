@@ -909,6 +909,35 @@ jobs:
 
           echo "OK: auto-release depends on e2e-gate."
 
+      - name: "Verify deploy-stream-lan firewall opens RTMP 1234 (#363)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # Scope to the deploy-stream-lan job block only. This self-check lives
+          # in test-integrity (earlier in the file), so it is OUTSIDE the sed
+          # range and can never self-match its own grep pattern (#325).
+          DEPLOY_BLOCK=$(sed -n '/^  deploy-stream-lan:/,/^  e2e-streaming-test:/p' "$WORKFLOW_FILE")
+          if ! echo "$DEPLOY_BLOCK" | grep -qE 'New-NetFirewallRule.*-LocalPort 1234'; then
+            echo "ERROR: deploy-stream-lan firewall block has no inbound rule for RTMP TCP 1234 (#363)."
+            echo "Remote OBS cannot push RTMP to the CI-deployed stream box without it."
+            exit 1
+          fi
+          echo "OK: deploy-stream-lan opens RTMP TCP 1234."
+
+      - name: "Verify OBS-streaming E2E jobs defensively StopRecord on teardown (#361)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # Scope to the OBS-streaming E2E jobs (obs-youtube through e2e-gate,
+          # which spans e2e-fb-push-stream-lan too). This self-check is in
+          # test-integrity, well before that range -- no self-match (#325).
+          E2E_BLOCK=$(sed -n '/^  e2e-obs-youtube-test:/,/^  e2e-gate:/p' "$WORKFLOW_FILE")
+          if ! echo "$E2E_BLOCK" | grep -qE 'requestType = "StopRecord"'; then
+            echo "ERROR: OBS-streaming E2E teardown never calls StopRecord (#361)."
+            echo "A stray OBS recording (RecordWhenStreaming on the camera-box-owned profile)"
+            echo "can outlive the job and block camera-box's rig-busy-gate."
+            exit 1
+          fi
+          echo "OK: OBS-streaming E2E jobs StopRecord on teardown."
+
   frontend-e2e:
     name: Frontend E2E (Playwright)
     runs-on: ubuntu-latest
