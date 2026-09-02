@@ -72,7 +72,10 @@ jobs:
 
   build-tauri:
     name: Build Tauri app (Windows)
-    needs: validate
+    # build-delivery added (#246): its Linux binary is bundled into the
+    # installer via tauri.conf.json's bundle.resources, so build-tauri must
+    # consume that artifact before `cargo tauri build`.
+    needs: [validate, build-delivery]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -82,6 +85,27 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - name: Download delivery binary (for bundling, #246)
+        uses: actions/download-artifact@v4
+        with:
+          name: delivery-binary
+          path: delivery-artifact
+      - name: Bundle delivery binary into Tauri resources (#246)
+        shell: pwsh
+        run: |
+          # #246: ship the Linux rs-delivery binary inside the installer so the
+          # client's first post-upgrade event never needs github.com. Copy the
+          # build-delivery artifact to the resource path declared in
+          # tauri.conf.json (bundle.resources), then fail LOUD if it is missing
+          # — a broken wiring must never silently ship an installer without it.
+          $src = Get-ChildItem -Path "delivery-artifact" -Recurse -Filter "rs-delivery-*-linux-amd64" |
+            Where-Object { $_.Name -notlike "*.sha256" } | Select-Object -First 1
+          if (-not $src) { throw "delivery binary artifact not found -- cannot bundle (#246)" }
+          Copy-Item $src.FullName "src-tauri/rs-delivery-linux" -Force
+          if (-not (Test-Path "src-tauri/rs-delivery-linux")) { throw "src-tauri/rs-delivery-linux missing after copy" }
+          $size = (Get-Item "src-tauri/rs-delivery-linux").Length
+          Write-Host "Bundled rs-delivery-linux: $size bytes"
+          if ($size -lt 1000000) { throw "bundled binary suspiciously small ($size bytes)" }
       - name: Install Trunk
         # --locked: unpinned transitive deps broke trunk's compile on CI
         # (lightningcss vs cssparser, ci run 29764745978) — build with the

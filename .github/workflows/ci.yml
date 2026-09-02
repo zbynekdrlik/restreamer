@@ -421,7 +421,10 @@ jobs:
 
   build-tauri:
     name: Build Tauri app
-    needs: [lint, test]
+    # build-delivery added (#246): its Linux binary is bundled into the
+    # installer via tauri.conf.json's bundle.resources, so build-tauri must
+    # consume that artifact before `cargo tauri build`.
+    needs: [lint, test, build-delivery]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -429,6 +432,26 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - name: Download delivery binary (for bundling, #246)
+        uses: actions/download-artifact@v4
+        with:
+          name: rs-delivery-binary
+          path: delivery-artifact
+      - name: Bundle delivery binary into Tauri resources (#246)
+        shell: pwsh
+        run: |
+          # #246: ship the Linux rs-delivery binary inside the installer so the
+          # client's first post-upgrade event never needs github.com. Copy the
+          # build-delivery artifact to the resource path declared in
+          # tauri.conf.json (bundle.resources), then fail LOUD if it is missing
+          # — a broken wiring must never silently ship an installer without it.
+          $src = Get-ChildItem -Path "delivery-artifact" -Recurse -Filter "rs-delivery" | Select-Object -First 1
+          if (-not $src) { throw "delivery binary artifact not found -- cannot bundle (#246)" }
+          Copy-Item $src.FullName "src-tauri/rs-delivery-linux" -Force
+          if (-not (Test-Path "src-tauri/rs-delivery-linux")) { throw "src-tauri/rs-delivery-linux missing after copy" }
+          $size = (Get-Item "src-tauri/rs-delivery-linux").Length
+          Write-Host "Bundled rs-delivery-linux: $size bytes"
+          if ($size -lt 1000000) { throw "bundled binary suspiciously small ($size bytes)" }
       - name: Install trunk and wasm-bindgen-cli
         run: |
           # --locked: build each tool with ITS committed Cargo.lock. Without it,
@@ -908,6 +931,23 @@ jobs:
           fi
 
           echo "OK: auto-release depends on e2e-gate."
+      - name: Verify delivery binary is bundled into the installer (#246)
+        run: |
+          # #246: the Linux rs-delivery binary must ship inside the Windows
+          # installer so the client's first post-upgrade event never needs
+          # github.com. If the bundle.resources declaration is dropped, Tauri
+          # silently ships an installer WITHOUT the binary (no build error) and
+          # the client silently falls back to the GitHub download — the exact
+          # regression this guards. (The staging steps in both build-tauri jobs
+          # are additionally protected at build time: a declared-but-missing
+          # resource fails `cargo tauri build`, and each stage step throws on a
+          # missing copy.)
+          TAURI_CONF="src-tauri/tauri.conf.json"
+          if ! grep -q '"rs-delivery-linux"' "$TAURI_CONF"; then
+            echo "ERROR: $TAURI_CONF must declare rs-delivery-linux in bundle.resources (#246)"
+            exit 1
+          fi
+          echo "OK: tauri.conf.json declares the bundled delivery binary."
 
   frontend-e2e:
     name: Frontend E2E (Playwright)

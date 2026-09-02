@@ -42,3 +42,8 @@ soak-*.png
 # src-tauri/icons/, etc.). Scoped to repo root only.
 /*.png
 /*.jpeg
+
+# Bundled Linux delivery binary — a build artifact copied into src-tauri/ by CI
+# (both build-tauri jobs) so Tauri's bundle.resources ships it in the installer
+# (#246). Never committed — it is the 8.6MB rs-delivery release binary.
+/src-tauri/rs-delivery-linux

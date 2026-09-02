@@ -91,12 +91,39 @@ fn github_release_url(client_version: &str) -> String {
 /// absent. Prefers the bundled sidecar shipped with the install; falls back to
 /// the GitHub release when no bundle is available (dev builds, older installs).
 pub fn resolve_binary_source(
-    _bundled: Option<std::path::PathBuf>,
+    bundled: Option<std::path::PathBuf>,
     client_version: &str,
 ) -> BinarySource {
-    // NOTE: current behavior — reaches GitHub even when a bundled binary is
-    // present. Fixed in the GREEN commit (#246).
-    BinarySource::GitHubRelease(github_release_url(client_version))
+    match bundled {
+        Some(path) => BinarySource::Bundled(path),
+        None => BinarySource::GitHubRelease(github_release_url(client_version)),
+    }
+}
+
+/// File name of the bundled Linux delivery binary shipped as a Tauri
+/// `bundle.resources` sidecar (release installer only).
+const BUNDLED_BINARY_NAME: &str = "rs-delivery-linux";
+
+/// Candidate on-disk locations for the bundled Linux binary, relative to the
+/// running executable's directory. Multiple candidates keep the lookup robust
+/// to Tauri/NSIS resource placement.
+fn bundled_candidates(exe_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![
+        exe_dir.join(BUNDLED_BINARY_NAME),
+        exe_dir.join("resources").join(BUNDLED_BINARY_NAME),
+    ]
+}
+
+/// Locate the bundled Linux delivery binary shipped with this install, if any.
+/// Searches next to the running executable; `None` when no bundle is present
+/// (dev builds, older installs, or an unexpected placement) so the caller falls
+/// back to the GitHub release.
+fn find_bundled_binary() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    bundled_candidates(exe_dir)
+        .into_iter()
+        .find(|p| p.is_file())
 }
 
 /// Post-boot gate: does the VPS-reported version match the client's?
@@ -171,12 +198,30 @@ pub async fn ensure_bucket_binary(
         );
         return Ok(None);
     }
-    warn!(
-        client_version,
-        "delivery binary lockstep: rs-delivery-{client_version} absent, uploading from release"
-    );
-    let sha = upload_release_binary(config, client_version).await?;
-    Ok(Some(sha))
+    // The versioned key is missing from the client bucket (typically the first
+    // event after a version upgrade). Prefer the Linux binary bundled inside
+    // this install — uploading it needs NO external network, so event start
+    // never depends on github.com (#246). Fall back to the GitHub release only
+    // when no bundle is present (dev builds, older installs).
+    match resolve_binary_source(find_bundled_binary(), client_version) {
+        BinarySource::Bundled(path) => {
+            warn!(
+                client_version,
+                bundled = %path.display(),
+                "delivery binary lockstep: rs-delivery-{client_version} absent, uploading bundled binary (no GitHub)"
+            );
+            let sha = upload_bundled_binary(config, client_version, &path).await?;
+            Ok(Some(sha))
+        }
+        BinarySource::GitHubRelease(_) => {
+            warn!(
+                client_version,
+                "delivery binary lockstep: rs-delivery-{client_version} absent and no bundled binary, uploading from GitHub release"
+            );
+            let sha = upload_release_binary(config, client_version).await?;
+            Ok(Some(sha))
+        }
+    }
 }
 
 /// Anonymous HEAD of `{endpoint}/{bucket}/rs-delivery-{client_version}`.
@@ -285,10 +330,48 @@ async fn upload_release_binary(
 
     // Upload under the versioned immutable key (public-read so cloud-init
     // fetches anonymously).
+    upload_verified_binary(config, client_version, &bin_bytes).await
+}
+
+/// Read the bundled Linux binary from `path` and upload it to the versioned
+/// immutable key — no GitHub, no network fetch (the #246 zero-dependency path).
+/// The file ships inside the signed installer in an admin-only directory, so it
+/// is trusted (no external sha sidecar); its sha256 is recorded for the audit.
+async fn upload_bundled_binary(
+    config: &rs_core::config::Config,
+    client_version: &str,
+    path: &std::path::Path,
+) -> anyhow::Result<String> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("read bundled binary {}", path.display()))?;
+    if bytes.is_empty() {
+        return Err(anyhow!(
+            "bundled binary {} is empty — refusing to upload",
+            path.display()
+        ));
+    }
+    info!(
+        version = client_version,
+        bytes = bytes.len(),
+        path = %path.display(),
+        "delivery binary lockstep: using bundled binary (no GitHub)"
+    );
+    upload_verified_binary(config, client_version, &bytes).await
+}
+
+/// Upload `bytes` to the versioned immutable key with public-read ACL (so
+/// cloud-init fetches anonymously) and return their sha256. Shared by the
+/// GitHub-release and bundled-binary paths.
+async fn upload_verified_binary(
+    config: &rs_core::config::Config,
+    client_version: &str,
+    bytes: &[u8],
+) -> anyhow::Result<String> {
+    let actual = sha256_hex(bytes);
     let key = binary_key(client_version);
     let s3 = rs_endpoint::s3::S3Client::new(&config.s3)
         .map_err(|e| anyhow!("S3Client::new for binary upload: {e}"))?;
-    s3.upload_public_object(&key, &bin_bytes, "application/octet-stream")
+    s3.upload_public_object(&key, bytes, "application/octet-stream")
         .await
         .map_err(|e| anyhow!("upload {key}: {e}"))?;
     info!(
@@ -297,7 +380,6 @@ async fn upload_release_binary(
         key = %key,
         "delivery binary lockstep: uploaded versioned binary (public-read)"
     );
-
     Ok(actual)
 }
 
@@ -498,6 +580,14 @@ mod tests {
             }
             other => panic!("expected GitHubRelease, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bundled_candidates_are_relative_to_exe_dir() {
+        let dir = std::path::Path::new("/opt/restreamer");
+        let c = bundled_candidates(dir);
+        assert!(c.contains(&dir.join("rs-delivery-linux")));
+        assert!(c.contains(&dir.join("resources").join("rs-delivery-linux")));
     }
 
     #[test]
