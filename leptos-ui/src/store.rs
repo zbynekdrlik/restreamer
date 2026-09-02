@@ -226,6 +226,11 @@ pub struct DashboardStore {
     // Number of orphaned delivery VPS still billing (#352). Polled from
     // `/status`; drives the VpsOrphanBanner. Defaults 0 (assume none).
     pub vps_orphan_count: RwSignal<u8>,
+
+    // #84: whether the current delivery has been running longer than the
+    // operator threshold (default 2.5 h). Polled from `/status`; drives the
+    // LongStreamBanner. Defaults false until the first poll lands.
+    pub long_stream_warning: RwSignal<bool>,
 }
 
 impl DashboardStore {
@@ -255,6 +260,7 @@ impl DashboardStore {
             ingest_skew_ms: RwSignal::new(0),
             ingest_skew_active: RwSignal::new(false),
             vps_orphan_count: RwSignal::new(0),
+            long_stream_warning: RwSignal::new(false),
         }
     }
 

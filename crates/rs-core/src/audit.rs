@@ -261,6 +261,14 @@ pub enum Action {
     /// data-driven server-type (tier) choice for the next event. Severity::Info.
     /// Detail JSON is `resource_sample::ResourceSample`.
     VpsResourceSample,
+    /// #84: a single delivery has been running longer than
+    /// `delivery.long_stream_warn_secs` (default 2.5 h) — a heads-up that the
+    /// stream may have been left on after the event finished. Emitted ONCE per
+    /// delivery by the delivery health monitor (`LongStreamWarner` re-arms when
+    /// a new delivery starts). Severity::Warn, Source::Delivery. Detail JSON:
+    /// {elapsed_secs, threshold_secs}. Routed to the operator's Discord as a
+    /// standalone heads-up (NOT an outage episode) — see `notify::classify`.
+    LongStreamWarning,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

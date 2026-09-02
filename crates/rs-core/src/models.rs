@@ -381,6 +381,13 @@ pub struct ServiceStatus {
     /// Defaults to 0 (assume none) so an absent/older field never false-alarms.
     #[serde(default)]
     pub vps_orphan_count: u8,
+    /// #84: whether the current delivery has been running longer than
+    /// `delivery.long_stream_warn_secs` (default 2.5 h). Drives the dashboard
+    /// LongStreamBanner. Computed live on every poll, so it clears the moment
+    /// delivery stops. Defaults false so an absent/older field never
+    /// false-alarms.
+    #[serde(default)]
+    pub long_stream_warning: bool,
 }
 
 fn default_true() -> bool {

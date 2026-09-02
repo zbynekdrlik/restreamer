@@ -522,6 +522,7 @@ mod tests {
         ("api.tls_key", false),
         ("client_uuid", false),
         ("delivery.delivery_delay_secs", false),
+        ("delivery.long_stream_warn_secs", false),
         ("delivery.orphan_delete_grace_secs", false),
         ("delivery.orphan_detect_grace_secs", false),
         ("delivery.orphan_sweep_interval_secs", false),

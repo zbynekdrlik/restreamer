@@ -13,6 +13,7 @@ mod endpoints;
 mod header;
 pub mod ingest_skew_banner;
 pub mod mbps_graph;
+pub mod long_stream_banner;
 mod operator_dashboard;
 pub mod outage_banner;
 pub mod pacing_panel;

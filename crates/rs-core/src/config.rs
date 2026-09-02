@@ -366,6 +366,13 @@ pub struct DeliveryConfig {
     /// is therefore never classified as an orphan regardless of age.
     #[serde(default = "default_orphan_delete_grace_secs")]
     pub orphan_delete_grace_secs: u64,
+    /// #84: warn the operator when a single delivery has been running longer
+    /// than this many seconds — a heads-up that a stream may have been left on
+    /// after the event finished ("potentially not finished stream"). Default
+    /// 9000 s (2.5 h). `0` disables the warning entirely. Not a credential
+    /// (a plain duration), so it is classified `readable` in CONFIG_INVENTORY.
+    #[serde(default = "default_long_stream_warn_secs")]
+    pub long_stream_warn_secs: u64,
 }
 
 fn default_delivery_delay_secs() -> u64 {
@@ -384,6 +391,10 @@ fn default_orphan_delete_grace_secs() -> u64 {
     10800
 }
 
+fn default_long_stream_warn_secs() -> u64 {
+    9000
+}
+
 impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
@@ -391,6 +402,7 @@ impl Default for DeliveryConfig {
             orphan_sweep_interval_secs: default_orphan_sweep_interval_secs(),
             orphan_detect_grace_secs: default_orphan_detect_grace_secs(),
             orphan_delete_grace_secs: default_orphan_delete_grace_secs(),
+            long_stream_warn_secs: default_long_stream_warn_secs(),
         }
     }
 }
