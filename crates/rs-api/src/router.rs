@@ -28,6 +28,12 @@ pub fn build_router(state: AppState) -> Router {
     build_router_with_gate(state, gate)
 }
 
+/// Inner fallback for the nested `/api/v1` router: an unmatched API path is a
+/// 404, never the SPA HTML (#248).
+async fn api_not_found() -> axum::http::StatusCode {
+    axum::http::StatusCode::NOT_FOUND
+}
+
 /// Build the router around an existing access gate.
 pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::AccessGate>) -> Router {
     let api = Router::new()
@@ -220,7 +226,14 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
         .route(
             "/_test/oauth-device-grant",
             post(crate::oauth_device::test_grant_now),
-        );
+        )
+        // Unknown `/api/v1/*` paths must 404 as an API, NOT fall through to the
+        // SPA fallback below (#248): the embedded/on-disk frontend serves
+        // index.html for any unmatched route, which is correct for client-side
+        // routes but wrong for a typo'd API endpoint. An explicit inner
+        // fallback stops the nested API delegating unmatched paths to the outer
+        // SPA fallback.
+        .fallback(api_not_found);
 
     // Same-origin only (#339). The dashboard is served by this very process
     // (`compute_api_base()` returns `window.location.origin + '/api/v1'`), so
