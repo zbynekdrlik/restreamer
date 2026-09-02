@@ -470,6 +470,10 @@ impl RtmpPusher {
             tracing::error!(
                 av_skew_ms,
                 max_av_skew_ms = crate::skew::MAX_AV_SKEW_MS,
+                // #359: which regime tripped — Normal (4000 ms threshold) or the
+                // DriftHold hard cap (SKEW_HOLD_MAX_MS) — so this line and the
+                // SkewTracker's own trip log agree on the acting threshold.
+                mode = ?self.skew.mode(),
                 a_out = max_audio_output_ts,
                 v_out = max_video_output_ts,
                 trip_count = self.skew.trip_count(),

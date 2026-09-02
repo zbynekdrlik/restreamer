@@ -63,6 +63,14 @@ pub const SKEW_STEP_JUMP_MS: i64 = 2_000;
 /// (#359) Window (ms) within which a fresh trip counts as CHAINED to the
 /// previous — the death-loop signal (a converged STEP never re-trips; the #359
 /// re-trips were 61–442 s apart). Also the `DriftHold` decay window. 10 min.
+///
+/// COVERED RATE RANGE: this bounds the hold to drifts whose time-to-threshold
+/// (≈ `MAX_AV_SKEW_MS / rate`) is under this window — i.e. drift rates ≳ 6.7 ms/s
+/// (`4000 ms / 600 s`), which fully covers the observed #359 signature
+/// (~20–26 ms/s). A much slower drift (< ~6.7 ms/s) re-trips > 10 min apart, so
+/// it is never chained and still reconnects every time-to-threshold (a far
+/// slower loop, ≤ ~6/h, not the observed ~59/h) — a distinct, longer-baseline
+/// drift-rate estimator is the proper fix, tracked as a follow-up.
 pub const SKEW_LOOP_WINDOW_MS: u64 = 600_000;
 
 /// (#359) Consecutive CHAINED DRIFT-class trips that force `DriftHold`. 2 = one
@@ -418,10 +426,12 @@ impl SkewTracker {
             GuardMode::DriftHold => {
                 // Safety net: the hard cap still kills (the debounce already
                 // required |skew| > SKEW_HOLD_MAX_MS). Stay in hold.
+                let held_for_ms = self.hold_since_ms.map(|h| now_ms.saturating_sub(h));
                 tracing::error!(
                     skew_ms = self.last_skew_ms,
                     hard_cap_ms = SKEW_HOLD_MAX_MS,
                     loop_streak = self.loop_streak,
+                    held_for_ms,
                     trip_count = self.trip_count + 1,
                     "rtmp_push: A/V skew HARD-CAP trip in DriftHold -- reconnecting a non-converging drift (#359)"
                 );
