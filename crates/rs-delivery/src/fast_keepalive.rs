@@ -43,10 +43,13 @@ pub fn keepalive_bytes(last_chunk: &Option<Arc<Vec<u8>>>) -> Option<&[u8]> {
 /// Takes primitives (not `EndpointConfig`) because this module is compiled
 /// into the rs-delivery LIBRARY target too, where `crate::api` does not
 /// exist. `is_rust` is `ep_cfg.pusher == PusherKind::Rust`.
-pub(crate) fn uses_keepalive_bridge(is_fast: bool, is_rust: bool) -> bool {
-    // RED placeholder: fast-only (pre-#124 behaviour). Flipped to all
-    // rust-pusher endpoints in the GREEN commit.
-    is_fast && is_rust
+pub(crate) fn uses_keepalive_bridge(_is_fast: bool, is_rust: bool) -> bool {
+    // #124: ALL rust-pusher endpoints bridge the gap on the live session —
+    // fast AND non-fast. Only the ffmpeg path (no RtmpPusher handle) keeps the
+    // old drop-then-reconnect rescue. Before #124 this was fast-only, which
+    // left the non-fast production church stream with up-to-8s of dead air +
+    // a premature disconnect at every drain (the "few seconds outage").
+    is_rust
 }
 
 /// Escalation anchor passed to `keepalive_until_chunk`, measured from
@@ -60,12 +63,21 @@ pub(crate) fn uses_keepalive_bridge(is_fast: bool, is_rust: bool) -> bool {
 /// `stall_threshold_secs` is `crate::rescue::RESCUE_STALL_THRESHOLD_SECS`,
 /// passed by the caller so this lib-target module needs no `crate::rescue`.
 pub(crate) fn keepalive_escalate_after(
-    _is_fast: bool,
+    is_fast: bool,
     stall_threshold_secs: u64,
 ) -> std::time::Duration {
-    // RED placeholder: flat threshold-from-entry for both (pre-#124). Flipped
-    // to the per-fast/non-fast anchor in the GREEN commit.
-    std::time::Duration::from_secs(stall_threshold_secs)
+    if is_fast {
+        // Fast endpoints: unchanged threshold-from-entry timing (pre-#124).
+        std::time::Duration::from_secs(stall_threshold_secs)
+    } else {
+        // #124: non-fast enters keepalive ~FAST_KEEPALIVE_TRIGGER_SECS after
+        // the last real chunk, so subtract that delay — escalation to the
+        // fresh-reconnect rescue still fires exactly stall_threshold_secs after
+        // the last real chunk, never slower than before #124.
+        std::time::Duration::from_secs(
+            stall_threshold_secs.saturating_sub(FAST_KEEPALIVE_TRIGGER_SECS),
+        )
+    }
 }
 
 #[cfg(test)]
