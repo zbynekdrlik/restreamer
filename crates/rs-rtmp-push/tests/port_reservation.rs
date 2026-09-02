@@ -16,7 +16,6 @@
 //! deterministically (no timing dependence): the reserved port must be OWNED
 //! the instant reservation returns.
 
-#[path = "common/mod.rs"]
 mod common;
 
 #[tokio::test]

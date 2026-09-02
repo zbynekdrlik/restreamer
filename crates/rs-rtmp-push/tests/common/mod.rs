@@ -51,7 +51,7 @@ pub async fn reserved_loopback_listener() -> (TcpListener, u16) {
 /// This replaces `rtmp::rtmp::RtmpServer::run()` — which binds by address
 /// string and cannot adopt an existing socket — so the harness can keep the
 /// reserved listener from the moment of port discovery (no close→rebind TOCTOU,
-/// #148). It mirrors xiu's own accept loop exactly: one `ServerSession::new(
+/// #148). It mirrors xiu's own accept loop structurally: one `ServerSession::new(
 /// stream, sender, gop_num, None)` spawned per accepted connection. Returns
 /// (ending the server task) when `accept()` errors, matching xiu's behaviour.
 async fn run_xiu_accept_loop(
@@ -70,7 +70,13 @@ async fn run_xiu_accept_loop(
         let mut session = ServerSession::new(stream, event_sender.clone(), gop_num, None);
         tokio::spawn(async move {
             if let Err(e) = session.run().await {
-                log::debug!("xiu test session ended: {e}");
+                // Carry xiu's own per-session context (app/stream) so a session
+                // that dies on CI is diagnosable, as xiu's own loop does.
+                log::debug!(
+                    "xiu test session ended: app={}, stream={}, err={e}",
+                    session.app_name,
+                    session.stream_name
+                );
             }
         });
     }
