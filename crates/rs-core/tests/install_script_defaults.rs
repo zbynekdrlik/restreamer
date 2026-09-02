@@ -300,6 +300,69 @@ fn install_script_never_references_the_deleted_nbg1_bucket() {
     }
 }
 
+/// True if an EXECUTABLE `New-NetFirewallRule` statement opens inbound TCP on
+/// `port` with an Allow action. `code_lines` has already stripped comments, so a
+/// rule that only appears in a comment (documented but never run) cannot satisfy
+/// this — the rule must be live script code.
+fn declares_inbound_tcp_allow_rule(lines: &[CodeLine], port: u16) -> bool {
+    let port_flag = format!("-LocalPort {port}");
+    lines.iter().any(|l| {
+        let c = &l.code;
+        c.contains("New-NetFirewallRule")
+            && c.contains(&port_flag)
+            && c.contains("-Protocol TCP")
+            && c.contains("-Direction Inbound")
+            && c.contains("-Action Allow")
+    })
+}
+
+/// #108: a fresh install must open the LAN-facing ports itself. Windows' default
+/// inbound policy blocks unsolicited TCP, so without these rules the dashboard
+/// (8910) is unreachable from other hosts and remote OBS cannot push RTMP (1234)
+/// — verified live on stream.lan, where only an 8910 rule (from the CI deploy's
+/// own block) existed and 1234 had no rule at all.
+#[test]
+fn install_script_opens_firewall_for_dashboard_and_rtmp_ports() {
+    let lines = code_lines(&install_script());
+    assert!(
+        declares_inbound_tcp_allow_rule(&lines, 8910),
+        "install.ps1 must declare an inbound TCP Allow firewall rule for the \
+         dashboard/API port 8910 (LAN access is blocked without it, #108)"
+    );
+    assert!(
+        declares_inbound_tcp_allow_rule(&lines, 1234),
+        "install.ps1 must declare an inbound TCP Allow firewall rule for the \
+         RTMP ingest port 1234 (remote OBS push is blocked without it, #108)"
+    );
+}
+
+/// The firewall rules must be idempotent — re-running the installer (redeploys
+/// are routine) must not stack duplicate rules. The proven pattern (mirrored
+/// from the CI deploy block) is a `Remove-NetFirewallRule` before each
+/// `New-NetFirewallRule` for the same DisplayName.
+#[test]
+fn install_script_firewall_rules_are_idempotent() {
+    let lines = code_lines(&install_script());
+    let news = lines
+        .iter()
+        .filter(|l| l.code.contains("New-NetFirewallRule"))
+        .count();
+    let removes = lines
+        .iter()
+        .filter(|l| l.code.contains("Remove-NetFirewallRule"))
+        .count();
+    assert!(
+        news >= 2,
+        "expected at least 2 New-NetFirewallRule statements (8910 + 1234), found {news}"
+    );
+    assert!(
+        removes >= news,
+        "each New-NetFirewallRule must be preceded by a Remove-NetFirewallRule for the same \
+         DisplayName so re-running install.ps1 does not stack duplicate rules \
+         (found {removes} Remove vs {news} New)"
+    );
+}
+
 fn install_script() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install.ps1");
     std::fs::read_to_string(&path)
