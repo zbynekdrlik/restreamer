@@ -189,6 +189,10 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
         .route("/youtube/status", get(youtube::youtube_status))
         .route("/youtube/oauths", get(youtube::list_oauths))
         .route(
+            "/youtube/oauths/stream-keys",
+            get(crate::oauth_stream_keys::list_oauth_stream_keys),
+        )
+        .route(
             "/youtube/oauth/device-start",
             post(crate::oauth_device::device_start),
         )

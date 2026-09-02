@@ -41,6 +41,9 @@ pub mod handlers;
 pub mod internet_probe;
 pub mod metrics_handlers;
 pub mod oauth_device;
+pub mod oauth_stream_keys;
+#[cfg(test)]
+mod oauth_stream_keys_tests;
 pub mod obs;
 #[cfg(test)]
 mod on_vps_ready_tests;

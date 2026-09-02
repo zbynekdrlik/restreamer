@@ -241,8 +241,33 @@ pub struct EndpointConfig {
     pub position_last: i64,
     pub delivered_bytes: i64,
     pub is_fast: bool,
+    /// FK into `youtube_oauth(id)` — which OAuth grant this YT endpoint is
+    /// linked to. `#[serde(default)]` keeps parsing responses that predate
+    /// the field. `None` => not linked.
+    #[serde(default)]
+    pub youtube_oauth_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// One authorized YouTube OAuth grant (from `GET /youtube/oauths`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OAuthGrant {
+    pub id: i64,
+    pub label: String,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub connected_at: Option<String>,
+}
+
+/// Per-grant owned ingestion stream names (from
+/// `GET /youtube/oauths/stream-keys`) — powers the edit-dialog auto-suggest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OauthStreamKeys {
+    pub oauth_id: i64,
+    #[serde(default)]
+    pub stream_names: Vec<String>,
 }
 
 async fn http_get<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String> {
@@ -622,6 +647,38 @@ pub struct UpdateEndpointRequest {
 
 pub async fn update_endpoint(id: i64, req: &UpdateEndpointRequest) -> Result<(), String> {
     http_put_json(&format!("/endpoints/{id}"), req).await
+}
+
+/// List authorized YouTube OAuth grants (for the edit-endpoint OAuth dropdown).
+pub async fn list_oauth_grants() -> Result<Vec<OAuthGrant>, String> {
+    http_get("/youtube/oauths").await
+}
+
+/// Per-grant owned ingestion stream names (auto-suggest source).
+pub async fn list_oauth_stream_keys() -> Result<Vec<OauthStreamKeys>, String> {
+    http_get("/youtube/oauths/stream-keys").await
+}
+
+/// Link (or, with `None`, unlink) an OAuth grant to an endpoint.
+/// `POST /endpoints/{id}/link-oauth` returns 204 No Content, so this does
+/// not parse a response body — any 2xx is success.
+pub async fn link_endpoint_oauth(id: i64, oauth_id: Option<i64>) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Body {
+        oauth_id: Option<i64>,
+    }
+    let url = format!("{}/endpoints/{id}/link-oauth", api_base());
+    let resp = gloo_net::http::Request::post(&url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&Body { oauth_id }).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Request error: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {e}"))?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(())
 }
 
 // Event-Endpoint Assignment API

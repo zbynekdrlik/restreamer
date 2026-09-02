@@ -24,11 +24,27 @@ pub fn EndpointsView() -> impl IntoView {
     let (saving, set_saving) = signal(false);
     let (show_edit_key, set_show_edit_key) = signal(false);
 
+    // #199: OAuth grant linkage state for the edit form.
+    let (grants, set_grants) = signal::<Vec<api::OAuthGrant>>(Vec::new());
+    let (stream_key_map, set_stream_key_map) = signal::<Vec<api::OauthStreamKeys>>(Vec::new());
+    let (edit_oauth_id, set_edit_oauth_id) = signal::<Option<i64>>(None);
+    let (edit_orig_oauth_id, set_edit_orig_oauth_id) = signal::<Option<i64>>(None);
+    let (edit_suggest_none, set_edit_suggest_none) = signal(false);
+
     // Refresh on mount
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
             if let Ok(eps) = api::list_endpoints().await {
                 store.endpoints_list.set(eps);
+            }
+            // OAuth grants + per-grant owned stream keys for the edit-dialog
+            // dropdown + auto-suggest. Best-effort: absence just disables the
+            // suggestion, the dropdown still works.
+            if let Ok(g) = api::list_oauth_grants().await {
+                set_grants.set(g);
+            }
+            if let Ok(m) = api::list_oauth_stream_keys().await {
+                set_stream_key_map.set(m);
             }
         });
     });
@@ -60,6 +76,29 @@ pub fn EndpointsView() -> impl IntoView {
         set_edit_key.set(ep.stream_key.clone());
         set_edit_enabled.set(ep.enabled);
         set_edit_fast.set(ep.is_fast);
+        set_edit_orig_oauth_id.set(ep.youtube_oauth_id);
+
+        // #199 auto-suggest: for a YT endpoint with no current link, pre-select
+        // the grant that UNIQUELY owns this endpoint's stream key. If none owns
+        // it, flag the "authorize the channel" hint. Ambiguous (>1) => no pick.
+        let mut chosen = ep.youtube_oauth_id;
+        let mut suggest_none = false;
+        if ep.service_type == "YT_RTMP" && ep.youtube_oauth_id.is_none() {
+            let key = ep.stream_key.clone();
+            let map = stream_key_map.get_untracked();
+            let owners: Vec<i64> = map
+                .iter()
+                .filter(|g| g.stream_names.iter().any(|n| *n == key))
+                .map(|g| g.oauth_id)
+                .collect();
+            if owners.len() == 1 {
+                chosen = Some(owners[0]);
+            } else if owners.is_empty() && !key.is_empty() && !map.is_empty() {
+                suggest_none = true;
+            }
+        }
+        set_edit_oauth_id.set(chosen);
+        set_edit_suggest_none.set(suggest_none);
         set_editing_id.set(Some(ep.id));
     };
 
@@ -79,6 +118,8 @@ pub fn EndpointsView() -> impl IntoView {
         let key = edit_key.get();
         let enabled = edit_enabled.get();
         let is_fast = edit_fast.get();
+        let oauth_id = edit_oauth_id.get();
+        let orig_oauth_id = edit_orig_oauth_id.get();
 
         if alias.is_empty() {
             set_error.set(Some("Alias cannot be empty".to_string()));
@@ -96,6 +137,16 @@ pub fn EndpointsView() -> impl IntoView {
             };
             match api::update_endpoint(id, &req).await {
                 Ok(_) => {
+                    // #199: persist the OAuth grant linkage only when it
+                    // changed, so an unrelated save does not emit a spurious
+                    // ConfigChanged audit row.
+                    if oauth_id != orig_oauth_id {
+                        if let Err(e) = api::link_endpoint_oauth(id, oauth_id).await {
+                            set_error.set(Some(format!("OAuth link failed: {e}")));
+                            set_saving.set(false);
+                            return;
+                        }
+                    }
                     set_editing_id.set(None);
                     set_error.set(None);
                     set_show_edit_key.set(false);
@@ -214,6 +265,49 @@ pub fn EndpointsView() -> impl IntoView {
                                                     })
                                                 }
                                             }
+                                            {
+                                                // #199: OAuth grant link/unlink — YT_RTMP only.
+                                                move || (edit_type.get() == "YT_RTMP").then(|| view! {
+                                                    <div class="edit-row">
+                                                        <label>"OAuth grant"</label>
+                                                        <select
+                                                            class="edit-oauth-select"
+                                                            data-testid="edit-oauth-select"
+                                                            on:change=move |ev| {
+                                                                let v = event_target_value(&ev);
+                                                                set_edit_oauth_id.set(v.parse::<i64>().ok());
+                                                                set_edit_suggest_none.set(false);
+                                                            }
+                                                        >
+                                                            <option value="" selected=move || edit_oauth_id.get().is_none()>
+                                                                "(unlink)"
+                                                            </option>
+                                                            {move || grants.get().into_iter().map(|g| {
+                                                                let gid = g.id;
+                                                                let ch = g.channel_id.clone().unwrap_or_default();
+                                                                let text = if ch.is_empty() {
+                                                                    g.label.clone()
+                                                                } else {
+                                                                    format!("{} ({ch})", g.label)
+                                                                };
+                                                                view! {
+                                                                    <option
+                                                                        value=gid.to_string()
+                                                                        selected=move || edit_oauth_id.get() == Some(gid)
+                                                                    >
+                                                                        {text}
+                                                                    </option>
+                                                                }
+                                                            }).collect::<Vec<_>>()}
+                                                        </select>
+                                                    </div>
+                                                })
+                                            }
+                                            {move || (edit_type.get() == "YT_RTMP" && edit_suggest_none.get()).then(|| view! {
+                                                <div class="oauth-suggest-hint" data-testid="oauth-suggest-hint">
+                                                    "No grant owns this stream key \u{2014} authorize the channel that does via \"Authorize new channel\"."
+                                                </div>
+                                            })}
                                             <div class="edit-row checkboxes">
                                                 <label class="checkbox-label">
                                                     <input

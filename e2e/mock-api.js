@@ -20,6 +20,7 @@ app.use(express.static(distDir));
 // Keyed by label.  Each entry: { user_code, verification_url, status, channel_id }
 let oauthGrants = {};
 let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
+let oauthStreamKeyMap = []; // #199: [{oauth_id, stream_names}] for auto-suggest
 
 // Scenario selection — set by `POST /api/v1/_test/scenario` before page.goto.
 // Supported values:
@@ -191,6 +192,7 @@ let endpoints = [
     position_last: 0,
     delivered_bytes: 1048576,
     is_fast: false,
+    youtube_oauth_id: null,
     created_at: "2026-03-01T00:00:00Z",
     updated_at: "2026-03-09T10:00:00Z",
   },
@@ -203,6 +205,7 @@ let endpoints = [
     position_last: 0,
     delivered_bytes: 0,
     is_fast: true,
+    youtube_oauth_id: null,
     created_at: "2026-03-05T00:00:00Z",
     updated_at: "2026-03-09T10:00:00Z",
   },
@@ -529,6 +532,7 @@ app.post("/api/v1/endpoints", (req, res) => {
     position_last: 0,
     delivered_bytes: 0,
     is_fast: false,
+    youtube_oauth_id: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -558,6 +562,18 @@ app.put("/api/v1/endpoints/:id", (req, res) => {
 app.delete("/api/v1/endpoints/:id", (req, res) => {
   endpoints = endpoints.filter((e) => e.id !== parseInt(req.params.id));
   res.json({ status: "ok" });
+
+// #199: link/unlink an OAuth grant to an endpoint. Real backend returns 204.
+app.post("/api/v1/endpoints/:id/link-oauth", (req, res) => {
+  const ep = endpoints.find((e) => e.id === parseInt(req.params.id));
+  if (!ep) {
+    return res.status(404).json({ error: "not found" });
+  }
+  const oauthId =
+    req.body && req.body.oauth_id !== undefined ? req.body.oauth_id : null;
+  ep.youtube_oauth_id = oauthId;
+  res.status(204).end();
+});
 });
 
 // Delivery endpoint add/remove. The real backend has these for adding /
@@ -778,6 +794,18 @@ app.get("/api/v1/youtube/oauths", (_req, res) => {
   res.json(oauthRows);
 });
 
+// #199: per-grant owned ingestion stream names (auto-suggest source).
+app.get("/api/v1/youtube/oauths/stream-keys", (_req, res) => {
+  res.json(oauthStreamKeyMap);
+});
+
+// Test fixture: seed OAuth grants + their owned stream keys for #199 tests.
+app.post("/api/v1/_test/seed-oauth-grants", (req, res) => {
+  oauthRows = (req.body && req.body.grants) || [];
+  oauthStreamKeyMap = (req.body && req.body.stream_keys) || [];
+  res.json({ seeded: true });
+});
+
 // Start device authorization: always returns a fixed mock code.
 app.post("/api/v1/youtube/oauth/device-start", (req, res) => {
   const label = (req.body && req.body.label) || "unknown";
@@ -862,6 +890,7 @@ app.post("/api/v1/__reset", (_req, res) => {
   auditIdCounter = 0;
   oauthGrants = {};
   oauthRows = [];
+  oauthStreamKeyMap = [];
   lastDestroyByEvent = {};
   changeKeyOps = [];
   res.json({ reset: true });
