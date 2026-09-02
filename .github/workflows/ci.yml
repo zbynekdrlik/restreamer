@@ -953,6 +953,41 @@ jobs:
           fi
           echo "OK: both OBS-streaming E2E jobs StopRecord on teardown; no StartRecord/ToggleRecord."
 
+      - name: "Verify OBS-streaming E2E jobs wait on the rig lease before StartStream (#349)"
+        run: |
+          WORKFLOW_FILE=".github/workflows/ci.yml"
+          # Each job that STARTS OBS streaming must run scripts/ci/rig-lease-wait.ps1
+          # BEFORE its first StartStream (OBS-WS) / obs/start-stream (API), so we
+          # never drive the shared rig while camera-box holds it (#349/#830). The
+          # greps run on sed-extracted JOB blocks (after test-integrity), so this
+          # self-check can never match its own pattern lines (#325).
+          check_job() {
+            block="$2"
+            lease_ln=$(echo "$block" | grep -n 'rig-lease-wait.ps1' | head -1 | cut -d: -f1)
+            start_ln=$(echo "$block" | grep -nE 'requestType = "StartStream"|/api/v1/obs/start-stream' | head -1 | cut -d: -f1)
+            if [ -z "$lease_ln" ]; then
+              echo "ERROR: $1 has no rig-lease-wait.ps1 step (#349)."
+              exit 1
+            fi
+            if [ -z "$start_ln" ]; then
+              echo "ERROR: $1 has no StartStream/obs-start-stream to gate (#349 anchor missing)."
+              exit 1
+            fi
+            if [ "$lease_ln" -ge "$start_ln" ]; then
+              echo "ERROR: $1 runs rig-lease-wait AFTER StartStream (#349) -- it must be BEFORE."
+              exit 1
+            fi
+          }
+          YT_BLOCK=$(sed -n '/^  e2e-obs-youtube-test:/,/^  e2e-fb-push-stream-lan:/p' "$WORKFLOW_FILE")
+          FB_BLOCK=$(sed -n '/^  e2e-fb-push-stream-lan:/,/^  e2e-gate:/p' "$WORKFLOW_FILE")
+          check_job "e2e-obs-youtube-test" "$YT_BLOCK"
+          check_job "e2e-fb-push-stream-lan" "$FB_BLOCK"
+          if [ ! -f scripts/ci/rig-lease-wait.ps1 ]; then
+            echo "ERROR: scripts/ci/rig-lease-wait.ps1 is missing (#349)."
+            exit 1
+          fi
+          echo "OK: both OBS-streaming E2E jobs wait on the rig lease before StartStream."
+
   frontend-e2e:
     name: Frontend E2E (Playwright)
     runs-on: ubuntu-latest
