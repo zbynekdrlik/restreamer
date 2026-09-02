@@ -46,6 +46,27 @@ Corollary worth knowing: **clippy's `items_after_test_module` (a hard
 every file.** That makes "truncate at the first `#[cfg(test)]`" an exact way to
 isolate production code when a test needs to scan sources.
 
+**Splitting a PRODUCTION handler file (not just its test module)** — when the
+inline production code itself is the bulk (e.g. `rs-api/src/handlers.rs`), move
+whole handler GROUPS into new sibling files declared as CHILD modules and
+glob-re-export them, so `handlers::<name>` router registration and every call
+site stay unchanged with zero visibility churn:
+
+```rust
+#[path = "handlers_events.rs"]
+mod events;
+pub use events::*;          // handlers::create_event still resolves
+```
+
+Two gotchas the move creates, both `-D warnings` failures if missed: (1) a moved
+handler's imports leave the PARENT file with **orphaned `use`s** (moving the only
+users of `EndpointConfig` / `S3Client` out of `handlers.rs` made those two
+imports unused) — prune them; (2) each new sibling needs its OWN `use` header,
+and a private `const` used only by the moved group (e.g. `VALID_SERVICE_TYPES`)
+moves WITH it. A `#[path]`-included test sibling (`use super::*`) is unaffected
+as long as the items IT touches stay in the parent. `handlers.rs` went 955 →
+525 this way (#341), splitting event-lifecycle + endpoint handlers out.
+
 ## Every version bump MUST regenerate `Cargo.lock`
 
 Five workspace commands carry `--locked` (#322). A stale lock fails Lint + Test +
