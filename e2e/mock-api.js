@@ -713,6 +713,41 @@ function buildOutageDelivery(which) {
   };
 }
 
+// Build a DeliveryStatus payload with one FB endpoint carrying facebook_health
+// (#166). Health is "bad"/NO_LIVE_VIDEO — the silent-discard case: we push
+// bytes but FB has zero receiving live_video, so the badge must read RED.
+function buildFbHealthDelivery() {
+  return {
+    instance_name: "rs-delivery-evt1",
+    status: "running",
+    server_ip: "1.2.3.4",
+    endpoint_count: 1,
+    endpoints: [
+      {
+        alias: "Facebook Page",
+        alive: true,
+        current_chunk_id: 142,
+        bytes_processed_total: 1073741824,
+        chunks_processed: 1847,
+        chunk_delay_secs: 3.2,
+        stall_reason: null,
+        ffmpeg_restart_count: 0,
+        reconnect_count: 0,
+        last_error: null,
+        is_fast: false,
+        delivery_mode: "normal",
+        rescue_eta_secs: null,
+        facebook_health: {
+          status: "NO_LIVE_VIDEO",
+          health: "bad",
+          age_secs: 3,
+        },
+        lifecycle: "live",
+      },
+    ],
+  };
+}
+
 // --- Logs endpoint ---
 app.get("/api/v1/logs", (_req, res) => {
   res.json([
@@ -935,6 +970,16 @@ app.post("/api/v1/_test/scenario", (req, res) => {
     );
     eventEndpoints[1] = [1];
     cachedDelivery = buildOutageDelivery(scenario);
+  } else if (scenario === "fb-health") {
+    // #166: one FB endpoint whose Graph ingest health reads RED (silent
+    // discard). Keeps the event active/delivering so the endpoint tree renders.
+    events = events.map((e) =>
+      e.id === 1
+        ? { ...e, receiving_activated: true, delivering_activated: true }
+        : e,
+    );
+    eventEndpoints[1] = [2];
+    cachedDelivery = buildFbHealthDelivery();
   }
   res.json({ scenario });
 });
@@ -1085,6 +1130,8 @@ wss.on("connection", (ws) => {
   let deliveryData;
   if (scenario === "outage-rescue" || scenario === "outage-attention") {
     deliveryData = buildOutageDelivery(scenario);
+  } else if (scenario === "fb-health") {
+    deliveryData = buildFbHealthDelivery();
   } else if (scenario === "zero-endpoints") {
     deliveryData = {
       instance_name: "rs-delivery-evt1",
@@ -1167,6 +1214,7 @@ wss.on("connection", (ws) => {
     "last-endpoint",
     "outage-rescue",
     "outage-attention",
+    "fb-health",
   ];
   const pipelineData = activePipelineScenarios.includes(scenario)
     ? {
