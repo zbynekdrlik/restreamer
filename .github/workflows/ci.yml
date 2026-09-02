@@ -963,7 +963,7 @@ jobs:
           # self-check can never match its own pattern lines (#325).
           check_job() {
             block="$2"
-            lease_ln=$(echo "$block" | grep -n 'rig-lease-wait.ps1' | head -1 | cut -d: -f1)
+            lease_ln=$(echo "$block" | grep -nE -- '-File scripts/ci/rig-lease-wait\.ps1' | head -1 | cut -d: -f1)
             start_ln=$(echo "$block" | grep -nE 'requestType = "StartStream"|/api/v1/obs/start-stream' | head -1 | cut -d: -f1)
             if [ -z "$lease_ln" ]; then
               echo "ERROR: $1 has no rig-lease-wait.ps1 step (#349)."
@@ -2129,7 +2129,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 85 # 42min typical + crash-exhaustion gate (#238/#318) up to ~18min
+    timeout-minutes: 145 # 42min typical + crash-exhaustion gate (#238/#318) up to ~18min + up to 60min #349 rig-lease wait + margin
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -2605,6 +2605,19 @@ jobs:
             "ORIG_BITRATE=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             "ENCODER_FILE=" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
+
+      # #349: final short-budget rig-lease re-check RIGHT before the first
+      # StartStream, closing the TOCTOU gap between the post-checkout check and
+      # here (camera-box could have acquired the lease during our setup steps;
+      # its reverse-direction gate keys on OUR streaming state, which is still
+      # false until now). Short budget (10 min) since setup already fenced most
+      # of the wait; fail-open + always exit 0 as before.
+      - name: "Rig lease: final re-check right before StartStream (#349 TOCTOU)"
+        shell: powershell
+        timeout-minutes: 12
+        env:
+          RIG_LEASE_BUDGET_S: "600"
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
 
       - name: "Baseline: OBS direct-to-YouTube RTMP (prove OBS works)"
         shell: powershell
@@ -6055,7 +6068,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     runs-on: [self-hosted, windows, stream-lan]
-    timeout-minutes: 60
+    timeout-minutes: 120 # ~32min real work + up to 60min #349 rig-lease wait + margin
     env:
       OBS_WS_HOST: "127.0.0.1"
       OBS_WS_PORT: "4455"
@@ -6423,6 +6436,16 @@ jobs:
           $null = Receive-OBSMessage $ws
           Write-Host "Switched OBS to Restreamer RTMP: rtmp://127.0.0.1:1234/live/obs-e2e-test"
           try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "", [System.Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch { }
+
+      # #349: final short-budget rig-lease re-check RIGHT before OBS starts
+      # streaming (via the API below), closing the TOCTOU gap between the
+      # post-checkout check and here. Short budget (10 min); fail-open; exit 0.
+      - name: "Rig lease: final re-check right before StartStream (#349 TOCTOU)"
+        shell: powershell
+        timeout-minutes: 12
+        env:
+          RIG_LEASE_BUDGET_S: "600"
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
 
       - name: Start OBS stream + delivery
         shell: powershell

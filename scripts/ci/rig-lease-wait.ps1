@@ -29,14 +29,20 @@
 # fallible call (the HTTP GET) is wrapped in its own try/catch that proceeds
 # fail-open, and we must never let an unexpected terminating error fail the job.
 
-$Url          = if ($env:RIG_LEASE_URL)      { $env:RIG_LEASE_URL }           else { "http://10.77.9.103:8890/rig-lease.json" }
-$BudgetS      = if ($env:RIG_LEASE_BUDGET_S) { [int]$env:RIG_LEASE_BUDGET_S } else { 3600 }  # 60 min hard cap (camera-box E2E ~75 min, ttl_s guides the real wait)
-$GraceS       = if ($env:RIG_LEASE_GRACE_S)  { [int]$env:RIG_LEASE_GRACE_S }  else { 120 }
-$PollS        = if ($env:RIG_LEASE_POLL_S)   { [int]$env:RIG_LEASE_POLL_S }   else { 30 }
-$HttpTimeoutS = if ($env:RIG_LEASE_HTTP_TIMEOUT_S) { [int]$env:RIG_LEASE_HTTP_TIMEOUT_S } else { 5 }
+$Url          = if ($env:RIG_LEASE_URL) { $env:RIG_LEASE_URL } else { "http://10.77.9.103:8890/rig-lease.json" }
+# -as [int] yields $null (never throws) on a null/blank/non-numeric override.
+$BudgetS      = $env:RIG_LEASE_BUDGET_S       -as [int]   # 60 min default (camera-box E2E ~75 min, ttl_s guides the real wait)
+$GraceS       = $env:RIG_LEASE_GRACE_S        -as [int]
+$PollS        = $env:RIG_LEASE_POLL_S         -as [int]
+$HttpTimeoutS = $env:RIG_LEASE_HTTP_TIMEOUT_S -as [int]
 
-if ($BudgetS -le 0) { $BudgetS = 3600 }
-if ($PollS   -le 0) { $PollS   = 30 }
+# Sanitize every numeric knob: a bad override must fall back to a safe default,
+# never $null -- a $null budget/ttl collapses the wait and a $null/0 -TimeoutSec
+# is INDEFINITE in PS 5.1 (would hang a black-holed endpoint to the step timeout).
+if ($null -eq $BudgetS      -or $BudgetS      -le 0) { $BudgetS      = 3600 }
+if ($null -eq $GraceS       -or $GraceS       -lt 0) { $GraceS       = 120 }
+if ($null -eq $PollS        -or $PollS        -le 0) { $PollS        = 30 }
+if ($null -eq $HttpTimeoutS -or $HttpTimeoutS -le 0) { $HttpTimeoutS = 5 }
 
 Write-Host "[rig-lease] pre-StartStream check against $Url (budget ${BudgetS}s, poll ${PollS}s, http-timeout ${HttpTimeoutS}s)"
 
@@ -51,12 +57,14 @@ while ($true) {
     # Read live every time; -Headers no-cache defeats any intermediary cache.
     $lease = Invoke-RestMethod -Uri $Url -Method GET -TimeoutSec $HttpTimeoutS -Headers @{ "Cache-Control" = "no-cache" }
   } catch {
-    Write-Host "[rig-lease] endpoint unreachable ($Url): $_ -- PROCEEDING (fail-open: endpoint down != rig busy)."
+    # ::warning:: so a BYPASSED guard is visible in the Actions run summary -- otherwise
+    # the guard could stay silently vacuous (e.g. camera-box #1277 not yet deployed).
+    Write-Host "::warning::[rig-lease] endpoint unreachable ($Url): $_ -- PROCEEDING (fail-open: endpoint down is not rig busy). Guard BYPASSED; confirm camera-box #1277 is deployed."
     exit 0
   }
 
   if ($null -eq $lease -or $lease.schema -ne 1) {
-    Write-Host "[rig-lease] unparseable or unknown-schema response -- PROCEEDING (fail-open)."
+    Write-Host "::warning::[rig-lease] unparseable or unknown-schema response -- PROCEEDING (fail-open). Guard BYPASSED."
     exit 0
   }
 
@@ -78,14 +86,15 @@ while ($true) {
     # Bound the wait to min(ttl_s + grace, our budget). A holder claiming a huge
     # ttl can never make us wait past our own budget; a null/zero ttl falls back
     # to the full budget.
-    $ttl = if ($null -ne $lease.ttl_s -and [int]$lease.ttl_s -gt 0) { [int]$lease.ttl_s } else { $BudgetS }
+    $ttl = $lease.ttl_s -as [int]   # $null on non-numeric / overflow -- never throws
+    if ($null -eq $ttl -or $ttl -le 0) { $ttl = $BudgetS }
     $waitCap = [Math]::Min($ttl + $GraceS, $BudgetS)
     $deadline = (Get-Date).AddSeconds($waitCap)
     Write-Host "[rig-lease] rig HELD by $holderJob ($holderUrl); will wait up to ${waitCap}s (min(ttl_s+grace, budget); ttl_s=$($lease.ttl_s))."
   }
 
   if ((Get-Date) -ge $deadline) {
-    Write-Host "[rig-lease] wait budget exhausted, rig still held by $holderUrl -- PROCEEDING anyway so CI is not deadlocked by a stuck lease (bounded budget)."
+    Write-Host "::warning::[rig-lease] wait budget exhausted, rig still held by $holderUrl -- PROCEEDING anyway so CI is not deadlocked by a stuck lease (bounded budget)."
     exit 0
   }
 
