@@ -34,6 +34,8 @@ let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
 //   - "s3-region-nonstandard" — status.s3_region_standard=false (red S3RegionBanner, #278)
 //   - "ingest-skew"     — inpoint.details.ingest_skew_active=true (red IngestSkewBanner + gate, #354)
 //   - "vps-orphan"      — status.vps_orphan_count=2 (amber VpsOrphanBanner, #352)
+//   - "no-rescue-video" — active event with rescue_video_url=null (amber NoRescueVideoBanner, #260)
+//   - "rescue-video-set" — active event with a rescue_video_url set (NoRescueVideoBanner hidden, #260)
 let scenario = "default";
 let rtmpStableSecs = 999; // default: stream has been stable plenty long
 let rtmpTickStartMs = null; // when the tick scenario started
@@ -88,6 +90,27 @@ function buildStatusResponse() {
   const ingestSkewMs = ingestSkewActive ? 25470 : 0;
   // #352: vps_orphan_count drives the dashboard VpsOrphanBanner.
   const vpsOrphanCount = scenario === "vps-orphan" ? 2 : 0;
+  // #260: rescue_video_url on the active streaming_event drives the dashboard
+  // NoRescueVideoBanner (no dedicated status scalar — the banner reads the
+  // event that already rides on /api/v1/status). Two scenarios exercise the
+  // discriminator: an active event with NO rescue video (banner shows) and one
+  // WITH a rescue video (banner hidden — proving it keys on rescue_video_url,
+  // not merely "an event is active").
+  let streamingEvent = currentStreamingEvent();
+  if (scenario === "no-rescue-video" || scenario === "rescue-video-set") {
+    streamingEvent = {
+      id: 99,
+      name: "No-Rescue Test",
+      received_bytes: 0,
+      receiving_activated: true,
+      delivering_activated: true,
+      cache_delay_secs: null,
+      rescue_video_url:
+        scenario === "rescue-video-set"
+          ? "https://s3.example/rescue.flv"
+          : null,
+    };
+  }
   return {
     inpoint: {
       state: rtmpActive ? "connected" : "idle",
@@ -98,7 +121,7 @@ function buildStatusResponse() {
         ingest_skew_active: ingestSkewActive,
       },
     },
-    streaming_event: currentStreamingEvent(),
+    streaming_event: streamingEvent,
     disk_pressure: diskPressure,
     s3_region_standard: s3RegionStandard,
     vps_orphan_count: vpsOrphanCount,

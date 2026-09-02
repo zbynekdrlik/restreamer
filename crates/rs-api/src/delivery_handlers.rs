@@ -211,6 +211,36 @@ pub async fn delivery_start(
             )
         })?;
 
+    // #260: warn — durably, in the audit log — when delivery is starting for an
+    // event that has NO custom rescue video. An outage would then fall back to
+    // the embedded generic default clip (`resolve_rescue_source` → `Countdown`)
+    // instead of a branded Slovak clip, and until now nothing told the operator
+    // (the silent 2026-06-19 event 9316 case). The dashboard `NoRescueVideoBanner`
+    // is the live surface; this row is the durable post-mortem record.
+    if event.rescue_video_missing() {
+        tracing::warn!(
+            event_id,
+            event_name = %event.name,
+            "Delivery started with no rescue video configured — an outage will play the generic default clip"
+        );
+        rs_core::audit::record(
+            &state.audit_tx,
+            rs_core::audit::AuditRow {
+                severity: rs_core::audit::Severity::Warn,
+                source: rs_core::audit::Source::Operator,
+                event_id: Some(event_id),
+                instance_id: Some(result.instance_id),
+                endpoint: None,
+                action: rs_core::audit::Action::NoRescueVideoConfigured,
+                detail: serde_json::json!({
+                    "event_id": event_id,
+                    "event_name": event.name,
+                }),
+                ts_override: None,
+            },
+        );
+    }
+
     // Spawn background task to poll Hetzner and init rs-delivery
     let (instance_id, event_name) = (result.instance_id, event.name.clone());
     let (auth_token, poll_handles, orch) = (

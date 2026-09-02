@@ -261,6 +261,15 @@ pub enum Action {
     /// data-driven server-type (tier) choice for the next event. Severity::Info.
     /// Detail JSON is `resource_sample::ResourceSample`.
     VpsResourceSample,
+    /// Host-side (#260): delivery was started for an event whose
+    /// `rescue_video_url` is NULL/empty, so a delivery outage would fall back
+    /// to the embedded generic default rescue clip
+    /// (`resolve_rescue_source` → `Countdown`) instead of a branded Slovak
+    /// clip. Warn severity, `Source::Operator`, emitted once at go-live so a
+    /// post-mortem shows the event went live on the generic default (the
+    /// silent 2026-06-19 event 9316 case). Detail JSON: {event_id, event_name}.
+    /// Pairs with the dashboard `NoRescueVideoBanner`.
+    NoRescueVideoConfigured,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -35,6 +35,26 @@ pub struct StreamingEvent {
     pub rescue_video_url: Option<String>,
 }
 
+impl StreamingEvent {
+    /// True when this event has no usable custom rescue video configured —
+    /// `rescue_video_url` is absent, empty, or whitespace-only.
+    ///
+    /// In that case a delivery outage falls back to the embedded generic
+    /// default clip (`rs_delivery::rescue::resolve_rescue_source` → `Countdown`)
+    /// with no branded content, and — until #260 — with no operator-facing
+    /// signal at all. That is exactly the silent misconfiguration event 9316
+    /// hit on 2026-06-19. The predicate is deliberately the single source of
+    /// truth shared by the go-live audit warning (`rs-api` `delivery_start`)
+    /// and mirrored by the dashboard banner (`leptos-ui`, which targets wasm32
+    /// and cannot depend on this crate).
+    pub fn rescue_video_missing(&self) -> bool {
+        match self.rescue_video_url.as_deref() {
+            Some(url) => url.trim().is_empty(),
+            None => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkRecord {
     pub id: i64,

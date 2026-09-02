@@ -10,6 +10,7 @@ use super::confirm_modal::ConfirmModal;
 use super::disk_pressure_banner::DiskPressureBanner;
 use super::endpoint_tree::EndpointTree;
 use super::ingest_skew_banner::IngestSkewBanner;
+use super::no_rescue_video_banner::NoRescueVideoBanner;
 use super::oauth_authorize::OAuthAuthorize;
 use super::outage_banner::OutageBanner;
 use super::pacing_panel::PacingPanel;
@@ -37,6 +38,7 @@ pub fn OperatorDashboard() -> impl IntoView {
     view! {
         <div class="operator-dashboard">
             <IngestSkewBanner />
+            <NoRescueVideoBanner />
             <DiskPressureBanner />
             <S3RegionBanner />
             <VpsOrphanBanner />

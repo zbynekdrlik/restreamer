@@ -477,3 +477,47 @@ fn inpoint_state_clone_shares_ingest_skew_cells() {
     assert_eq!(state.ingest_skew_ms(), 0);
     assert!(!state.ingest_skew_active());
 }
+
+// #260: `StreamingEvent::rescue_video_missing()` — the single predicate shared
+// by the go-live audit warning and (mirrored) the dashboard banner.
+fn event_with_rescue(url: Option<&str>) -> StreamingEvent {
+    StreamingEvent {
+        id: 1,
+        name: "9316".to_string(),
+        received_bytes: 0,
+        receiving_activated: true,
+        delivering_activated: false,
+        cache_delay_secs: None,
+        created_from: None,
+        rescue_video_url: url.map(str::to_string),
+    }
+}
+
+#[test]
+fn rescue_video_missing_true_when_none() {
+    assert!(
+        event_with_rescue(None).rescue_video_missing(),
+        "a NULL rescue_video_url is the 9316 case — must warn"
+    );
+}
+
+#[test]
+fn rescue_video_missing_true_when_empty_or_whitespace() {
+    assert!(event_with_rescue(Some("")).rescue_video_missing());
+    assert!(
+        event_with_rescue(Some("   \t ")).rescue_video_missing(),
+        "whitespace-only is not a usable URL"
+    );
+}
+
+#[test]
+fn rescue_video_missing_false_when_url_set() {
+    assert!(
+        !event_with_rescue(Some("https://s3.example/rescue.flv")).rescue_video_missing(),
+        "a real URL means a custom rescue clip is configured — no warning"
+    );
+    assert!(
+        !event_with_rescue(Some("  https://s3.example/rescue.flv  ")).rescue_video_missing(),
+        "surrounding whitespace must not falsely flag a configured URL as missing"
+    );
+}
