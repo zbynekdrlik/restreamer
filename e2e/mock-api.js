@@ -35,6 +35,7 @@ let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
 //   - "ingest-skew"     — inpoint.details.ingest_skew_active=true (red IngestSkewBanner + gate, #354)
 //   - "vps-orphan"      — status.vps_orphan_count=2 (amber VpsOrphanBanner, #352)
 //   - "long-stream"     — status.long_stream_warning=true (amber LongStreamBanner, #84)
+//   - "rtmp-bind-error" — inpoint.details.rtmp_bind_error set (red RtmpBindErrorBanner, #106)
 let scenario = "default";
 let rtmpStableSecs = 999; // default: stream has been stable plenty long
 let rtmpTickStartMs = null; // when the tick scenario started
@@ -91,6 +92,11 @@ function buildStatusResponse() {
   const vpsOrphanCount = scenario === "vps-orphan" ? 2 : 0;
   // #84: long_stream_warning drives the dashboard LongStreamBanner.
   const longStreamWarning = scenario === "long-stream";
+  // #106: RTMP port-bind failure drives the RtmpBindErrorBanner.
+  const rtmpBindError =
+    scenario === "rtmp-bind-error"
+      ? "Port 1234 is already in use by another process (PID 4321: inpoint_service.exe). RTMP streaming will not work until the conflict is resolved."
+      : null;
   return {
     inpoint: {
       state: rtmpActive ? "connected" : "idle",
@@ -99,6 +105,7 @@ function buildStatusResponse() {
         rtmp_stable_secs: currentRtmpStableSecs(),
         ingest_skew_ms: ingestSkewMs,
         ingest_skew_active: ingestSkewActive,
+        rtmp_bind_error: rtmpBindError,
       },
     },
     streaming_event: currentStreamingEvent(),

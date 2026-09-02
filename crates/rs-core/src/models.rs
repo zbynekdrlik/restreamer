@@ -233,6 +233,15 @@ pub enum WsEvent {
         service: String,
         message: String,
     },
+    /// RTMP listener failed to bind its port (#106). Emitted by the runtime
+    /// inpoint loop's pre-bind probe so any connected dashboard updates its
+    /// red bind-failure banner immediately instead of waiting for the 2s
+    /// `/status` poll. `error` names the port and, if detected, the holding
+    /// process.
+    RtmpBindFailed {
+        port: u16,
+        error: String,
+    },
     ActivityFeed {
         timestamp: String,
         severity: String,
@@ -445,6 +454,14 @@ pub struct InpointState {
     /// dashboard banner and gates `Start Delivering`. Shared by `Arc` across
     /// clones like `ingest_skew_ms` (#354).
     ingest_skew_active: Arc<AtomicBool>,
+    /// Human-readable RTMP listener bind error (#106). `Some(msg)` while the
+    /// RTMP listener cannot bind its port (e.g. another process holds 1234);
+    /// `None` when the port is free / bound. Written by the runtime inpoint
+    /// loop's pre-bind probe, read by the API `/status` handler to drive the
+    /// dashboard's red bind-failure banner. Shared by `Arc` across clones like
+    /// `ingest_skew_active`, so the copy wired into the inpoint loop and the
+    /// copy held by `AppState.inpoint_state` see the same value.
+    rtmp_bind_error: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl InpointState {
@@ -456,6 +473,7 @@ impl InpointState {
             connect_started_at: Arc::new(std::sync::Mutex::new(None)),
             ingest_skew_ms: Arc::new(AtomicI64::new(0)),
             ingest_skew_active: Arc::new(AtomicBool::new(false)),
+            rtmp_bind_error: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -544,6 +562,40 @@ impl InpointState {
     /// desynced). `Acquire` — see [`Self::set_ingest_skew_ms`] doc.
     pub fn ingest_skew_active(&self) -> bool {
         self.ingest_skew_active.load(Ordering::Acquire)
+    }
+
+    /// Record the RTMP listener bind error (#106). Called by the runtime
+    /// inpoint loop when the pre-bind probe fails. `msg` is a human-readable,
+    /// operator-facing string (names the port and, if detected, the holding
+    /// process). A poisoned lock is tolerated (best-effort diagnostic surface).
+    pub fn set_bind_error(&self, msg: String) {
+        // Recover a poisoned lock (into_inner) rather than no-op'ing: a stuck
+        // banner (or a hidden real conflict) is worse than a torn write on a
+        // plain Option<String> cell (#106 review).
+        let mut g = self
+            .rtmp_bind_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *g = Some(msg);
+    }
+
+    /// Clear the RTMP listener bind error (#106). Called when the pre-bind
+    /// probe succeeds so the dashboard banner clears automatically.
+    pub fn clear_bind_error(&self) {
+        let mut g = self
+            .rtmp_bind_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *g = None;
+    }
+
+    /// Current RTMP listener bind error, if any (#106). Read by the API
+    /// `/status` handler. `None` = the listener is bound / the port is free.
+    pub fn bind_error(&self) -> Option<String> {
+        self.rtmp_bind_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 

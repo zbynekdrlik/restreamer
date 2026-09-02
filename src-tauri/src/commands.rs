@@ -67,6 +67,10 @@ pub struct StatusResponse {
     /// `delivery.long_stream_warn_secs` — mirrors
     /// `/api/v1/status.long_stream_warning` (#84).
     pub long_stream_warning: bool,
+    /// RTMP listener bind error — mirrors
+    /// `/api/v1/status.inpoint.details.rtmp_bind_error` (#106).
+    #[serde(default)]
+    pub rtmp_bind_error: Option<String>,
 }
 
 /// Get the current service status including streaming event and chunk stats.
@@ -94,6 +98,7 @@ pub async fn get_status(
     // #84: computed from the SAME streaming_event already fetched above, so no
     // second DB read for the event.
     let long_stream_warning = state.long_stream_warning(streaming_event.as_ref()).await;
+    let rtmp_bind_error = state.rtmp_bind_error();
 
     Ok(CommandResult::ok(StatusResponse {
         streaming_event,
@@ -106,6 +111,7 @@ pub async fn get_status(
         ingest_skew_active,
         vps_orphan_count,
         long_stream_warning,
+        rtmp_bind_error,
     }))
 }
 

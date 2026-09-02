@@ -231,6 +231,11 @@ pub struct DashboardStore {
     // operator threshold (default 2.5 h). Polled from `/status`; drives the
     // LongStreamBanner. Defaults false until the first poll lands.
     pub long_stream_warning: RwSignal<bool>,
+
+    // RTMP listener bind error (#106). `Some(msg)` while the RTMP port is held
+    // by another process; drives the RtmpBindErrorBanner. Set from the 2s
+    // `/status` poll and (instantly) from the `RtmpBindFailed` WS event.
+    pub rtmp_bind_error: RwSignal<Option<String>>,
 }
 
 impl DashboardStore {
@@ -261,6 +266,7 @@ impl DashboardStore {
             ingest_skew_active: RwSignal::new(false),
             vps_orphan_count: RwSignal::new(0),
             long_stream_warning: RwSignal::new(false),
+            rtmp_bind_error: RwSignal::new(None),
         }
     }
 

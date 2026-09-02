@@ -145,6 +145,13 @@ impl AppState {
         .await
     }
 
+    /// RTMP listener bind error (#106) from the SAME shared `InpointState` the
+    /// runtime inpoint loop writes, so the tray webview shows the same red
+    /// bind-failure banner as the LAN dashboard.
+    pub fn rtmp_bind_error(&self) -> Option<String> {
+        self.inpoint_state.bind_error()
+    }
+
     /// Get chunk statistics directly from the database.
     pub async fn get_chunk_stats(&self) -> Result<ChunkStats, String> {
         let chunk_duration_ms = self.config.inpoint.chunk_duration_ms;

@@ -61,6 +61,13 @@ enum WsEvent {
         service: String,
         message: String,
     },
+    /// #106: RTMP listener failed to bind — update the red banner immediately
+    /// instead of waiting for the 2s `/status` poll.
+    RtmpBindFailed {
+        #[allow(dead_code)]
+        port: u16,
+        error: String,
+    },
     ActivityFeed {
         timestamp: String,
         severity: String,
@@ -363,6 +370,11 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
         }
         WsEvent::Error { service, message } => {
             store.push_error(service, message);
+        }
+        WsEvent::RtmpBindFailed { error, .. } => {
+            // #106: surface the bind failure instantly; the 2s /status poll
+            // clears it once the port frees.
+            store.rtmp_bind_error.set(Some(error));
         }
         WsEvent::ActivityFeed {
             timestamp,

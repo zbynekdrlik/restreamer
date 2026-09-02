@@ -48,6 +48,18 @@ pub enum Action {
     RtmpConnected,
     RtmpDisconnected,
     RtmpHandshakeFailed,
+    /// The RTMP listener could not BIND its port (e.g. another process holds
+    /// 1234). Warn severity, `Source::Inpoint`. Detail carries
+    /// `{port, holder, error}`. Durable post-mortem for a silent-ingest window;
+    /// pairs with `RtmpBindRecovered`. Surfaced on the dashboard via a red
+    /// banner + `WsEvent::RtmpBindFailed` (#106). Edge-triggered (first failure
+    /// of a streak only), so it never floods the audit log on the retry loop.
+    RtmpBindFailed,
+    /// The RTMP listener port became bindable again after an `RtmpBindFailed`
+    /// — the conflicting process released the port. Info severity,
+    /// `Source::Inpoint`. Detail carries `{port}`. Pairs with `RtmpBindFailed`
+    /// (#106).
+    RtmpBindRecovered,
     /// Ingest A/V skew crossed the operator threshold — the SOURCE (OBS) is
     /// desynced. Warn severity, `Source::Inpoint` (or `Source::Operator` for
     /// the `Start Delivering` `force:true` override, which re-fires this same
