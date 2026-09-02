@@ -110,8 +110,8 @@ pub enum Action {
     /// the embedded default rescue blob for this endpoint's lifetime.
     /// Severity::Warn. Detail JSON: {"url", "error"}.
     RescueCustomFetchFailed,
-    /// Disk cache started pre-filling for an event. Emitted on first
-    /// EndpointReader registration. Issue #174.
+    /// Disk cache started pre-filling for an event. Emitted on
+    /// `DiskCacheFetcher` construction (one per endpoint). Issue #174.
     DiskCachePrefillStarted,
     /// Disk cache window is fully populated for at least one endpoint;
     /// the first push is imminent.
@@ -122,8 +122,13 @@ pub enum Action {
     /// DownloadService bandwidth cap reached; sustained S3 latency
     /// expected. Operator may want to investigate Hetzner status.
     DiskCacheDownloadThrottled,
-    /// EndpointReader.wait_for_chunk timed out (default 60 s).
-    /// Indicates a real S3 outage longer than the cache window.
+    /// The disk-cache fetcher failed to land a chunk within its stall budget.
+    /// The `detail.shape` field (#332) discriminates the two outage classes:
+    /// `"bounded_attempts"` -- the bounded S3-retry cap (~3s) was exhausted (a
+    /// persistently-erroring S3); `"stall_timeout"` -- the outer stall-timeout
+    /// deadline (default 60 s) elapsed, i.e. a wedge >= the cache window.
+    /// `detail.timeout_secs` is present ONLY on the `stall_timeout` shape.
+    /// Pairs with `DiskCacheReaderRecovered` to bracket the outage window.
     DiskCacheStallTimeout,
     /// Disk write failed (ENOSPC / EIO). Severity::Error.
     DiskCacheWriteFailed,
@@ -131,7 +136,8 @@ pub enum Action {
     /// the transient. Pair with DiskCacheStallTimeout to bound outage
     /// duration in the audit log.
     DiskCacheReaderRecovered,
-    /// Per-endpoint push sample emitted by EndpointReader on chunk push.
+    /// Per-endpoint push sample emitted by the consumer_task on chunk push
+    /// (`disk_cache_push_sample::emit_push_sample`).
     /// Rate-limited 1/min/endpoint via RateLimiter keyed by
     /// (DiskCachePushSample, endpoint_alias). Carries chunk_supply_lag_ms,
     /// inter_chunk_gap_ms, burst_factor, cumulative_pushed_secs (total media

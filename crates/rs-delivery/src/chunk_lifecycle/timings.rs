@@ -25,7 +25,9 @@ pub struct ChunkLifecycleTimings {
     pub vps_fetch_start_ts: Option<SystemTime>,
     /// Stage D: VPS GET returned with chunk in memory.
     pub vps_fetch_done_ts: Option<SystemTime>,
-    /// Stage E: pusher popped chunk from PrefetchQueue.
+    /// Stage E: pusher dequeued the chunk for push. (Currently unstamped —
+    /// the PrefetchQueue that fed this stage was removed in #286/#334; kept
+    /// for the lifecycle-stage layout until a replacement fill signal wires in.)
     pub pusher_request_ts: Option<SystemTime>,
     /// Stage F: pusher's first TCP write succeeded.
     pub wire_first_byte_ts: Option<SystemTime>,
