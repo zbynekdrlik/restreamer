@@ -92,6 +92,23 @@ pub struct YoutubeHealth {
     pub error: Option<String>,
 }
 
+/// Per-endpoint FB ingest health snapshot (mirrors `rs-core::models::FacebookHealth`, #166).
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct FacebookHealth {
+    pub status: String,
+    pub health: String,
+    #[serde(default)]
+    pub video_bitrate_kbps: Option<i64>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub frame_rate: Option<String>,
+    #[serde(default)]
+    pub age_secs: i64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// Endpoint lifecycle (frontend mirror of `rs-core::models::EndpointLifecycle`).
 ///
 /// Drives the dashboard semaphore: survivable auto-recovery states
@@ -154,6 +171,7 @@ pub struct DeliveryEndpointState {
     pub delivery_mode: Option<String>,
     pub rescue_eta_secs: Option<u64>,
     pub youtube_health: Option<YoutubeHealth>,
+    pub facebook_health: Option<FacebookHealth>,
     pub lifecycle: EndpointLifecycle,
 }
 

@@ -142,6 +142,9 @@ struct WsDeliveryEndpoint {
     rescue_eta_secs: Option<u64>,
     #[serde(default)]
     youtube_health: Option<crate::store::YoutubeHealth>,
+    /// FB ingestion health (#166). Absent for non-FB endpoints.
+    #[serde(default)]
+    facebook_health: Option<crate::store::FacebookHealth>,
     #[serde(default = "crate::store::default_lifecycle")]
     lifecycle: crate::store::EndpointLifecycle,
 }
@@ -192,12 +195,13 @@ async fn load_initial_state(store: DashboardStore) {
                     ffmpeg_restart_count: ep.ffmpeg_restart_count,
                     reconnect_count: 0,
                     av_skew_ms: ep.av_skew_ms,
-            fast_delay_target_secs: ep.fast_delay_target_secs,
+                    fast_delay_target_secs: ep.fast_delay_target_secs,
                     last_error: ep.last_error,
                     is_fast: ep.is_fast,
                     delivery_mode: ep.delivery_mode.clone(),
                     rescue_eta_secs: ep.rescue_eta_secs,
                     youtube_health: ep.youtube_health,
+                    facebook_health: ep.facebook_health,
                     lifecycle: ep.lifecycle,
                 })
                 .collect();
@@ -339,12 +343,13 @@ fn dispatch_event(store: DashboardStore, event: WsEvent) {
                             ffmpeg_restart_count: ep.ffmpeg_restart_count,
                             reconnect_count: ep.reconnect_count,
                             av_skew_ms: ep.av_skew_ms,
-            fast_delay_target_secs: ep.fast_delay_target_secs,
+                            fast_delay_target_secs: ep.fast_delay_target_secs,
                             last_error: ep.last_error.clone(),
                             is_fast: ep.is_fast,
                             delivery_mode: ep.delivery_mode.clone(),
                             rescue_eta_secs: ep.rescue_eta_secs,
                             youtube_health: ep.youtube_health.clone(),
+                            facebook_health: ep.facebook_health.clone(),
                             lifecycle: ep.lifecycle,
                         }
                     })
