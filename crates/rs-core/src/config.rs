@@ -62,8 +62,19 @@ pub struct HetznerConfig {
     pub api_token: String,
     #[serde(default = "default_hetzner_location")]
     pub location: String,
-    #[serde(default = "default_hetzner_server_type")]
-    pub default_server_type: String,
+    /// Operator override for the delivery VPS server type (#353). Empty (the
+    /// default) = "auto": size by endpoint count (`rs_cloud::resolve_server_type`
+    /// → `select_server_type`). A non-empty value forces that type.
+    ///
+    /// RENAMED from `default_server_type` in #353: that field was DEAD config
+    /// (never read) that shipped with a persisted `cpx22`/`cx23` value on every
+    /// existing box. Reading the OLD field would have turned that never-chosen
+    /// value into an always-on override and silently downgraded 3+-endpoint
+    /// events. The new name means the stale `default_server_type` key is ignored
+    /// on load (serde drops unknown fields) → existing boxes get auto tiering,
+    /// and `save()` drops the dead key on the next write.
+    #[serde(default = "default_hetzner_server_type_override")]
+    pub server_type_override: String,
     #[serde(default = "default_hetzner_snapshot_label")]
     pub snapshot_label: String,
     #[serde(default = "default_hetzner_ssh_key_name")]
@@ -78,8 +89,12 @@ pub struct HetznerConfig {
 fn default_hetzner_location() -> String {
     "fsn1".to_string()
 }
-fn default_hetzner_server_type() -> String {
-    "cpx22".to_string()
+/// Empty = "auto": size the delivery VPS by endpoint count
+/// (`rs_cloud::select_server_type`). A non-empty value is an explicit operator
+/// override honoured by `rs_cloud::resolve_server_type` (#353). Defaulting to a
+/// real type here would make the override always-on and defeat the tiering.
+fn default_hetzner_server_type_override() -> String {
+    String::new()
 }
 fn default_hetzner_snapshot_label() -> String {
     "rs-delivery".to_string()
@@ -93,7 +108,7 @@ impl Default for HetznerConfig {
         Self {
             api_token: String::new(),
             location: default_hetzner_location(),
-            default_server_type: default_hetzner_server_type(),
+            server_type_override: default_hetzner_server_type_override(),
             snapshot_label: default_hetzner_snapshot_label(),
             ssh_key_name: default_hetzner_ssh_key_name(),
             extra_ssh_key_names: Vec::new(),
@@ -335,16 +350,47 @@ impl Default for ApiConfig {
 pub struct DeliveryConfig {
     #[serde(default = "default_delivery_delay_secs")]
     pub delivery_delay_secs: u64,
+    /// #352 orphan reaper: how often the runtime re-lists Hetzner and reconciles
+    /// against the DB (seconds). Default 30 min. The runtime clamps this to a
+    /// floor of 60s so a mis-set tiny value cannot hammer the Hetzner API.
+    #[serde(default = "default_orphan_sweep_interval_secs")]
+    pub orphan_sweep_interval_secs: u64,
+    /// #352 orphan reaper: a rowless labelled server younger than this (seconds)
+    /// is treated as an in-flight create and left alone, so the create-window
+    /// reverse gap never nukes a VPS mid-create. Default 30 min.
+    #[serde(default = "default_orphan_detect_grace_secs")]
+    pub orphan_detect_grace_secs: u64,
+    /// #352 orphan reaper: a detected orphan older than this (seconds) is
+    /// auto-deleted. `0` disables auto-delete (detect + surface only). Default
+    /// 3 h — safe because a genuinely-delivering VPS always has a live DB row and
+    /// is therefore never classified as an orphan regardless of age.
+    #[serde(default = "default_orphan_delete_grace_secs")]
+    pub orphan_delete_grace_secs: u64,
 }
 
 fn default_delivery_delay_secs() -> u64 {
     120
 }
 
+fn default_orphan_sweep_interval_secs() -> u64 {
+    1800
+}
+
+fn default_orphan_detect_grace_secs() -> u64 {
+    1800
+}
+
+fn default_orphan_delete_grace_secs() -> u64 {
+    10800
+}
+
 impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
             delivery_delay_secs: default_delivery_delay_secs(),
+            orphan_sweep_interval_secs: default_orphan_sweep_interval_secs(),
+            orphan_detect_grace_secs: default_orphan_detect_grace_secs(),
+            orphan_delete_grace_secs: default_orphan_delete_grace_secs(),
         }
     }
 }
@@ -611,12 +657,39 @@ mod tests {
         assert_eq!(config.inpoint.chunk_duration_ms, 1000);
         assert_eq!(config.api.port, 8910);
         assert_eq!(config.api.bind, "127.0.0.1");
-        assert_eq!(config.hetzner.default_server_type, "cpx22");
+        // #353: default is empty = "auto" (size by endpoint count). A real type
+        // here would make the override always-on and defeat the tiering.
+        assert_eq!(config.hetzner.server_type_override, "");
         assert_eq!(config.delivery.delivery_delay_secs, 120);
         assert_eq!(config.inpoint.chunk_format, "flv");
         assert!(config.obs.enabled);
         assert_eq!(config.obs.ws_url, "ws://127.0.0.1:4455");
         assert!(config.obs.ws_password.is_empty());
+    }
+
+    #[test]
+    fn stale_default_server_type_key_is_ignored_not_forced_as_override() {
+        // #353 regression: every pre-#353 box has the DEAD `default_server_type`
+        // field persisted with a real value (install.ps1 wrote "cx23"; a patched
+        // config carries "cpx22"). That value was NEVER an operator choice.
+        // Renaming the live field to `server_type_override` must make the stale
+        // key inert (serde drops unknown fields), so the box resolves to AUTO
+        // tiering — NOT a forced cpx22 that silently downgrades 3+-endpoint
+        // events. If the field were still read under the old name, this would
+        // deserialize "cpx22" into the override and fail.
+        let json = r#"{
+            "client_uuid": "x",
+            "hetzner": { "api_token": "", "default_server_type": "cpx22" },
+            "s3": {
+                "bucket": "b", "region": "r",
+                "endpoint": "e", "access_key_id": "k", "secret_access_key": "s"
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.hetzner.server_type_override, "",
+            "a stale `default_server_type` value must NOT become an active override"
+        );
     }
 
     #[test]

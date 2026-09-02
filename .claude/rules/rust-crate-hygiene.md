@@ -31,6 +31,16 @@ The moved file starts with `use super::*;` and its contents de-indented one
 level. `access.rs` went 1187 → 707 and `router.rs` 1025 → 295 this way, with no
 production change and no visibility change.
 
+**Splitting a test file that is ITSELF `#[path]`-included** (e.g. the ones under
+`endpoint_task_test_root.rs`): add a nested `#[path = "child.rs"] mod child;` at
+the end of the parent test file and move some `#[tokio::test]` fns into `child.rs`.
+The child reaches the parent's private mock backends + harness helpers via `super::`.
+**Gotcha:** the child does NOT automatically inherit the parent's `use` imports, and
+in particular a TRAIT whose methods the tests call must be re-imported explicitly —
+`use crate::endpoint_task::ChunkFetcher;` — or `fetcher.fetch_chunk_with_meta(..)`
+fails with `method not found in DiskCacheFetcher … trait ChunkFetcher … not in scope`.
+`disk_cache_stall_tests.rs` was split this way (→ `disk_cache_bracket_tests.rs`, 1049→647).
+
 Corollary worth knowing: **clippy's `items_after_test_module` (a hard
 `-D warnings` error here) guarantees a `#[cfg(test)]` module is the LAST item in
 every file.** That makes "truncate at the first `#[cfg(test)]`" an exact way to

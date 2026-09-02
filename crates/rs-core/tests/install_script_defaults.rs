@@ -157,21 +157,22 @@ fn split_statements(code: &str, skeleton: &str) -> Vec<CodeLine> {
     out
 }
 
-/// The `s3 = @{ … }` hashtable. Scoping to it matters: a `bucket =` key in any
-/// block placed above `s3` would otherwise silently become what is validated.
-fn s3_block(lines: &[CodeLine]) -> Vec<&CodeLine> {
+/// The `<name> = @{ … }` hashtable block. Scoping to it matters: a `bucket =`
+/// (or `server_type_override =`) key in any block placed above `<name>` would
+/// otherwise silently become what is validated.
+fn named_block<'a>(lines: &'a [CodeLine], name: &str) -> Vec<&'a CodeLine> {
     let start = lines
         .iter()
         .position(|l| {
-            // `strip_prefix` + `=`, not `starts_with("s3")` — otherwise a decoy
-            // `s3_archive = @{` above the real block matches first.
+            // `strip_prefix` + `=`, not `starts_with(name)` — otherwise a decoy
+            // `s3_archive = @{` above the real `s3` block matches first.
             l.skeleton
                 .trim_start()
-                .strip_prefix("s3")
+                .strip_prefix(name)
                 .is_some_and(|rest| rest.trim_start().starts_with('='))
                 && l.skeleton.contains("@{")
         })
-        .expect("install.ps1 must have an `s3 = @{` default block");
+        .unwrap_or_else(|| panic!("install.ps1 must have a `{name} = @{{` default block"));
 
     let mut depth = 0i32;
     let mut block = Vec::new();
@@ -183,12 +184,17 @@ fn s3_block(lines: &[CodeLine]) -> Vec<&CodeLine> {
             return block;
         }
     }
-    panic!("install.ps1 `s3 = @{{` block is never closed");
+    panic!("install.ps1 `{name} = @{{` block is never closed");
+}
+
+/// The `s3 = @{ … }` hashtable (thin wrapper over [`named_block`]).
+fn s3_block(lines: &[CodeLine]) -> Vec<&CodeLine> {
+    named_block(lines, "s3")
 }
 
 /// Value of a `key = "value"` line. `split_once` — not `split('=')` — so a value
 /// that itself contains `=` (base64 padding, a query string) survives.
-fn ps_value(block: &[&CodeLine], key: &str) -> String {
+fn ps_value(block: &[&CodeLine], block_name: &str, key: &str) -> String {
     let stmt = block
         .iter()
         .flat_map(|l| l.statements())
@@ -196,7 +202,7 @@ fn ps_value(block: &[&CodeLine], key: &str) -> String {
             let t = l.skeleton.trim_start();
             t.starts_with(key) && t[key.len()..].trim_start().starts_with('=')
         })
-        .unwrap_or_else(|| panic!("install.ps1 s3 block has no `{key} = ...` default"));
+        .unwrap_or_else(|| panic!("install.ps1 {block_name} block has no `{key} = ...` default"));
 
     let raw = stmt
         .code
@@ -222,20 +228,58 @@ fn install_script_s3_defaults_match_the_binary_defaults() {
     let want = Config::default().s3;
 
     assert_eq!(
-        ps_value(&block, "bucket"),
+        ps_value(&block, "s3", "bucket"),
         want.bucket,
         "install.ps1 default S3 bucket drifted from Config::default()"
     );
     assert_eq!(
-        ps_value(&block, "region"),
+        ps_value(&block, "s3", "region"),
         want.region,
         "install.ps1 default S3 region drifted from Config::default()"
     );
     assert_eq!(
-        ps_value(&block, "endpoint"),
+        ps_value(&block, "s3", "endpoint"),
         want.endpoint,
         "install.ps1 default S3 endpoint drifted from Config::default()"
     );
+}
+
+/// #353: the script's `hetzner.server_type_override` default must match the
+/// binary default (empty = "auto"). The old script default `cx23` was BOTH a
+/// deprecated Hetzner type AND — under the old `default_server_type` name —
+/// dead config; pinning it to `Config::default()` stops it silently drifting
+/// back to a forced type.
+#[test]
+fn install_script_hetzner_server_type_override_matches_the_binary_default() {
+    let lines = code_lines(&install_script());
+    let block = named_block(&lines, "hetzner");
+    let want = Config::default().hetzner.server_type_override;
+
+    assert_eq!(
+        ps_value(&block, "hetzner", "server_type_override"),
+        want,
+        "install.ps1 default hetzner.server_type_override drifted from Config::default() \
+         (empty = auto-size by endpoint count)"
+    );
+}
+
+/// #353: no deprecated Hetzner `cx*` server type (renamed to `cpx*` in
+/// `de4df3e9`) may appear in EXECUTABLE script lines. Comments are exempt by
+/// design — install.ps1 documents why the value changed.
+#[test]
+fn install_script_never_references_a_deprecated_cx_server_type() {
+    let lines = code_lines(&install_script());
+    for (i, line) in lines.iter().enumerate() {
+        let line_no = i + 1;
+        for dead in ["cx23", "cx33", "cx43"] {
+            assert!(
+                !line.code.contains(dead),
+                "install.ps1:{line_no} names the deprecated Hetzner type `{dead}` \
+                 in executable code: {}",
+                line.code
+            );
+        }
+    }
 }
 
 /// Oracle 2 — the region-derived shape. Guards the copy-paste slip that mirrors

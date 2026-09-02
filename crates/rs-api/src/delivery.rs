@@ -281,9 +281,24 @@ impl DeliveryOrchestrator {
             warn!(event_id, "received_bytes reset failed: {e}");
         }
 
-        // Get event endpoints to determine server size
+        // Get event endpoints to determine server size. An explicit
+        // `hetzner.server_type_override` wins over the endpoint-count tiering;
+        // empty = "auto" falls back to it (#353).
         let endpoints = db::get_event_endpoints(&self.pool, event_id).await?;
-        let server_type = rs_cloud::select_server_type(endpoints.len());
+        let server_type_override = self.config.hetzner.server_type_override.trim();
+        let server_type_source = if server_type_override.is_empty() {
+            "auto"
+        } else {
+            "override"
+        };
+        let server_type = rs_cloud::resolve_server_type(server_type_override, endpoints.len());
+        info!(
+            event_id,
+            endpoint_count = endpoints.len(),
+            %server_type,
+            server_type_source,
+            "resolved delivery VPS server type"
+        );
 
         let name = format!("rs-delivery-evt{event_id}");
         // Versioned immutable key — the VPS downloads EXACTLY this build's
@@ -350,7 +365,8 @@ impl DeliveryOrchestrator {
                     endpoint: None,
                     action: Action::VpsCreating,
                     detail: serde_json::json!({
-                        "server_type": server_type,
+                        "server_type": server_type.as_str(),
+                        "server_type_source": server_type_source,
                         "datacenter": self.config.hetzner.location,
                     }),
                     ts_override: None,
@@ -369,7 +385,7 @@ impl DeliveryOrchestrator {
             .hetzner
             .create_server(
                 &name,
-                server_type,
+                &server_type,
                 &self.config.hetzner.location,
                 &image,
                 &ssh_key_names,
@@ -385,7 +401,7 @@ impl DeliveryOrchestrator {
             server.id,
             &name,
             &ipv4,
-            server_type,
+            &server_type,
             Some(event_id),
             &auth_token,
         )
@@ -402,7 +418,7 @@ impl DeliveryOrchestrator {
             instance_id,
             hetzner_id: server.id,
             name,
-            server_type: server_type.to_string(),
+            server_type,
             status: "creating".to_string(),
             auth_token,
         })

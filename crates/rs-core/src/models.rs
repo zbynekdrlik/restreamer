@@ -375,6 +375,12 @@ pub struct ServiceStatus {
     /// standard) so an absent/older field never false-alarms.
     #[serde(default = "default_true")]
     pub s3_region_standard: bool,
+    /// Number of orphaned delivery VPS still billing — Hetzner servers labelled
+    /// for this install with no live `delivery_instances` row, as found by the
+    /// runtime orphan reaper (#352). Drives the dashboard orphan banner.
+    /// Defaults to 0 (assume none) so an absent/older field never false-alarms.
+    #[serde(default)]
+    pub vps_orphan_count: u8,
 }
 
 fn default_true() -> bool {

@@ -36,6 +36,11 @@ pub struct StatusResponse {
     /// (#354). Defaults false so a missing field never false-alarms.
     #[serde(default)]
     pub ingest_skew_active: bool,
+    /// Number of orphaned delivery VPS still billing on Hetzner (#352). Drives
+    /// the VpsOrphanBanner. Defaults 0 (assume none) so a missing field never
+    /// false-alarms.
+    #[serde(default)]
+    pub vps_orphan_count: u8,
 }
 
 fn default_true() -> bool {
@@ -75,6 +80,7 @@ pub async fn get_status() -> Result<StatusResponse, String> {
     let ingest_skew_active = status["inpoint"]["details"]["ingest_skew_active"]
         .as_bool()
         .unwrap_or(false);
+    let vps_orphan_count = status["vps_orphan_count"].as_u64().unwrap_or(0) as u8;
     Ok(StatusResponse {
         streaming_event: event,
         chunk_stats,
@@ -84,5 +90,6 @@ pub async fn get_status() -> Result<StatusResponse, String> {
         s3_region_standard,
         ingest_skew_ms,
         ingest_skew_active,
+        vps_orphan_count,
     })
 }

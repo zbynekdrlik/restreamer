@@ -225,8 +225,8 @@ mod tests {
             .await
             .unwrap();
         // After eviction, registry must report Evicted (not stale Available).
-        let s1 = registry.wait_for_chunk(1).await.unwrap();
-        let s2 = registry.wait_for_chunk(2).await.unwrap();
+        let s1 = registry.wait_for_chunk(1).await;
+        let s2 = registry.wait_for_chunk(2).await;
         assert!(matches!(
             s1,
             crate::disk_cache::registry::ChunkAvailability::Evicted
