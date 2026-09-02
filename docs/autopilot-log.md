@@ -4,7 +4,38 @@ Terse per-issue record of autonomous autopilot work (decisions, SHAs, RED→GREE
 
 ---
 
-## 2026-07-25 — Batch #267 + #281 + #268 (one PR, v0.29.18, CI-infra only)
+## 2026-09-02 — Lane #363 + #361 (ci.yml only; #349 parked needs-decision)
+
+Worktree lane `worktree-agent-a61cc62fbb7978042` off dev (0.29.26). No version bump / PR /
+merge by this lane — the supervisor integrates. Only `.github/workflows/ci.yml` +
+`docs/autopilot-log.md` changed (no Rust/JS). RED `e38dce8b` → GREEN `5a73d9f7`.
+
+- **#363 (CI, security-boundary) — deploy-stream-lan firewall missing RTMP 1234:** GREEN
+  `5a73d9f7`. The CI inline firewall block opened only TCP 8910 + 443, so remote OBS RTMP
+  push to :1234 was firewall-blocked on the CI-deployed box (ServiceCore listens on 1234).
+  Added idempotent Remove-then-New `Restreamer RTMP` → TCP 1234 rule, mirroring the sibling
+  rules. Live-confirmed pre-fix on stream.lan via MCP `Get-NetFirewallRule` (only 8910+443).
+  Rejected the `Restreamer-*` rename (#108) — remove-by-DisplayName would orphan the existing
+  rules on deployed boxes. Guard: `verify-ci-yaml-invariants` grep (sed-scoped to the
+  deploy-stream-lan block; RED absent → GREEN present, lines 1313 in 1100–1537).
+- **#361 (bug, cross-cutting) — stray OBS recording after StopStream:** GREEN `5a73d9f7`.
+  Restreamer never records (audit: no StartRecord in ci.yml/e2e); the stray recording is
+  camera-box's OBS `RecordWhenStreaming` firing on our StartStream. OBS streaming starts only
+  in `e2e-obs-youtube-test` (OBS-WS StartStream) + `e2e-fb-push-stream-lan` (API
+  `/api/v1/obs/start-stream`). Added `if: always()` defensive teardown to both:
+  GetRecordStatus → StopRecord if outputActive, try/catch best-effort, StopRecord only (owner
+  directive 2026-08-30). `e2e-streaming-test` uses ffmpeg direct push (no OBS stream) → out of
+  scope. Teardown PowerShell verified with the real parser on stream.lan (0 errors). Guard:
+  `verify-ci-yaml-invariants` grep (sed-scoped obs-youtube→e2e-gate; StopRecord at 5958+6992).
+- **#349 (rig lease) — PARKED, needs-decision (FALSE premise found):** NOT shipped. The
+  agreed contract (camera-box #830 `rig-lease.sh`) is a LOCAL lockdir `/var/tmp/rig-lease/` on
+  dev1, assuming "both runners are the same machine". They are NOT: camera-box's gate runs on
+  `[self-hosted, linux, camera-lan]` = dev1 Linux; restreamer's E2E runs on
+  `[self-hosted, windows, stream-lan]` = the Windows stream box (10.77.9.204). No shared local
+  filesystem → a lockdir restreamer writes is invisible to camera-box's dev1 gate (false
+  guard). Finding + options posted on #349; `needs-decision` label added; owner asked (cross-
+  machine coordination surface: SSH-to-dev1 lease vs shared mount vs lock service — reverses
+  #830's "no network dependency"). Stream box CAN ssh to dev1 by hostname (grounding).
 
 Bundled batch on `dev`, version bump `0c412de1` (0.29.17→0.29.18, 4 files). No Rust/JS/Python
 source changed — all three are `.github/workflows/ci.yml` / `.cargo/audit.toml` / `CLAUDE.md` only.
