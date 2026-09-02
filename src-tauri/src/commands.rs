@@ -59,6 +59,10 @@ pub struct StatusResponse {
     /// Latched ingest-skew-over-threshold flag — mirrors
     /// `/api/v1/status.inpoint.details.ingest_skew_active` (#354).
     pub ingest_skew_active: bool,
+    /// Number of orphaned delivery VPS still billing. Mirrors
+    /// `/api/v1/status.vps_orphan_count` so the tray webview shows the orphan
+    /// banner — the tray app is the production deployment (#352).
+    pub vps_orphan_count: u8,
 }
 
 /// Get the current service status including streaming event and chunk stats.
@@ -82,6 +86,7 @@ pub async fn get_status(
     let s3_region_standard = state.s3_region_standard();
     let ingest_skew_ms = state.ingest_skew_ms();
     let ingest_skew_active = state.ingest_skew_active();
+    let vps_orphan_count = state.vps_orphan_count();
 
     Ok(CommandResult::ok(StatusResponse {
         streaming_event,
@@ -92,6 +97,7 @@ pub async fn get_status(
         s3_region_standard,
         ingest_skew_ms,
         ingest_skew_active,
+        vps_orphan_count,
     }))
 }
 

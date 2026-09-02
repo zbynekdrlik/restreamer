@@ -17,6 +17,7 @@ pub mod outage_banner;
 pub mod pacing_panel;
 pub mod s3_region_banner;
 mod settings;
+pub mod vps_orphan_banner;
 mod templates;
 pub mod upload_strip;
 mod uploads;

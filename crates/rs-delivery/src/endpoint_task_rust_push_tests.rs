@@ -341,10 +341,11 @@ mod close_on_error {
         FlvStreamNormalizer,
         u32,
         u32,
+        u32,
     ) {
         let stats = Arc::new(Mutex::new(EndpointStats::default()));
         let (_tx, rx) = watch::channel(false);
-        (stats, rx, FlvStreamNormalizer::new(), 0u32, 0u32)
+        (stats, rx, FlvStreamNormalizer::new(), 0u32, 0u32, 0u32)
     }
 
     #[tokio::test(start_paused = true)]
@@ -360,7 +361,8 @@ mod close_on_error {
             Ok(()),
         ]);
 
-        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write) = fresh_state();
+        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+            fresh_state();
 
         // Spawn the handle_rust_push call so we can advance virtual time
         // past the backoff sleep.
@@ -376,6 +378,7 @@ mod close_on_error {
                 "TEST_FILE",
                 &mut consec_err,
                 &mut consec_write,
+                &mut consec_zero_byte,
                 &stats_clone,
                 &None,
                 &mut tel,
@@ -418,7 +421,8 @@ mod close_on_error {
         // successful push must clear them so the dashboard reflects
         // recovery instead of the stale freeze indicator.
         let mut pusher = MockPusher::with_results(vec![Ok(())]);
-        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write) = fresh_state();
+        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+            fresh_state();
 
         // Pre-seed stale error markers as if a prior failure happened.
         {
@@ -437,6 +441,7 @@ mod close_on_error {
             "TEST_FILE",
             &mut consec_err,
             &mut consec_write,
+            &mut consec_zero_byte,
             &stats,
             &None,
             &mut tel,
@@ -471,7 +476,8 @@ mod close_on_error {
         // short-circuit must return Break BEFORE the close() call, so no
         // double-close on shutdown (close happens via Drop on stack unwind).
         let mut pusher = MockPusher::with_results(vec![Err(PushError::LocalCancel)]);
-        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write) = fresh_state();
+        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+            fresh_state();
 
         let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
         let action = handle_rust_push(
@@ -483,6 +489,7 @@ mod close_on_error {
             "TEST_FILE",
             &mut consec_err,
             &mut consec_write,
+            &mut consec_zero_byte,
             &stats,
             &None,
             &mut tel,
@@ -508,3 +515,15 @@ mod close_on_error {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #236: dead-target classifier (consecutive zero-byte-since-connect deaths).
+// A Rust-pusher session that never sends any media before the peer closes
+// it (e.g. an expired FB persistent-key live_video) must be distinguished
+// from a transient outage (media WAS flowing, then the peer dropped it) --
+// see the issue for the confirmed root cause and the live 3548x/~3s-apart
+// death-loop this classifier exists to stop.
+// ---------------------------------------------------------------------------
+
+#[path = "endpoint_task_dead_target_tests.rs"]
+mod dead_target_classifier;

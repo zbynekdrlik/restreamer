@@ -1,15 +1,24 @@
 //! Database migration runner.
 //!
 //! All schema migrations are idempotent — ALTER TABLE ADD COLUMN and
-//! RENAME COLUMN go through helpers that check `pragma_table_info` first.
-//! This allows a rerun to recover from an interrupted previous migration
-//! (e.g. the DB was fully advanced but schema_version was rolled back).
-//! See issue #112.
+//! RENAME COLUMN go through helpers that check `pragma_table_info` first, and
+//! the destructive table rebuilds (V3/V4/V16) guard on a post-migration shape
+//! signal (a `name` column / a widened status CHECK) and no-op if already
+//! applied. This allows a rerun to recover from an interrupted previous
+//! migration (e.g. the DB was fully advanced but schema_version was rolled
+//! back). See issues #112 and #125.
 
 use sqlx::Row;
 use sqlx::sqlite::SqlitePool;
 
 use crate::error::Result;
+
+// Pure-DDL migration scripts live in a sibling file to keep this one under the
+// 1000-line CI cap (#125). `#[path]` keeps it a child module so the glob below
+// exposes the consts here unchanged.
+#[path = "migration_sql.rs"]
+pub(crate) mod migration_sql;
+use migration_sql::*;
 
 /// Maximum schema version. Must equal the highest version in the migration list.
 /// Tests assert that `run_migrations` reaches this exact value.
@@ -71,9 +80,12 @@ async fn rename_column_if_old_exists(
 }
 
 /// Execute a multi-statement SQL script inside a transaction.
-/// Splits on `;` and skips empty statements.
-/// Used for pure-DDL migrations that only contain CREATE TABLE / CREATE INDEX
-/// (already idempotent via IF NOT EXISTS).
+/// Splits on `;` and skips empty statements. Used both for pure-DDL migrations
+/// (CREATE TABLE / CREATE INDEX IF NOT EXISTS, idempotent on their own) and for
+/// the guarded destructive rebuilds (V3/V4/V16), whose non-idempotent
+/// INSERT/DROP/RENAME steps are made safe by the caller's shape guard. The
+/// scripts must therefore contain no `;` inside a statement (no string literal
+/// with a semicolon, no triggers).
 async fn execute_sql_statements(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     sql: &str,
@@ -85,6 +97,34 @@ async fn execute_sql_statements(
         }
     }
     Ok(())
+}
+
+/// Return the stored `CREATE` SQL for a table from `sqlite_master`, or `None`
+/// if the table does not exist. The table name is bound as `?1`, so it is
+/// injection-safe regardless of source.
+async fn table_sql(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &str,
+) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1")
+        .bind(table)
+        .fetch_optional(&mut **tx)
+        .await
+}
+
+/// True if `delivery_instances`' stored `CREATE` SQL already lists the given
+/// status token in its CHECK constraint. Used to detect whether a
+/// CHECK-widening rebuild (V4 adds `'failed'`, V16 adds `'booting'` etc.) has
+/// already been applied, so a `schema_version` rewind cannot re-run the
+/// destructive rebuild against an already-advanced schema (#125).
+async fn delivery_status_check_allows(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    status: &str,
+) -> sqlx::Result<bool> {
+    let needle = format!("'{status}'");
+    Ok(table_sql(tx, "delivery_instances")
+        .await?
+        .is_some_and(|sql| sql.contains(&needle)))
 }
 
 async fn migrate_v5(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
@@ -318,8 +358,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         match version {
             1 => execute_sql_statements(&mut tx, MIGRATION_V1_SQL).await?,
             2 => execute_sql_statements(&mut tx, MIGRATION_V2_SQL).await?,
-            3 => execute_sql_statements(&mut tx, MIGRATION_V3_SQL).await?,
-            4 => execute_sql_statements(&mut tx, MIGRATION_V4_SQL).await?,
+            3 => migrate_v3(&mut tx).await?,
+            4 => migrate_v4(&mut tx).await?,
             5 => migrate_v5(&mut tx).await?,
             6 => migrate_v6(&mut tx).await?,
             7 => migrate_v7(&mut tx).await?,
@@ -331,7 +371,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             13 => execute_sql_statements(&mut tx, MIGRATION_V13_SQL).await?,
             14 => migrate_v14(&mut tx).await?,
             15 => migrate_v15(&mut tx).await?,
-            16 => execute_sql_statements(&mut tx, MIGRATION_V16_SQL).await?,
+            16 => migrate_v16(&mut tx).await?,
             17 => migrate_v17(&mut tx).await?,
             18 => execute_sql_statements(&mut tx, MIGRATION_V18_SQL).await?,
             19 => migrate_v19(&mut tx).await?,
@@ -370,245 +410,146 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-const MIGRATION_V1_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS client_profile (
-    id        INTEGER PRIMARY KEY,
-    user_uuid TEXT NOT NULL UNIQUE
-);
+/// V3: rebuild `streaming_events` from the V1 shape (`identifier`) to the V3
+/// shape (`name` UNIQUE). Guarded against a `schema_version` rewind (#125): if
+/// `name` already exists the schema is at/past the target — no-op, so a
+/// rewound re-run cannot crash (the INSERT references `identifier`, dropped by
+/// this migration) nor destroy later-added columns. Fresh installs (no `name`)
+/// rebuild exactly as before.
+async fn migrate_v3(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    // Idempotent prep — always safe to re-run.
+    sqlx::query("DROP TABLE IF EXISTS scheduled_streams")
+        .execute(&mut **tx)
+        .await?;
 
-CREATE TABLE IF NOT EXISTS streaming_events (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    identifier           TEXT UNIQUE,
-    short_description    TEXT,
-    date_of_event        TEXT NOT NULL DEFAULT (datetime('now')),
-    server_ip            TEXT DEFAULT '',
-    received_bytes       INTEGER NOT NULL DEFAULT 0,
-    receiving_activated  INTEGER NOT NULL DEFAULT 0,
-    delivering_activated INTEGER NOT NULL DEFAULT 0
-);
+    // Guard: post-V3 shape already present -> nothing to rebuild.
+    if column_exists(tx, "streaming_events", "name").await? {
+        return Ok(());
+    }
 
-CREATE TABLE IF NOT EXISTS chunk_records (
-    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    streaming_event_id INTEGER NOT NULL REFERENCES streaming_events(id) ON DELETE CASCADE,
-    chunk_file_path    TEXT NOT NULL,
-    data_size          INTEGER NOT NULL,
-    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
-    md5                TEXT NOT NULL DEFAULT '',
-    in_process         INTEGER NOT NULL DEFAULT 0,
-    sent               INTEGER NOT NULL DEFAULT 0
-);
+    // Clear any leftover temp table from a crashed prior run (Mode A), then
+    // rebuild cleanly.
+    execute_sql_statements(
+        tx,
+        r#"
+        DROP TABLE IF EXISTS streaming_events_new;
+        CREATE TABLE streaming_events_new (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                 TEXT NOT NULL UNIQUE,
+            received_bytes       INTEGER NOT NULL DEFAULT 0,
+            receiving_activated  INTEGER NOT NULL DEFAULT 0,
+            delivering_activated INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO streaming_events_new (id, name, received_bytes, receiving_activated, delivering_activated)
+            SELECT id, COALESCE(identifier, 'Event-' || id), received_bytes, receiving_activated, delivering_activated
+            FROM streaming_events;
+        DROP TABLE streaming_events;
+        ALTER TABLE streaming_events_new RENAME TO streaming_events
+        "#,
+    )
+    .await
+}
 
-CREATE INDEX IF NOT EXISTS idx_chunks_unsent ON chunk_records(streaming_event_id, sent, in_process)
-    WHERE sent = 0 AND in_process = 0
-"#;
+/// V4: widen the `delivery_instances.status` CHECK to add `'failed'` and add
+/// the unique index on `delivery_endpoint_status(instance_id, alias)`. Guarded
+/// against a `schema_version` rewind (#125): if the CHECK already lists
+/// `'failed'` (V4 or a later widening like V16 already applied) the destructive
+/// rebuild is skipped, so a rewound re-run cannot drop later-added columns
+/// (`auth_token` V5, `last_audit_cursor` V19) nor reject rows whose status is a
+/// later-added value (`booting`/`initializing`/`delivering`). Fresh installs
+/// (CHECK lacks `'failed'`) rebuild as before. The original inlined `PRAGMA
+/// foreign_keys OFF/ON` is dropped: it was a no-op inside a transaction (SQLite
+/// ignores it mid-transaction), so FK enforcement stays ON and the `DROP TABLE
+/// delivery_instances` step cascades child rows (`delivery_endpoint_status` ON
+/// DELETE CASCADE) on the forward path — long true, and harmless because this
+/// migration only ever runs at V2 shape, before any child rows exist. A real
+/// FK-safe rebuild would need `PRAGMA foreign_keys=OFF` on a connection outside
+/// the transaction, which this runner does not have.
+async fn migrate_v4(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    // Idempotent prep.
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_endpoint_status_instance_alias
+            ON delivery_endpoint_status(instance_id, alias)",
+    )
+    .execute(&mut **tx)
+    .await?;
 
-const MIGRATION_V2_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS endpoint_configs (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    alias          TEXT NOT NULL UNIQUE,
-    service_type   TEXT NOT NULL CHECK(service_type IN ('YT_HLS','FB','YT_RTMP','VIMEO','INSTAGRAM','TEST_FILE')),
-    stream_key     TEXT NOT NULL DEFAULT '',
-    enabled        INTEGER NOT NULL DEFAULT 1,
-    position_last  INTEGER NOT NULL DEFAULT 0,
-    delivered_bytes INTEGER NOT NULL DEFAULT 0,
-    is_fast        INTEGER NOT NULL DEFAULT 0,
-    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
-);
+    // Guard: CHECK already allows 'failed' -> target shape reached.
+    if delivery_status_check_allows(tx, "failed").await? {
+        return Ok(());
+    }
 
-CREATE TABLE IF NOT EXISTS event_endpoints (
-    event_id    INTEGER NOT NULL REFERENCES streaming_events(id) ON DELETE CASCADE,
-    endpoint_id INTEGER NOT NULL REFERENCES endpoint_configs(id) ON DELETE CASCADE,
-    PRIMARY KEY (event_id, endpoint_id)
-);
+    // Clear any leftover temp table (Mode A), then rebuild cleanly.
+    execute_sql_statements(
+        tx,
+        r#"
+        DROP TABLE IF EXISTS delivery_instances_new;
+        CREATE TABLE delivery_instances_new (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            hetzner_id     INTEGER NOT NULL UNIQUE,
+            name           TEXT NOT NULL,
+            ipv4           TEXT NOT NULL DEFAULT '',
+            status         TEXT NOT NULL DEFAULT 'creating' CHECK(status IN ('creating','running','stopping','deleted','failed')),
+            server_type    TEXT NOT NULL DEFAULT 'cx23',
+            event_id       INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
+            created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+            last_health_at TEXT
+        );
+        INSERT INTO delivery_instances_new (id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at)
+            SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at
+            FROM delivery_instances;
+        DROP TABLE delivery_instances;
+        ALTER TABLE delivery_instances_new RENAME TO delivery_instances
+        "#,
+    )
+    .await
+}
 
-CREATE TABLE IF NOT EXISTS delivery_instances (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    hetzner_id     INTEGER NOT NULL UNIQUE,
-    name           TEXT NOT NULL,
-    ipv4           TEXT NOT NULL DEFAULT '',
-    status         TEXT NOT NULL DEFAULT 'creating' CHECK(status IN ('creating','running','stopping','deleted')),
-    server_type    TEXT NOT NULL DEFAULT 'cx23',
-    event_id       INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
-    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    last_health_at TEXT,
-    auth_token     TEXT NOT NULL DEFAULT ''
-);
+/// V16: widen the `delivery_instances.status` CHECK to add the orchestrator
+/// phases (`booting`/`initializing`/`delivering`) — SQLite cannot alter a
+/// CHECK in place, so the table is rebuilt. Without it, a `poll_and_init`
+/// write of `'booting'` fails the old CHECK and the instance flips to
+/// `'failed'`. Guarded against a `schema_version` rewind (#125): if the CHECK
+/// already lists `'booting'` the destructive rebuild is skipped, so a rewound
+/// re-run cannot drop `last_audit_cursor` (V19). The `DROP TABLE IF EXISTS`
+/// before the `CREATE` survives a crashed prior run (Mode A; the original
+/// `CREATE` lacked `IF NOT EXISTS`).
+async fn migrate_v16(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
+    // Guard: CHECK already allows 'booting' -> target shape reached.
+    if delivery_status_check_allows(tx, "booting").await? {
+        return Ok(());
+    }
 
-CREATE TABLE IF NOT EXISTS delivery_endpoint_status (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    instance_id     INTEGER NOT NULL REFERENCES delivery_instances(id) ON DELETE CASCADE,
-    alias           TEXT NOT NULL,
-    alive           INTEGER NOT NULL DEFAULT 0,
-    buff_size_bytes INTEGER NOT NULL DEFAULT 0,
-    current_chunk_id INTEGER NOT NULL DEFAULT 0,
-    last_check_at   TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS youtube_oauth (
-    id             INTEGER PRIMARY KEY DEFAULT 1,
-    access_token   TEXT NOT NULL DEFAULT '',
-    refresh_token  TEXT NOT NULL DEFAULT '',
-    token_uri      TEXT NOT NULL DEFAULT 'https://oauth2.googleapis.com/token',
-    client_id      TEXT NOT NULL DEFAULT '',
-    client_secret  TEXT NOT NULL DEFAULT '',
-    scopes         TEXT NOT NULL DEFAULT '',
-    expires_at     TEXT
-);
-
-"#;
-
-const MIGRATION_V3_SQL: &str = r#"
-DROP TABLE IF EXISTS scheduled_streams;
-
-CREATE TABLE IF NOT EXISTS streaming_events_new (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    name                 TEXT NOT NULL UNIQUE,
-    received_bytes       INTEGER NOT NULL DEFAULT 0,
-    receiving_activated  INTEGER NOT NULL DEFAULT 0,
-    delivering_activated INTEGER NOT NULL DEFAULT 0
-);
-
-INSERT INTO streaming_events_new (id, name, received_bytes, receiving_activated, delivering_activated)
-    SELECT id, COALESCE(identifier, 'Event-' || id), received_bytes, receiving_activated, delivering_activated
-    FROM streaming_events;
-
-DROP TABLE streaming_events;
-
-ALTER TABLE streaming_events_new RENAME TO streaming_events
-"#;
-
-const MIGRATION_V4_SQL: &str = r#"
-CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_endpoint_status_instance_alias
-    ON delivery_endpoint_status(instance_id, alias);
-
-PRAGMA foreign_keys = OFF;
-
-CREATE TABLE IF NOT EXISTS delivery_instances_new (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    hetzner_id     INTEGER NOT NULL UNIQUE,
-    name           TEXT NOT NULL,
-    ipv4           TEXT NOT NULL DEFAULT '',
-    status         TEXT NOT NULL DEFAULT 'creating' CHECK(status IN ('creating','running','stopping','deleted','failed')),
-    server_type    TEXT NOT NULL DEFAULT 'cx23',
-    event_id       INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
-    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    last_health_at TEXT
-);
-
-INSERT INTO delivery_instances_new (id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at)
-    SELECT id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at
-    FROM delivery_instances;
-
-DROP TABLE delivery_instances;
-
-ALTER TABLE delivery_instances_new RENAME TO delivery_instances;
-
-PRAGMA foreign_keys = ON
-"#;
-
-const MIGRATION_V13_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS delivery_logs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    instance_id INTEGER NOT NULL,
-    event_id    INTEGER,
-    captured_at TEXT NOT NULL DEFAULT (datetime('now')),
-    log_text    TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS delivery_restart_log (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    instance_id   INTEGER NOT NULL,
-    event_id      INTEGER,
-    alias         TEXT NOT NULL,
-    timestamp_ms  INTEGER NOT NULL,
-    chunk_id      INTEGER NOT NULL,
-    lifetime_secs INTEGER NOT NULL,
-    reason        TEXT NOT NULL,
-    stderr_tail   TEXT,
-    backoff_secs  INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_delivery_restart_log_instance
-    ON delivery_restart_log(instance_id);
-
-CREATE INDEX IF NOT EXISTS idx_delivery_logs_instance
-    ON delivery_logs(instance_id)
-"#;
-
-// V16: widen the delivery_instances.status CHECK constraint to allow the
-// new orchestrator phases (booting, initializing, delivering). Without
-// this, writes from poll_and_init to "booting" fail with
-//   CHECK constraint failed: status IN ('creating','running',...)
-// which then sets the instance to "failed" and leaves the operator
-// staring at a broken dashboard.
-//
-// SQLite doesn't support ALTER TABLE ... DROP CONSTRAINT so we have to
-// recreate the table, copying rows over.
-const MIGRATION_V16_SQL: &str = r#"
-CREATE TABLE delivery_instances_v16 (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    hetzner_id      INTEGER NOT NULL UNIQUE,
-    name            TEXT NOT NULL,
-    ipv4            TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'creating' CHECK(status IN (
-        'creating', 'running', 'stopping', 'deleted', 'failed',
-        'booting', 'initializing', 'delivering'
-    )),
-    server_type     TEXT NOT NULL,
-    event_id        INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    last_health_at  TEXT,
-    auth_token      TEXT NOT NULL DEFAULT ''
-);
-
-INSERT INTO delivery_instances_v16
-    (id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token)
-SELECT
-    id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token
-FROM delivery_instances;
-
-DROP TABLE delivery_instances;
-ALTER TABLE delivery_instances_v16 RENAME TO delivery_instances
-"#;
-
-const MIGRATION_V18_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS audit_log (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    severity    TEXT    NOT NULL,
-    source      TEXT    NOT NULL,
-    event_id    INTEGER,
-    instance_id INTEGER,
-    endpoint    TEXT,
-    action      TEXT    NOT NULL,
-    detail      TEXT    NOT NULL DEFAULT '{}'
-);
-CREATE INDEX IF NOT EXISTS idx_audit_ts    ON audit_log(ts DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_event ON audit_log(event_id, ts DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_sev   ON audit_log(severity, ts DESC);
-"#;
-
-const MIGRATION_V19_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS delivery_endpoint_metrics (
-    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts_ms                 INTEGER NOT NULL,
-    instance_id           INTEGER NOT NULL,
-    event_id              INTEGER NOT NULL,
-    alias                 TEXT    NOT NULL,
-    alive                 INTEGER NOT NULL,
-    current_chunk_id      INTEGER NOT NULL,
-    chunks_processed      INTEGER NOT NULL,
-    chunk_delay_secs      REAL    NOT NULL,
-    bytes_processed_total INTEGER NOT NULL,
-    ffmpeg_restart_count  INTEGER NOT NULL,
-    delivery_mode         TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_dem_event_alias
-    ON delivery_endpoint_metrics(event_id, alias, ts_ms DESC);
-CREATE INDEX IF NOT EXISTS idx_dem_ts
-    ON delivery_endpoint_metrics(ts_ms DESC);
-"#;
+    execute_sql_statements(
+        tx,
+        r#"
+        DROP TABLE IF EXISTS delivery_instances_v16;
+        CREATE TABLE delivery_instances_v16 (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            hetzner_id      INTEGER NOT NULL UNIQUE,
+            name            TEXT NOT NULL,
+            ipv4            TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'creating' CHECK(status IN (
+                'creating', 'running', 'stopping', 'deleted', 'failed',
+                'booting', 'initializing', 'delivering'
+            )),
+            server_type     TEXT NOT NULL,
+            event_id        INTEGER REFERENCES streaming_events(id) ON DELETE SET NULL,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            last_health_at  TEXT,
+            auth_token      TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO delivery_instances_v16
+            (id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token)
+        SELECT
+            id, hetzner_id, name, ipv4, status, server_type, event_id, created_at, last_health_at, auth_token
+        FROM delivery_instances;
+        DROP TABLE delivery_instances;
+        ALTER TABLE delivery_instances_v16 RENAME TO delivery_instances
+        "#,
+    )
+    .await
+}
 
 async fn migrate_v19(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
     execute_sql_statements(tx, MIGRATION_V19_SQL).await?;
@@ -710,17 +651,6 @@ async fn migrate_v22(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
     )
     .await
 }
-
-// V23: covering index on delivery_instances(event_id, id DESC) so
-// `get_delivery_instance_by_event` (which now ORDER BYs id DESC LIMIT 1
-// after the #165 stale-row fix) avoids a partition full scan as the
-// instance row count grows over long-lived deployments. Partial index on
-// `status != 'deleted'` matches the WHERE clause exactly.
-const MIGRATION_V23_SQL: &str = r#"
-CREATE INDEX IF NOT EXISTS idx_delivery_instances_event_id_active
-    ON delivery_instances(event_id, id DESC)
-    WHERE status != 'deleted';
-"#;
 
 /// Adds per-chunk lifecycle timestamps for the fast-endpoint zero-reconnect
 /// feature (#184) — stages A and B on the host clock, millis since epoch.

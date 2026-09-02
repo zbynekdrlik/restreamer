@@ -75,17 +75,18 @@ pub(crate) fn emit_push_sample(
         Some(t) => now.saturating_duration_since(t).as_millis() as u64,
         None => 0,
     };
-    let chunk_dur = chunk_duration_ms.max(0) as u64;
-    let burst_factor = if inter_chunk_gap_ms == 0 || chunk_dur == 0 {
-        0.0
-    } else {
-        chunk_dur as f64 / inter_chunk_gap_ms as f64
-    };
-    let expected_wallclock_ms = (chunk_id.max(0) as u64).saturating_mul(chunk_dur);
-    let actual_wallclock_ms = now
+    let event_elapsed_ms = now
         .saturating_duration_since(ctx.event_start_at)
         .as_millis() as i64;
-    let chunk_supply_lag_ms = actual_wallclock_ms.saturating_sub(expected_wallclock_ms as i64);
+    let PushSampleMetrics {
+        burst_factor,
+        chunk_supply_lag_ms,
+    } = compute_push_sample_metrics(
+        chunk_id,
+        chunk_duration_ms,
+        inter_chunk_gap_ms,
+        event_elapsed_ms,
+    );
     // #224: pacing telemetry is a debug-only diagnostic, NOT an operator-facing
     // audit row. Emitting it to the audit ring flooded the activity feed
     // (197/200 warn rows during a live event), drowning real warn/error events.
@@ -102,10 +103,79 @@ pub(crate) fn emit_push_sample(
     );
 }
 
+/// Derived pacing metrics for one push sample (#176). Extracted from
+/// `emit_push_sample` (#335) so the shipped math is directly testable —
+/// `emit_push_sample` only logs these, it writes no audit row (#224), so the
+/// numbers are otherwise unobservable.
+pub(crate) struct PushSampleMetrics {
+    /// `chunk_dur / inter_chunk_gap` — >1 means the pusher is catching up
+    /// (bursting), <1 means it is pacing behind live. 0 when either input is 0.
+    pub burst_factor: f64,
+    /// `event_elapsed - chunk_id * chunk_dur` — how far behind the expected
+    /// wall-clock position this push is (positive = behind live).
+    pub chunk_supply_lag_ms: i64,
+}
+
+/// Pure derivation of the push-sample pacing metrics. `inter_chunk_gap_ms` and
+/// `event_elapsed_ms` are measured by the caller from `Instant`s; everything
+/// else is arithmetic, so this is fully unit-testable.
+pub(crate) fn compute_push_sample_metrics(
+    chunk_id: i64,
+    chunk_duration_ms: i64,
+    inter_chunk_gap_ms: u64,
+    event_elapsed_ms: i64,
+) -> PushSampleMetrics {
+    let chunk_dur = chunk_duration_ms.max(0) as u64;
+    let burst_factor = if inter_chunk_gap_ms == 0 || chunk_dur == 0 {
+        0.0
+    } else {
+        chunk_dur as f64 / inter_chunk_gap_ms as f64
+    };
+    let expected_wallclock_ms = (chunk_id.max(0) as u64).saturating_mul(chunk_dur);
+    let chunk_supply_lag_ms = event_elapsed_ms.saturating_sub(expected_wallclock_ms as i64);
+    PushSampleMetrics {
+        burst_factor,
+        chunk_supply_lag_ms,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audit_ring::AuditRing;
+
+    /// #335: retargeted from the deleted endpoint_reader.rs mirror-math test at
+    /// the real production `compute_push_sample_metrics`. burst_factor is
+    /// chunk_dur/gap; chunk_supply_lag is elapsed - chunk_id*chunk_dur.
+    #[test]
+    fn push_sample_payload_math() {
+        let m = compute_push_sample_metrics(42, 6000, 3000, 260_000);
+        assert_eq!(
+            m.burst_factor, 2.0,
+            "6000ms chunk over a 3000ms gap = 2x burst"
+        );
+        assert_eq!(
+            m.chunk_supply_lag_ms,
+            260_000 - 42 * 6000,
+            "lag = elapsed - expected wallclock (42 * 6000 = 252000)"
+        );
+    }
+
+    /// #335: burst_factor must be 0 when either the inter-chunk gap or the chunk
+    /// duration is 0 (the div-by-zero / first-sample guards).
+    #[test]
+    fn push_sample_burst_factor_is_zero_when_gap_or_dur_is_zero() {
+        assert_eq!(
+            compute_push_sample_metrics(1, 6000, 0, 6000).burst_factor,
+            0.0,
+            "gap == 0 (first sample) must not divide by zero"
+        );
+        assert_eq!(
+            compute_push_sample_metrics(1, 0, 3000, 6000).burst_factor,
+            0.0,
+            "chunk_dur == 0 must not produce a spurious burst"
+        );
+    }
 
     /// Regression for #224: the operator activity feed was flooded with
     /// `disk_cache_push_sample severity=warn` rows (197/200 during a live
