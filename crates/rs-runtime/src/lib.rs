@@ -6,6 +6,7 @@
 
 mod log_capture;
 mod orchestrator;
+pub mod rtmp_bind;
 mod shutdown;
 
 pub use log_capture::LogCaptureLayer;
