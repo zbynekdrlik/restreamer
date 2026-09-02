@@ -562,6 +562,7 @@ app.put("/api/v1/endpoints/:id", (req, res) => {
 app.delete("/api/v1/endpoints/:id", (req, res) => {
   endpoints = endpoints.filter((e) => e.id !== parseInt(req.params.id));
   res.json({ status: "ok" });
+});
 
 // #199: link/unlink an OAuth grant to an endpoint. Real backend returns 204.
 app.post("/api/v1/endpoints/:id/link-oauth", (req, res) => {
@@ -573,7 +574,6 @@ app.post("/api/v1/endpoints/:id/link-oauth", (req, res) => {
     req.body && req.body.oauth_id !== undefined ? req.body.oauth_id : null;
   ep.youtube_oauth_id = oauthId;
   res.status(204).end();
-});
 });
 
 // Delivery endpoint add/remove. The real backend has these for adding /
