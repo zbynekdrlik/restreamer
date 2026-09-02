@@ -115,6 +115,14 @@ ssh newlevel@dev2 'sudo -n apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 # after EVERY rsync (the rsync excludes *.png, and generate_context! needs the icons):
 # airuleset:deploy-dirty-ok
 scp -q src-tauri/icons/*.png newlevel@dev2:~/restreamer-buildcheck/src-tauri/icons/
+# #246: tauri.conf.json declares bundle.resources rs-delivery-linux + its
+# .sha256 sidecar. Tauri's build script HARD-FAILS on a missing declared
+# resource (`resource path 'rs-delivery-linux' doesn't exist`) — and it runs on
+# `cargo check` too — so stage two placeholders before the check (CI stages the
+# real 8.6MB binary + real sha from the build-delivery artifact):
+ssh newlevel@dev2 'cd ~/restreamer-buildcheck/src-tauri
+  truncate -s 0 rs-delivery-linux
+  : > rs-delivery-linux.sha256'
 ssh newlevel@dev2 'source ~/.cargo/env; export SQLX_OFFLINE=true
   cd ~/restreamer-buildcheck/src-tauri && cargo check'
 ```

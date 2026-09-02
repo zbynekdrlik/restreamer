@@ -45,5 +45,7 @@ soak-*.png
 
 # Bundled Linux delivery binary — a build artifact copied into src-tauri/ by CI
 # (both build-tauri jobs) so Tauri's bundle.resources ships it in the installer
-# (#246). Never committed — it is the 8.6MB rs-delivery release binary.
+# (#246). Never committed — it is the 8.6MB rs-delivery release binary plus its
+# sha256 sidecar (which rs-api verifies before uploading it to S3).
 /src-tauri/rs-delivery-linux
+/src-tauri/rs-delivery-linux.sha256

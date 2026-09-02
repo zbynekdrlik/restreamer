@@ -452,6 +452,11 @@ jobs:
           $size = (Get-Item "src-tauri/rs-delivery-linux").Length
           Write-Host "Bundled rs-delivery-linux: $size bytes"
           if ($size -lt 1000000) { throw "bundled binary suspiciously small ($size bytes)" }
+          # Sidecar sha256 (sha256sum format) — rs-api verifies the bundled
+          # binary against this before uploading it to the immutable S3 key.
+          $hash = (Get-FileHash "src-tauri/rs-delivery-linux" -Algorithm SHA256).Hash.ToLower()
+          "$hash  rs-delivery-linux" | Out-File -FilePath "src-tauri/rs-delivery-linux.sha256" -Encoding ascii -NoNewline
+          Write-Host "Bundled sha256: $hash"
       - name: Install trunk and wasm-bindgen-cli
         run: |
           # --locked: build each tool with ITS committed Cargo.lock. Without it,
@@ -942,12 +947,17 @@ jobs:
           # are additionally protected at build time: a declared-but-missing
           # resource fails `cargo tauri build`, and each stage step throws on a
           # missing copy.)
+          # Structural check (jq, present on ubuntu-latest) — not a substring
+          # grep, so it cannot be fooled by the name appearing under some other
+          # key. Both the binary and its sha256 sidecar must be declared.
           TAURI_CONF="src-tauri/tauri.conf.json"
-          if ! grep -q '"rs-delivery-linux"' "$TAURI_CONF"; then
-            echo "ERROR: $TAURI_CONF must declare rs-delivery-linux in bundle.resources (#246)"
-            exit 1
-          fi
-          echo "OK: tauri.conf.json declares the bundled delivery binary."
+          for RES in rs-delivery-linux rs-delivery-linux.sha256; do
+            if ! jq -e --arg r "$RES" '.bundle.resources | index($r) != null' "$TAURI_CONF" >/dev/null; then
+              echo "ERROR: $TAURI_CONF must declare $RES in bundle.resources (#246)"
+              exit 1
+            fi
+          done
+          echo "OK: tauri.conf.json declares the bundled delivery binary + sha256 sidecar."
 
   frontend-e2e:
     name: Frontend E2E (Playwright)
