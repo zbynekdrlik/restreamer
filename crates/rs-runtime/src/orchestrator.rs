@@ -331,16 +331,52 @@ impl ServiceCore {
         api_state = api_state.with_inpoint_state(wired_inpoint.clone());
         let inpoint_state = wired_inpoint;
 
-        // Serve the WASM frontend from a "www" directory next to the binary,
-        // so LAN browsers can access the dashboard at http://<host>:8910/
+        // The WASM dashboard is served EMBEDDED in the binary (#248/#107): a
+        // fresh install works with no on-disk `www/` and the drift class dies
+        // by construction. An on-disk `<exe_dir>/www` is honoured ONLY as an
+        // explicit override (dev / hand-placed copy); else the embedded UI.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
                 let www = exe_dir.join("www");
                 if www.is_dir() {
-                    info!("Serving frontend from {}", www.display());
+                    info!(
+                        "Serving frontend from on-disk override {} (embedded is the default)",
+                        www.display()
+                    );
                     api_state = api_state.with_www_dir(www);
+                } else {
+                    info!("Serving embedded WASM frontend from the binary");
                 }
             }
+        }
+
+        // #248 belt-and-braces: audit CRITICAL if the embedded frontend build
+        // version drifts from the binary's own version (catches a stale `dist/`
+        // embedded against a newer binary). `None` = dev/non-trunk build, never
+        // a drift. Mirrors the S3RegionNonStandard startup Critical above.
+        if let Some((frontend_version, binary_version)) = rs_api::compare_versions(
+            rs_api::embedded_frontend_version().as_deref(),
+            env!("CARGO_PKG_VERSION"),
+        ) {
+            warn!(
+                "Embedded frontend version {frontend_version} differs from binary version {binary_version} (#248 www-drift)"
+            );
+            rs_core::audit::record(
+                &audit_tx,
+                AuditRow {
+                    severity: Severity::Critical,
+                    source: Source::System,
+                    event_id: None,
+                    instance_id: None,
+                    endpoint: None,
+                    action: Action::FrontendVersionDrift,
+                    detail: serde_json::json!({
+                        "frontend_version": frontend_version,
+                        "binary_version": binary_version,
+                    }),
+                    ts_override: None,
+                },
+            );
         }
         // Capture the delivery orchestrator + ws sender BEFORE `api_state` is
         // moved into `serve`, so boot reconciliation (below) can re-establish

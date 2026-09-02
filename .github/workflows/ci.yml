@@ -477,6 +477,13 @@ jobs:
         env:
           BUILD_VERSION: ${{ env.BUILD_VERSION }}
           BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
+      - name: Write frontend version.txt for the embed drift self-check (#248)
+        shell: pwsh
+        # The embedded dashboard (rs-webui) reads dist/version.txt at startup and
+        # audits CRITICAL if it drifts from the binary's CARGO_PKG_VERSION. Write
+        # it from the SAME authoritative BUILD_VERSION as the trunk build above,
+        # so it reflects the ACTUAL frontend build the binary embeds next.
+        run: Set-Content -Path dist/version.txt -Value "$env:BUILD_VERSION" -NoNewline
       - name: Install Tauri CLI
         # Use prebuilt binary instead of `cargo install tauri-cli` because the
         # source build hangs intermittently on Windows runners (observed twice
@@ -1253,17 +1260,17 @@ jobs:
           Write-Host "=== Deployment complete ==="
           exit 0
 
-      - name: Deploy WASM frontend for LAN access
+      - name: Open LAN firewall for the dashboard (#248 — frontend now embedded)
         if: steps.live_guard.outputs.live != 'true'
         shell: powershell
         run: |
+          # The WASM dashboard is EMBEDDED in Restreamer.exe (#248/#107) — the
+          # binary self-serves it, so the old out-of-band `www\` copy that
+          # masked the installer's missing-frontend bug is gone. Any stale
+          # on-disk `www\` would now act as an override, so remove it to fall
+          # back to the embedded (version-locked) frontend.
           $wwwDir = "C:\Program Files\Restreamer\www"
-          # Remove old www directory
           Remove-Item -Path $wwwDir -Recurse -Force -ErrorAction SilentlyContinue
-          # Copy new WASM frontend files
-          Copy-Item -Path "artifacts\www" -Destination $wwwDir -Recurse -Force
-          Write-Host "=== WASM frontend deployed to $wwwDir ==="
-          Get-ChildItem $wwwDir
 
           # Allow LAN access through Windows Firewall
           Remove-NetFirewallRule -DisplayName "Restreamer API" -ErrorAction SilentlyContinue

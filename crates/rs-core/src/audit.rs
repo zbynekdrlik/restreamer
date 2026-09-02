@@ -246,6 +246,12 @@ pub enum Action {
     /// the 2026-06-24 incident. Emitted once at startup, never auto-fixed.
     /// Detail JSON: {"configured_region", "standard_region"}.
     S3RegionNonStandard,
+    /// Host-side CRITICAL (#248): the embedded dashboard frontend build version
+    /// differs from the binary's own `CARGO_PKG_VERSION` — a www-drift, which
+    /// embedding is meant to make impossible. Emitted once at startup as a
+    /// belt-and-braces self-check; never auto-fixed. Detail JSON:
+    /// {"frontend_version", "binary_version"}.
+    FrontendVersionDrift,
     /// VPS-side (#236): a Rust-pusher endpoint crossed
     /// `DEAD_TARGET_ZERO_BYTE_THRESHOLD` consecutive zero-byte-since-connect
     /// deaths -- the remote session/broadcast is bound-but-dead (e.g. an

@@ -256,13 +256,20 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 
-    // Serve the WASM frontend from the www_dir if configured,
-    // so LAN browsers can access the dashboard at http://<host>:8910/
+    // Serve the WASM dashboard. Production serves it EMBEDDED in the binary
+    // (`rs_webui`, #248/#107) so a fresh NSIS install has a working dashboard
+    // with no on-disk `www/` and the whole www-drift class dies by
+    // construction; the embedded handler sets per-asset cache-control
+    // (index.html no-cache, hashed assets immutable). An on-disk `www_dir`
+    // override stays ONLY for tests / dev E2E (injected via `with_www_dir`),
+    // where cache-control is irrelevant.
     if let Some(www_dir) = &state.www_dir {
         use tower_http::services::{ServeDir, ServeFile};
         let index = www_dir.join("index.html");
         let serve = ServeDir::new(www_dir).fallback(ServeFile::new(index));
         router = router.fallback_service(serve);
+    } else {
+        router = router.fallback(rs_webui::serve_embedded);
     }
 
     // Origin-aware access control (#70/#273/#337/#339) goes on LAST, AFTER

@@ -105,6 +105,12 @@ jobs:
         env:
           BUILD_VERSION: ${{ env.BUILD_VERSION }}
           BUILD_TIMESTAMP: ${{ env.BUILD_TIMESTAMP }}
+      - name: Write frontend version.txt for the embed drift self-check (#248)
+        shell: pwsh
+        # rs-webui embeds dist/ and reads dist/version.txt at startup, auditing
+        # CRITICAL if it drifts from the binary's CARGO_PKG_VERSION. Write it
+        # from the same authoritative BUILD_VERSION as the trunk build above.
+        run: Set-Content -Path dist/version.txt -Value "$env:BUILD_VERSION" -NoNewline
       - name: Build Tauri app
         run: cargo tauri build
         env:

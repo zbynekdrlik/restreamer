@@ -151,6 +151,13 @@ async fn https_redirect(
     }
 }
 
+/// Embedded-frontend version helpers (#248 drift self-check). Re-exported so
+/// `rs-runtime` can run the startup drift check without a direct `rs-webui`
+/// dependency. `embedded_frontend_version()` returns the version baked into
+/// the embedded dashboard build (or `None` in a dev/non-trunk build);
+/// `compare_versions()` reports a genuine mismatch against the binary version.
+pub use rs_webui::{compare_versions, frontend_version as embedded_frontend_version};
+
 /// Start the API server on the given address.
 /// Returns the actual bound address and a JoinHandle for shutdown coordination.
 pub async fn serve(
