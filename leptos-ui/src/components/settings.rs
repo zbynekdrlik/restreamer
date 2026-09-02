@@ -368,11 +368,13 @@ fn EventEndpoints(event_id: i64) -> impl IntoView {
     let store = use_context::<DashboardStore>().expect("DashboardStore");
     let assigned = RwSignal::new(Vec::<api::EndpointConfig>::new());
 
-    // Load assigned endpoints on mount
+    // Load assigned endpoints on mount. #343: this on-mount fetch can resolve
+    // after the Events tab / event card was disposed on a tab or route switch
+    // — `try_set` no-ops then instead of panicking on the disposed signal.
     let eid = event_id;
     spawn_local(async move {
         if let Ok(eps) = api::get_event_endpoints(eid).await {
-            assigned.set(eps);
+            assigned.try_set(eps);
         }
     });
 

@@ -106,9 +106,14 @@ pub fn OAuthAuthorize() -> impl IntoView {
                         spawn_local(async move {
                             loop {
                                 TimeoutFuture::new(3_000).await;
-                                // Cancel if user closed modal or started another flow.
-                                if !modal_open.get_untracked() {
-                                    break;
+                                // Cancel if user closed modal or started another
+                                // flow — or if OAuthAuthorize was disposed on a
+                                // route change (#343: this self-rescheduling poll
+                                // outlives its owner; `try_get_untracked` returns
+                                // None on a disposed signal instead of panicking).
+                                match modal_open.try_get_untracked() {
+                                    Some(true) => {}
+                                    _ => break,
                                 }
                                 let url = format!(
                                     "/api/v1/youtube/oauth/device-status?label={l}"
@@ -119,7 +124,7 @@ pub fn OAuthAuthorize() -> impl IntoView {
                                             b.status.as_str(),
                                             "granted" | "denied" | "expired" | "error"
                                         );
-                                        status.set(Some(b));
+                                        status.try_set(Some(b));
                                         if term {
                                             break;
                                         }

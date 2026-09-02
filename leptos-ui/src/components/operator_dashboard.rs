@@ -1,6 +1,5 @@
 //! Operator-facing single-page dashboard — vertical pipeline flow with endpoint tree.
 
-use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -81,7 +80,9 @@ fn ControlBar() -> impl IntoView {
     // the single source of truth for the RTMP connection indicator, so
     // overwriting it here would cause the pipeline display to flip back to
     // "connected" within a poll cycle after a disconnect event.
-    let _status_poll = Interval::new(2_000, move || {
+    // #343: bound to ControlBar's owner so the poll stops (and no longer hits
+    // /status) once the dashboard route is left — see utils::interval_until_disposed.
+    crate::utils::interval_until_disposed(2_000, move || {
         spawn_local(async move {
             if let Ok(s) = api::get_status().await {
                 store.rtmp_stable_secs.set(s.rtmp_stable_secs);
@@ -93,10 +94,6 @@ fn ControlBar() -> impl IntoView {
             }
         });
     });
-    // #343: cancel the poll when ControlBar is disposed (route change) instead
-    // of leaking it — a forgotten Interval keeps firing against disposed
-    // signals. gloo `Interval` clears the browser timer on Drop.
-    let _ = StoredValue::new_local(_status_poll);
 
     let pipeline_state = move || store.pipeline_state.get().state.clone();
     let is_active = move || {
@@ -205,14 +202,12 @@ fn ControlBar() -> impl IntoView {
         )
     });
 
-    // 1-second tick for session timer
+    // 1-second tick for session timer. #343: bound to ControlBar's owner so the
+    // tick stops firing against the disposed `tick` signal on a route change.
     let tick = RwSignal::new(0u32);
-    let _interval = Interval::new(1_000, move || {
+    crate::utils::interval_until_disposed(1_000, move || {
         tick.update(|t| *t = t.wrapping_add(1));
     });
-    // #343: the session-timer tick captures ControlBar-scoped `tick`; cancel
-    // it on disposal so it never fires against the disposed signal.
-    let _ = StoredValue::new_local(_interval);
 
     let session_duration = move || {
         let _ = tick.get();
@@ -432,7 +427,9 @@ fn Pipeline() -> impl IntoView {
     };
     let prev_bytes = RwSignal::new(0i64);
     let bitrate_mbps = RwSignal::new(0.0f64);
-    let _bitrate_interval = Interval::new(2_000, move || {
+    // #343: bound to Pipeline's owner — the sampler captures Pipeline-scoped
+    // `prev_bytes` / `bitrate_mbps`; it stops on disposal (route change).
+    crate::utils::interval_until_disposed(2_000, move || {
         let current = store.chunk_stats.get().total_bytes;
         let prev = prev_bytes.get_untracked();
         if prev > 0 && current > prev {
@@ -442,9 +439,6 @@ fn Pipeline() -> impl IntoView {
         }
         prev_bytes.set(current);
     });
-    // #343: the bitrate sampler captures ControlBar-scoped `prev_bytes` /
-    // `bitrate_mbps`; cancel it on disposal.
-    let _ = StoredValue::new_local(_bitrate_interval);
     let rtmp_metric = move || {
         if rtmp_connected() {
             let mbps = bitrate_mbps.get();
@@ -496,7 +490,7 @@ fn Pipeline() -> impl IntoView {
         match (status.is_empty() || status == "none", event_id) {
             (true, Some(id)) => {
                 spawn_local(async move {
-                    // #343: this fetch can resolve after ControlBar is disposed
+                    // #343: this fetch can resolve after Pipeline is disposed
                     // on a route change — `try_set` no-ops then instead of
                     // panicking on the disposed signal.
                     let v = api::get_last_vps_destroy(id).await.ok().flatten();

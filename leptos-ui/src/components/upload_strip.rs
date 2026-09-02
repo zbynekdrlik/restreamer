@@ -5,7 +5,6 @@
 //! target concurrency, and rolling error rate. Click anywhere on the strip
 //! to drill into the full uploads page.
 
-use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -15,16 +14,14 @@ pub fn UploadStrip() -> impl IntoView {
 
     // Poll every 2s — even when idle, the strip should update adaptive_target
     // and in_flight (both default to 0/0 so rendering stays stable).
-    let _interval = Interval::new(2_000, move || {
+    // #343: bound to UploadStrip's owner so it stops on a route change.
+    crate::utils::interval_until_disposed(2_000, move || {
         spawn_local(async move {
             if let Ok(s) = crate::api::fetch_upload_stats().await {
                 stats.try_set(s); // #343: no-op if UploadStrip was disposed mid-fetch
             }
         });
     });
-    // #343: cancel on disposal — a forgotten interval keeps writing the
-    // disposed `stats` signal after UploadStrip unmounts on a route change.
-    let _ = StoredValue::new_local(_interval);
 
     // Fire one immediate fetch so the strip isn't blank for 2s on load.
     spawn_local(async move {

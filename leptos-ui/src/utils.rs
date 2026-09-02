@@ -1,7 +1,37 @@
 //! Small helpers shared across Leptos components.
 
-use gloo_timers::callback::Timeout;
+use gloo_timers::callback::{Interval, Timeout};
 use leptos::prelude::*;
+
+/// Create a repeating [`Interval`] whose lifetime is bound to the CURRENT
+/// reactive owner (issue #343).
+///
+/// The timer fires every `millis` ms and is CANCELLED — its browser
+/// `setInterval` cleared — the moment the owning component is disposed (a
+/// route/tab change). Mechanism: the `Interval` is parked in a
+/// `StoredValue::new_local`, whose value lives in the owner's local arena;
+/// on owner cleanup the arena drops it, running gloo's `Interval` `Drop`
+/// (`clearInterval`). The handle is discarded (`let _ =`) but the parked
+/// value is NOT — `StoredValue` is a `Copy` handle with no `Drop`, so
+/// dropping it detaches nothing.
+///
+/// This replaces the old `Interval::new(...); std::mem::forget(...)` idiom,
+/// whose leaked timers kept firing against disposed signals. `on_cleanup`
+/// cannot be used because the `!Send` gloo handle fails its `Send + Sync`
+/// bound.
+///
+/// MUST be called synchronously from a component body — a live reactive
+/// owner must be current. Calling it after an `.await` (inside a
+/// `spawn_local`) registers with no owner and silently degrades back to a
+/// leak; the `debug_assert!` catches that in dev builds.
+pub fn interval_until_disposed(millis: u32, f: impl FnMut() + 'static) {
+    debug_assert!(
+        Owner::current().is_some(),
+        "interval_until_disposed must run under a live reactive owner"
+    );
+    let handle = Interval::new(millis, f);
+    let _ = StoredValue::new_local(handle);
+}
 
 /// Defer `signal.set(false)` to the next JS macrotask (via `setTimeout(0)`).
 ///
