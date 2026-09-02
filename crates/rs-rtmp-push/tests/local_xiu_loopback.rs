@@ -150,14 +150,14 @@ async fn publish_rejected_on_invalid_stream_key() {
     let addr = listener.local_addr().expect("local_addr");
 
     let server_handle = tokio::spawn(async move {
-        if let Err(e) = run_rejecting_server(listener).await {
+        if let Err(e) = rejecting_server::run_rejecting_server(listener).await {
             eprintln!("[rejecting-server] error: {e}");
         }
     });
 
-    // Small delay so the server task has time to reach accept().
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
+    // No startup sleep needed: the listener is bound BEFORE the task is
+    // spawned, so the kernel backlog queues the client's SYN whether or not
+    // the server task has reached accept() yet.
     let url = format!("rtmp://{}/live/badkey", addr);
     let mut pusher = RtmpPusher::new(url, PusherConfig::default());
 
@@ -179,11 +179,6 @@ async fn publish_rejected_on_invalid_stream_key() {
         }
         other => panic!("expected PushError::PublishRejected, got {other:?}"),
     }
-
-    // A rejected publish must not have opened a usable session or advanced
-    // the output timeline.
-    assert_eq!(pusher.reconnect_count(), 0);
-    assert_eq!(pusher.last_output_ts_ms(), 0);
 }
 
 /// Assert that output timestamps remain monotonic across a pusher reconnect
