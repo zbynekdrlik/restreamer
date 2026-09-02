@@ -3,15 +3,13 @@
 //! (CI `file-size` job). Included via `#[path]` as `mod endpoint_traits`
 //! inside `endpoint_task.rs`; every item is re-exported at the
 //! `endpoint_task` level so existing `crate::endpoint_task::{ChunkFetcher,
-//! OutputProcess, OutputProcessFactory, PrefetchedChunk}` import paths (used
-//! across `producer_lag`, `disk_cache_fetcher`, `rescue`, the tests, and the
-//! `endpoint_ffmpeg_impl` trait impls) keep resolving unchanged. Pure move —
-//! no logic change.
+//! PrefetchedChunk}` import paths (used across `producer_lag`,
+//! `disk_cache_fetcher`, `rescue`, and the tests) keep resolving unchanged.
+//! The `OutputProcess`/`OutputProcessFactory` traits (the ffmpeg-subprocess
+//! push abstraction) were removed in #212 — `rs_rtmp_push` is the only push
+//! backend now.
 
 use std::sync::Arc;
-
-use async_trait::async_trait;
-use rs_ffmpeg::ServiceType;
 
 /// A chunk that has been fetched from S3 and is ready for the consumer.
 pub(crate) struct PrefetchedChunk {
@@ -53,24 +51,4 @@ impl<T: ChunkFetcher> ChunkFetcher for Arc<T> {
     ) -> impl std::future::Future<Output = Result<Option<i64>, String>> + Send {
         (**self).chunk_duration_ms(chunk_id)
     }
-}
-
-/// Trait for output process (ffmpeg or mock).
-/// Uses async_trait for object safety (Box<dyn OutputProcess>).
-#[async_trait]
-pub trait OutputProcess: Send {
-    fn is_alive(&mut self) -> bool;
-    async fn write(&mut self, data: &[u8]) -> Result<(), String>;
-    async fn kill(&mut self);
-    fn last_stderr_line(&self) -> Option<String>;
-}
-
-/// Factory for spawning output processes.
-pub trait OutputProcessFactory: Send + Sync {
-    fn spawn(
-        &self,
-        service_type: ServiceType,
-        stream_key: &str,
-        alias: &str,
-    ) -> Result<Box<dyn OutputProcess>, String>;
 }

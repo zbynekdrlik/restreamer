@@ -641,7 +641,7 @@ async fn migrate_v21(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
 }
 
 async fn migrate_v22(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Result<()> {
-    // Add pusher column for PusherKind (#103). Default 'ffmpeg' preserves
+    // Add pusher column (#103). Default 'ffmpeg' preserves
     // existing endpoint behaviour for all rows created before this migration.
     add_column_if_missing(
         tx,
@@ -762,7 +762,7 @@ async fn migrate_v27(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> sqlx::Resu
 /// Migration v22 set the column DEFAULT to `'ffmpeg'` to preserve legacy
 /// behaviour. The SQL DEFAULT itself is still `'ffmpeg'` on the column —
 /// this migration does NOT change it. What changes in v0.17.0 is:
-///   1. `PusherKind::default()` is now `Rust` (was `Ffmpeg`), so anything
+///   1. the in-process Rust pusher is now the default (was ffmpeg), so anything
 ///      deserialized in-process without an explicit `pusher` field picks
 ///      the working path.
 ///   2. `create_endpoint_config` INSERTs `pusher='rust'` explicitly,

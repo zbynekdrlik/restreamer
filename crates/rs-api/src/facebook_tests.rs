@@ -8,7 +8,6 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use rs_core::db::{create_memory_pool, run_migrations};
-use rs_core::models::PusherKind;
 
 use crate::facebook::{FacebookConfigSeedRequest, facebook_config_seed};
 
@@ -50,11 +49,6 @@ async fn seed_creates_endpoint_when_absent() {
 
     assert_eq!(fb.service_type, "FB", "service_type must be FB");
     assert_eq!(fb.stream_key, "FB-PERSISTENT-KEY-001");
-    assert_eq!(
-        fb.pusher,
-        PusherKind::Rust,
-        "pusher must be Rust (PR #218 default)"
-    );
 }
 
 #[tokio::test]
@@ -92,7 +86,6 @@ async fn seed_updates_existing_endpoint_stream_key() {
     assert_eq!(fb.len(), 1, "must be exactly one 'e2e fb' row (idempotent)");
     assert_eq!(fb[0].stream_key, "NEW-KEY");
     assert_eq!(fb[0].service_type, "FB");
-    assert_eq!(fb[0].pusher, PusherKind::Rust);
 }
 
 #[tokio::test]

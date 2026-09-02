@@ -32,11 +32,11 @@ pub struct EndpointStats {
     pub delivery_mode: String,
     /// ETA in seconds until rescue mode ends (warmup or buffer refill).
     pub rescue_eta_secs: Option<u64>,
-    /// Reconnect counter for `PusherKind::Rust` endpoints. Mirrors
+    /// Reconnect counter for rust-pusher endpoints. Mirrors
     /// `ffmpeg_restart_count` so the dashboard can use either uniformly.
     #[serde(default)]
     pub reconnect_count: u32,
-    /// Current signed content-PTS A/V skew in ms for `PusherKind::Rust`
+    /// Current signed content-PTS A/V skew in ms for rust-pusher
     /// endpoints (positive = audio behind video). Read from the pusher on
     /// every successful chunk push. The dashboard alarms on a sustained
     /// non-zero value and the #258 E2E gate asserts it stays ~0 (issue #257).

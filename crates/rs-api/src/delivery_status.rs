@@ -35,8 +35,8 @@ pub struct EndpointRestartRecord {
     pub stderr_last_error_line: Option<String>,
 }
 
-/// Mirror of `rs_delivery::ffmpeg_reason::pick_last_error_line` to avoid a
-/// cross-crate dependency cycle. Keep logic identical.
+/// Pick the most relevant last-error line from a captured stderr tail for
+/// dashboard display. (Self-contained — no cross-crate dependency.)
 pub(crate) fn pick_last_error_line_inline(stderr_tail: &str) -> Option<String> {
     stderr_tail
         .lines()

@@ -33,7 +33,6 @@ use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, watch};
 
 use rs_core::audit::Action;
-use rs_core::models::PusherKind;
 
 use crate::api::EndpointConfig;
 use crate::audit_ring::AuditRing;
@@ -44,8 +43,6 @@ use crate::disk_cache_fetcher::DiskCacheFetcher;
 use crate::endpoint_producer::producer_task;
 use crate::endpoint_stats::{EndpointStats, Stats};
 use crate::endpoint_task::{ChunkFetcher, endpoint_loop};
-
-use super::tests::MockProcessFactory;
 
 /// Short stall budget so the bounded-wait assertions run in tight virtual
 /// time. Production uses 60s (`EndpointHandle::spawn`); the invariants under
@@ -284,7 +281,6 @@ fn ep_cfg(alias: &str) -> EndpointConfig {
         is_fast: false,
         chunk_format: "flv".to_string(),
         start_chunk_id: None,
-        pusher: PusherKind::Ffmpeg,
     }
 }
 
@@ -314,7 +310,6 @@ async fn run_real_cache_until_rescue(
     let handle = tokio::spawn(async move {
         endpoint_loop(
             fetcher,
-            MockProcessFactory::new(),
             cfg,
             1,
             0, // no warmup — straight to the pipeline

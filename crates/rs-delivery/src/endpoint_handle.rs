@@ -2,7 +2,7 @@
 //! task. Extracted from `endpoint_task.rs` to keep that file under the
 //! 1000-line file-size gate (CI `file-size` job). Included via `#[path]` as
 //! `mod endpoint_handle` inside `endpoint_task.rs`, so `super::` reaches the
-//! sibling `endpoint_loop` fn and the `FfmpegProcessFactory` re-export.
+//! sibling `endpoint_loop` fn.
 //! `EndpointHandle` is re-exported at the `endpoint_task` level so the
 //! existing `crate::endpoint_task::EndpointHandle` (and `crate::EndpointHandle`
 //! via main.rs) import paths keep resolving unchanged. Pure move — no logic
@@ -14,8 +14,7 @@ use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 
 use super::{
-    BufferState, EndpointStats, FfmpegProcessFactory, Stats, endpoint_loop, initial_delivery_mode,
-    initial_endpoint_stats,
+    BufferState, EndpointStats, Stats, endpoint_loop, initial_delivery_mode, initial_endpoint_stats,
 };
 use crate::api::EndpointConfig;
 use crate::audit_ring::AuditRing;
@@ -75,7 +74,6 @@ impl EndpointHandle {
         let cfg = ep_cfg.clone();
         let task = tokio::spawn(endpoint_loop(
             fetcher,
-            FfmpegProcessFactory,
             ep_cfg,
             start_chunk_id,
             effective_delay,
@@ -158,7 +156,6 @@ impl EndpointHandle {
             is_fast: false,
             chunk_format: "flv".to_string(),
             start_chunk_id: None,
-            pusher: Default::default(),
         };
         Self {
             task,

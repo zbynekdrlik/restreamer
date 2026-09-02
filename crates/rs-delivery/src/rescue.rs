@@ -163,22 +163,16 @@ pub async fn run_outage_rescue(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
     last_delivered_chunk_id: i64,
-    proc: &mut Option<Box<dyn crate::endpoint_task::OutputProcess>>,
     rust_pusher: &mut Option<rs_rtmp_push::RtmpPusher>,
-    use_rust_pusher: bool,
 ) -> OutageRescueOutcome {
     let rescue_started = std::time::Instant::now();
     crate::rescue_audit::emit_activated(audit_ring, alias, last_delivered_chunk_id);
 
-    // Review #1: kill the legacy ffmpeg child AND drop the existing
-    // rust_pusher BEFORE entering rescue. The rescue loop constructs its
-    // own `RtmpPusher` to the SAME URL+stream_key; if our pre-existing
-    // rust_pusher still holds the original `Session` open, YouTube/FB
-    // sees two concurrent publishes and rejects/kills one of them. Both
-    // takes are no-ops when None.
-    if let Some(mut p) = proc.take() {
-        p.kill().await;
-    }
+    // Review #1: drop the existing rust_pusher (closing its RTMP `Session`)
+    // BEFORE entering rescue. The rescue loop constructs its own `RtmpPusher`
+    // to the SAME URL+stream_key; if our pre-existing rust_pusher still holds
+    // the original `Session` open, YouTube/FB sees two concurrent publishes
+    // and rejects/kills one of them. No-op when None.
     if let Some(p) = rust_pusher.take() {
         drop(p);
     }
@@ -208,7 +202,7 @@ pub async fn run_outage_rescue(
     // resume normal-delivery writes against a fresh `Session`
     // (lazy-connects on next push). Timestamps reset from zero — that's
     // expected after a rescue gap.
-    if use_rust_pusher {
+    {
         let url = crate::endpoint_rtmp_url::build_rtmp_url(service_type, stream_key);
         *rust_pusher = Some(rs_rtmp_push::RtmpPusher::new(
             url,
@@ -259,19 +253,14 @@ pub async fn run_defensive_rescue(
     stop_rx: &mut tokio::sync::watch::Receiver<bool>,
     audit_ring: &Option<std::sync::Arc<crate::audit_ring::AuditRing>>,
     last_delivered_chunk_id: i64,
-    proc: &mut Option<Box<dyn crate::endpoint_task::OutputProcess>>,
     rust_pusher: &mut Option<rs_rtmp_push::RtmpPusher>,
 ) {
     crate::rescue_audit::emit_activated(audit_ring, alias, last_delivered_chunk_id);
 
-    // Review #1: kill any orphaned ffmpeg child AND drop the existing
-    // rust_pusher so its RTMP `Session` is closed BEFORE `run_rescue_loop`
-    // constructs a fresh pusher to the same URL+stream_key. Two concurrent
-    // publishes to the same key trigger publish-busy on YouTube/FB and
-    // break the stream.
-    if let Some(mut p) = proc.take() {
-        p.kill().await;
-    }
+    // Review #1: drop the existing rust_pusher so its RTMP `Session` is closed
+    // BEFORE `run_rescue_loop` constructs a fresh pusher to the same
+    // URL+stream_key. Two concurrent publishes to the same key trigger
+    // publish-busy on YouTube/FB and break the stream. No-op when None.
     if let Some(p) = rust_pusher.take() {
         drop(p);
     }

@@ -6,8 +6,8 @@
 //! exactly as they did when this content lived inline (one level of
 //! module nesting either way).
 
+use super::super::super::EndpointStats;
 use super::super::super::consumer_helpers::{Pushable, RustPushAction, handle_rust_push};
-use super::super::super::{EndpointStats, FlvStreamNormalizer};
 use crate::audit_ring::AuditRing;
 use rs_core::audit::{Action, Severity};
 use rs_rtmp_push::PushError;
@@ -106,14 +106,13 @@ impl Pushable for SequencedPusher {
 fn fresh_state() -> (
     Arc<Mutex<EndpointStats>>,
     watch::Receiver<bool>,
-    FlvStreamNormalizer,
     u32,
     u32,
     u32,
 ) {
     let stats = Arc::new(Mutex::new(EndpointStats::default()));
     let (_tx, rx) = watch::channel(false);
-    (stats, rx, FlvStreamNormalizer::new(), 0u32, 0u32, 0u32)
+    (stats, rx, 0u32, 0u32, 0u32)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -122,7 +121,6 @@ async fn push_once(
     stats: &Arc<Mutex<EndpointStats>>,
     audit_ring: &Option<Arc<AuditRing>>,
     stop_rx: &mut watch::Receiver<bool>,
-    norm: &mut FlvStreamNormalizer,
     consec_err: &mut u32,
     consec_write: &mut u32,
     consec_zero_byte: &mut u32,
@@ -143,7 +141,6 @@ async fn push_once(
         audit_ring,
         tel,
         stop_rx,
-        norm,
     )
     .await
 }
@@ -156,7 +153,7 @@ async fn below_threshold_zero_byte_deaths_do_not_classify_dead_target() {
     // and last_error/stall_reason carry the RAW error text, not the
     // DEAD_TARGET operator remedy.
     let mut pusher = SequencedPusher::default();
-    let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+    let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
         fresh_state();
     let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 
@@ -166,7 +163,6 @@ async fn below_threshold_zero_byte_deaths_do_not_classify_dead_target() {
             &stats,
             &None,
             &mut stop_rx,
-            &mut norm,
             &mut consec_err,
             &mut consec_write,
             &mut consec_zero_byte,
@@ -196,7 +192,7 @@ async fn five_consecutive_zero_byte_deaths_classify_fb_dead_target_and_force_30s
     let ring = AuditRing::new(64);
     let audit_ring = Some(Arc::clone(&ring));
     let mut pusher = SequencedPusher::default();
-    let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+    let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
         fresh_state();
     let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 
@@ -206,7 +202,6 @@ async fn five_consecutive_zero_byte_deaths_classify_fb_dead_target_and_force_30s
             &stats,
             &audit_ring,
             &mut stop_rx,
-            &mut norm,
             &mut consec_err,
             &mut consec_write,
             &mut consec_zero_byte,
@@ -262,7 +257,7 @@ async fn dead_target_audit_row_never_repeats_while_still_classified() {
     let ring = AuditRing::new(64);
     let audit_ring = Some(Arc::clone(&ring));
     let mut pusher = SequencedPusher::default();
-    let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+    let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
         fresh_state();
     let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 
@@ -272,7 +267,6 @@ async fn dead_target_audit_row_never_repeats_while_still_classified() {
             &stats,
             &audit_ring,
             &mut stop_rx,
-            &mut norm,
             &mut consec_err,
             &mut consec_write,
             &mut consec_zero_byte,
@@ -309,7 +303,7 @@ async fn re_arm_after_recovery_emits_a_second_audit_row() {
         Err(remote_closed()),
         Ok(()),
     ]);
-    let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+    let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
         fresh_state();
     let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 
@@ -319,7 +313,6 @@ async fn re_arm_after_recovery_emits_a_second_audit_row() {
             &stats,
             &audit_ring,
             &mut stop_rx,
-            &mut norm,
             &mut consec_err,
             &mut consec_write,
             &mut consec_zero_byte,
@@ -342,7 +335,6 @@ async fn re_arm_after_recovery_emits_a_second_audit_row() {
             &stats,
             &audit_ring,
             &mut stop_rx,
-            &mut norm,
             &mut consec_err,
             &mut consec_write,
             &mut consec_zero_byte,
@@ -367,7 +359,7 @@ async fn re_arm_after_recovery_emits_a_second_audit_row() {
 #[tokio::test(start_paused = true)]
 async fn five_consecutive_zero_byte_deaths_on_a_non_fb_service_get_generic_message() {
     let mut pusher = SequencedPusher::default();
-    let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+    let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
         fresh_state();
     let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 
@@ -377,7 +369,6 @@ async fn five_consecutive_zero_byte_deaths_on_a_non_fb_service_get_generic_messa
             &stats,
             &None,
             &mut stop_rx,
-            &mut norm,
             &mut consec_err,
             &mut consec_write,
             &mut consec_zero_byte,
@@ -430,7 +421,7 @@ async fn a_successful_push_between_deaths_prevents_dead_target_classification() 
         Err(remote_closed()),
         Err(remote_closed()),
     ]);
-    let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+    let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
         fresh_state();
     let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 
@@ -440,7 +431,6 @@ async fn a_successful_push_between_deaths_prevents_dead_target_classification() 
             &stats,
             &None,
             &mut stop_rx,
-            &mut norm,
             &mut consec_err,
             &mut consec_write,
             &mut consec_zero_byte,
@@ -478,7 +468,7 @@ async fn five_consecutive_handshake_failures_never_classify_dead_target() {
     // is "check the network", never "recreate the FB broadcast".
     let mut pusher =
         SequencedPusher::with_results((0..8).map(|_| Err(handshake_failed())).collect());
-    let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+    let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
         fresh_state();
     let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 
@@ -488,7 +478,6 @@ async fn five_consecutive_handshake_failures_never_classify_dead_target() {
             &stats,
             &None,
             &mut stop_rx,
-            &mut norm,
             &mut consec_err,
             &mut consec_write,
             &mut consec_zero_byte,
@@ -522,7 +511,7 @@ async fn five_consecutive_bad_stream_key_rejects_keep_their_own_actionable_messa
     // replaced with "the key stays the same", actively wrong advice).
     let mut pusher =
         SequencedPusher::with_results((0..8).map(|_| Err(publish_rejected_bad_name())).collect());
-    let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+    let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
         fresh_state();
     let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 
@@ -532,7 +521,6 @@ async fn five_consecutive_bad_stream_key_rejects_keep_their_own_actionable_messa
             &stats,
             &None,
             &mut stop_rx,
-            &mut norm,
             &mut consec_err,
             &mut consec_write,
             &mut consec_zero_byte,
@@ -574,7 +562,7 @@ async fn a_non_remote_closed_error_between_remote_closed_deaths_resets_the_count
         Err(remote_closed()),
         Err(remote_closed()),
     ]);
-    let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+    let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
         fresh_state();
     let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 
@@ -584,7 +572,6 @@ async fn a_non_remote_closed_error_between_remote_closed_deaths_resets_the_count
             &stats,
             &None,
             &mut stop_rx,
-            &mut norm,
             &mut consec_err,
             &mut consec_write,
             &mut consec_zero_byte,
@@ -628,7 +615,7 @@ async fn a_write_timeout_between_remote_closed_deaths_resets_the_counter() {
         ],
         5,
     );
-    let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+    let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
         fresh_state();
     let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
 
@@ -639,7 +626,6 @@ async fn a_write_timeout_between_remote_closed_deaths_resets_the_counter() {
             &stats,
             &None,
             &mut stop_rx,
-            &mut norm,
             &mut consec_err,
             &mut consec_write,
             &mut consec_zero_byte,
@@ -657,7 +643,6 @@ async fn a_write_timeout_between_remote_closed_deaths_resets_the_counter() {
         &stats,
         &None,
         &mut stop_rx,
-        &mut norm,
         &mut consec_err,
         &mut consec_write,
         &mut consec_zero_byte,

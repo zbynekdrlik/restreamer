@@ -64,28 +64,6 @@ pub struct ChunkRecord {
     pub upload_failed_permanently: bool,
 }
 
-/// Which RTMP-push backend an endpoint uses. Default `Ffmpeg` keeps existing
-/// `config.json` files behaving exactly as today; `Rust` selects the new
-/// in-process pusher introduced for #103.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PusherKind {
-    /// Legacy ffmpeg-subprocess push. Kept as a DB / config value for
-    /// backward read compatibility with rows created before the
-    /// rust-pusher migration, but no API path writes this value: the
-    /// `create_endpoint_config` INSERT site explicitly sets `'rust'`
-    /// and `update_endpoint` doesn't accept a `pusher` field at all.
-    /// Migration v28 backfills any pre-existing `'ffmpeg'` row to
-    /// `'rust'` on the next service start. Full removal of this variant
-    /// and the ffmpeg-subprocess push code path is tracked in #212.
-    Ffmpeg,
-    /// In-process Rust RTMP pusher (rs-rtmp-push). The only supported
-    /// push backend for new endpoints. `#[default]` so any config without
-    /// an explicit pusher field starts on the working path.
-    #[default]
-    Rust,
-}
-
 /// Endpoint configuration (e.g., YouTube HLS, Facebook RTMP).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointConfig {
@@ -97,13 +75,6 @@ pub struct EndpointConfig {
     pub position_last: i64,
     pub delivered_bytes: i64,
     pub is_fast: bool,
-    /// Which push backend to use. `#[serde(default)]` parses legacy
-    /// config.json files that omit the field; the default is `Rust`
-    /// (post-#196 — was `Ffmpeg` until v0.17.0). Endpoints without an
-    /// explicit `pusher` field now silently land on the working
-    /// rs-rtmp-push backend.
-    #[serde(default)]
-    pub pusher: PusherKind,
     /// Number of chunks to pre-fetch ahead of the pusher. Resolution
     /// at endpoint init: explicit Some(K) wins; else is_fast=true => K=1
     /// (double-buffered, ~zero added delay); else K=0 (current bypass

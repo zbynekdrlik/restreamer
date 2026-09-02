@@ -5,8 +5,7 @@ use tokio::time::Instant;
 /// Per-`RtmpPusher` runtime state. Owns connection-lifetime data (TCP session +
 /// monotonic output timestamp + reconnect counter). Retry-policy state
 /// (`consecutive_errors`, `last_error_class`) lives in the *caller*
-/// (`endpoint_task`) — same boundary as today's split between `FfmpegProcess`
-/// and `EndpointRestartState`.
+/// (`endpoint_task`) — the retry-policy state lives beside the pusher in the consumer loop.
 #[derive(Default)]
 pub struct PusherState {
     /// Highest output timestamp seen across all tracks. Used by the consumer

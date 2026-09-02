@@ -3,32 +3,19 @@ use sqlx::Row;
 use sqlx::sqlite::SqlitePool;
 
 use crate::error::{CoreError, Result};
-use crate::models::{
-    DeliveryEndpointStatus, DeliveryInstance, EndpointConfig, PusherKind, StreamingEvent,
-};
-
-/// Parse a `pusher` TEXT column value from the database into `PusherKind`.
-/// Unknown values default to `Ffmpeg` so existing rows are never broken.
-/// Parse the `pusher` TEXT column. Known values `'rust'` and `'ffmpeg'`
-/// round-trip cleanly. Unknown / malformed values fall back to the enum
-/// default (`Rust` post-#196). Migration v28 flips any literal `'ffmpeg'`
-/// rows to `'rust'` on the next deploy, so the `'ffmpeg'` arm should
-/// rarely fire in practice but is kept for read-back of legacy rows
-/// on stale binaries.
-pub(super) fn parse_pusher_kind(s: String) -> PusherKind {
-    match s.as_str() {
-        "rust" => PusherKind::Rust,
-        "ffmpeg" => PusherKind::Ffmpeg,
-        _ => PusherKind::default(),
-    }
-}
+use crate::models::{DeliveryEndpointStatus, DeliveryInstance, EndpointConfig, StreamingEvent};
 
 // --- Endpoint Configs ---
+//
+// The legacy `pusher` selector and its ffmpeg-subprocess push
+// path were removed in #212 — `rs_rtmp_push` is the only push backend now.
+// The `pusher` TEXT column is left in place on the table (inert, DEFAULT
+// 'ffmpeg') for back-compat with existing DBs; no code reads or writes it.
 
 pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConfig>> {
     let rows = sqlx::query(
         "SELECT id, alias, service_type, stream_key, enabled, position_last,
-         delivered_bytes, is_fast, pusher, youtube_oauth_id, created_at, updated_at
+         delivered_bytes, is_fast, youtube_oauth_id, created_at, updated_at
          FROM endpoint_configs ORDER BY id",
     )
     .fetch_all(pool)
@@ -45,7 +32,6 @@ pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConf
             position_last: r.get("position_last"),
             delivered_bytes: r.get("delivered_bytes"),
             is_fast: r.get::<i32, _>("is_fast") != 0,
-            pusher: parse_pusher_kind(r.get("pusher")),
             prefetch_chunks: None,
             youtube_oauth_id: r.get("youtube_oauth_id"),
             created_at: r.get("created_at"),
@@ -57,7 +43,7 @@ pub async fn list_endpoint_configs(pool: &SqlitePool) -> Result<Vec<EndpointConf
 pub async fn get_endpoint_config(pool: &SqlitePool, id: i64) -> Result<Option<EndpointConfig>> {
     let row = sqlx::query(
         "SELECT id, alias, service_type, stream_key, enabled, position_last,
-         delivered_bytes, is_fast, pusher, youtube_oauth_id, created_at, updated_at
+         delivered_bytes, is_fast, youtube_oauth_id, created_at, updated_at
          FROM endpoint_configs WHERE id = ?1",
     )
     .bind(id)
@@ -73,7 +59,6 @@ pub async fn get_endpoint_config(pool: &SqlitePool, id: i64) -> Result<Option<En
         position_last: r.get("position_last"),
         delivered_bytes: r.get("delivered_bytes"),
         is_fast: r.get::<i32, _>("is_fast") != 0,
-        pusher: parse_pusher_kind(r.get("pusher")),
         prefetch_chunks: None,
         youtube_oauth_id: r.get("youtube_oauth_id"),
         created_at: r.get("created_at"),
@@ -88,17 +73,13 @@ pub async fn create_endpoint_config(
     stream_key: &str,
     is_fast: bool,
 ) -> Result<i64> {
-    // Explicit `pusher='rust'` overrides the v22 column DEFAULT 'ffmpeg'.
-    // SQLite ALTER COLUMN can't change a column DEFAULT cleanly, so we
-    // override at every INSERT site instead. Together with migration v28
-    // (flips all existing 'ffmpeg' rows to 'rust') this closes the gap
-    // where new endpoints silently landed on the broken ffmpeg-subprocess
-    // path (root cause of #196 "YT-BB always bad"). PusherKind::default()
-    // is also `Rust` so anything that deserializes from config.json picks
-    // the right path automatically.
+    // #212: the `pusher` column is no longer written — the ffmpeg-subprocess
+    // push path was removed and `rs_rtmp_push` is the only backend. New rows
+    // fall to the column's SQLite DEFAULT ('ffmpeg'), which is inert dead data
+    // now that nothing reads the column back.
     let row = sqlx::query(
-        "INSERT INTO endpoint_configs (alias, service_type, stream_key, is_fast, pusher)
-         VALUES (?1, ?2, ?3, ?4, 'rust') RETURNING id",
+        "INSERT INTO endpoint_configs (alias, service_type, stream_key, is_fast)
+         VALUES (?1, ?2, ?3, ?4) RETURNING id",
     )
     .bind(alias)
     .bind(service_type)
@@ -190,7 +171,7 @@ pub async fn detach_endpoint_from_event(
 pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec<EndpointConfig>> {
     let rows = sqlx::query(
         "SELECT e.id, e.alias, e.service_type, e.stream_key, e.enabled, e.position_last,
-         e.delivered_bytes, e.is_fast, e.pusher, e.youtube_oauth_id, e.created_at, e.updated_at
+         e.delivered_bytes, e.is_fast, e.youtube_oauth_id, e.created_at, e.updated_at
          FROM endpoint_configs e
          INNER JOIN event_endpoints ee ON ee.endpoint_id = e.id
          WHERE ee.event_id = ?1 AND e.enabled = 1
@@ -211,7 +192,6 @@ pub async fn get_event_endpoints(pool: &SqlitePool, event_id: i64) -> Result<Vec
             position_last: r.get("position_last"),
             delivered_bytes: r.get("delivered_bytes"),
             is_fast: r.get::<i32, _>("is_fast") != 0,
-            pusher: parse_pusher_kind(r.get("pusher")),
             prefetch_chunks: None,
             youtube_oauth_id: r.get("youtube_oauth_id"),
             created_at: r.get("created_at"),

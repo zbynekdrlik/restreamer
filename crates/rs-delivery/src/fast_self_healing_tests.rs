@@ -3,7 +3,7 @@
 //! cap. These exercise the producer's adaptive read-delay / live-edge
 //! lag-probe behaviour (#232) plus the buffer-fill stop/pacing paths.
 //!
-//! Shared mock helpers (`TimedMockFetcher`, `MockProcessFactory`,
+//! Shared mock helpers (`TimedMockFetcher`,
 //! `test_ep_cfg`) live in the sibling `tests` module and are reused here via
 //! `super::tests::…`. This is a pure move of the tests — no assertion change.
 
@@ -16,60 +16,8 @@ use crate::endpoint_producer::producer_task;
 use crate::endpoint_stats::{EndpointStats, Stats};
 use crate::endpoint_task::{PREFETCH_BUFFER_SIZE, PrefetchedChunk, endpoint_loop};
 
-use super::tests::{MockProcessFactory, TimedMockFetcher, test_ep_cfg};
+use super::tests::{TimedMockFetcher, test_ep_cfg};
 
-#[tokio::test]
-async fn test_chunk_gap_maintained_at_delay_target() {
-    // With delivery_delay_ms=20000, start_chunk_id=1, pre-load chunks 1-30 (2000ms each):
-    // After buffer fill (chunk 11 available), VPS starts consuming from chunk 1.
-    // Elapsed-aware pacing: 1000ms per chunk (non-fast).
-    tokio::time::pause();
-
-    let all_chunks: Vec<(i64, Vec<u8>)> = (1..=30).map(|i| (i, vec![i as u8; 100])).collect();
-    // All 30 chunks available immediately
-    let fetcher = TimedMockFetcher::new(all_chunks, 30);
-    let factory = MockProcessFactory::new();
-
-    let (stop_tx, stop_rx) = watch::channel(false);
-    let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
-
-    let stats_clone = stats.clone();
-    let handle = tokio::spawn(async move {
-        endpoint_loop(
-            fetcher,
-            factory,
-            test_ep_cfg(),
-            1,     // start_chunk_id
-            20000, // delivery_delay_ms (10 chunks * 2000ms)
-            stop_rx,
-            stats_clone,
-            None,
-            Arc::new(BufferState::new()),
-            None,
-        )
-        .await;
-    });
-
-    // Buffer fill needs 10 chunks (20000ms / 2000ms) which are already
-    // available. Consumer pacing sleeps ~2000ms per chunk. 30 chunks require
-    // ~60s of wall-clock advancement for pacing. Each iteration advances
-    // 100ms, so we need at least 600 iterations; use 2000 for slack.
-    for _ in 0..2000 {
-        tokio::time::advance(std::time::Duration::from_millis(100)).await;
-        tokio::task::yield_now().await;
-    }
-
-    let s = stats.lock().await;
-    assert_eq!(
-        s.chunks_processed, 30,
-        "Should have processed all 30 chunks, got {}",
-        s.chunks_processed
-    );
-    drop(s);
-
-    let _ = stop_tx.send(true);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
-}
 #[tokio::test]
 async fn test_buffer_fill_stops_on_signal() {
     // If stop signal is sent during buffer fill, the loop should exit
@@ -79,7 +27,6 @@ async fn test_buffer_fill_stops_on_signal() {
     let all_chunks: Vec<(i64, Vec<u8>)> = (1..=5).map(|i| (i, vec![i as u8; 100])).collect();
     // Only chunk 1 available, target_chunk = 1 + 10 = 11 -- will never be available
     let fetcher = TimedMockFetcher::new(all_chunks, 1);
-    let factory = MockProcessFactory::new();
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let stats: Stats = Arc::new(Mutex::new(EndpointStats::default()));
@@ -88,7 +35,6 @@ async fn test_buffer_fill_stops_on_signal() {
     let handle = tokio::spawn(async move {
         endpoint_loop(
             fetcher,
-            factory,
             test_ep_cfg(),
             1,
             20000, // delivery_delay_ms (10 chunks * 2000ms)

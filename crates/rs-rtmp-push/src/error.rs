@@ -47,8 +47,7 @@ pub enum PushError {
     AvSkewExceeded { skew_ms: i64 },
 }
 
-/// Backoff floor in milliseconds for a given error variant. Mirrors today's
-/// `crates/rs-delivery/src/ffmpeg_reason.rs::reconnect_floor` semantics.
+/// Backoff floor in milliseconds for a given error variant.
 ///
 /// The endpoint task multiplies this by `2^consecutive_errors` and caps at 300_000
 /// (5 min). All `PublishRejected` variants share the same 30 s floor; the

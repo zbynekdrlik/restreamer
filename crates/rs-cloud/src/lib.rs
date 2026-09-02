@@ -171,7 +171,6 @@ pub fn bootstrap_cloud_init(
     format!(
         r#"#cloud-config
 packages:
-  - ffmpeg
   - curl
   - unzip
 
@@ -257,7 +256,8 @@ runcmd:
 
 /// Cloud-init script for starting delivery from an existing snapshot.
 /// Downloads the latest binary from S3 to ensure the newest version runs,
-/// while the snapshot provides ffmpeg and other dependencies pre-installed.
+/// while the snapshot provides curl/awscli and other dependencies
+/// pre-installed. (#212 removed ffmpeg — the rust pusher is the only backend.)
 /// S3 credentials are written to an environment file on disk (mode 0600).
 pub fn snapshot_cloud_init(
     delivery_binary_url: &str,
@@ -410,7 +410,13 @@ mod tests {
         assert!(out.contains("      DELIVERY_S3_BUCKET=test-bucket"));
         assert!(out.contains("      DELIVERY_S3_REGION=eu-central"));
         assert!(out.contains("      DELIVERY_AUTH_TOKEN=tok-xyz"));
-        assert!(out.contains("packages:\n  - ffmpeg"));
+        // #212: ffmpeg was removed from the apt list — the rust pusher is the
+        // only push backend and nothing spawns the ffmpeg binary on the VPS.
+        assert!(out.contains("packages:\n  - curl"));
+        assert!(
+            !out.contains("- ffmpeg"),
+            "ffmpeg must no longer be installed on the delivery VPS (#212):\n{out}"
+        );
         assert!(out.contains("runcmd:\n  - /opt/restreamer/setup.sh"));
     }
 

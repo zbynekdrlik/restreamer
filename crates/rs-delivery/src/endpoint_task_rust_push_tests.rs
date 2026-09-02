@@ -282,8 +282,8 @@ fn emit_rtmp_push_died_with_none_ring_is_no_op() {
 // ---------------------------------------------------------------------------
 
 mod close_on_error {
+    use super::super::super::EndpointStats;
     use super::super::super::consumer_helpers::{Pushable, RustPushAction, handle_rust_push};
-    use super::super::super::{EndpointStats, FlvStreamNormalizer};
     use rs_rtmp_push::PushError;
     use std::collections::VecDeque;
     use std::io;
@@ -338,14 +338,13 @@ mod close_on_error {
     fn fresh_state() -> (
         Arc<Mutex<EndpointStats>>,
         watch::Receiver<bool>,
-        FlvStreamNormalizer,
         u32,
         u32,
         u32,
     ) {
         let stats = Arc::new(Mutex::new(EndpointStats::default()));
         let (_tx, rx) = watch::channel(false);
-        (stats, rx, FlvStreamNormalizer::new(), 0u32, 0u32, 0u32)
+        (stats, rx, 0u32, 0u32, 0u32)
     }
 
     #[tokio::test(start_paused = true)]
@@ -361,7 +360,7 @@ mod close_on_error {
             Ok(()),
         ]);
 
-        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+        let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
             fresh_state();
 
         // Spawn the handle_rust_push call so we can advance virtual time
@@ -383,7 +382,6 @@ mod close_on_error {
                 &None,
                 &mut tel,
                 &mut stop_rx,
-                &mut norm,
             )
             .await;
             pusher
@@ -421,7 +419,7 @@ mod close_on_error {
         // successful push must clear them so the dashboard reflects
         // recovery instead of the stale freeze indicator.
         let mut pusher = MockPusher::with_results(vec![Ok(())]);
-        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+        let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
             fresh_state();
 
         // Pre-seed stale error markers as if a prior failure happened.
@@ -446,7 +444,6 @@ mod close_on_error {
             &None,
             &mut tel,
             &mut stop_rx,
-            &mut norm,
         )
         .await;
 
@@ -476,7 +473,7 @@ mod close_on_error {
         // short-circuit must return Break BEFORE the close() call, so no
         // double-close on shutdown (close happens via Drop on stack unwind).
         let mut pusher = MockPusher::with_results(vec![Err(PushError::LocalCancel)]);
-        let (stats, mut stop_rx, mut norm, mut consec_err, mut consec_write, mut consec_zero_byte) =
+        let (stats, mut stop_rx, mut consec_err, mut consec_write, mut consec_zero_byte) =
             fresh_state();
 
         let mut tel = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
@@ -494,7 +491,6 @@ mod close_on_error {
             &None,
             &mut tel,
             &mut stop_rx,
-            &mut norm,
         )
         .await;
 
