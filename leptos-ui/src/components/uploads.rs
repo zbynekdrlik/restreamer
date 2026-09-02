@@ -15,13 +15,15 @@ pub fn UploadsView() -> impl IntoView {
     let refresh = move || {
         spawn_local(async move {
             if let Ok(r) = api::fetch_recent_uploads(200).await {
-                rows.set(r);
+                rows.try_set(r); // #343: no-op if the /uploads view was disposed mid-fetch
             }
         });
     };
     refresh();
     let _interval = Interval::new(2_000, refresh);
-    std::mem::forget(_interval);
+    // #343: cancel on disposal — a forgotten interval keeps writing the
+    // disposed `rows` signal after the /uploads view unmounts.
+    let _ = StoredValue::new_local(_interval);
 
     view! {
         <div class="uploads-page">

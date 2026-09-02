@@ -95,7 +95,8 @@ pub fn EndpointTree() -> impl IntoView {
             });
         }
     });
-    std::mem::forget(_yt_poll);
+    // #343: cancel on disposal — captures EndpointTree-scoped `yt_has_polled`.
+    let _ = StoredValue::new_local(_yt_poll);
     let _yt_refresh = Interval::new(30_000, move || {
         let delivery_active = !store.delivery.get().endpoints.is_empty();
         if delivery_active {
@@ -105,7 +106,9 @@ pub fn EndpointTree() -> impl IntoView {
             });
         }
     });
-    std::mem::forget(_yt_refresh);
+    // #343: cancel on disposal (touches only root `store.*`, but leaking it
+    // keeps hitting the YT-health endpoint from a dead route).
+    let _ = StoredValue::new_local(_yt_refresh);
 
     let has_endpoints = Memo::new(move |_| !store.delivery.get().endpoints.is_empty());
     let is_running = Memo::new(move |_| {

@@ -135,7 +135,7 @@ pub fn TemplateCard(
     let tid = template_id;
     spawn_local(async move {
         if let Ok(eps) = api::get_template_endpoints(tid).await {
-            assigned.set(eps);
+            assigned.try_set(eps); // #343: no-op if this template row was disposed mid-fetch
         }
     });
 

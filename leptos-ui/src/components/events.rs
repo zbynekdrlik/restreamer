@@ -134,9 +134,15 @@ fn EventEndpoints(
     // Fetch assigned endpoints on mount
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
+            // #343: on-mount fetch may resolve after EventEndpoints is disposed
+            // on a tab/route switch — fallible writes no-op on a disposed signal.
             match api::get_event_endpoints(event_id).await {
-                Ok(eps) => set_assigned.set(eps),
-                Err(e) => set_error.set(Some(e)),
+                Ok(eps) => {
+                    set_assigned.try_set(eps);
+                }
+                Err(e) => {
+                    set_error.try_set(Some(e));
+                }
             }
         });
     });

@@ -56,7 +56,10 @@ pub fn OAuthAuthorize() -> impl IntoView {
         spawn_local(async move {
             if let Ok(resp) = Request::get("/api/v1/youtube/oauths").send().await {
                 if let Ok(list) = resp.json::<Vec<OAuthRow>>().await {
-                    oauths.set(list);
+                    // #343: OAuthAuthorize lives in the dashboard sidebar; the
+                    // on-mount refresh can resolve after a route change disposed
+                    // it — no-op on the disposed signal.
+                    oauths.try_set(list);
                 }
             }
         });

@@ -18,16 +18,18 @@ pub fn UploadStrip() -> impl IntoView {
     let _interval = Interval::new(2_000, move || {
         spawn_local(async move {
             if let Ok(s) = crate::api::fetch_upload_stats().await {
-                stats.set(s);
+                stats.try_set(s); // #343: no-op if UploadStrip was disposed mid-fetch
             }
         });
     });
-    std::mem::forget(_interval);
+    // #343: cancel on disposal — a forgotten interval keeps writing the
+    // disposed `stats` signal after UploadStrip unmounts on a route change.
+    let _ = StoredValue::new_local(_interval);
 
     // Fire one immediate fetch so the strip isn't blank for 2s on load.
     spawn_local(async move {
         if let Ok(s) = crate::api::fetch_upload_stats().await {
-            stats.set(s);
+            stats.try_set(s); // #343: no-op if disposed before the initial fetch resolves
         }
     });
 

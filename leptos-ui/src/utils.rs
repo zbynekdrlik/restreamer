@@ -20,7 +20,10 @@ use leptos::prelude::*;
 /// once and there is nothing to cancel afterwards.
 pub fn defer_set_false(signal: RwSignal<bool>) {
     Timeout::new(0, move || {
-        signal.set(false);
+        // #343: this one-shot fires on the next macrotask; if the owning
+        // overlay was disposed in the meantime, `try_set` no-ops instead of
+        // panicking on the disposed signal.
+        signal.try_set(false);
     })
     .forget();
 }
