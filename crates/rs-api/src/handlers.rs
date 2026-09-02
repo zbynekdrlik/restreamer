@@ -53,6 +53,10 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
             // the server enforces the gate too.
             "ingest_skew_ms": state.inpoint_state.ingest_skew_ms(),
             "ingest_skew_active": state.inpoint_state.ingest_skew_active(),
+            // #106: human-readable RTMP listener bind error (e.g. port 1234 held
+            // by another process). null when the listener is healthy. Drives the
+            // dashboard's red bind-failure banner.
+            "rtmp_bind_error": state.inpoint_state.bind_error(),
         }),
     };
 

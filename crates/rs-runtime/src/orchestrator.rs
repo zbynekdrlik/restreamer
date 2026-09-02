@@ -446,12 +446,14 @@ impl ServiceCore {
         let inpoint_port = self.config.inpoint.rtmp_port;
         let inpoint_flv_sink = Arc::clone(&flv_chunk_sink);
         let inpoint_state_clone = inpoint_state.clone();
+        let inpoint_ws_tx = ws_tx.clone();
         let inpoint_task = tokio::spawn(async move {
             run_inpoint_loop(
                 inpoint_bind,
                 inpoint_port,
                 inpoint_flv_sink,
                 inpoint_state_clone,
+                inpoint_ws_tx,
                 inpoint_restart_rx,
                 inpoint_shutdown_rx,
             )
@@ -603,19 +605,53 @@ impl ServiceCore {
 /// Auto-restarts on crash with exponential backoff (2s, 4s, 8s, 16s, max 30s).
 /// Crash counter resets when a publisher connects. Gives up after 10 consecutive
 /// crashes without any successful connection.
+#[allow(clippy::too_many_arguments)]
 async fn run_inpoint_loop(
     bind: String,
     port: u16,
     flv_chunk_sink: Arc<FlvChunkSink>,
     inpoint_state: InpointState,
+    ws_tx: broadcast::Sender<WsEvent>,
     mut restart_rx: mpsc::Receiver<()>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
     let mut consecutive_crashes: u32 = 0;
     let mut last_connected = false;
+    let mut bind_backoff_secs: u64 = 2;
     const MAX_CONSECUTIVE_CRASHES: u32 = 10;
+    const MAX_BIND_BACKOFF_SECS: u64 = 30;
 
     loop {
+        // #106: probe the RTMP port BEFORE starting xiu. A bind conflict used
+        // to be swallowed into a clean stop, leaving the dashboard blind. Now
+        // the failure is recorded on `inpoint_state` (surfaced on `/status` +
+        // a red banner) and broadcast, and we retry on a capped backoff instead
+        // of giving up — the API + dashboard keep serving, and the banner
+        // auto-clears the moment the port frees.
+        if !crate::rtmp_bind::probe_and_record_bind(&bind, port, &inpoint_state, &ws_tx) {
+            let backoff = bind_backoff_secs.min(MAX_BIND_BACKOFF_SECS);
+            warn!(
+                port,
+                backoff_secs = backoff,
+                "RTMP port unavailable, retrying bind in {backoff}s"
+            );
+            let bind_wait = tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => true,
+                _ = shutdown_rx.recv() => {
+                    info!("Inpoint shutting down while waiting for RTMP port");
+                    false
+                }
+                msg = restart_rx.recv() => msg.is_some(),
+            };
+            if !bind_wait {
+                break;
+            }
+            bind_backoff_secs = (bind_backoff_secs * 2).min(MAX_BIND_BACKOFF_SECS);
+            continue;
+        }
+        // Port is free — reset the bind backoff for the next conflict.
+        bind_backoff_secs = 2;
+
         let server = RtmpServer::new(&bind, port);
         let rtmp_shutdown = server.shutdown_handle();
         let flv_sink = Arc::clone(&flv_chunk_sink);

@@ -15,6 +15,7 @@ pub mod ingest_skew_banner;
 mod operator_dashboard;
 pub mod outage_banner;
 pub mod pacing_panel;
+pub mod rtmp_bind_error_banner;
 pub mod s3_region_banner;
 mod settings;
 mod templates;

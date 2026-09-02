@@ -23,6 +23,11 @@ const mockResponses = {
     // under the Tauri-mock IPC path every frontend spec runs through.
     const ingest_skew_ms = status.inpoint?.details?.ingest_skew_ms || 0;
     const ingest_skew_active = status.inpoint?.details?.ingest_skew_active || false;
+    // #106: RTMP bind error mirrors /api/v1/status.inpoint.details -- must be
+    // forwarded here too (this object is hand-composed, not a verbatim relay),
+    // or the RtmpBindErrorBanner silently sees a default under the Tauri-mock
+    // IPC path every frontend spec runs through.
+    const rtmp_bind_error = status.inpoint?.details?.rtmp_bind_error || null;
     const data = {
       streaming_event: status.streaming_event || null,
       chunk_stats,
@@ -32,6 +37,7 @@ const mockResponses = {
       s3_region_standard,
       ingest_skew_ms,
       ingest_skew_active,
+      rtmp_bind_error,
     };
     return { success: true, data, error: null };
   },

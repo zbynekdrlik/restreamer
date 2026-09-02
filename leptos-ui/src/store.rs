@@ -223,6 +223,11 @@ pub struct DashboardStore {
     // gate (#354).
     pub ingest_skew_ms: RwSignal<i64>,
     pub ingest_skew_active: RwSignal<bool>,
+
+    // RTMP listener bind error (#106). `Some(msg)` while the RTMP port is held
+    // by another process; drives the RtmpBindErrorBanner. Set from the 2s
+    // `/status` poll and (instantly) from the `RtmpBindFailed` WS event.
+    pub rtmp_bind_error: RwSignal<Option<String>>,
 }
 
 impl DashboardStore {
@@ -251,6 +256,7 @@ impl DashboardStore {
             s3_region_standard: RwSignal::new(true),
             ingest_skew_ms: RwSignal::new(0),
             ingest_skew_active: RwSignal::new(false),
+            rtmp_bind_error: RwSignal::new(None),
         }
     }
 

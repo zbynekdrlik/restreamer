@@ -13,6 +13,7 @@ use super::ingest_skew_banner::IngestSkewBanner;
 use super::oauth_authorize::OAuthAuthorize;
 use super::outage_banner::OutageBanner;
 use super::pacing_panel::PacingPanel;
+use super::rtmp_bind_error_banner::RtmpBindErrorBanner;
 use super::s3_region_banner::S3RegionBanner;
 use super::upload_strip::UploadStrip;
 use super::zero_endpoint_banner::ZeroEndpointBanner;
@@ -35,6 +36,7 @@ pub fn OperatorDashboard() -> impl IntoView {
 
     view! {
         <div class="operator-dashboard">
+            <RtmpBindErrorBanner />
             <IngestSkewBanner />
             <DiskPressureBanner />
             <S3RegionBanner />
@@ -87,6 +89,9 @@ fn ControlBar() -> impl IntoView {
                 store.s3_region_standard.set(s.s3_region_standard);
                 store.ingest_skew_ms.set(s.ingest_skew_ms);
                 store.ingest_skew_active.set(s.ingest_skew_active);
+                // #106: refresh the RTMP bind-error banner (clears when the
+                // port frees; the WS event sets it instantly on failure).
+                store.rtmp_bind_error.set(s.rtmp_bind_error);
             }
         });
     });

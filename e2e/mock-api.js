@@ -33,6 +33,7 @@ let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
 //   - "disk-critical"   — status.disk_pressure="critical" (red DiskPressureBanner)
 //   - "s3-region-nonstandard" — status.s3_region_standard=false (red S3RegionBanner, #278)
 //   - "ingest-skew"     — inpoint.details.ingest_skew_active=true (red IngestSkewBanner + gate, #354)
+//   - "rtmp-bind-error" — inpoint.details.rtmp_bind_error set (red RtmpBindErrorBanner, #106)
 let scenario = "default";
 let rtmpStableSecs = 999; // default: stream has been stable plenty long
 let rtmpTickStartMs = null; // when the tick scenario started
@@ -85,6 +86,11 @@ function buildStatusResponse() {
   // gate. The "ingest-skew" scenario feeds a large sustained skew.
   const ingestSkewActive = scenario === "ingest-skew";
   const ingestSkewMs = ingestSkewActive ? 25470 : 0;
+  // #106: RTMP port-bind failure drives the RtmpBindErrorBanner.
+  const rtmpBindError =
+    scenario === "rtmp-bind-error"
+      ? "Port 1234 is already in use by another process (PID 4321: inpoint_service.exe). RTMP streaming will not work until the conflict is resolved."
+      : null;
   return {
     inpoint: {
       state: rtmpActive ? "connected" : "idle",
@@ -93,6 +99,7 @@ function buildStatusResponse() {
         rtmp_stable_secs: currentRtmpStableSecs(),
         ingest_skew_ms: ingestSkewMs,
         ingest_skew_active: ingestSkewActive,
+        rtmp_bind_error: rtmpBindError,
       },
     },
     streaming_event: currentStreamingEvent(),
