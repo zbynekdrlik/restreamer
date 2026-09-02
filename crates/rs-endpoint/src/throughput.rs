@@ -286,9 +286,11 @@ mod tests {
         // A record with an earlier timestamp (clock skew) accumulates into
         // the open bucket rather than finalizing.
         h.record_bytes(875_000, T0 + 1);
-        let s = h.series(T0 + 3 * SAMPLE_INTERVAL_MS);
-        // Only the one open bucket finalizes; total 1.875 MB -> 1 Mbps.
+        // Read one bucket later so only the single open bucket finalizes (no
+        // idle zero-fill). Total 1.875 MB -> 1 Mbps, never negative.
+        let s = h.series(T0 + 2 * SAMPLE_INTERVAL_MS + 1);
         assert_eq!(s.samples.len(), 1);
         assert!((s.samples[0].mbps - 1.0).abs() < 1e-9);
+        assert!(s.samples.iter().all(|x| x.mbps >= 0.0));
     }
 }
