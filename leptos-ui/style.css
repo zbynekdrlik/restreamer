@@ -559,6 +559,8 @@ button.danger:hover { background: rgba(220,53,69,0.15); }
 .edit-row label { font-size: 13px; color: var(--text-label); }
 .edit-row input[type="text"], .edit-row select { width: 100%; }
 .edit-row.checkboxes { flex-direction: row; gap: var(--spacing-md); margin-top: var(--spacing-xs); }
+.edit-oauth-select { width: 100%; }
+.oauth-suggest-hint { font-size: 12px; color: var(--text-label); margin: calc(-1 * var(--spacing-xs)) 0 var(--spacing-sm); font-style: italic; }
 .checkbox-label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
 .checkbox-label input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--status-ok); cursor: pointer; }
 .edit-actions { display: flex; gap: var(--spacing-sm); margin-top: var(--spacing-sm); }

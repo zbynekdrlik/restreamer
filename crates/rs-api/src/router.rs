@@ -136,6 +136,10 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
             "/endpoints/{id}/link-oauth",
             post(crate::endpoint_oauth::link_endpoint_oauth),
         )
+        .route(
+            "/endpoints/{id}/oauth-suggest",
+            get(crate::oauth_stream_keys::endpoint_oauth_suggest),
+        )
         // Template CRUD
         .route(
             "/templates",

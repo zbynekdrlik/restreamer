@@ -722,7 +722,7 @@ pub fn clear_yt_health_cache_for_test() {
 /// by `daily_quota` from `youtube.device_flow` config (default 10_000).
 /// `acquire(1)` is called before every `liveStreams.list` probe in
 /// `attach_yt_health`. Exhausted budget → `error: "quota_throttled"`.
-fn youtube_quota_tracker() -> &'static rs_youtube::quota::QuotaTracker {
+pub(crate) fn youtube_quota_tracker() -> &'static rs_youtube::quota::QuotaTracker {
     static T: OnceLock<rs_youtube::quota::QuotaTracker> = OnceLock::new();
     T.get_or_init(|| rs_youtube::quota::QuotaTracker::new(10_000))
 }

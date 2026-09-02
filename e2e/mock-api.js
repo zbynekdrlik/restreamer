@@ -20,6 +20,7 @@ app.use(express.static(distDir));
 // Keyed by label.  Each entry: { user_code, verification_url, status, channel_id }
 let oauthGrants = {};
 let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
+let oauthSuggestByEndpoint = {}; // #199: { endpointId: {oauth_id, owners, probed_ok} }
 
 // Scenario selection — set by `POST /api/v1/_test/scenario` before page.goto.
 // Supported values:
@@ -202,6 +203,7 @@ let endpoints = [
     position_last: 0,
     delivered_bytes: 1048576,
     is_fast: false,
+    youtube_oauth_id: null,
     created_at: "2026-03-01T00:00:00Z",
     updated_at: "2026-03-09T10:00:00Z",
   },
@@ -214,6 +216,7 @@ let endpoints = [
     position_last: 0,
     delivered_bytes: 0,
     is_fast: true,
+    youtube_oauth_id: null,
     created_at: "2026-03-05T00:00:00Z",
     updated_at: "2026-03-09T10:00:00Z",
   },
@@ -540,6 +543,7 @@ app.post("/api/v1/endpoints", (req, res) => {
     position_last: 0,
     delivered_bytes: 0,
     is_fast: false,
+    youtube_oauth_id: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -569,6 +573,34 @@ app.put("/api/v1/endpoints/:id", (req, res) => {
 app.delete("/api/v1/endpoints/:id", (req, res) => {
   endpoints = endpoints.filter((e) => e.id !== parseInt(req.params.id));
   res.json({ status: "ok" });
+});
+
+// #199: link/unlink an OAuth grant to an endpoint. Real backend returns 204.
+app.post("/api/v1/endpoints/:id/link-oauth", (req, res) => {
+  const ep = endpoints.find((e) => e.id === parseInt(req.params.id));
+  if (!ep) {
+    return res.status(404).json({ error: "not found" });
+  }
+  const oauthId =
+    req.body && req.body.oauth_id !== undefined ? req.body.oauth_id : null;
+  ep.youtube_oauth_id = oauthId;
+  res.status(204).end();
+});
+
+// #199: server-side auto-suggest verdict for one endpoint. Seeded per-endpoint
+// via _test/seed-oauth-grants; defaults to "no owner, probed_ok".
+app.get("/api/v1/endpoints/:id/oauth-suggest", (req, res) => {
+  const ep = endpoints.find((e) => e.id === parseInt(req.params.id));
+  if (!ep) {
+    return res.status(404).json({ error: "not found" });
+  }
+  const v = oauthSuggestByEndpoint[req.params.id] ||
+    oauthSuggestByEndpoint[parseInt(req.params.id)] || {
+      oauth_id: null,
+      owners: 0,
+      probed_ok: true,
+    };
+  res.json(v);
 });
 
 // Delivery endpoint add/remove. The real backend has these for adding /
@@ -1005,6 +1037,14 @@ app.get("/api/v1/youtube/oauths", (_req, res) => {
   res.json(oauthRows);
 });
 
+// Test fixture: seed OAuth grants + per-endpoint auto-suggest verdicts for
+// #199 tests. `suggest` is { endpointId: {oauth_id, owners, probed_ok} }.
+app.post("/api/v1/_test/seed-oauth-grants", (req, res) => {
+  oauthRows = (req.body && req.body.grants) || [];
+  oauthSuggestByEndpoint = (req.body && req.body.suggest) || {};
+  res.json({ seeded: true });
+});
+
 // Start device authorization: always returns a fixed mock code.
 app.post("/api/v1/youtube/oauth/device-start", (req, res) => {
   const label = (req.body && req.body.label) || "unknown";
@@ -1089,6 +1129,7 @@ app.post("/api/v1/__reset", (_req, res) => {
   auditIdCounter = 0;
   oauthGrants = {};
   oauthRows = [];
+  oauthSuggestByEndpoint = {};
   lastDestroyByEvent = {};
   changeKeyOps = [];
   // #136: the standalone /delivery/start sets cachedDelivery to a running +

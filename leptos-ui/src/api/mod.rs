@@ -241,8 +241,41 @@ pub struct EndpointConfig {
     pub position_last: i64,
     pub delivered_bytes: i64,
     pub is_fast: bool,
+    /// FK into `youtube_oauth(id)` — which OAuth grant this YT endpoint is
+    /// linked to. `#[serde(default)]` keeps parsing responses that predate
+    /// the field. `None` => not linked.
+    #[serde(default)]
+    pub youtube_oauth_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// One authorized YouTube OAuth grant (from `GET /youtube/oauths`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OAuthGrant {
+    pub id: i64,
+    pub label: String,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub connected_at: Option<String>,
+}
+
+/// Auto-suggest verdict for one endpoint (from
+/// `GET /endpoints/{id}/oauth-suggest`) — computed server-side so the raw
+/// stream-key inventory never reaches the browser.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct OauthSuggest {
+    /// The grant that uniquely owns this endpoint's stream key, or `None`.
+    #[serde(default)]
+    pub oauth_id: Option<i64>,
+    /// How many grants own the key (0, 1, or >1).
+    #[serde(default)]
+    pub owners: usize,
+    /// Whether every grant probed successfully (a "no owner" verdict is only
+    /// trustworthy — and the "authorize the channel" hint only shown — when true).
+    #[serde(default)]
+    pub probed_ok: bool,
 }
 
 async fn http_get<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String> {
@@ -644,6 +677,38 @@ pub struct UpdateEndpointRequest {
 
 pub async fn update_endpoint(id: i64, req: &UpdateEndpointRequest) -> Result<(), String> {
     http_put_json(&format!("/endpoints/{id}"), req).await
+}
+
+/// List authorized YouTube OAuth grants (for the edit-endpoint OAuth dropdown).
+pub async fn list_oauth_grants() -> Result<Vec<OAuthGrant>, String> {
+    http_get("/youtube/oauths").await
+}
+
+/// Server-side auto-suggest verdict for one endpoint's stream key.
+pub async fn oauth_suggest(id: i64) -> Result<OauthSuggest, String> {
+    http_get(&format!("/endpoints/{id}/oauth-suggest")).await
+}
+
+/// Link (or, with `None`, unlink) an OAuth grant to an endpoint.
+/// `POST /endpoints/{id}/link-oauth` returns 204 No Content, so this does
+/// not parse a response body — any 2xx is success.
+pub async fn link_endpoint_oauth(id: i64, oauth_id: Option<i64>) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Body {
+        oauth_id: Option<i64>,
+    }
+    let url = format!("{}/endpoints/{id}/link-oauth", api_base());
+    let resp = gloo_net::http::Request::post(&url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&Body { oauth_id }).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Request error: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {e}"))?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(())
 }
 
 // Event-Endpoint Assignment API
