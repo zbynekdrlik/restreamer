@@ -65,6 +65,10 @@ test.describe("standalone POST /delivery/start", () => {
     // default WS-connect delivery payload uses delivery_mode "normal".
     await expect(page.locator(".endpoint-mode-warmup")).toHaveCount(0);
 
+    // Operator picks the event to deliver (Sunday Service, id=1).
+    await page.locator(".event-selector").selectOption("1");
+    await expect(page.locator(".event-selector")).toHaveValue("1");
+
     // --- Activate the event (sets receiving_activated), then start delivery
     // DIRECTLY via the standalone endpoint (NOT via /start-stream) ---
     const activateResp = await request.post(
@@ -88,10 +92,9 @@ test.describe("standalone POST /delivery/start", () => {
       timeout: 5000,
     });
 
-    // The event auto-selects in the dropdown, which then locks while active.
-    await expect(page.locator(".event-selector")).toHaveValue("1", {
-      timeout: 5000,
-    });
+    // The selected delivering event stays shown and the dropdown locks while
+    // delivery is active.
+    await expect(page.locator(".event-selector")).toHaveValue("1");
     await expect(page.locator(".event-selector")).toBeDisabled();
 
     // The VPS link (S3 -> VPS pipeline node) reflects a live delivering VPS.
