@@ -591,6 +591,7 @@ fn live_metrics(alias: &str) -> DeliveryEndpointMetrics {
         delivery_mode: None,
         rescue_eta_secs: None,
         youtube_health: None,
+        facebook_health: None,
         lifecycle: EndpointLifecycle::Live,
     }
 }
