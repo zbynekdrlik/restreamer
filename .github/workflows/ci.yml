@@ -916,8 +916,8 @@ jobs:
           # in test-integrity (earlier in the file), so it is OUTSIDE the sed
           # range and can never self-match its own grep pattern (#325).
           DEPLOY_BLOCK=$(sed -n '/^  deploy-stream-lan:/,/^  e2e-streaming-test:/p' "$WORKFLOW_FILE")
-          if ! echo "$DEPLOY_BLOCK" | grep -qE 'New-NetFirewallRule.*-LocalPort 1234'; then
-            echo "ERROR: deploy-stream-lan firewall block has no inbound rule for RTMP TCP 1234 (#363)."
+          if ! echo "$DEPLOY_BLOCK" | grep -qE 'New-NetFirewallRule.*-Direction Inbound.*-Protocol TCP.*-LocalPort 1234.*-Action Allow'; then
+            echo "ERROR: deploy-stream-lan firewall block has no inbound ALLOW rule for RTMP TCP 1234 (#363)."
             echo "Remote OBS cannot push RTMP to the CI-deployed stream box without it."
             exit 1
           fi
@@ -926,17 +926,32 @@ jobs:
       - name: "Verify OBS-streaming E2E jobs defensively StopRecord on teardown (#361)"
         run: |
           WORKFLOW_FILE=".github/workflows/ci.yml"
-          # Scope to the OBS-streaming E2E jobs (obs-youtube through e2e-gate,
-          # which spans e2e-fb-push-stream-lan too). This self-check is in
-          # test-integrity, well before that range -- no self-match (#325).
-          E2E_BLOCK=$(sed -n '/^  e2e-obs-youtube-test:/,/^  e2e-gate:/p' "$WORKFLOW_FILE")
-          if ! echo "$E2E_BLOCK" | grep -qE 'requestType = "StopRecord"'; then
-            echo "ERROR: OBS-streaming E2E teardown never calls StopRecord (#361)."
-            echo "A stray OBS recording (RecordWhenStreaming on the camera-box-owned profile)"
-            echo "can outlive the job and block camera-box's rig-busy-gate."
+          # Assert EACH OBS-streaming job (the two that START OBS streaming) has
+          # a StopRecord teardown -- separately, so deleting it from either job
+          # fails this guard (a single obs-youtube..e2e-gate range would stay
+          # GREEN with only one job covered). Both ranges are scoped to job
+          # blocks AFTER test-integrity, so this self-check (earlier in the file)
+          # can never self-match its own grep pattern (#325).
+          YT_BLOCK=$(sed -n '/^  e2e-obs-youtube-test:/,/^  e2e-fb-push-stream-lan:/p' "$WORKFLOW_FILE")
+          FB_BLOCK=$(sed -n '/^  e2e-fb-push-stream-lan:/,/^  e2e-gate:/p' "$WORKFLOW_FILE")
+          if ! echo "$YT_BLOCK" | grep -qE 'requestType = "StopRecord"'; then
+            echo "ERROR: e2e-obs-youtube-test has no StopRecord teardown (#361) -- a stray OBS"
+            echo "recording (RecordWhenStreaming on the camera-box-owned profile) can outlive"
+            echo "the job and block camera-box's rig-busy-gate."
             exit 1
           fi
-          echo "OK: OBS-streaming E2E jobs StopRecord on teardown."
+          if ! echo "$FB_BLOCK" | grep -qE 'requestType = "StopRecord"'; then
+            echo "ERROR: e2e-fb-push-stream-lan has no StopRecord teardown (#361)."
+            exit 1
+          fi
+          # Owner directive (2026-08-30): restreamer NEVER records -- StopRecord
+          # is the single sanctioned OBS-recording touch. Any StartRecord/
+          # ToggleRecord in the workflow is a violation.
+          if grep -qE 'requestType = "(StartRecord|ToggleRecord)"' "$WORKFLOW_FILE"; then
+            echo "ERROR: workflow issues StartRecord/ToggleRecord -- restreamer must never record (#361)."
+            exit 1
+          fi
+          echo "OK: both OBS-streaming E2E jobs StopRecord on teardown; no StartRecord/ToggleRecord."
 
   frontend-e2e:
     name: Frontend E2E (Playwright)
@@ -5937,15 +5952,21 @@ jobs:
 
             $hello = Receive-OBSMessage $ws
             $authRequired = $hello.d.authentication
+            # eventSubscriptions = 0: subscribe to NO OBS events, so the only
+            # frames OBS sends us are the op=7 RequestResponses we ask for. This
+            # makes Receive-Response deterministic (the response is always the
+            # first frame) -- no event burst can starve the 8-frame loop and
+            # cause a StopRecord to be wrongly skipped, and worst-case wall time
+            # stays well under this step's timeout-minutes (#361 review 2026-09-02).
             if ($authRequired) {
               $sha256 = [System.Security.Cryptography.SHA256]::Create()
               $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
               $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
               $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
               $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
-              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; eventSubscriptions = 0; authentication = $authHash } } | ConvertTo-Json -Depth 5
             } else {
-              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; eventSubscriptions = 0 } } | ConvertTo-Json -Depth 5
             }
             Send-OBSMessage $ws $identify
             $null = Receive-OBSMessage $ws
@@ -5957,8 +5978,13 @@ jobs:
               Write-Host "Stray OBS recording detected (outputActive=true) -- issuing StopRecord (#361)"
               $stopRec = @{ op = 6; d = @{ requestType = "StopRecord"; requestId = "teardown-rec-stop" } } | ConvertTo-Json -Depth 5
               Send-OBSMessage $ws $stopRec
-              $null = Receive-Response $ws "teardown-rec-stop"
-              Write-Host "OBS recording stopped (#361 defensive teardown)"
+              Write-Host "StopRecord issued (#361 defensive teardown)"
+              # ACK read in its OWN try/catch: a receive timeout here must NOT
+              # jump to the outer catch and print "skipped" -- the StopRecord was
+              # already sent (and near-certainly executed); mislabeling it would
+              # misdirect a future stray-recording investigation.
+              try { $null = Receive-Response $ws "teardown-rec-stop"; Write-Host "StopRecord acknowledged" }
+              catch { Write-Host "StopRecord issued; ACK not received (non-fatal): $_" }
             } else {
               Write-Host "No OBS recording active -- nothing to stop (#361)"
             }
@@ -6971,15 +6997,21 @@ jobs:
 
             $hello = Receive-OBSMessage $ws
             $authRequired = $hello.d.authentication
+            # eventSubscriptions = 0: subscribe to NO OBS events, so the only
+            # frames OBS sends us are the op=7 RequestResponses we ask for. This
+            # makes Receive-Response deterministic (the response is always the
+            # first frame) -- no event burst can starve the 8-frame loop and
+            # cause a StopRecord to be wrongly skipped, and worst-case wall time
+            # stays well under this step's timeout-minutes (#361 review 2026-09-02).
             if ($authRequired) {
               $sha256 = [System.Security.Cryptography.SHA256]::Create()
               $passBytes = [System.Text.Encoding]::UTF8.GetBytes($env:OBS_WS_PASSWORD + $authRequired.salt)
               $passHash = [Convert]::ToBase64String($sha256.ComputeHash($passBytes))
               $authBytes = [System.Text.Encoding]::UTF8.GetBytes($passHash + $authRequired.challenge)
               $authHash = [Convert]::ToBase64String($sha256.ComputeHash($authBytes))
-              $identify = @{ op = 1; d = @{ rpcVersion = 1; authentication = $authHash } } | ConvertTo-Json -Depth 5
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; eventSubscriptions = 0; authentication = $authHash } } | ConvertTo-Json -Depth 5
             } else {
-              $identify = @{ op = 1; d = @{ rpcVersion = 1 } } | ConvertTo-Json -Depth 5
+              $identify = @{ op = 1; d = @{ rpcVersion = 1; eventSubscriptions = 0 } } | ConvertTo-Json -Depth 5
             }
             Send-OBSMessage $ws $identify
             $null = Receive-OBSMessage $ws
@@ -6991,8 +7023,13 @@ jobs:
               Write-Host "Stray OBS recording detected (outputActive=true) -- issuing StopRecord (#361)"
               $stopRec = @{ op = 6; d = @{ requestType = "StopRecord"; requestId = "teardown-rec-stop" } } | ConvertTo-Json -Depth 5
               Send-OBSMessage $ws $stopRec
-              $null = Receive-Response $ws "teardown-rec-stop"
-              Write-Host "OBS recording stopped (#361 defensive teardown)"
+              Write-Host "StopRecord issued (#361 defensive teardown)"
+              # ACK read in its OWN try/catch: a receive timeout here must NOT
+              # jump to the outer catch and print "skipped" -- the StopRecord was
+              # already sent (and near-certainly executed); mislabeling it would
+              # misdirect a future stray-recording investigation.
+              try { $null = Receive-Response $ws "teardown-rec-stop"; Write-Host "StopRecord acknowledged" }
+              catch { Write-Host "StopRecord issued; ACK not received (non-fatal): $_" }
             } else {
               Write-Host "No OBS recording active -- nothing to stop (#361)"
             }

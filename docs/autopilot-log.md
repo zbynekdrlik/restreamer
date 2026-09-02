@@ -37,6 +37,8 @@ merge by this lane — the supervisor integrates. Only `.github/workflows/ci.yml
   machine coordination surface: SSH-to-dev1 lease vs shared mount vs lock service — reverses
   #830's "no network dependency"). Stream box CAN ssh to dev1 by hostname (grounding).
 
+## 2026-07-25 — Batch #267 + #281 + #268 (one PR, v0.29.18, CI-infra only)
+
 Bundled batch on `dev`, version bump `0c412de1` (0.29.17→0.29.18, 4 files). No Rust/JS/Python
 source changed — all three are `.github/workflows/ci.yml` / `.cargo/audit.toml` / `CLAUDE.md` only.
 
