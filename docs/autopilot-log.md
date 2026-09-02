@@ -27,15 +27,20 @@ merge by this lane — the supervisor integrates. Only `.github/workflows/ci.yml
   directive 2026-08-30). `e2e-streaming-test` uses ffmpeg direct push (no OBS stream) → out of
   scope. Teardown PowerShell verified with the real parser on stream.lan (0 errors). Guard:
   `verify-ci-yaml-invariants` grep (sed-scoped obs-youtube→e2e-gate; StopRecord at 5958+6992).
-- **#349 (rig lease) — PARKED, needs-decision (FALSE premise found):** NOT shipped. The
-  agreed contract (camera-box #830 `rig-lease.sh`) is a LOCAL lockdir `/var/tmp/rig-lease/` on
-  dev1, assuming "both runners are the same machine". They are NOT: camera-box's gate runs on
-  `[self-hosted, linux, camera-lan]` = dev1 Linux; restreamer's E2E runs on
-  `[self-hosted, windows, stream-lan]` = the Windows stream box (10.77.9.204). No shared local
-  filesystem → a lockdir restreamer writes is invisible to camera-box's dev1 gate (false
-  guard). Finding + options posted on #349; `needs-decision` label added; owner asked (cross-
-  machine coordination surface: SSH-to-dev1 lease vs shared mount vs lock service — reverses
-  #830's "no network dependency"). Stream box CAN ssh to dev1 by hostname (grounding).
+- **#349 (rig lease) — SHIPPED after unpark:** RED `06db988c` → GREEN `eedab22c` → review-hardened
+  `b46d4f09`. FALSE-premise found while parked: the two runners are DIFFERENT machines (camera-box
+  gate = dev1 Linux `camera-lan`; restreamer E2E = Windows stream box `stream-lan`), so the original
+  local-lockdir `/var/tmp/rig-lease/` contract (camera-box #830) cannot coordinate them. Owner picked
+  option 1: camera-box exposes the lockdir READ-ONLY over HTTP; restreamer POLLS it. New
+  `scripts/ci/rig-lease-wait.ps1` (one reusable file) — `GET http://10.77.9.103:8890/rig-lease.json`,
+  held&&!stale → wait bounded min(ttl_s+grace, 60min) re-poll 30s; stale → proceed (reclaimable);
+  free → proceed; unreachable/non-200/unparseable → proceed + `::warning::` (fail-open); budget
+  exhausted → proceed. Writes nothing (our OBS streaming IS the lease in their direction); always
+  exits 0. Wired as the first step (after checkout) + a second short-budget re-check right before
+  StartStream (TOCTOU) in both OBS-streaming jobs; job timeouts raised (YT 85→145, FB 60→120) to fit
+  the wait budget. Invariant: lease-wait before StartStream in each job + script exists. Fail-open
+  until camera-box's HTTP endpoint (their #1277) is live. Script parsed clean on the real stream.lan
+  PowerShell parser (0 errors).
 
 ## 2026-07-25 — Batch #267 + #281 + #268 (one PR, v0.29.18, CI-infra only)
 

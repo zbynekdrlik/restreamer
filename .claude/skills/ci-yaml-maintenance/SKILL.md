@@ -195,7 +195,23 @@ camera-box's `full-path-e2e` gate runs on `[self-hosted, linux, camera-lan]` =
 `[self-hosted, windows, stream-lan]` = **the Windows stream box (10.77.9.204)**.
 There is NO shared local filesystem between them, so the camera-box #830 lockdir
 design (`/var/tmp/rig-lease/` acquired by atomic `mkdir`, "both runners are the
-same machine") CANNOT coordinate the restreamer side as-is — a lockdir restreamer
-writes locally is invisible to camera-box's dev1 gate. #349 is parked
-needs-decision on the coordination surface (SSH-to-dev1 lease vs shared mount vs
-lock service). Don't implement a stream-box-local lockdir: it is a false guard.
+same machine") CANNOT coordinate the restreamer side — a lockdir restreamer
+writes locally is invisible to camera-box's dev1 gate (a false guard; never ship
+a stream-box-local lockdir).
+
+**Solution shipped (#349):** camera-box exposes its lockdir READ-ONLY over HTTP
+(`GET http://10.77.9.103:8890/rig-lease.json`, their #1277); restreamer POLLS it
+in `scripts/ci/rig-lease-wait.ps1` before starting OBS streaming and WRITES
+NOTHING (our OBS streaming IS the lease in their direction). Semantics: held &&
+!stale → wait bounded `min(ttl_s+grace, 60min)`; stale → proceed (reclaimable);
+free → proceed; unreachable/non-200/unparseable → proceed + `::warning::`
+(FAIL-OPEN — endpoint down ≠ rig busy); budget exhausted → proceed. The script
+ALWAYS exits 0 (courtesy wait, never a hard gate). Gotchas learned: (1) a wait
+budget MUST fit inside the job's `timeout-minutes` or a genuine hold becomes a
+job-timeout FAILURE — size `job timeout ≥ work + budget + margin` (YT 145, FB
+120 for a 60-min budget). (2) TOCTOU: camera-box can acquire in the
+minutes-long gap between a post-checkout check and StartStream, so ALSO re-check
+(short budget) right before StartStream. (3) Fail-open messages use `::warning::`
+so a bypassed guard is visible in the Actions summary. (4) Sanitize every numeric
+env knob with `-as [int]` + fallback — a `$null` `-TimeoutSec` is INDEFINITE in
+PS 5.1, and a `$null` budget collapses the wait.
