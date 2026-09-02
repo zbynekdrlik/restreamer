@@ -63,6 +63,16 @@ Always `source ~/.cargo/env` and `export SQLX_OFFLINE=true` on dev2.
 - `rs-delivery`'s `producer_lag` / `endpoint_producer` / most producer logic
   lives in the **BIN** target, not the lib — a `cargo test -p rs-delivery --lib`
   runs 0 of those. Use `cargo test --bin rs-delivery`.
+- **A few rs-delivery modules are compiled in BOTH targets** (`lib.rs` lists
+  `fast_keepalive`, `fast_delay*`, `rescue_default`, `audit_ring`,
+  `chunk_lifecycle`, `clock_endpoint`, `ffmpeg_reason` as `pub(crate) mod`,
+  and `main.rs` re-declares them). Anything you ADD to one of those files must
+  NOT reference a BIN-only module (`crate::api`, `crate::rescue`,
+  `crate::endpoint_task`, …) or the LIB build fails with `cannot find X in the
+  crate root` — take a primitive param and let the bin caller pass the
+  bin-only value (e.g. `keepalive_escalate_after(is_fast, stall_secs)` instead
+  of `&EndpointConfig` / `crate::rescue::RESCUE_STALL_THRESHOLD_SECS`). Cost a
+  compile cycle on #124.
 - **`ld terminated with signal 7 [Bus error]` or `No space left on device`
   during a `cargo test --workspace` link = dev2 DISK is FULL, not a code bug.**
   The workspace test links MANY large test binaries (rs-service e2e, rs-api lib
