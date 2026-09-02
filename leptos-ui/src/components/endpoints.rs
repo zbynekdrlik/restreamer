@@ -26,10 +26,12 @@ pub fn EndpointsView() -> impl IntoView {
 
     // #199: OAuth grant linkage state for the edit form.
     let (grants, set_grants) = signal::<Vec<api::OAuthGrant>>(Vec::new());
-    let (stream_key_map, set_stream_key_map) = signal::<Vec<api::OauthStreamKeys>>(Vec::new());
     let (edit_oauth_id, set_edit_oauth_id) = signal::<Option<i64>>(None);
     let (edit_orig_oauth_id, set_edit_orig_oauth_id) = signal::<Option<i64>>(None);
     let (edit_suggest_none, set_edit_suggest_none) = signal(false);
+    // Set once the operator changes the OAuth dropdown, so a late-arriving
+    // auto-suggest probe never overrides an explicit choice.
+    let (edit_oauth_touched, set_edit_oauth_touched) = signal(false);
 
     // Refresh on mount
     Effect::new(move |_| {
@@ -37,14 +39,10 @@ pub fn EndpointsView() -> impl IntoView {
             if let Ok(eps) = api::list_endpoints().await {
                 store.endpoints_list.set(eps);
             }
-            // OAuth grants + per-grant owned stream keys for the edit-dialog
-            // dropdown + auto-suggest. Best-effort: absence just disables the
-            // suggestion, the dropdown still works.
+            // OAuth grants for the edit-dialog dropdown. Best-effort: absence
+            // just leaves the dropdown with only the "(unlink)" option.
             if let Ok(g) = api::list_oauth_grants().await {
                 set_grants.set(g);
-            }
-            if let Ok(m) = api::list_oauth_stream_keys().await {
-                set_stream_key_map.set(m);
             }
         });
     });
@@ -77,29 +75,39 @@ pub fn EndpointsView() -> impl IntoView {
         set_edit_enabled.set(ep.enabled);
         set_edit_fast.set(ep.is_fast);
         set_edit_orig_oauth_id.set(ep.youtube_oauth_id);
+        set_edit_oauth_id.set(ep.youtube_oauth_id);
+        set_edit_suggest_none.set(false);
+        set_edit_oauth_touched.set(false);
+        let id = ep.id;
+        set_editing_id.set(Some(id));
 
-        // #199 auto-suggest: for a YT endpoint with no current link, pre-select
-        // the grant that UNIQUELY owns this endpoint's stream key. If none owns
-        // it, flag the "authorize the channel" hint. Ambiguous (>1) => no pick.
-        let mut chosen = ep.youtube_oauth_id;
-        let mut suggest_none = false;
+        // #199 auto-suggest: for a YT endpoint with no current link, ask the
+        // SERVER which grant uniquely owns this stream key (matching runs
+        // server-side; the browser never receives the raw key inventory). Apply
+        // the verdict only if the operator has not touched the dropdown and is
+        // still editing THIS endpoint when the probe returns.
         if ep.service_type == "YT_RTMP" && ep.youtube_oauth_id.is_none() {
-            let key = ep.stream_key.clone();
-            let map = stream_key_map.get_untracked();
-            let owners: Vec<i64> = map
-                .iter()
-                .filter(|g| g.stream_names.iter().any(|n| *n == key))
-                .map(|g| g.oauth_id)
-                .collect();
-            if owners.len() == 1 {
-                chosen = Some(owners[0]);
-            } else if owners.is_empty() && !key.is_empty() && !map.is_empty() {
-                suggest_none = true;
-            }
+            leptos::task::spawn_local(async move {
+                let Ok(s) = api::oauth_suggest(id).await else {
+                    return;
+                };
+                if editing_id.get_untracked() != Some(id)
+                    || edit_oauth_touched.get_untracked()
+                    || edit_oauth_id.get_untracked().is_some()
+                {
+                    return;
+                }
+                // Only pre-select a grant that is actually in the dropdown
+                // (guards against a grant deleted within the probe's TTL).
+                if let Some(oid) = s.oauth_id {
+                    if grants.get_untracked().iter().any(|g| g.id == oid) {
+                        set_edit_oauth_id.set(Some(oid));
+                    }
+                }
+                // Only hint "no grant owns this key" when every grant probed OK.
+                set_edit_suggest_none.set(s.owners == 0 && s.probed_ok);
+            });
         }
-        set_edit_oauth_id.set(chosen);
-        set_edit_suggest_none.set(suggest_none);
-        set_editing_id.set(Some(ep.id));
     };
 
     let cancel_edit = move |_| {
@@ -118,7 +126,14 @@ pub fn EndpointsView() -> impl IntoView {
         let key = edit_key.get();
         let enabled = edit_enabled.get();
         let is_fast = edit_fast.get();
-        let oauth_id = edit_oauth_id.get();
+        // Only a YT_RTMP endpoint carries an OAuth grant. If the operator
+        // retyped a YT endpoint to another service, this also unlinks it
+        // (None), never leaving a stray FK on a non-YT row.
+        let oauth_id = if stype == "YT_RTMP" {
+            edit_oauth_id.get()
+        } else {
+            None
+        };
         let orig_oauth_id = edit_orig_oauth_id.get();
 
         if alias.is_empty() {
@@ -143,6 +158,12 @@ pub fn EndpointsView() -> impl IntoView {
                     if oauth_id != orig_oauth_id {
                         if let Err(e) = api::link_endpoint_oauth(id, oauth_id).await {
                             set_error.set(Some(format!("OAuth link failed: {e}")));
+                            // The PUT above already persisted; refresh so the
+                            // card (and a subsequent Cancel) reflect committed
+                            // state rather than stale pre-save values.
+                            if let Ok(eps) = api::list_endpoints().await {
+                                store.endpoints_list.set(eps);
+                            }
                             set_saving.set(false);
                             return;
                         }
@@ -277,9 +298,10 @@ pub fn EndpointsView() -> impl IntoView {
                                                                 let v = event_target_value(&ev);
                                                                 set_edit_oauth_id.set(v.parse::<i64>().ok());
                                                                 set_edit_suggest_none.set(false);
+                                                                set_edit_oauth_touched.set(true);
                                                             }
                                                         >
-                                                            <option value="" selected=move || edit_oauth_id.get().is_none()>
+                                                            <option value="" prop:selected=move || edit_oauth_id.get().is_none()>
                                                                 "(unlink)"
                                                             </option>
                                                             {move || grants.get().into_iter().map(|g| {
@@ -290,10 +312,13 @@ pub fn EndpointsView() -> impl IntoView {
                                                                 } else {
                                                                     format!("{} ({ch})", g.label)
                                                                 };
+                                                                // Reactive per-option `selected`: each grant option
+                                                                // self-selects when it renders AND re-selects when the
+                                                                // auto-suggest updates `edit_oauth_id` after open.
                                                                 view! {
                                                                     <option
                                                                         value=gid.to_string()
-                                                                        selected=move || edit_oauth_id.get() == Some(gid)
+                                                                        prop:selected=move || edit_oauth_id.get() == Some(gid)
                                                                     >
                                                                         {text}
                                                                     </option>

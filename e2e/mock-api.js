@@ -20,7 +20,7 @@ app.use(express.static(distDir));
 // Keyed by label.  Each entry: { user_code, verification_url, status, channel_id }
 let oauthGrants = {};
 let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
-let oauthStreamKeyMap = []; // #199: [{oauth_id, stream_names}] for auto-suggest
+let oauthSuggestByEndpoint = {}; // #199: { endpointId: {oauth_id, owners, probed_ok} }
 
 // Scenario selection — set by `POST /api/v1/_test/scenario` before page.goto.
 // Supported values:
@@ -576,6 +576,22 @@ app.post("/api/v1/endpoints/:id/link-oauth", (req, res) => {
   res.status(204).end();
 });
 
+// #199: server-side auto-suggest verdict for one endpoint. Seeded per-endpoint
+// via _test/seed-oauth-grants; defaults to "no owner, probed_ok".
+app.get("/api/v1/endpoints/:id/oauth-suggest", (req, res) => {
+  const ep = endpoints.find((e) => e.id === parseInt(req.params.id));
+  if (!ep) {
+    return res.status(404).json({ error: "not found" });
+  }
+  const v = oauthSuggestByEndpoint[req.params.id] ||
+    oauthSuggestByEndpoint[parseInt(req.params.id)] || {
+      oauth_id: null,
+      owners: 0,
+      probed_ok: true,
+    };
+  res.json(v);
+});
+
 // Delivery endpoint add/remove. The real backend has these for adding /
 // removing endpoints from an actively delivering event. Mock as no-ops
 // (200) so frontend tests that fire these requests don't get a 404
@@ -794,15 +810,11 @@ app.get("/api/v1/youtube/oauths", (_req, res) => {
   res.json(oauthRows);
 });
 
-// #199: per-grant owned ingestion stream names (auto-suggest source).
-app.get("/api/v1/youtube/oauths/stream-keys", (_req, res) => {
-  res.json(oauthStreamKeyMap);
-});
-
-// Test fixture: seed OAuth grants + their owned stream keys for #199 tests.
+// Test fixture: seed OAuth grants + per-endpoint auto-suggest verdicts for
+// #199 tests. `suggest` is { endpointId: {oauth_id, owners, probed_ok} }.
 app.post("/api/v1/_test/seed-oauth-grants", (req, res) => {
   oauthRows = (req.body && req.body.grants) || [];
-  oauthStreamKeyMap = (req.body && req.body.stream_keys) || [];
+  oauthSuggestByEndpoint = (req.body && req.body.suggest) || {};
   res.json({ seeded: true });
 });
 
@@ -890,7 +902,7 @@ app.post("/api/v1/__reset", (_req, res) => {
   auditIdCounter = 0;
   oauthGrants = {};
   oauthRows = [];
-  oauthStreamKeyMap = [];
+  oauthSuggestByEndpoint = {};
   lastDestroyByEvent = {};
   changeKeyOps = [];
   res.json({ reset: true });

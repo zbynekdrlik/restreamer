@@ -135,6 +135,10 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
             "/endpoints/{id}/link-oauth",
             post(crate::endpoint_oauth::link_endpoint_oauth),
         )
+        .route(
+            "/endpoints/{id}/oauth-suggest",
+            get(crate::oauth_stream_keys::endpoint_oauth_suggest),
+        )
         // Template CRUD
         .route(
             "/templates",
@@ -188,10 +192,6 @@ pub fn build_router_with_gate(state: AppState, gate: std::sync::Arc<access::Acce
         // YouTube
         .route("/youtube/status", get(youtube::youtube_status))
         .route("/youtube/oauths", get(youtube::list_oauths))
-        .route(
-            "/youtube/oauths/stream-keys",
-            get(crate::oauth_stream_keys::list_oauth_stream_keys),
-        )
         .route(
             "/youtube/oauth/device-start",
             post(crate::oauth_device::device_start),

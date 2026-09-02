@@ -261,13 +261,21 @@ pub struct OAuthGrant {
     pub connected_at: Option<String>,
 }
 
-/// Per-grant owned ingestion stream names (from
-/// `GET /youtube/oauths/stream-keys`) — powers the edit-dialog auto-suggest.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct OauthStreamKeys {
-    pub oauth_id: i64,
+/// Auto-suggest verdict for one endpoint (from
+/// `GET /endpoints/{id}/oauth-suggest`) — computed server-side so the raw
+/// stream-key inventory never reaches the browser.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct OauthSuggest {
+    /// The grant that uniquely owns this endpoint's stream key, or `None`.
     #[serde(default)]
-    pub stream_names: Vec<String>,
+    pub oauth_id: Option<i64>,
+    /// How many grants own the key (0, 1, or >1).
+    #[serde(default)]
+    pub owners: usize,
+    /// Whether every grant probed successfully (a "no owner" verdict is only
+    /// trustworthy — and the "authorize the channel" hint only shown — when true).
+    #[serde(default)]
+    pub probed_ok: bool,
 }
 
 async fn http_get<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String> {
@@ -654,9 +662,9 @@ pub async fn list_oauth_grants() -> Result<Vec<OAuthGrant>, String> {
     http_get("/youtube/oauths").await
 }
 
-/// Per-grant owned ingestion stream names (auto-suggest source).
-pub async fn list_oauth_stream_keys() -> Result<Vec<OauthStreamKeys>, String> {
-    http_get("/youtube/oauths/stream-keys").await
+/// Server-side auto-suggest verdict for one endpoint's stream key.
+pub async fn oauth_suggest(id: i64) -> Result<OauthSuggest, String> {
+    http_get(&format!("/endpoints/{id}/oauth-suggest")).await
 }
 
 /// Link (or, with `None`, unlink) an OAuth grant to an endpoint.

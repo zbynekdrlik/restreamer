@@ -1,6 +1,8 @@
 //! Unit tests for the pure auto-suggest helpers (#199).
 
-use crate::oauth_stream_keys::{OauthStreamKeys, stream_names_of, suggest_oauth_for_key};
+use crate::oauth_stream_keys::{
+    OauthStreamKeys, count_owners, stream_names_of, suggest_oauth_for_key,
+};
 use rs_youtube::streams::LiveStream;
 
 fn stream_with_name(name: Option<&str>) -> LiveStream {
@@ -83,4 +85,26 @@ fn suggest_none_for_empty_key() {
         stream_names: vec!["".into()],
     }];
     assert_eq!(suggest_oauth_for_key("", &grants), None);
+}
+
+#[test]
+fn count_owners_counts_matches() {
+    let grants = vec![
+        OauthStreamKeys {
+            oauth_id: 10,
+            stream_names: vec!["dup".into()],
+        },
+        OauthStreamKeys {
+            oauth_id: 20,
+            stream_names: vec!["dup".into(), "solo".into()],
+        },
+        OauthStreamKeys {
+            oauth_id: 30,
+            stream_names: vec!["other".into()],
+        },
+    ];
+    assert_eq!(count_owners("dup", &grants), 2); // ambiguous
+    assert_eq!(count_owners("solo", &grants), 1); // unique
+    assert_eq!(count_owners("nope", &grants), 0); // no owner
+    assert_eq!(count_owners("", &grants), 0); // empty key
 }
