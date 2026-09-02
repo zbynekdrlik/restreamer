@@ -13,6 +13,7 @@ auto-load on their `paths:` — you do not invoke those.
 - stream.lan / streampp operations, deployment, OBS, MCP → `.claude/skills/stream-lan-operations`
 - authorization / Cloudflare Access / tunnel exposure → `.claude/rules/access-control.md` (auto) + `docs/cloudflare-tunnel-setup.md`
 - file-size cap, `Cargo.lock`/`--locked`, test-crypto, secret scanner → `.claude/rules/rust-crate-hygiene.md` (auto)
+- DB migrations / destructive-rebuild idempotency / schema_version rewind → `.claude/rules/migrations.md` (auto)
 - Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
 - OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`
