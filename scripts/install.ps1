@@ -137,7 +137,12 @@ if (-not (Test-Path $ConfigFile)) {
         hetzner      = @{
             api_token          = ""
             location           = "fsn1"
-            default_server_type = "cx23"
+            # Empty = "auto": size the delivery VPS by endpoint count
+            # (rs_cloud::select_server_type). A non-empty value is an explicit
+            # operator override (rs_cloud::resolve_server_type, #353). Renamed
+            # from the old dead `default_server_type` (which wrote a deprecated
+            # "cx23"); no deprecated cx* type may reappear here.
+            server_type_override = ""
             snapshot_label     = "rs-delivery"
             ssh_key_name       = "restreamer"
         }

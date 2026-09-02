@@ -17,6 +17,27 @@ use std::time::Duration;
 use crate::disk_cache::{ChunkAvailability, DiskCache};
 use crate::endpoint_task::ChunkFetcher;
 
+/// Discriminates the two shapes of a disk-cache stall. Keeps the rate-limiter
+/// window separate per class (#331) so a bounded-attempts error storm and a
+/// stall_timeout-length wedge in the same 60s window each keep their audit row
+/// and the class transition stays visible on the timeline.
+#[derive(Clone, Copy)]
+enum StallShape {
+    /// `MAX_FETCH_ATTEMPTS` exhausted in ~3s (a persistently-erroring S3).
+    BoundedAttempts,
+    /// The outer `stall_timeout` deadline elapsed (a wedge >= the cache window).
+    StallTimeout,
+}
+
+impl StallShape {
+    fn as_str(self) -> &'static str {
+        match self {
+            StallShape::BoundedAttempts => "bounded_attempts",
+            StallShape::StallTimeout => "stall_timeout",
+        }
+    }
+}
+
 pub struct DiskCacheFetcher {
     cache: Arc<DiskCache>,
     alias: String,
@@ -25,9 +46,10 @@ pub struct DiskCacheFetcher {
     /// Endpoint window length in chunks. Used for prefetch-ahead and the
     /// position-registry registration.
     window_chunks: i64,
-    /// `wait_for_chunk_with_timeout` deadline: how long the producer
-    /// waits for a single chunk before returning Err. The producer's
-    /// existing backoff loop turns the Err into a retry.
+    /// Stall deadline: how long the producer waits for a single chunk
+    /// (the `tokio::time::timeout` wrapping `request_chunk` + `wait_for_chunk`)
+    /// before returning Err. The producer's existing backoff loop turns the
+    /// Err into a retry.
     stall_timeout_secs: u64,
     /// VPS audit ring for outage-forensics events (stall-timeout,
     /// reader-recovered, prefill-started). `None` outside production.
@@ -39,6 +61,13 @@ pub struct DiskCacheFetcher {
     was_stalled: std::sync::atomic::AtomicBool,
     /// Rate-limits the `DiskCacheStallTimeout` emit (a sustained outage
     /// would otherwise emit one row per stall_timeout window).
+    ///
+    /// #335: `RateLimiter` keys off `std::time::Instant`, which does NOT honor
+    /// tokio's paused clock. Under `#[tokio::test(start_paused)]` its 60s
+    /// window is measured in REAL elapsed time (~microseconds between two rapid
+    /// calls), so two same-key stall rows in one test are suppressed regardless
+    /// of virtual time — a test asserting a SECOND row must space the calls by
+    /// real wall time or key them on a different `(alias, shape)`.
     stall_rl: rs_core::audit::RateLimiter,
 }
 
@@ -91,28 +120,78 @@ impl DiskCacheFetcher {
     /// `DiskCacheReaderRecovered` bracket, emit the rate-limited
     /// `DiskCacheStallTimeout` audit row, and build the Err string the
     /// producer's backoff loop expects.
-    fn note_stall(&self, chunk_id: i64, detail: &str) -> String {
-        self.was_stalled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+    fn note_stall(&self, chunk_id: i64, shape: StallShape, detail: &str) -> String {
         if let Some(ring) = &self.audit_ring {
-            if self
-                .stall_rl
-                .allow(rs_core::audit::Action::DiskCacheStallTimeout, &self.alias)
-            {
+            // #331: key the limiter on (action, alias, shape) so a
+            // bounded-attempts storm and a stall_timeout wedge in the same 60s
+            // window each keep their row. Arm `was_stalled` ONLY when the stall
+            // row is actually emitted -- a rate-limited (suppressed) stall must
+            // NOT arm the flag, or the next recovery would emit a
+            // DiskCacheReaderRecovered with no matching stall row.
+            if self.stall_rl.allow(
+                rs_core::audit::Action::DiskCacheStallTimeout,
+                &format!("{}:{}", self.alias, shape.as_str()),
+            ) {
+                self.was_stalled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                // #332: stamp the shape so a ~3s bounded-attempts storm is not
+                // read as a stall_timeout-length outage, and set `timeout_secs`
+                // ONLY on the stall_timeout branch -- the bounded-attempts path
+                // reaches here after ~3s and never consults the timeout.
+                let mut row_detail = serde_json::json!({
+                    "chunk_id": chunk_id,
+                    "shape": shape.as_str(),
+                    "detail": detail,
+                });
+                if matches!(shape, StallShape::StallTimeout) {
+                    row_detail["timeout_secs"] = serde_json::json!(self.stall_timeout_secs);
+                }
                 ring.push_parts(crate::audit_ring::RingRowParts {
                     severity: rs_core::audit::Severity::Error,
                     source: rs_core::audit::Source::Vps,
                     endpoint: Some(self.alias.clone()),
                     action: rs_core::audit::Action::DiskCacheStallTimeout,
-                    detail: serde_json::json!({
-                        "chunk_id": chunk_id,
-                        "timeout_secs": self.stall_timeout_secs,
-                        "detail": detail,
-                    }),
+                    detail: row_detail,
                 });
             }
         }
-        format!("disk_cache stall on chunk {chunk_id}: {detail}")
+        // #332: keep the shape in the operator-facing last_error string
+        // (stored on stats.last_error and shown on the dashboard) so a 3-attempt
+        // cap is not misread as a 60s stall.
+        match shape {
+            StallShape::BoundedAttempts => {
+                format!("disk_cache bounded attempts exhausted on chunk {chunk_id}: {detail}")
+            }
+            StallShape::StallTimeout => format!("disk_cache stall on chunk {chunk_id}: {detail}"),
+        }
+    }
+
+    /// Close the outage bracket (#333): if a stall was recorded, clear the
+    /// flag and emit the paired `DiskCacheReaderRecovered`. Called only where a
+    /// GENUINE clean terminal is established -- after a successful file read, a
+    /// top-level `NotFound`/`Evicted`, or a refetch that resolved
+    /// `Available`/`NotFound`/`Evicted` -- because those mean S3 actually
+    /// answered and the reader is no longer stalled. It is deliberately NOT
+    /// called on a bare registry `Available` (which can be STALE: the slot reads
+    /// Available while the local file was evicted and no fresh S3 GET was
+    /// issued), or on the stall arms (which re-arm instead). `swap` is the
+    /// atomic test-and-clear so exactly one recovered row closes each bracket
+    /// regardless of which clean terminal arrives first.
+    fn note_recovered(&self, chunk_id: i64) {
+        if self
+            .was_stalled
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some(ring) = &self.audit_ring {
+                ring.push_parts(crate::audit_ring::RingRowParts {
+                    severity: rs_core::audit::Severity::Info,
+                    source: rs_core::audit::Source::Vps,
+                    endpoint: Some(self.alias.clone()),
+                    action: rs_core::audit::Action::DiskCacheReaderRecovered,
+                    detail: serde_json::json!({ "chunk_id": chunk_id }),
+                });
+            }
+        }
     }
 }
 
@@ -158,11 +237,11 @@ impl ChunkFetcher for DiskCacheFetcher {
             })
             .await
             {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => return Err(self.note_stall(chunk_id, &e.to_string())),
+                Ok(s) => s,
                 Err(_elapsed) => {
                     return Err(self.note_stall(
                         chunk_id,
+                        StallShape::StallTimeout,
                         &format!(
                             "request+wait exceeded stall_timeout {}s",
                             self.stall_timeout_secs
@@ -173,23 +252,15 @@ impl ChunkFetcher for DiskCacheFetcher {
 
         match state {
             ChunkAvailability::Available { .. } => {
-                // Recovered after a stall: emit the paired ReaderRecovered
-                // exactly once per outage so the audit timeline brackets the
-                // gap. `swap` is the atomic test-and-clear.
-                if self
-                    .was_stalled
-                    .swap(false, std::sync::atomic::Ordering::Relaxed)
-                {
-                    if let Some(ring) = &self.audit_ring {
-                        ring.push_parts(crate::audit_ring::RingRowParts {
-                            severity: rs_core::audit::Severity::Info,
-                            source: rs_core::audit::Source::Vps,
-                            endpoint: Some(self.alias.clone()),
-                            action: rs_core::audit::Action::DiskCacheReaderRecovered,
-                            detail: serde_json::json!({ "chunk_id": chunk_id }),
-                        });
-                    }
-                }
+                // NOTE (#333 review): do NOT close the bracket here. A registry
+                // `Available` can be STALE — the slot still reads Available while
+                // the local file was already evicted (#252), and `request_chunk`
+                // dedup-skips it so NO fresh S3 GET was issued. Closing the
+                // bracket on that stale state would emit a spurious
+                // DiskCacheReaderRecovered while S3 is still down. Instead
+                // `note_recovered` is called only where a clean terminal is
+                // genuinely established: after a successful file read, and on the
+                // refetch's clean terminals below.
                 let path = self.event_dir.join(format!("{chunk_id}.bin"));
                 // A registry-`Available` chunk whose LOCAL file is missing is
                 // a CACHE MISS, not a disk error (#252). Two ways to get here:
@@ -211,13 +282,27 @@ impl ChunkFetcher for DiskCacheFetcher {
                 // `mark_in_flight` invalidates the stale slot (the #184 reset
                 // pattern) so the re-request issues a genuine S3 GET.
                 let data = match tokio::fs::read(&path).await {
-                    Ok(d) => d,
+                    Ok(d) => {
+                        // Genuine clean terminal: the chunk's bytes are on disk.
+                        // Close any open outage bracket here (#333 review).
+                        self.note_recovered(chunk_id);
+                        d
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         self.cache.registry.mark_in_flight(chunk_id);
                         // Same single-deadline bound as the main path (#284):
                         // an unbounded request_chunk().await here would park
                         // the producer identically.
-                        let refetched = tokio::time::timeout(
+                        // #330: route the evicted-chunk refetch stall arms
+                        // through note_stall (like the main path) so a
+                        // resume-after-eviction that lands in an S3 storm also
+                        // records DiskCacheStallTimeout and arms the paired
+                        // DiskCacheReaderRecovered bracket -- previously these
+                        // returned raw strings and left the resume outage silent
+                        // on the timeline. The bracket was NOT closed on the
+                        // stale Available above, so re-arming here brackets the
+                        // resume outage correctly.
+                        let refetched = match tokio::time::timeout(
                             Duration::from_secs(self.stall_timeout_secs),
                             async {
                                 self.cache.download_service.request_chunk(chunk_id).await;
@@ -225,13 +310,16 @@ impl ChunkFetcher for DiskCacheFetcher {
                             },
                         )
                         .await
-                        .map_err(|_| {
-                            format!(
-                                "disk_cache evicted-chunk refetch on {chunk_id}: \
-                                 request+wait exceeded stall_timeout"
-                            )
-                        })?
-                        .map_err(|e| format!("disk_cache evicted-chunk refetch: {e}"))?;
+                        {
+                            Ok(s) => s,
+                            Err(_elapsed) => {
+                                return Err(self.note_stall(
+                                    chunk_id,
+                                    StallShape::StallTimeout,
+                                    "evicted-chunk refetch request+wait exceeded stall_timeout",
+                                ));
+                            }
+                        };
 
                         match refetched {
                             // Refetch landed the file back on disk — read it.
@@ -240,6 +328,11 @@ impl ChunkFetcher for DiskCacheFetcher {
                             // skip-ahead probe advances past it — never loop
                             // on the disk path.
                             ChunkAvailability::Available { .. } => {
+                                // A genuine S3 GET succeeded (mark_in_flight
+                                // forced a real fetch), so this IS a recovery
+                                // regardless of whether the re-read then races
+                                // (#333 review): close the bracket.
+                                self.note_recovered(chunk_id);
                                 match tokio::fs::read(&path).await {
                                     Ok(d) => d,
                                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -256,20 +349,30 @@ impl ChunkFetcher for DiskCacheFetcher {
                             // The chunk is genuinely gone from S3 (or evicted
                             // past every window): a cache miss the producer
                             // resolves by probing ahead — NOT a hard Err that
-                            // would re-arm the 60s backoff loop.
+                            // would re-arm the 60s backoff loop. A clean S3
+                            // answer, so close the bracket too (#333 review).
                             ChunkAvailability::NotFound | ChunkAvailability::Evicted => {
+                                self.note_recovered(chunk_id);
                                 return Ok(None);
                             }
                             // A GENUINE S3 failure — surface as Err so the
                             // producer's consecutive-error rescue counter
                             // advances and it retries on its backoff cadence.
                             // Only real S3 failures keep the retry/backoff.
+                            // #330: route through note_stall (bounded-attempts
+                            // shape) like the main-path Failed arm so this
+                            // outage class also brackets on the timeline.
                             ChunkAvailability::Failed { error } => {
-                                return Err(format!(
-                                    "disk_cache: chunk {chunk_id} evicted-chunk \
-                                     refetch failed: {error}"
+                                return Err(self.note_stall(
+                                    chunk_id,
+                                    StallShape::BoundedAttempts,
+                                    &format!("evicted-chunk refetch failed: {error}"),
                                 ));
                             }
+                            // #330: unreachable in practice -- wait_for_chunk
+                            // only resolves on a TERMINAL state, never while
+                            // still InFlight (mirrors the main-path arm below).
+                            // Kept only for match exhaustiveness.
                             ChunkAvailability::InFlight => {
                                 return Err(format!(
                                     "disk_cache: chunk {chunk_id} stuck InFlight \
@@ -288,13 +391,21 @@ impl ChunkFetcher for DiskCacheFetcher {
                     .unwrap_or(0);
                 Ok(Some((data, duration_ms)))
             }
-            ChunkAvailability::NotFound => Ok(None),
+            ChunkAvailability::NotFound => {
+                // A clean 404 means S3 answered -- the reader is no longer
+                // stalled, so close any open outage bracket (#333) before
+                // reporting the cache miss.
+                self.note_recovered(chunk_id);
+                Ok(None)
+            }
             ChunkAvailability::Evicted => {
                 // The chunk used to exist on disk and was swept. The
                 // producer treats `None` as "not on S3", which triggers
                 // its skip-ahead probe loop. That's the right recovery
                 // because eviction only happens for chunks outside any
-                // endpoint's window.
+                // endpoint's window. A clean Evicted is likewise an S3
+                // answer -- close any open outage bracket (#333).
+                self.note_recovered(chunk_id);
                 Ok(None)
             }
             ChunkAvailability::Failed { error } => {
@@ -310,7 +421,7 @@ impl ChunkFetcher for DiskCacheFetcher {
                 // typically resolves well before the outer stall_timeout, so
                 // without this the common error-storm outage left no stall
                 // row on the audit timeline even though rescue still fired.
-                Err(self.note_stall(chunk_id, &error))
+                Err(self.note_stall(chunk_id, StallShape::BoundedAttempts, &error))
             }
             // Unreachable in practice: `wait_for_chunk` only returns once a
             // slot transitions to a TERMINAL state (Available / NotFound /

@@ -45,9 +45,11 @@ pub struct EndpointStats {
     /// Per-endpoint ring buffer of recent Rust RTMP pusher reconnects.
     #[serde(default)]
     pub rtmp_push_history: std::collections::VecDeque<RtmpPushAuditRecord>,
-    /// PrefetchQueue fill: depth/capacity for fast endpoints. None when
-    /// the endpoint runs without a prefetch queue (K=0). Surfaced on the
-    /// dashboard as a fill bar (#184).
+    /// Prefetch-queue fill (depth/capacity) for the dashboard fill bar (#184).
+    /// Currently ALWAYS `None`: the `PrefetchQueue` that fed it was removed as
+    /// dead code (#286/#334), so nothing populates this yet. Kept as a
+    /// serialized field (serde `default`, so no reader breaks) until a
+    /// replacement fill signal wires in.
     #[serde(default)]
     pub prefetch_fill: Option<PrefetchFill>,
     /// Last lifecycle worst-stage observation: stage label + duration.
@@ -66,7 +68,9 @@ pub struct EndpointStats {
     pub last_push_ok_unix_ms: Option<i64>,
 }
 
-/// Snapshot of a per-endpoint PrefetchQueue.
+/// Snapshot of a per-endpoint prefetch-queue fill. Currently unpopulated —
+/// see `EndpointStats::prefetch_fill` (the `PrefetchQueue` was removed in
+/// #286/#334); retained for the dashboard fill-bar contract (#184).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PrefetchFill {
     pub depth: u32,
