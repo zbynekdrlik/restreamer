@@ -77,10 +77,13 @@ fn bucket_start(t_ms: i64) -> i64 {
     (t / SAMPLE_INTERVAL_MS) * SAMPLE_INTERVAL_MS
 }
 
-/// Convert bytes-per-bucket to average megabits/sec over one interval.
+/// Convert bytes-per-bucket to average megabits/sec over one interval,
+/// rounded to 3 decimals (the graph can't show more, and it roughly halves
+/// the JSON payload vs full f64 precision).
 fn mbps_of(bytes: u64) -> f64 {
     let secs = SAMPLE_INTERVAL_MS as f64 / 1000.0;
-    (bytes as f64) * 8.0 / secs / 1_000_000.0
+    let raw = (bytes as f64) * 8.0 / secs / 1_000_000.0;
+    (raw * 1000.0).round() / 1000.0
 }
 
 impl Inner {
@@ -99,6 +102,13 @@ impl Inner {
     /// re-open an empty bucket at `b`. No-op when there is no open bucket or
     /// `b` is not strictly after the open bucket (same bucket / clock went
     /// backwards).
+    ///
+    /// The zero-fill (and the open bucket itself) is anchored to the
+    /// RETENTION WINDOW `[b - capacity·interval, b)`, not to `open`: for a
+    /// gap longer than the ring (a box idle for hours), buckets older than
+    /// the window are never emitted, so every retained sample carries a
+    /// `t_ms` that is actually within the last 3 h and the loop is bounded
+    /// to at most `HISTORY_CAPACITY` iterations by construction.
     fn finalize_up_to(&mut self, b: i64) {
         let Some(open) = self.open_start_ms else {
             return;
@@ -106,20 +116,22 @@ impl Inner {
         if b <= open {
             return;
         }
-        // Emit the completed open bucket.
-        self.push(Sample {
-            t_ms: open,
-            mbps: mbps_of(self.open_bytes),
-        });
-        // Zero-fill idle buckets strictly between `open` and `b`. Cap the
-        // fill at the ring capacity so a multi-hour idle gap can't spin an
-        // unbounded loop (older samples would be evicted anyway).
-        let mut s = open + SAMPLE_INTERVAL_MS;
-        let mut filled = 0usize;
-        while s < b && filled < HISTORY_CAPACITY {
+        let window_floor = b - (HISTORY_CAPACITY as i64) * SAMPLE_INTERVAL_MS;
+        // Emit the completed open bucket only if it is still within the
+        // retention window; otherwise it would be immediately evicted and
+        // its stale timestamp would misrepresent the window.
+        if open >= window_floor {
+            self.push(Sample {
+                t_ms: open,
+                mbps: mbps_of(self.open_bytes),
+            });
+        }
+        // Zero-fill idle buckets strictly between `open` and `b`, clamped to
+        // the window floor so ancient buckets are skipped.
+        let mut s = (open + SAMPLE_INTERVAL_MS).max(window_floor);
+        while s < b {
             self.push(Sample { t_ms: s, mbps: 0.0 });
             s += SAMPLE_INTERVAL_MS;
-            filled += 1;
         }
         self.open_start_ms = Some(b);
         self.open_bytes = 0;
@@ -161,7 +173,10 @@ impl ThroughputHistory {
 
     /// Snapshot the retained series as of `now_ms`. Finalizes any completed
     /// buckets up to (but not including) the current in-progress bucket so
-    /// the returned series ends at the last full 15 s window.
+    /// the returned series ends at the last full 15 s window. The series
+    /// therefore lags live throughput by up to one interval (the open
+    /// bucket) plus the client poll interval — acceptable for a "how did
+    /// upload behave over time" history.
     pub fn series(&self, now_ms: i64) -> ThroughputSeries {
         let b = bucket_start(now_ms);
         let mut g = self.inner.lock().unwrap();
@@ -277,6 +292,44 @@ mod tests {
             s.samples[HISTORY_CAPACITY - 1].t_ms,
             T0 + (n as i64 - 1) * SAMPLE_INTERVAL_MS
         );
+    }
+
+    #[test]
+    fn gap_longer_than_ring_stays_within_retention_window() {
+        let h = ThroughputHistory::default();
+        // One burst, then activity again after a gap FAR longer than the ring
+        // (capacity + 10 idle buckets). The zero-fill must stay anchored to
+        // the retention window, never emit ancient timestamps, and stay
+        // bounded to capacity.
+        h.record_bytes(1_875_000, T0 + 1); // bucket T0 (ancient after the gap)
+        let gap = (HISTORY_CAPACITY as i64 + 10) * SAMPLE_INTERVAL_MS;
+        h.record_bytes(1_875_000, T0 + gap + 1);
+        // Read one bucket after the second burst.
+        let read_at = T0 + gap + SAMPLE_INTERVAL_MS + 1;
+        let s = h.series(read_at);
+        let b = (read_at / SAMPLE_INTERVAL_MS) * SAMPLE_INTERVAL_MS;
+        let window_floor = b - (HISTORY_CAPACITY as i64) * SAMPLE_INTERVAL_MS;
+        assert!(s.samples.len() <= HISTORY_CAPACITY, "bounded to capacity");
+        // Every retained sample is inside the last-3h window (no ancient
+        // T0 bucket, which fell out of the window).
+        assert!(
+            s.samples
+                .iter()
+                .all(|x| x.t_ms >= window_floor && x.t_ms < b),
+            "all t_ms within retention window"
+        );
+        // Contiguous, interval-spaced, ending at the last completed bucket.
+        assert_eq!(s.samples.last().unwrap().t_ms, b - SAMPLE_INTERVAL_MS);
+        for w in s.samples.windows(2) {
+            assert_eq!(w[1].t_ms - w[0].t_ms, SAMPLE_INTERVAL_MS, "contiguous");
+        }
+        // The second burst finalized to ~1 Mbps at bucket (T0+gap).
+        let burst = s
+            .samples
+            .iter()
+            .find(|x| x.t_ms == T0 + gap)
+            .expect("second-burst bucket retained");
+        assert!((burst.mbps - 1.0).abs() < 1e-9);
     }
 
     #[test]

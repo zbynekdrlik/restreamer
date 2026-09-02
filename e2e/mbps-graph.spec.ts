@@ -48,6 +48,13 @@ test("outgoing-Mbps history graph renders from the throughput series", async ({
     1,
   );
 
+  // The line path must reflect all 6 mocked samples: one M + five L points,
+  // so a truncated/duplicated series can't pass silently.
+  await expect(page.locator("path.mbps-graph__line")).toHaveAttribute(
+    "d",
+    /^M [\d.]+,[\d.]+( L [\d.]+,[\d.]+){5}$/,
+  );
+
   // The header readout shows the peak from the series (6.4 Mbps).
   await expect(page.locator(".mbps-graph__peak")).toContainText("peak 6.4");
 

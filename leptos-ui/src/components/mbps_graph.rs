@@ -17,6 +17,10 @@ use crate::api::{self, ThroughputSeries};
 const VB_W: f64 = 600.0;
 const VB_H: f64 = 80.0;
 
+/// The x-axis window: 3 h, matching the server's retention. Samples are
+/// placed by their real timestamp within `[t_last - WINDOW_MS, t_last]`.
+const WINDOW_MS: f64 = 3.0 * 3600.0 * 1000.0;
+
 #[component]
 pub fn MbpsGraph() -> impl IntoView {
     let series: RwSignal<ThroughputSeries> = RwSignal::new(ThroughputSeries::default());
@@ -49,14 +53,7 @@ pub fn MbpsGraph() -> impl IntoView {
             .map(|s| s.mbps)
             .fold(0.0_f64, f64::max)
     };
-    let latest = move || {
-        series
-            .get()
-            .samples
-            .last()
-            .map(|s| s.mbps)
-            .unwrap_or(0.0)
-    };
+    let latest = move || series.get().samples.last().map(|s| s.mbps).unwrap_or(0.0);
 
     view! {
         <div class="mbps-graph" title="Outgoing upload bitrate to the internet over time (last 3h)">
@@ -75,11 +72,19 @@ pub fn MbpsGraph() -> impl IntoView {
                     }
                     .into_any();
                 }
-                let n = pts.len() as f64;
+                // X is scaled by REAL TIME against a fixed 3 h window ending
+                // at the newest sample, so a partial series fills from the
+                // right at its true temporal position instead of stretching
+                // a few points across the whole width. `t_ms` is therefore
+                // load-bearing, not decorative.
+                let t_last = pts.last().map(|p| p.t_ms).unwrap_or(0) as f64;
+                let t_start = t_last - WINDOW_MS;
+                let x_of = |t_ms: i64| {
+                    (((t_ms as f64 - t_start) / WINDOW_MS) * VB_W).clamp(0.0, VB_W)
+                };
                 // Scale Y to the peak, with a 1 Mbps floor so a quiet stream
                 // doesn't blow tiny values up to full height.
                 let max = pts.iter().map(|p| p.mbps).fold(1.0_f64, f64::max);
-                let x_of = |i: usize| (i as f64) * (VB_W / (n - 1.0));
                 let y_of = |mbps: f64| VB_H - (mbps / max * VB_H);
                 let line: String = pts
                     .iter()
@@ -88,17 +93,18 @@ pub fn MbpsGraph() -> impl IntoView {
                         format!(
                             "{} {:.1},{:.1}",
                             if i == 0 { "M" } else { "L" },
-                            x_of(i),
+                            x_of(p.t_ms),
                             y_of(p.mbps)
                         )
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
-                // Close the area path down to the baseline.
+                // Close the area path down to the baseline under the series.
                 let area = format!(
-                    "{line} L {:.1},{:.1} L 0.0,{:.1} Z",
-                    x_of(pts.len() - 1),
+                    "{line} L {:.1},{:.1} L {:.1},{:.1} Z",
+                    x_of(pts.last().unwrap().t_ms),
                     VB_H,
+                    x_of(pts[0].t_ms),
                     VB_H
                 );
                 view! {

@@ -63,19 +63,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recorded_uploads_surface_as_samples() {
+    async fn recorded_upload_surfaces_as_a_finalized_sample() {
         let (app, state) = test_app().await;
-        // Record two successful uploads. They land in the current in-progress
-        // bucket, so a snapshot right away emits nothing yet — but the field
-        // shape must still be present and well-formed.
-        for _ in 0..2 {
-            state.upload_metrics.record(UploadEvent {
+        // Record a 1.875 MB success TWO intervals in the past so the
+        // real-clock endpoint snapshot finalizes it into a completed bucket.
+        let interval = rs_endpoint::throughput::SAMPLE_INTERVAL_MS;
+        let past = chrono::Utc::now().timestamp_millis() - 2 * interval;
+        state.upload_metrics.record_at(
+            UploadEvent {
                 at: Instant::now(),
                 duration_ms: 50,
                 success: true,
-                bytes: 1_000_000,
-            });
-        }
+                bytes: 1_875_000,
+            },
+            past,
+        );
         let resp = app
             .oneshot(
                 Request::get("/api/v1/uploads/throughput")
@@ -85,5 +87,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let samples = v["samples"].as_array().expect("samples array");
+        assert!(!samples.is_empty(), "the past upload surfaces as a sample");
+        // The bucket holding our 1.875 MB upload reads ~1 Mbps.
+        let has_one_mbps = samples
+            .iter()
+            .any(|s| (s["mbps"].as_f64().unwrap_or(0.0) - 1.0).abs() < 1e-6);
+        assert!(has_one_mbps, "the ~1 Mbps bucket is present: {samples:?}");
     }
 }
