@@ -585,6 +585,170 @@ app.get("/api/v1/_test/change-key-ops", (_req, res) => {
   res.json(changeKeyOps);
 });
 
+// --- Standalone delivery start/stop (#136) ---
+// The REAL backend exposes POST /api/v1/delivery/start and /delivery/stop
+// (delivery_handlers::delivery_start / delivery_stop) as a path DISTINCT from
+// the "Start Delivering" button's /events/{id}/start-stream. CI scripts,
+// tooling and future external integrations hit these directly. The handlers
+// flip streaming_events.delivering_activated and broadcast a WS StreamingEvent
+// so connected dashboards flip IDLE<->STREAMING without waiting for the 2s
+// poll. This mock mirrors that observable behavior (the RTMP-stable + skew
+// gates, the DeliveryStartResponse shape, the StreamingEvent broadcast) PLUS
+// the PipelineState/DeliveryStatus broadcasts the delivery-monitor loop emits
+// as delivery actually comes up — the end-to-end observable an operator sees.
+app.post("/api/v1/delivery/start", (req, res) => {
+  const eventId = req.body && req.body.event_id;
+  const force = !!(req.body && req.body.force);
+
+  // RTMP-stable gate (mirror of delivery_handlers::RTMP_STABLE_REQUIRED_SECS).
+  const stableSecs = currentRtmpStableSecs();
+  if (stableSecs < 15) {
+    return res.status(400).json({
+      error: "rtmp_not_stable",
+      current_secs: stableSecs,
+      need_secs: 15,
+    });
+  }
+
+  // Ingest A/V-skew gate (#354): refuse a paid VPS while OBS is desynced,
+  // unless the operator forces the override.
+  if (scenario === "ingest-skew" && !force) {
+    return res.status(400).json({
+      error: "ingest_skew_too_high",
+      skew_ms: 25470,
+      reason:
+        "Zvuk a obraz z OBS sú rozídené o ~25 s — reštartuj stream v OBS pred spustením delivery.",
+    });
+  }
+
+  const evt = events.find((e) => e.id === eventId);
+  if (!evt) {
+    return res.status(404).json({ error: "not found" });
+  }
+
+  // Mirror db::set_delivering_activated(true). The real handler does NOT touch
+  // receiving_activated here (the caller /activate set it first).
+  evt.delivering_activated = true;
+
+  // Mirror the real handler's WS StreamingEvent broadcast (dashboard flips
+  // events_list + streaming_event delivering flag immediately).
+  broadcastWs({
+    type: "StreamingEvent",
+    data: {
+      action: "delivering_activated",
+      name: null,
+      receiving: true,
+      delivering: true,
+    },
+  });
+
+  // Simulate the delivery-monitor's follow-up broadcasts that realize the
+  // STREAMING state + the VPS/endpoint view (a warming-up endpoint).
+  broadcastWs({
+    type: "PipelineState",
+    data: {
+      state: "streaming",
+      event_id: eventId,
+      event_name: evt.name,
+      target_delay_secs: 120,
+      session_start: new Date().toISOString(),
+      local_buffer_chunks: 10,
+      s3_queue_chunks: 5,
+      cache_duration_secs: 118.0,
+    },
+  });
+  const deliveryData = {
+    instance_name: `rs-delivery-evt${eventId}`,
+    status: "running",
+    server_ip: "1.2.3.4",
+    endpoint_count: 1,
+    endpoints: [
+      {
+        alias: "YouTube Main",
+        alive: true,
+        current_chunk_id: 1,
+        bytes_processed_total: 0,
+        chunks_processed: 0,
+        chunk_delay_secs: 0.0,
+        stall_reason: null,
+        ffmpeg_restart_count: 0,
+        reconnect_count: 0,
+        last_error: null,
+        is_fast: false,
+        delivery_mode: "warmup",
+        rescue_eta_secs: 30,
+        lifecycle: "pending",
+      },
+    ],
+  };
+  cachedDelivery = deliveryData;
+  broadcastWs({ type: "DeliveryStatus", data: deliveryData });
+
+  broadcastAudit("delivery_started", "operator", "info", null, {
+    event_id: eventId,
+    instance_id: 1,
+  });
+
+  // Mirror DeliveryStartResponse.
+  res.json({
+    instance_id: 1,
+    hetzner_id: 12345,
+    name: `rs-delivery-evt${eventId}`,
+    server_type: "cx22",
+    status: "running",
+  });
+});
+
+app.post("/api/v1/delivery/stop", (req, res) => {
+  const eventId = req.body && req.body.event_id;
+  const evt = events.find((e) => e.id === eventId);
+  if (!evt) {
+    return res.status(404).json({ error: "not found" });
+  }
+
+  // Mirror db::set_delivering_activated(false). Leaves receiving_activated as
+  // is (the real stop handler only clears delivering).
+  evt.delivering_activated = false;
+  const stillReceiving = evt.receiving_activated;
+
+  broadcastWs({
+    type: "StreamingEvent",
+    data: {
+      action: "delivering_deactivated",
+      name: null,
+      receiving: stillReceiving,
+      delivering: false,
+    },
+  });
+  broadcastWs({
+    type: "PipelineState",
+    data: {
+      state: "idle",
+      event_id: null,
+      event_name: null,
+      target_delay_secs: 0,
+      session_start: null,
+      local_buffer_chunks: 0,
+      s3_queue_chunks: 0,
+    },
+  });
+  const noneDelivery = {
+    instance_name: "",
+    status: "none",
+    server_ip: null,
+    endpoint_count: 0,
+    endpoints: [],
+  };
+  cachedDelivery = noneDelivery;
+  broadcastWs({ type: "DeliveryStatus", data: noneDelivery });
+
+  broadcastAudit("delivery_stopped", "operator", "info", null, {
+    event_id: eventId,
+  });
+
+  res.json({ status: "ok" });
+});
+
 // S3 usage + per-event clear stubs for the new Settings tab UI. Both
 // no-op so frontend tests that visit /settings don't 404.
 app.get("/api/v1/s3/usage", (_req, res) => {
