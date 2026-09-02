@@ -20,6 +20,7 @@ auto-load on their `paths:` — you do not invoke those.
 - OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`
 - Outage survival, rescue clip, keepalive, notification UX → `.claude/skills/outage-rescue`
 - Compile / test / clippy / frontend-E2E (dev1 Tier-0 → build on dev2) → `.claude/skills/dev2-build-verify`
+- leptos-ui timers / detached async / reactive-disposal panics on SPA nav → `.claude/rules/leptos-ownership.md` (auto-loads on `leptos-ui/src/**`)
 - ci.yml conditional-logic gates, verify-ci-yaml-invariants, .cargo/audit.toml → `.claude/skills/ci-yaml-maintenance`
 
 ## Project Structure

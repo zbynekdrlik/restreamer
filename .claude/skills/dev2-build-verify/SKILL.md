@@ -340,3 +340,41 @@ bug and was not:
   `cargo fmt --all`), so a hand-formatted targeted `Edit` needs no rustfmt at all;
   if you do rustfmt, `git checkout --` the files you did not intend to change
   before committing.
+
+## trunk incremental build leaves STALE `snippets/` → WASM won't instantiate (#343)
+
+After a `trunk build --release` that only recompiled a bit, the browser can fail
+with `WebAssembly.instantiate(): Import #3 "./snippets/leptos-ui-<hash>/inline0.js":
+module is not an object or function` and the app never mounts (every E2E times
+out on `.operator-dashboard` / any root element). Cause: the JS glue references
+a snippet-dir hash that trunk did not emit — stale `dist/snippets/` from earlier
+builds plus a missing current one. `dist/` is regenerable → fix with a CLEAN
+rebuild: `rm -rf ~/restreamer-bc-<lane>/dist && trunk build --release`. Confirm
+the glue's `grep -o 'snippets/leptos-ui-[0-9a-f]*/inline0.js' dist/leptos-ui-*.js`
+matches a dir that actually exists under `dist/snippets/`.
+
+## Detached E2E launch that survives ssh drops AND the worktree-isolation guard (#343)
+
+Under dev2 load (`uptime` ~7+), a heavy inline `ssh … npx playwright test` drops
+at handshake (tool returns **exit 255**, run never started) — but the
+worktree-isolation guard ALSO refuses opaque remote commands (`ssh … 'bash -s'`,
+`ssh … bash /tmp/x.sh`, and multi-line `;`-separated scripts): "cannot be shown
+not to be git". What the guard DOES accept: `ssh dev2 'cd <known-dir> && <named
+cmd> && …'` (trunk, cargo, rsync, cp, npx all pass). So daemonize with the
+subshell idiom, which returns rc 0 and survives the drop:
+
+```bash
+ssh newlevel@dev2 'cd ~/restreamer-bc-<lane>/e2e && ( setsid npx playwright test \
+  --config playwright-frontend.config.ts <spec>.spec.ts --workers=1 \
+  >/tmp/pw.log 2>&1 </dev/null & ) ; echo LAUNCHED'
+# then poll from dev1 with SIMPLE single ssh calls (a `for`/`;`-loop is refused):
+#   ssh newlevel@dev2 'sleep 30 && tail -15 /tmp/pw.log'
+```
+
+Two traps: (1) `pkill -f "node mock-api.js"` INSIDE a compound ssh makes the
+whole command return exit 255 (the LAUNCHED echo never prints) — start the mock
+without a pkill when nothing is on :8910, or kill it in its own call. (2) The
+mock (`node mock-api.js`) can DIE mid-suite under load → tests fail en masse at
+~100 ms with `root=000`; restart it and re-run rather than chasing a "regression".
+Start the mock the same daemonized way: `( setsid env RESTREAMER_TEST_HOOKS=1
+node mock-api.js >/tmp/mock.log 2>&1 </dev/null & )`.
