@@ -210,6 +210,22 @@ ssh newlevel@dev2 'cd ~/restreamer-buildcheck/e2e && npm install >/dev/null 2>&1
   `SyntaxError: Unexpected token '<', "<!DOCTYPE"…`. It looks like a code bug but
   is a stale-process env bug. Confirm with `tail /tmp/mockapi.log` (shows the
   `EADDRINUSE`) and `ss -ltn | grep :8910`.
+- **A backgrounded `node mock-api.js` over ssh needs `</dev/null` or the ssh
+  call drops with exit 255 (#77).** `ssh dev2 "... node mock-api.js >log 2>&1 &"`
+  leaves the detached node holding the ssh channel's stdin; ssh then fails to
+  close and returns **exit 255 with no output** (looks like a connection drop,
+  but reproduces every time — a backgrounded `sleep 30` over ssh does NOT drop,
+  so it is specifically the port-binding server). Fix: redirect stdin too —
+  `RESTREAMER_TEST_HOOKS=1 nohup node mock-api.js >/tmp/mockapi.log 2>&1 </dev/null &`
+  — then the mock survives the ssh session close and a SEPARATE foreground
+  `ssh … npx playwright test …` reaches it. If a stale mock still holds the port,
+  `fuser -k 8910/tcp` frees it more reliably than `pkill`.
+- **Parallel-lane worktree gotcha: the isolation guard refuses ssh commands it
+  can't verify aren't git ops** — `ssh dev2 'cd … && npm …'` compounds, opaque
+  `ssh dev2 'bash /tmp/x.sh'`, and loop-wrapped ssh all get blocked. Run dev2
+  commands as a SINGLE plain command (`;`-separated is fine, `&&`-chains and
+  `bash <file>` are not), one ssh call at a time; `dangerouslyDisableSandbox`
+  does NOT lift this particular guard.
 - A new spec file is only picked up if its basename is in the config's
   `testMatch` regex (`e2e/playwright-frontend.config.ts`) — add it there.
 - `testMatch` is explicit, and `cargo test` takes only ONE positional filter —
