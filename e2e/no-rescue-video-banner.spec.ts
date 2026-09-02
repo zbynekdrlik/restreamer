@@ -65,10 +65,15 @@ test("no banner when the active event HAS a rescue video (keys on rescue_video_u
 
   await page.goto("/");
 
-  // Give the dashboard a moment to load + poll, then confirm no banner even
-  // though an event is active — proves the banner keys on rescue_video_url,
-  // not merely on an active event.
-  await page.waitForTimeout(2000);
+  // Prove the dashboard actually loaded and polled /status (otherwise a
+  // toHaveCount(0) would pass vacuously on a blank page). Only THEN assert the
+  // banner is absent — proving it keys on rescue_video_url, not merely on an
+  // active event.
+  await page.waitForResponse(
+    (r) => r.url().endsWith("/api/v1/status") && r.ok(),
+    { timeout: 10000 },
+  );
+  await page.waitForTimeout(500);
   await expect(
     page.locator('[data-testid="no-rescue-video-banner"]'),
   ).toHaveCount(0);
@@ -83,7 +88,13 @@ test("no banner on the idle dashboard (no active event)", async ({
   // Default scenario => idle dashboard, no active streaming event.
   await page.goto("/");
 
-  await page.waitForTimeout(2000);
+  // Wait for a real /status poll before asserting absence (no vacuous pass on
+  // a blank page).
+  await page.waitForResponse(
+    (r) => r.url().endsWith("/api/v1/status") && r.ok(),
+    { timeout: 10000 },
+  );
+  await page.waitForTimeout(500);
   await expect(
     page.locator('[data-testid="no-rescue-video-banner"]'),
   ).toHaveCount(0);

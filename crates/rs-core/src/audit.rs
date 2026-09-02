@@ -458,6 +458,12 @@ mod tests {
             serde_json::to_string(&Action::RescueActivated).unwrap(),
             r#""rescue_activated""#
         );
+        // #260: the audit panel renders the raw action string (audit_panel.rs),
+        // so lock the serialization for the no-rescue-video warning too.
+        assert_eq!(
+            serde_json::to_string(&Action::NoRescueVideoConfigured).unwrap(),
+            r#""no_rescue_video_configured""#
+        );
     }
 
     #[test]

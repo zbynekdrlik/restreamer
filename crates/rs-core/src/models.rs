@@ -47,6 +47,13 @@ impl StreamingEvent {
     /// truth shared by the go-live audit warning (`rs-api` `delivery_start`)
     /// and mirrored by the dashboard banner (`leptos-ui`, which targets wasm32
     /// and cannot depend on this crate).
+    ///
+    /// Note: the VPS-side resolver
+    /// (`rs_delivery::rescue::resolve_rescue_source`) treats only `None`/empty
+    /// (no `trim`) as missing, so a whitespace-only URL is "configured" there
+    /// but then rejected as non-FLV and still falls back to the generic clip.
+    /// The outcome is identical (generic clip on outage), so this stricter
+    /// (trimming) host-side warning stays truthful.
     pub fn rescue_video_missing(&self) -> bool {
         match self.rescue_video_url.as_deref() {
             Some(url) => url.trim().is_empty(),
