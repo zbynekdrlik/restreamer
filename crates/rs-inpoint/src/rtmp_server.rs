@@ -141,7 +141,21 @@ impl RtmpServer {
         event_sender: StreamHubEventSender,
     ) -> Result<(), crate::InpointError> {
         loop {
-            let (tcp_stream, _peer) = listener.accept().await?;
+            let (tcp_stream, _peer) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    // A per-connection accept error (a peer that reset a queued
+                    // connection — e.g. WSAECONNRESET / ECONNABORTED — or a
+                    // momentary fd exhaustion) must NOT tear down live RTMP
+                    // ingest. Log it and keep accepting; a short backoff avoids
+                    // a busy-loop if the condition persists (e.g. EMFILE). Note
+                    // this is a deliberate improvement over xiu's own accept
+                    // loop, which propagated the first accept error.
+                    error!("RTMP accept error (continuing): {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
             let mut session = ServerSession::new(
                 tcp_stream,
                 event_sender.clone(),
