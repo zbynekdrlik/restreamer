@@ -19,10 +19,8 @@ pub fn App() -> impl IntoView {
 
     view! {
         <Router>
-            // App-level unified "any issue" red edge-glow overlay (#73).
-            // Fixed + click-through, so its position in the tree is irrelevant.
-            <AlertGlow />
             <div class="app">
+                <AlertGlow />
                 <Header />
                 <main class="content">
                     <Routes fallback=|| view! { <div class="empty">"Page not found"</div> }>

@@ -264,3 +264,108 @@ impl DashboardStore {
         });
     }
 }
+
+// --- Shared "attention"/"red" predicates ---------------------------------
+//
+// A single source of truth for the two red-alarm conditions the dashboard
+// derives in more than one place, so the per-component signals and the
+// app-level `AlertGlow` (#73) can never drift apart. Pure functions on plain
+// state, so they are unit-testable without a browser.
+
+/// True when any delivery endpoint needs the operator (renders a red node).
+///
+/// Survivable auto-recovery states (`Buffering`/`Rescue`/`Recovering`) are
+/// deliberately NOT attention — they are the calm/blue semaphore.
+pub fn any_attention(d: &DeliveryState) -> bool {
+    d.endpoints
+        .iter()
+        .any(|e| e.lifecycle == EndpointLifecycle::Attention)
+}
+
+/// True when delivery is ACTIVE (a KNOWN, non-idle/stopping pipeline state)
+/// but zero endpoints are running — the audience sees nothing.
+///
+/// An UNKNOWN (empty) pipeline state is treated as NOT active: a fresh
+/// dashboard load carries `PipelineState::default()` (`state == ""`) with an
+/// empty delivery until the first WebSocket tick lands (~2 s later), and
+/// without the empty-state guard that window would false-alarm on every load
+/// (#73 review 🔴 — this also fixes the same latent blink in the
+/// `ZeroEndpointBanner`).
+pub fn zero_endpoint_alarm(ps: &PipelineState, d: &DeliveryState) -> bool {
+    !ps.state.is_empty()
+        && ps.state != "idle"
+        && ps.state != "stopping"
+        && d.endpoints.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ep(lifecycle: EndpointLifecycle) -> DeliveryEndpointState {
+        DeliveryEndpointState {
+            lifecycle,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fresh_load_default_state_is_not_a_zero_endpoint_alarm() {
+        // Regression (#73 review 🔴): PipelineState::default().state == "" plus
+        // an empty delivery (the state on first paint, before the first WS
+        // tick) must NOT fire the alarm — otherwise the glow cries wolf on
+        // every dashboard load/reload.
+        assert!(!zero_endpoint_alarm(
+            &PipelineState::default(),
+            &DeliveryState::default()
+        ));
+    }
+
+    #[test]
+    fn active_pipeline_with_no_endpoints_is_a_zero_endpoint_alarm() {
+        let ps = PipelineState {
+            state: "streaming".to_string(),
+            ..Default::default()
+        };
+        assert!(zero_endpoint_alarm(&ps, &DeliveryState::default()));
+    }
+
+    #[test]
+    fn idle_or_stopping_is_never_a_zero_endpoint_alarm() {
+        for s in ["idle", "stopping"] {
+            let ps = PipelineState {
+                state: s.to_string(),
+                ..Default::default()
+            };
+            assert!(!zero_endpoint_alarm(&ps, &DeliveryState::default()));
+        }
+    }
+
+    #[test]
+    fn active_pipeline_with_endpoints_is_not_a_zero_endpoint_alarm() {
+        let ps = PipelineState {
+            state: "streaming".to_string(),
+            ..Default::default()
+        };
+        let d = DeliveryState {
+            endpoints: vec![ep(EndpointLifecycle::Live)],
+            ..Default::default()
+        };
+        assert!(!zero_endpoint_alarm(&ps, &d));
+    }
+
+    #[test]
+    fn any_attention_fires_only_on_attention() {
+        let calm = DeliveryState {
+            endpoints: vec![ep(EndpointLifecycle::Live), ep(EndpointLifecycle::Rescue)],
+            ..Default::default()
+        };
+        assert!(!any_attention(&calm));
+
+        let red = DeliveryState {
+            endpoints: vec![ep(EndpointLifecycle::Live), ep(EndpointLifecycle::Attention)],
+            ..Default::default()
+        };
+        assert!(any_attention(&red));
+    }
+}

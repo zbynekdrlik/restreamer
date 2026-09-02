@@ -11,19 +11,27 @@
 //!
 //! This is the missing aggregate signal: a fixed, full-viewport,
 //! click-through (`pointer-events:none`) overlay carrying an inset red halo
-//! that pulses around the viewport border whenever ANY of the conditions the
-//! dashboard already renders red is active. It renders only when the
-//! aggregate `any_issue` memo is true, and invents NO new backend signal —
-//! it ORs the existing `DashboardStore` signals, so it is fully drivable
-//! through the scenario mock harness and Playwright-testable.
+//! that pulses around the viewport border whenever ANY of the conditions
+//! below is active. It invents NO new backend signal — it ORs existing
+//! `DashboardStore` signals through the shared predicates in
+//! [`crate::store`], so it stays a true mirror of what the dashboard already
+//! shows and is fully drivable through the scenario mock harness.
 //!
-//! Semaphore consistency: survivable auto-recovery states
-//! (Rescue/Buffering/Recovering) stay deliberately CALM/blue (the
-//! `OutageBanner` philosophy). The red glow fires ONLY on genuine
-//! attention/red conditions, so it never red-alarms a state the dashboard
-//! intentionally treats as calm.
+//! It fires on exactly the five conditions the dashboard already renders red:
+//!   1. any endpoint in `Attention` (`any_attention`),
+//!   2. delivery active with zero endpoints (`zero_endpoint_alarm`),
+//!   3. local disk `critical`,
+//!   4. ingest A/V skew latched over threshold,
+//!   5. a non-standard S3 region.
+//!
+//! Deliberately EXCLUDED, to stay consistent with the existing semaphore:
+//! survivable auto-recovery states (`Buffering`/`Rescue`/`Recovering`, incl.
+//! the `buffer_exhausted` badge that coincides with Rescue) are calm/blue —
+//! "protected, recovering, no action needed" (the `OutageBanner` philosophy)
+//! — so the red glow never fires on them. The early disk WARN (80%) and a
+//! degraded YouTube health badge are likewise not red-critical here.
 
-use crate::store::{DashboardStore, EndpointLifecycle};
+use crate::store::{DashboardStore, any_attention, zero_endpoint_alarm};
 use leptos::prelude::*;
 
 #[component]
@@ -35,28 +43,18 @@ pub fn AlertGlow() -> impl IntoView {
     let skew_active = store.ingest_skew_active;
     let s3_standard = store.s3_region_standard;
 
-    // Aggregate of exactly the conditions the dashboard ALREADY renders red.
+    // Aggregate of exactly the conditions the dashboard ALREADY renders red,
+    // via the shared predicates so it can never drift from the banners/cards.
+    // Every signal is read (via `.get()`) INSIDE this closure, so the memo
+    // re-evaluates when any of them changes.
     let any_issue = Memo::new(move |_| {
         let d = delivery.get();
-
-        // 1) Any endpoint needs the operator (red per-endpoint node).
-        let attention = d
-            .endpoints
-            .iter()
-            .any(|e| e.lifecycle == EndpointLifecycle::Attention);
-
-        // 2) Delivery active but zero endpoints running — mirrors the
-        //    ZeroEndpointBanner predicate (highest-priority alarm).
         let ps = pipeline.get();
-        let zero_endpoint = ps.state != "idle" && ps.state != "stopping" && d.endpoints.is_empty();
 
-        // 3) Local chunk-store disk critically full (never-drop safety valve).
+        let attention = any_attention(&d);
+        let zero_endpoint = zero_endpoint_alarm(&ps, &d);
         let disk_critical = disk.get() == "critical";
-
-        // 4) Ingest-side A/V skew latched over threshold (OBS desync).
         let skew = skew_active.get();
-
-        // 5) Non-standard / degraded S3 region.
         let s3_bad = !s3_standard.get();
 
         attention || zero_endpoint || disk_critical || skew || s3_bad
