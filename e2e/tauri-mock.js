@@ -23,6 +23,11 @@ const mockResponses = {
     // under the Tauri-mock IPC path every frontend spec runs through.
     const ingest_skew_ms = status.inpoint?.details?.ingest_skew_ms || 0;
     const ingest_skew_active = status.inpoint?.details?.ingest_skew_active || false;
+    // #84: long_stream_warning is a top-level /status field; forward it here
+    // too (this hand-composed object does not relay the HTTP response
+    // verbatim), or the LongStreamBanner silently sees the default under the
+    // Tauri-mock IPC path every frontend spec runs through.
+    const long_stream_warning = status.long_stream_warning || false;
     const data = {
       streaming_event: status.streaming_event || null,
       chunk_stats,
@@ -32,6 +37,7 @@ const mockResponses = {
       s3_region_standard,
       ingest_skew_ms,
       ingest_skew_active,
+      long_stream_warning,
     };
     return { success: true, data, error: null };
   },

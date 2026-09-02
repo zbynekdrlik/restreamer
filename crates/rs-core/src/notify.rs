@@ -40,6 +40,13 @@ enum Signal {
     Onset(Action),
     /// Recovery / all-clear — ends the episode and re-arms onset alerts.
     Recovery(Action),
+    /// #84: a standalone operator heads-up that is NOT part of outage-episode
+    /// semantics — it fires an alert but never touches `in_outage`/`alerted`,
+    /// so it cannot flip the notifier into a fake outage (which would make a
+    /// later `RescueRecovered` emit a spurious "recovered"). The emitter
+    /// guarantees its own once-per-occurrence dedup (the long-stream monitor
+    /// arms once per delivery).
+    Standalone(Action),
 }
 
 /// Route an audit action to an outage signal, or `None` if it is not
@@ -58,6 +65,8 @@ fn classify(action: Action) -> Option<Signal> {
         Action::RescueRecovered
         | Action::HostInternetRecovered
         | Action::IngestSkewRecovered => Some(Signal::Recovery(action)),
+        // #84: standalone heads-up, deliberately OUTSIDE the outage episode.
+        Action::LongStreamWarning => Some(Signal::Standalone(action)),
         _ => None,
     }
 }
@@ -140,7 +149,10 @@ fn slovak_text(action: Action) -> &'static str {
              kým to platí."
         }
         Action::IngestSkewRecovered => "✅ Zvuk a obraz z OBS sú znova zosynchronizované.",
-        // classify() only routes the eight actions above into this function.
+        Action::LongStreamWarning => {
+            "⏱️ Stream beží už veľmi dlho — over, či ho netreba ukončiť (možno zostal omylom zapnutý)."
+        }
+        // classify() only routes the nine actions above into this function.
         _ => "",
     }
 }
@@ -269,6 +281,10 @@ impl OutageNotifier {
                     None
                 }
             }
+            // #84: fire the heads-up without touching episode state. The
+            // emitter (the long-stream monitor) already dedups to once per
+            // delivery, so no per-episode `alerted` tracking is needed here.
+            Signal::Standalone(action) => Some(build_alert(action, row)),
         }
     }
 

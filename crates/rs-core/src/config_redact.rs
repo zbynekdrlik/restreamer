@@ -522,6 +522,7 @@ mod tests {
         ("api.tls_key", false),
         ("client_uuid", false),
         ("delivery.delivery_delay_secs", false),
+        ("delivery.long_stream_warn_secs", false),
         ("hetzner.api_token", true),
         ("hetzner.default_server_type", false),
         ("hetzner.extra_ssh_key_names", false),

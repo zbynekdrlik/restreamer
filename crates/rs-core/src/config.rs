@@ -335,16 +335,28 @@ impl Default for ApiConfig {
 pub struct DeliveryConfig {
     #[serde(default = "default_delivery_delay_secs")]
     pub delivery_delay_secs: u64,
+    /// #84: warn the operator when a single delivery has been running longer
+    /// than this many seconds — a heads-up that a stream may have been left on
+    /// after the event finished ("potentially not finished stream"). Default
+    /// 9000 s (2.5 h). `0` disables the warning entirely. Not a credential
+    /// (a plain duration), so it is classified `readable` in CONFIG_INVENTORY.
+    #[serde(default = "default_long_stream_warn_secs")]
+    pub long_stream_warn_secs: u64,
 }
 
 fn default_delivery_delay_secs() -> u64 {
     120
 }
 
+fn default_long_stream_warn_secs() -> u64 {
+    9000
+}
+
 impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
             delivery_delay_secs: default_delivery_delay_secs(),
+            long_stream_warn_secs: default_long_stream_warn_secs(),
         }
     }
 }

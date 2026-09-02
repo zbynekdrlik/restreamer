@@ -375,6 +375,13 @@ pub struct ServiceStatus {
     /// standard) so an absent/older field never false-alarms.
     #[serde(default = "default_true")]
     pub s3_region_standard: bool,
+    /// #84: whether the current delivery has been running longer than
+    /// `delivery.long_stream_warn_secs` (default 2.5 h). Drives the dashboard
+    /// LongStreamBanner. Computed live on every poll, so it clears the moment
+    /// delivery stops. Defaults false so an absent/older field never
+    /// false-alarms.
+    #[serde(default)]
+    pub long_stream_warning: bool,
 }
 
 fn default_true() -> bool {

@@ -33,6 +33,7 @@ let oauthRows = []; // persisted rows returned by GET /api/v1/youtube/oauths
 //   - "disk-critical"   — status.disk_pressure="critical" (red DiskPressureBanner)
 //   - "s3-region-nonstandard" — status.s3_region_standard=false (red S3RegionBanner, #278)
 //   - "ingest-skew"     — inpoint.details.ingest_skew_active=true (red IngestSkewBanner + gate, #354)
+//   - "long-stream"     — status.long_stream_warning=true (amber LongStreamBanner, #84)
 let scenario = "default";
 let rtmpStableSecs = 999; // default: stream has been stable plenty long
 let rtmpTickStartMs = null; // when the tick scenario started
@@ -85,6 +86,8 @@ function buildStatusResponse() {
   // gate. The "ingest-skew" scenario feeds a large sustained skew.
   const ingestSkewActive = scenario === "ingest-skew";
   const ingestSkewMs = ingestSkewActive ? 25470 : 0;
+  // #84: long_stream_warning drives the dashboard LongStreamBanner.
+  const longStreamWarning = scenario === "long-stream";
   return {
     inpoint: {
       state: rtmpActive ? "connected" : "idle",
@@ -98,6 +101,7 @@ function buildStatusResponse() {
     streaming_event: currentStreamingEvent(),
     disk_pressure: diskPressure,
     s3_region_standard: s3RegionStandard,
+    long_stream_warning: longStreamWarning,
     chunk_stats: {
       total_chunks: 42,
       pending_chunks: 3,

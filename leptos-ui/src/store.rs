@@ -223,6 +223,11 @@ pub struct DashboardStore {
     // gate (#354).
     pub ingest_skew_ms: RwSignal<i64>,
     pub ingest_skew_active: RwSignal<bool>,
+
+    // #84: whether the current delivery has been running longer than the
+    // operator threshold (default 2.5 h). Polled from `/status`; drives the
+    // LongStreamBanner. Defaults false until the first poll lands.
+    pub long_stream_warning: RwSignal<bool>,
 }
 
 impl DashboardStore {
@@ -251,6 +256,7 @@ impl DashboardStore {
             s3_region_standard: RwSignal::new(true),
             ingest_skew_ms: RwSignal::new(0),
             ingest_skew_active: RwSignal::new(false),
+            long_stream_warning: RwSignal::new(false),
         }
     }
 

@@ -36,6 +36,12 @@ pub struct StatusResponse {
     /// (#354). Defaults false so a missing field never false-alarms.
     #[serde(default)]
     pub ingest_skew_active: bool,
+    /// Whether the current delivery has been running longer than
+    /// `delivery.long_stream_warn_secs` (default 2.5 h). Drives the
+    /// LongStreamBanner (#84). Defaults false so a missing field never
+    /// false-alarms.
+    #[serde(default)]
+    pub long_stream_warning: bool,
 }
 
 fn default_true() -> bool {
@@ -75,6 +81,8 @@ pub async fn get_status() -> Result<StatusResponse, String> {
     let ingest_skew_active = status["inpoint"]["details"]["ingest_skew_active"]
         .as_bool()
         .unwrap_or(false);
+    // #84: top-level flag on /status (sibling of s3_region_standard).
+    let long_stream_warning = status["long_stream_warning"].as_bool().unwrap_or(false);
     Ok(StatusResponse {
         streaming_event: event,
         chunk_stats,
@@ -84,5 +92,6 @@ pub async fn get_status() -> Result<StatusResponse, String> {
         s3_region_standard,
         ingest_skew_ms,
         ingest_skew_active,
+        long_stream_warning,
     })
 }

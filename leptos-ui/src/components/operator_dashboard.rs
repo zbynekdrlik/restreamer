@@ -10,6 +10,7 @@ use super::confirm_modal::ConfirmModal;
 use super::disk_pressure_banner::DiskPressureBanner;
 use super::endpoint_tree::EndpointTree;
 use super::ingest_skew_banner::IngestSkewBanner;
+use super::long_stream_banner::LongStreamBanner;
 use super::oauth_authorize::OAuthAuthorize;
 use super::outage_banner::OutageBanner;
 use super::pacing_panel::PacingPanel;
@@ -36,6 +37,7 @@ pub fn OperatorDashboard() -> impl IntoView {
     view! {
         <div class="operator-dashboard">
             <IngestSkewBanner />
+            <LongStreamBanner />
             <DiskPressureBanner />
             <S3RegionBanner />
             <ZeroEndpointBanner />
@@ -87,6 +89,7 @@ fn ControlBar() -> impl IntoView {
                 store.s3_region_standard.set(s.s3_region_standard);
                 store.ingest_skew_ms.set(s.ingest_skew_ms);
                 store.ingest_skew_active.set(s.ingest_skew_active);
+                store.long_stream_warning.set(s.long_stream_warning);
             }
         });
     });

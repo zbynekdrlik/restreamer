@@ -83,6 +83,21 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
         .map(|c| c.s3_region_is_standard())
         .unwrap_or(true);
 
+    // #84: warn when the current delivery has been running longer than the
+    // operator threshold. Computed live (auto-clears when delivery stops)
+    // through the shared rs-core helper so the Tauri IPC path matches exactly.
+    let long_stream_warn_secs = state
+        .config_live
+        .read()
+        .map(|c| c.delivery.long_stream_warn_secs)
+        .unwrap_or(0);
+    let long_stream_warning = rs_core::long_stream::is_long_running_now(
+        &state.pool,
+        event.as_ref(),
+        long_stream_warn_secs,
+    )
+    .await;
+
     Ok(Json(ServiceStatus {
         inpoint,
         endpoint,
@@ -90,6 +105,7 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
         streaming_event: event,
         disk_pressure,
         s3_region_standard,
+        long_stream_warning,
     }))
 }
 

@@ -38,6 +38,14 @@ impl DeliveryOrchestrator {
         let mut consecutive_failures = 0u32;
         let client = reqwest::Client::new();
 
+        // #84: fire a one-shot "stream running too long" warning once this
+        // delivery passes the operator threshold. A fresh warner per loop (the
+        // loop lives exactly one delivery) gives "once per event, re-arm on
+        // stop" for free. `0` disables it. Read from the orchestrator's config
+        // snapshot, matching how `delivery_delay_secs` is read.
+        let long_stream_warn_secs = self.config().delivery.long_stream_warn_secs;
+        let mut long_stream_warner = rs_core::long_stream::LongStreamWarner::new();
+
         loop {
             interval.tick().await;
 
@@ -80,6 +88,41 @@ impl DeliveryOrchestrator {
                     continue;
                 }
             };
+
+            // #84: warn ONCE per delivery when it has been running longer than
+            // the operator threshold — a stream possibly left on after the
+            // event finished. Independent of VPS health. The audit row is
+            // routed to Discord as a standalone heads-up (see notify::classify).
+            if let Some(elapsed) =
+                rs_core::long_stream::elapsed_secs(&instance.created_at, chrono::Utc::now())
+            {
+                if long_stream_warner.observe(elapsed, long_stream_warn_secs) {
+                    warn!(
+                        event_id,
+                        elapsed_secs = elapsed,
+                        threshold_secs = long_stream_warn_secs,
+                        "Delivery running longer than the long-stream warning threshold (#84)"
+                    );
+                    if let Some(tx) = self.audit_tx() {
+                        rs_core::audit::record(
+                            tx,
+                            AuditRow {
+                                severity: Severity::Warn,
+                                source: Source::Delivery,
+                                event_id: Some(event_id),
+                                instance_id: Some(instance_id),
+                                endpoint: None,
+                                action: Action::LongStreamWarning,
+                                detail: serde_json::json!({
+                                    "elapsed_secs": elapsed,
+                                    "threshold_secs": long_stream_warn_secs,
+                                }),
+                                ts_override: None,
+                            },
+                        );
+                    }
+                }
+            }
 
             // Check health. `last_error` is captured so audit rows carry a
             // useful message instead of just `false`.

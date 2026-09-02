@@ -59,6 +59,10 @@ pub struct StatusResponse {
     /// Latched ingest-skew-over-threshold flag — mirrors
     /// `/api/v1/status.inpoint.details.ingest_skew_active` (#354).
     pub ingest_skew_active: bool,
+    /// Whether the current delivery has been running longer than
+    /// `delivery.long_stream_warn_secs` — mirrors
+    /// `/api/v1/status.long_stream_warning` (#84).
+    pub long_stream_warning: bool,
 }
 
 /// Get the current service status including streaming event and chunk stats.
@@ -82,6 +86,9 @@ pub async fn get_status(
     let s3_region_standard = state.s3_region_standard();
     let ingest_skew_ms = state.ingest_skew_ms();
     let ingest_skew_active = state.ingest_skew_active();
+    // #84: computed from the SAME streaming_event already fetched above, so no
+    // second DB read for the event.
+    let long_stream_warning = state.long_stream_warning(streaming_event.as_ref()).await;
 
     Ok(CommandResult::ok(StatusResponse {
         streaming_event,
@@ -92,6 +99,7 @@ pub async fn get_status(
         s3_region_standard,
         ingest_skew_ms,
         ingest_skew_active,
+        long_stream_warning,
     }))
 }
 
