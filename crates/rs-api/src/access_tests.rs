@@ -550,3 +550,40 @@ async fn the_spa_fallback_is_gated_too() {
         "#273: the dashboard SPA must be gated, not just /api/v1/*"
     );
 }
+
+/// #107/#248 — with NO on-disk `www_dir` (the fresh-install state), the router
+/// must still install the EMBEDDED frontend fallback, so a LAN `GET /` reaches
+/// `rs_webui::serve_embedded` instead of Axum's default "no route" 404.
+///
+/// The embedded handler answers EITHER `200` with the dashboard (when real
+/// assets are embedded — a release/trunk build) OR its own distinctive
+/// `404 "frontend not embedded"` (a workspace `cargo test` build with no
+/// `trunk build`). Either proves the fallback is WIRED. Before the fix
+/// (`www_dir` `None` → no fallback registered at all) the response was Axum's
+/// default EMPTY-body 404 — which this test rejects. In production the same
+/// wiring serves the real embedded dashboard (also proven by the `rs-webui`
+/// fixture-backed serving tests, which are deterministic regardless of the
+/// build's `dist/` state).
+#[tokio::test]
+async fn root_uses_embedded_fallback_without_www_dir() {
+    use axum::body::to_bytes;
+    let state = test_state().await; // www_dir defaults to None
+    assert!(state.www_dir.is_none());
+    let app = build_router(state);
+    // Loopback peer, no forwarded headers = the operator's own LAN browser,
+    // which is never gated (see `lan_control_action_stays_unauthenticated`).
+    let resp = app
+        .oneshot(req("GET", "/", "127.0.0.1:54321", &[]))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let wired = status == StatusCode::OK
+        || (status == StatusCode::NOT_FOUND && &body[..] == b"frontend not embedded");
+    assert!(
+        wired,
+        "GET / must reach the embedded fallback handler (200 dashboard, or the \
+         embedded 404), not Axum's default empty 404 — got {status}, body {} bytes",
+        body.len()
+    );
+}
