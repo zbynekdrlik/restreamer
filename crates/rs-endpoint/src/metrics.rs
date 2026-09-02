@@ -13,10 +13,17 @@ pub struct UploadEvent {
     pub at: Instant,
     pub duration_ms: u32,
     pub success: bool,
+    /// Bytes delivered to S3 by this upload (the chunk's `data_size`). Only
+    /// meaningful for `success == true`; failures carry 0 since nothing
+    /// reached the internet. Feeds the outgoing-Mbps history (#77).
+    pub bytes: u64,
 }
 
 pub struct UploadMetrics {
     inner: Mutex<Inner>,
+    /// Historical time-series of outgoing (S3-upload) Mbps for the dashboard
+    /// graph (#77). Has its own lock; never held together with `inner`.
+    throughput: crate::throughput::ThroughputHistory,
 }
 
 struct Inner {
@@ -43,12 +50,24 @@ impl Default for UploadMetrics {
                 adaptive_target: 4,
                 permanent_recent: 0,
             }),
+            throughput: crate::throughput::ThroughputHistory::default(),
         }
     }
 }
 
 impl UploadMetrics {
     pub fn record(&self, event: UploadEvent) {
+        self.record_at(event, chrono::Utc::now().timestamp_millis());
+    }
+
+    /// `record` with an explicit clock, so the outgoing-throughput wiring
+    /// (#77) is deterministically testable.
+    pub fn record_at(&self, event: UploadEvent, now_ms: i64) {
+        // Feed the outgoing-throughput history on the success path (#77).
+        // A separate lock, taken outside `inner`, so the two never nest.
+        if event.success && event.bytes > 0 {
+            self.throughput.record_bytes(event.bytes, now_ms);
+        }
         let mut g = self.inner.lock().unwrap();
         if g.ring.len() < RING_CAPACITY {
             g.ring.push(event);
@@ -58,6 +77,16 @@ impl UploadMetrics {
             g.head = (g.head + 1) % RING_CAPACITY;
             g.filled = true;
         }
+    }
+
+    /// Snapshot the outgoing-Mbps history for the dashboard graph (#77).
+    pub fn throughput_series(&self) -> crate::throughput::ThroughputSeries {
+        self.throughput_series_at(chrono::Utc::now().timestamp_millis())
+    }
+
+    /// `throughput_series` with an explicit clock, for deterministic tests.
+    pub fn throughput_series_at(&self, now_ms: i64) -> crate::throughput::ThroughputSeries {
+        self.throughput.series(now_ms)
     }
 
     pub fn set_in_flight(&self, n: usize) {
@@ -321,12 +350,14 @@ mod tests {
                 at: now,
                 duration_ms: 100,
                 success: true,
+                bytes: 0,
             });
         }
         m.record(UploadEvent {
             at: now,
             duration_ms: 5000,
             success: false,
+            bytes: 0,
         });
 
         let s = m.snapshot(Duration::from_secs(60));
@@ -437,6 +468,7 @@ mod tests {
                 at: now,
                 duration_ms: 100,
                 success: true,
+                bytes: 0,
             });
         }
         let s = m.snapshot(Duration::from_secs(60));
@@ -523,5 +555,50 @@ mod tests {
         for c in classes {
             assert!(seen.insert(c), "duplicate class {c}");
         }
+    }
+
+    #[test]
+    fn throughput_wiring_records_only_successful_bytes() {
+        // #77: record() feeds the outgoing-Mbps history ONLY on success with
+        // non-zero bytes. A failure and a zero-byte "success" must not count.
+        const T0: i64 = 1_700_000_010_000; // interval-aligned
+        const I: i64 = crate::throughput::SAMPLE_INTERVAL_MS;
+        let m = UploadMetrics::default();
+        let now = Instant::now();
+        // 1.875 MB successful upload in bucket T0 -> 1 Mbps.
+        m.record_at(
+            UploadEvent {
+                at: now,
+                duration_ms: 50,
+                success: true,
+                bytes: 1_875_000,
+            },
+            T0 + 1,
+        );
+        // A failure (same bucket) must NOT add bytes.
+        m.record_at(
+            UploadEvent {
+                at: now,
+                duration_ms: 50,
+                success: false,
+                bytes: 0,
+            },
+            T0 + 2,
+        );
+        // A zero-byte success must NOT add bytes.
+        m.record_at(
+            UploadEvent {
+                at: now,
+                duration_ms: 50,
+                success: true,
+                bytes: 0,
+            },
+            T0 + 3,
+        );
+        // Read one bucket later -> exactly one finalized 1-Mbps bucket.
+        let s = m.throughput_series_at(T0 + I + 1);
+        assert_eq!(s.samples.len(), 1);
+        assert_eq!(s.samples[0].t_ms, T0);
+        assert!((s.samples[0].mbps - 1.0).abs() < 1e-9);
     }
 }

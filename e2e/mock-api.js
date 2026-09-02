@@ -632,6 +632,19 @@ app.get("/api/v1/uploads/recent", (_req, res) => {
   res.json(uploadRecent);
 });
 
+// --- Outgoing-Mbps history graph (#77) ---
+// A short synthetic series with >=2 points so the dashboard graph draws a
+// path. `t_ms` are bucket starts 15s apart; `mbps` varies incl. an idle 0.
+app.get("/api/v1/uploads/throughput", (_req, res) => {
+  const base = 1735000000000;
+  const step = 15000;
+  const mbps = [4.2, 5.1, 3.8, 0.0, 6.4, 5.9];
+  res.json({
+    interval_ms: step,
+    samples: mbps.map((m, i) => ({ t_ms: base + i * step, mbps: m })),
+  });
+});
+
 // --- Cached delivery status (for instant initial load) ---
 let cachedDelivery = {
   instance_name: "",

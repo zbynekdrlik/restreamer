@@ -169,6 +169,35 @@ h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
     text-decoration: underline wavy;
 }
 
+/* Issue #77: outgoing-Mbps history graph under the S3->VPS node. */
+.mbps-graph {
+    margin: 0.25rem 0;
+    padding: 0.4rem 0.8rem;
+    background: var(--bg-primary);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+}
+.mbps-graph__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    font-size: 0.8rem;
+    margin-bottom: 0.3rem;
+}
+.mbps-graph__title { color: var(--text-primary); font-weight: 500; }
+.mbps-graph__peak { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.mbps-graph__empty { color: var(--text-label); font-size: 0.8rem; margin: 0.4rem 0; }
+.mbps-graph__svg {
+    display: block;
+    width: 100%;
+    height: 80px;
+    background: var(--bg-card);
+    border-radius: var(--radius);
+}
+.mbps-graph__area { fill: var(--status-ok); opacity: 0.15; stroke: none; }
+.mbps-graph__line { fill: none; stroke: var(--status-ok); stroke-width: 1.5; }
+
 /* Uploads drill-down page */
 .uploads-page {
     padding: 1.5rem;

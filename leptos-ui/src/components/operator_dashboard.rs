@@ -10,6 +10,7 @@ use super::confirm_modal::ConfirmModal;
 use super::disk_pressure_banner::DiskPressureBanner;
 use super::endpoint_tree::EndpointTree;
 use super::ingest_skew_banner::IngestSkewBanner;
+use super::mbps_graph::MbpsGraph;
 use super::oauth_authorize::OAuthAuthorize;
 use super::outage_banner::OutageBanner;
 use super::pacing_panel::PacingPanel;
@@ -621,6 +622,9 @@ fn Pipeline() -> impl IntoView {
             </div>
 
             <UploadStrip />
+
+            // --- Outgoing-Mbps history graph (#77) ---
+            <MbpsGraph />
 
             // --- Endpoint tree (branching from VPS) ---
             <EndpointTree />

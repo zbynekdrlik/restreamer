@@ -58,6 +58,7 @@ pub mod state;
 pub mod status_summary;
 pub mod stream_handlers;
 pub mod template_handlers;
+pub mod throughput_endpoints;
 pub mod uploads_endpoints;
 pub mod websocket;
 pub mod youtube;

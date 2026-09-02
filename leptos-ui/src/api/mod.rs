@@ -433,6 +433,28 @@ pub async fn fetch_upload_stats() -> Result<UploadStats, String> {
     http_get("/uploads/stats").await
 }
 
+/// One finalized outgoing-throughput bucket. Mirrors
+/// `rs_endpoint::throughput::Sample` (issue #77). `t_ms` is the bucket start
+/// (unix ms); `mbps` is the average outgoing megabits/sec over that window.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Default)]
+pub struct ThroughputSample {
+    pub t_ms: i64,
+    pub mbps: f64,
+}
+
+/// The outgoing-Mbps history payload. Mirrors
+/// `rs_endpoint::throughput::ThroughputSeries`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Default)]
+pub struct ThroughputSeries {
+    pub interval_ms: i64,
+    pub samples: Vec<ThroughputSample>,
+}
+
+/// Fetch the retained outgoing-Mbps time-series for the dashboard graph (#77).
+pub async fn fetch_throughput() -> Result<ThroughputSeries, String> {
+    http_get("/uploads/throughput").await
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct UploadRow {
     pub chunk_id: i64,
