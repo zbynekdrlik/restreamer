@@ -13,26 +13,42 @@ use std::time::Duration;
 use rs_inpoint::flv_chunker::FlvChunkSink;
 use rs_inpoint::rtmp_server::RtmpServer;
 
-/// Find an available TCP port by binding to port 0.
-fn find_available_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
 /// Reserve a free TCP port and KEEP the listener bound, so no concurrent test
 /// (or any other process) can grab the port before the RTMP server adopts it.
-/// Returns the held listener plus its port. See #148.
+/// Returns the held listener (set non-blocking, ready for
+/// `tokio::net::TcpListener::from_std`) plus its port. See #148.
 fn reserved_listener() -> (std::net::TcpListener, u16) {
-    // NOTE (pre-fix, deliberately broken to reproduce #148): this mirrors the
-    // old `find_available_port` TOCTOU — it picks a port then RELEASES it, so
-    // the returned port is free the instant we return and can be stolen.
-    let picker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = picker.local_addr().unwrap().port();
-    drop(picker);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // Required so tokio can adopt it via TcpListener::from_std.
+    listener.set_nonblocking(true).unwrap();
     (listener, port)
+}
+
+/// Start an `RtmpServer` on a freshly reserved port and hand it the exact
+/// listener that reserved that port (no close→bind window — see #148).
+///
+/// Returns the server's `JoinHandle`, its shutdown handle, and the port ffmpeg
+/// should publish to.
+#[allow(clippy::type_complexity)]
+fn start_reserved_rtmp_server(
+    flv_sink: Arc<FlvChunkSink>,
+    inpoint_state: rs_core::models::InpointState,
+) -> (
+    tokio::task::JoinHandle<Result<(), rs_inpoint::InpointError>>,
+    tokio::sync::broadcast::Sender<()>,
+    u16,
+) {
+    let (std_listener, port) = reserved_listener();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+    let server = RtmpServer::new("127.0.0.1", port);
+    let shutdown = server.shutdown_handle();
+    let task = tokio::spawn(async move {
+        server
+            .run_on_listener(listener, flv_sink, inpoint_state)
+            .await
+    });
+    (task, shutdown, port)
 }
 
 /// Regression for #148: the port a test hands to `RtmpServer` must stay BOUND
@@ -131,7 +147,6 @@ async fn rtmp_server_receives_ffmpeg_stream_and_produces_flv_chunks() {
         panic!("ffmpeg is required for RTMP E2E tests but was not found in PATH");
     }
 
-    let port = find_available_port();
     let dir = tempfile::tempdir().unwrap();
     let flv_chunk_sink = Arc::new(FlvChunkSink::new(
         dir.path().to_path_buf(),
@@ -139,12 +154,10 @@ async fn rtmp_server_receives_ffmpeg_stream_and_produces_flv_chunks() {
     ));
     let mut chunk_rx = flv_chunk_sink.subscribe();
 
-    // Start the real RTMP server
-    let server = RtmpServer::new("127.0.0.1", port);
-    let shutdown = server.shutdown_handle();
+    // Start the real RTMP server on a reserved (held) port — no TOCTOU window.
     let flv_sink = Arc::clone(&flv_chunk_sink);
     let inpoint_state = rs_core::models::InpointState::new();
-    let server_task = tokio::spawn(async move { server.run(flv_sink, inpoint_state).await });
+    let (server_task, shutdown, port) = start_reserved_rtmp_server(flv_sink, inpoint_state);
 
     // Wait for RTMP server to be ready (TCP port accepting connections)
     assert!(
@@ -193,7 +206,6 @@ async fn rtmp_server_produces_multiple_flv_chunks_from_stream() {
     // Use env_logger to capture xiu's log crate output
     let _ = env_logger::builder().is_test(true).try_init();
 
-    let port = find_available_port();
     let dir = tempfile::tempdir().unwrap();
     let flv_chunk_sink = Arc::new(FlvChunkSink::new(
         dir.path().to_path_buf(),
@@ -201,11 +213,9 @@ async fn rtmp_server_produces_multiple_flv_chunks_from_stream() {
     ));
     let mut chunk_rx = flv_chunk_sink.subscribe();
 
-    let server = RtmpServer::new("127.0.0.1", port);
-    let shutdown = server.shutdown_handle();
     let flv_sink = Arc::clone(&flv_chunk_sink);
     let inpoint_state = rs_core::models::InpointState::new();
-    let server_task = tokio::spawn(async move { server.run(flv_sink, inpoint_state).await });
+    let (server_task, shutdown, port) = start_reserved_rtmp_server(flv_sink, inpoint_state);
 
     assert!(
         wait_for_port(port, Duration::from_secs(5)).await,
@@ -280,7 +290,6 @@ async fn rtmp_server_chunk_md5_matches_file() {
         panic!("ffmpeg is required for RTMP E2E tests but was not found in PATH");
     }
 
-    let port = find_available_port();
     let dir = tempfile::tempdir().unwrap();
     let flv_chunk_sink = Arc::new(FlvChunkSink::new(
         dir.path().to_path_buf(),
@@ -288,11 +297,9 @@ async fn rtmp_server_chunk_md5_matches_file() {
     ));
     let mut chunk_rx = flv_chunk_sink.subscribe();
 
-    let server = RtmpServer::new("127.0.0.1", port);
-    let shutdown = server.shutdown_handle();
     let flv_sink = Arc::clone(&flv_chunk_sink);
     let inpoint_state = rs_core::models::InpointState::new();
-    let server_task = tokio::spawn(async move { server.run(flv_sink, inpoint_state).await });
+    let (server_task, shutdown, port) = start_reserved_rtmp_server(flv_sink, inpoint_state);
 
     assert!(
         wait_for_port(port, Duration::from_secs(5)).await,
