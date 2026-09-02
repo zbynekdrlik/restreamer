@@ -2,11 +2,10 @@
 //!
 //! Owns the source of truth for "is chunk N on disk and ready to read?".
 //! `DownloadService` calls `mark_available` after the file rename;
-//! `EndpointReader` calls `wait_for_chunk` to block until ready.
+//! `DiskCacheFetcher` calls `wait_for_chunk` to block until ready.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::sync::Notify;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,9 +106,10 @@ impl ChunkRegistry {
 
     /// Set the slot to InFlight, ALWAYS — even if a previous fetch
     /// already terminated (NotFound / Evicted). Without this active
-    /// reset, a PrefetchReader retry against a chunk that previously
-    /// 404'd would observe stale NotFound state via `wait_for_chunk`
-    /// and never block on the new in-flight fetch (#184).
+    /// reset, the fetcher's evicted-chunk refetch (or any re-request)
+    /// against a chunk that previously 404'd would observe stale NotFound
+    /// state via `wait_for_chunk` and never block on the new in-flight
+    /// fetch (#184).
     pub fn mark_in_flight(self: &Arc<Self>, chunk_id: i64) {
         let mut g = self.inner.lock().unwrap();
         let slot = g.entry(chunk_id).or_insert_with(|| Slot {
@@ -137,10 +137,7 @@ impl ChunkRegistry {
     /// Race-safe pattern: the `Notified` future is created and `enable`d
     /// BEFORE the state check, so concurrent `mark_*` calls cannot fire
     /// `notify_waiters()` in the gap and lose the wake.
-    pub async fn wait_for_chunk(
-        self: &Arc<Self>,
-        chunk_id: i64,
-    ) -> Result<ChunkAvailability, RegistryError> {
+    pub async fn wait_for_chunk(self: &Arc<Self>, chunk_id: i64) -> ChunkAvailability {
         loop {
             // 1. Get-or-create the slot's Notify Arc, drop the lock immediately.
             let notify_arc = {
@@ -165,7 +162,7 @@ impl ChunkRegistry {
                 let g = self.inner.lock().unwrap();
                 if let Some(slot) = g.get(&chunk_id) {
                     if !matches!(slot.state, ChunkAvailability::InFlight) {
-                        return Ok(slot.state.clone());
+                        return slot.state.clone();
                     }
                 }
             }
@@ -188,24 +185,6 @@ impl ChunkRegistry {
             Err(_) => None,
         }
     }
-
-    /// Same as `wait_for_chunk` but with a timeout.
-    pub async fn wait_for_chunk_with_timeout(
-        self: &Arc<Self>,
-        chunk_id: i64,
-        timeout: Duration,
-    ) -> Result<ChunkAvailability, RegistryError> {
-        match tokio::time::timeout(timeout, self.wait_for_chunk(chunk_id)).await {
-            Ok(r) => r,
-            Err(_) => Err(RegistryError::Timeout),
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum RegistryError {
-    #[error("registry wait timed out")]
-    Timeout,
 }
 
 #[cfg(test)]
@@ -222,7 +201,7 @@ mod tests {
             .expect("should not block");
         assert!(matches!(
             got,
-            Ok(ChunkAvailability::Available { size_bytes: 1024 })
+            ChunkAvailability::Available { size_bytes: 1024 }
         ));
     }
 
@@ -240,7 +219,7 @@ mod tests {
             .expect("task panicked");
         assert!(matches!(
             got,
-            Ok(ChunkAvailability::Available { size_bytes: 2048 })
+            ChunkAvailability::Available { size_bytes: 2048 }
         ));
     }
 
@@ -259,7 +238,7 @@ mod tests {
             .expect("mark_failed must wake waiters")
             .expect("task panicked");
         match got {
-            Ok(ChunkAvailability::Failed { error }) => assert_eq!(error, "s3 exploded"),
+            ChunkAvailability::Failed { error } => assert_eq!(error, "s3 exploded"),
             other => panic!("expected Failed, got {other:?}"),
         }
     }
@@ -279,7 +258,7 @@ mod tests {
         let r = ChunkRegistry::new();
         r.mark_not_found(99);
         let got = r.wait_for_chunk(99).await;
-        assert!(matches!(got, Ok(ChunkAvailability::NotFound)));
+        assert!(matches!(got, ChunkAvailability::NotFound));
     }
 
     #[tokio::test]
@@ -288,16 +267,7 @@ mod tests {
         r.mark_available(5, 1000);
         r.mark_evicted(5);
         let got = r.wait_for_chunk(5).await;
-        assert!(matches!(got, Ok(ChunkAvailability::Evicted)));
-    }
-
-    #[tokio::test]
-    async fn wait_for_chunk_times_out_after_configured_duration() {
-        let r = ChunkRegistry::new();
-        let result = r
-            .wait_for_chunk_with_timeout(123, Duration::from_millis(50))
-            .await;
-        assert!(result.is_err(), "expected timeout error");
+        assert!(matches!(got, ChunkAvailability::Evicted));
     }
 
     #[tokio::test]
@@ -317,7 +287,7 @@ mod tests {
                 .expect("task panicked");
             assert!(matches!(
                 got,
-                Ok(ChunkAvailability::Available { size_bytes: 512 })
+                ChunkAvailability::Available { size_bytes: 512 }
             ));
         }
     }

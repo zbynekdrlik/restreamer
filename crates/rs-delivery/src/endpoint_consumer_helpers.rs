@@ -106,6 +106,54 @@ pub(super) enum RustPushAction {
     Break,
 }
 
+/// #236: consecutive zero-byte-since-connect deaths before an endpoint is
+/// classified "dead target" (the bound remote session/broadcast is gone,
+/// not merely a transient outage) -- e.g. an expired FB persistent-key
+/// live_video, which FB closes at/just after the RTMP handshake before any
+/// FLV bytes go out. At the `RemoteClosed` 3s floor this is ~15s.
+const DEAD_TARGET_ZERO_BYTE_THRESHOLD: u32 = 5;
+
+/// Hard backoff floor applied once an endpoint is classified dead-target,
+/// overriding whatever the underlying `PushError`'s own floor/ladder would
+/// otherwise pick. Stops the sub-second-to-3s reconnect hammer (#236: 3548
+/// reconnects, ~3s apart, in one live incident) while still reconnecting
+/// fast enough to recover the moment the operator recreates the broadcast.
+const DEAD_TARGET_BACKOFF_MS: u64 = 30_000;
+
+/// Build the operator-facing dead-target message for `service_type`,
+/// prefixed with `rs_core::endpoint_lifecycle::DEAD_TARGET_STALL_PREFIX` --
+/// the SHARED marker (defined in `rs-core`, not duplicated here) that
+/// `EndpointLifecycle::compute` matches on `stall_reason` to force
+/// `Attention` (red) even while the endpoint keeps reconnecting forever
+/// (`alive` never goes false for this failure class -- the consumer task
+/// never exits, see `EndpointHandle::is_alive`). Reusing the existing
+/// `stall_reason` string field (rather than adding a new boolean field to
+/// `DeliveryEndpointMetrics`/`LifecycleInput`) means this reaches the
+/// dashboard's lifecycle computation through the pipeline that already
+/// threads `stall_reason` end-to-end, with no change needed to the VPS
+/// `/api/status` serialization or the host's status-poll mapping.
+/// FB-specific wording names the concrete remedy (persistent key stays
+/// put, only the broadcast/live_video needs recreating); every other
+/// service type gets a generic dead-target message naming the observed
+/// signal so an operator can still act on it.
+/// `raw_error` (the underlying `PushError`'s own `Display` text, e.g.
+/// `"upstream closed connection mid-stream: unexpected end of file"`) is
+/// appended so the operator does not lose the concrete signal once the
+/// dashboard switches to the dead-target remedy text (review finding: the
+/// remedy text alone discarded it).
+fn dead_target_message(service_type: &str, raw_error: &str) -> String {
+    let prefix = rs_core::endpoint_lifecycle::DEAD_TARGET_STALL_PREFIX;
+    if service_type.eq_ignore_ascii_case("FB") {
+        format!(
+            "{prefix}FB broadcast expired/killed -- recreate the live broadcast on Facebook (stream key stays the same) (last error: {raw_error})"
+        )
+    } else {
+        format!(
+            "{prefix}{service_type} endpoint rejected {DEAD_TARGET_ZERO_BYTE_THRESHOLD} consecutive connects with 0 bytes sent -- the remote target/session looks dead; check it on the provider side (last error: {raw_error})"
+        )
+    }
+}
+
 /// Minimal interface `handle_rust_push` needs from a pusher. Hoisted to
 /// `crate::pushable` (#239) so the rescue push loop (`rust_rescue_push`,
 /// outside the `endpoint_task` tree) can share it and accept a recording
@@ -129,6 +177,7 @@ pub(super) async fn handle_rust_push(
     service_type: &str,
     consecutive_push_errors: &mut u32,
     consecutive_write_failures: &mut u32,
+    consecutive_zero_byte_deaths: &mut u32,
     stats: &Stats,
     audit_ring: &Option<Arc<AuditRing>>,
     telemetry: &mut crate::rtmp_push_telemetry::RtmpPushTelemetry,
@@ -169,6 +218,10 @@ pub(super) async fn handle_rust_push(
         Ok(Ok(())) => {
             *consecutive_push_errors = 0;
             *consecutive_write_failures = 0;
+            // #236: a connect that sends real bytes is never a dead target,
+            // even if it later dies mid-stream (that's the unchanged
+            // transient-outage path in the Err arm below).
+            *consecutive_zero_byte_deaths = 0;
             telemetry.note_send("flv_bytes", data.len() as u64);
             telemetry.note_chunk_pushed();
             let mut s = stats.lock().await;
@@ -203,6 +256,35 @@ pub(super) async fn handle_rust_push(
                 consecutive = *consecutive_push_errors,
                 "Consumer: Rust pusher error: {error_display} -- force-closing session"
             );
+            // #236: read bytes_sent BEFORE the telemetry reset below. Only
+            // `RemoteClosed` with 0 bytes sent this connect is the
+            // dead-target signal (the confirmed FB signature: "upstream
+            // closed connection mid-stream" with nothing ever pushed).
+            // REVIEW FINDING (adversarial pass, fixed): gating on
+            // bytes_sent()==0 alone was wrong -- EVERY connect-time
+            // failure has 0 bytes sent at that point (push_flv_bytes was
+            // never reached), including HandshakeFailed (DNS/TCP/TLS
+            // failure -- wrong remedy: "check network", not "recreate the
+            // FB broadcast") and PublishRejected BadName (wrong stream
+            // key -- already has its own actionable last_error text via
+            // `last_error_is_actionable`'s "badname"/"rejected" match,
+            // which the old code would eventually OVERWRITE with the
+            // dead-target message after 5 consecutive rejects). Scoping to
+            // `RemoteClosed` alone matches the ONE failure mode this
+            // classifier is meant to detect; every other connect-time
+            // error variant resets the counter (its own distinct signal
+            // deserves its own distinct handling, not folding into this
+            // one).
+            let is_zero_byte_remote_close =
+                matches!(push_err, PushError::RemoteClosed(_)) && telemetry.bytes_sent() == 0;
+            if is_zero_byte_remote_close {
+                *consecutive_zero_byte_deaths = consecutive_zero_byte_deaths.saturating_add(1);
+            } else {
+                *consecutive_zero_byte_deaths = 0;
+            }
+            let is_dead_target = *consecutive_zero_byte_deaths >= DEAD_TARGET_ZERO_BYTE_THRESHOLD;
+            let just_became_dead_target =
+                *consecutive_zero_byte_deaths == DEAD_TARGET_ZERO_BYTE_THRESHOLD;
             let floor = backoff_floor_ms(&push_err);
             let Some(floor_ms) = floor else {
                 // LocalCancel is the only None-floor variant. Returning
@@ -228,6 +310,14 @@ pub(super) async fn handle_rust_push(
                 floor_ms.saturating_mul(factor).min(300_000)
             } else {
                 floor_ms
+            };
+            // #236: once classified dead-target, stop the fast (down to 3s)
+            // reconnect hammer regardless of the underlying error's own
+            // floor -- the remote session is gone, not merely rotating.
+            let backoff_ms = if is_dead_target {
+                backoff_ms.max(DEAD_TARGET_BACKOFF_MS)
+            } else {
+                backoff_ms
             };
             let timestamp_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -264,6 +354,25 @@ pub(super) async fn handle_rust_push(
                     });
                 }
             }
+            let dead_target_msg = if is_dead_target {
+                Some(dead_target_message(service_type, &error_display))
+            } else {
+                None
+            };
+            // #236: emit ONCE, at the threshold transition -- every retry
+            // afterwards would just spam the audit log while the endpoint
+            // stays classified dead-target.
+            if just_became_dead_target {
+                if let Some(msg) = &dead_target_msg {
+                    endpoint_audit::emit_endpoint_dead_target(
+                        audit_ring,
+                        alias,
+                        msg,
+                        *consecutive_zero_byte_deaths,
+                        backoff_ms,
+                    );
+                }
+            }
             *telemetry = crate::rtmp_push_telemetry::RtmpPushTelemetry::new();
             let record = RtmpPushAuditRecord {
                 timestamp_ms,
@@ -274,10 +383,11 @@ pub(super) async fn handle_rust_push(
             };
             let mut s = stats.lock().await;
             s.reconnect_count = reconnect_count;
-            s.last_error = Some(error_display.clone());
+            let dashboard_message = dead_target_msg.unwrap_or(error_display);
+            s.last_error = Some(dashboard_message.clone());
             // Match the Timeout arm: surface the freeze on the dashboard.
             // The success path clears stall_reason once writes resume.
-            s.stall_reason = Some(error_display);
+            s.stall_reason = Some(dashboard_message);
             if s.rtmp_push_history.len() >= RESTART_HISTORY_CAP {
                 s.rtmp_push_history.pop_front();
             }
@@ -294,6 +404,13 @@ pub(super) async fn handle_rust_push(
         }
         Err(_timeout) => {
             *consecutive_push_errors += 1;
+            // #236: a write TIMEOUT means the peer held the TCP connection
+            // open for the full WRITE_TIMEOUT_SECS instead of closing it --
+            // the opposite of the dead-target signature (FB closes the
+            // connection immediately, it does not let the write hang).
+            // Reset so a timeout sandwiched between RemoteClosed deaths
+            // never contributes to (or silently preserves) that streak.
+            *consecutive_zero_byte_deaths = 0;
             tracing::error!(
                 alias = %alias,
                 chunk_id,

@@ -21,6 +21,24 @@ pub enum EndpointLifecycle {
     Attention,
 }
 
+/// Stable, machine-matchable prefix on `LifecycleInput::stall_reason`
+/// identifying the #236 dead-target class: N consecutive Rust-pusher
+/// reconnects each sent zero bytes before the peer closed the connection
+/// (e.g. an expired FB persistent-key `live_video` -- the broadcast is
+/// gone even though the stream key stays valid). Set by
+/// `rs-delivery`'s `endpoint_consumer_helpers::handle_rust_push`
+/// classifier. Lives here (not duplicated per-crate) because
+/// `LifecycleInput::compute` is the sole consumer that must recognize it
+/// and `rs-delivery` already depends on `rs-core`.
+pub const DEAD_TARGET_STALL_PREFIX: &str = "DEAD_TARGET: ";
+
+/// True when `reason` carries the #236 dead-target marker.
+fn stall_reason_is_dead_target(reason: Option<&str>) -> bool {
+    reason
+        .map(|r| r.starts_with(DEAD_TARGET_STALL_PREFIX))
+        .unwrap_or(false)
+}
+
 /// Inputs the host has when computing lifecycle for one endpoint.
 pub struct LifecycleInput {
     pub alive: bool,
@@ -40,6 +58,17 @@ impl EndpointLifecycle {
         // stats; the dashboard surfaces it only for Attention endpoints), so a
         // healthy endpoint must never be painted red by a leftover error.
         if i.disk_critical {
+            return EndpointLifecycle::Attention;
+        }
+        // #236: the dead-target class (e.g. an expired FB broadcast) is
+        // checked BEFORE the alive-gated branches below. Unlike an
+        // auth/key reject, the Rust-pusher consumer task never breaks its
+        // reconnect loop on this failure class (`RustPushAction::Continue`
+        // always), so `alive` (`!task.is_finished()`) stays `true` for the
+        // entire death-loop and the `!i.alive && ...` branch below could
+        // never fire for it -- this endpoint needs an operator to act
+        // (recreate the broadcast) precisely WHILE it keeps reconnecting.
+        if stall_reason_is_dead_target(i.stall_reason.as_deref()) {
             return EndpointLifecycle::Attention;
         }
         if !i.alive && last_error_is_actionable(i.last_error.as_deref()) {
@@ -173,5 +202,69 @@ mod lifecycle_tests {
     fn not_started_is_pending() {
         let i = input(false, None, None, None);
         assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Pending);
+    }
+
+    // --- #236: dead-target (e.g. expired FB broadcast) classification ---
+
+    #[test]
+    fn dead_target_stall_reason_is_red_attention_even_while_alive() {
+        // The critical regression this branch exists for: the Rust-pusher
+        // consumer task NEVER exits on this failure class (it keeps
+        // reconnecting forever, RustPushAction::Continue always), so
+        // `alive` stays true throughout the whole death-loop. Without a
+        // branch that ignores `alive`, this endpoint would be painted blue
+        // "Buffering" (survivable) forever instead of red (operator must
+        // recreate the broadcast).
+        let i = input(
+            true,
+            Some("normal"),
+            Some(
+                "DEAD_TARGET: FB broadcast expired/killed -- recreate the live broadcast on Facebook (stream key stays the same)",
+            ),
+            None,
+        );
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Attention);
+    }
+
+    #[test]
+    fn dead_target_stall_reason_is_red_attention_when_not_alive_too() {
+        let i = input(
+            false,
+            None,
+            Some(
+                "DEAD_TARGET: generic endpoint rejected 5 consecutive connects with 0 bytes sent -- the remote target/session looks dead; check it on the provider side",
+            ),
+            None,
+        );
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Attention);
+    }
+
+    #[test]
+    fn ordinary_stall_reason_without_the_marker_stays_buffering() {
+        // Regression guard: an ordinary transient stall_reason (no
+        // DEAD_TARGET prefix) must NOT be mistakenly classified dead-target
+        // just because it happens to contain similar words.
+        let i = input(
+            true,
+            Some("normal"),
+            Some("upstream closed connection mid-stream: unexpected end of file"),
+            None,
+        );
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Buffering);
+    }
+
+    #[test]
+    fn dead_target_marker_must_be_a_prefix_not_a_bare_substring() {
+        // A message that merely CONTAINS the marker text later in the
+        // string (never as the actual classification signal) must not
+        // trigger Attention -- only handle_rust_push's own classifier,
+        // writing the marker as the leading prefix, may do that.
+        let i = input(
+            true,
+            Some("normal"),
+            Some("operator note: not a DEAD_TARGET: situation, just flaky wifi"),
+            None,
+        );
+        assert_eq!(EndpointLifecycle::compute(&i), EndpointLifecycle::Buffering);
     }
 }

@@ -76,20 +76,21 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<ServiceSta
     .as_str()
     .to_string();
 
-    // #278: read the LIVE config (config_live) so a runtime config patch is reflected.
-    let s3_region_standard = state
-        .config_live
-        .read()
-        .map(|c| c.s3_region_is_standard())
-        .unwrap_or(true);
-
+    // #278 s3_region_standard: read the LIVE config so a runtime patch is reflected.
+    // #352 vps_orphan_count: written by the runtime orphan reaper. Both inlined to
+    // keep this file under the 1000-line CI cap.
     Ok(Json(ServiceStatus {
         inpoint,
         endpoint,
         delivery,
         streaming_event: event,
         disk_pressure,
-        s3_region_standard,
+        s3_region_standard: (state.config_live.read())
+            .map(|c| c.s3_region_is_standard())
+            .unwrap_or(true),
+        vps_orphan_count: state
+            .vps_orphan_count
+            .load(std::sync::atomic::Ordering::Relaxed),
     }))
 }
 
