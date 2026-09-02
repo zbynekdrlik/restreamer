@@ -15,6 +15,7 @@ auto-load on their `paths:` — you do not invoke those.
 - file-size cap, `Cargo.lock`/`--locked`, test-crypto, secret scanner → `.claude/rules/rust-crate-hygiene.md` (auto)
 - DB migrations / destructive-rebuild idempotency / schema_version rewind → `.claude/rules/migrations.md` (auto)
 - disk_cache stall/recovered audit-bracket invariant (was_stalled, note_stall/note_recovered) → `.claude/rules/disk-cache-audit-bracket.md` (auto)
+- installer `scripts/install.ps1` (firewall dual-path, ErrorAction=Stop, script-shape tests) → `.claude/rules/installer-script.md` (auto)
 - Streaming boxes reference (IPs, subnets, soak recipe, fast endpoints) → `.claude/skills/streaming-boxes`
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
 - OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`
