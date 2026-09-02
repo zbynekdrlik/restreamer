@@ -1,6 +1,5 @@
 //! `/uploads` drill-down page — per-chunk S3 upload telemetry view.
 
-use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -15,13 +14,13 @@ pub fn UploadsView() -> impl IntoView {
     let refresh = move || {
         spawn_local(async move {
             if let Ok(r) = api::fetch_recent_uploads(200).await {
-                rows.set(r);
+                rows.try_set(r); // #343: no-op if the /uploads view was disposed mid-fetch
             }
         });
     };
     refresh();
-    let _interval = Interval::new(2_000, refresh);
-    std::mem::forget(_interval);
+    // #343: bound to the /uploads view's owner so it stops on a route change.
+    crate::utils::interval_until_disposed(2_000, refresh);
 
     view! {
         <div class="uploads-page">

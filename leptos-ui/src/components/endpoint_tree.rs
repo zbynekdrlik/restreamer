@@ -3,7 +3,6 @@
 //! Split out of `operator_dashboard.rs` (#75) to keep that file under the
 //! project's 1000-line-per-file cap.
 
-use gloo_timers::callback::Interval;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -83,9 +82,13 @@ pub fn EndpointTree() -> impl IntoView {
         show_last_remove_modal.set(false);
     };
 
-    // YouTube health polling: fast initial poll, then every 30s
+    // YouTube health polling: fast initial poll, then every 30s.
+    // #343: both are bound to EndpointTree's owner (the 5s poll captures
+    // EndpointTree-scoped `yt_has_polled`; the 30s refresh touches only root
+    // `store.*`, but leaking it kept hitting the YT-health endpoint from a dead
+    // route). They stop on disposal via utils::interval_until_disposed.
     let yt_has_polled = RwSignal::new(false);
-    let _yt_poll = Interval::new(5_000, move || {
+    crate::utils::interval_until_disposed(5_000, move || {
         let delivery_active = !store.delivery.get().endpoints.is_empty();
         if delivery_active && !yt_has_polled.get_untracked() {
             yt_has_polled.set(true);
@@ -95,8 +98,7 @@ pub fn EndpointTree() -> impl IntoView {
             });
         }
     });
-    std::mem::forget(_yt_poll);
-    let _yt_refresh = Interval::new(30_000, move || {
+    crate::utils::interval_until_disposed(30_000, move || {
         let delivery_active = !store.delivery.get().endpoints.is_empty();
         if delivery_active {
             spawn_local(async move {
@@ -105,7 +107,6 @@ pub fn EndpointTree() -> impl IntoView {
             });
         }
     });
-    std::mem::forget(_yt_refresh);
 
     let has_endpoints = Memo::new(move |_| !store.delivery.get().endpoints.is_empty());
     let is_running = Memo::new(move |_| {
