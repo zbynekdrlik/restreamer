@@ -124,13 +124,67 @@ async fn media_payload_byte_identical_to_source() {
     assert_eq!(rec_video_sha, src_video_sha, "video body bytes diverged");
 }
 
-// publish_rejected_on_invalid_stream_key was removed in PR #103: the
-// hand-rolled rejecting server in common/run_rejecting_server produces
-// AMF "pack error" / "none return" inside xiu's MessageParser, so the
-// test fails for an infrastructure reason instead of asserting the real
-// PublishRejected path. The PublishRejected path itself is implemented
-// (see crates/rs-rtmp-push/src/session.rs::wait_for_publish_start).
-// Tracked: issue #149 -- re-add with a working AMF harness.
+/// Assert that `RtmpPusher` surfaces `PushError::PublishRejected` with the
+/// correct code when the server rejects `publish` with
+/// `onStatus(NetStream.Publish.BadName)` -- and that it does so promptly
+/// (no death-loop / hang).
+///
+/// This is the re-add of the test removed in PR #103 (issue #149). The prior
+/// harness desynced the client's chunk parser; `run_rejecting_server` now
+/// mirrors xiu's real `ServerSession` accept sequence byte-for-byte (feeding
+/// the handshake's `get_remaining_bytes()` into the unpacketizer, which the
+/// removed `SimpleHandshakeServer` version dropped) and substitutes only the
+/// publish onStatus code. See `common/mod.rs::run_rejecting_server`.
+///
+/// Regression coverage for `session.rs::wait_for_publish_start`'s AMF onStatus
+/// parsing: it goes red immediately if that rejection path is removed or broken.
+/// The 30 s `PublishRejected` backoff floor that prevents a higher-level
+/// death-loop (#236 dead-target backoff) is unit-tested separately in
+/// `error.rs`; here we assert the single connect attempt returns the rejection
+/// rather than looping.
+#[tokio::test]
+async fn publish_rejected_on_invalid_stream_key() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = run_rejecting_server(listener).await {
+            eprintln!("[rejecting-server] error: {e}");
+        }
+    });
+
+    // Small delay so the server task has time to reach accept().
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let url = format!("rtmp://{}/live/badkey", addr);
+    let mut pusher = RtmpPusher::new(url, PusherConfig::default());
+
+    // A bounded wait doubles as the "does not death-loop / hang" assertion:
+    // Session::connect returns the rejection once (push_flv_bytes does
+    // `connect_result?`), so this must resolve well within 5 s.
+    let result = tokio::time::timeout(Duration::from_secs(5), pusher.push_flv_bytes(&[]))
+        .await
+        .expect("push_flv_bytes did not return within 5 s (death-loop/hang?)");
+
+    server_handle.abort();
+
+    match result {
+        Err(rs_rtmp_push::PushError::PublishRejected { code, .. }) => {
+            assert_eq!(
+                code, "NetStream.Publish.BadName",
+                "expected NetStream.Publish.BadName, got code={code}"
+            );
+        }
+        other => panic!("expected PushError::PublishRejected, got {other:?}"),
+    }
+
+    // A rejected publish must not have opened a usable session or advanced
+    // the output timeline.
+    assert_eq!(pusher.reconnect_count(), 0);
+    assert_eq!(pusher.last_output_ts_ms(), 0);
+}
 
 /// Assert that output timestamps remain monotonic across a pusher reconnect
 /// AND that `reconnect_count()` increments from 0 to 1.
