@@ -53,6 +53,52 @@ pub const SKEW_DEBOUNCE_CHUNKS: u32 = 3;
 /// speed-up — recovery is only ever a clean reconnect + re-anchor).
 pub const SKEW_RECOVERY_MIN_INTERVAL_MS: u64 = 60_000;
 
+/// (#359) A per-chunk baseline-relative skew CHANGE ≥ this classifies a trip as
+/// a STEP (a sudden jump — a republish freezing an offset, which a reconnect CAN
+/// fix), else a DRIFT (a gradual cross-clock rate drift, which a reconnect canNOT
+/// fix). Half the trip threshold: worst observed drift <100 ms/chunk (>20×
+/// margin), while any step ≥4000 ms, even split across two chunks, exceeds it.
+pub const SKEW_STEP_JUMP_MS: i64 = 2_000;
+
+/// (#359) Window (ms) within which a fresh trip counts as CHAINED to the
+/// previous — the death-loop signal (a converged STEP never re-trips; the #359
+/// re-trips were 61–442 s apart). Also the `DriftHold` decay window. 10 min.
+pub const SKEW_LOOP_WINDOW_MS: u64 = 600_000;
+
+/// (#359) Consecutive CHAINED DRIFT-class trips that force `DriftHold`. 2 = one
+/// honest reconnect (absorbs a benign post-reconnect transient); a 2nd gradual
+/// trip proves the reconnect is not the remedy.
+pub const SKEW_LOOP_MAX_DRIFT: u32 = 2;
+
+/// (#359) Consecutive CHAINED STEP-class trips that force `DriftHold`. 3 = a
+/// mechanism-agnostic backstop (three jump-shaped trips in 10 min with no
+/// convergence is a loop regardless of the classifier); > DRIFT limit so genuine
+/// repeated republishes each still get their reconnect.
+pub const SKEW_LOOP_MAX_STEP: u32 = 3;
+
+/// (#359) `DriftHold` hard-cap threshold (ms), 3× `MAX_AV_SKEW_MS`. The guard is
+/// NOT disabled in hold — a skew this large still trips (the "never never-kill"
+/// floor: a runaway drift or a genuinely large step is always eventually killed).
+pub const SKEW_HOLD_MAX_MS: i64 = 12_000;
+
+/// (#359) Minimum wall-clock (ms) between `DriftHold` hard-cap trips — bounds
+/// skew reconnects to ≤6/h under a persistent drift (vs the ~61 s loop). 10 min.
+pub const SKEW_HOLD_MIN_INTERVAL_MS: u64 = 600_000;
+
+/// (#359) Which recovery regime the guard is in. A reconnect fixes a STEP but
+/// never a continuous DRIFT, so once a chain of reconnects fails to converge the
+/// guard moves to `DriftHold` and stops thrashing.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum GuardMode {
+    /// Full sensitivity: trip at `MAX_AV_SKEW_MS` / `SKEW_RECOVERY_MIN_INTERVAL_MS`.
+    #[default]
+    Normal,
+    /// Non-convergence hold: only the `SKEW_HOLD_MAX_MS` hard cap trips, ≤1 per
+    /// `SKEW_HOLD_MIN_INTERVAL_MS`. Exits to `Normal` after `SKEW_LOOP_WINDOW_MS`
+    /// with no trip AND no over-threshold chunk (source healed).
+    DriftHold,
+}
+
 /// Cross-track skew tracker. Measures the content-PTS skew between audio and
 /// video using a SINGLE shared origin (post-#255 the chunker stamps both tracks
 /// on one shared epoch, so their input PTS live on the same clock — content
@@ -114,6 +160,30 @@ pub struct SkewTracker {
     /// `SKEW_RECOVERY_MIN_INTERVAL_MS` rate limit so a skew that survives the
     /// reconnect can't thrash the session.
     last_trip_ms: Option<u64>,
+    /// (#359) Previous chunk's `current_skew_ms`, for the per-chunk delta that
+    /// classifies a trip STEP vs DRIFT. CLEARED on `reset_tracks` — each
+    /// connection re-derives its own classification from a fresh baseline.
+    prev_skew_ms: Option<i64>,
+    /// (#359) Running max over THIS connection of `|current_skew − prev_skew|`
+    /// (the largest single-chunk jump). `≥ SKEW_STEP_JUMP_MS` ⇒ STEP, else
+    /// DRIFT. CLEARED on `reset_tracks`.
+    max_abs_step_ms: i64,
+    /// (#359) Number of consecutive CHAINED trips (each within
+    /// `SKEW_LOOP_WINDOW_MS` of its predecessor) — the death-loop counter. MUST
+    /// SURVIVE `reset_tracks`: a reconnect clears the tracks, so the loop is
+    /// only ever visible ACROSS reconnects; clearing this here would make the
+    /// non-convergence undetectable (the exact #359 bug).
+    loop_streak: u32,
+    /// (#359) Current recovery regime. PERSISTS across `reset_tracks`.
+    mode: GuardMode,
+    /// (#359) Last `now_ms` at which `|current_skew|` exceeded `MAX_AV_SKEW_MS`.
+    /// Drives the `DriftHold` decay/exit — once the source heals it stops
+    /// updating and, after `SKEW_LOOP_WINDOW_MS`, the guard returns to `Normal`.
+    /// PERSISTS across `reset_tracks`.
+    last_over_threshold_ms: Option<u64>,
+    /// (#359) `now_ms` the guard entered `DriftHold` (diagnostics/log only).
+    /// PERSISTS across `reset_tracks`.
+    hold_since_ms: Option<u64>,
 }
 
 impl SkewTracker {
@@ -160,6 +230,13 @@ impl SkewTracker {
         // first chunk — a stale baseline that survived the re-anchor would
         // measure deviation against the OLD steady state.
         self.baseline_skew_ms = None;
+        // (#359) The per-connection STEP/DRIFT classifier is re-derived from the
+        // fresh baseline, so clear it here. `loop_streak`, `mode`,
+        // `last_over_threshold_ms` and `hold_since_ms` DELIBERATELY persist — the
+        // death-loop is only visible ACROSS reconnects, so the non-convergence
+        // state must survive this reset.
+        self.prev_skew_ms = None;
+        self.max_abs_step_ms = 0;
     }
 
     /// `true` once BOTH tracks have produced at least one tag this session.
@@ -208,6 +285,19 @@ impl SkewTracker {
         self.trip_count
     }
 
+    /// (#359) Current recovery regime. `DriftHold` means the guard detected a
+    /// non-converging reconnect chain and stopped thrashing (only the hard cap
+    /// trips now). Surfaced for logging / tests.
+    pub fn mode(&self) -> GuardMode {
+        self.mode
+    }
+
+    /// (#359) Consecutive chained-trip count — the death-loop counter. Surfaced
+    /// for logging / tests.
+    pub fn loop_streak(&self) -> u32 {
+        self.loop_streak
+    }
+
     /// Call at the END of each chunk. Updates the debounce counter from the
     /// current skew and returns the decision for this chunk boundary.
     ///
@@ -223,11 +313,49 @@ impl SkewTracker {
         }
         let skew = self.current_skew_ms();
         self.last_skew_ms = skew;
-        // Only a stream with BOTH tracks present can have a meaningful A/V
-        // skew. For a one-track stream the baseline is never captured and
-        // current_skew_ms() returns 0, so the debounce stays at 0 and it can
-        // never trip.
-        if self.both_tracks_seen() && skew.abs() > MAX_AV_SKEW_MS {
+
+        // (#359) Per-chunk skew CHANGE → STEP/DRIFT classification for THIS
+        // connection. The first computed chunk contributes no delta; a STEP
+        // leaves at least one chunk-to-chunk jump ≥ SKEW_STEP_JUMP_MS, a DRIFT
+        // reaches the threshold with every per-chunk delta well below it.
+        if let Some(prev) = self.prev_skew_ms {
+            let delta = (skew - prev).abs();
+            if delta > self.max_abs_step_ms {
+                self.max_abs_step_ms = delta;
+            }
+        }
+        self.prev_skew_ms = Some(skew);
+
+        // (#359) Decay: once SKEW_LOOP_WINDOW_MS passes with neither a trip nor
+        // an over-threshold chunk, the reconnect(s) genuinely converged (or the
+        // source healed) — return to full sensitivity. Under a persistent drift
+        // the over-threshold chunks keep updating last_over_threshold_ms, so
+        // this never fires while the desync is live (DriftHold is the right
+        // steady state).
+        let last_activity = self.last_trip_ms.max(self.last_over_threshold_ms);
+        if let Some(act) = last_activity
+            && now_ms.saturating_sub(act) >= SKEW_LOOP_WINDOW_MS
+        {
+            self.loop_streak = 0;
+            self.mode = GuardMode::Normal;
+            self.hold_since_ms = None;
+        }
+
+        // Only a stream with BOTH tracks present can have a meaningful A/V skew.
+        // For a one-track stream the baseline is never captured and
+        // current_skew_ms() returns 0, so nothing below trips.
+        let over_hard_threshold = self.both_tracks_seen() && skew.abs() > MAX_AV_SKEW_MS;
+        if over_hard_threshold {
+            self.last_over_threshold_ms = Some(now_ms);
+        }
+
+        // Debounce against the ACTIVE mode's threshold: MAX_AV_SKEW_MS in
+        // Normal, the wider SKEW_HOLD_MAX_MS hard cap in DriftHold.
+        let threshold = match self.mode {
+            GuardMode::Normal => MAX_AV_SKEW_MS,
+            GuardMode::DriftHold => SKEW_HOLD_MAX_MS,
+        };
+        if self.both_tracks_seen() && skew.abs() > threshold {
             self.consecutive_over = self.consecutive_over.saturating_add(1);
         } else {
             self.consecutive_over = 0;
@@ -250,453 +378,106 @@ pub enum SkewDecision {
 
 impl SkewTracker {
     /// Decide whether a sustained over-threshold skew should trip recovery,
-    /// honoring the debounce and the reconnect-thrash rate limit.
+    /// honoring the debounce, the per-mode reconnect-thrash rate limit, and the
+    /// #359 non-convergence hold.
     ///
-    /// Trips `TripRecovery` only when ALL hold:
-    ///   1. the skew has exceeded `MAX_AV_SKEW_MS` for at least
-    ///      `SKEW_DEBOUNCE_CHUNKS` consecutive chunks (rejects transients), AND
-    ///   2. at least `SKEW_RECOVERY_MIN_INTERVAL_MS` of wall-clock has elapsed
-    ///      since the previous trip (prevents reconnect thrash if a skew
-    ///      survives the reconnect).
+    /// A candidate trip requires (as before) the skew over the ACTIVE mode's
+    /// threshold for `SKEW_DEBOUNCE_CHUNKS` consecutive chunks AND at least the
+    /// mode's rate-limit interval since the previous trip. Given a candidate:
+    ///   - **Normal:** classify the trip STEP vs DRIFT (from
+    ///     `max_abs_step_ms`), count the CHAINED streak (trips within
+    ///     `SKEW_LOOP_WINDOW_MS` of each other), and if it reaches the class
+    ///     limit (`SKEW_LOOP_MAX_DRIFT`/`SKEW_LOOP_MAX_STEP`) switch to
+    ///     `DriftHold` and SUPPRESS this trip — a reconnect cannot fix a drift,
+    ///     so we stop thrashing. Otherwise issue the reconnect (a STEP converges
+    ///     in one, so it never chains to the limit).
+    ///   - **DriftHold:** the guard is not disabled — the `SKEW_HOLD_MAX_MS`
+    ///     hard cap (already applied as the debounce threshold) still trips,
+    ///     rate-limited to one per `SKEW_HOLD_MIN_INTERVAL_MS`. Never "never
+    ///     kill".
     ///
-    /// On a trip the debounce counter is reset (the reconnect establishes a
-    /// fresh baseline) and `last_trip_ms` is stamped for the rate limit.
+    /// On an issued trip the debounce is reset and `last_trip_ms` stamped.
     fn decide(&mut self, now_ms: u64) -> SkewDecision {
         if self.consecutive_over < SKEW_DEBOUNCE_CHUNKS {
             return SkewDecision::Continue;
         }
-        // Rate limit: suppress a second trip within the min interval.
+        let interval = match self.mode {
+            GuardMode::Normal => SKEW_RECOVERY_MIN_INTERVAL_MS,
+            GuardMode::DriftHold => SKEW_HOLD_MIN_INTERVAL_MS,
+        };
+        // Rate limit: suppress a trip within the active mode's min interval.
+        // Evaluated BEFORE the chain accounting so one over-threshold episode
+        // held back by the floor can never be double-counted into the streak.
         if let Some(prev) = self.last_trip_ms
-            && now_ms.saturating_sub(prev) < SKEW_RECOVERY_MIN_INTERVAL_MS
+            && now_ms.saturating_sub(prev) < interval
         {
             return SkewDecision::Continue;
         }
+
+        match self.mode {
+            GuardMode::DriftHold => {
+                // Safety net: the hard cap still kills (the debounce already
+                // required |skew| > SKEW_HOLD_MAX_MS). Stay in hold.
+                tracing::error!(
+                    skew_ms = self.last_skew_ms,
+                    hard_cap_ms = SKEW_HOLD_MAX_MS,
+                    loop_streak = self.loop_streak,
+                    trip_count = self.trip_count + 1,
+                    "rtmp_push: A/V skew HARD-CAP trip in DriftHold -- reconnecting a non-converging drift (#359)"
+                );
+                self.issue_trip(now_ms);
+                SkewDecision::TripRecovery
+            }
+            GuardMode::Normal => {
+                let chained = self
+                    .last_trip_ms
+                    .map(|t| now_ms.saturating_sub(t) <= SKEW_LOOP_WINDOW_MS)
+                    .unwrap_or(false);
+                self.loop_streak = if chained {
+                    self.loop_streak.saturating_add(1)
+                } else {
+                    1
+                };
+                let is_step = self.max_abs_step_ms >= SKEW_STEP_JUMP_MS;
+                let limit = if is_step {
+                    SKEW_LOOP_MAX_STEP
+                } else {
+                    SKEW_LOOP_MAX_DRIFT
+                };
+                if self.loop_streak >= limit {
+                    // The reconnect chain is NOT converging — a reconnect cannot
+                    // fix this class. Stop thrashing: hold reconnects behind the
+                    // hard cap. The would-be trip is NOT issued.
+                    self.mode = GuardMode::DriftHold;
+                    self.hold_since_ms = Some(now_ms);
+                    self.consecutive_over = 0;
+                    tracing::error!(
+                        skew_ms = self.last_skew_ms,
+                        loop_streak = self.loop_streak,
+                        kind = if is_step { "step" } else { "drift" },
+                        hard_cap_ms = SKEW_HOLD_MAX_MS,
+                        hold_interval_ms = SKEW_HOLD_MIN_INTERVAL_MS,
+                        "rtmp_push: A/V skew guard -- reconnects did NOT converge; HOLDING reconnects, hard cap only (#359)"
+                    );
+                    SkewDecision::Continue
+                } else {
+                    self.issue_trip(now_ms);
+                    SkewDecision::TripRecovery
+                }
+            }
+        }
+    }
+
+    /// Stamp an issued recovery trip: bump the count, record the trip time for
+    /// the rate limit, and reset the debounce so a fresh over-threshold window
+    /// must re-accumulate before the next trip.
+    fn issue_trip(&mut self, now_ms: u64) {
         self.trip_count = self.trip_count.saturating_add(1);
         self.last_trip_ms = Some(now_ms);
-        // Reset the debounce so the post-reconnect baseline must re-accumulate
-        // before another trip (alongside the rate limit above).
         self.consecutive_over = 0;
-        SkewDecision::TripRecovery
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Build the per-track input-PTS sequences for ONE chunk, given each
-    /// track's start ts on the chunker's shared epoch. Video frames advance at
-    /// ~33 ms (30 fps), audio at ~21 ms (AAC). The pusher's per-track output
-    /// re-anchor would mask any offset on the wire, but the INPUT PTS deltas
-    /// carry the true content skew.
-    fn chunk_input_pts(video_start: u32, audio_start: u32, span_ms: u32) -> (Vec<u32>, Vec<u32>) {
-        let video: Vec<u32> = (0..=span_ms / 33).map(|i| video_start + i * 33).collect();
-        let audio: Vec<u32> = (0..=span_ms / 21).map(|i| audio_start + i * 21).collect();
-        (video, audio)
-    }
-
-    /// Feed one chunk (video_start/audio_start on the shared epoch) and return
-    /// the decision at its boundary.
-    fn feed_chunk(
-        t: &mut SkewTracker,
-        video_start: u32,
-        audio_start: u32,
-        now_ms: u64,
-    ) -> SkewDecision {
-        let (video, audio) = chunk_input_pts(video_start, audio_start, 2_000);
-        for v in &video {
-            t.observe_video(*v);
-        }
-        for a in &audio {
-            t.observe_audio(*a);
-        }
-        t.evaluate_chunk(now_ms)
-    }
-
-    /// Issue #257 detection RED→GREEN. The 2026-06-19 incident desync APPEARED
-    /// mid-stream (audio fell ~25.5 s behind video on an OBS republish /
-    /// reconnect), it was NOT present from t=0. So the stream starts ALIGNED
-    /// (baseline ~0), then audio falls 25,500 ms behind — the baseline-relative
-    /// skew jumps to ~25,500 ms and MUST trip recovery after the debounce.
-    ///
-    /// RED (no guard wired): `evaluate_chunk` returns `Continue` forever — the
-    /// pusher propagates the desync silently. GREEN: after `SKEW_DEBOUNCE_CHUNKS`
-    /// consecutive over-threshold chunks the tracker returns `TripRecovery`.
-    #[test]
-    fn audio_falling_behind_video_mid_stream_trips_recovery_after_debounce() {
-        let mut tracker = SkewTracker::default();
-        const LAG_MS: u32 = 25_500;
-
-        // Phase 1: a few ALIGNED chunks establish a near-zero baseline.
-        for chunk in 0..3u32 {
-            let start = chunk * 2_000;
-            assert_eq!(
-                feed_chunk(&mut tracker, start, start, (chunk as u64 + 1) * 2_000),
-                SkewDecision::Continue,
-                "aligned warm-up must not trip"
-            );
-        }
-        assert!(
-            tracker.current_skew_ms().abs() <= 66,
-            "baseline-relative skew must be ~0 while aligned, got {}",
-            tracker.current_skew_ms()
-        );
-
-        // Phase 2: a republish makes video's epoch leap 25,500 ms AHEAD of
-        // audio's (equivalently, audio falls 25,500 ms behind video). Audio
-        // keeps advancing normally; video's PTS now runs LAG_MS ahead, so
-        // video_max_abs pulls away from audio_max_abs by ~LAG_MS each chunk.
-        // (Modelled as a video lead so both tracks' monotonic max keeps
-        // growing — the GAP, not a downward step, is what the metric detects.)
-        let mut last = SkewDecision::Continue;
-        for chunk in 3..(3 + SKEW_DEBOUNCE_CHUNKS) {
-            let video_start = chunk * 2_000 + LAG_MS;
-            let audio_start = chunk * 2_000;
-            last = feed_chunk(
-                &mut tracker,
-                video_start,
-                audio_start,
-                (chunk as u64 + 1) * 2_000,
-            );
-            let skew = tracker.current_skew_ms();
-            assert!(
-                (skew - LAG_MS as i64).abs() <= 66,
-                "baseline-relative skew must reproduce the {LAG_MS} ms desync, got {skew}"
-            );
-        }
-
-        assert_eq!(
-            last,
-            SkewDecision::TripRecovery,
-            "a desync that APPEARS mid-stream and persists must trip bounded \
-             recovery after {SKEW_DEBOUNCE_CHUNKS} consecutive over-threshold chunks"
-        );
-        assert!(
-            tracker.last_skew_ms().abs() > MAX_AV_SKEW_MS,
-            "last_skew_ms must record the over-threshold deviation for telemetry"
-        );
-        assert_eq!(tracker.trip_count(), 1, "exactly one recovery tripped");
-    }
-
-    /// THE false-positive guard (#257 review 🟡): a benign CONSTANT A/V domain
-    /// offset present from session start (audio xiu-ts vs video wall-clock have
-    /// different absolute zero points — startup/device init lag) must NEVER
-    /// trip. The constant offset folds into the baseline; only a CHANGE trips.
-    #[test]
-    fn constant_startup_domain_offset_never_trips() {
-        let mut tracker = SkewTracker::default();
-        // Video's epoch sits 20,000 ms (>> threshold) AHEAD of audio's from the
-        // very first chunk (a benign constant domain gap) and stays exactly
-        // there for the whole stream. Audio runs from 0; video from CONST_OFFSET.
-        const CONST_OFFSET: u32 = 20_000;
-        for chunk in 0..15u32 {
-            let video_start = chunk * 2_000 + CONST_OFFSET;
-            let audio_start = chunk * 2_000;
-            assert_eq!(
-                feed_chunk(
-                    &mut tracker,
-                    video_start,
-                    audio_start,
-                    (chunk as u64 + 1) * 2_000
-                ),
-                SkewDecision::Continue,
-                "a CONSTANT startup domain offset is benign and must never trip \
-                 (it folds into the baseline)"
-            );
-            assert!(
-                tracker.current_skew_ms().abs() <= 66,
-                "baseline-relative skew must stay ~0 for a constant offset, got {}",
-                tracker.current_skew_ms()
-            );
-        }
-        assert_eq!(tracker.trip_count(), 0);
-    }
-
-    /// A healthy shared-epoch source (audio and video advance together from 0)
-    /// must NEVER trip — the guard is silent in steady state.
-    #[test]
-    fn aligned_av_never_trips() {
-        let mut tracker = SkewTracker::default();
-        for chunk in 0..10u32 {
-            let start = chunk * 2_000;
-            assert_eq!(
-                feed_chunk(&mut tracker, start, start, (chunk as u64 + 1) * 2_000),
-                SkewDecision::Continue,
-                "aligned A/V must never trip recovery"
-            );
-            assert!(tracker.current_skew_ms().abs() <= MAX_AV_SKEW_MS);
-        }
-        assert_eq!(tracker.trip_count(), 0);
-    }
-
-    /// A transient single-chunk over-threshold deviation must NOT trip — only a
-    /// deviation sustained across the debounce window does.
-    #[test]
-    fn single_chunk_spike_does_not_trip_below_debounce() {
-        let mut tracker = SkewTracker::default();
-        // Chunk 0 aligned → baseline ~0.
-        assert_eq!(
-            feed_chunk(&mut tracker, 0, 0, 2_000),
-            SkewDecision::Continue
-        );
-        // Chunk 1: one over-threshold deviation only.
-        assert_eq!(
-            feed_chunk(&mut tracker, 12_000, 2_000, 4_000),
-            SkewDecision::Continue,
-            "a single over-threshold chunk must not trip (debounce = {SKEW_DEBOUNCE_CHUNKS})"
-        );
-    }
-
-    /// Reset clears both tracks, the debounce, AND the baseline so skew is
-    /// re-measured from a fresh common origin after a reconnect / symmetric
-    /// re-anchor.
-    #[test]
-    fn reset_tracks_clears_progress_baseline_and_debounce() {
-        let mut tracker = SkewTracker::default();
-        // Establish a baseline, then deviate.
-        feed_chunk(&mut tracker, 0, 0, 2_000);
-        feed_chunk(&mut tracker, 30_000, 2_000, 4_000);
-        assert!(tracker.current_skew_ms().abs() > MAX_AV_SKEW_MS);
-        tracker.reset_tracks();
-        assert_eq!(
-            tracker.raw_skew_ms(),
-            0,
-            "reset must clear both tracks' progress"
-        );
-        assert_eq!(
-            tracker.current_skew_ms(),
-            0,
-            "reset must clear the baseline so deviation re-measures from 0"
-        );
-    }
-
-    /// Recovery is rate-limited: a deviation that survives the reconnect must
-    /// NOT thrash. After one trip, a second trip within
-    /// `SKEW_RECOVERY_MIN_INTERVAL_MS` is suppressed.
-    #[test]
-    fn recovery_is_rate_limited_to_avoid_reconnect_thrash() {
-        let mut tracker = SkewTracker::default();
-        // Aligned baseline.
-        feed_chunk(&mut tracker, 0, 0, 1_000);
-        // Sustained deviation → first trip.
-        let mut tripped_at = 0u32;
-        for chunk in 1.. {
-            let d = feed_chunk(
-                &mut tracker,
-                30_000 + chunk * 2_000,
-                chunk * 2_000,
-                (chunk as u64 + 1) * 1_000,
-            );
-            if d == SkewDecision::TripRecovery {
-                tripped_at = chunk;
-                break;
-            }
-            assert!(chunk < 10, "should have tripped by now");
-        }
-        assert_eq!(
-            tracker.trip_count(),
-            1,
-            "first sustained deviation trips once"
-        );
-
-        // A second over-threshold window within the min interval is suppressed.
-        for chunk in (tripped_at + 1)..(tripped_at + 1 + 2 * SKEW_DEBOUNCE_CHUNKS) {
-            let d = feed_chunk(
-                &mut tracker,
-                30_000 + chunk * 2_000,
-                chunk * 2_000,
-                (chunk as u64 + 1) * 1_000,
-            );
-            assert_eq!(
-                d,
-                SkewDecision::Continue,
-                "a second trip within the min recovery interval must be rate-limited"
-            );
-        }
-        assert_eq!(
-            tracker.trip_count(),
-            1,
-            "rate limit keeps trip_count at 1 within the min interval"
-        );
-    }
-
-    /// After the min recovery interval has elapsed, a still-present deviation is
-    /// allowed to trip again (the rate limit is a floor, not a permanent
-    /// silence).
-    #[test]
-    fn recovery_allowed_again_after_min_interval() {
-        let mut tracker = SkewTracker::default();
-        feed_chunk(&mut tracker, 0, 0, 1_000);
-        let mut tripped_at = 0u32;
-        for chunk in 1.. {
-            if feed_chunk(&mut tracker, 30_000 + chunk * 2_000, chunk * 2_000, 1_000)
-                == SkewDecision::TripRecovery
-            {
-                tripped_at = chunk;
-                break;
-            }
-            assert!(chunk < 10);
-        }
-        assert_eq!(tracker.trip_count(), 1);
-
-        // Re-accumulate the debounce, now PAST the min interval.
-        let base = SKEW_RECOVERY_MIN_INTERVAL_MS + 10_000;
-        let mut tripped_again = false;
-        for chunk in (tripped_at + 1)..(tripped_at + 1 + 2 * SKEW_DEBOUNCE_CHUNKS) {
-            if feed_chunk(&mut tracker, 30_000 + chunk * 2_000, chunk * 2_000, base)
-                == SkewDecision::TripRecovery
-            {
-                tripped_again = true;
-            }
-        }
-        assert!(
-            tripped_again,
-            "a still-present deviation may trip again once the min interval has passed"
-        );
-        assert_eq!(tracker.trip_count(), 2);
-    }
-
-    /// An audio-ONLY stream (no video tags) must NEVER trip — the baseline is
-    /// never captured (both_tracks_seen false), so current_skew_ms() stays 0.
-    #[test]
-    fn audio_only_stream_never_trips() {
-        let mut tracker = SkewTracker::default();
-        for chunk in 0..10u32 {
-            tracker.observe_audio(chunk * 10_000);
-            assert_eq!(
-                tracker.evaluate_chunk((chunk as u64 + 1) * 1_000),
-                SkewDecision::Continue,
-                "audio-only stream has no A/V skew and must never trip"
-            );
-            assert_eq!(
-                tracker.current_skew_ms(),
-                0,
-                "one-track skew must read 0 (no baseline) for telemetry sanity"
-            );
-        }
-        assert_eq!(tracker.trip_count(), 0);
-    }
-
-    /// A video-ONLY stream must likewise never trip.
-    #[test]
-    fn video_only_stream_never_trips() {
-        let mut tracker = SkewTracker::default();
-        for chunk in 0..10u32 {
-            tracker.observe_video(chunk * 10_000);
-            assert_eq!(
-                tracker.evaluate_chunk((chunk as u64 + 1) * 1_000),
-                SkewDecision::Continue,
-                "video-only stream has no A/V skew and must never trip"
-            );
-            assert_eq!(tracker.current_skew_ms(), 0);
-        }
-        assert_eq!(tracker.trip_count(), 0);
-    }
-
-    /// Sign convention on the baseline-relative deviation: audio falling behind
-    /// video (vs baseline) reads POSITIVE; video falling behind reads NEGATIVE.
-    #[test]
-    fn deviation_sign_audio_behind_is_positive_video_behind_is_negative() {
-        // Establish aligned baseline, then audio falls behind → positive.
-        let mut t = SkewTracker::default();
-        t.observe_video(0);
-        t.observe_audio(0);
-        t.evaluate_chunk(1_000); // baseline = 0
-        t.observe_video(10_000);
-        t.observe_audio(0);
-        t.evaluate_chunk(2_000);
-        assert!(
-            t.current_skew_ms() > 0,
-            "audio falling behind video must read positive, got {}",
-            t.current_skew_ms()
-        );
-
-        // Aligned baseline, then video falls behind → negative.
-        let mut t2 = SkewTracker::default();
-        t2.observe_video(0);
-        t2.observe_audio(0);
-        t2.evaluate_chunk(1_000); // baseline = 0
-        t2.observe_audio(10_000);
-        t2.observe_video(0);
-        t2.evaluate_chunk(2_000);
-        assert!(
-            t2.current_skew_ms() < 0,
-            "video falling behind audio must read negative, got {}",
-            t2.current_skew_ms()
-        );
-    }
-
-    /// The RAW absolute offset is still exposed for diagnostics even though the
-    /// guard uses the baseline-relative deviation.
-    #[test]
-    fn raw_skew_exposes_absolute_offset() {
-        let mut t = SkewTracker::default();
-        t.observe_video(10_000);
-        t.observe_audio(0);
-        assert_eq!(
-            t.raw_skew_ms(),
-            10_000,
-            "raw_skew_ms is the absolute video-minus-audio offset"
-        );
-        // current_skew_ms is 0 until a baseline exists.
-        assert_eq!(t.current_skew_ms(), 0);
-    }
-
-    /// Issue #359 — a CONTINUOUS cross-track drift (audio xiu-ts and video
-    /// wall-clock advancing at slightly DIFFERENT RATES on our path) must NOT
-    /// death-loop the push. On the pre-fix guard every `AvSkewExceeded`
-    /// reconnect calls `reset_tracks()`, re-zeroes the baseline, and the SAME
-    /// drift re-accumulates past `MAX_AV_SKEW_MS` and trips again — forever
-    /// (7 kills / run in the #359 evidence, skew alternating sign
-    /// +7308/-8088/+8622/-10128 and GROWING). A reconnect cannot fix a rate
-    /// drift. The guard must CONVERGE: after detecting the non-converging
-    /// chain it stops thrashing (bounded trips), while a genuine STEP desync
-    /// still trips (proved separately).
-    ///
-    /// This models the exact failure signature: a ~50 ms/s drift that crosses
-    /// the 4000 ms threshold in ~80 s (past the 60 s trip floor), then FLIPS
-    /// SIGN on each simulated reconnect (the alternating-sign signature). Over
-    /// 1200 s the pre-fix guard trips ~14 times; the fix bounds it.
-    ///
-    /// RED (pre-fix): ~14 trips → the `<= 3` assert fails.
-    /// GREEN (post-fix): the non-convergence hold caps it at 2.
-    #[test]
-    fn continuous_drift_does_not_death_loop() {
-        let mut tracker = SkewTracker::default();
-        let chunk_ms: u64 = 2_000;
-        let drift_per_chunk: i64 = 100; // 50 ms/s
-        let mut now: u64 = 0;
-        let mut base: i64 = 0; // shared-epoch base for this connection
-        let mut i: i64 = 0; // chunk index within the current connection
-        let mut sign: i64 = 1; // audio-behind (+) then flips on each reconnect
-        let mut trips: u32 = 0;
-
-        for _ in 0..600 {
-            now += chunk_ms;
-            let video_start = base + i * chunk_ms as i64;
-            // audio lags (sign +1) or leads (sign -1) by i*drift, growing each
-            // chunk — a continuous rate drift a reconnect cannot fix.
-            let audio_start = video_start - sign * i * drift_per_chunk;
-            let d = feed_chunk(&mut tracker, video_start as u32, audio_start as u32, now);
-            if d == SkewDecision::TripRecovery {
-                trips += 1;
-                // Simulate the pusher's reconnect: reset_tracks re-anchors from
-                // a fresh common epoch. Input PTS keep running (the chunker is
-                // continuous across OUR reconnect); flip the drift sign to
-                // reproduce the alternating-sign signature.
-                tracker.reset_tracks();
-                base = video_start + chunk_ms as i64;
-                sign = -sign;
-                i = 0;
-            } else {
-                i += 1;
-            }
-        }
-
-        assert!(
-            trips <= 3,
-            "a continuous cross-clock drift must converge to a bounded number of \
-             recovery trips, not death-loop; got {trips} trips over 1200 s"
-        );
-    }
-}
+#[path = "skew_tests.rs"]
+mod tests;
