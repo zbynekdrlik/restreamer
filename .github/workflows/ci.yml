@@ -2143,6 +2143,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # #349: before touching the shared rig's OBS, wait out any active
+      # camera-box hold (read-only poll of camera-box's HTTP-exposed lease;
+      # fail-open; we write nothing). Placed first so it precedes ALL OBS work.
+      - name: "Rig lease: wait out a camera-box hold before OBS streaming (#349)"
+        shell: powershell
+        timeout-minutes: 65
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
+
       - name: Configure Hetzner API token
         shell: powershell
         run: |
@@ -6067,6 +6075,14 @@ jobs:
       FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+
+      # #349: before touching the shared rig's OBS, wait out any active
+      # camera-box hold (read-only poll of camera-box's HTTP-exposed lease;
+      # fail-open; we write nothing). Placed first so it precedes ALL OBS work.
+      - name: "Rig lease: wait out a camera-box hold before OBS streaming (#349)"
+        shell: powershell
+        timeout-minutes: 65
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci/rig-lease-wait.ps1
 
       - name: Configure Hetzner API token
         shell: powershell
