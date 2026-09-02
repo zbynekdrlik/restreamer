@@ -17,6 +17,7 @@ auto-load on their `paths:` — you do not invoke those.
 - Facebook Live endpoints, CI gate, Graph API credentials → `.claude/skills/facebook-streaming`
 - OBS degraded / CI runner offline / autonomous recovery → `.claude/skills/obs-recovery`
 - Outage survival, rescue clip, keepalive, notification UX → `.claude/skills/outage-rescue`
+- Adding a status-driven dashboard banner (backend + both frontends + Tauri + E2E) → `.claude/rules/dashboard-status-banner.md` (auto)
 - Compile / test / clippy / frontend-E2E (dev1 Tier-0 → build on dev2) → `.claude/skills/dev2-build-verify`
 - ci.yml conditional-logic gates, verify-ci-yaml-invariants, .cargo/audit.toml → `.claude/skills/ci-yaml-maintenance`
 
